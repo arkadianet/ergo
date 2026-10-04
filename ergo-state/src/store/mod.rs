@@ -2273,15 +2273,18 @@ impl StateStore {
     /// Repair the legacy header-only pruning floor before any UTXO block has
     /// been applied. A fresh UTXO tree must replay from height 1; headers alone
     /// do not supply the missing parent state. This exception cannot lower a
-    /// floor belonging to applied or snapshot-installed state.
+    /// floor belonging to applied, snapshot-installed or NiPoPoW-bootstrapped
+    /// state.
     ///
-    /// Requires both live and committed full tips/AVL metadata at height 0 and
-    /// no permanent snapshot-install or first-epoch trust marker. Checks and
+    /// Requires both live and committed full tips/AVL metadata at height 0,
+    /// dense committed header availability (`apply_popow_proof` writes its
+    /// `dense_from_height` floor while the full tip stays at 0) and no
+    /// permanent snapshot-install or first-epoch trust marker. Checks and
     /// the floor reset share one quick-repair transaction. Returns `false`
     /// for an absent/already-1 floor. The ordinary setter remains monotonic.
     pub fn repair_unapplied_pruning_floor(&mut self) -> Result<bool, StateError> {
         const REFUSAL: &str =
-            "pruning floor repair requires committed unapplied UTXO genesis without snapshot trust";
+            "pruning floor repair requires committed unapplied dense UTXO genesis without bootstrap";
         if self.height != 0 || self.chain_state.best_full_block_height != 0 {
             return Err(StateError::InvalidPrecondition { what: REFUSAL });
         }
@@ -2304,6 +2307,7 @@ impl StateStore {
             })?;
             if durable.best_full_block_height != 0
                 || durable.best_full_block_id != self.chain_state.best_full_block_id
+                || durable.header_availability != HeaderAvailability::Dense
             {
                 return Err(StateError::InvalidPrecondition { what: REFUSAL });
             }
@@ -4498,6 +4502,40 @@ mod tests {
                 Some(951)
             );
         }
+    }
+
+    #[test]
+    fn pruning_floor_repair_refuses_nipopow_proof_floor() {
+        // `apply_popow_proof` writes its `dense_from_height` floor while the
+        // full tip stays at 0 and writes no snapshot marker. That floor is
+        // bootstrap state, not a legacy header-only floor.
+        let (mut store, directory) = fresh_store();
+        store.initialize_genesis(&[]).unwrap();
+        store
+            .apply_popow_proof(&crate::test_helpers::nipopow_proof_dense_from_2())
+            .unwrap();
+        assert_eq!(store.chain_state().best_full_block_height, 0);
+        assert!(matches!(
+            store.chain_state().header_availability,
+            HeaderAvailability::PoPowSparse {
+                dense_from_height: 2,
+                ..
+            }
+        ));
+        assert_eq!(
+            store.try_read_minimal_full_block_height_raw().unwrap(),
+            Some(2)
+        );
+        assert!(matches!(
+            store.repair_unapplied_pruning_floor(),
+            Err(StateError::InvalidPrecondition { .. })
+        ));
+        drop(store);
+        let reopened = StateStore::open(&directory.path().join("state.redb")).unwrap();
+        assert_eq!(
+            reopened.try_read_minimal_full_block_height_raw().unwrap(),
+            Some(2)
+        );
     }
 
     #[test]

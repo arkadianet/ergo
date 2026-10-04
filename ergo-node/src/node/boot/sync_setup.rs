@@ -503,7 +503,7 @@ pub(super) fn setup(
 
     // Fresh UTXO validation starts from the applied genesis parent. Repair a
     // legacy header-only download floor, if present, before serving requests;
-    // the guarded state helper refuses applied or bootstrap-marked stores.
+    // applied, snapshot-installed and NiPoPoW-bootstrapped stores keep theirs.
     // Rebuild the pending range only when a floor was actually reset.
     if let Err(e) = crate::node::prune_activation::repair_unapplied_floor_and_rebuild_pending(
         store,

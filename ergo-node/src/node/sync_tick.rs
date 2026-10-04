@@ -171,8 +171,9 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
 
     // 2.6 A fresh UTXO node must download from its applied parent at genesis.
     // Repair a header-only floor left by older boot activation and rebuild the
-    // pending range after the guarded reset. Applied/snapshot stores keep their
-    // floors; forward apply owns subsequent pruning. No-op on a valid floor.
+    // pending range after the guarded reset. Applied, snapshot and NiPoPoW
+    // stores keep their floors; forward apply owns subsequent pruning. No-op
+    // on a valid floor.
     if let Err(e) = super::prune_activation::repair_unapplied_floor_and_rebuild_pending(
         &mut state.store,
         &mut state.executor,

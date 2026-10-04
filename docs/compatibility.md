@@ -235,10 +235,11 @@ closure criteria.
 
   Older startup code could persist a header-derived floor before any full
   block was applied. Boot and sync ticks repair that floor to 1 only when
-  both live and committed UTXO state remain at height 0 and neither bootstrap
-  marker is present, then rebuild pending downloads. A valid fresh floor is
-  unchanged. Applied and snapshot stores keep their floor; the ordinary
-  setter remains monotonic. Repair failures are logged and retried. Archive
+  both live and committed UTXO state remain at height 0, the header chain is
+  dense and neither bootstrap marker is present, then rebuild pending
+  downloads. A valid fresh floor is unchanged. Applied, snapshot and
+  NiPoPoW-bootstrapped stores keep their floor; the ordinary setter remains
+  monotonic. Repair failures are logged and retried. Archive
   nodes also download from their applied parent; headers-only Mode 6 does
   not download full blocks. Rollbacks below a retained floor are refused.
 

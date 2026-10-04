@@ -3,9 +3,10 @@
 //! This backend validates sequentially from its applied UTXO tip. A retention
 //! floor computed only from a fresh header tip cannot supply the skipped parent
 //! state. Fresh Mode3 nodes therefore replay full blocks from genesis and prune
-//! after apply. Installed snapshots and already-applied pruned stores retain
-//! their durable download floor.
+//! after apply. Installed snapshots, applied NiPoPoW proofs and already-applied
+//! pruned stores retain their durable download floor.
 
+use ergo_state::chain::HeaderAvailability;
 use ergo_state::ChainStateRead;
 use ergo_sync::coordinator::SyncCoordinator;
 use ergo_sync::executor::{HydrationError, SyncExecutor};
@@ -32,14 +33,18 @@ pub(super) fn repair_unapplied_floor_and_rebuild_pending(
 
 /// Header synchronization cannot advance a fresh UTXO download floor past the
 /// first unapplied block. Reset the old header-only sentinel when present;
-/// pruning after apply and snapshot installation own all later floors.
+/// pruning after apply, snapshot installation and NiPoPoW proofs (whose
+/// `PoPowSparse` store keeps the proof's `dense_from_height` floor) own all
+/// other floors.
 pub(super) fn repair_unapplied_floor_after_header_sync(
     store: &mut ergo_state::StateBackendKind,
     coordinator: &mut SyncCoordinator,
 ) -> Option<u32> {
-    if !coordinator.sync_state().headers_chain_synced()
-        || store.chain_state_meta().best_full_block_height != 0
-    {
+    if !coordinator.sync_state().headers_chain_synced() {
+        return None;
+    }
+    let meta = store.chain_state_meta();
+    if meta.best_full_block_height != 0 || meta.header_availability != HeaderAvailability::Dense {
         return None;
     }
     let utxo = store.as_utxo_mut()?;
@@ -290,5 +295,69 @@ mod tests {
             .map(|b| b.height)
             .collect();
         assert_eq!(after, before, "valid download range must be untouched");
+    }
+
+    #[test]
+    fn nipopow_proof_floor_survives_the_headers_synced_latch() {
+        // A Mode 4 proof leaves the full tip at 0 with the proof's
+        // `dense_from_height` floor and no snapshot marker. Forward header
+        // sync can flip the latch before the snapshot install; the repair
+        // must leave that bootstrap floor alone, quietly, on every tick.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tracing_subscriber::prelude::*;
+        struct WarnCounter(Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCounter {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = StateStore::open(&dir.path().join("state.redb"))
+            .expect("open store")
+            .with_non_durable_commits_for_test();
+        store.initialize_genesis(&[]).expect("init genesis");
+        store
+            .apply_popow_proof(&ergo_state::test_helpers::nipopow_proof_dense_from_2())
+            .expect("apply popow proof");
+        let mut store = ergo_state::StateBackendKind::Utxo(store);
+        assert_eq!(store.read_minimal_full_block_height().unwrap(), 2);
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        let mut coordinator = SyncCoordinator::new_with_window(0, DOWNLOAD_WINDOW);
+        coordinator.sync_state_mut().set_prune_sentinel(2);
+        coordinator.sync_state_mut().mark_headers_chain_synced();
+
+        let warnings = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(WarnCounter(warnings.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..2 {
+                assert_eq!(
+                    repair_unapplied_floor_and_rebuild_pending(
+                        &mut store,
+                        &mut executor,
+                        &mut coordinator,
+                    )
+                    .unwrap(),
+                    None
+                );
+            }
+        });
+        assert_eq!(
+            warnings.load(Ordering::SeqCst),
+            0,
+            "no per-tick retry warning"
+        );
+        assert_eq!(store.read_minimal_full_block_height().unwrap(), 2);
+        assert_eq!(coordinator.sync_state().prune_sentinel(), 2);
     }
 }
