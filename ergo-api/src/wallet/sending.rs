@@ -60,7 +60,7 @@ pub struct UnsignedTxDto {
 /// `ergo_wallet::proving::external::ProverExternalSecret` (internal type
 /// carrying decoded `k256::Scalar`s). This type carries hex strings and
 /// is deserialized from JSON; the writer task decodes hex → scalar on use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ExternalSecretDto {
     /// Discrete log secret: `dlog` is a big-endian hex scalar.
@@ -74,6 +74,22 @@ pub enum ExternalSecretDto {
         v: String,
         x: String,
     },
+}
+
+impl std::fmt::Debug for ExternalSecretDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dlog { .. } => f.debug_struct("Dlog").field("dlog", &"[REDACTED]").finish(),
+            Self::DhTuple { g, h, u, v, .. } => f
+                .debug_struct("DhTuple")
+                .field("g", g)
+                .field("h", h)
+                .field("u", u)
+                .field("v", v)
+                .field("x", &"[REDACTED]")
+                .finish(),
+        }
+    }
 }
 
 /// Wire shape for a transaction hint bag.
@@ -98,7 +114,7 @@ pub struct TxHintsBagDto {
 ///
 /// The `hint` field acts as the serde tag and uses the canonical Scala/sigma-rust
 /// names: `cmtReal`, `cmtSimulated`, `cmtWithSecret`, `proofReal`, `proofSimulated`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "hint", rename_all = "camelCase")]
 pub enum HintDto {
     /// Real commitment — public; shared with co-signers.
@@ -152,6 +168,71 @@ pub enum HintDto {
         response: String,
         position: String,
     },
+}
+
+impl std::fmt::Debug for HintDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RealCommitment {
+                image,
+                commitment,
+                position,
+            } => f
+                .debug_struct("RealCommitment")
+                .field("image", image)
+                .field("commitment", commitment)
+                .field("position", position)
+                .finish(),
+            Self::SimulatedCommitment {
+                image,
+                commitment,
+                challenge,
+                position,
+            } => f
+                .debug_struct("SimulatedCommitment")
+                .field("image", image)
+                .field("commitment", commitment)
+                .field("challenge", challenge)
+                .field("position", position)
+                .finish(),
+            Self::OwnCommitment {
+                image,
+                commitment,
+                position,
+                ..
+            } => f
+                .debug_struct("OwnCommitment")
+                .field("image", image)
+                .field("secret", &"[REDACTED]")
+                .field("commitment", commitment)
+                .field("position", position)
+                .finish(),
+            Self::RealSecretProof {
+                image,
+                challenge,
+                response,
+                position,
+            } => f
+                .debug_struct("RealSecretProof")
+                .field("image", image)
+                .field("challenge", challenge)
+                .field("response", response)
+                .field("position", position)
+                .finish(),
+            Self::SimulatedSecretProof {
+                image,
+                challenge,
+                response,
+                position,
+            } => f
+                .debug_struct("SimulatedSecretProof")
+                .field("image", image)
+                .field("challenge", challenge)
+                .field("response", response)
+                .field("position", position)
+                .finish(),
+        }
+    }
 }
 
 /// First-prover message: the public commitment broadcast at the start of a

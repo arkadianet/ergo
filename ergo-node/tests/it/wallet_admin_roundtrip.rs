@@ -1367,6 +1367,114 @@ async fn init_twice_returns_wallet_exists() {
     );
 }
 
+/// One committed mainnet block, so wallet signing reaches request decoding.
+fn committed_chain(path: &std::path::Path) -> ergo_state::store::StateStore {
+    let headers: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/headers_1_10.json"
+    ))
+    .unwrap();
+    let mut store = ergo_state::store::StateStore::open(path).unwrap();
+    store.initialize_genesis(&[]).unwrap();
+    let bytes = hex::decode(headers[0]["bytes"].as_str().unwrap()).unwrap();
+    let header =
+        ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
+            .unwrap();
+    let (bytes, id) = ergo_ser::header::serialize_header(&header).unwrap();
+    store.store_header(id.as_bytes(), &bytes).unwrap();
+    let root = store.root_digest();
+    store
+        .apply_block_unchecked_for_test(1, id.as_bytes(), &root, &[])
+        .unwrap();
+    store
+}
+
+#[tokio::test]
+async fn private_commitment_in_public_hints_is_a_client_error_over_http() {
+    use ergo_api::wallet::sending::{
+        FirstProverMessageJson, HintDto, SigmaBooleanJson, TransactionSignRequest, TxHintsBagDto,
+        UnsignedTxDto,
+    };
+    let chain_dir = tempfile::tempdir().unwrap();
+    let store = committed_chain(&chain_dir.path().join("chain.redb"));
+    let chain = Arc::new(ergo_node::node::wallet_bridge::ChainStateAccessorImpl::new(
+        store.db_arc(),
+        false,
+        None,
+    ));
+    let (admin, _db, _dir) = spawn_writer_with_chain(chain, Arc::new(StubTxSubmitter));
+    let key = "operator-key";
+    let security =
+        ergo_api::auth::ApiSecurity::new(ergo_api::auth::ApiSecurity::hash_key(key.as_bytes()))
+            .unwrap();
+    let app = ergo_api::wallet::router_with_security(Arc::new(admin), Some(Arc::new(security)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let tree =
+        ergo_ser::ergo_tree::read_ergo_tree(&mut ergo_primitives::reader::VlqReader::new(&[
+            0x00, 0x08, 0xd3,
+        ]))
+        .unwrap();
+    let unsigned = ergo_ser::transaction::UnsignedTransaction {
+        inputs: vec![ergo_ser::input::UnsignedInput {
+            box_id: ergo_primitives::digest::Digest32::from_bytes([0x55; 32]),
+            extension: ergo_ser::input::ContextExtension::empty(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![ergo_ser::ergo_box::ErgoBoxCandidate::new(
+            1_000_000,
+            tree,
+            1,
+            vec![],
+            ergo_ser::register::AdditionalRegisters::empty(),
+        )
+        .unwrap()],
+    };
+    let mut writer = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::transaction::write_unsigned_transaction(&mut writer, &unsigned).unwrap();
+    let point = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    let mut hints = TxHintsBagDto::default();
+    hints.public_hints.insert(
+        "0".into(),
+        vec![HintDto::OwnCommitment {
+            image: SigmaBooleanJson {
+                inner: serde_json::json!({"op": 205, "h": point}),
+            },
+            secret: "ab".repeat(32),
+            commitment: FirstProverMessageJson::Dlog { a: point.into() },
+            position: "0".into(),
+        }],
+    );
+    let request = TransactionSignRequest {
+        unsigned_tx: UnsignedTxDto {
+            bytes: hex::encode(writer.result()),
+        },
+        external_secrets: None,
+        hints: Some(hints),
+        inputs: None,
+        data_inputs: None,
+    };
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/wallet/transaction/sign"))
+        .header("api_key", key)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["reason"], "bad_request", "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("publicHints cannot contain cmtWithSecret"),
+        "{body}"
+    );
+    assert!(!body.to_string().contains(&"ab".repeat(32)));
+}
+
 #[tokio::test]
 async fn change_address_requires_unlocked_owned_key_and_preserves_persisted_value() {
     use ergo_state::wallet::tables::{
@@ -1403,18 +1511,15 @@ async fn change_address_requires_unlocked_owned_key_and_preserves_persisted_valu
             .unwrap()
             .try_into()
             .unwrap();
+    let foreign_key = tracked_pubkey_key(999, &foreign);
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(WALLET_TRACKED_PUBKEYS).unwrap();
         let existing = table.iter().unwrap().next().unwrap().unwrap().1.value();
         // Reuse valid metadata: the foreign key cannot derive at that path.
-        table
-            .insert(tracked_pubkey_key(999, &foreign), existing)
-            .unwrap();
+        table.insert(foreign_key, existing).unwrap();
     }
     txn.commit().unwrap();
-    admin.lock().await.unwrap();
-    admin.unlock("pw".into()).await.unwrap();
     let foreign_address = ergo_wallet::address::pubkey_to_p2pk_address(
         &foreign,
         ergo_ser::address::NetworkPrefix::Mainnet,
@@ -1424,6 +1529,20 @@ async fn change_address_requires_unlocked_owned_key_and_preserves_persisted_valu
         admin.update_change_address(foreign_address).await,
         Err(WalletAdminError::ChangeAddressUntracked)
     ));
+    // The next unlock re-derives every persisted key and refuses the row.
+    admin.lock().await.unwrap();
+    assert!(matches!(
+        admin.unlock("pw".into()).await,
+        Err(WalletAdminError::Internal(detail)) if detail.contains("tracked key at m/")
+    ));
+    assert!(!admin.status().await.unwrap().is_unlocked);
+    let txn = db.begin_write().unwrap();
+    txn.open_table(WALLET_TRACKED_PUBKEYS)
+        .unwrap()
+        .remove(foreign_key)
+        .unwrap();
+    txn.commit().unwrap();
+    admin.unlock("pw".into()).await.unwrap();
     assert_eq!(read_change(), original);
     admin.update_change_address(address).await.unwrap();
 }

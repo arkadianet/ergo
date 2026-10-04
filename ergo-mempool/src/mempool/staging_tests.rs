@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::admission::{PeekedStructure, PeekedTx, Validated, ValidationErr, Validator};
-use crate::types::{AppliedTx, TxDiff};
+use crate::types::{AppliedTx, PenaltyKind, TxDiff};
 use crate::weight::ByCost;
 use ergo_primitives::cost::JitCost;
 use ergo_primitives::digest::{Digest32, ModifierId};
@@ -88,11 +88,13 @@ struct ProbePlan {
 
 struct PoolAwareProbe {
     plans: HashMap<Vec<u8>, ProbePlan>,
+    calls: std::cell::RefCell<HashMap<Vec<u8>, usize>>,
 }
 impl PoolAwareProbe {
     fn new() -> Self {
         Self {
             plans: HashMap::new(),
+            calls: std::cell::RefCell::new(HashMap::new()),
         }
     }
     /// `tx` byte, `fee`, `inputs`, `outputs` (created box ids). Output boxes
@@ -212,6 +214,11 @@ impl Validator for PoolAwareProbe {
         data_input_view: &dyn UtxoView,
         cx: &mut TxValidationCtx<'_>,
     ) -> Result<Validated, ValidationErr> {
+        *self
+            .calls
+            .borrow_mut()
+            .entry(tx_bytes.to_vec())
+            .or_default() += 1;
         let p = self.plans.get(tx_bytes).ok_or(ValidationErr::Deserialize)?;
         if let Ok(jc) = JitCost::from_block_cost(p.charge) {
             let _ = cx.cost.add(jc);
@@ -675,7 +682,27 @@ fn package_admitted_when_child_completes_held_parent_threshold() {
     ));
     assert_eq!(mp.staging_len(), 1, "parent held");
 
-    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    #[derive(Default)]
+    struct Admissions(std::sync::Mutex<Vec<TxId>>);
+    impl MempoolObserver for Admissions {
+        fn on_admitted(&self, id: TxId, _: u64, _: u32) {
+            self.0.lock().unwrap().push(id);
+        }
+        fn on_evicted(&self, _: TxId, _: &str) {}
+        fn on_confirmed(&self, _: TxId, _: u32, _: Digest32) {}
+        fn on_replaced(&self, _: TxId, _: TxId) {}
+    }
+    let observer = Arc::new(Admissions::default());
+    mp.set_observer(Some(observer.clone()));
+    let (co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert_eq!(
+        co,
+        AdmissionOutcome::Admitted {
+            tx_id: d(2),
+            fee: 10_000_000,
+            size: 20
+        }
+    );
     assert!(
         mp.contains(&d(1)) && mp.contains(&d(2)),
         "P and C admitted together as a package"
@@ -685,12 +712,366 @@ fn package_admitted_when_child_completes_held_parent_threshold() {
         "the two lower-priority incumbents were evicted"
     );
     assert_eq!(mp.staging_len(), 0, "held parent drained from staging");
+    assert_eq!(
+        *observer.0.lock().unwrap(),
+        vec![d(1), d(2)],
+        "one admission per committed member"
+    );
     let inv = broadcasts(&ca);
     assert!(
         inv.contains(&d(1)) && inv.contains(&d(2)),
         "both package members advertised: {inv:?}"
     );
     mp.pool().check_invariants();
+}
+
+#[test]
+fn package_admission_traces_each_members_original_source() {
+    // Other unit-test threads emit at these same callsites through the no-op
+    // dispatcher. Isolate scoped capture so their interest-cache updates cannot
+    // suppress an event in this test's temporary subscriber.
+    const CHILD_MARKER: &str = "ERGO_TEST_PACKAGE_SOURCE_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let path = concat!(
+            module_path!(),
+            "::package_admission_traces_each_members_original_source"
+        );
+        // The harness filter omits the crate name.
+        let name = path.split_once("::").map_or(path, |(_, name)| name);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--test-threads=1"])
+            .env(CHILD_MARKER, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "isolated capture failed: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // A filter that matches nothing also exits successfully.
+        assert!(
+            stdout.contains("test result: ok. 1 passed"),
+            "isolated capture ran no test: {stdout}"
+        );
+        return;
+    }
+    use tracing_subscriber::prelude::*;
+    #[derive(Clone, Default)]
+    struct Events(Arc<std::sync::Mutex<Vec<(String, String, tracing::Level)>>>);
+    #[derive(Default)]
+    struct Fields(HashMap<String, String>);
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+            self.0.insert(f.name().into(), format!("{v:?}"));
+        }
+        fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
+            self.0.insert(f.name().into(), v.into());
+        }
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+        fn on_event(&self, e: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            let mut fields = Fields::default();
+            e.record(&mut fields);
+            if fields.0.get("event").map(String::as_str) == Some("mempool_tx_admitted") {
+                self.0.lock().unwrap().push((
+                    fields.0["tx_id"].clone(),
+                    fields.0["source"].clone(),
+                    *e.metadata().level(),
+                ));
+            }
+        }
+    }
+    let mut mp = Mempool::new(
+        MempoolConfig {
+            max_pool_size: 2,
+            ..base_cfg()
+        },
+        Box::new(ByCost),
+    );
+    let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(10, 1_000_000, &[0x90], &[0x9A])
+        .plan(11, 3_000_000, &[0x91], &[0x9B])
+        .plan(1, 1_000_000, &[0x70], &[0x71])
+        .plan(2, 10_000_000, &[0x71], &[0x72]);
+    let now = Instant::now();
+    for b in [10, 11] {
+        mp.process(&tx_bytes(b), TxSource::Api, now, &tip.view(&utxo), &v);
+    }
+    mp.process(
+        &tx_bytes(1),
+        TxSource::Peer("127.0.0.1:9001".parse().unwrap()),
+        now,
+        &tip.view(&utxo),
+        &v,
+    );
+    let events = Events::default();
+    let subscriber = tracing_subscriber::registry().with(events.clone());
+    let (outcome, actions) = tracing::subscriber::with_default(subscriber, || {
+        mp.process(&tx_bytes(2), TxSource::Wallet, now, &tip.view(&utxo), &v)
+    });
+    assert!(matches!(outcome, AdmissionOutcome::Admitted { .. }));
+    assert_eq!(
+        *events.0.lock().unwrap(),
+        vec![
+            (
+                hex::encode(d(1).as_bytes()),
+                "peer".into(),
+                tracing::Level::DEBUG
+            ),
+            (
+                hex::encode(d(2).as_bytes()),
+                "local".into(),
+                tracing::Level::INFO
+            ),
+        ]
+    );
+    assert!(
+        actions
+            .iter()
+            .filter(|a| matches!(a, MempoolAction::BroadcastInv { .. }))
+            .all(|a| matches!(a, MempoolAction::BroadcastInv { except: None, .. })),
+        "routing exclusion follows the triggering Wallet child"
+    );
+}
+
+#[test]
+fn package_hard_invalid_child_is_penalized_and_blacklisted() {
+    // The child resolves only through its held parent, so its script failure
+    // surfaces in the package pass, not in single-tx admission.
+    let mut mp = Mempool::new(
+        MempoolConfig {
+            max_pool_size: 2,
+            ..base_cfg()
+        },
+        Box::new(ByCost),
+    );
+    let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(10, 1_000_000, &[0x90], &[0x9A])
+        .plan(11, 3_000_000, &[0x91], &[0x9B])
+        .plan(1, 1_000_000, &[0x70], &[0x71])
+        .plan_height_gated(2, 10_000_000, 999, &[0x71], &[0x72]);
+    let now = Instant::now();
+    for tx in [10, 11, 1] {
+        mp.process(&tx_bytes(tx), TxSource::Api, now, &tip.view(&utxo), &v);
+    }
+    assert_eq!(mp.staging_len(), 1, "parent held");
+    let peer = "127.0.0.1:9000".parse().unwrap();
+    let (outcome, actions) = mp.process(
+        &tx_bytes(2),
+        TxSource::Peer(peer),
+        now,
+        &tip.view(&utxo),
+        &v,
+    );
+    assert_eq!(
+        outcome,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::ValidationFailed {
+                kind: ValidationErr::ScriptFailed
+            }
+        }
+    );
+    assert_eq!(
+        v.calls.borrow()[&tx_bytes(2)],
+        2,
+        "single-tx then package pass"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            MempoolAction::Penalize { peer: p, kind: PenaltyKind::Misbehavior } if *p == peer
+        )),
+        "{actions:?}"
+    );
+    assert!(
+        mp.is_invalidated(&d(2)),
+        "Inv fetch filter learns the child"
+    );
+    assert_eq!(mp.staging_len(), 1, "held parent stays");
+}
+
+#[test]
+fn package_child_stops_when_initial_unresolved_validation_spends_the_budget() {
+    for source in [TxSource::Api, TxSource::PublicApi] {
+        let mut mp = Mempool::new(
+            MempoolConfig {
+                max_pool_size: 2,
+                ..base_cfg()
+            },
+            Box::new(ByCost),
+        );
+        let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+        let tip = TestTip::new();
+        let validator = PoolAwareProbe::new()
+            .plan(10, 1_000_000, &[0x90], &[0x9A])
+            .plan(11, 3_000_000, &[0x91], &[0x9B])
+            .plan(1, 1_000_000, &[0x70], &[0x71])
+            .plan(2, 10_000_000, &[0x71], &[0x72]);
+        let now = Instant::now();
+        for tx in [10, 11, 1] {
+            mp.process(
+                &tx_bytes(tx),
+                source.clone(),
+                now,
+                &tip.view(&utxo),
+                &validator,
+            );
+        }
+        assert_eq!(mp.staging_len(), 1);
+        mp.budgets = CostBudgets::new(10_000, 10_000, 0);
+        let (outcome, actions) = mp.process(
+            &tx_bytes(2),
+            source.clone(),
+            now,
+            &tip.view(&utxo),
+            &validator,
+        );
+        assert_eq!(
+            outcome,
+            AdmissionOutcome::Rejected {
+                reason: RejectReason::GlobalBudgetExhausted
+            }
+        );
+        assert_eq!(validator.calls.borrow()[&tx_bytes(2)], 1);
+        assert_eq!(mp.budgets.global_consumed(), 10_000);
+        assert_eq!(
+            mp.staging_len(),
+            1,
+            "cached held ancestor remains available"
+        );
+        assert!(!mp.contains(&d(1)) && !mp.contains(&d(2)));
+        assert!(mp.contains(&d(10)) && mp.contains(&d(11)));
+        assert!(broadcasts(&actions).is_empty());
+        assert!(!mp.unresolved.contains(&tx_bytes(2), now));
+        mp.budgets = CostBudgets::new(30_000, 30_000, 0);
+        let (retry, _) = mp.process(&tx_bytes(2), source, now, &tip.view(&utxo), &validator);
+        assert!(matches!(retry, AdmissionOutcome::Admitted { tx_id, .. } if tx_id == d(2)));
+        assert_eq!(validator.calls.borrow()[&tx_bytes(2)], 3);
+    }
+}
+
+#[test]
+fn stale_held_parent_keeps_its_identity_when_its_source_budget_is_exhausted() {
+    let parent_peer = "127.0.0.1:9000".parse().unwrap();
+    let child_peer: std::net::SocketAddr = "127.0.0.1:9001".parse().unwrap();
+    // The child's own source decides its reported reason; the exhausted
+    // parent source never blames a submitter whose budget still has room.
+    for (child, expected) in [
+        (TxSource::Api, RejectReason::UnresolvedInput),
+        (
+            TxSource::Peer(child_peer),
+            RejectReason::PeerBudgetExhausted,
+        ),
+    ] {
+        let mut mp = Mempool::new(
+            MempoolConfig {
+                max_pool_size: 2,
+                ..base_cfg()
+            },
+            Box::new(ByCost),
+        );
+        let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+        let before = TestTip::at_height(1000);
+        let after = TestTip::at_height(1001);
+        let validator = PoolAwareProbe::new()
+            .plan(10, 1_000_000, &[0x90], &[0x9A])
+            .plan(11, 3_000_000, &[0x91], &[0x9B])
+            .plan(1, 1_000_000, &[0x70], &[0x71])
+            .plan(2, 10_000_000, &[0x71], &[0x72]);
+        let now = Instant::now();
+        for tx in [10, 11] {
+            mp.process(
+                &tx_bytes(tx),
+                TxSource::Api,
+                now,
+                &before.view(&utxo),
+                &validator,
+            );
+        }
+        mp.process(
+            &tx_bytes(1),
+            TxSource::Peer(parent_peer),
+            now,
+            &before.view(&utxo),
+            &validator,
+        );
+        mp.budgets = CostBudgets::new(100_000, 10_000, 0);
+        mp.budgets
+            .charge(crate::budget::BudgetSource::Peer(parent_peer), 10_000);
+        let (outcome, actions) =
+            mp.process(&tx_bytes(2), child, now, &after.view(&utxo), &validator);
+        assert_eq!(outcome, AdmissionOutcome::Rejected { reason: expected });
+        assert_eq!(
+            validator.calls.borrow()[&tx_bytes(1)],
+            1,
+            "no stale parent re-evaluation"
+        );
+        assert_eq!(validator.calls.borrow()[&tx_bytes(2)], 1);
+        assert_eq!(mp.budgets.global_consumed(), 20_000);
+        assert_eq!(
+            mp.staging_len(),
+            1,
+            "budget refusal does not evict a valid held parent"
+        );
+        assert!(
+            !mp.unresolved_contains(&tx_bytes(2)),
+            "a retry after the budget reset can reach the package"
+        );
+        assert!(broadcasts(&actions).is_empty());
+    }
+}
+
+#[test]
+fn demoted_package_evaluations_remain_budget_exempt() {
+    let mut mp = Mempool::new(
+        MempoolConfig {
+            max_pool_size: 2,
+            ..base_cfg()
+        },
+        Box::new(ByCost),
+    );
+    let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+    let before = TestTip::at_height(1000);
+    let after = TestTip::at_height(1001);
+    let validator = PoolAwareProbe::new()
+        .plan(10, 1_000_000, &[0x90], &[0x9A])
+        .plan(11, 3_000_000, &[0x91], &[0x9B])
+        .plan(1, 1_000_000, &[0x70], &[0x71])
+        .plan(2, 10_000_000, &[0x71], &[0x72]);
+    let now = Instant::now();
+    for tx in [10, 11, 1] {
+        mp.process(
+            &tx_bytes(tx),
+            TxSource::DemotedFromBlock,
+            now,
+            &before.view(&utxo),
+            &validator,
+        );
+    }
+    mp.budgets = CostBudgets::new(0, 0, 0);
+    let (outcome, _) = mp.process(
+        &tx_bytes(2),
+        TxSource::DemotedFromBlock,
+        now,
+        &after.view(&utxo),
+        &validator,
+    );
+    assert_eq!(
+        outcome,
+        AdmissionOutcome::Admitted {
+            tx_id: d(2),
+            fee: 10_000_000,
+            size: 20
+        }
+    );
+    assert_eq!(validator.calls.borrow()[&tx_bytes(1)], 2);
+    assert_eq!(validator.calls.borrow()[&tx_bytes(2)], 2);
+    assert_eq!(mp.budgets.global_consumed(), 0);
 }
 
 #[test]
@@ -1198,6 +1579,56 @@ fn package_rbf_accepts_over_multi_tx_descendant_closure() {
         "both family members revoked: {revoked:?}"
     );
     assert_eq!(mp.staging_len(), 0, "held parent drained");
+    mp.pool().check_invariants();
+}
+
+#[test]
+fn package_replacement_retains_the_bounded_descendant_frontier() {
+    let mut mp = Mempool::new(
+        MempoolConfig {
+            max_family_depth: 2,
+            ..base_cfg()
+        },
+        Box::new(ByCost),
+    );
+    let utxo = FakeUtxo::with(&[0x80]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(9, 2_000_000, &[0x80], &[0x81])
+        .plan(8, 2_000_000, &[0x81], &[0x82])
+        .plan(7, 2_000_000, &[0x82], &[0x83])
+        .plan(1, 1_000_000, &[0x80], &[0x85])
+        .plan(2, 20_000_000, &[0x85], &[0x86]);
+    let now = Instant::now();
+    for b in [9, 8, 7] {
+        assert!(matches!(
+            mp.process(&tx_bytes(b), TxSource::Api, now, &tip.view(&utxo), &v)
+                .0,
+            AdmissionOutcome::Admitted { .. }
+        ));
+    }
+    assert!(matches!(
+        mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v)
+            .0,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::DoubleSpendLoser
+        }
+    ));
+    assert!(matches!(
+        mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v)
+            .0,
+        AdmissionOutcome::Admitted { .. }
+    ));
+    assert!(mp.contains(&d(7)), "the first removal is bounded");
+    assert_eq!(mp.orphan_eviction_pending(), 1);
+    let actions = mp.tick_revalidation(now, &tip.view(&utxo), &v);
+    assert!(!mp.contains(&d(7)));
+    assert!(actions
+        .iter()
+        .any(|a| matches!(a, MempoolAction::RevokeBroadcast { tx_ids } if tx_ids == &vec![d(7)])));
+    assert!(mp.contains(&d(1)) && mp.contains(&d(2)));
+    assert!(!mp.is_invalidated(&d(7)));
+    assert_eq!(mp.orphan_eviction_pending(), 0);
     mp.pool().check_invariants();
 }
 

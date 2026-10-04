@@ -1,0 +1,191 @@
+{
+  "capture_date_utc": "2026-10-04",
+  "reference_repository": "https://github.com/ergoplatform/ergo",
+  "reference_tag": "v6.0.5",
+  "reference_revision": "5528ef569a41ebccbc8658212e6ee3c97d990b96",
+  "observed_node_version": "6.0.3",
+  "observed_network": "testnet",
+  "genesis_block_id": "5b1827ca092b599eafbaf339d2acf2445bc5216ec2e022d9c001a6fff660cad9",
+  "files": {
+    "ErgoStateContext.scala": "1ee61869fcdd83bca4b0dd4b7bd3410653eb0b37c8788d54afa4a8e5b1653561",
+    "LaunchParameters.scala": "8263cba25f7bc8c8fd263ffc43c8c3ce99468fd374cac487d5d81fe569d0d157",
+    "Parameters.scala": "f40851f2cf6010b1a61a572dcf027fc1c35958f817e8d89c78a49bf617d1a8bb",
+    "PrintHeaderBytes.scala": "83d1a9bf28bb4856ef8d541ee7c3e8a718e793f1d9f29e9eeaf9d5085f30c710",
+    "block-1.json": "5666a706e7a91d9e92e956a35d037ed778468027ed74bd259646d5c7775b2853",
+    "block-1024.json": "4d6408a1d4d3326cd728c8616c47f4c93a7f5f11bf1c55838dfbb629c33943b2",
+    "block-128.json": "d437f3aaf34274c19c53a0888548f29b470135b83e08f130514f0e33eafae881",
+    "block-2.json": "dbddcc0e86bedef4f38a17671eb6a714d2a6e0fdf04dc3f0a208405201c4c850",
+    "explorer-genesis.json": "f9c0c3f09f57c356c5deaba4b350455d23bd4534a2c2663e39ea88aebea41e05",
+    "genesis.json": "fe9ab1fb64de7c6ba878aceb44dbd062d3cb223355c790829b02602f9a409664",
+    "headers.json": "3cb17933747459f27a960727e767a7509581a212125ef4bb275474a226ebb5a9",
+    "node-info.json": "291df4d18402eb6e1cf7a29a53eeb1770dca4a5530d834b431412fb02e25efdd",
+    "header-1.json": "1ea965ea557f8840166d6735a6676da948fd064e2e40fa74a48193fc05b77a4a",
+    "header-1.jvm.txt": "b2c150e27eca02a5ed508f765fdbbb595fe0e1e9c39daf7e0dea2f20a77d3eb6",
+    "header-1024.json": "c373f0580058efa29e0448d955318c5897c46406d17dccf83cf52c080f944d13",
+    "header-1024.jvm.txt": "a7e37af421a30727b3448679d53ed66277a470a1433d487631a91d518cde1fba",
+    "header-128.json": "dddd6aa41658e59f4012c6a68a56cf6801c85b01f20d0994b0a25cf6500b190d",
+    "header-128.jvm.txt": "8e580734c60f32ae6767dd43d9b421bd13bbd20670910fe71c040681428b70ba",
+    "header-2.json": "7b7e5baa773da6351234d8fdd5e6a36e6ee82fa9da053914da737c5d0f31cb5d",
+    "header-2.jvm.txt": "6c3984a63ba98b9810699cc75cbf7d0f57634ffb8be1da6c5192f452751e8550"
+  },
+  "http_observations": [
+    {
+      "url": "http://213.239.193.208:9052/info",
+      "purpose": "read-only public testnet fixture/identity acquisition",
+      "timeout_seconds": 8,
+      "status": 200,
+      "bytes": 1454,
+      "sha256": "291df4d18402eb6e1cf7a29a53eeb1770dca4a5530d834b431412fb02e25efdd",
+      "truncated": false,
+      "json_shape": "dict",
+      "elapsed_seconds": 0.6794093190110289
+    },
+    {
+      "url": "https://api-testnet.ergoplatform.com/api/v1/blocks?limit=1&offset=0&sortBy=height&sortDirection=asc",
+      "purpose": "read-only public testnet fixture/identity acquisition",
+      "timeout_seconds": 8,
+      "status": 200,
+      "bytes": 355,
+      "sha256": "2819e61fd32fcbf83dbd35b8459c146d356957717d2dcbacb4cb7fac1c3cd1fa",
+      "truncated": false,
+      "json_shape": "dict",
+      "elapsed_seconds": 0.9283430880168453
+    },
+    {
+      "url": "https://api-testnet.ergoplatform.com/api/v1/blocks/5b1827ca092b599eafbaf339d2acf2445bc5216ec2e022d9c001a6fff660cad9",
+      "purpose": "read-only public testnet fixture/identity acquisition",
+      "timeout_seconds": 8,
+      "status": 200,
+      "bytes": 5635,
+      "sha256": "f9c0c3f09f57c356c5deaba4b350455d23bd4534a2c2663e39ea88aebea41e05",
+      "truncated": false,
+      "json_shape": "dict",
+      "elapsed_seconds": 0.32061545696342364
+    },
+    {
+      "url": "http://213.239.193.208:9052/blocks/5b1827ca092b599eafbaf339d2acf2445bc5216ec2e022d9c001a6fff660cad9",
+      "label": "block-1",
+      "purpose": "finite read-only public fixture acquisition",
+      "timeout_seconds": 8,
+      "status": 200,
+      "bytes": 3684,
+      "sha256": "5666a706e7a91d9e92e956a35d037ed778468027ed74bd259646d5c7775b2853",
+      "truncated": false,
+      "elapsed_seconds": 0.7325077070272528
+    },
+    {
+      "url": "http://213.239.193.208:9052/blocks/32105ea602e92a149e7ce68596972811605b03755a11a1c5870b6937368fe778",
+      "label": "block-2",
+      "purpose": "finite read-only public fixture acquisition",
+      "timeout_seconds": 8,
+      "status": 200,
+      "bytes": 3717,
+      "sha256": "dbddcc0e86bedef4f38a17671eb6a714d2a6e0fdf04dc3f0a208405201c4c850",
+      "truncated": false,
+      "elapsed_seconds": 0.6919594110222533
+    },
+    {
+      "url": "http://213.239.193.208:9052/blocks/31207eca673355e367b2a8cb4b928da9f964df71ed11822cb7d4cbbc44b15df5",
+      "label": "block-128",
+      "purpose": "finite read-only public fixture acquisition",
+      "timeout_seconds": 8,
+      "status": 200,
+      "bytes": 4739,
+      "sha256": "d437f3aaf34274c19c53a0888548f29b470135b83e08f130514f0e33eafae881",
+      "truncated": false,
+      "elapsed_seconds": 0.7298829120118171
+    },
+    {
+      "url": "http://213.239.193.208:9052/blocks/0d18338508e84461024cbdf4669a4dce4379fc349902767a71f13f903dd5e650",
+      "label": "block-1024",
+      "purpose": "finite read-only public fixture acquisition",
+      "timeout_seconds": 8,
+      "status": 200,
+      "bytes": 5297,
+      "sha256": "4d6408a1d4d3326cd728c8616c47f4c93a7f5f11bf1c55838dfbb629c33943b2",
+      "truncated": false,
+      "elapsed_seconds": 0.7671102590393275
+    },
+    {
+      "url": "http://213.239.193.208:9052/utxo/genesis",
+      "label": "genesis",
+      "purpose": "finite read-only public fixture acquisition",
+      "timeout_seconds": 8,
+      "status": 200,
+      "bytes": 2933,
+      "sha256": "fe9ab1fb64de7c6ba878aceb44dbd062d3cb223355c790829b02602f9a409664",
+      "truncated": false,
+      "elapsed_seconds": 0.86399177799467
+    }
+  ],
+  "header_serializer": {
+    "library": "org.scorexfoundation:sigma-state_2.12:6.0.6",
+    "scala_compiler": "2.12.21",
+    "jars": {
+      "scala-library-2.12.21.jar": "e2f4040c95cc4dd1cfeaae38bdde596e4b36933632451efa7d8564c6a359510c",
+      "scala-compiler-2.12.21.jar": "fb1bb6b0d7e8e922f03b5294ef0af23b9d2bd1cde6819ecb820c57210db4548e",
+      "scala-reflect-2.12.21.jar": "8b91a08ba69a0564689793e732f06768d0914ec9e90fa8c3d1b55c5bf4600c14",
+      "sigma-state_2.12-6.0.6.jar": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898",
+      "scrypto_2.12-3.1.1.jar": "a9b44951038cd4049b997cebfb24c64b3b664a2427ac550be09030ad4119830a",
+      "scorex-util_2.12-0.2.2.jar": "4e3b0422a747b02fc83a7fd7659fc4453abc813c7b95ab858d13f63832bdd80e",
+      "bcprov-jdk15to18-1.85.1.jar": "ffd4186dab3cb1663572f493814c4ecdfdc6c950783b566072907c6d32dc10bc",
+      "supertagged_2.12-2.0-RC2.jar": "a14e9782f09d747323dacac7adcdefa9aa105012c5c42017971868c5c663a7b7",
+      "debox_2.12-0.10.0.jar": "7e1a47b430e6ad9bb7943b384805f99140554e4fe53aa787721dc4e49a7932e9",
+      "scala-collection-compat_2.12-2.14.0.jar": "40d7c1719db7940a7101509dff407f1ff67baf01abd1f40547b04077d94a92e5",
+      "fastparse_2.12-2.3.3.jar": "99ebdabb902a79b9fedd90d6f2b459eff6982849ecd0a80f958218bad9175120",
+      "sourcecode_2.12-0.2.4.jar": "a9ecd36cf1f1ed5d460e17e3e42a50e940fd792d6ec61d3a5fbaf29ae90dd93b",
+      "geny_2.12-0.6.10.jar": "07be2815eae87b0f0397f4ea628c4002d744b7be43a04b73fc62429e67ff6915",
+      "circe-core_2.12-0.14.15.jar": "1bb842f33a9f9e6540669a2926468500c7d8f782f417c15c76ca77eca26125b1",
+      "circe-parser_2.12-0.14.15.jar": "2d3542ebb5cc6a30518a11e54c3055c588ce19e8e10813134064ac6761cc590f",
+      "circe-numbers_2.12-0.14.15.jar": "a7bd4db65baa06d3f50b7488ec572cf1f49beab06e850b4012885b730e5a93c8",
+      "circe-jawn_2.12-0.14.15.jar": "82744fca9206db561a81090715d79efaeb6c720d1bea753cc579f34eb1a82cc3",
+      "cats-core_2.12-2.13.0.jar": "4b92d574b01cf448018707de8bf20a2c37d0f6c6bd657a0f3c1be762761a310e",
+      "cats-kernel_2.12-2.13.0.jar": "daeb592b533bd9d6400aac1397d780ff22ca672e98f4dc69c08fd0ceba3fa0ed",
+      "jawn-parser_2.12-1.6.0.jar": "3ac478a24fd55caed61c2ccb10dda337549409684decc1279a2e71b45da3ea2f",
+      "scodec-bits_2.12-1.1.34.jar": "3754e6ed81d25c872dee8383e27830eac474f77251af0bf5d06ec5bc78bcfb3d"
+    },
+    "helper_sha256": "83d1a9bf28bb4856ef8d541ee7c3e8a718e793f1d9f29e9eeaf9d5085f30c710",
+    "executed": [
+      {
+        "name": "compile",
+        "exit_code": 0,
+        "elapsed_seconds": 4.6379022859619
+      },
+      {
+        "name": "header-1",
+        "input_sha256": "1ea965ea557f8840166d6735a6676da948fd064e2e40fa74a48193fc05b77a4a",
+        "exit_code": 0,
+        "elapsed_seconds": 1.2360388259985484,
+        "stdout_sha256": "b2c150e27eca02a5ed508f765fdbbb595fe0e1e9c39daf7e0dea2f20a77d3eb6"
+      },
+      {
+        "name": "header-2",
+        "input_sha256": "7b7e5baa773da6351234d8fdd5e6a36e6ee82fa9da053914da737c5d0f31cb5d",
+        "exit_code": 0,
+        "elapsed_seconds": 0.6874503290164284,
+        "stdout_sha256": "6c3984a63ba98b9810699cc75cbf7d0f57634ffb8be1da6c5192f452751e8550"
+      },
+      {
+        "name": "header-128",
+        "input_sha256": "dddd6aa41658e59f4012c6a68a56cf6801c85b01f20d0994b0a25cf6500b190d",
+        "exit_code": 0,
+        "elapsed_seconds": 0.5267742950236425,
+        "stdout_sha256": "8e580734c60f32ae6767dd43d9b421bd13bbd20670910fe71c040681428b70ba"
+      },
+      {
+        "name": "header-1024",
+        "input_sha256": "c373f0580058efa29e0448d955318c5897c46406d17dccf83cf52c080f944d13",
+        "exit_code": 0,
+        "elapsed_seconds": 0.4065677530015819,
+        "stdout_sha256": "a7e37af421a30727b3448679d53ed66277a470a1433d487631a91d518cde1fba"
+      }
+    ],
+    "scope": "Pinned Sigma6.0.6 ErgoHeader serializer; not an Ergo node execution, raw wire response or complete chain authentication. Scala2.12.21."
+  },
+  "limits": [
+    "REST captures and independent explorer genesis agreement are observations, not continuous authenticated chain history.",
+    "Wire bytes were serialized by pinned Sigma6.0.6 from REST header JSON; /header/bytes returned JSON and is not claimed as a raw-wire source.",
+    "Epoch128 is the first boundary (voting length128); the height0 bootstrap accepts parsed parameters/settings without claiming the actual previous vote tally.",
+    "No whole reference-node block execution, full bootstrap, historical database migration or physical crash evidence."
+  ]
+}

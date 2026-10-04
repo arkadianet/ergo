@@ -208,22 +208,13 @@ impl SigmaType {
 /// `embeddableV5` (codes 1..=8). Matches `isV3OrLaterErgoTreeVersion`.
 const V6_EMBEDDABLE_TREE_VERSION: u8 = 3;
 
-/// The version used to gate embeddable type codes.
+/// The version used to select embeddable type-table membership.
 ///
-/// Scala's `TypeSerializer.getEmbeddableType` selects `embeddableV5` vs
-/// `embeddableV6` by `VersionContext.current.isV6Activated` — the ACTIVATED
-/// version (`VersionContext.scala:33`, `activatedVersion >= V6SoftForkVersion`),
-/// NOT the tree header. On the consensus path this crate uses the body's header
-/// version as the gate (the activated version is not threaded through the
-/// byte-level reader): a headerless register/context-var value falls back to the
-/// v6 set, and a v0/v1/v2-header tree body gates on that header version.
-///
-/// The ergo-compiler self-check needs the true activated axis: it emits a
-/// header-v0 tree whose body may carry a V6 type code that a `tree_version >= 3`
-/// (V6-activated) compile legitimately produces and Scala re-parses. It sets
-/// [`VlqReader::set_embeddable_activated_version`]; when present, that override
-/// takes precedence here, mirroring Scala's activated-version gate exactly.
-/// `None` (every consensus caller) keeps the header-version fallback — byte-inert.
+/// Scala's `TypeSerializer.embeddableIdToType` selects V5/V6 by ErgoTree version;
+/// its validation-rule identity uses activation separately. Headerless contexts
+/// default to the V6 table. The existing low-level override supports explicitly
+/// scoped typed-expression callers; it is not a whole-tree acceptance guarantee.
+/// The public activated ErgoTree helper clears it while parsing the header.
 fn embeddable_gate_version(r: &VlqReader) -> u8 {
     r.embeddable_activated_version()
         .unwrap_or_else(|| r.ergo_tree_version().unwrap_or(V6_EMBEDDABLE_TREE_VERSION))
@@ -298,13 +289,8 @@ mod tests {
         assert_eq!(embeddable_gate_version(&r), 1);
     }
 
-    /// F1: the activated-version OVERRIDE
-    /// ([`VlqReader::set_embeddable_activated_version`]) takes precedence over the
-    /// header version for embeddable-code gating — mirroring Scala
-    /// `getEmbeddableType` gating on `VersionContext.isV6Activated` (the ACTIVATED
-    /// version), NOT the tree header. A header-v0 reader with an activated
-    /// override of 3 admits code 9; the default (`None`) keeps header-version
-    /// gating (byte-inert for consensus callers).
+    /// A low-level explicit type-table override takes precedence. Whole-tree
+    /// activated parsing must clear it to preserve header-based membership.
     #[test]
     fn embeddable_activated_version_override_wins_over_header() {
         let mut r = VlqReader::new(&[]);

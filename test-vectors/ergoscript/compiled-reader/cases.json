@@ -1,0 +1,266 @@
+{
+  "cases": [
+    {
+      "id": "self-unsigned",
+      "source": "sigmaProp(SELF.R4[UnsignedBigInt].isDefined)",
+      "frontend_version": 3,
+      "compile_outcome": "COMPILE_ACCEPT",
+      "tree_hex": "1000d1e6c6a70409",
+      "reader_results": [
+        {
+          "activated_version": 1,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        },
+        {
+          "activated_version": 2,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        },
+        {
+          "activated_version": 3,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        }
+      ],
+      "header3_control_hex": "1b0700d1e6c6a70409",
+      "header3_control_result": {
+        "activated_version": 3,
+        "outcome": "READ_RIGHT",
+        "consumed": 9
+      }
+    },
+    {
+      "id": "var-unsigned",
+      "source": "sigmaProp(getVar[UnsignedBigInt](1).isDefined)",
+      "frontend_version": 3,
+      "compile_outcome": "COMPILE_ACCEPT",
+      "tree_hex": "1000d1e6e30109",
+      "reader_results": [
+        {
+          "activated_version": 1,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 7
+        },
+        {
+          "activated_version": 2,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 7
+        },
+        {
+          "activated_version": 3,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 7
+        }
+      ],
+      "header3_control_hex": "1b0600d1e6e30109",
+      "header3_control_result": {
+        "activated_version": 3,
+        "outcome": "READ_RIGHT",
+        "consumed": 8
+      }
+    },
+    {
+      "id": "self-coll-unsigned",
+      "source": "sigmaProp(SELF.R4[Coll[UnsignedBigInt]].isDefined)",
+      "frontend_version": 3,
+      "compile_outcome": "COMPILE_ACCEPT",
+      "tree_hex": "1000d1e6c6a70415",
+      "reader_results": [
+        {
+          "activated_version": 1,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        },
+        {
+          "activated_version": 2,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        },
+        {
+          "activated_version": 3,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        }
+      ],
+      "header3_control_hex": "1b0700d1e6c6a70415",
+      "header3_control_result": {
+        "activated_version": 3,
+        "outcome": "READ_RIGHT",
+        "consumed": 9
+      }
+    },
+    {
+      "id": "self-tuple-unsigned-int",
+      "source": "sigmaProp(SELF.R4[(UnsignedBigInt,Int)].isDefined)",
+      "frontend_version": 3,
+      "compile_outcome": "COMPILE_ACCEPT",
+      "tree_hex": "1000d1e6c6a7044504",
+      "reader_results": [
+        {
+          "activated_version": 1,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        },
+        {
+          "activated_version": 2,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        },
+        {
+          "activated_version": 3,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        }
+      ],
+      "header3_control_hex": "1b0800d1e6c6a7044504",
+      "header3_control_result": {
+        "activated_version": 3,
+        "outcome": "READ_RIGHT",
+        "consumed": 10
+      }
+    },
+    {
+      "id": "self-option-unsigned",
+      "source": "sigmaProp(SELF.R4[Option[UnsignedBigInt]].isDefined)",
+      "frontend_version": 3,
+      "compile_outcome": "COMPILE_ACCEPT",
+      "tree_hex": "1000d1e6c6a7042d",
+      "reader_results": [
+        {
+          "activated_version": 1,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        },
+        {
+          "activated_version": 2,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        },
+        {
+          "activated_version": 3,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 8
+        }
+      ],
+      "header3_control_hex": "1b0700d1e6c6a7042d",
+      "header3_control_result": {
+        "activated_version": 3,
+        "outcome": "READ_RIGHT",
+        "consumed": 9
+      }
+    },
+    {
+      "id": "var-coll-unsigned",
+      "source": "sigmaProp(getVar[Coll[UnsignedBigInt]](1).isDefined)",
+      "frontend_version": 3,
+      "compile_outcome": "COMPILE_ACCEPT",
+      "tree_hex": "1000d1e6e30115",
+      "reader_results": [
+        {
+          "activated_version": 1,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 7
+        },
+        {
+          "activated_version": 2,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 7
+        },
+        {
+          "activated_version": 3,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 7
+        }
+      ],
+      "header3_control_hex": "1b0600d1e6e30115",
+      "header3_control_result": {
+        "activated_version": 3,
+        "outcome": "READ_RIGHT",
+        "consumed": 8
+      }
+    },
+    {
+      "id": "self-tuple-int-unsigned",
+      "source": "sigmaProp(SELF.R4[(Int,UnsignedBigInt)].isDefined)",
+      "frontend_version": 3,
+      "compile_outcome": "COMPILE_ACCEPT",
+      "tree_hex": "1000d1e6c6a7044009",
+      "reader_results": [
+        {
+          "activated_version": 1,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 9
+        },
+        {
+          "activated_version": 2,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 9
+        },
+        {
+          "activated_version": 3,
+          "outcome": "READ_ERROR",
+          "exception_class": "sigma.serialization.SerializerException",
+          "message": "Cannot handle ValidationException, ErgoTree serialized without size bit.",
+          "consumed": 9
+        }
+      ],
+      "header3_control_hex": "1b0800d1e6c6a7044009",
+      "header3_control_result": {
+        "activated_version": 3,
+        "outcome": "READ_RIGHT",
+        "consumed": 10
+      }
+    }
+  ],
+  "oracle": {
+    "sigma_state": "6.0.6",
+    "sigma_state_jar_sha256": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898",
+    "ergo_core_jar_sha256": "382da71e318f662da713dc7a6542b0e4527e7d035aaa65aea97545d85f9ece9f",
+    "scala": "2.12.21",
+    "scala_cli": "1.12.1",
+    "java": "17",
+    "capture_source_sha256": "38c294e4b07531318ab0384eb02010e37cbbad90226c2022bd1ec3bce2702f9c",
+    "transcript_sha256": "c353d6e5d96cf9e5ccb4ecf5a0cd81659d92e5049e7db5bef3ed0921cc8d4565"
+  }
+}

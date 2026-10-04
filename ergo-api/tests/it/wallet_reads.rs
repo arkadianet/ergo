@@ -78,8 +78,19 @@ impl WalletAdmin for StubAdmin {
     }
     async fn transaction_by_id(
         &self,
-        _: String,
+        id: String,
     ) -> Result<Option<WalletTransactionEntry>, WalletAdminError> {
+        if id == "cd".repeat(32) {
+            return Ok(self
+                .transactions(Page {
+                    offset: 0,
+                    limit: 1,
+                })
+                .await?
+                .items
+                .into_iter()
+                .next());
+        }
         Ok(None) // simulate "not found" — handler returns 404
     }
     async fn transactions_by_scan_id(
@@ -289,6 +300,7 @@ async fn transactions_returns_paginated_shape() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    super::published_schema::assert_response("/wallet/transactions", "get", &body);
     assert_eq!(body["total"], 1);
     assert!(body["items"].is_array());
 }
@@ -360,4 +372,23 @@ async fn transactions_by_scan_id_forwards_user_scan_ids() {
         Some(99),
         "path scan id forwarded to the admin verbatim"
     );
+}
+
+#[tokio::test]
+async fn transaction_by_id_success_matches_published_summary_shape() {
+    let resp = app()
+        .oneshot(
+            Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
+                .uri(format!("/wallet/transactionById?id={}", "cd".repeat(32)))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    super::published_schema::assert_response("/wallet/transactionById", "get", &body);
+    assert_eq!(body["txId"], "cd".repeat(32));
 }

@@ -25,6 +25,9 @@ pub use launch::{
     scala_launch, scala_launch_for_network, scala_launch_mainnet, scala_launch_testnet,
 };
 
+/// System-parameter extension fields as fixed-width keys and serialized values.
+pub type ActiveParameterFields = Vec<([u8; 2], Vec<u8>)>;
+
 use crate::voting::validation_settings::{
     ErgoValidationSettingsUpdate, ValidationSettingsCodecError,
 };
@@ -134,6 +137,9 @@ pub enum ActiveParamsError {
     /// `extra` contains the same id twice.
     #[error("extra entry has duplicate id {0}")]
     ExtraDuplicateId(u8),
+    /// The persistent field count does not fit its one-byte encoding.
+    #[error("codec: parameter count {0} exceeds 255")]
+    TooManyParameters(usize),
     /// Persistence-codec input was truncated.
     #[error("codec: unexpected end of input")]
     UnexpectedEof,

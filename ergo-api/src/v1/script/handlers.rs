@@ -586,7 +586,8 @@ struct SimulateResponse {
 /// against real chain state. `box_id` missing ⇒ `box_not_found`; the chain
 /// reader unwired ⇒ `chain_reader_unavailable` (never a bare 404).
 #[utoipa::path(
-    post, path = "/api/v1/script/simulate", tag = "script",
+    post, path = "/api/v1/script/simulate",
+    operation_id = "v1_script_simulate_post", tag = "script",
     request_body = SimulateBody,
     responses(
         (status = 200, description = "Spendability against the real resolved box (single-box scope — no tx/proof verified)", body = SimulateResponse),

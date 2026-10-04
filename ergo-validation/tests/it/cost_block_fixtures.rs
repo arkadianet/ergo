@@ -589,7 +589,7 @@ fn replay(fixture: Fixture) {
                 .map(|(_, costs)| costs.iter().map(|(_, c)| c).sum::<u64>()),
             transition.stale_cost
         );
-        ProtocolParams::for_block(&previous, Some(&computed))
+        ProtocolParams::for_block(&previous, Some(&computed), &Default::default())
     });
     let observed_view = ObservedView {
         state: &state,

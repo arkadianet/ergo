@@ -1,12 +1,15 @@
 //! Invalidation cache for txs that failed validation.
 //!
-//! Simple LRU + TTL, capped at `max_size` entries. First hit on a
-//! tx_id is a silent drop (we might have tagged it on a stale tip).
-//! A repeat hit within `spam_window` is peer-spammy and admission
-//! escalates to a spam penalty.
+//! Insertion-order eviction + TTL, capped at `max_size` entries. Reinserting
+//! an ID refreshes its position; lookups do not. First hit on a
+//! tx_id and a repeat within `spam_window` have distinct library lookup
+//! results. Production uses this cache to filter inventory fetches;
+//! received transaction bytes still undergo full admission validation.
 
-use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
+
+use lru::LruCache;
 
 use crate::types::TxId;
 
@@ -34,8 +37,8 @@ struct Record {
     reason: InvalidationReason,
 }
 
-/// Result of an invalidation lookup. Admission routes each case
-/// separately at step 7 of the pipeline.
+/// Result of the optional hit-counting lookup. Production's inventory filter
+/// uses `contains` and does not translate these results into peer penalties.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LookupResult {
     NotCached,
@@ -44,11 +47,9 @@ pub enum LookupResult {
 }
 
 pub struct InvalidationCache {
-    entries: HashMap<TxId, Record>,
-    /// FIFO of (tx_id, inserted_at) for O(1) eviction on overflow and
-    /// O(1)-amortized pruning of expired entries.
-    by_insertion: VecDeque<(TxId, Instant)>,
-    max_size: usize,
+    // One bounded node per ID, with no stale insertion descriptors. Use
+    // peek/peek_mut for reads so this cache retains insertion-order policy.
+    entries: Option<LruCache<TxId, Record>>,
     ttl: Duration,
     spam_window: Duration,
 }
@@ -60,65 +61,58 @@ impl InvalidationCache {
     /// spam rather than a coincidental retry (default 60 s).
     pub fn new(max_size: usize, ttl: Duration, spam_window: Duration) -> Self {
         Self {
-            entries: HashMap::with_capacity(max_size),
-            by_insertion: VecDeque::with_capacity(max_size),
-            max_size,
+            entries: NonZeroUsize::new(max_size).map(LruCache::new),
             ttl,
             spam_window,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.as_ref().map_or(0, LruCache::len)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 
     /// Prune entries older than `ttl` from the insertion-time front.
     /// Called at the start of every admission — amortized O(1).
     pub fn prune_expired(&mut self, now: Instant) {
-        while let Some((tx_id, inserted_at)) = self.by_insertion.front().copied() {
-            if now.duration_since(inserted_at) < self.ttl {
+        let Some(entries) = self.entries.as_mut() else {
+            return;
+        };
+        while let Some((_, record)) = entries.peek_lru() {
+            if now.duration_since(record.inserted_at) < self.ttl {
                 break;
             }
-            self.by_insertion.pop_front();
-            // Only remove if the entry in `entries` is the one this
-            // insertion-event refers to (re-inserts after eviction may
-            // leave stale front entries).
-            if let Some(rec) = self.entries.get(&tx_id) {
-                if rec.inserted_at == inserted_at {
-                    self.entries.remove(&tx_id);
-                }
-            }
+            entries.pop_lru();
         }
     }
 
     /// Record an invalidation. Evicts oldest if at capacity.
     pub fn insert(&mut self, tx_id: TxId, reason: InvalidationReason, now: Instant) {
         self.prune_expired(now);
-        if self.entries.len() >= self.max_size && !self.entries.contains_key(&tx_id) {
-            // Evict oldest.
-            if let Some((oldest_id, _)) = self.by_insertion.pop_front() {
-                self.entries.remove(&oldest_id);
-            }
-        }
+        let Some(entries) = self.entries.as_mut() else {
+            return;
+        };
         let rec = Record {
             inserted_at: now,
             last_hit_at: now,
             hits: 0,
             reason,
         };
-        self.entries.insert(tx_id, rec);
-        self.by_insertion.push_back((tx_id, now));
+        entries.put(tx_id, rec);
     }
 
     /// Look up a tx. Increments the hit counter and returns whether
     /// this is the first hit or a repeat (with hit count).
     pub fn record_hit(&mut self, tx_id: &TxId, now: Instant) -> LookupResult {
         self.prune_expired(now);
-        match self.entries.get_mut(tx_id) {
+        match self
+            .entries
+            .as_mut()
+            .and_then(|entries| entries.peek_mut(tx_id))
+        {
             None => LookupResult::NotCached,
             Some(rec) => {
                 let is_repeat_in_window =
@@ -140,26 +134,16 @@ impl InvalidationCache {
     }
 
     pub fn contains(&self, tx_id: &TxId) -> bool {
-        self.entries.contains_key(tx_id)
+        self.entries
+            .as_ref()
+            .is_some_and(|entries| entries.contains(tx_id))
     }
 
     pub fn reason(&self, tx_id: &TxId) -> Option<InvalidationReason> {
-        self.entries.get(tx_id).map(|r| r.reason)
-    }
-
-    /// Test hook: bulk-insert without prune (for deterministic seeds).
-    #[cfg(test)]
-    fn insert_raw(&mut self, tx_id: TxId, inserted_at: Instant, reason: InvalidationReason) {
-        self.entries.insert(
-            tx_id,
-            Record {
-                inserted_at,
-                last_hit_at: inserted_at,
-                hits: 0,
-                reason,
-            },
-        );
-        self.by_insertion.push_back((tx_id, inserted_at));
+        self.entries
+            .as_ref()
+            .and_then(|entries| entries.peek(tx_id))
+            .map(|r| r.reason)
     }
 }
 
@@ -212,7 +196,7 @@ mod tests {
     fn ttl_prunes_old_entries() {
         let mut c = cache();
         let t0 = Instant::now();
-        c.insert_raw(id(1), t0, InvalidationReason::ValidationFailed);
+        c.insert(id(1), InvalidationReason::ValidationFailed, t0);
         assert!(c.contains(&id(1)));
         let later = t0 + Duration::from_secs(120);
         c.prune_expired(later);
@@ -242,6 +226,68 @@ mod tests {
         c.insert(id(1), InvalidationReason::DoubleSpendLoser, t0);
         assert_eq!(c.len(), 1);
         assert_eq!(c.reason(&id(1)), Some(InvalidationReason::DoubleSpendLoser));
+        assert_eq!(c.entries.as_ref().unwrap().iter().count(), 1);
+    }
+
+    #[test]
+    fn refreshed_id_has_one_node_and_survives_older_entry_eviction() {
+        let mut c = InvalidationCache::new(2, Duration::from_secs(60), Duration::from_secs(1));
+        let t0 = Instant::now();
+        c.insert(id(1), InvalidationReason::ValidationFailed, t0);
+        c.insert(id(2), InvalidationReason::ValidationFailed, t0);
+        // Same-instant refresh must replace ownership, not leave a second
+        // descriptor that can later evict this refreshed record.
+        c.insert(id(1), InvalidationReason::DoubleSpendLoser, t0);
+        c.insert(id(1), InvalidationReason::DoubleSpendLoser, t0);
+        assert_eq!(c.entries.as_ref().unwrap().iter().count(), 2);
+        c.insert(id(3), InvalidationReason::ValidationFailed, t0);
+        assert!(c.contains(&id(1)));
+        assert!(!c.contains(&id(2)));
+        assert!(c.contains(&id(3)));
+        assert_eq!(c.len(), 2);
+    }
+
+    #[test]
+    fn refresh_extends_ttl_but_hits_do_not_change_eviction_order() {
+        let mut c = InvalidationCache::new(2, Duration::from_secs(60), Duration::from_secs(1));
+        let t0 = Instant::now();
+        c.insert(id(1), InvalidationReason::ValidationFailed, t0);
+        c.insert(id(2), InvalidationReason::ValidationFailed, t0);
+        c.insert(
+            id(1),
+            InvalidationReason::DoubleSpendLoser,
+            t0 + Duration::from_secs(30),
+        );
+        c.prune_expired(t0 + Duration::from_secs(60));
+        assert!(!c.contains(&id(2)));
+        assert!(c.contains(&id(1)));
+        c.insert(
+            id(2),
+            InvalidationReason::ValidationFailed,
+            t0 + Duration::from_secs(60),
+        );
+        c.record_hit(&id(1), t0 + Duration::from_secs(61));
+        c.insert(
+            id(3),
+            InvalidationReason::ValidationFailed,
+            t0 + Duration::from_secs(61),
+        );
+        assert!(
+            !c.contains(&id(1)),
+            "a lookup does not refresh insertion order"
+        );
+        c.prune_expired(t0 + Duration::from_secs(121));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn zero_capacity_retains_no_invalidation_or_ordering_nodes() {
+        let mut c = InvalidationCache::new(0, Duration::from_secs(60), Duration::from_secs(1));
+        let now = Instant::now();
+        c.insert(id(1), InvalidationReason::ValidationFailed, now);
+        assert!(c.entries.is_none());
+        assert!(c.is_empty());
+        assert_eq!(c.record_hit(&id(1), now), LookupResult::NotCached);
     }
 
     #[test]

@@ -1,5 +1,6 @@
-//> using scala 2.12
-//> using dep org.ergoplatform::ergo-wallet:6.1.0
+//> using scala 2.12.20
+//> using dep org.ergoplatform::ergo-wallet:6.0.6
+//> using dep org.scorexfoundation::sigma-state:6.0.6
 
 // Reads canonical signed transaction hex from stdin.
 // Deserializes it and prints the bytes_to_sign (unsigned message) as hex.

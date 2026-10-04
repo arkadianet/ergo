@@ -154,7 +154,8 @@ fn url_reject_response(rej: UrlReject) -> Response {
 /// `POST /api/v1/webhooks` — register a subscription (T1). Returns 201 with the
 /// subscription **and** the secret echoed exactly once.
 #[utoipa::path(
-    post, path = "/api/v1/webhooks", tag = "webhooks",
+    post, path = "/api/v1/webhooks",
+    operation_id = "v1_webhooks_post", tag = "webhooks",
     request_body = RegisterRequest,
     responses(
         (status = 201, description = "Registered — subscription + secret (echoed only here)", body = serde_json::Value),
@@ -281,7 +282,8 @@ pub(crate) async fn register(
 
 /// `GET /api/v1/webhooks` — list subscriptions (T1), cursor-paginated.
 #[utoipa::path(
-    get, path = "/api/v1/webhooks", tag = "webhooks",
+    get, path = "/api/v1/webhooks",
+    operation_id = "v1_webhooks_get", tag = "webhooks",
     params(
         ("limit" = Option<u32>, Query, description = "Page size"),
         ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),

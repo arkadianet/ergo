@@ -12,11 +12,14 @@ use super::error::BlockValidationError;
 /// Topological layering of a block's transactions for parallel validation.
 ///
 /// Every tx index in `[0, txs.len())` appears in exactly one layer. For any
-/// pair where tx `j` spends (or data-reads) an output of tx `i` within the
-/// same block, `layer[j] > layer[i]`. Within a single layer no tx depends
-/// on any other in the same layer, so layer members can be validated
-/// concurrently against a shared overlay snapshot that contains the
-/// outputs of strictly lower layers.
+/// backward dependency where tx `j` spends (or data-reads) an output of tx
+/// `i` with `i < j`, `layer[j] > layer[i]`. Within a single layer no tx has
+/// a recorded backward dependency on another member, so members validate
+/// concurrently against an overlay
+/// containing outputs of lower layers. Forward references are not recorded:
+/// data inputs resolve against every output of the block regardless of
+/// layer, and a forward spend is rejected when the block's removals apply
+/// before the producing insertion.
 ///
 /// Also rejects intra-block double-spends (two txs listing the same input
 /// `box_id`) up front — this was caught implicitly by the sequential
@@ -103,9 +106,9 @@ pub(crate) fn build_tx_layers(txs: &[Transaction]) -> Result<TxLayers, BlockVali
     // 3. Compute dependency depth per tx. A block's canonical tx order
     //    places dependencies at lower indices, so forward iteration with
     //    layer[j] = max(layer[dep]) + 1 is sufficient. Backwards edges
-    //    (j depends on k>j) cannot be stitched into a dag here — they
-    //    fall through unresolved and the per-tx input resolution will
-    //    fail normally, matching sequential behaviour.
+    //    (j depends on k>j) are not recorded: a forward data read resolves
+    //    through the overlay's whole-block outputs, and a forward spend
+    //    fails when the block's state changes apply.
     let mut layer: Vec<usize> = vec![0; txs.len()];
     for (i, tx) in txs.iter().enumerate() {
         let mut max_dep_layer: Option<usize> = None;
@@ -233,6 +236,21 @@ mod layering_tests {
     }
 
     #[test]
+    fn layers_do_not_preserve_global_original_error_order() {
+        let producer = tx_with(vec![input_filled(1)], vec![], 1);
+        let dependent = tx_with(vec![input_of(first_output_box_id(&producer))], vec![], 1);
+        let independent = tx_with(vec![input_filled(2)], vec![], 1);
+        let layers = build_tx_layers(&[producer, dependent, independent]).unwrap();
+        assert_eq!(layers.layers, vec![vec![0, 2], vec![1]]);
+        assert_eq!(
+            layers.layers.into_iter().flatten().collect::<Vec<_>>(),
+            vec![0, 2, 1]
+        );
+        // If tx2 fails in layer0, validation never reaches tx1 in layer1.
+        // This assertion describes scheduling, not a reference verdict.
+    }
+
+    #[test]
     fn linear_chain_builds_deep_layering() {
         // tx0 spends pre-block box. tx1 spends tx0's output. tx2 spends tx1's output.
         let tx0 = tx_with(vec![input_filled(1)], vec![], 1);
@@ -353,10 +371,10 @@ mod layering_tests {
     ///   block resolves through the pre-block base (we don't filter
     ///   `spent_in_block`).
     /// - Block 422179 — data input to a box CREATED earlier in the
-    ///   same block resolves through `in_block_outputs`.
+    ///   same block resolves through the block's outputs.
     ///
     /// Complements `data_input_creates_dependency` (the scheduling
-    /// edge) with the lookup contract the schedule is defending.
+    /// edge) with the lookup contract.
     #[test]
     fn data_input_resolution_unions_preblock_with_inblock_creates() {
         let pre_block_id = Digest32::from_bytes([1u8; 32]);
@@ -370,16 +388,15 @@ mod layering_tests {
             b: pre_block_box.clone(),
         };
 
-        let mut overlay = BlockUtxoOverlay::new(&base);
-
         // Apply a tx that spends the pre-block box and creates a new one.
         let creator = tx_with(vec![input_of(pre_block_id)], vec![], 1);
         let created_id = first_output_box_id(&creator);
-        overlay.apply_tx(&creator);
+        let mut overlay = BlockUtxoOverlay::new(&base, std::slice::from_ref(&creator));
+        overlay.apply_tx(0, &creator);
 
         // Spending-input view (UtxoView::get_box) respects in-block changes:
         //   - pre-block id is now spent_in_block → None
-        //   - newly-created id is in in_block_outputs → Some
+        //   - newly-created id belongs to an applied tx → Some
         assert!(
             overlay.get_box(&pre_block_id).is_none(),
             "spending view must hide a box spent earlier in the block"
@@ -393,7 +410,7 @@ mod layering_tests {
         // UTXO + in-block creates, with no spent_in_block filter:
         //   - pre-block id still resolves even though it's spent_in_block
         //     (mainnet block 290684)
-        //   - newly-created id resolves via in_block_outputs
+        //   - newly-created id resolves via the block's outputs
         //     (mainnet block 422179, tx 2 data input on settlementHeight=422179 box)
         assert!(
             overlay.get_box_from_base(&pre_block_id).is_some(),
@@ -405,5 +422,44 @@ mod layering_tests {
             "data-input view must surface in-block-created outputs \
              (block 422179 parity: tx 2 data-inputs a box with settlementHeight=422179)"
         );
+    }
+
+    /// A data input may name an output of a LATER transaction in the block:
+    /// Scala resolves data inputs through `createdOutputs`, every output of
+    /// the block, and their AVL lookups never fail. A regular input must not
+    /// spend that output before its producer is applied.
+    #[test]
+    fn forward_output_resolves_for_data_inputs_but_not_for_spends() {
+        let producer = tx_with(vec![input_filled(2)], vec![], 1);
+        let produced_id = first_output_box_id(&producer);
+        let reader = tx_with(
+            vec![input_filled(1)],
+            vec![DataInput {
+                box_id: produced_id,
+            }],
+            1,
+        );
+        let base = OneBoxUtxo {
+            id: Digest32::from_bytes([9u8; 32]),
+            b: ErgoBox::new(
+                make_candidate(1_000_000_000),
+                ergo_primitives::digest::ModifierId::from_bytes([0u8; 32]),
+                0,
+            ),
+        };
+        let txs = [reader, producer];
+        let mut overlay = BlockUtxoOverlay::new(&base, &txs);
+
+        assert!(
+            overlay.get_box_from_base(&produced_id).is_some(),
+            "data-input view must surface a later transaction's output"
+        );
+        assert!(
+            overlay.get_box(&produced_id).is_none(),
+            "spending view must not surface an output before its producer is applied"
+        );
+
+        overlay.apply_tx(1, &txs[1]);
+        assert!(overlay.get_box(&produced_id).is_some());
     }
 }

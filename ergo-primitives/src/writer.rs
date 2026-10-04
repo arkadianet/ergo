@@ -76,7 +76,8 @@ impl VlqWriter {
     ///
     /// Panics if `bytes.len()` exceeds `i32::MAX` (~2 GiB), matching the
     /// reader's `getUIntExact` rejection bound. A payload that large
-    /// would silently wrap the length prefix on the wire and produce a
+    /// would exceed the reader's accepted length range; lengths beyond
+    /// `u32::MAX` would also narrow the prefix. They could produce a
     /// frame the reader can't decode; the assert turns that programmer-
     /// error path into a loud panic at the construction site rather
     /// than a corrupted-wire-format bug downstream. Consistent with the

@@ -32,7 +32,8 @@ pub const CODE_UTXO_CHUNK: u8 = 81;
 pub const CODE_GET_NIPOPOW_PROOF: u8 = 90;
 pub const CODE_NIPOPOW_PROOF: u8 = 91;
 
-const MAX_INV_OBJECTS: usize = 400;
+/// Maximum IDs in one Inv or RequestModifier payload.
+pub const MAX_INV_OBJECTS: usize = 400;
 const MAX_MODIFIERS: usize = 400;
 const MODIFIER_ID_SIZE: usize = 32;
 const MAX_MODIFIER_MESSAGE_SIZE: usize = 2_048_576;
@@ -142,8 +143,14 @@ pub fn single_modifier_fits(byte_len: usize) -> bool {
 }
 
 pub fn serialize_modifiers(data: &ModifiersData) -> Result<Vec<u8>, MessageError> {
+    if ModifierTypeId::from_byte(data.type_id).is_none() {
+        return Err(MessageError::UnknownModifierType(data.type_id));
+    }
     if data.modifiers.is_empty() {
         return Err(MessageError::EmptyModifiers);
+    }
+    if data.modifiers.len() > MAX_MODIFIERS {
+        return Err(MessageError::TooManyModifiers(data.modifiers.len()));
     }
     let mut w = VlqWriter::new();
     w.put_u8(data.type_id);

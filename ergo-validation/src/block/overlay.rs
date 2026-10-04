@@ -8,43 +8,58 @@ use crate::context::UtxoView;
 
 /// UTXO overlay for intra-block transaction dependencies.
 ///
-/// Wraps a base UtxoView and tracks outputs created and inputs spent
-/// within the current block, so transaction N can spend outputs of
-/// transaction M (M < N) in the same block.
+/// Wraps a base UtxoView and the block's outputs. Regular inputs see the
+/// outputs of transactions already applied to the overlay, so transaction N
+/// can spend outputs of transaction M (M < N) in the same block. Data inputs
+/// see every output of the block, as Scala's `UtxoState.applyTransactions`
+/// resolves both through `createdOutputs = transactions.flatMap(_.outputs)`
+/// before falling back to the pre-block state.
 pub(super) struct BlockUtxoOverlay<'a> {
     base: &'a dyn UtxoView,
-    in_block_outputs: HashMap<Digest32, ErgoBox>,
+    block_outputs: HashMap<Digest32, ErgoBox>,
+    // Output ids per transaction index, in output order.
+    outputs_by_tx: Vec<Vec<Digest32>>,
+    applied_outputs: HashSet<Digest32>,
     spent_in_block: HashSet<Digest32>,
 }
 
 impl<'a> BlockUtxoOverlay<'a> {
-    pub(super) fn new(base: &'a dyn UtxoView) -> Self {
+    /// Build the overlay for a whole block. Transactions whose id or output
+    /// ids cannot be derived contribute no outputs; block validation rejects
+    /// such a transaction before its outputs could matter.
+    pub(super) fn new(base: &'a dyn UtxoView, transactions: &[Transaction]) -> Self {
+        let mut block_outputs = HashMap::new();
+        let mut outputs_by_tx = Vec::with_capacity(transactions.len());
+        for tx in transactions {
+            let mut ids = Vec::with_capacity(tx.output_candidates.len());
+            if let Ok(tx_id) = ergo_ser::transaction::transaction_id(tx) {
+                for (idx, output) in tx.output_candidates.iter().enumerate() {
+                    let ergo_box = ErgoBox::new(output.clone(), tx_id, idx as u16);
+                    if let Ok(box_id) = ergo_box.box_id() {
+                        ids.push(box_id);
+                        block_outputs.insert(box_id, ergo_box);
+                    }
+                }
+            }
+            outputs_by_tx.push(ids);
+        }
         Self {
             base,
-            in_block_outputs: HashMap::new(),
+            block_outputs,
+            outputs_by_tx,
+            applied_outputs: HashSet::new(),
             spent_in_block: HashSet::new(),
         }
     }
 
-    pub(super) fn apply_tx(&mut self, tx: &Transaction) {
+    /// Commit the transaction at `index` of the block passed to [`Self::new`]:
+    /// its inputs become spent and its outputs become spendable.
+    pub(super) fn apply_tx(&mut self, index: usize, tx: &Transaction) {
         for input in &tx.inputs {
             self.spent_in_block.insert(input.box_id);
         }
-        // `transaction_id` is fallible only on write-side errors that
-        // require malformed in-memory state (token-id-not-in-table); a
-        // Transaction that reached this overlay has already been
-        // structurally validated, so the id derivation cannot fail.
-        let tx_id = ergo_ser::transaction::transaction_id(tx)
-            .expect("validated Transaction yields a deterministic id");
-        for (idx, output) in tx.output_candidates.iter().enumerate() {
-            let ergo_box = ErgoBox {
-                candidate: output.clone(),
-                transaction_id: tx_id,
-                index: idx as u16,
-            };
-            if let Ok(box_id) = ergo_box.box_id() {
-                self.in_block_outputs.insert(box_id, ergo_box);
-            }
+        if let Some(ids) = self.outputs_by_tx.get(index) {
+            self.applied_outputs.extend(ids.iter().copied());
         }
     }
 }
@@ -52,10 +67,14 @@ impl<'a> BlockUtxoOverlay<'a> {
 impl BlockUtxoOverlay<'_> {
     /// Look up a box for data-input resolution.
     ///
-    /// Resolves through the union of pre-block UTXO + intra-block
-    /// creates, ignoring intra-block spends. This differs from regular
-    /// input resolution (`UtxoView::get_box`) which both surfaces
-    /// in-block creates AND filters out in-block spends.
+    /// Resolves through every output of the block, then the base view,
+    /// ignoring intra-block spends and transaction order. This matches
+    /// Scala's `checkBoxExistence` (`createdOutputs.get(id).orElse(boxById(id))`
+    /// in `UtxoState.applyTransactions`); the AVL lookups for data inputs
+    /// run before the block's removals and insertions and never fail
+    /// (`StateChanges.operations`). It differs from regular input resolution
+    /// (`UtxoView::get_box`), which surfaces only outputs of transactions
+    /// already applied AND filters out in-block spends.
     ///
     /// Mainnet oracle evidence:
     /// 1. Block 290684 — data input to a box SPENT earlier in the same
@@ -63,17 +82,12 @@ impl BlockUtxoOverlay<'_> {
     ///    filter on `spent_in_block`).
     /// 2. Block 422179 — tx 2 has a data input on a box with
     ///    `settlementHeight = 422179` (created in this same block by
-    ///    an earlier tx). Scala accepts this block — the box must be
-    ///    found via `in_block_outputs`.
+    ///    an earlier tx). Scala accepts this block.
     ///
-    /// An earlier version of this helper went to `base` only, citing
-    /// "Scala parity: ErgoState.stateChanges resolves data inputs from
-    /// the original state". That reading was wrong — Scala's stateful
-    /// validation runs over a sequentially-applied per-block view, so
-    /// a tx's data inputs see what earlier txs in the same block have
-    /// already added. Mainnet block 422179 is the proof.
+    /// A data input may also name an output of a later transaction in the
+    /// block, which the digest path's `DigestUtxoView` resolves the same way.
     pub(super) fn get_box_from_base(&self, box_id: &Digest32) -> Option<ErgoBox> {
-        if let Some(b) = self.in_block_outputs.get(box_id) {
+        if let Some(b) = self.block_outputs.get(box_id) {
             return Some(b.clone());
         }
         self.base.get_box(box_id)
@@ -85,8 +99,8 @@ impl UtxoView for BlockUtxoOverlay<'_> {
         if self.spent_in_block.contains(box_id) {
             return None;
         }
-        if let Some(b) = self.in_block_outputs.get(box_id) {
-            return Some(b.clone());
+        if self.applied_outputs.contains(box_id) {
+            return self.block_outputs.get(box_id).cloned();
         }
         self.base.get_box(box_id)
     }

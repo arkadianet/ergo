@@ -31,7 +31,7 @@ Contents:
 
 Build the node binary (the workspace pins Rust 1.99.0 via
 [`../rust-toolchain.toml`](../rust-toolchain.toml); `rustup` installs it on
-first build). See the README [Building](../README.md#building) section for
+first build). See the overview [Building](overview.md#building) section for
 the full set of build commands.
 
 ```bash
@@ -56,7 +56,7 @@ With the bundled defaults the node connects on mainnet (P2P port 9030),
 persists state under `./ergo-data/`, and serves the REST API on
 `127.0.0.1:9099`. The first run performs an Initial Block Download (IBD)
 from genesis; later runs resume from the persisted tip. See
-[Running](../README.md#running) in the README for the cargo one-shot form
+[Running](overview.md#running) in the overview for the cargo one-shot form
 and CLI help.
 
 For the authoritative description of every config key, read the source
@@ -78,7 +78,7 @@ to start on an unsupported combination.
 | **Mode 2 — UTXO snapshot bootstrap** | Mode 1 plus `[node.utxo] utxo_bootstrap = true` | Supported | Clean-DB boot and you want to skip multi-hour genesis replay by installing a UTXO snapshot, then resume normal sync. See the trust caveat below. |
 | **Mode 6 — headers-only** | `state_type = "digest"`, `verify_transactions = false`, `blocks_to_keep = 0`, `utxo_bootstrap = false` | Supported | You only need the validated header chain (PoW + difficulty) and never need block bodies, transaction validation, the mempool, or UTXO queries. |
 | **Mode 5 — digest verifier** | `state_type = "digest"`, `verify_transactions = true`, `blocks_to_keep = -1`, `utxo_bootstrap = false`, `nipopow_bootstrap = false` | Partial | External replay covers a mainnet voting boundary and additional mainnet/testnet windows, with rollback/replay and corrupted-proof rejection. Bounded process-death reorg recovery is tested for digest and UTXO backends. Broader historical coverage, complete external-window cold-open recovery campaigns and a history-retention policy remain open. |
-| **Mode 3 — pruned** | `state_type = "utxo"`, `blocks_to_keep = N > 0` | Partial | A standard pruned config boots — `blocks_to_keep` at or above the rollback-window floor (`keep_versions + SAFETY_MARGIN`, 250 at the defaults) — with `block_sections` eviction and headers-synced activation landed; end-to-end activation-parity tests are the remaining done gate. |
+| **Mode 3 — pruned** | `state_type = "utxo"`, `blocks_to_keep = N > 0` | Partial | A standard pruned config boots — `blocks_to_keep` at or above the rollback-window floor (`keep_versions + SAFETY_MARGIN`, 250 at the defaults) — with `block_sections` eviction. Fresh UTXO stores replay from genesis before pruning; complete activation and retention campaigns remain open. |
 | **Mode 4 — pruned + bootstrap** | Mode 3 plus `utxo_bootstrap = true` | Partial | Install/reopen and both NiPoPoW/UTXO orderings are tested. A three-peer test exercises deferred snapshot installation through real header catch-up, full validation of the next mainnet block and restart. Long-running live multi-peer soak remains outstanding. |
 
 The [operating-mode evidence inventory](operating-mode-evidence.md) links the
@@ -318,7 +318,9 @@ digest backup only into a digest-configured node.
 
 Notes:
 
-- Every tagged release through 1.0 is marked **pre-release** on GitHub;
+- Tags with a prerelease suffix (for example `v0.11.0-rc.1`) are marked
+  **pre-release** on GitHub. A plain version tag is not marked pre-release;
+  pre-1.0 compatibility and readiness limits still apply;
   treat any pre-1.0 deployment as experimental.
 - Configuration is unstable until 1.0 — a minor-version upgrade may rename
   or reshape config keys. The node validates the whole config at load and
@@ -843,9 +845,15 @@ until sync catches up.
 **Disk usage growing faster than expected.** Enabling the extra-index
 (`[indexer] enabled = true`) adds an `indexer.redb` file and roughly doubles
 the on-disk footprint. Disable it if you are not querying the
-address/token/template indices. Pruning (positive `[node] blocks_to_keep`)
-is not a supported posture today; the supported way to run without keeping
-full blocks is Mode 6 (headers-only).
+address/token/template indices. Pruned Mode 3 is partial, as described above.
+A fresh pruned UTXO node downloads and validates the chain from genesis
+before discarding old block sections; pruning does not skip initial UTXO
+reconstruction or remove the current UTXO set. Its retained window must
+cover `[node] keep_versions` plus the safety margin, with the extra index
+disabled. Mode 6 (headers-only) avoids full blocks and does not provide UTXO
+or transaction validation. See the
+[mode table](#state-modes-and-how-to-choose) for boot combinations and
+remaining external-validation limits.
 
 **Reorgs.** The node handles reorgs automatically with delta-based rollback
 through the undo log. You will see a brief dip in `best_full_block_height`

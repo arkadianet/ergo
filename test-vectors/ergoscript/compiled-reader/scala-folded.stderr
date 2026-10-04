@@ -1,0 +1,23 @@
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/maven-metadata.xml
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/maven-metadata.xml
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/maven-metadata.xml.sha1
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/maven-metadata.xml.sha1
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/
+Downloading https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/
+Failed to download https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/
+Downloading https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/maven-metadata.xml
+Failed to download https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/maven-metadata.xml
+Downloading https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/maven-metadata.xml.sha1
+Failed to download https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/maven-metadata.xml.sha1
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/maven-metadata.xml
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/maven-metadata.xml
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/maven-metadata.xml.sha1
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/maven-metadata.xml.sha1
+[[33mhint[0m] ./CapturePositive.scala:4:15
+[[33mhint[0m] "sigma-state is outdated, update to 6.0.7"
+[[33mhint[0m]      sigma-state 6.0.6 -> org.scorexfoundation::sigma-state:6.0.7
+[[33mhint[0m] //> using dep org.scorexfoundation::sigma-state:6.0.6
+[[33mhint[0m]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

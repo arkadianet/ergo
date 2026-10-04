@@ -5,9 +5,8 @@
 //! drives each tx through our admission pipeline, and compares:
 //!   1. Admission parity  — every tx Scala holds should be admitted (or
 //!      classified as a known policy divergence: BelowMinFee).
-//!   2. Ordering parity   — compare our BySize ordering against Scala's
-//!      natural ordering (fee/size, descending) and our ByCost ordering
-//!      against the same ground truth, reporting Kendall τ for each.
+//!   2. Ordering coverage — compare ByCost and BySize on transactions present
+//!      in both Rust pools and the Scala capture, reporting Kendall τ.
 //!
 //! This test is gated behind the `diagnostics` feature because it
 //! needs a running Scala node and remains explicitly ignored in hermetic
@@ -16,14 +15,16 @@
 //!   cargo test --locked -p ergo-mempool --features diagnostics --test it m7_scala_oracle -- --ignored --nocapture
 //!
 //! The test NEVER asserts a specific ordering score — ordering divergence
-//! between ByCost and BySize is expected and intentional. What IS
-//! asserted: admission parity (no unexpected rejections) and that BySize
-//! ordering is closer to Scala's than a random permutation would be.
+//! between ByCost and BySize is expected and intentional. The diagnostic
+//! requires actual admissions in both modes and at least five common ordering
+//! entries, then checks positive ByCost correlation. Missing context/inputs
+//! can make a capture incomplete; an incomplete capture fails this diagnostic.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use std::time::Instant;
 
+use crate::m7_oracle_coverage::require_oracle_coverage;
 use ergo_mempool::admission::TipContext;
 use ergo_mempool::types::{TipPointer, TxSource};
 use ergo_mempool::weight::{ByCost, BySize};
@@ -378,6 +379,7 @@ fn scala_pending_tx_oracle() {
 
     let mut admitted_bysize = 0usize;
     let mut admitted_bycost = 0usize;
+    let mut compared = 0usize;
     let mut below_min_fee = 0usize;
     let mut unresolved_data_input = 0usize;
     let mut unresolved_input = 0usize;
@@ -457,6 +459,7 @@ fn scala_pending_tx_oracle() {
         let tx_bytes = w.result();
 
         let utxo = MapUtxo(input_boxes);
+        compared += 1;
         let tip = TipContext {
             tip: TipPointer {
                 height: tip_height,
@@ -515,6 +518,10 @@ fn scala_pending_tx_oracle() {
             Instant::now(),
             &tip,
             &ErgoValidator,
+        );
+        assert_eq!(
+            out_s, out_c,
+            "fresh-pool admission differs between weight modes for {tx_id_hex}"
         );
         if matches!(out_c, AdmissionOutcome::Admitted { .. }) {
             admitted_bycost += 1;
@@ -670,8 +677,30 @@ fn scala_pending_tx_oracle() {
     };
 
     // ── Compute ordering metrics ──
-    let tau_bysize = kendall_tau(&bysize_order, &scala_order);
-    let tau_bycost = kendall_tau(&bycost_order, &scala_order);
+    let size_ids: HashSet<_> = bysize_order.iter().copied().collect();
+    let cost_ids: HashSet<_> = bycost_order.iter().copied().collect();
+    let common: HashSet<_> = scala_order
+        .iter()
+        .copied()
+        .filter(|id| size_ids.contains(id) && cost_ids.contains(id))
+        .collect();
+    let scala_common: Vec<_> = scala_order
+        .iter()
+        .copied()
+        .filter(|id| common.contains(id))
+        .collect();
+    let size_common: Vec<_> = bysize_order
+        .iter()
+        .copied()
+        .filter(|id| common.contains(id))
+        .collect();
+    let cost_common: Vec<_> = bycost_order
+        .iter()
+        .copied()
+        .filter(|id| common.contains(id))
+        .collect();
+    let tau_bysize = kendall_tau(&size_common, &scala_common);
+    let tau_bycost = kendall_tau(&cost_common, &scala_common);
 
     // ── Report ──
     let total = txs.len();
@@ -679,6 +708,8 @@ fn scala_pending_tx_oracle() {
     eprintln!("\n[m7-oracle] Scala differential oracle ({total} pending txs, tip={tip_height}):");
     eprintln!("  admitted BySize         : {admitted_bysize}");
     eprintln!("  admitted ByCost         : {admitted_bycost}");
+    eprintln!("  compared admissions     : {compared}");
+    eprintln!("  common ordering entries : {}", common.len());
     eprintln!("  below_min_fee           : {below_min_fee}");
     eprintln!("  unresolved data input   : {unresolved_data_input} (known: oracle can't resolve in-flight data inputs)");
     eprintln!("  unresolved input (bug?) : {unresolved_input}");
@@ -689,26 +720,22 @@ fn scala_pending_tx_oracle() {
     eprintln!("  ordering Kendall τ (ByCost  vs Scala): {tau_bycost:.4}");
     eprintln!("  ordering Kendall τ (BySize  vs Scala): {tau_bysize:.4}");
     eprintln!("  (1.0=identical, 0.0=random, -1.0=reversed)");
-    eprintln!();
-    eprintln!("  Expected τ baselines (2026-04-26 live run, 15 txs):");
-    eprintln!("    ByCost ≈ 0.978  (cost-ordered; residual gap = tie-breakers / missing boxes)");
-    eprintln!("    BySize ≈ 0.385  (size-ordered; expected lower — Scala is cost-ordered)");
 
     // ── Admission parity: no unexpected rejections ──
     assert_eq!(other_n, 0, "unexpected rejections: {other_reject:?}");
+    require_oracle_coverage(compared, admitted_bysize, admitted_bycost, common.len())
+        .unwrap_or_else(|reason| panic!("{reason}"));
 
     // ── Ordering sanity: ByCost must be positively correlated with Scala ──
-    // Threshold 0.5 is conservative: the live run shows τ≈0.978 with 15
-    // txs, but pool composition changes between runs. If τ drops below 0.5
+    // The diagnostic threshold is 0.5 on the common captured subset.
+    // Pool composition changes between runs. If τ drops below 0.5
     // it most likely indicates a weight-function regression, not natural
     // variance. Investigate by inspecting the mismatch pairs in the
     // eprintln output above.
-    if bycost_order.len() >= 5 {
-        assert!(
-            tau_bycost >= 0.5,
-            "ByCost ordering correlation with Scala dropped below 0.5 (τ={tau_bycost:.4}); \
+    assert!(
+        tau_bycost >= 0.5,
+        "ByCost ordering correlation with Scala dropped below 0.5 (τ={tau_bycost:.4}); \
              investigate tie-breakers, missing boxes, or local validation rejects that \
              changed admission relative to Scala"
-        );
-    }
+    );
 }

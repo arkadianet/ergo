@@ -1,0 +1,76 @@
+{
+  "authority": {
+    "scala": "2.12.20",
+    "sigma-state": "6.0.6",
+    "scala-cli": "1.12.1",
+    "java": "17.0.17 Corretto"
+  },
+  "reference": {
+    "tag": "v6.0.6",
+    "commit": "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042",
+    "path": "data/shared/src/main/scala/org/ergoplatform/ErgoBox.scala",
+    "sha256": "224c120027f94330f2e048cf2b91ca665ce0037ef1b137009a91e660a8141130",
+    "selected_read_ranges": [
+      [
+        1,
+        118
+      ],
+      [
+        188,
+        232
+      ]
+    ],
+    "tag_source_hash_matches_worktree": true
+  },
+  "original_capture_command": [
+    "$HOME/.local/kdex-toolchain/bin/scala-cli",
+    "run",
+    "$HOME/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/shared-evidence/box-reference/AuditBoxReference.scala",
+    "--server=false"
+  ],
+  "recorded_at": "2026-10-03T12:03:06.543091+00:00",
+  "cases": [
+    {
+      "activation": "1",
+      "consumed": "42",
+      "inputBytes": "42",
+      "cached": "c0843d00d17f0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "serialized": "c0843d00d101010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "id": "733c16cac9f5d9187eda2cffcd57830e0173aaf1650e55ba9e4b8f1b43cbd1c3",
+      "reconstructedBytes": "c0843d00d101010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "reconstructedId": "8a8952eb1c47a928f5480ae513e26066390022825fefd1f0cb5b39c300063ed0",
+      "treeCached": "00d17f",
+      "canonicalByteLength": 43
+    },
+    {
+      "activation": "2",
+      "consumed": "42",
+      "inputBytes": "42",
+      "cached": "c0843d00d17f0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "serialized": "c0843d00d101010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "id": "733c16cac9f5d9187eda2cffcd57830e0173aaf1650e55ba9e4b8f1b43cbd1c3",
+      "reconstructedBytes": "c0843d00d101010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "reconstructedId": "8a8952eb1c47a928f5480ae513e26066390022825fefd1f0cb5b39c300063ed0",
+      "treeCached": "00d17f",
+      "canonicalByteLength": 43
+    },
+    {
+      "activation": "3",
+      "consumed": "42",
+      "inputBytes": "42",
+      "cached": "c0843d00d17f0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "serialized": "c0843d00d101010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "id": "733c16cac9f5d9187eda2cffcd57830e0173aaf1650e55ba9e4b8f1b43cbd1c3",
+      "reconstructedBytes": "c0843d00d101010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "reconstructedId": "8a8952eb1c47a928f5480ae513e26066390022825fefd1f0cb5b39c300063ed0",
+      "treeCached": "00d17f",
+      "canonicalByteLength": 43
+    }
+  ],
+  "artifact_sha256": {
+    "Capture.scala": "cb0b6791c790a7d0b2b2ad3e5ab65b48f316de3eaf20d7590a5dfa099e264124",
+    "scala.stdout": "aaef23fe6e5618d2b0ae5ecbc468790846c870d22e26e30c03e1fa111768f9b7",
+    "scala.stderr": "d234ed0e4b4ac676757a601d5ffe36148341ff084905549eb3a18747a4a154c7"
+  },
+  "limits": "Previously executed ordinary standalone box parse and newly constructed box comparison; no new capture, full transaction or canonical-chain occurrence."
+}

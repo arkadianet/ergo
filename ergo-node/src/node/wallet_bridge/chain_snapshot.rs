@@ -68,6 +68,7 @@ impl ChainSnapshot {
             what: "ChainSnapshot::from_committed: empty ancestor header window",
         })?;
         let active_params = committed.active_params()?;
+        let validation_settings = committed.validation_settings()?;
         let signing_params = BlockchainParameters {
             max_block_cost: active_params.max_block_cost as u64,
             input_cost: active_params.input_cost as u64,
@@ -77,7 +78,8 @@ impl ChainSnapshot {
             interpreter_init_cost: ergo_validation::INTERPRETER_INIT_COST,
             block_version: active_params.block_version,
         };
-        let protocol_params = ProtocolParams::from_active(&active_params);
+        let protocol_params =
+            ProtocolParams::from_active_with_settings(&active_params, &validation_settings);
         let state_context = BlockchainStateContext {
             sigma_last_headers: headers.clone(),
             sigma_pre_header: CandidatePreHeader {
@@ -214,6 +216,93 @@ mod tests {
         assert_eq!(snapshot.tip().height, 5);
         assert_eq!(snapshot.headers().len(), 5);
         assert_eq!(snapshot.headers()[0].height, 5);
+    }
+
+    #[test]
+    fn node_contexts_retain_cumulative_statuses_after_an_empty_epoch_and_reopen() {
+        use ergo_validation::{ErgoValidationSettingsUpdate, RuleStatus};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.redb");
+        let mut store = StateStore::open(&path)
+            .unwrap()
+            .with_non_durable_commits_for_test();
+        store.initialize_genesis(&[]).unwrap();
+        let mut parent = ModifierId::from_bytes([0; 32]);
+        // Unchecked synthetic persistence transitions exercise the node's
+        // consumers. The pinned JVM context fixture in ergo-validation owns
+        // the independent cumulative-settings semantics, not a chain verdict.
+        for height in 1..=2048 {
+            let mut synthetic_header = header(height, parent);
+            // Match the unchecked helper's synthesized HEADER_META timestamp
+            // so normal startup hydration still performs its integrity checks.
+            synthetic_header.timestamp = 1_700_000_000 + u64::from(height);
+            let (bytes, id) = serialize_header(&synthetic_header).unwrap();
+            store.store_header(id.as_bytes(), &bytes).unwrap();
+            let voted = height.is_multiple_of(1024).then(|| {
+                let mut row = ergo_validation::scala_launch();
+                row.epoch_start_height = height;
+                row.activated_update = if height == 1024 {
+                    ErgoValidationSettingsUpdate {
+                        rules_to_disable: vec![215],
+                        status_updates: vec![
+                            (1007, RuleStatus::Disabled),
+                            (1008, RuleStatus::Changed(vec![10, 11])),
+                        ],
+                    }
+                } else {
+                    ErgoValidationSettingsUpdate::empty()
+                };
+                row
+            });
+            let root = store.root_digest();
+            store
+                .apply_block_unchecked_for_test_with_voted_params(
+                    height,
+                    id.as_bytes(),
+                    &root,
+                    &[],
+                    voted,
+                )
+                .unwrap();
+            parent = id;
+        }
+
+        fn check(store: StateStore) {
+            use ergo_sigma::evaluator::{RuleStatus as Sigma, SigmaValidationSettings};
+            use ergo_state::ChainStateRead;
+            let mut node = crate::node::tests::make_state_with_store(store);
+            node.executor.hydrate_block_context(&node.store).unwrap();
+            assert!(node
+                .store
+                .active_params()
+                .activated_update
+                .status_updates
+                .is_empty());
+            let expected = SigmaValidationSettings(
+                [
+                    (1007, Sigma::Disabled),
+                    (1008, Sigma::Changed(vec![10, 11])),
+                ]
+                .into_iter()
+                .collect(),
+            );
+            let live = crate::node::tip_context::build_tip_context(&node).unwrap();
+            assert_eq!(live.tip.height, 2048);
+            assert_eq!(live.params.validation_settings, expected);
+
+            let accessor = super::super::ChainStateAccessorImpl::new(
+                node.store.as_utxo().unwrap().db_arc(),
+                false,
+                None,
+            );
+            let signing = accessor.chain_snapshot().unwrap();
+            assert_eq!(signing.tip().height, 2048);
+            assert_eq!(signing.protocol_params().validation_settings, expected);
+        }
+
+        check(store);
+        check(StateStore::open(&path).unwrap());
     }
 
     #[tokio::test]

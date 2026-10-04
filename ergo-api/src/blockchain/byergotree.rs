@@ -1,7 +1,7 @@
 //! `/blockchain/box/byErgoTree` (#24) and `/blockchain/box/unspent/byErgoTree` (#25).
 //!
 //! Both routes accept a hex-encoded ErgoTree as a JSON-string body. The
-//! hex is decoded, the parsed tree is re-serialized to canonical bytes,
+//! hex is decoded and structurally parsed, then the received bytes are
 //! hashed (blake2b256), and the resulting tree_hash is dispatched into
 //! the same address-keyed reader methods used by /box/byAddress and
 //! /box/unspent/byAddress (extra-index parity doc lines 1553-1554).
@@ -26,7 +26,7 @@ use super::{
 
 /// `POST /blockchain/box/byErgoTree`. Body is a JSON-string holding the
 /// hex-encoded ergotree. Dispatches into `address_boxes_paged` after
-/// hashing the canonical tree bytes.
+/// hashing the validated received tree bytes.
 pub async fn boxes_by_ergo_tree_post_handler(
     State(state): State<BlockchainState>,
     Query(q): Query<PagedQuery>,
@@ -136,8 +136,8 @@ pub async fn boxes_unspent_by_ergo_tree_post_handler(
     }
 }
 
-/// Hex-decode the ErgoTree body and dispatch through the canonical
-/// blake2b256 step that the indexer uses to key its address records.
+/// Hex-decode and validate the ErgoTree, then hash the received bytes,
+/// matching the indexer's cached proposition-byte address identity.
 /// Surfacing hex-decode and parse failures separately would let callers
 /// distinguish them — Scala emits a generic 400 for either, so we
 /// flatten both into the `invalid-ergo-tree` envelope.

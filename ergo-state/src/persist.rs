@@ -60,6 +60,10 @@ use crate::store::{
 struct CommitWatch {
     state: Mutex<CommitState>,
     cond: Condvar,
+}
+
+#[derive(Default)]
+struct CommitState {
     /// Mirror of `committed_count` that the AVL arena can read without
     /// taking a lock. The arena pins clean nodes to the sequence number
     /// of the job carrying their bytes and releases the pin once this
@@ -67,10 +71,6 @@ struct CommitWatch {
     /// again. `None` when no arena is attached (tests constructing a
     /// bare pipeline).
     durable_seq: Option<Arc<AtomicU64>>,
-}
-
-#[derive(Default)]
-struct CommitState {
     /// Number of jobs the worker has successfully committed to redb so
     /// far. Strictly monotonic on success — independent of block height,
     /// so it remains correct across rollback / reorg branch swaps.
@@ -87,9 +87,11 @@ struct CommitState {
 impl CommitWatch {
     fn new(durable_seq: Option<Arc<AtomicU64>>) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(CommitState::default()),
+            state: Mutex::new(CommitState {
+                durable_seq,
+                ..CommitState::default()
+            }),
             cond: Condvar::new(),
-            durable_seq,
         })
     }
 
@@ -116,10 +118,18 @@ impl CommitWatch {
         // recorded. Release ordering pairs with the arena's acquire load:
         // a reader that sees this value also sees the redb commit that
         // produced it.
-        if let Some(seq) = &self.durable_seq {
+        if let Some(seq) = &s.durable_seq {
             seq.store(s.committed_count, Ordering::Release);
         }
         self.cond.notify_all();
+    }
+
+    fn rebind_arena_progress(&self, durable_seq: Option<Arc<AtomicU64>>) {
+        let mut state = self.take_lock();
+        if let Some(seq) = &durable_seq {
+            seq.store(state.committed_count, Ordering::Release);
+        }
+        state.durable_seq = durable_seq;
     }
 
     fn record_error(&self, height: u32, error: String) {
@@ -499,6 +509,13 @@ where
 }
 
 impl PersistPipeline {
+    /// Attach a replacement arena to the existing job sequence. Publishing the
+    /// current count and changing its mirror under the commit lock prevents a
+    /// concurrent commit from updating only the arena being retired.
+    pub(crate) fn rebind_arena_progress(&self, durable_seq: Option<Arc<AtomicU64>>) {
+        self.commit_watch.rebind_arena_progress(durable_seq);
+    }
+
     pub fn progress(&self) -> PersistProgress {
         let state = self.commit_watch.take_lock();
         PersistProgress {
@@ -1527,6 +1544,26 @@ mod tests {
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn arena_rebind_preserves_progress_and_retires_old_mirror() {
+        let old = Arc::new(AtomicU64::new(0));
+        let watch = CommitWatch::new(Some(Arc::clone(&old)));
+        watch.record_committed_jobs(3, true);
+        let replacement = Arc::new(AtomicU64::new(0));
+        watch.rebind_arena_progress(Some(Arc::clone(&replacement)));
+        assert_eq!(replacement.load(Ordering::Acquire), 3);
+        watch.record_committed_jobs(1, true);
+        assert_eq!(replacement.load(Ordering::Acquire), 4);
+        assert_eq!(old.load(Ordering::Acquire), 3);
+
+        let initially_unattached = CommitWatch::new(None);
+        initially_unattached.record_committed_jobs(2, true);
+        initially_unattached.rebind_arena_progress(Some(Arc::clone(&replacement)));
+        assert_eq!(replacement.load(Ordering::Acquire), 2);
+        initially_unattached.record_committed_jobs(1, true);
+        assert_eq!(replacement.load(Ordering::Acquire), 3);
+    }
 
     #[test]
     fn corrupt_prune_sentinel_batch_failure_emits_one_diagnostic() {

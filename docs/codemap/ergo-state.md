@@ -36,7 +36,7 @@ same state root from a block's ADProofs instead of a box arena.
   snapshot install / pruning, plus all redb table definitions. Submodules:
   `apply.rs` (block-apply core + `compute_minimal_full_block_height`),
   `reorg.rs` (`rollback_to` three-phase delta replay), `undo.rs` (`UndoEntry`
-  reverse-delta codec), `snapshot.rs` (`CommittedSnapshot` single-txn off-loop
+  reverse-delta codec), `snapshot/` (`CommittedSnapshot` single-txn off-loop
   view + mining-candidate dry-run), `dry_run.rs` (`apply_change_set_via_prover`),
   `lazy_prover.rs` (scoped-worker AVL proof generation with on-demand node
   expansion, backing `StateStore::regenerate_ad_proofs`),
@@ -47,7 +47,7 @@ same state root from a block's ADProofs instead of a box arena.
   `tree.rs` (`AvlTree`), `arena.rs` (`NodeArena` trait + memory/cached-disk
   arenas), `digest.rs` (leaf/internal label + root-digest math),
   `changelog.rs` (`ChangeLog` before-image undo), `serialization.rs` (node
-  byte codec), `hydrate.rs` (rebuild tree from `AVL_NODES`), `snapshot_codec.rs`
+  byte codec), `hydrate.rs` (rebuild tree from `AVL_NODES`), `snapshot_codec/`
   (Scala-byte-exact `ProverNodeSerializer` codec for Mode 2 snapshot chunks).
 - `src/backend.rs` — `StateBackend`/`ChainStateRead`/`HeaderSectionStore`/
   `BlockApply` traits + `StateBackendKind` enum dispatch.
@@ -131,7 +131,7 @@ same state root from a block's ADProofs instead of a box arena.
   batches use `Durability::Immediate`; relaxed IBD batches use `None`. Leaving
   IBD drains queued jobs and forces an Immediate barrier before changing mode.
   `persistence_progress` reports admitted, committed and synchronously durable
-  job counts since this pipeline started, not heights. The configured IBD
+  cumulative job counts across worker rebinding, not heights. The configured IBD
   interval alone does not bound replay loss: queued jobs add volatile work to
   committed jobs since the last fsync. A process crash and a machine power
   failure have different survival guarantees, and durable writes depend on
@@ -146,18 +146,24 @@ same state root from a block's ADProofs instead of a box arena.
   `UNDO_LOG` def in `store/mod.rs:74`).
 - **best_header and best_full_block are separate.** Tracked independently in
   `ChainState` / `ChainStateMeta`; the gap drives IBD block download.
-- **Invalidity policy.** `pow_validity` is the ONLY persisted validity flag,
-  reserved for cryptographically definitive PoW failure. All other failures use
-  session-scoped `ChainState::session_invalids`, cleared on restart
-  (`chain.rs:17`, `:375`).
+- **Invalidity policy.** `pow_validity` persists definitive PoW invalidity
+  (`2`) and full-block consensus-rule invalidity (`3`), including descendants.
+  IO, missing context, local consistency errors and ambiguous digest failures
+  use session marks instead. The sync executor owns verdict classification.
 - **AVL+ label hashing matches scorex-util / `ergo_avltree_rust`.** Leaf =
   `blake2b256(0x00 ‖ key ‖ value ‖ next_key)`, Internal =
   `blake2b256(0x01 ‖ balance ‖ left_label ‖ right_label)`, ADDigest =
   `root_label[32] ‖ tree_height[1]`. Note the label prefixes (leaf=0,
   internal=1) are the OPPOSITE of the node serialization prefixes (leaf=1,
-  internal=0) — `avl/digest.rs:15`, `avl/snapshot_codec.rs:8`.
+  internal=0) — `avl/digest.rs`, `avl/snapshot_codec/mod.rs`.
 - **Snapshot node codec is Scala-byte-exact.** `value_length` is fixed-width
-  4-byte big-endian (`Ints.toByteArray`), NOT VLQ (`avl/snapshot_codec.rs:20`).
+  4-byte big-endian (`Ints.toByteArray`), NOT VLQ (`avl/snapshot_codec/mod.rs`).
+- **Snapshot installation and trust are separate.** Codec reconstruction
+  verifies manifest/chunk labels; the caller must supply the authenticated
+  header root. Install drains any worker, replaces AVL rows, co-commits root
+  and allocator metadata, then publishes the height/tree and rebinds the
+  worker without resetting progress. Runtime node IDs start at 1, reserving
+  0 for NULL; legacy imported root-0 stores fail explicitly on reopen.
 - **Single-writer state; generic (not `dyn`) backend dispatch.** The action
   loop is the sole writer, so the executor binds `B: StateBackend` and
   monomorphizes; the differing `apply_full_block` internals (box arena vs

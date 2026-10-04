@@ -5,10 +5,12 @@
 //! * [`MiningConfig`] / [`MiningError`] — node-level configuration and
 //!   error types for the mining subsystem.
 //!
-//! External-miner only: no internal CPU miner, no wallet integration, no
-//! automatic voting-bit selection, no `/mining/candidateWithTxs`, and no
-//! `offline_generation`. Mining requires the node be synced to the
-//! network tip.
+//! External-miner work generation and submitted-solution verification; there
+//! is no internal CPU miner or `/mining/candidateWithTxs` route. Reward keys
+//! may come from a configured key or the wallet's EIP-3 first address. The
+//! builder selects vote bytes from configured targets and handles supported
+//! epoch boundaries. `offline_generation` permits the configured devnet
+//! freshness exception; ordinary network mining requires a current applied tip.
 
 pub mod candidate;
 pub mod candidate_selection;

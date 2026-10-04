@@ -1132,7 +1132,9 @@ async fn run_inner_with_backend(
         wallet_cancel,
         wallet_handle: Some(wallet_handle),
         inbound_handle,
-        shadow_task_handle: sync.shadow_task_handle,
+        // Successful boot transfers the optional shadow future into its
+        // supervised RunHandle. Earlier errors drop an unstarted future.
+        shadow_task_handle: sync.shadow_future.map(tokio::spawn),
         indexer_cancel: sync.indexer_cancel,
         indexer_task_handle: sync.indexer_task_handle,
         anchor_builder_handle: Some(anchor_builder_handle),

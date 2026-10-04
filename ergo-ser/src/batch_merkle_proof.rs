@@ -122,20 +122,7 @@ pub fn deserialize_batch_merkle_proof(bytes: &[u8]) -> Result<BatchMerkleProof, 
     let num_indices = u32::from_be_bytes(bytes[0..4].try_into().expect("4 bytes")) as usize;
     let num_proofs = u32::from_be_bytes(bytes[4..8].try_into().expect("4 bytes")) as usize;
 
-    // 4-byte index + 32-byte digest per index; 32-byte digest +
-    // 1-byte side per proof. Checked: the counts come straight off
-    // the wire and must not overflow usize (32-bit targets).
-    let indices_size = num_indices.checked_mul(36).ok_or_else(|| {
-        WriteError::InvalidData(format!(
-            "BatchMerkleProof: size overflow — {num_indices} indices × 36 bytes"
-        ))
-    })?;
-    let proofs_size = num_proofs.checked_mul(33).ok_or_else(|| {
-        WriteError::InvalidData(format!(
-            "BatchMerkleProof: size overflow — {num_proofs} proofs × 33 bytes"
-        ))
-    })?;
-    let expected_total = 8 + indices_size + proofs_size;
+    let expected_total = batch_proof_size(num_indices, num_proofs)?;
     if bytes.len() != expected_total {
         return Err(WriteError::InvalidData(format!(
             "BatchMerkleProof: invalid size — expected {expected_total} bytes for \
@@ -178,6 +165,24 @@ pub fn deserialize_batch_merkle_proof(bytes: &[u8]) -> Result<BatchMerkleProof, 
     Ok(BatchMerkleProof { indices, proofs })
 }
 
+// Kept separate so arithmetic boundaries can be checked without allocating a
+// proof or requiring a native host with a particular pointer width.
+fn batch_proof_size(indices: usize, proofs: usize) -> Result<usize, WriteError> {
+    indices
+        .checked_mul(36)
+        .and_then(|size| {
+            proofs
+                .checked_mul(33)
+                .and_then(|other| size.checked_add(other))
+        })
+        .and_then(|size| size.checked_add(8))
+        .ok_or_else(|| {
+            WriteError::InvalidData(format!(
+                "BatchMerkleProof: size overflow for {indices} indices + {proofs} proofs"
+            ))
+        })
+}
+
 /// Deserialize via a [`VlqReader`] consuming exactly the expected
 /// number of bytes. Convenience for nested codecs that hold the
 /// proof as a length-prefixed blob.
@@ -193,6 +198,22 @@ pub fn read_batch_merkle_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn total_size_checks_products_and_sum() {
+        assert_eq!(batch_proof_size(2, 3).unwrap(), 8 + 72 + 99);
+        assert!(batch_proof_size(usize::MAX / 36, usize::MAX / 33).is_err());
+        assert!(batch_proof_size(usize::MAX / 36 + 1, 0).is_err());
+        assert!(batch_proof_size(0, usize::MAX / 33 + 1).is_err());
+        // usize::MAX (2^k - 1 with even k) is a multiple of 3, so some
+        // 36 * indices + 33 * proofs equals it exactly. Only the 8-byte count
+        // header then overflows, on every pointer width.
+        let third = usize::MAX / 3;
+        let proofs = (12 - third % 12) % 12;
+        let indices = (third - 11 * proofs) / 12;
+        assert_eq!(indices * 36 + proofs * 33, usize::MAX);
+        assert!(batch_proof_size(indices, proofs).is_err());
+    }
 
     // ----- helpers -----
 

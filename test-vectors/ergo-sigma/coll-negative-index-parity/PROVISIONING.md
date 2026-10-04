@@ -1,4 +1,4 @@
-# Scala-parity oracle for Coll negative-index family
+# Source-derived models for the Coll negative-index family
 
 This tree holds the durable re-extraction artifact for the Rust
 sigma evaluator's `Coll.patch`, `Coll.updated`, `Coll.indexOf`, and
@@ -33,9 +33,12 @@ javap -p -c \
   | awk '/public default <B> CC patch\(int,/,/^  public/' | head -120
 ```
 
-The chunk1/chunk2 model in `Oracle.java` is the decoded form. Re-run
-`Oracle.java` after any scala-library bump to verify the algorithm
-has not drifted.
+The chunk1/chunk2 model in `Oracle.java` is a transcription of the decoded
+algorithm. It loads neither scala-library nor the Rust evaluator. Rerunning
+it checks agreement between the saved Java models; it cannot detect changes
+in either implementation. After an implementation or dependency change,
+repeat the disassembly and compare actual pinned Scala and Rust calls before
+making a runtime parity claim.
 
 ## What the oracle covers
 
@@ -68,32 +71,21 @@ java Oracle
 ```
 
 Expected last line: `ALL CASES MATCH` (36 cases across 4 methods).
-A divergent run means either (a) one of the underlying Scala
-algorithms changed in a newer scala-library release, or (b) the
-corresponding Rust arm was refactored. Either way, stop and re-decode.
+A divergent run means the two saved model implementations disagree. A
+successful run provides no evidence that current Scala or Rust code was
+executed. Keep real implementation regressions separate from model checks.
 
 ## Why no JSON fixture
 
-Unlike the cost-total fixtures in `../cost-total/`, this tree pins
-**algorithmic** parity rather than specific input/output byte rows.
-The 36 cases in `Oracle.java` cover every i32-boundary class across
-all four methods (happy paths, negative single args, negative pairs,
-arg > length, arg < -length, i32::MAX, i32::MIN); adding more rows
-would not improve coverage of the underlying algorithms. A future
-PR that also pins per-test JSON rows is welcome but not load-bearing.
+This artifact stores models rather than runtime input/output captures. Its
+36 cases sample the listed boundary inputs; they do not prove exhaustive
+coverage of all i32 pairs. Independent runtime fixtures are required for any
+claim that a production refactor or Scala dependency update preserves behavior.
 
-## Residual gaps (out of scope for the negative-index sweep)
+## Cost evidence
 
-- `Coll.patch` / `Coll.updated` JIT cost: the Rust arms charge the
-  fixed `0xDC` MethodCall opcode cost
-  (`cost_table.rs::opcode_cost(0xDC) = fixed(4)`) regardless of
-  `coll.length`. Scala `methods.scala::patch_eval` /
-  `updated_eval` declare `PerItemCost(...)` and charge over
-  `xs.length + patch.length` / `coll.length` respectively. Closing
-  this requires its own Scala-anchored cost-oracle fixture
-  (re-extract via `ErgoTreeEvaluator` cost trace on a mainnet-synced
-  Scala node) plus a mainnet scan to bound the consensus impact
-  before the fix lands. Not bundled here.
-- `Slice` JIT cost: `eval_slice` charges over `sliced.len()` post-
-  clamp; Scala `Slice.eval` charges over `Math.max(0, until - from)`
-  pre-clamp. Same shape of follow-up as above.
+This model executes no interpreter and observes no JIT costs. Current Rust
+`patch` and `updated` use their per-item tariffs; `Slice` has its own cost
+path. Consult the named tests and independent captures in
+[`../cost-ledger/LEDGER.md`](../cost-ledger/LEDGER.md) for each cost obligation.
+Do not infer cost closure from `ALL CASES MATCH`.

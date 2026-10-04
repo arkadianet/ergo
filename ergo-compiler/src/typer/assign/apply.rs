@@ -94,8 +94,8 @@ pub(crate) fn assign_apply_explicit_method(
     // we propagate as TyperError — verdict parity, class-tag differs).
     let n_args = if field == "getVarFromInput"
         && args.len() == 2
-        && numeric_const_value(&args[0]).is_some()
-        && numeric_const_value(&args[1]).is_some()
+        && numeric_constant_parts(&args[0]).is_some()
+        && numeric_constant_parts(&args[1]).is_some()
     {
         vec![
             narrow_numeric_const_to(&args[0], &SType::SShort, ctx.tree_version)?,
@@ -609,7 +609,7 @@ pub(crate) fn adapt_apply_args(
         // Range-checked via const_downcast (Scala toByteExact throws ArithmeticException
         // on overflow; we propagate as TyperError — verdict parity, class-tag differs).
         "getVar" | "executeFromVar"
-            if typed_args.len() == 1 && numeric_const_value(&typed_args[0]).is_some() =>
+            if typed_args.len() == 1 && numeric_constant_parts(&typed_args[0]).is_some() =>
         {
             Ok(vec![narrow_numeric_const_to(
                 &typed_args[0],
@@ -619,8 +619,8 @@ pub(crate) fn adapt_apply_args(
         }
         "getVarFromInput"
             if typed_args.len() == 2
-                && numeric_const_value(&typed_args[0]).is_some()
-                && numeric_const_value(&typed_args[1]).is_some() =>
+                && numeric_constant_parts(&typed_args[0]).is_some()
+                && numeric_constant_parts(&typed_args[1]).is_some() =>
         {
             Ok(vec![
                 narrow_numeric_const_to(&typed_args[0], &SType::SShort, ctx.tree_version)?,
@@ -735,17 +735,6 @@ pub(crate) fn finalize_collection(
 // ─────────────────────────────────────────────────────────────────────────────
 // small helpers for the Apply arms
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Numeric value of a numeric `Constant` (Byte/Short/Int/Long), else `None`.
-pub(crate) fn numeric_const_value(e: &TypedExpr) -> Option<i64> {
-    numeric_constant_parts(e).map(|(payload, _)| match payload {
-        ConstPayload::Byte(v) => v as i64,
-        ConstPayload::Short(v) => v as i64,
-        ConstPayload::Int(v) => v as i64,
-        ConstPayload::Long(v) => v,
-        _ => unreachable!("numeric_constant_parts only yields numeric payloads"),
-    })
-}
 
 /// `(payload, type)` of a numeric `Constant` (Byte/Short/Int/Long/BigInt), else
 /// `None`.  Mirrors the `Constant(index, _: SNumericType)` match arms.
