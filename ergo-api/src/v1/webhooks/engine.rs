@@ -1154,6 +1154,27 @@ mod tests {
     }
 
     #[test]
+    fn skipped_cursor_is_persisted_when_idle_checkpoint_deadline_expires() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        register_blocks(&engine);
+        let mut event = blocks_event(1, true);
+        event.routes = vec!["peers".into()];
+        assert!(engine.admit_page(&[Arc::new(event)], 1, 1));
+        assert_eq!(engine.replay_seq(), 1);
+        let saved_cursor = || {
+            let value: serde_json::Value =
+                serde_json::from_slice(&store.load().unwrap().unwrap()).unwrap();
+            value["replay_seq"].as_u64().unwrap()
+        };
+        assert_eq!(saved_cursor(), 0);
+        assert!(engine.admit_page(&[], 1, 4999));
+        assert_eq!(saved_cursor(), 0);
+        assert!(engine.admit_page(&[], 1, 5000));
+        assert_eq!(saved_cursor(), 1);
+    }
+
+    #[test]
     fn durable_multi_hook_admission_is_atomic_when_only_one_slot_remains() {
         let store = Arc::new(MemoryStore::default());
         let engine = durable(store.clone());

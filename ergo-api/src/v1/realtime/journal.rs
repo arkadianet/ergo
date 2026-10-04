@@ -519,7 +519,10 @@ mod tests {
             wait_until(|| bus.journal_status().unwrap().committed_seq == seq);
             let status = bus.journal_status().unwrap();
             assert_eq!(status.complete_through_seq, seq);
-            assert_eq!(serde_json::to_value(&status).unwrap()["complete_from_seq"], seq - 1);
+            assert_eq!(
+                serde_json::to_value(&status).unwrap()["complete_from_seq"],
+                seq - 1
+            );
             assert!(
                 bus.backfill(&filter(), 0, 100).gap,
                 "old missing interval is still a gap"

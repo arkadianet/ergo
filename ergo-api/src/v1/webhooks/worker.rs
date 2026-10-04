@@ -603,6 +603,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catch_up_without_hooks_never_checkpoints_source() {
+        let store = Arc::new(CountingStore::default());
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        engine.attach_filter(filter.clone());
+        let executor = Arc::new(WebhookExecutor::new(engine));
+        for height in 1..=2000 {
+            bus.publish(block(height));
+        }
+        let before = store.commits.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..3 {
+            catch_up(&bus, &filter, &executor).await.unwrap();
+        }
+        assert_eq!(
+            store.commits.load(std::sync::atomic::Ordering::SeqCst),
+            before
+        );
+        executor.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn catch_up_batches_snapshots_and_bounds_skip_checkpoints() {
         use std::sync::atomic::Ordering::SeqCst;
         let store = Arc::new(CountingStore::default());
@@ -614,13 +636,6 @@ mod tests {
         for height in 1..=128 {
             bus.publish(block(height));
         }
-        let idle = store.commits.load(SeqCst);
-        catch_up(&bus, &filter, &executor).await.unwrap();
-        assert_eq!(
-            store.commits.load(SeqCst),
-            idle,
-            "no hooks need a checkpoint"
-        );
         register_blocks(&engine);
         let before = store.commits.load(SeqCst);
         catch_up(&bus, &filter, &executor).await.unwrap();

@@ -929,6 +929,139 @@ mod tests {
     }
 
     #[test]
+    fn unclean_replay_fixture_worker() {
+        use ergo_api::v1::realtime::journal::RealtimeStore;
+        use ergo_api::v1::realtime::{ChannelClass, RealtimeBus, RealtimeEventBody};
+        let Some(path) = std::env::var_os("ERGO_REPLAY_UNCLEAN_FIXTURE") else {
+            return;
+        };
+        let store = Arc::new(RedbWebhookStore::open(Path::new(&path)).unwrap());
+        let engine = WebhookEngine::durable(Default::default(), store.clone()).unwrap();
+        engine
+            .register_after(
+                "https://receiver.example/hook".into(),
+                vec!["blocks".into()],
+                Some("crash-key".into()),
+                1,
+                0,
+                0,
+            )
+            .unwrap();
+        let bus = RealtimeBus::durable(
+            [ChannelClass::Blocks].into_iter().collect(),
+            store.clone(),
+            1,
+        )
+        .unwrap();
+        for height in 1..=10 {
+            bus.publish(RealtimeEventBody::block_applied(
+                1,
+                format!("h-{height}"),
+                height,
+                1,
+                100,
+            ));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while store.load_events().unwrap().events.len() < 10 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        for observation in bus.backfill(&["blocks".into()].into(), 0, 5).events {
+            engine.enqueue_matches(&observation, 0);
+        }
+        engine.checkpoint_replay(5);
+        // Real abrupt exit: retain ten source records, five admissions and the
+        // unused journal reservation without invoking any destructor.
+        std::process::exit(0);
+    }
+
+    #[tokio::test]
+    async fn abrupt_exit_with_lagging_worker_admits_retained_prefix_before_gap() {
+        use ergo_api::v1::realtime::journal::RealtimeStore;
+        use ergo_api::v1::realtime::{ChannelClass, RealtimeBus};
+        use ergo_api::v1::webhooks::worker::{spawn_webhook_worker_with_shutdown, WebhookSink};
+        use ergo_api::v1::webhooks::PreparedRequest;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        #[derive(Default)]
+        struct Sink(AtomicUsize);
+        #[async_trait::async_trait]
+        impl WebhookSink for Sink {
+            async fn post(&self, _: &PreparedRequest) -> DeliveryOutcome {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                DeliveryOutcome::Success(204)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("webhooks.redb");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "webhook_store::tests::unclean_replay_fixture_worker",
+            ])
+            .env("ERGO_REPLAY_UNCLEAN_FIXTURE", &path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let store = Arc::new(RedbWebhookStore::open(&path).unwrap());
+        let before_gap = store.load_events().unwrap().next_seq - 1;
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+        let hook = engine.list(0, 1).remove(0).webhook_id;
+        let original = engine.deliveries_for(&hook, 0, 20);
+        assert_eq!(original.len(), 5);
+        let bus = Arc::new(
+            RealtimeBus::durable(
+                [ChannelClass::Blocks].into_iter().collect(),
+                store.clone(),
+                6,
+            )
+            .unwrap(),
+        );
+        let sink = Arc::new(Sink::default());
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let worker = spawn_webhook_worker_with_shutdown(
+            bus.clone(),
+            engine.clone(),
+            sink.clone(),
+            Duration::from_millis(1),
+            stopped,
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while engine.replay_seq() < before_gap {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send(()).unwrap();
+        worker.await.unwrap();
+        bus.shutdown_journal().await;
+        let admitted = engine.deliveries_for(&hook, 0, 20);
+        assert_eq!(
+            admitted.len(),
+            10,
+            "retained events 6..10 must survive crash catch-up"
+        );
+        for delivery in original {
+            assert!(admitted
+                .iter()
+                .any(|after| after.delivery_id == delivery.delivery_id
+                    && after.event_seq == delivery.event_seq));
+        }
+        assert!(!engine.get(&hook).unwrap().active);
+        assert_eq!(
+            sink.0.load(Ordering::SeqCst),
+            0,
+            "gap pauses outbound attempts while keeping obligations"
+        );
+        drop(engine);
+        let recovered = WebhookEngine::durable(Default::default(), store).unwrap();
+        assert_eq!(recovered.replay_seq(), before_gap);
+        assert_eq!(recovered.deliveries_for(&hook, 0, 20).len(), 10);
+    }
+
+    #[test]
     fn unclean_webhook_fixture_worker() {
         let Some(path) = std::env::var_os("ERGO_WEBHOOK_UNCLEAN_FIXTURE") else {
             return;

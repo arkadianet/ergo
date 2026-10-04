@@ -468,10 +468,35 @@ impl NodeReadState for DefaultStub {
     }
 }
 
+#[derive(Default)]
+struct ReplayTestStore(std::sync::Mutex<ergo_api::v1::realtime::journal::JournalRecovery>);
+impl ergo_api::v1::realtime::journal::RealtimeStore for ReplayTestStore {
+    fn load_events(&self) -> Result<ergo_api::v1::realtime::journal::JournalRecovery, String> {
+        let saved = self.0.lock().unwrap();
+        Ok(ergo_api::v1::realtime::journal::JournalRecovery {
+            next_seq: saved.next_seq,
+            events: saved.events.clone(),
+        })
+    }
+    fn reserve_cursor(&self, next: u64) -> Result<(), String> {
+        self.0.lock().unwrap().next_seq = next;
+        Ok(())
+    }
+    fn append_events(
+        &self,
+        events: &[ergo_api::v1::realtime::journal::ReplayEvent],
+    ) -> Result<(), String> {
+        self.0.lock().unwrap().events.extend_from_slice(events);
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn replay_history_pages_shared_cursors_and_preserves_inverse_links() {
     use ergo_api::v1::realtime::RealtimeEventBody;
-    let services = Arc::new(ergo_api::ApiServices::new());
+    let store = Arc::new(ReplayTestStore::default());
+    let services =
+        Arc::new(ergo_api::ApiServices::with_durable_realtime(None, store.clone()).unwrap());
     let bus = &services.realtime.bus;
     for height in 1..=3 {
         bus.publish(RealtimeEventBody::block_applied(
@@ -486,6 +511,9 @@ async fn replay_history_pages_shared_cursors_and_preserves_inverse_links() {
     inverse.event = "reorg";
     inverse.previous_seq = Some(3);
     bus.publish(inverse);
+    services.shutdown_background().await;
+    drop(services);
+    let services = Arc::new(ergo_api::ApiServices::with_durable_realtime(None, store).unwrap());
     let app = activity_app_with_services(false, Arc::new(FeedStub), services);
     let first = get_json(
         app.clone(),
@@ -497,7 +525,8 @@ async fn replay_history_pages_shared_cursors_and_preserves_inverse_links() {
     assert_eq!(first["next_seq"], 2);
     assert_eq!(first["has_more"], true);
     assert_eq!(first["gap"], false);
-    assert_eq!(first["persistence"], serde_json::Value::Null);
+    assert_eq!(first["persistence"]["committed_seq"], 4);
+    assert_eq!(first["persistence"]["complete_through_seq"], 4);
     let last = get_json(
         app.clone(),
         "/api/v1/events/replay?channels=blocks&since=2&limit=2",
