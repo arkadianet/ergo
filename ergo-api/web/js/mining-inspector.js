@@ -212,6 +212,11 @@ export function createMiningInspector(host) {
   let history = null;
   let generation = 0;
   let drawnIdentity = null;
+  // A report never changes for the same work: the served candidate plus any
+  // selected template. Refreshes skip the download while one for that work
+  // is in flight or has succeeded, and retry after a failed read.
+  let download = null;
+  const workKey = () => `${current?.msg}:${current?.template_seq}|${selected?.msg ?? ''}:${selected?.template_seq ?? ''}`;
 
   const draw = () => {
     const signature = `${selected?.msg || 'current'}:${result?.data?.msg || ''}:${result?.data?.template_seq || ''}:${result?.data?.status || ''}:${result?.status || 0}:${result?.reason || ''}:${history?.outcomes?.[0]?.at_ms || 0}:${history?.retained_templates?.[0]?.template_seq || 0}:${history?.chain_tip?.block_id || ''}`;
@@ -262,8 +267,10 @@ export function createMiningInspector(host) {
     const target = selected || current;
     if (!target) { draw(); return; }
     const ticket = ++generation;
+    download = { key: workKey(), ticket, done: false };
     const [details, recent] = await Promise.all([api.miningCandidateDetails(target.msg, target.template_seq), api.miningHistory()]);
     if (ticket !== generation) return;
+    download.done = true;
     result = details;
     if (details?.ok && !matchesTemplate(details.data, target)) result = { ok: false, status: 0, reason: 'The response did not match the requested template. Retrying automatically.' };
     history = recent?.ok ? recent.data : null;
@@ -277,6 +284,8 @@ export function createMiningInspector(host) {
     async refresh(candidateResult) {
       if (!candidateResult?.ok || !candidateResult.data) { generation++; current = null; result = candidateResult; history = null; drawnIdentity = null; draw(); return; }
       current = candidateResult.data;
+      const same = download?.key === workKey() && download.ticket === generation;
+      if (same && (!download.done || (result?.ok && history))) return;
       await load();
     },
   };
