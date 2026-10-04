@@ -214,19 +214,29 @@ pub(super) fn admit(
     Ok(api_entry(result))
 }
 
+/// Reconcile applied history first, then apply deadlines, so a transaction
+/// confirmed in its last eligible block is recorded as mined, not expired.
+pub(super) fn run_lifecycle(state: &mut NodeState, handle: &MiningHandle) {
+    if let Err(error) = reconcile(state, handle) {
+        tracing::warn!(%error, "private mining queue waits for confirmation history");
+    }
+    if let Err(error) = expire(state, handle) {
+        tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
+    }
+}
+
 /// Called before every solution request as well as on ordinary loop ticks.
+/// Height deadlines are judged against the reconciled height, never the
+/// applied tip, so a deadline cannot expire a transaction that a not yet
+/// reconciled block confirmed. A time deadline racing such a block is
+/// corrected when reconciliation finds the confirmation.
 pub(super) fn expire(state: &mut NodeState, handle: &MiningHandle) -> Result<bool, String> {
     let now = crate::snapshot::unix_now_ms();
     let queue = handle.private_queue();
     if queue.list().is_empty() {
         return Ok(false);
     }
-    let height = state
-        .store
-        .reader_handle()
-        .committed_tip()
-        .map_err(|e| e.to_string())?
-        .map_or(0, |(height, _)| height);
+    let height = queue.observation_cursor().0;
     if !queue.list().iter().any(|entry| {
         matches!(
             entry.state,

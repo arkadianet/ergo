@@ -234,6 +234,70 @@ fn corrupted_reservation_metadata_fails_startup_closed() {
 }
 
 #[test]
+fn confirmation_overrides_an_expiry_or_cancellation_that_raced_its_block() {
+    // The block confirming each transaction was applied before the queue
+    // noticed, but the deadline or the operator's cancel landed first.
+    let queue = PrivateTransactionQueue::default();
+    let expiring = queue
+        .admit(
+            &entry(1),
+            PrivateTransactionOptions {
+                expires_at_ms: Some(20),
+                ..Default::default()
+            },
+            10,
+            100,
+        )
+        .unwrap();
+    let cancelled = queue
+        .admit(&entry(2), PrivateTransactionOptions::default(), 10, 100)
+        .unwrap();
+    assert_eq!(queue.expire(20, 100).unwrap(), vec![expiring.tx_id.clone()]);
+    queue.cancel(&cancelled.tx_id).unwrap();
+    let applied = BTreeMap::from([
+        (expiring.tx_id.clone(), (101, "block".into())),
+        (cancelled.tx_id.clone(), (101, "block".into())),
+    ]);
+    queue
+        .reconcile(
+            101,
+            "block".into(),
+            &applied,
+            |_, _| true,
+            |_| false,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+    for id in [&expiring.tx_id, &cancelled.tx_id] {
+        let item = queue.entry(id).unwrap();
+        assert_eq!(item.state, PrivateTransactionState::Mined);
+        assert_eq!(item.mined_height, Some(101));
+    }
+    assert!(
+        queue.cancel(&cancelled.tx_id).is_err(),
+        "mined cannot be cancelled"
+    );
+    assert!(queue.expire(u64::MAX, u32::MAX).unwrap().is_empty());
+
+    // Rolling the block back restores the withdrawal, never the queue.
+    queue
+        .reopen_rolled_back(&BTreeSet::from([
+            expiring.tx_id.clone(),
+            cancelled.tx_id.clone(),
+        ]))
+        .unwrap();
+    assert_eq!(
+        queue.entry(&expiring.tx_id).unwrap().state,
+        PrivateTransactionState::Expired
+    );
+    assert_eq!(
+        queue.entry(&cancelled.tx_id).unwrap().state,
+        PrivateTransactionState::Cancelled
+    );
+    assert!(queue.selection_entries().is_empty());
+}
+
+#[test]
 fn cancelling_a_conflict_prevents_reactivation_after_rollback() {
     let queue = PrivateTransactionQueue::default();
     let item = queue

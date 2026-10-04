@@ -46,9 +46,13 @@ a block will be found. Private ordering prefers larger integer priorities, then
 submission order, subject to dependency order and candidate policy budgets.
 
 Optional deadlines use either Unix milliseconds (`expires_at_ms`) or the last
-eligible block height (`expires_at_height`). The node expires a height-bounded
-item when the applied parent reaches that height, so it cannot enter the next
-block. It checks expiry before solution acceptance, retires cached templates,
+eligible block height (`expires_at_height`). A height-bounded item is never
+placed in a candidate above that height, and it expires once the node has
+checked applied history through that height for its confirmation. The node
+reconciles applied blocks before applying deadlines, and a confirmation always
+wins: a transaction found in an applied block is reported `mined` even if its
+deadline or a cancellation was recorded first, and rolling that block back
+restores the cancelled or expired state. It checks expiry before solution acceptance, retires cached templates,
 and rejects publication of builds frozen before an operator change. Cancellation
 also retires templates before releasing inputs. These are local queue rules;
 they do not make a previously signed transaction invalid elsewhere. Cancelled

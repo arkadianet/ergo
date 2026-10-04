@@ -80,6 +80,38 @@ pub struct PrivateTransactionEntry {
 struct Record {
     entry: PrivateTransactionEntry,
     signed_bytes: String,
+    /// Cancelled or Expired state a confirmation overrode. A rollback of that
+    /// confirmation restores it instead of queueing withdrawn work again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    withdrawn: Option<PrivateTransactionState>,
+}
+
+impl Record {
+    /// Undo a confirmation whose block left the applied chain: withdrawn work
+    /// returns to its withdrawn state, anything else waits in the queue again.
+    fn unconfirm(&mut self) {
+        let e = &mut self.entry;
+        e.mined_height = None;
+        e.mined_block_id = None;
+        match self.withdrawn.take() {
+            Some(state) => {
+                e.state = state;
+                e.reason = Some(withdrawal_reason(state).into());
+            }
+            None => {
+                e.state = PrivateTransactionState::Queued;
+                e.reason = Some("mined block rolled back; confirming applied history".into());
+            }
+        }
+    }
+}
+
+fn withdrawal_reason(state: PrivateTransactionState) -> &'static str {
+    if state == PrivateTransactionState::Cancelled {
+        "cancelled by operator"
+    } else {
+        "local mining deadline elapsed"
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,6 +325,7 @@ impl PrivateTransactionQueue {
             Record {
                 entry: result.clone(),
                 signed_bytes: hex::encode(&entry.bytes),
+                withdrawn: None,
             },
         );
         updated.revision = updated.revision.wrapping_add(1);
@@ -314,7 +347,8 @@ impl PrivateTransactionQueue {
                 || record.entry.state == PrivateTransactionState::Conflicted
             {
                 record.entry.state = PrivateTransactionState::Cancelled;
-                record.entry.reason = Some("cancelled by operator".into());
+                record.entry.reason =
+                    Some(withdrawal_reason(PrivateTransactionState::Cancelled).into());
             }
             Ok(record.entry.clone())
         })
@@ -338,7 +372,7 @@ impl PrivateTransactionQueue {
                     .is_some_and(|d| d <= parent_height))
             {
                 r.entry.state = PrivateTransactionState::Expired;
-                r.entry.reason = Some("local mining deadline elapsed".into());
+                r.entry.reason = Some(withdrawal_reason(PrivateTransactionState::Expired).into());
                 expired.push(r.entry.tx_id.clone());
             }
         }
@@ -366,11 +400,7 @@ impl PrivateTransactionQueue {
             for id in tx_ids {
                 if let Some(record) = store.records.get_mut(id) {
                     if record.entry.state == PrivateTransactionState::Mined {
-                        record.entry.state = PrivateTransactionState::Queued;
-                        record.entry.mined_height = None;
-                        record.entry.mined_block_id = None;
-                        record.entry.reason =
-                            Some("mined block rolled back; confirming applied history".into());
+                        record.unconfirm();
                         changed = true;
                     }
                 }
@@ -403,25 +433,41 @@ impl PrivateTransactionQueue {
         let mut updated = store.clone();
         let mut changed = false;
         for record in updated.records.values_mut() {
-            let e = &mut record.entry;
-            if matches!(
-                e.state,
-                PrivateTransactionState::Cancelled | PrivateTransactionState::Expired
-            ) {
-                continue;
-            }
-            let previous = e.state;
-            if let Some((h, id)) = applied.get(&e.tx_id) {
+            let previous = record.entry.state;
+            if let Some((h, id)) = applied.get(&record.entry.tx_id) {
+                // A confirmation wins over any local state: a deadline or a
+                // cancellation that raced the block must not hide that the
+                // transaction was mined.
+                if matches!(
+                    previous,
+                    PrivateTransactionState::Cancelled | PrivateTransactionState::Expired
+                ) {
+                    record.withdrawn = Some(previous);
+                }
+                let e = &mut record.entry;
+                changed |= e.mined_height != Some(*h) || e.mined_block_id.as_ref() != Some(id);
                 e.state = PrivateTransactionState::Mined;
                 e.mined_height = Some(*h);
                 e.mined_block_id = Some(id.clone());
                 e.reason = None;
-            } else if e
-                .mined_height
+                changed |= previous != e.state;
+                continue;
+            }
+            if matches!(
+                previous,
+                PrivateTransactionState::Cancelled | PrivateTransactionState::Expired
+            ) {
+                continue;
+            }
+            let e = &mut record.entry;
+            if e.mined_height
                 .zip(e.mined_block_id.as_deref())
                 .is_some_and(|(h, id)| canonical(h, id))
             {
                 e.state = PrivateTransactionState::Mined;
+            } else if record.withdrawn.is_some() {
+                // Its confirmation left the applied chain; it stays withdrawn.
+                record.unconfirm();
             } else {
                 e.mined_height = None;
                 e.mined_block_id = None;
@@ -442,7 +488,7 @@ impl PrivateTransactionQueue {
                     e.reason = None;
                 }
             }
-            changed |= previous != e.state;
+            changed |= previous != record.entry.state;
         }
         let cursor_changed =
             updated.observed_height != height || updated.observed_tip.as_deref() != Some(&tip_id);
