@@ -19,18 +19,39 @@ pub use ergo_state::wallet::hydration::HydrationSource;
 use crate::storage::UnlockedSecret;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Public-key visibility for tracked entries ordered by derivation index.
-/// Scala WalletCache hides the first master only when the following key has
-/// the EIP-3 account prefix. The number of later keys does not affect that rule.
+/// Public-key visibility for tracked `(index, pubkey, path)` entries, listed as
+/// Scala lists them after a restart or unlock. `WalletStorage.readAllKeys`
+/// walks LevelDB keys in bytewise order, and each key ends in the
+/// public-branch `DerivationPathSerializer` bytes (see `scala_path_key`), so
+/// the master comes first and same-depth indices compare as unsigned
+/// integers. Scala WalletCache then hides that master only when the following
+/// key has the EIP-3 account prefix. The number of later keys does not affect
+/// that rule.
 pub fn visible_pubkeys_with_paths(tracked: &[(u64, [u8; 33], Vec<u32>)]) -> Vec<[u8; 33]> {
+    let mut ordered: Vec<_> = tracked.iter().collect();
+    ordered.sort_by_cached_key(|(_, _, path)| scala_path_key(path));
     let eip3_prefix = [44 | 0x8000_0000, 429 | 0x8000_0000, 0x8000_0000];
     let hide_master =
-        tracked.len() > 1 && tracked[0].2.is_empty() && tracked[1].2.starts_with(&eip3_prefix);
-    tracked
+        ordered.len() > 1 && ordered[0].2.is_empty() && ordered[1].2.starts_with(&eip3_prefix);
+    ordered
         .iter()
         .skip(usize::from(hide_master))
         .map(|(_, pk, _)| *pk)
         .collect()
+}
+
+/// Scala `DerivationPathSerializer` bytes of a public-branch path: `0x01`,
+/// the depth (`decodedPath.length`, counting the leading `0`) as a ZigZag VLQ
+/// `putInt`, then every index including that leading `0` as 4 big-endian
+/// bytes.
+fn scala_path_key(path: &[u32]) -> Vec<u8> {
+    let mut key = ergo_primitives::writer::VlqWriter::new();
+    key.put_u8(0x01);
+    key.put_i32(i32::try_from(path.len() + 1).unwrap_or(i32::MAX));
+    for index in std::iter::once(&0).chain(path) {
+        key.put_bytes(&index.to_be_bytes());
+    }
+    key.result()
 }
 
 /// `WalletState`. Fields are public-within-crate so the apply hook (in
@@ -287,6 +308,44 @@ mod tests {
     }
 
     #[test]
+    fn visibility_follows_scala_storage_key_order() {
+        const H: u32 = 0x8000_0000;
+        let eip3 = |account: u32, index: u32| vec![H | 44, H | 429, H | account, 0, index];
+        // `WalletStorage.pubKeyPrefixKey` suffixes, after the `00 02` prefix.
+        assert_eq!(hex::encode(scala_path_key(&[])), "010200000000");
+        assert_eq!(hex::encode(scala_path_key(&[1])), "01040000000000000001");
+        assert_eq!(
+            hex::encode(scala_path_key(&eip3(0, 0))),
+            "010c000000008000002c800001ad800000000000000000000000"
+        );
+        // Entries in insertion order; pubkey `[n; 33]` marks the n-th inserted.
+        let visible = |paths: Vec<Vec<u32>>| -> Vec<u8> {
+            let tracked: Vec<_> = paths
+                .into_iter()
+                .zip(1u8..)
+                .map(|(path, n)| (u64::from(n), [n; 33], path))
+                .collect();
+            visible_pubkeys_with_paths(&tracked)
+                .iter()
+                .map(|pk| pk[0])
+                .collect()
+        };
+        // A pre-EIP-3 key sorts before the EIP-3 address: the master shows.
+        assert_eq!(visible(vec![vec![], eip3(0, 0), vec![1]]), [1, 3, 2]);
+        // Indices compare as unsigned integers, not by insertion.
+        assert_eq!(
+            visible(vec![vec![], eip3(0, 0), eip3(0, 256), eip3(0, 128)]),
+            [2, 4, 3]
+        );
+        assert_eq!(
+            visible(vec![vec![], eip3(0, 0), eip3(1, 0), eip3(0, 1)]),
+            [2, 4, 3]
+        );
+        // Hardened indices sort after non-hardened ones of the same depth.
+        assert_eq!(visible(vec![vec![], vec![H], vec![1]]), [1, 3, 2]);
+    }
+
+    #[test]
     fn empty_state_with_pre_1627_carries_flag() {
         let s = WalletState::empty(true);
         assert!(s.use_pre_1627);
@@ -442,7 +501,11 @@ mod tests {
             [2; 33],
             vec![44 | 0x8000_0000, 429 | 0x8000_0000, 0x8000_0000, 0, 0],
         );
-        let later = (12, [3; 33], vec![2]);
+        let later = (
+            12,
+            [3; 33],
+            vec![44 | 0x8000_0000, 429 | 0x8000_0000, 0x8000_0000, 0, 1],
+        );
         assert_eq!(
             visible_pubkeys_with_paths(std::slice::from_ref(&master)),
             vec![[1; 33]]
@@ -454,6 +517,12 @@ mod tests {
         assert_eq!(
             visible_pubkeys_with_paths(&[master.clone(), eip3.clone(), later]),
             vec![[2; 33], [3; 33]]
+        );
+        // A shorter path tracked later sorts second in Scala's storage order.
+        let shorter = (12, [3; 33], vec![2]);
+        assert_eq!(
+            visible_pubkeys_with_paths(&[master.clone(), eip3.clone(), shorter]),
+            vec![[1; 33], [3; 33], [2; 33]]
         );
         assert_eq!(
             visible_pubkeys_with_paths(&[pre_eip3, eip3.clone()]),

@@ -14,6 +14,16 @@ and its second key is EIP-3, omit that master. Otherwise expose all keys.
 Complete source SHA-256: `05460eccbbe5bedfa58946265971605938e7023138d9c69974d5b983e5a072cc`.
 The checked local file exactly matches the pinned tag.
 
+The ordered sequence is the one Scala rebuilds at boot and unlock:
+`WalletStorage.readAllKeys` walks its LevelDB keys bytewise, and each key ends
+in the public-branch `DerivationPathSerializer` bytes (`0x01`, the ZigZag-VLQ
+depth, then every index including the leading `0` as 4 big-endian bytes). The
+master therefore sorts first and indices compare as unsigned integers. Scala
+appends keys derived within a running session and re-sorts them at the next
+unlock; the node keeps the storage order throughout. The cases here are already
+in that order, so the native regression cannot tell it from insertion order;
+`ergo-wallet` and `ergo-node` unit tests cover out-of-order derivations.
+
 [SDK DerivationPath.scala v6.0.6](https://github.com/ScorexFoundation/sigmastate-interpreter/blob/ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042/sdk/shared/src/main/scala/org/ergoplatform/sdk/wallet/secrets/DerivationPath.scala)
 checks the three-component EIP-3 account prefix, without requiring a five-part
 address path. Complete source SHA-256:

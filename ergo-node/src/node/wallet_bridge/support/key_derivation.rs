@@ -84,8 +84,8 @@ pub(crate) fn render_derivation_path(components: &[u32]) -> String {
 /// with manually tracked paths in the same account. `derive_key_impl` passes
 /// `None` because it may derive an unrelated path.
 ///
-/// WALLET_VISIBLE_ADDRESSES is rebuilt using the ordered paths: hide the master
-/// only when the next tracked entry has the EIP-3 account prefix.
+/// WALLET_VISIBLE_ADDRESSES is rebuilt in Scala's storage order of the paths:
+/// hide the master only when the next entry has the EIP-3 account prefix.
 pub(crate) fn persist_tracked_pubkey(
     db: &redb::Database,
     path_idx: u64,
@@ -136,31 +136,11 @@ pub(crate) fn persist_tracked_pubkey(
         let mut visible = write_txn
             .open_table(WALLET_VISIBLE_ADDRESSES)
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-
-        // Clear all existing visible entries.
-        let existing_keys: Vec<u32> = visible
-            .iter()
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            .map(|entry| entry.map(|(k, _)| k.value()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e: redb::StorageError| WalletAdminError::Internal(e.to_string()))?;
-        for key in existing_keys {
-            visible
-                .remove(key)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        }
-
-        for (index, pk) in ergo_wallet::state::visible_pubkeys_with_paths(&all_tracked)
-            .into_iter()
-            .enumerate()
-        {
-            let index = u32::try_from(index).map_err(|_| {
-                WalletAdminError::Internal("visible wallet index exceeds u32".into())
-            })?;
-            visible
-                .insert(index, pk)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        }
+        crate::wallet_boot::replace_visible_pubkeys(
+            &mut visible,
+            &ergo_wallet::state::visible_pubkeys_with_paths(&all_tracked),
+        )
+        .map_err(WalletAdminError::Internal)?;
 
         if let Some(new_head) = new_derivation_head {
             use ergo_state::wallet::tables::WALLET_DERIVATION_HEAD;
@@ -637,6 +617,88 @@ mod tests {
             matches!(&error, WalletAdminError::Internal(detail) if detail.contains("tracked key at m/1")),
             "{error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn addresses_follow_scala_storage_order_live_after_reopen_and_on_upgrade() {
+        use ergo_state::wallet::tables::WALLET_VISIBLE_ADDRESSES;
+        let address = |path: &str| {
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../test-vectors/wallet/leading-zero-master/scala_6_0_6.json"
+            )))
+            .unwrap();
+            fixture["vectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["mode"] == "legacy" && v["path"] == path)
+                .unwrap()["address"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let eip3 = ergo_wallet::DerivationPath::eip3_first_address();
+        // Scala after a restart or unlock: master, m/1, then the EIP-3 key.
+        let scala = vec![address("m"), address("m/1"), address(&eip3.to_string())];
+        let network = ergo_ser::address::NetworkPrefix::Mainnet;
+        let unlock = |db: &redb::Database, directory: &std::path::Path| {
+            let mut storage = leading_zero_legacy_storage(directory);
+            let mut state = ergo_wallet::state::WalletState::empty(true);
+            crate::wallet_boot::WalletBootService::unlock_and_sync(
+                &mut storage,
+                &mut state,
+                db,
+                network,
+                "pw",
+            )
+            .unwrap();
+            (RwLock::new(storage), RwLock::new(state))
+        };
+
+        // Live: deriving m/1 after the EIP-3 key re-sorts the list.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.redb");
+        let db = redb::Database::create(&path).unwrap();
+        track(&db, 0, &leading_zero_vector("legacy", "m").0, vec![]);
+        let first = leading_zero_vector("legacy", &eip3.to_string()).0;
+        track(&db, 1, &first, eip3.components().to_vec());
+        let (storage, state) = unlock(&db, &dir.path().join("secret"));
+        let request = ergo_api::wallet::admin_advanced::DeriveKeyRequest {
+            derivation_path: "m/1".into(),
+        };
+        derive_key_impl(&request, &storage, &state, &db, &EmptyChain, network)
+            .await
+            .unwrap();
+        assert_eq!(state.read().visible_addresses(), scala);
+        drop(db);
+        let db = redb::Database::open(&path).unwrap();
+        assert_eq!(
+            unlock(&db, &dir.path().join("secret"))
+                .1
+                .read()
+                .visible_addresses(),
+            scala
+        );
+
+        // Upgrade: a list persisted in insertion order is rebuilt at unlock.
+        let write = db.begin_write().unwrap();
+        crate::wallet_boot::replace_visible_pubkeys(
+            &mut write.open_table(WALLET_VISIBLE_ADDRESSES).unwrap(),
+            &[first, leading_zero_vector("legacy", "m/1").0],
+        )
+        .unwrap();
+        write.commit().unwrap();
+        assert_eq!(
+            unlock(&db, &dir.path().join("secret"))
+                .1
+                .read()
+                .visible_addresses(),
+            scala
+        );
+        let read = db.begin_read().unwrap();
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read);
+        assert_eq!(reader.visible_pubkeys().unwrap().len(), 3);
     }
 
     #[test]

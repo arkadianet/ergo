@@ -155,6 +155,30 @@ pub static FAULT_INJECT: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 
 pub struct WalletBootService;
 
+/// Replace the persisted `WALLET_VISIBLE_ADDRESSES` list with `pubkeys`, in
+/// order. The table is small, so writers rebuild it whole.
+pub(crate) fn replace_visible_pubkeys(
+    visible: &mut redb::Table<'_, u32, [u8; 33]>,
+    pubkeys: &[[u8; 33]],
+) -> Result<(), String> {
+    use redb::ReadableTable;
+    let existing: Vec<u32> = visible
+        .iter()
+        .map_err(|e| e.to_string())?
+        .map(|entry| entry.map(|(key, _)| key.value()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    for key in existing {
+        visible.remove(key).map_err(|e| e.to_string())?;
+    }
+    for (index, pubkey) in pubkeys.iter().enumerate() {
+        let index =
+            u32::try_from(index).map_err(|_| "visible wallet index exceeds u32".to_string())?;
+        visible.insert(index, pubkey).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// A decrypted master remains owned by the unlock operation until every
 /// synchronization step succeeds. Errors and unwinding erase secret state.
 struct UnlockSyncAttempt<'a> {
@@ -237,17 +261,26 @@ impl WalletBootService {
 
         if already_persisted {
             // Step 5a: hydrate from redb (the persisted state is the source of truth).
-            let read_txn = db
-                .begin_read()
-                .map_err(|e| WalletError::SecretFile(format!("redb begin_read: {e}")))?;
-            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+            let (rows, visible) = {
+                let read_txn = db
+                    .begin_read()
+                    .map_err(|e| WalletError::SecretFile(format!("redb begin_read: {e}")))?;
+                let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+                let rows = reader
+                    .tracked_pubkeys_with_paths()
+                    .map_err(|e| WalletError::SecretFile(format!("wallet tracked keys: {e}")))?;
+                let visible =
+                    ergo_state::wallet::hydration::HydrationSource::visible_pubkeys(&reader)
+                        .map_err(|e| {
+                            WalletError::SecretFile(format!("wallet visible keys: {e}"))
+                        })?;
+                (rows, visible)
+            };
             // Every persisted key must come from the unlocked secret before
             // anything pairs it with a derived scalar.
-            let tracked: Vec<([u8; 33], Vec<u32>)> = reader
-                .tracked_pubkeys_with_paths()
-                .map_err(|e| WalletError::SecretFile(format!("wallet tracked keys: {e}")))?
-                .into_iter()
-                .map(|(_, pubkey, path)| (pubkey, path))
+            let tracked: Vec<([u8; 33], Vec<u32>)> = rows
+                .iter()
+                .map(|(_, pubkey, path)| (*pubkey, path.clone()))
                 .collect();
             if storage.bind_tracked_keys(&tracked)?
                 == ergo_wallet::storage::MasterDerivation::LegacyRustTrimmed
@@ -258,6 +291,33 @@ impl WalletBootService {
                      differ from Scala's for this secret file"
                 );
             }
+            // Scala rebuilds its address list from storage order at every
+            // unlock; rewrite a list persisted in another order (earlier
+            // releases kept insertion order).
+            let ordered = ergo_wallet::state::visible_pubkeys_with_paths(&rows);
+            if !visible.iter().map(|(_, pubkey)| pubkey).eq(ordered.iter()) {
+                let write_txn = ergo_state::begin_write_qr(db)
+                    .map_err(|e| WalletError::SecretFile(format!("redb begin_write: {e}")))?;
+                {
+                    let mut table =
+                        write_txn
+                            .open_table(WALLET_VISIBLE_ADDRESSES)
+                            .map_err(|e| {
+                                WalletError::SecretFile(format!(
+                                    "open WALLET_VISIBLE_ADDRESSES: {e}"
+                                ))
+                            })?;
+                    replace_visible_pubkeys(&mut table, &ordered)
+                        .map_err(|e| WalletError::SecretFile(format!("visible keys: {e}")))?;
+                }
+                write_txn
+                    .commit()
+                    .map_err(|e| WalletError::SecretFile(format!("redb commit: {e}")))?;
+            }
+            let read_txn = db
+                .begin_read()
+                .map_err(|e| WalletError::SecretFile(format!("redb begin_read: {e}")))?;
+            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
             state.hydrate_from_reader(&reader, network)?;
         } else {
             // Step 5b: Fresh wallet — auto-derive master + EIP-3 first child + persist.
