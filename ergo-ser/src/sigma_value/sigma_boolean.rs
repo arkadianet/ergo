@@ -199,6 +199,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parsed_nodes_grow_children_instead_of_reserving_the_declared_count() {
+        // `Vec::with_capacity(65)` is exactly 65. Storage that starts from the
+        // bounded 64-entry reservation must grow on the 65th decoded child, so
+        // its capacity cannot equal the declared count. Checked at every
+        // compound node's own parser call site.
+        const COUNT: u16 = 65;
+        for header in [vec![SIGMA_AND], vec![SIGMA_OR], vec![SIGMA_THRESHOLD]] {
+            let mut w = VlqWriter::new();
+            w.put_bytes(&header);
+            if header == [SIGMA_THRESHOLD] {
+                w.put_u16(1);
+            }
+            w.put_u16(COUNT);
+            for _ in 0..COUNT {
+                w.put_u8(TRIVIAL_PROP_TRUE);
+            }
+            let bytes = w.result();
+            let mut r = VlqReader::new(&bytes);
+            let children = match read_sigma_boolean_at_depth(&mut r, 0).unwrap() {
+                SigmaBoolean::Cand(children)
+                | SigmaBoolean::Cor(children)
+                | SigmaBoolean::Cthreshold { children, .. } => children,
+                other => panic!("expected a compound node, got {other:?}"),
+            };
+            assert!(r.is_empty());
+            assert_eq!(children.len(), usize::from(COUNT));
+            assert!(
+                children.capacity() > usize::from(COUNT),
+                "0x{:02X}: children reserved for the declared count",
+                header[0]
+            );
+        }
+    }
+
     // ----- helpers -----
 
     fn roundtrip_value(tpe: &SigmaType, val: &SigmaValue) {
