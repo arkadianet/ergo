@@ -2506,3 +2506,27 @@ fn container_configuration_and_build_context_protect_secrets() {
         assert!(ignore.lines().any(|line| line == pattern));
     }
 }
+
+#[test]
+fn build_context_protects_nested_rust_wallet_data_and_keeps_vectors() {
+    let ignore = include_str!("../../../.dockerignore");
+    // The default data directory may be created under ergo-node/ or any
+    // other working directory; its wallet secrets are UUID-named JSON files.
+    assert!(ignore.lines().any(|line| line == "**/ergo-data"));
+    for pattern in [
+        "wallet",
+        "**/wallet",
+        "**/wallet/*.json",
+        "**/*.json",
+        "test-vectors",
+        "test-vectors/wallet",
+    ] {
+        assert!(
+            !ignore.lines().any(|line| line == pattern),
+            "wallet vectors must remain in the build context: {pattern}"
+        );
+    }
+    assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/wallet")
+        .is_dir());
+}

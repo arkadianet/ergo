@@ -1,6 +1,6 @@
 .git
 **/target
-ergo-data
+**/ergo-data
 **/*.redb
 **/*.redb.*
 **/*.log
