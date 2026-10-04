@@ -15,12 +15,11 @@
 
 use std::sync::Arc;
 
+mod inspection;
+
 use async_trait::async_trait;
 use ergo_api::mining::{MiningApiError, NodeMining};
-use ergo_rest_json::mining::{
-    AutolykosSolutionJson, CandidateMetricsJson, MiningTemplateJson, TemplateExtensionFieldJson,
-    TemplateTransactionJson, WorkMessageJson,
-};
+use ergo_rest_json::mining::{AutolykosSolutionJson, CandidateMetricsJson, WorkMessageJson};
 use tokio::sync::{mpsc, oneshot};
 
 /// Project a typed mining `WorkMessage` to its JSON wire shape, stamping the
@@ -54,67 +53,6 @@ pub(crate) fn work_message_to_json(
     }
 }
 
-/// Serialize exactly one frozen candidate; no second cache read can mix jobs.
-pub(crate) fn template_to_json(
-    template: ergo_mining::engine::Template,
-) -> Result<MiningTemplateJson, MiningApiError> {
-    use ergo_primitives::writer::VlqWriter;
-    let candidate = template.candidate;
-    let header = ergo_ser::header::serialize_header_without_pow(&candidate.header)
-        .map_err(|e| MiningApiError::Internal(format!("serialize candidate header: {e:?}")))?;
-    if template.work.msg != candidate.msg
-        || ergo_primitives::digest::blake2b256(&header).as_bytes() != &candidate.msg
-    {
-        return Err(MiningApiError::Internal(
-            "candidate header and work hash disagree".into(),
-        ));
-    }
-    let transactions = candidate
-        .transactions
-        .iter()
-        .map(|tx| {
-            let mut writer = VlqWriter::new();
-            ergo_ser::transaction::write_transaction(&mut writer, tx).map_err(|e| {
-                MiningApiError::Internal(format!("serialize template transaction: {e:?}"))
-            })?;
-            let id = ergo_ser::transaction::transaction_id(tx)
-                .map_err(|e| MiningApiError::Internal(format!("template transaction id: {e:?}")))?;
-            Ok(TemplateTransactionJson {
-                id: hex::encode(id.as_bytes()),
-                bytes: hex::encode(writer.result()),
-            })
-        })
-        .collect::<Result<Vec<_>, MiningApiError>>()?;
-    Ok(MiningTemplateJson {
-        work: work_message_to_json(
-            template.work,
-            template.identity.template_seq,
-            template.identity.clean_jobs,
-        ),
-        header_without_pow: hex::encode(header),
-        parent_id: hex::encode(candidate.parent_id),
-        version: candidate.header.version,
-        transactions,
-        extension: candidate
-            .extension_fields
-            .into_iter()
-            .map(|(key, value)| TemplateExtensionFieldJson {
-                key: hex::encode(key),
-                value: hex::encode(value),
-            })
-            .collect(),
-        ad_proofs: hex::encode(candidate.ad_proof_bytes),
-        required_transaction_ids: candidate
-            .required_transaction_ids
-            .into_iter()
-            .map(hex::encode)
-            .collect(),
-    })
-}
-
-/// Requested builds have a longer deadline than cache-only mining reads.
-pub const REQUIRED_BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Per-request deadline. If the main loop hasn't drained and replied
 /// within this window, the handler returns 504 `timeout`. Matches the
 /// existing `crate::api_bridge::SUBMIT_TIMEOUT` value (5s).
@@ -133,6 +71,19 @@ pub const LONGPOLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// loop's `select!` arm sends back when the request completes.
 #[derive(Debug)]
 pub enum MiningRequest {
+    ListPrivateTransactions {
+        reply:
+            oneshot::Sender<Result<Vec<ergo_api::mining::PrivateTransactionEntry>, MiningApiError>>,
+    },
+    SubmitPrivateTransaction {
+        bytes: Vec<u8>,
+        options: ergo_api::mining::PrivateTransactionOptions,
+        reply: oneshot::Sender<Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError>>,
+    },
+    CancelPrivateTransaction {
+        tx_id: String,
+        reply: oneshot::Sender<Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError>>,
+    },
     /// `GET /mining/candidate` — main loop serves the cache via
     /// [`ergo_mining::handle::MiningHandle::cached_template_if_synced`] (the
     /// off-loop engine is the sole builder) and replies with the work message
@@ -141,17 +92,6 @@ pub enum MiningRequest {
     /// current tip yet.
     GetCandidate {
         reply: oneshot::Sender<Result<WorkMessageJson, MiningApiError>>,
-    },
-    /// Cache-only complete-template read.
-    GetTemplate {
-        reply: oneshot::Sender<Result<Option<ergo_mining::engine::Template>, MiningApiError>>,
-    },
-    /// A single off-loop request owns the permit until its worker exits.
-    /// HTTP disconnect/timeouts cannot release capacity while a build runs.
-    CandidateWithTxs {
-        transactions: Vec<Arc<[u8]>>,
-        permit: tokio::sync::OwnedSemaphorePermit,
-        reply: oneshot::Sender<Result<MiningTemplateJson, MiningApiError>>,
     },
     /// `POST /mining/solution` — main loop runs the API-side pre-check
     /// via [`ergo_mining::handle::MiningHandle::verify_solution`], then
@@ -177,6 +117,15 @@ pub enum MiningRequest {
     },
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 /// `NodeMining` impl over an mpsc channel. Construct one in the node
 /// init alongside the `mining_submit_{tx,rx}` channel, hand the
 /// `Sender` here and the `Receiver` to the action loop.
@@ -187,6 +136,7 @@ pub enum MiningRequest {
 /// network prefix for address encoding.
 pub struct MiningBridge {
     tx: mpsc::Sender<MiningRequest>,
+    handle: Option<ergo_mining::handle::MiningHandle>,
     network: ergo_ser::address::NetworkPrefix,
     /// Serve-state-change receiver from the [`MiningHandle`]. Observes a change
     /// whenever the served candidate changes — a publish OR a tip transition
@@ -197,7 +147,6 @@ pub struct MiningBridge {
     /// a test constructor overrides it so the timeout path runs deterministically
     /// without a real 30 s wait.
     longpoll_timeout: std::time::Duration,
-    required_builds: Arc<tokio::sync::Semaphore>,
 }
 
 impl MiningBridge {
@@ -215,11 +164,24 @@ impl MiningBridge {
     ) -> Self {
         Self {
             tx,
+            handle: None,
             network,
             serve_rx,
             longpoll_timeout: LONGPOLL_TIMEOUT,
-            required_builds: Arc::new(tokio::sync::Semaphore::new(1)),
         }
+    }
+
+    /// Give the operator inspection path direct access to the immutable cache.
+    /// Formatting happens on the API task, outside the writer-loop/cache lock.
+    pub fn with_handle(mut self, handle: ergo_mining::handle::MiningHandle) -> Self {
+        self.handle = Some(handle);
+        self
+    }
+
+    fn inspection_handle(&self) -> Result<&ergo_mining::handle::MiningHandle, MiningApiError> {
+        self.handle
+            .as_ref()
+            .ok_or_else(|| MiningApiError::Unavailable("mining cache unavailable".into()))
     }
 
     /// Test-only constructor with an explicit (short) longpoll bound so the
@@ -234,10 +196,10 @@ impl MiningBridge {
     ) -> Self {
         Self {
             tx,
+            handle: None,
             network,
             serve_rx,
             longpoll_timeout,
-            required_builds: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
 
@@ -305,6 +267,25 @@ impl MiningBridge {
         }
     }
 
+    async fn private_request<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, MiningApiError>>) -> MiningRequest,
+    ) -> Result<T, MiningApiError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.try_send(make(reply)).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => {
+                MiningApiError::Unavailable("mining channel full; retry with backoff".into())
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                MiningApiError::Unavailable("node main loop has stopped".into())
+            }
+        })?;
+        tokio::time::timeout(MINING_TIMEOUT, rx)
+            .await
+            .map_err(|_| MiningApiError::Timeout("private queue request timed out".into()))?
+            .map_err(|_| MiningApiError::Unavailable("main loop closed reply channel".into()))?
+    }
+
     /// Erase the concrete type for axum state injection.
     pub fn into_dyn(self) -> Arc<dyn NodeMining> {
         Arc::new(self)
@@ -327,6 +308,125 @@ fn parse_and_encode_reward_address(
 
 #[async_trait]
 impl NodeMining for MiningBridge {
+    async fn candidate_details(
+        &self,
+        msg: Option<String>,
+        template_seq: Option<u64>,
+    ) -> Result<Option<ergo_rest_json::mining_inspection::CandidateDetailsJson>, MiningApiError>
+    {
+        let msg = inspection::parse_msg(msg)?;
+        let handle = self.inspection_handle()?;
+        handle
+            .inspect_template(msg, template_seq)
+            .map(|s| {
+                inspection::candidate_details(s, self.network, handle.reemission_ref(), now_ms())
+            })
+            .transpose()
+    }
+
+    async fn mining_history(
+        &self,
+    ) -> Result<ergo_rest_json::mining_inspection::MiningHistoryJson, MiningApiError> {
+        use ergo_rest_json::mining_inspection::{
+            MiningAccountingJson, MiningAssetJson, MiningHistoryJson, MiningOutcomeJson,
+        };
+        let handle = self.inspection_handle()?;
+        Ok(MiningHistoryJson {
+            retention: ergo_mining::handle::MAX_RETAINED_TEMPLATES,
+            retained_templates: handle
+                .inspect_history()
+                .into_iter()
+                .map(inspection::summary)
+                .collect(),
+            outcomes: handle
+                .mining_outcomes()
+                .into_iter()
+                .map(|e| MiningOutcomeJson {
+                    msg: e.msg.map(hex::encode),
+                    template_seq: e.template_seq,
+                    block_id: e.block_id.map(hex::encode),
+                    at_ms: e.at_ms,
+                    outcome: e.outcome,
+                    detail: e.detail,
+                    canonical: None,
+                    confirmations: None,
+                    accounting: e.accounting.map(|a| MiningAccountingJson {
+                        height: a.height,
+                        emission_nano_erg: a.emission_nano_erg,
+                        emission_gross_nano_erg: a.emission_gross_nano_erg,
+                        reemission_obligation_nano_erg: a.reemission_obligation_nano_erg,
+                        fees_nano_erg: a.fees_nano_erg,
+                        rent_nano_erg: a.rent_nano_erg,
+                        recovered_tokens: a
+                            .recovered_tokens
+                            .into_iter()
+                            .map(|t| MiningAssetJson {
+                                token_id: t.token_id,
+                                amount: t.amount,
+                            })
+                            .collect(),
+                    }),
+                })
+                .collect(),
+            resets_on_restart: !handle.outcome_journal_status().0,
+            journal_error: handle.outcome_journal_status().1,
+            chain_tip: None,
+        })
+    }
+
+    async fn mining_freshness(
+        &self,
+    ) -> Result<ergo_rest_json::mining_inspection::MiningFreshnessJson, MiningApiError> {
+        use ergo_rest_json::mining_inspection::MiningFreshnessJson;
+        let handle = self.inspection_handle()?;
+        let best = handle.best_tip();
+        let current = handle.cached_template_if_synced();
+        Ok(MiningFreshnessJson {
+            mining_started: best.synced,
+            last_template_msg: current.as_ref().map(|(w, _)| hex::encode(w.msg)),
+            last_template_height: current.as_ref().map(|(w, _)| w.height),
+            last_template_age_ms: current
+                .as_ref()
+                .map(|(_, id)| now_ms().saturating_sub(id.built_at_ms)),
+            template_seq: current.map(|(_, id)| id.template_seq),
+        })
+    }
+
+    async fn block_policy(&self) -> Result<serde_json::Value, MiningApiError> {
+        serde_json::to_value(self.inspection_handle()?.policy())
+            .map_err(|e| MiningApiError::Internal(e.to_string()))
+    }
+
+    async fn set_block_policy(
+        &self,
+        policy: serde_json::Value,
+    ) -> Result<serde_json::Value, MiningApiError> {
+        let policy: ergo_mining::policy::BlockPolicy = serde_json::from_value(policy)
+            .map_err(|e| MiningApiError::BadRequest(e.to_string()))?;
+        let handle = self.inspection_handle()?.clone();
+        // Saving syncs the policy file to disk: keep it off the API workers.
+        let saved = tokio::task::spawn_blocking(move || handle.set_policy(policy))
+            .await
+            .map_err(|e| MiningApiError::Internal(format!("mining policy save task: {e}")))?;
+        match saved {
+            Ok(None) => {}
+            Ok(Some(warning)) => {
+                tracing::warn!(%warning, "mining: block policy saved and active");
+            }
+            // Only an invalid policy is the client's fault. A storage failure
+            // leaves the saved and active policy unchanged.
+            Err(ergo_mining::MiningError::InvalidConfig(detail)) => {
+                return Err(MiningApiError::BadRequest(detail));
+            }
+            Err(error) => {
+                return Err(MiningApiError::Internal(format!(
+                    "mining policy not saved: {error}"
+                )));
+            }
+        }
+        self.block_policy().await
+    }
+
     async fn candidate(
         &self,
         longpoll: Option<String>,
@@ -380,58 +480,6 @@ impl NodeMining for MiningBridge {
         Ok(current)
     }
 
-    async fn template(&self) -> Result<Option<MiningTemplateJson>, MiningApiError> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .try_send(MiningRequest::GetTemplate { reply })
-            .map_err(|_| {
-                MiningApiError::Unavailable("mining channel unavailable; retry with backoff".into())
-            })?;
-        let template = tokio::time::timeout(MINING_TIMEOUT, rx)
-            .await
-            .map_err(|_| MiningApiError::Timeout("template read deadline exceeded".into()))?
-            .map_err(|_| MiningApiError::Unavailable("main loop closed reply channel".into()))??;
-        // Serialize off the action loop; the frozen clone cannot mix refreshes.
-        template.map(template_to_json).transpose()
-    }
-
-    async fn candidate_with_txs(
-        &self,
-        transactions: Vec<Vec<u8>>,
-    ) -> Result<MiningTemplateJson, MiningApiError> {
-        if transactions.len() > 256 || transactions.iter().map(Vec::len).sum::<usize>() > 1_048_576
-        {
-            return Err(MiningApiError::BadRequest(
-                "at most 256 transactions and 1 MiB of transaction bytes may be requested".into(),
-            ));
-        }
-        let permit = self
-            .required_builds
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| {
-                MiningApiError::Unavailable(
-                    "a required-transaction build is already running; retry with backoff".into(),
-                )
-            })?;
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .try_send(MiningRequest::CandidateWithTxs {
-                transactions: transactions.into_iter().map(Arc::from).collect(),
-                permit,
-                reply,
-            })
-            .map_err(|_| {
-                MiningApiError::Unavailable("mining channel unavailable; retry with backoff".into())
-            })?;
-        tokio::time::timeout(REQUIRED_BUILD_TIMEOUT, rx)
-            .await
-            .map_err(|_| {
-                MiningApiError::Timeout("required-transaction build deadline exceeded".into())
-            })?
-            .map_err(|_| MiningApiError::Unavailable("main loop closed reply channel".into()))?
-    }
-
     async fn submit_solution(&self, solution: AutolykosSolutionJson) -> Result<(), MiningApiError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         match self.tx.try_send(MiningRequest::SubmitSolution {
@@ -467,6 +515,34 @@ impl NodeMining for MiningBridge {
         let reward_bytes = ergo_mining::reward_output_script(&pk).to_vec();
         parse_and_encode_reward_address(&reward_bytes, self.network)
             .map_err(|e| MiningApiError::Internal(format!("encode reward address: {e}")))
+    }
+
+    async fn private_transactions(
+        &self,
+    ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, MiningApiError> {
+        self.private_request(|reply| MiningRequest::ListPrivateTransactions { reply })
+            .await
+    }
+
+    async fn submit_private_transaction(
+        &self,
+        bytes: Vec<u8>,
+        options: ergo_api::mining::PrivateTransactionOptions,
+    ) -> Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError> {
+        self.private_request(|reply| MiningRequest::SubmitPrivateTransaction {
+            bytes,
+            options,
+            reply,
+        })
+        .await
+    }
+
+    async fn cancel_private_transaction(
+        &self,
+        tx_id: String,
+    ) -> Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError> {
+        self.private_request(|reply| MiningRequest::CancelPrivateTransaction { tx_id, reply })
+            .await
     }
 
     async fn reward_pubkey(&self) -> Result<String, MiningApiError> {
@@ -536,13 +612,12 @@ mod tests {
                     MiningRequest::SubmitSolution { reply, .. } => {
                         let _ = reply.send(Err(MiningApiError::Unavailable("n/a".into())));
                     }
+                    MiningRequest::ListPrivateTransactions { .. }
+                    | MiningRequest::SubmitPrivateTransaction { .. }
+                    | MiningRequest::CancelPrivateTransaction { .. } => {
+                        panic!("private requests are not expected in this fixture")
+                    }
                     MiningRequest::GetRewardKey { reply } => {
-                        let _ = reply.send(Err(MiningApiError::Unavailable("n/a".into())));
-                    }
-                    MiningRequest::GetTemplate { reply } => {
-                        let _ = reply.send(Err(MiningApiError::Unavailable("n/a".into())));
-                    }
-                    MiningRequest::CandidateWithTxs { reply, .. } => {
                         let _ = reply.send(Err(MiningApiError::Unavailable("n/a".into())));
                     }
                 }
@@ -555,138 +630,6 @@ mod tests {
             longpoll_timeout,
         );
         (bridge, serve_tx, served)
-    }
-
-    #[test]
-    fn exported_template_header_hash_matches_work_and_keeps_frozen_artifacts() {
-        use ergo_mining::{
-            candidate::Candidate,
-            engine::{BuildReason, Template, TemplateIdentity},
-            work_message::WorkMessage,
-        };
-        use ergo_primitives::digest::{ADDigest, Digest32};
-        use ergo_ser::{autolykos::AutolykosSolution, header::Header};
-        use ergo_validation::pre_header::{
-            build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
-        };
-        let header = Header {
-            version: 3,
-            parent_id: Digest32::from_bytes([2; 32]).into(),
-            ad_proofs_root: Digest32::from_bytes([3; 32]),
-            transactions_root: Digest32::from_bytes([4; 32]),
-            state_root: ADDigest::from_bytes([5; 33]),
-            extension_root: Digest32::from_bytes([6; 32]),
-            timestamp: 1234,
-            n_bits: 0x01010000,
-            height: 100,
-            votes: [0; 3],
-            unparsed_bytes: vec![],
-            solution: AutolykosSolution::V2 {
-                pk: ergo_primitives::group_element::GroupElement::from([2; 33]),
-                nonce: [0; 8],
-            },
-        };
-        let header_bytes = ergo_ser::header::serialize_header_without_pow(&header).unwrap();
-        let msg = *ergo_primitives::digest::blake2b256(&header_bytes).as_bytes();
-        let template = Template {
-            candidate: Candidate {
-                header: header.clone(),
-                validation_ctx: CandidateValidationContext {
-                    pre_header: CandidatePreHeader {
-                        version: 3,
-                        parent_id: [2; 32],
-                        height: 100,
-                        timestamp: 1234,
-                        n_bits: 0x01010000,
-                        votes: [0; 3],
-                        miner_pubkey: [2; 33],
-                    },
-                    activated_script_version: 2,
-                    last_headers: vec![],
-                    last_block_utxo_root: build_last_block_utxo_root(header.state_root),
-                },
-                transactions: vec![],
-                required_transaction_ids: vec![[9; 32]],
-                ad_proof_bytes: vec![7, 8],
-                extension_fields: vec![(vec![1, 2], vec![3, 4])],
-                msg,
-                target: 1u8.into(),
-                parent_id: [2; 32],
-            },
-            work: WorkMessage {
-                msg,
-                target: 1u8.into(),
-                height: 100,
-                pk: [2; 33],
-                metrics: Default::default(),
-            },
-            identity: TemplateIdentity {
-                template_id: msg,
-                parent_id: [2; 32],
-                chain_seq: 1,
-                template_seq: 12,
-                clean_jobs: false,
-                built_at_ms: 1000,
-                reason: BuildReason::RequiredTransactions,
-            },
-        };
-        let exported = template_to_json(template.clone()).unwrap();
-        assert_eq!(exported.header_without_pow, hex::encode(header_bytes));
-        assert_eq!(
-            hex::encode(
-                ergo_primitives::digest::blake2b256(
-                    &hex::decode(&exported.header_without_pow).unwrap()
-                )
-                .as_bytes()
-            ),
-            exported.work.msg
-        );
-        assert_eq!(exported.work.template_seq, 12);
-        assert_eq!(exported.ad_proofs, "0708");
-        assert_eq!(exported.extension[0].key, "0102");
-        assert_eq!(exported.extension[0].value, "0304");
-        assert_eq!(exported.required_transaction_ids, vec!["09".repeat(32)]);
-        let mut wrong = template;
-        wrong.work.msg[0] ^= 1;
-        assert!(matches!(
-            template_to_json(wrong),
-            Err(MiningApiError::Internal(_))
-        ));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn required_build_permit_survives_http_timeout_until_worker_exits() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let (_notify, serve_rx) = tokio::sync::watch::channel(0u64);
-        let bridge = Arc::new(MiningBridge::new(
-            tx,
-            ergo_ser::address::NetworkPrefix::Mainnet,
-            serve_rx,
-        ));
-        let first = {
-            let bridge = bridge.clone();
-            tokio::spawn(async move { bridge.candidate_with_txs(vec![]).await })
-        };
-        let request = rx.recv().await.unwrap();
-        assert!(matches!(
-            bridge.candidate_with_txs(vec![]).await,
-            Err(MiningApiError::Unavailable(_))
-        ));
-        tokio::time::advance(REQUIRED_BUILD_TIMEOUT + std::time::Duration::from_secs(1)).await;
-        assert!(matches!(
-            first.await.unwrap(),
-            Err(MiningApiError::Timeout(_))
-        ));
-        assert!(matches!(
-            bridge.candidate_with_txs(vec![]).await,
-            Err(MiningApiError::Unavailable(_))
-        ));
-        match &request {
-            MiningRequest::CandidateWithTxs { reply, .. } => assert!(reply.is_closed()),
-            _ => panic!("wrong mining request"),
-        }
-        drop(request);
-        assert_eq!(bridge.required_builds.available_permits(), 1);
     }
 
     // ----- happy path -----
@@ -892,6 +835,44 @@ mod tests {
         assert!(
             matches!(result, Err(MiningApiError::Unavailable(_))),
             "a longpoll parked at shutdown returns Unavailable, got {result:?}",
+        );
+    }
+
+    // ----- error paths -----
+
+    #[tokio::test]
+    async fn policy_storage_failure_is_internal_while_an_invalid_policy_is_the_clients() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        let handle = ergo_mining::handle::MiningHandle::mainnet([0x02; 33])
+            .with_policy_store(data_dir.join("mining-policy.json"))
+            .unwrap();
+        // A file now stands where the data directory was, so nothing can be
+        // saved there.
+        std::fs::remove_dir(&data_dir).unwrap();
+        std::fs::write(&data_dir, "").unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        let bridge = MiningBridge::new(
+            tx,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            handle.subscribe_serve_changes(),
+        )
+        .with_handle(handle.clone());
+        let mut policy = serde_json::to_value(handle.policy()).unwrap();
+        policy["rent_max_cost_basis_points"] = 0.into();
+        let stored = bridge.set_block_policy(policy).await;
+        assert!(
+            matches!(stored, Err(MiningApiError::Internal(_))),
+            "{stored:?}"
+        );
+        assert_eq!(handle.policy(), ergo_mining::policy::BlockPolicy::default());
+        let mut invalid = serde_json::to_value(handle.policy()).unwrap();
+        invalid["rent_max_cost_basis_points"] = 10_001.into();
+        let rejected = bridge.set_block_policy(invalid).await;
+        assert!(
+            matches!(rejected, Err(MiningApiError::BadRequest(_))),
+            "{rejected:?}"
         );
     }
 }

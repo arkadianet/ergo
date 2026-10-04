@@ -11,11 +11,14 @@ import { erg, num, bytes, dur, truncMiddle, blockTime } from './format.js';
 import { minerNode, poolLabel, fetchOwnPk, ownPkHex } from './miners.js';
 import { miningWork } from './mining-work.js';
 import { miningReward } from './mining-reward.js';
+import { createMiningInspector } from './mining-inspector.js';
+import { miningPolicy } from './mining-policy.js';
 
 const EPOCH = 128; // EIP-37 difficulty-adjustment period (blocks)
 
 let els = null;
 let recentTable = null;
+let inspector = null;
 let identity = null;
 let candidate = null;
 let candidateSeq = null;
@@ -81,6 +84,10 @@ export function mount(elRoot) {
         <div class="panel__body mn-network" data-net></div>
       </section>
       <section class="panel mn-full">
+        <div class="panel__head"><h2 class="panel__title">Candidate contents</h2></div>
+        <div class="panel__body" data-inspector></div>
+      </section>
+      <section class="panel mn-full">
         <div class="panel__head">
           <h2 class="panel__title">Miner distribution</h2>
           <span class="mn-win" data-win></span>
@@ -131,7 +138,9 @@ export function mount(elRoot) {
     ],
     { rowKey: (b) => b.header_id, initialSort: { key: 'height', dir: -1 } },
   );
+  inspector = createMiningInspector(elRoot.querySelector('[data-inspector]'));
   fetchOwnPk();
+  elRoot.querySelector('.mn-grid').append(miningPolicy());
 }
 
 function blockLink(b, label) {
@@ -164,17 +173,22 @@ export async function onSlow() {
   if (tipNow) tip = tipNow;
   if (infoNow) info = infoNow;
   if (rew?.rewardAddress) rewardAddr = rew.rewardAddress;
-  if (miningOn) candidate = cand;
+  // Work fetched while mining was enabled is retired once it is disabled.
+  candidate = miningOn ? cand : null;
   if (cand?.ok && cand.data) {
     const identity = `${cand.data.msg}:${cand.data.template_seq}`;
     if (candidateSeq !== identity) {
       candidateSeq = identity;
       candidateSeqAt = Date.now();
     }
-  } else if (miningOn) {
+  } else {
     candidateSeq = null;
     candidateSeqAt = null;
   }
+
+  // The inspector downloads in the background, and only for new work; the
+  // network panels below need not wait for a candidate report.
+  if (inspector) void inspector.refresh(candidate);
 
   // Network statistics are header-based. A historical full-block tip would
   // show an old block reward alongside today's difficulty while syncing.

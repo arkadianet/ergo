@@ -177,6 +177,20 @@ async fn build_unsigned_tx_with_options(
         .tip_height()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
+    if let Some(ids) = override_inputs {
+        let reserved = chain.reserved_wallet_inputs()?;
+        if ids
+            .iter()
+            .filter_map(|id| hex::decode(id).ok())
+            .filter_map(|id| <[u8; 32]>::try_from(id).ok())
+            .any(|id| reserved.contains(&id))
+        {
+            return Err(WalletAdminError::BadRequest(
+                "an input is reserved for private mining".into(),
+            ));
+        }
+    }
+
     // Build unsigned tx.
     if let Some(explicit_inputs) = override_inputs {
         // Caller-supplied box ids: decode, look up full boxes from UTXO set,
@@ -377,6 +391,12 @@ async fn build_unsigned_tx_with_options(
         // carrying tokens is always kept as a box regardless of ERG value.
         let change_goes_to_fee =
             change_erg > 0 && change_erg < MIN_BOX_VALUE && change_tokens.is_empty();
+        if fee == 0 && change_goes_to_fee {
+            return Err(WalletAdminError::BadRequest(
+                "zero-fee transactions need exact inputs or change above the minimum box value"
+                    .into(),
+            ));
+        }
         let fee_value = if change_goes_to_fee {
             fee.checked_add(change_erg)
                 .ok_or_else(|| WalletAdminError::Internal("fee + folded change overflow".into()))?
@@ -384,22 +404,26 @@ async fn build_unsigned_tx_with_options(
             fee
         };
 
-        // Fee output (value includes any folded sub-minimum change).
-        let fee_tree = {
-            let mut r = ergo_primitives::reader::VlqReader::new(&fee_ergo_tree);
-            ergo_ser::ergo_tree::read_ergo_tree(&mut r)
-                .map_err(|e| WalletAdminError::Internal(format!("fee ergo_tree: {e:?}")))?
-        };
-        output_candidates.push(
-            ergo_ser::ergo_box::ErgoBoxCandidate::new(
-                fee_value,
-                fee_tree,
-                current_height,
-                vec![],
-                ergo_ser::register::AdditionalRegisters::empty(),
-            )
-            .map_err(|e| WalletAdminError::Internal(format!("ErgoBoxCandidate (fee): {e:?}")))?,
-        );
+        if fee_value > 0 {
+            // Fee output (value includes any folded sub-minimum change).
+            let fee_tree = {
+                let mut r = ergo_primitives::reader::VlqReader::new(&fee_ergo_tree);
+                ergo_ser::ergo_tree::read_ergo_tree(&mut r)
+                    .map_err(|e| WalletAdminError::Internal(format!("fee ergo_tree: {e:?}")))?
+            };
+            output_candidates.push(
+                ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                    fee_value,
+                    fee_tree,
+                    current_height,
+                    vec![],
+                    ergo_ser::register::AdditionalRegisters::empty(),
+                )
+                .map_err(|e| {
+                    WalletAdminError::Internal(format!("ErgoBoxCandidate (fee): {e:?}"))
+                })?,
+            );
+        }
 
         // EIP-27 pay-to-reemission output (exactly `to_burn` nanoErg = 1 per
         // burned token). For a real reward box `to_burn` is ERG-scale, so this is
@@ -486,7 +510,7 @@ async fn build_unsigned_tx_with_options(
             as_of,
         })
     } else {
-        let summaries = if let Some(available) = &options.available {
+        let mut summaries = if let Some(available) = &options.available {
             available.clone()
         } else {
             let read = db
@@ -503,6 +527,11 @@ async fn build_unsigned_tx_with_options(
                 })
                 .collect()
         };
+
+        let reserved = chain.reserved_wallet_inputs()?;
+        summaries.retain(|box_summary: &ergo_wallet::box_selector::BoxSummary| {
+            !reserved.contains(&box_summary.box_id)
+        });
 
         let data_inputs: Vec<ergo_ser::input::DataInput> = override_data_inputs
             .unwrap_or(&[])
@@ -845,6 +874,7 @@ fn selection_candidates(
     let tip = chain
         .tip_height()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let reserved = chain.reserved_wallet_inputs()?;
     let mut summaries: BTreeMap<[u8; 32], BoxSummary> = boxes
         .into_iter()
         .filter(|record| {
@@ -853,6 +883,7 @@ fn selection_candidates(
             record.creation_height <= tip
                 && (minimum < 0 || i64::from(tip - record.creation_height) >= minimum)
                 && !excluded.contains(&record.box_id)
+                && !reserved.contains(&record.box_id)
                 && !overlay
                     .spent_box_ids
                     .contains(&Digest32::from_bytes(record.box_id))
@@ -872,6 +903,7 @@ fn selection_candidates(
         let wallet = state.read();
         for (id, output) in overlay.outputs.iter() {
             if !excluded.contains(id.as_bytes())
+                && !reserved.contains(id.as_bytes())
                 && !overlay.spent_box_ids.contains(id)
                 && wallet.is_tracked_tree(output.candidate.ergo_tree_bytes())
             {

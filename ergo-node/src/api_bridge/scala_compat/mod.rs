@@ -95,6 +95,30 @@ impl ergo_api::ChainParamsView for ScalaCompatBridge {
 }
 
 impl NodeChainQuery for ScalaCompatBridge {
+    fn applied_chain_at_heights(
+        &self,
+        heights: &[u32],
+    ) -> Result<Option<ergo_rest_json::mining_inspection::MiningAppliedChainJson>, ChainReadError>
+    {
+        use ergo_rest_json::mining_inspection::{MiningAppliedChainJson, MiningChainTipJson};
+        self.store_reader
+            .applied_chain_at_heights(heights)
+            .map(|snapshot| {
+                snapshot.map(|s| MiningAppliedChainJson {
+                    tip: MiningChainTipJson {
+                        height: s.tip_height,
+                        block_id: hex::encode(s.tip_id),
+                    },
+                    blocks: s
+                        .blocks
+                        .into_iter()
+                        .map(|(h, id)| (h, id.map(hex::encode)))
+                        .collect(),
+                })
+            })
+            .map_err(|e| ChainReadError::from(BridgeError::from(e)))
+    }
+
     fn snapshots_info(&self) -> Vec<(i32, String)> {
         // Mirrored into the published snapshot once per sync_tick from the
         // action loop's Mode-2 serve cache (`SnapshotState`), so this REST

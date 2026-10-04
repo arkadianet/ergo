@@ -437,11 +437,31 @@ fn fixed_work() -> WorkMessageJson {
 
 #[async_trait]
 impl NodeMining for StubMining {
+    async fn mining_freshness(
+        &self,
+    ) -> Result<ergo_rest_json::mining_inspection::MiningFreshnessJson, MiningApiError> {
+        Ok(ergo_rest_json::mining_inspection::MiningFreshnessJson {
+            mining_started: true,
+            last_template_msg: Some("ab".repeat(32)),
+            last_template_height: Some(100),
+            last_template_age_ms: Some(25),
+            template_seq: Some(7),
+        })
+    }
     async fn candidate(
         &self,
         _longpoll: Option<String>,
     ) -> Result<Option<WorkMessageJson>, MiningApiError> {
         Ok(Some(fixed_work()))
+    }
+    async fn candidate_details(
+        &self,
+        _msg: Option<String>,
+        _template_seq: Option<u64>,
+    ) -> Result<Option<ergo_rest_json::mining_inspection::CandidateDetailsJson>, MiningApiError>
+    {
+        // Nothing is retained.
+        Ok(None)
     }
     async fn submit_solution(&self, _: AutolykosSolutionJson) -> Result<(), MiningApiError> {
         Ok(())
@@ -664,7 +684,10 @@ async fn mining_status_t0_composed_always_200() {
     assert_eq!(v["mining_enabled"], true);
     assert_eq!(v["synced"], true);
     assert_eq!(v["longpoll_supported"], true);
-    assert!(v["last_template_msg"].is_null());
+    assert_eq!(v["last_template_msg"], "ab".repeat(32));
+    assert_eq!(v["last_template_height"], 100);
+    assert_eq!(v["last_template_age_ms"], 25);
+    assert_eq!(v["template_seq"], 7);
 }
 
 #[tokio::test]
@@ -794,6 +817,47 @@ async fn mining_candidate_t1_accepts_valid_key() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["msg"], "ab".repeat(32));
     assert_eq!(v["template_seq"], 7);
+}
+
+#[tokio::test]
+async fn mining_candidate_details_unretained_selector_is_v1_template_not_found() {
+    let uri = format!(
+        "/api/v1/mining/candidate-details?msg={}&template_seq=3",
+        "ab".repeat(32)
+    );
+    let (status, v) = send(
+        app_full(default_auth()),
+        req(
+            Method::GET,
+            &uri,
+            Some("operator-secret"),
+            Some(REMOTE),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(v["error"]["reason"], "template_not_found");
+    assert!(v["error"]["message"].is_string() && v["error"]["detail"].is_string());
+    assert!(
+        v.get("reason").is_none(),
+        "the v1 envelope nests the reason"
+    );
+
+    // Without selectors there is simply no current work.
+    let (status, v) = send(
+        app_full(default_auth()),
+        req(
+            Method::GET,
+            "/api/v1/mining/candidate-details",
+            Some("operator-secret"),
+            Some(REMOTE),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(v["error"]["reason"], "candidate_unavailable");
 }
 
 #[tokio::test]
@@ -987,7 +1051,7 @@ async fn mining_candidate_mining_off_is_mining_disabled_not_404() {
 }
 
 #[tokio::test]
-async fn mining_candidate_with_txs_rejects_malformed_body() {
+async fn mining_candidate_with_txs_seam_deferred_route_unavailable() {
     let (status, v) = send(
         app_full(default_auth()),
         req(
@@ -999,8 +1063,8 @@ async fn mining_candidate_with_txs_rejects_malformed_body() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(v["error"]["reason"], "bad_request");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(v["error"]["reason"], "route_unavailable");
 }
 
 #[tokio::test]
@@ -1047,63 +1111,4 @@ async fn voting_candidate_t0_seam_deferred_route_unavailable() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(v["error"]["reason"], "route_unavailable");
-}
-
-#[tokio::test]
-async fn mining_template_and_required_candidates_require_operator_key() {
-    for (method, path) in [
-        (Method::GET, "/api/v1/mining/template"),
-        (Method::POST, "/api/v1/mining/candidate-with-txs"),
-    ] {
-        let (status, value) = send(
-            app_full(default_auth()),
-            req(
-                method,
-                path,
-                None,
-                Some(REMOTE),
-                Some(Body::from(r#"{"transactions":[]}"#)),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(value["error"]["reason"], "unauthorized");
-    }
-}
-
-#[tokio::test]
-async fn required_candidates_forward_valid_request_and_reject_limits() {
-    // This legacy adapter deliberately inherits the unavailable default.
-    let (status, value) = send(
-        app_full(default_auth()),
-        req(
-            Method::POST,
-            "/api/v1/mining/candidate-with-txs",
-            Some("operator-secret"),
-            Some(REMOTE),
-            Some(Body::from(r#"{"transactions":[]}"#)),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(value["error"]["reason"], "candidate_unavailable");
-    for body in [
-        serde_json::json!({"transactions":["zz"]}),
-        serde_json::json!({"transactions":vec!["00"; 257]}),
-        serde_json::json!({"transactions":[],"unexpected":true}),
-    ] {
-        let (status, value) = send(
-            app_full(default_auth()),
-            req(
-                Method::POST,
-                "/api/v1/mining/candidate-with-txs",
-                Some("operator-secret"),
-                Some(REMOTE),
-                Some(Body::from(body.to_string())),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(value["error"]["reason"], "bad_request");
-    }
 }

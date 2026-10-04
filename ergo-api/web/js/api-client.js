@@ -155,6 +155,8 @@ export const api = {
   // Mining surface — routes mount only when mining is wired (404 = off).
   // candidate is cheap on repeat calls (same-tip template cache node-side).
   miningCandidate: getMiningCandidate,
+  miningCandidateDetails: (msg, sequence) => walletReq(`/api/v1/mining/candidate-details?msg=${encodeURIComponent(msg)}&template_seq=${encodeURIComponent(sequence)}`),
+  miningHistory: () => walletReq('/api/v1/mining/history'),
   miningRewardAddress: () => getJson('/mining/rewardAddress'),
   miningRewardPublicKey: () => getJson('/mining/rewardPublicKey'),
   // Network mining landscape: last-`window` headers folded by miner pk,
@@ -179,6 +181,10 @@ export const api = {
   // /lock and /deriveNextKey are GET routes (see ergo-api wallet/mod.rs).
   wallet: {
     status: () => walletReq('/wallet/status'),
+    boxes: (offset = 0, limit = 100) => walletReq(`/api/v1/wallet/boxes?offset=${offset}&limit=${limit}`),
+    miningJobs: () => walletReq('/api/v1/wallet/mining-jobs'),
+    createMiningJob: (request) => walletPost('/api/v1/wallet/mining-jobs', request),
+    cancelMiningJob: (id) => walletPost(`/api/v1/wallet/mining-jobs/${encodeURIComponent(id)}/cancel`, {}),
     init: (body) => walletPost('/wallet/init', body),
     restore: (body) => walletPost('/wallet/restore', body),
     unlock: (pass) => walletPost('/wallet/unlock', { pass }),
@@ -188,7 +194,10 @@ export const api = {
     transactions: (offset = 0, limit = 12) => walletReq(`/api/v1/wallet/transactions?offset=${offset}&limit=${limit}`),
     build: (intent) => walletPost('/api/v1/wallet/transactions/build', intent),
     sign: (unsignedTransaction) => walletPost('/api/v1/wallet/transactions/sign', { unsignedTransaction }),
-    submitSigned: (signedTransaction) => walletPost('/api/v1/wallet/transactions/send', { type: 'signed', signedTransaction }),
+    submitSigned: (signedTransaction, delivery = 'broadcast', privateOptions = null) => walletPost('/api/v1/wallet/transactions/send', { type: 'signed', signedTransaction, delivery, privateOptions }),
+    privateTransactions: () => walletReq('/api/v1/mining/private-transactions'),
+    importPrivate: (signedTransactionHex, options = {}) => walletPost('/api/v1/mining/private-transactions', { signed_transaction_hex: signedTransactionHex, options }),
+    cancelPrivate: (txId) => walletPost(`/api/v1/mining/private-transactions/${encodeURIComponent(txId)}/cancel`, {}),
     addresses: () => walletReq('/wallet/addresses'),
     deriveNextKey: () => walletReq('/wallet/deriveNextKey'),
     updateChangeAddress: (address) => walletPost('/wallet/updateChangeAddress', { address }),

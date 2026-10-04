@@ -27,7 +27,9 @@ use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
 use ergo_state::store::{BaseDisposition, CommittedSnapshot, DryRunBase};
 
-use crate::candidate::{generate_candidate_cancellable, BuildMode, Candidate, PhaseTimings};
+use crate::candidate::{
+    generate_candidate_with_policy_cancellable, BuildMode, Candidate, PhaseTimings,
+};
 use crate::error::MiningError;
 use crate::handle::MiningHandle;
 use crate::state_view::{
@@ -60,8 +62,9 @@ pub enum BuildReason {
     /// builds again on the next candidate request; the eager rebuild is this
     /// node's choice, so a miner polling for work is not left without it.
     SolvedBlockFailed,
-    /// Authenticated, request-scoped transaction selection.
-    RequiredTransactions,
+    /// The private mining queue changed on the same tip: an admission, a
+    /// cancellation, an expiry, or a confirmation found while catching up.
+    PrivateQueue,
 }
 
 /// How far the header tip may lead the applied full-block tip while mining
@@ -118,6 +121,10 @@ pub struct BuildIntent {
     pub expected_height: u32,
     /// Frozen mempool view (built on the loop, where `&Mempool` lives).
     pub mempool: Arc<MempoolReadSnapshot>,
+    /// Trusted transactions excluded from every public mempool/relay view.
+    pub private_transactions: Arc<Vec<ergo_mempool::pool::Entry>>,
+    /// Captured operator state; stale work must never publish after withdrawal.
+    pub operator_generation: u64,
     /// Reward key resolved on the loop (`Ready` only — the loop does not
     /// signal while the wallet key is `Pending`).
     pub miner_pk: [u8; 33],
@@ -160,6 +167,21 @@ pub struct Template {
     pub candidate: Candidate,
     pub work: WorkMessage,
     pub identity: TemplateIdentity,
+}
+
+impl Template {
+    /// Ids of the operator-private transactions this template includes. Only
+    /// transactions the build categorized as private are hashed.
+    pub fn private_transaction_ids(&self) -> Vec<Digest32> {
+        self.candidate
+            .transactions
+            .iter()
+            .zip(&self.candidate.observation.transactions)
+            .filter(|(_, observation)| observation.category == "private")
+            .filter_map(|(tx, _)| ergo_ser::transaction::transaction_id(tx).ok())
+            .map(|id| Digest32::from_bytes(*id.as_bytes()))
+            .collect()
+    }
 }
 
 /// Result of a single [`build_and_publish`] attempt. The async driver uses
@@ -365,9 +387,13 @@ fn build_and_publish_inner(
     }
     // Same-parent mempool changes deliberately do not cancel the in-flight
     // candidate: allowing it to publish prevents starvation under steady load.
+    let (policy_revision, policy) = handle.policy_snapshot();
     let should_cancel = || {
         let tip = handle.best_tip();
-        !tip.synced || tip.parent_id != intent.expected_parent
+        !tip.synced
+            || tip.parent_id != intent.expected_parent
+            || handle.policy_revision() != policy_revision
+            || handle.operator_generation() != intent.operator_generation
     };
     if should_cancel() {
         return Ok(BuildOutcome::DroppedStale);
@@ -441,6 +467,8 @@ fn build_and_publish_inner(
                 &eligible_rent_boxes,
                 &voting_targets,
                 &custom_extension_fields,
+                &policy,
+                policy_revision,
                 &mut suspects,
                 &should_cancel,
             );
@@ -458,6 +486,8 @@ fn build_and_publish_inner(
             &eligible_rent_boxes,
             &voting_targets,
             &custom_extension_fields,
+            &policy,
+            policy_revision,
             &mut suspects,
             &should_cancel,
         ),
@@ -527,12 +557,14 @@ fn generate_from_view<V: CandidateStateView>(
     eligible_rent_boxes: &[ErgoBox],
     voting_targets: &std::collections::BTreeMap<u8, i64>,
     custom_extension_fields: &[([u8; 2], Vec<u8>)],
+    policy: &crate::policy::BlockPolicy,
+    policy_revision: u64,
     suspects: &mut Vec<Digest32>,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     macro_rules! generate {
         ($view:expr) => {
-            generate_candidate_cancellable(
+            generate_candidate_with_policy_cancellable(
                 $view,
                 handle.network(),
                 mode,
@@ -547,6 +579,14 @@ fn generate_from_view<V: CandidateStateView>(
                 handle.voting_settings(),
                 custom_extension_fields,
                 suspects,
+                if mode == BuildMode::Full {
+                    intent.private_transactions.as_slice()
+                } else {
+                    &[]
+                },
+                policy,
+                policy_revision,
+                intent.operator_generation,
                 should_cancel,
             )
         };
@@ -562,80 +602,6 @@ fn generate_from_view<V: CandidateStateView>(
         }
         None => generate!(view),
     }
-}
-
-/// Build one requested template against a committed snapshot without changing
-/// the mempool. The caller bounds concurrency and holds its permit until this
-/// function finishes, including after an HTTP timeout. Requested candidates
-/// omit optional rent sweeping so a miner's requested spend gets priority.
-/// Publication uses the ordinary retained-template and stale-parent rules.
-pub fn build_required_candidate(
-    reader: &ChainStoreReader,
-    handle: &MiningHandle,
-    intent: &BuildIntent,
-    required: &[Arc<[u8]>],
-    now_ms: impl Fn() -> u64,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<Option<Template>, MiningError> {
-    let Some(snapshot) = reader
-        .committed_snapshot()
-        .map_err(|e| MiningError::StateRead {
-            op: "required_candidate_snapshot",
-            reason: format!("{e:?}"),
-        })?
-    else {
-        return Ok(None);
-    };
-    if snapshot.best_full_block_id() != intent.expected_parent || !handle.best_tip().synced {
-        return Ok(None);
-    }
-    let should_cancel = || {
-        cancelled() || {
-            let tip = handle.best_tip();
-            !tip.synced || tip.parent_id != intent.expected_parent
-        }
-    };
-    let mut suspects = Vec::new();
-    let extension = handle.resolve_extension_fields()?;
-    let Some((candidate, work, _)) =
-        crate::candidate::generate_candidate_with_required_cancellable(
-            &snapshot,
-            handle.network(),
-            BuildMode::Full,
-            &intent.mempool,
-            &intent.miner_pk,
-            handle.monetary(),
-            handle.reemission_ref(),
-            handle.reemission_rules_ref(),
-            handle.chain_config(),
-            &[],
-            &handle.voting_targets(),
-            handle.voting_settings(),
-            &extension,
-            &mut suspects,
-            required,
-            &should_cancel,
-        )?
-    else {
-        return Ok(None);
-    };
-    crate::error::check_build_cancelled(&should_cancel)?;
-    let Some(identity) = handle.publish_if_current(
-        candidate.clone(),
-        work.clone(),
-        &intent.expected_parent,
-        now_ms,
-        BuildReason::RequiredTransactions,
-    ) else {
-        return Ok(None);
-    };
-    // Request failures never evict pooled transactions. Ordinary engine builds
-    // independently recheck suspects against the live tip.
-    Ok(Some(Template {
-        candidate,
-        work,
-        identity,
-    }))
 }
 
 #[cfg(test)]
@@ -665,6 +631,8 @@ mod tests {
 
     fn intent(parent: [u8; 32], expected_height: u32) -> BuildIntent {
         BuildIntent {
+            private_transactions: Arc::new(Vec::new()),
+            operator_generation: 0,
             expected_parent: parent,
             expected_height,
             mempool: Arc::new(MempoolReadSnapshot::empty()),

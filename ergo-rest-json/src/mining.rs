@@ -110,33 +110,6 @@ pub struct CandidateMetricsJson {
     pub max_block_cost: u64,
 }
 
-/// Complete frozen mining template. Every binary field is canonical lowercase
-/// hex; `blake2b256(header_without_pow)` equals `work.msg`. Transaction order
-/// matches the exact candidate validated by the node, including emission/fees.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MiningTemplateJson {
-    pub work: WorkMessageJson,
-    pub header_without_pow: String,
-    pub parent_id: String,
-    pub version: u8,
-    pub transactions: Vec<TemplateTransactionJson>,
-    pub extension: Vec<TemplateExtensionFieldJson>,
-    pub ad_proofs: String,
-    pub required_transaction_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TemplateTransactionJson {
-    pub id: String,
-    pub bytes: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TemplateExtensionFieldJson {
-    pub key: String,
-    pub value: String,
-}
-
 /// JSON payload accepted by `POST /mining/solution`. Autolykos v2 form
 /// only — v1 carried an additional `d` BigInt (distance), which v2
 /// replaces with the hit-comparison directly on `n` (nonce).

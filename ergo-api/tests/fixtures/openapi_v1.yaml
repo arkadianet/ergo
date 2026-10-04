@@ -2572,42 +2572,80 @@ paths:
                 $ref: '#/components/schemas/V1Error'
       security:
       - ApiKeyAuth: []
-  /api/v1/mining/candidate-with-txs:
-    post:
+  /api/v1/mining/candidate-details:
+    get:
       tags:
       - mining
-      summary: |-
-        Request-specific selection: validate all requested signed transactions and
-        pool ancestors against the frozen candidate context, then fill spare
-        capacity from the pool. Invalid/conflicting/oversized sets fail atomically;
-        successful requests publish a retained template without pool admission.
-      operationId: candidate_with_txs
-      requestBody:
-        description: '{transactions: [...]}: at most 256 signed Scala transaction objects or canonical transaction hex strings, at most 1 MiB decoded bytes; dependencies may be unordered; repeated identical IDs are included once'
-        content:
-          application/json:
-            schema: {}
-        required: true
+      summary: Operator-only transaction and rent inventory of one frozen template.
+      operationId: v1_mining_candidate_details_get
+      parameters:
+      - name: msg
+        in: query
+        description: 32-byte hexadecimal work ID
+        required: false
+        schema:
+          type: string
+      - name: template_seq
+        in: query
+        description: Exact retained publish sequence
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
       responses:
         '200':
-          description: Complete validated template containing all requested transactions
+          description: Frozen template inventory and miner proceeds
           content:
             application/json:
               schema: {}
-        '400':
-          description: Malformed, invalid, unresolved, conflicting, or over-budget requested transactions
+        '404':
+          description: Template was evicted or selectors do not match
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Mining unavailable, tip changed, or another requested build is running
+          description: No current template
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
-        '504':
-          description: Requested build timed out (30 seconds)
+      security:
+      - ApiKeyAuth: []
+  /api/v1/mining/candidate-with-txs:
+    post:
+      tags:
+      - mining
+      summary: |-
+        `POST /api/v1/mining/candidate-with-txs` — T1, seam-deferred. The wire shape
+        is documented but no `NodeMining::candidate_with_txs` seam exists,
+        so this answers the honest `route_unavailable` rather than silently ignoring
+        the forced-tx set. Still gated at `Tier::Operator`.
+      operationId: candidate_with_txs
+      responses:
+        '503':
+          description: Forced-transaction candidate building not wired on this node
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/mining/history:
+    get:
+      tags:
+      - mining
+      summary: Bounded local template and solution history. Resets on restart.
+      operationId: v1_mining_history_get
+      responses:
+        '200':
+          description: Bounded operator mining history
+          content:
+            application/json:
+              schema: {}
+        '503':
+          description: Mining history unavailable
           content:
             application/json:
               schema:
@@ -2658,6 +2696,94 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/mining/policy:
+    get:
+      tags:
+      - mining
+      operationId: v1_mining_policy_get
+      responses:
+        '200':
+          description: Active durable block assembly policy
+          content:
+            application/json:
+              schema: {}
+      security:
+      - ApiKeyAuth: []
+    put:
+      tags:
+      - mining
+      operationId: v1_mining_policy_put
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        required: true
+      responses:
+        '200':
+          description: Saved policy; previously offered templates retired
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Malformed or contradictory policy
+        '500':
+          description: The policy could not be saved; the active policy is unchanged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/mining/private-transactions:
+    get:
+      tags:
+      - mining
+      operationId: v1_mining_private_transactions_get
+      responses:
+        '200':
+          description: Owner-only private queue
+      security:
+      - ApiKeyAuth: []
+    post:
+      tags:
+      - mining
+      operationId: v1_mining_private_transactions_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrivateTransactionRequest'
+        required: true
+      responses:
+        '200':
+          description: Durably queued without relay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivateTransactionEntry'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/mining/private-transactions/{tx_id}/cancel:
+    post:
+      tags:
+      - mining
+      operationId: v1_mining_private_transaction_cancel_post
+      parameters:
+      - name: tx_id
+        in: path
+        description: Private transaction id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Transaction withdrawn and inputs released
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivateTransactionEntry'
+      security:
+      - ApiKeyAuth: []
   /api/v1/mining/reward-address:
     get:
       tags:
@@ -2766,34 +2892,11 @@ paths:
       operationId: v1_mining_status_get
       responses:
         '200':
-          description: Mining capability + template freshness (nulls until the template-cache seam is wired)
+          description: Mining capability and current served-template freshness
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MiningStatus'
-  /api/v1/mining/template:
-    get:
-      tags:
-      - mining
-      summary: |-
-        `GET /api/v1/mining/template` returns the exact frozen template behind
-        mining work. All binary artifacts are canonical hex; hashing the header
-        without PoW yields `work.msg`. This read never starts a candidate build.
-      operationId: v1_mining_template_get
-      responses:
-        '200':
-          description: 'Complete frozen template: work, header_without_pow, ordered transaction IDs/bytes, extension key/value pairs, ad_proofs, and required_transaction_ids'
-          content:
-            application/json:
-              schema: {}
-        '503':
-          description: No current template available
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
   /api/v1/network/blacklist:
     post:
       tags:
@@ -9286,9 +9389,8 @@ components:
       description: |-
         The `mining/status` aggregate. Always `200` — safe to poll from an
         unauthenticated dashboard even when mining is off (hence T0). The
-        `last_template_*` / `template_seq` fields require the mining bridge to cache
-        its last-published template metadata; that seam is not wired yet, so they are
-        emitted as `null` (honest) rather than fabricated.
+        Freshness comes from the served cache and contains no transaction content.
+        `synced` means the mining-started latch when mining is enabled.
       required:
       - mining_enabled
       - synced
@@ -9729,6 +9831,109 @@ components:
         address:
           type: string
       additionalProperties: false
+    PrivateTransactionEntry:
+      type: object
+      description: Owner-only queue metadata; signed bytes never appear in public snapshots.
+      required:
+      - tx_id
+      - state
+      - created_at_ms
+      - priority
+      - input_ids
+      - fee_nano_erg
+      - size_bytes
+      - validation_cost
+      properties:
+        created_at_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        expires_at_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        expires_at_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        fee_nano_erg:
+          type: string
+        input_ids:
+          type: array
+          items:
+            type: string
+        label:
+          type:
+          - string
+          - 'null'
+        mined_block_id:
+          type:
+          - string
+          - 'null'
+        mined_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        priority:
+          type: integer
+          format: int32
+        reason:
+          type:
+          - string
+          - 'null'
+        size_bytes:
+          type: integer
+          format: int32
+          minimum: 0
+        state:
+          type: string
+        tx_id:
+          type: string
+        validation_cost:
+          type: integer
+          format: int64
+          minimum: 0
+    PrivateTransactionOptions:
+      type: object
+      description: Queue policy. A deadline is local policy, not a transaction script expiry.
+      properties:
+        expires_at_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        expires_at_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        label:
+          type:
+          - string
+          - 'null'
+        priority:
+          type: integer
+          format: int32
+      additionalProperties: false
+    PrivateTransactionRequest:
+      type: object
+      description: Import a signed transaction for this miner without network announcement.
+      required:
+      - signed_transaction_hex
+      properties:
+        options:
+          $ref: '#/components/schemas/PrivateTransactionOptions'
+        signed_transaction_hex:
+          type: string
+      additionalProperties: false
     ProtocolDetail:
       type: object
       description: '`GET /api/v1/protocols/{id}` detail body.'
@@ -9904,6 +10109,7 @@ components:
       - tx_not_in_block
       - not_blacklisted
       - not_a_singleton_protocol
+      - template_not_found
       - bad_request
       - invalid_address
       - invalid_ergo_tree

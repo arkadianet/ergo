@@ -41,11 +41,6 @@ pub enum MiningError {
     #[error("candidate build superseded by a new applied parent")]
     BuildCancelled,
 
-    /// A requested transaction (or required pool ancestor) is invalid,
-    /// unresolved, conflicting, or cannot fit together with the block fee tx.
-    #[error("required transactions rejected: {0}")]
-    RequiredTransactions(String),
-
     /// Configuration was rejected at parse time, or a runtime regime
     /// gate refused to assemble. Includes the human-readable reason.
     #[error("invalid mining configuration: {0}")]

@@ -25,10 +25,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use ergo_rest_json::mining::{
-    AutolykosSolutionJson, MiningTemplateJson, RewardAddressResponse, RewardPublicKeyResponse,
-    WorkMessageJson,
+    AutolykosSolutionJson, RewardAddressResponse, RewardPublicKeyResponse, WorkMessageJson,
+};
+use ergo_rest_json::mining_inspection::{
+    CandidateDetailsJson, MiningFreshnessJson, MiningHistoryJson,
 };
 use serde::{Deserialize, Serialize};
+
+mod private;
+pub use private::{PrivateTransactionEntry, PrivateTransactionOptions, PrivateTransactionRequest};
 
 /// Trait the node implements to surface its mining subsystem to the
 /// API server. Each call crosses into the node's main loop and awaits
@@ -51,22 +56,43 @@ pub trait NodeMining: Send + Sync {
         longpoll: Option<String>,
     ) -> Result<Option<WorkMessageJson>, MiningApiError>;
 
-    /// Complete current cached template. Default keeps older trait adapters
-    /// object-safe and reports their unsupported capability explicitly.
-    async fn template(&self) -> Result<Option<MiningTemplateJson>, MiningApiError> {
+    /// Authenticated exact-template inspection. Both selectors are matched
+    /// against the same retained template; no selector chooses current work.
+    async fn candidate_details(
+        &self,
+        _msg: Option<String>,
+        _template_seq: Option<u64>,
+    ) -> Result<Option<CandidateDetailsJson>, MiningApiError> {
         Err(MiningApiError::Unavailable(
-            "full templates unsupported by this adapter".into(),
+            "candidate inspection unsupported".into(),
         ))
     }
 
-    /// Validate and publish a candidate containing every requested signed
-    /// transaction. Does not admit or broadcast these transactions.
-    async fn candidate_with_txs(
-        &self,
-        _transactions: Vec<Vec<u8>>,
-    ) -> Result<MiningTemplateJson, MiningApiError> {
+    /// Operator-only bounded template and local submission history.
+    async fn mining_history(&self) -> Result<MiningHistoryJson, MiningApiError> {
         Err(MiningApiError::Unavailable(
-            "required transactions unsupported by this adapter".into(),
+            "mining history unsupported".into(),
+        ))
+    }
+
+    /// Public freshness has no transaction or wallet content.
+    async fn mining_freshness(&self) -> Result<MiningFreshnessJson, MiningApiError> {
+        Ok(MiningFreshnessJson::default())
+    }
+
+    /// Validated runtime block selection policy. A JSON seam preserves the
+    /// API crate's independence from the concrete mining implementation.
+    async fn block_policy(&self) -> Result<serde_json::Value, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "block policy unsupported".into(),
+        ))
+    }
+    async fn set_block_policy(
+        &self,
+        _policy: serde_json::Value,
+    ) -> Result<serde_json::Value, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "block policy unsupported".into(),
         ))
     }
 
@@ -79,6 +105,34 @@ pub trait NodeMining: Send + Sync {
     /// initialized, and `Internal` (500) if wallet tracking is inconsistent —
     /// never a stale or fabricated address.
     async fn reward_address(&self) -> Result<String, MiningApiError>;
+
+    /// List private transactions, available only through authenticated routes.
+    async fn private_transactions(&self) -> Result<Vec<PrivateTransactionEntry>, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "private mining queue is unavailable".into(),
+        ))
+    }
+
+    /// Validate and durably retain signed bytes for this miner alone.
+    async fn submit_private_transaction(
+        &self,
+        _bytes: Vec<u8>,
+        _options: PrivateTransactionOptions,
+    ) -> Result<PrivateTransactionEntry, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "private mining queue is unavailable".into(),
+        ))
+    }
+
+    /// Withdraw pending work before releasing its reserved wallet inputs.
+    async fn cancel_private_transaction(
+        &self,
+        _tx_id: String,
+    ) -> Result<PrivateTransactionEntry, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "private mining queue is unavailable".into(),
+        ))
+    }
 
     /// `GET /mining/rewardPublicKey`. Hex-encoded 33-byte compressed
     /// secp256k1 miner pubkey. Same fallibility as [`Self::reward_address`].

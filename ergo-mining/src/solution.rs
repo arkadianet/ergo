@@ -193,9 +193,9 @@ mod tests {
             last_block_utxo_root,
         };
         Candidate {
-            required_transaction_ids: Vec::new(),
             header: h.clone(),
             validation_ctx,
+            observation: Default::default(),
             transactions: Vec::new(),
             ad_proof_bytes: Vec::new(),
             extension_fields: Vec::new(),
