@@ -4,6 +4,21 @@ These tools use pinned Scala 2.12.20, ergo-wallet 6.0.6 and sigma-state 6.0.6.
 Set `SCALA_CLI` to select the executable; compilation/setup failures are not
 reference verdicts. Their finite observations do not certify whole-chain parity.
 
+Maven Central has sigma-state 6.0.6 but not ergo-wallet 6.0.6. Publish it to
+the local Ivy repository from the tagged reference source first, as CI's
+"Publish reference wallet locally" step does:
+
+```sh
+git clone --depth 1 --branch v6.0.6 https://github.com/ergoplatform/ergo.git ergo-v6.0.6
+cd ergo-v6.0.6
+test "$(git rev-parse HEAD)" = 23aabead88774d27f2c9190ace3c9abbc8f1d5cb
+sbt "ergoWallet/publishLocal"
+```
+
+Scala CLI then resolves `ergo-wallet:6.0.6` from `~/.ivy2/local`. The
+dependency is pinned by version only, with no checksum: any jar published
+locally as 6.0.6 satisfies it, so publish it from that commit.
+
 `extract_bytes_to_sign.sh INPUT OUTPUT` compares every row in a nonempty
 transaction array with `PrintBytesToSign.scala`. Its JSON report retains matches,
 mismatches and helper errors. A mismatch or helper error causes a nonzero exit;
