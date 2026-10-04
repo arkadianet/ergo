@@ -2674,6 +2674,12 @@ paths:
               schema: {}
         '400':
           description: Malformed or contradictory policy
+        '500':
+          description: The policy could not be saved; the active policy is unchanged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
       security:
       - ApiKeyAuth: []
   /api/v1/mining/private-transactions:
@@ -9970,6 +9976,7 @@ components:
       - tx_not_in_block
       - not_blacklisted
       - not_a_singleton_protocol
+      - template_not_found
       - bad_request
       - invalid_address
       - invalid_ergo_tree

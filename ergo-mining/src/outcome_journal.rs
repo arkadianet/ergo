@@ -16,6 +16,9 @@ pub(crate) struct OutcomeJournal {
     pub events: VecDeque<MiningOutcome>,
     path: Option<PathBuf>,
     pub last_error: Option<String>,
+    /// Why the stored history was set aside at startup, kept for the life of
+    /// the process so the history status keeps explaining the reset.
+    recovery: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -25,35 +28,65 @@ struct FileJournal {
 }
 
 impl OutcomeJournal {
-    pub fn open(path: &Path) -> Result<Self, String> {
-        let events = match std::fs::File::open(path) {
-            Ok(file) => {
-                let mut bytes = Vec::new();
-                file.take(MAX_JOURNAL_BYTES + 1)
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| format!("cannot read mining history: {e}"))?;
-                if bytes.len() as u64 > MAX_JOURNAL_BYTES {
-                    return Err("mining history exceeds 8 MiB".into());
+    /// Open the journal at `path`. A history that cannot be read never blocks
+    /// startup: the file is moved aside as `<name>.corrupt-<unix ms>` and a
+    /// new history starts, with the reason reported by [`Self::error`]. If it
+    /// cannot even be moved, this run keeps history in memory only, so the
+    /// unreadable file is never overwritten.
+    pub fn open(path: &Path) -> Self {
+        let problem = match read_events(path) {
+            Ok(events) => {
+                return Self {
+                    events,
+                    path: Some(path.to_owned()),
+                    last_error: None,
+                    recovery: None,
                 }
-                let parsed: FileJournal = serde_json::from_slice(&bytes)
-                    .map_err(|e| format!("invalid mining history: {e}"))?;
-                if parsed.version != 1 || parsed.events.len() > crate::handle::MAX_MINING_OUTCOMES {
-                    return Err("unsupported mining history version or event count".into());
-                }
-                parsed.events
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => VecDeque::new(),
-            Err(e) => return Err(format!("cannot open mining history: {e}")),
+            Err(problem) => problem,
         };
-        Ok(Self {
-            events,
-            path: Some(path.to_owned()),
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let mut aside = path.as_os_str().to_owned();
+        aside.push(format!(".corrupt-{stamp}"));
+        let aside = PathBuf::from(aside);
+        let (path, recovery) = match std::fs::rename(path, &aside) {
+            Ok(()) => (
+                Some(path.to_owned()),
+                format!(
+                    "{problem}; moved it to {} and started a new history",
+                    aside.display()
+                ),
+            ),
+            Err(error) => (
+                None,
+                format!(
+                    "{problem}; it could not be moved aside ({error}), so this run's \
+                     history is not saved"
+                ),
+            ),
+        };
+        Self {
+            events: VecDeque::new(),
+            path,
             last_error: None,
-        })
+            recovery: Some(recovery),
+        }
     }
 
     pub fn persistent(&self) -> bool {
         self.path.is_some()
+    }
+
+    /// The latest persistence failure and any startup recovery, for the
+    /// history status.
+    pub fn error(&self) -> Option<String> {
+        match (&self.last_error, &self.recovery) {
+            (Some(last), Some(recovery)) => Some(format!("{last}; {recovery}")),
+            (last, recovery) => last.clone().or_else(|| recovery.clone()),
+        }
     }
 
     pub fn append(&mut self, event: MiningOutcome) {
@@ -121,6 +154,28 @@ impl OutcomeJournal {
     }
 }
 
+/// Stored events; a missing file is an empty history.
+fn read_events(path: &Path) -> Result<VecDeque<MiningOutcome>, String> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(VecDeque::new()),
+        Err(e) => return Err(format!("cannot open mining history: {e}")),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_JOURNAL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read mining history: {e}"))?;
+    if bytes.len() as u64 > MAX_JOURNAL_BYTES {
+        return Err("mining history exceeds 8 MiB".into());
+    }
+    let parsed: FileJournal =
+        serde_json::from_slice(&bytes).map_err(|e| format!("invalid mining history: {e}"))?;
+    if parsed.version != 1 || parsed.events.len() > crate::handle::MAX_MINING_OUTCOMES {
+        return Err("unsupported mining history version or event count".into());
+    }
+    Ok(parsed.events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,11 +196,11 @@ mod tests {
     fn mining_journal_persists_across_restart_and_deduplicates_applied_blocks() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("history.json");
-        let mut journal = OutcomeJournal::open(&path).unwrap();
+        let mut journal = OutcomeJournal::open(&path);
         journal.append(event(1, 10));
         journal.append(event(1, 20));
         assert!(journal.last_error.is_none());
-        let restored = OutcomeJournal::open(&path).unwrap();
+        let restored = OutcomeJournal::open(&path);
         assert_eq!(restored.events.len(), 1);
         assert_eq!(restored.events[0].at_ms, 10);
         #[cfg(unix)]
@@ -162,16 +217,40 @@ mod tests {
     fn mining_journal_reports_persistence_failure_without_discarding_observation() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("missing").join("history.json");
-        let mut journal = OutcomeJournal::open(&path).unwrap();
+        let mut journal = OutcomeJournal::open(&path);
         journal.append(event(1, 10));
         assert_eq!(journal.events.len(), 1);
         assert!(journal.last_error.is_some());
     }
     #[test]
-    fn mining_journal_rejects_corrupt_existing_history() {
+    fn mining_journal_sets_corrupt_history_aside_and_starts_a_new_one() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("history.json");
         std::fs::write(&path, b"broken").unwrap();
-        assert!(OutcomeJournal::open(&path).is_err());
+        let mut journal = OutcomeJournal::open(&path);
+        assert!(journal.events.is_empty());
+        assert!(journal.persistent());
+        let error = journal.error().unwrap();
+        assert!(error.starts_with("invalid mining history"), "{error}");
+        let aside: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("history.json.corrupt-")
+            })
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert!(error.contains(&aside[0].display().to_string()), "{error}");
+        assert_eq!(std::fs::read(&aside[0]).unwrap(), b"broken");
+        assert!(!path.exists());
+
+        // The new history persists and keeps reporting the reset.
+        journal.append(event(1, 10));
+        assert!(journal.error().unwrap().contains("moved it to"));
+        assert_eq!(OutcomeJournal::open(&path).events.len(), 1);
+        assert_eq!(std::fs::read(&aside[0]).unwrap(), b"broken");
     }
 }

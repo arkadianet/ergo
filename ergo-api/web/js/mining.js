@@ -185,7 +185,9 @@ export async function onSlow() {
     candidateSeqAt = null;
   }
 
-  if (inspector) await inspector.refresh(candidate);
+  // The inspector downloads in the background, and only for new work; the
+  // network panels below need not wait for a candidate report.
+  if (inspector) void inspector.refresh(candidate);
 
   // Network statistics are header-based. A historical full-block tip would
   // show an old block reward alongside today's difficulty while syncing.

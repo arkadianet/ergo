@@ -62,16 +62,16 @@ export function miningPolicy() {
   root.innerHTML = `
     <div class="panel__head"><h2 class="panel__title">Block contents policy</h2></div>
     <div class="panel__body">
-      <p class="muted">Set how your candidates use space and validation cost. Private transactions take priority, and public transactions use the remaining budget.</p>
+      <p class="muted">Set how your candidates use space and validation cost. Required transactions come first, then private transactions; public transactions use the remaining budget.</p>
       <p class="muted" data-policy-status role="status">Loading policy…</p>
       <form data-policy-form hidden>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
           <label>Maximum rent validation cost (%)<input name="rent_cost" type="number" min="0" max="100" step="0.01" required></label>
           <label>Maximum rent block size (%)<input name="rent_size" type="number" min="0" max="100" step="0.01" required></label>
-          <label>Reserve validation cost for private transactions (%)<input name="private_cost" type="number" min="0" max="100" step="0.01" required></label>
-          <label>Reserve block size for private transactions (%)<input name="private_size" type="number" min="0" max="100" step="0.01" required></label>
+          <label>Reserve validation cost for private and required transactions (%)<input name="private_cost" type="number" min="0" max="100" step="0.01" required></label>
+          <label>Reserve block size for private and required transactions (%)<input name="private_size" type="number" min="0" max="100" step="0.01" required></label>
         </div>
-        <p class="muted">Reservations limit rent while private transactions are waiting. Mandatory block overhead is deducted, and consensus limits always apply.</p>
+        <p class="muted">Reservations limit rent while private or required transactions are waiting, and rent always leaves room for the measured size and cost of required transactions. Mandatory block overhead is deducted, and consensus limits always apply.</p>
         <label>Recovered storage-rent tokens
           <select name="tokens"><option value="preserve">Preserve tokens; defer claims that cannot fit</option><option value="burn_overflow">Allow overflow tokens to be burned</option></select>
         </label>
@@ -79,9 +79,9 @@ export function miningPolicy() {
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:16px 0">
           <label>Required transaction IDs<textarea name="required" rows="3" spellcheck="false" placeholder="One transaction ID per line"></textarea></label>
           <label>Excluded transaction IDs<textarea name="excluded" rows="3" spellcheck="false" placeholder="One transaction ID per line"></textarea></label>
-          <label>Mandatory bundles<textarea name="bundles" rows="3" spellcheck="false" placeholder="One bundle per line; separate its IDs with spaces"></textarea></label>
+          <label>Required bundles, tried in order<textarea name="bundles" rows="3" spellcheck="false" placeholder="One bundle per line; separate its IDs with spaces"></textarea></label>
         </div>
-        <p class="muted">Every required transaction and its available ancestors must fit and validate together. Mining waits if a requirement is unavailable; clear completed requirements to resume.</p>
+        <p class="muted">Required transactions and their available ancestors are selected first, and rent never claims their inputs. Mining never waits for them: a requirement that is unavailable or cannot be included is left out and reported under Candidate contents. A bundle sets the order and is not all-or-nothing. Requirements stay in the policy until you clear them, including after they confirm.</p>
         <button class="btn" type="submit">Save block policy</button>
         <button class="btn" type="button" data-policy-reload>Reload saved policy</button>
       </form>

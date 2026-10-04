@@ -16,6 +16,45 @@ export function matchesTemplate(details, candidate) {
   return !!details && !!candidate && details.msg === candidate.msg && details.template_seq === candidate.template_seq;
 }
 
+// Exclusion reasons recorded by candidate assembly. A `required_` prefix marks
+// a block-policy requirement the template leaves out; mining continues.
+const EXCLUSION_REASONS = {
+  excluded_by_policy: 'excluded by your block policy',
+  unavailable: 'not in the mempool or private queue (mined, replaced or expired)',
+  excluded_ancestor: 'depends on a transaction your policy excludes',
+  cost_budget: 'did not fit the remaining validation cost',
+  size_budget: 'did not fit the remaining block size',
+  input_conflict: 'an input is already spent in this block',
+  input_unavailable: 'an input is spent or not yet available',
+  data_input_unavailable: 'a data input is not available',
+  malformed_transaction: 'could not be decoded',
+  consensus_validation_failed: 'failed validation for this block',
+  final_fee_or_section_budget: 'trimmed so the fee transaction and block section fit',
+};
+const REQUIRED = 'required_';
+
+export const isUnmetRequirement = (entry) => String(entry?.reason ?? '').startsWith(REQUIRED);
+
+export function exclusionLabel(reason) {
+  const text = String(reason ?? '');
+  const required = text.startsWith(REQUIRED);
+  const base = required ? text.slice(REQUIRED.length) : text;
+  const detail = EXCLUSION_REASONS[base] || base.replaceAll('_', ' ') || 'unknown reason';
+  return required ? `Required, not included: ${detail}` : detail.charAt(0).toUpperCase() + detail.slice(1);
+}
+
+// EIP-27 reward boxes hold re-emission tokens that cost 1 nanoERG each to
+// spend, so only the kept emission (`emission_nano_erg`) is miner income.
+export function emissionRows(amounts) {
+  const owed = amounts?.reemission_obligation_nano_erg;
+  if (typeof owed !== 'string' || !/^\d+$/.test(owed) || BigInt(owed) === 0n) return [['Emission', money(amounts?.emission_nano_erg)]];
+  return [
+    ['Emission reward box', money(amounts.emission_gross_nano_erg)],
+    ['Owed to re-emission when spent (EIP-27)', `−${money(owed)}`],
+    ['Emission kept', money(amounts.emission_nano_erg)],
+  ];
+}
+
 export function inspectorMessage(result) {
   if (!result) return 'Waiting for a candidate to inspect.';
   if (result.status === 401 || result.status === 403) return 'Authorize to inspect transaction contents and miner proceeds.';
@@ -108,8 +147,10 @@ function detailsView(details) {
   context.append(kv('Template', `${num(details.template_seq)} · ${details.status.replaceAll('_', ' ')}`), kv('Height', num(details.height)), kv('Published', new Date(details.published_at_ms).toLocaleString()), kv('Build', `${details.build_mode} · ${details.build_reason}`), kv('Parent block', idNode(details.parent_id)));
   root.append(context);
   if (details.build_mode === 'initial') root.append(el('p', 'muted', 'The first template after a new block contains emission only. The enriched refresh adds selected transactions and storage rent.'));
+  const unmet = details.exclusions.filter(isUnmetRequirement);
+  if (unmet.length) root.append(el('p', 'mining-inspector__burn', `${num(unmet.length)} required ${unmet.length === 1 ? 'transaction is' : 'transactions are'} not in this template; mining continues without ${unmet.length === 1 ? 'it' : 'them'}. Requirements stay in your block policy until you clear them. See the excluded transactions below.`));
   const rewards = el('div', 'mining-inspector__rewards');
-  for (const [label, amount] of [['Emission', details.rewards.emission_nano_erg], ['Transaction fees', details.rewards.fees_nano_erg], ['Storage rent', details.rewards.rent_nano_erg], ['Total miner proceeds', details.rewards.total_nano_erg]]) rewards.append(kv(label, money(amount)));
+  for (const [label, amount] of [...emissionRows(details.rewards), ['Transaction fees', money(details.rewards.fees_nano_erg)], ['Storage rent', money(details.rewards.rent_nano_erg)], ['Total miner proceeds', money(details.rewards.total_nano_erg)]]) rewards.append(kv(label, amount));
   root.append(rewards);
   const payouts = section('Payout boxes and spendability');
   for (const payout of details.rewards.outputs || []) {
@@ -141,8 +182,12 @@ function detailsView(details) {
     { key: 'collected_nano_erg', label: 'Rent collected', width: 140, render: (b) => money(b.collected_nano_erg), sort: (b) => BigInt(b.collected_nano_erg) },
   ], { rowKey: (b) => b.box_id, renderDetail: (b) => assetsView(b.input_assets), label: 'Storage rent inputs' });
   root.append(rent.root);
-  const exclusions = section(`Transactions excluded · ${num(details.exclusions.length)}`);
-  for (const entry of details.exclusions) exclusions.body.append(kv(entry.reason, idNode(entry.transaction_id)));
+  const exclusions = section(`Transactions excluded · ${num(details.exclusions.length)}`, unmet.length > 0);
+  for (const entry of [...unmet, ...details.exclusions.filter((e) => !isUnmetRequirement(e))]) {
+    const row = kv(exclusionLabel(entry.reason), idNode(entry.transaction_id));
+    row.title = entry.reason;
+    exclusions.body.append(row);
+  }
   if (!details.exclusions.length) exclusions.body.append(el('p', 'muted', 'No recorded exclusions.'));
   root.append(exclusions.root);
   const protocol = section('Votes and extension commitments');
@@ -167,6 +212,11 @@ export function createMiningInspector(host) {
   let history = null;
   let generation = 0;
   let drawnIdentity = null;
+  // A report never changes for the same work: the served candidate plus any
+  // selected template. Refreshes skip the download while one for that work
+  // is in flight or has succeeded, and retry after a failed read.
+  let download = null;
+  const workKey = () => `${current?.msg}:${current?.template_seq}|${selected?.msg ?? ''}:${selected?.template_seq ?? ''}`;
 
   const draw = () => {
     const signature = `${selected?.msg || 'current'}:${result?.data?.msg || ''}:${result?.data?.template_seq || ''}:${result?.data?.status || ''}:${result?.status || 0}:${result?.reason || ''}:${history?.outcomes?.[0]?.at_ms || 0}:${history?.retained_templates?.[0]?.template_seq || 0}:${history?.chain_tip?.block_id || ''}`;
@@ -206,7 +256,7 @@ export function createMiningInspector(host) {
       if (event.block_id) row.append(kv('Current applied chain', event.canonical === true ? `${num(event.confirmations)} confirmations` : event.canonical === false ? 'Orphaned by a reorg' : 'Not verified'));
       if (event.accounting?.recovered_tokens?.length) row.append(assetsView(event.accounting.recovered_tokens));
       if (event.detail) row.append(el('p', 'muted', event.detail));
-      if (event.accounting) for (const [label, amount] of [['Emission', event.accounting.emission_nano_erg], ['Fees', event.accounting.fees_nano_erg], ['Rent', event.accounting.rent_nano_erg]]) row.append(kv(label, money(amount)));
+      if (event.accounting) for (const [label, amount] of [...emissionRows(event.accounting), ['Fees', money(event.accounting.fees_nano_erg)], ['Rent', money(event.accounting.rent_nano_erg)]]) row.append(kv(label, amount));
       outcomes.body.append(row);
     }
     if (!history?.outcomes?.length) outcomes.body.append(el('p', 'muted', 'No local solution submissions recorded.'));
@@ -217,8 +267,10 @@ export function createMiningInspector(host) {
     const target = selected || current;
     if (!target) { draw(); return; }
     const ticket = ++generation;
+    download = { key: workKey(), ticket, done: false };
     const [details, recent] = await Promise.all([api.miningCandidateDetails(target.msg, target.template_seq), api.miningHistory()]);
     if (ticket !== generation) return;
+    download.done = true;
     result = details;
     if (details?.ok && !matchesTemplate(details.data, target)) result = { ok: false, status: 0, reason: 'The response did not match the requested template. Retrying automatically.' };
     history = recent?.ok ? recent.data : null;
@@ -232,6 +284,8 @@ export function createMiningInspector(host) {
     async refresh(candidateResult) {
       if (!candidateResult?.ok || !candidateResult.data) { generation++; current = null; result = candidateResult; history = null; drawnIdentity = null; draw(); return; }
       current = candidateResult.data;
+      const same = download?.key === workKey() && download.ticket === generation;
+      if (same && (!download.done || (result?.ok && history))) return;
       await load();
     },
   };

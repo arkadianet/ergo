@@ -315,11 +315,12 @@ impl NodeMining for MiningBridge {
     ) -> Result<Option<ergo_rest_json::mining_inspection::CandidateDetailsJson>, MiningApiError>
     {
         let msg = inspection::parse_msg(msg)?;
-        let snapshot = self
-            .inspection_handle()?
-            .inspect_template(msg, template_seq);
-        snapshot
-            .map(|s| inspection::candidate_details(s, self.network, now_ms()))
+        let handle = self.inspection_handle()?;
+        handle
+            .inspect_template(msg, template_seq)
+            .map(|s| {
+                inspection::candidate_details(s, self.network, handle.reemission_ref(), now_ms())
+            })
             .transpose()
     }
 
@@ -352,6 +353,8 @@ impl NodeMining for MiningBridge {
                     accounting: e.accounting.map(|a| MiningAccountingJson {
                         height: a.height,
                         emission_nano_erg: a.emission_nano_erg,
+                        emission_gross_nano_erg: a.emission_gross_nano_erg,
+                        reemission_obligation_nano_erg: a.reemission_obligation_nano_erg,
                         fees_nano_erg: a.fees_nano_erg,
                         rent_nano_erg: a.rent_nano_erg,
                         recovered_tokens: a
@@ -400,9 +403,27 @@ impl NodeMining for MiningBridge {
     ) -> Result<serde_json::Value, MiningApiError> {
         let policy: ergo_mining::policy::BlockPolicy = serde_json::from_value(policy)
             .map_err(|e| MiningApiError::BadRequest(e.to_string()))?;
-        self.inspection_handle()?
-            .set_policy(policy)
-            .map_err(|e| MiningApiError::BadRequest(e.to_string()))?;
+        let handle = self.inspection_handle()?.clone();
+        // Saving syncs the policy file to disk: keep it off the API workers.
+        let saved = tokio::task::spawn_blocking(move || handle.set_policy(policy))
+            .await
+            .map_err(|e| MiningApiError::Internal(format!("mining policy save task: {e}")))?;
+        match saved {
+            Ok(None) => {}
+            Ok(Some(warning)) => {
+                tracing::warn!(%warning, "mining: block policy saved and active");
+            }
+            // Only an invalid policy is the client's fault. A storage failure
+            // leaves the saved and active policy unchanged.
+            Err(ergo_mining::MiningError::InvalidConfig(detail)) => {
+                return Err(MiningApiError::BadRequest(detail));
+            }
+            Err(error) => {
+                return Err(MiningApiError::Internal(format!(
+                    "mining policy not saved: {error}"
+                )));
+            }
+        }
         self.block_policy().await
     }
 
@@ -814,6 +835,44 @@ mod tests {
         assert!(
             matches!(result, Err(MiningApiError::Unavailable(_))),
             "a longpoll parked at shutdown returns Unavailable, got {result:?}",
+        );
+    }
+
+    // ----- error paths -----
+
+    #[tokio::test]
+    async fn policy_storage_failure_is_internal_while_an_invalid_policy_is_the_clients() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        let handle = ergo_mining::handle::MiningHandle::mainnet([0x02; 33])
+            .with_policy_store(data_dir.join("mining-policy.json"))
+            .unwrap();
+        // A file now stands where the data directory was, so nothing can be
+        // saved there.
+        std::fs::remove_dir(&data_dir).unwrap();
+        std::fs::write(&data_dir, "").unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        let bridge = MiningBridge::new(
+            tx,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            handle.subscribe_serve_changes(),
+        )
+        .with_handle(handle.clone());
+        let mut policy = serde_json::to_value(handle.policy()).unwrap();
+        policy["rent_max_cost_basis_points"] = 0.into();
+        let stored = bridge.set_block_policy(policy).await;
+        assert!(
+            matches!(stored, Err(MiningApiError::Internal(_))),
+            "{stored:?}"
+        );
+        assert_eq!(handle.policy(), ergo_mining::policy::BlockPolicy::default());
+        let mut invalid = serde_json::to_value(handle.policy()).unwrap();
+        invalid["rent_max_cost_basis_points"] = 10_001.into();
+        let rejected = bridge.set_block_policy(invalid).await;
+        assert!(
+            matches!(rejected, Err(MiningApiError::BadRequest(_))),
+            "{rejected:?}"
         );
     }
 }

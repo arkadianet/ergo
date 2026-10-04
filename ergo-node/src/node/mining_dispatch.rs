@@ -486,16 +486,17 @@ pub(super) fn signal_mining_engine(
         RewardKeyResolution::Pending | RewardKeyResolution::Corrupt => return now,
     };
     let mempool = ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool);
+    // Elapsed private deadlines are filtered here even while their durable
+    // expiry is still being retried.
+    let (operator_generation, private_transactions) = handle.operator_snapshot(|queue| {
+        queue.selection_entries_at(crate::snapshot::unix_now_ms(), now.best_full_height)
+    });
     let intent = BuildIntent {
         expected_parent: now.best_full_id,
         expected_height: now.best_full_height,
         mempool: Arc::new(mempool),
-        private_transactions: Arc::new(
-            handle
-                .private_queue()
-                .selection_entries_at(crate::snapshot::unix_now_ms(), now.best_full_height),
-        ),
-        operator_generation: handle.operator_generation(),
+        private_transactions: Arc::new(private_transactions),
+        operator_generation,
         miner_pk,
         reason,
     };

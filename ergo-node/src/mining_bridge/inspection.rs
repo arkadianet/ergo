@@ -47,10 +47,12 @@ fn total_assets(totals: BTreeMap<[u8; 32], u128>) -> Vec<MiningAssetJson> {
 }
 
 /// Format only the frozen candidate: current state/indexer reads would make a
-/// report disagree with the work a miner is actually hashing.
+/// report disagree with the work a miner is actually hashing. `reemission`
+/// prices the EIP-27 obligation an emission reward box carries.
 pub(super) fn candidate_details(
     snapshot: InspectionSnapshot,
     network: ergo_ser::address::NetworkPrefix,
+    reemission: Option<&ergo_mining::reemission::ReemissionSettings>,
     now_ms: u64,
 ) -> Result<CandidateDetailsJson, MiningApiError> {
     let template = snapshot.template;
@@ -61,6 +63,7 @@ pub(super) fn candidate_details(
     let mut transactions = Vec::with_capacity(candidate.transactions.len());
     let mut proceeds = Vec::new();
     let mut emission_total = 0u128;
+    let mut obligation_total = 0u128;
     let mut fees_total = 0u128;
     let mut rent_total = 0u128;
     let mut rent = RentBreakdownJson {
@@ -117,7 +120,12 @@ pub(super) fn candidate_details(
             if is_proceeds {
                 let amount = u128::from(output.value);
                 match category {
-                    "emission" => emission_total += amount,
+                    "emission" => {
+                        emission_total += amount;
+                        obligation_total += u128::from(
+                            ergo_mining::inspection::reemission_obligation(output, reemission),
+                        );
+                    }
                     "fees" => fees_total += amount,
                     "rent" => rent_total += amount,
                     _ => {}
@@ -229,6 +237,8 @@ pub(super) fn candidate_details(
         });
     }
     rent.collected_nano_erg = rent_total.to_string();
+    // EIP-27: spending the reward box pays its re-emission tokens' worth back.
+    let emission_kept = emission_total.saturating_sub(obligation_total);
     let identity = &template.identity;
     let metrics = &template.work.metrics;
     Ok(CandidateDetailsJson {
@@ -266,10 +276,12 @@ pub(super) fn candidate_details(
             .collect(),
         transactions,
         rewards: RewardBreakdownJson {
-            emission_nano_erg: emission_total.to_string(),
+            emission_nano_erg: emission_kept.to_string(),
+            emission_gross_nano_erg: emission_total.to_string(),
+            reemission_obligation_nano_erg: obligation_total.to_string(),
             fees_nano_erg: fees_total.to_string(),
             rent_nano_erg: rent_total.to_string(),
-            total_nano_erg: (emission_total + fees_total + rent_total).to_string(),
+            total_nano_erg: (emission_kept + fees_total + rent_total).to_string(),
             outputs: proceeds,
         },
         rent,
@@ -344,5 +356,158 @@ mod tests {
             total_assets(token_totals(tokens.iter()))[0].amount,
             "18446744073709551617"
         );
+    }
+
+    /// An initial template whose emission spends a mainnet-shaped EIP-27
+    /// emission box (NFT plus re-emission stash) at `height`.
+    fn eip27_emission_snapshot(height: u32, pk: [u8; 33]) -> InspectionSnapshot {
+        use ergo_mining::reemission::ReemissionSettings;
+        use ergo_primitives::digest::{ADDigest, ModifierId};
+        let reemission = ReemissionSettings::mainnet();
+        let tree_bytes = ergo_ser::address::build_p2pk_tree_bytes(&pk).unwrap();
+        let tree = ergo_ser::ergo_tree::read_ergo_tree(
+            &mut ergo_primitives::reader::VlqReader::new(&tree_bytes),
+        )
+        .unwrap();
+        let emission_box = ErgoBox {
+            candidate: ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                10_000_000_000_000_000,
+                tree,
+                height - 1,
+                vec![
+                    Token {
+                        token_id: reemission.emission_nft_id,
+                        amount: 1,
+                    },
+                    Token {
+                        token_id: reemission.reemission_token_id,
+                        amount: 10_000_000_000_000_000,
+                    },
+                ],
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+            transaction_id: ModifierId::from_bytes([9; 32]),
+            index: 0,
+        };
+        let tx = ergo_mining::reemission::build_post_eip27_emission_tx(
+            &emission_box,
+            &pk,
+            height,
+            &ergo_mining::MonetarySettings::mainnet(),
+            &reemission,
+        )
+        .unwrap();
+        let header = ergo_ser::header::Header {
+            version: 3,
+            parent_id: ModifierId::from_bytes([1; 32]),
+            ad_proofs_root: Digest32::from_bytes([0; 32]),
+            transactions_root: Digest32::from_bytes([0; 32]),
+            state_root: ADDigest::from_bytes([0; 33]),
+            timestamp: 1_700_000_000_000,
+            extension_root: Digest32::from_bytes([0; 32]),
+            n_bits: 0x0101_0000,
+            height,
+            votes: [0; 3],
+            unparsed_bytes: Vec::new(),
+            solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from(pk),
+                nonce: [0; 8],
+            },
+        };
+        let validation_ctx = ergo_validation::pre_header::CandidateValidationContext {
+            pre_header: ergo_validation::pre_header::CandidatePreHeader {
+                version: header.version,
+                parent_id: [1; 32],
+                height,
+                timestamp: header.timestamp,
+                n_bits: header.n_bits,
+                votes: header.votes,
+                miner_pubkey: pk,
+            },
+            activated_script_version: 2,
+            last_headers: Vec::new(),
+            last_block_utxo_root: ergo_validation::pre_header::build_last_block_utxo_root(
+                header.state_root,
+            ),
+        };
+        let observation = ergo_mining::inspection::CandidateObservation {
+            mode: "initial",
+            transactions: vec![ergo_mining::inspection::TransactionObservation {
+                category: "emission",
+                resolved_inputs: vec![emission_box],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        InspectionSnapshot {
+            template: std::sync::Arc::new(ergo_mining::engine::Template {
+                candidate: ergo_mining::candidate::Candidate {
+                    header,
+                    validation_ctx,
+                    observation,
+                    transactions: vec![tx],
+                    ad_proof_bytes: Vec::new(),
+                    extension_fields: Vec::new(),
+                    msg: [2; 32],
+                    target: 1u8.into(),
+                    parent_id: [1; 32],
+                },
+                work: ergo_mining::work_message::WorkMessage {
+                    msg: [2; 32],
+                    target: 1u8.into(),
+                    height,
+                    pk,
+                    metrics: Default::default(),
+                },
+                identity: ergo_mining::engine::TemplateIdentity {
+                    template_id: [2; 32],
+                    parent_id: [1; 32],
+                    chain_seq: 1,
+                    template_seq: 1,
+                    clean_jobs: true,
+                    built_at_ms: 0,
+                    reason: ergo_mining::engine::BuildReason::Tip,
+                },
+            }),
+            status: "current",
+        }
+    }
+
+    #[test]
+    fn eip27_rewards_count_only_the_emission_the_miner_keeps() {
+        // At this height the 12 ERG reward box owes 9 ERG to re-emission.
+        let pk: [u8; 33] =
+            hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let reemission = ergo_mining::reemission::ReemissionSettings::mainnet();
+        let details = candidate_details(
+            eip27_emission_snapshot(1_850_000, pk),
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            Some(&reemission),
+            0,
+        )
+        .unwrap();
+        let rewards = &details.rewards;
+        assert_eq!(rewards.emission_gross_nano_erg, "12000000000");
+        assert_eq!(rewards.reemission_obligation_nano_erg, "9000000000");
+        assert_eq!(rewards.emission_nano_erg, "3000000000");
+        assert_eq!(rewards.total_nano_erg, "3000000000");
+        // The payout box itself is reported as it is.
+        assert_eq!(rewards.outputs.len(), 1);
+        assert_eq!(rewards.outputs[0].value_nano_erg, "12000000000");
+
+        // Without EIP-27 settings the same box would be all income.
+        let plain = candidate_details(
+            eip27_emission_snapshot(1_850_000, pk),
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(plain.rewards.reemission_obligation_nano_erg, "0");
+        assert_eq!(plain.rewards.total_nano_erg, "12000000000");
     }
 }
