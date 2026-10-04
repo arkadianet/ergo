@@ -26,6 +26,12 @@ infrastructure.
 
 ### Changed
 
+- UTXO-snapshot bootstraps (Modes 2 and 4) by earlier releases stored the
+  snapshot root at AVL node ID 0, the ID the store also reads as a null child.
+  Such databases now fail to open with `LegacySnapshotNodeIds` rather than
+  serving misread lookups. Keep the old database and bootstrap from a
+  verified snapshot into a fresh data directory; stores synced from genesis
+  and snapshots installed by this release are unaffected.
 - Upgrade normal storage to redb 4.3. Legacy redb 2.6 file-format v2 databases
   require the copy-only `ergo-node migrate-redb SOURCE DESTINATION` command
   before startup. Originals remain intact; the offline converter locks the
