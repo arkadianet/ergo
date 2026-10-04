@@ -105,23 +105,60 @@ pub struct ScalaPowSolutions {
 ///
 /// `field` names the JSON path in the error, e.g. `"powSolutions.d"`.
 pub(crate) fn unsigned_bigint_from_json(field: &str, value: &JsonValue) -> Result<BigUint, String> {
+    exact_unsigned_decimal(&json_decimal(field, value)?, MAX_BIGINT_DECIMAL_DIGITS).map_err(
+        |error| {
+            let reason = match error {
+                DecimalError::Invalid(reason) => reason,
+                DecimalError::TooManyDigits => {
+                    "nonzero integer exceeds the reference's 2^18 decimal digit bound"
+                }
+            };
+            format!("{field} is not a valid unsigned decimal: {reason}")
+        },
+    )
+}
+
+/// The decimal spelling of a JSON number or numeric string.
+fn json_decimal<'a>(
+    field: &str,
+    value: &'a JsonValue,
+) -> Result<std::borrow::Cow<'a, str>, String> {
     match value {
-        JsonValue::Number(n) => exact_unsigned_decimal(&n.to_string()),
-        JsonValue::String(s) => exact_unsigned_decimal(s),
-        other => {
-            return Err(format!(
-                "{field} must be a JSON number or decimal string, got {other}"
-            ))
-        }
+        JsonValue::Number(n) => Ok(n.to_string().into()),
+        JsonValue::String(s) => Ok(s.as_str().into()),
+        other => Err(format!(
+            "{field} must be a JSON number or decimal string, got {other}"
+        )),
     }
-    .map_err(|reason| format!("{field} is not a valid unsigned decimal: {reason}"))
 }
 
 // Circe 0.14.15 BiggerDecimal.MaxBigIntegerDigits. Check the resulting length,
 // not the exponent alone: significant digits and scale can cancel each other.
 const MAX_BIGINT_DECIMAL_DIGITS: usize = 1 << 18;
 
-fn exact_unsigned_decimal(decimal: &str) -> Result<BigUint, &'static str> {
+// Every nonnegative Scala `Long` has at most 19 decimal digits
+// (`Long.MAX_VALUE` = 9223372036854775807), so a longer integral result is out
+// of range without materializing it.
+const MAX_LONG_DECIMAL_DIGITS: usize = 19;
+
+/// Why an exact decimal spelling has no value in the caller's domain.
+#[derive(Debug, PartialEq, Eq)]
+enum DecimalError {
+    /// Not an integral decimal the reference decoder accepts.
+    Invalid(&'static str),
+    /// Integral, but with more decimal digits than the domain admits.
+    TooManyDigits,
+}
+
+impl From<&'static str> for DecimalError {
+    fn from(reason: &'static str) -> Self {
+        Self::Invalid(reason)
+    }
+}
+
+/// Exact nonnegative integer value of `decimal`. Results longer than
+/// `max_digits` are refused before any digits are materialized.
+fn exact_unsigned_decimal(decimal: &str, max_digits: usize) -> Result<BigUint, DecimalError> {
     let (mantissa, exponent) = decimal
         .split_once(['e', 'E'])
         .map_or((decimal, None), |(m, e)| (m, Some(e)));
@@ -133,12 +170,12 @@ fn exact_unsigned_decimal(decimal: &str) -> Result<BigUint, &'static str> {
         .map_or((magnitude, None), |(i, f)| (i, Some(f)));
     let digits_only = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     if !digits_only(integer) || fractional.is_some_and(|f| !digits_only(f)) {
-        return Err("invalid decimal syntax");
+        return Err("invalid decimal syntax".into());
     }
     if let Some(exponent) = exponent {
         let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
         if !digits_only(digits) {
-            return Err("invalid exponent syntax");
+            return Err("invalid exponent syntax".into());
         }
     }
     let fractional = fractional.unwrap_or("");
@@ -150,7 +187,7 @@ fn exact_unsigned_decimal(decimal: &str) -> Result<BigUint, &'static str> {
         return Ok(BigUint::default());
     }
     if negative {
-        return Err("negative value is outside the unsigned magnitude domain");
+        return Err("negative value is outside the unsigned magnitude domain".into());
     }
     let trailing_zeros = digits.len() - digits.trim_end_matches('0').len();
     let exponent: i64 = match exponent {
@@ -171,24 +208,54 @@ fn exact_unsigned_decimal(decimal: &str) -> Result<BigUint, &'static str> {
         .len()
         .checked_add(zeros)
         .ok_or("decimal digit count overflow")?;
-    if result_len > MAX_BIGINT_DECIMAL_DIGITS {
-        return Err("nonzero integer exceeds the reference's 2^18 decimal digit bound");
+    if result_len > max_digits {
+        return Err(DecimalError::TooManyDigits);
     }
     let mut integer = Vec::with_capacity(result_len);
     integer.extend_from_slice(nonzero.as_bytes());
     integer.resize(result_len, b'0');
-    BigUint::parse_bytes(&integer, 10).ok_or("invalid unsigned decimal magnitude")
+    BigUint::parse_bytes(&integer, 10)
+        .ok_or(DecimalError::Invalid("invalid unsigned decimal magnitude"))
+}
+
+/// Read a nonnegative Scala `Long` named `field` from a JSON number or numeric
+/// string, with the same exact decimal forms as [`unsigned_bigint_from_json`].
+fn nonnegative_long_from_json(field: &str, value: &JsonValue) -> Result<u64, String> {
+    let decimal = json_decimal(field, value)?;
+    let out_of_range = || {
+        // Received spellings can be long; keep the error bounded.
+        let shown = match decimal.char_indices().nth(32) {
+            Some((end, _)) => format!("{}...", &decimal[..end]),
+            None => decimal.to_string(),
+        };
+        format!("{field} {shown} exceeds Scala Long.MAX_VALUE")
+    };
+    match exact_unsigned_decimal(&decimal, MAX_LONG_DECIMAL_DIGITS) {
+        Ok(magnitude) => u64::try_from(magnitude)
+            .ok()
+            .filter(|value| i64::try_from(*value).is_ok())
+            .ok_or_else(out_of_range),
+        Err(DecimalError::TooManyDigits) => Err(out_of_range()),
+        Err(DecimalError::Invalid(reason)) => {
+            Err(format!("{field} is not a valid unsigned decimal: {reason}"))
+        }
+    }
 }
 
 fn deserialize_nonnegative_long<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
+    field: &str,
 ) -> Result<u64, D::Error> {
     let value = JsonValue::deserialize(deserializer)?;
-    let magnitude = unsigned_bigint_from_json("nonnegative Scala Long", &value)
-        .map_err(serde::de::Error::custom)?;
-    let value = u64::try_from(magnitude).map_err(serde::de::Error::custom)?;
-    i64::try_from(value).map_err(serde::de::Error::custom)?;
-    Ok(value)
+    nonnegative_long_from_json(field, &value).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_value<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    deserialize_nonnegative_long(deserializer, "value")
+}
+
+fn deserialize_amount<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    deserialize_nonnegative_long(deserializer, "amount")
 }
 
 /// `BlockTransactions.jsonEncoder` shape:
@@ -258,7 +325,7 @@ pub struct ScalaDataInput {
 pub struct ScalaOutput {
     #[serde(rename = "boxId")]
     pub box_id: String,
-    #[serde(deserialize_with = "deserialize_nonnegative_long")]
+    #[serde(deserialize_with = "deserialize_value")]
     pub value: u64,
     #[serde(rename = "ergoTree")]
     pub ergo_tree: String,
@@ -280,7 +347,7 @@ pub struct ScalaOutput {
 pub struct ScalaAsset {
     #[serde(rename = "tokenId")]
     pub token_id: String,
-    #[serde(deserialize_with = "deserialize_nonnegative_long")]
+    #[serde(deserialize_with = "deserialize_amount")]
     pub amount: u64,
 }
 
@@ -312,7 +379,7 @@ pub struct ScalaTransactionInput {
 /// rationale as [`ScalaTransactionInput`].
 #[derive(Clone, Debug, Deserialize)]
 pub struct ScalaOutputInput {
-    #[serde(deserialize_with = "deserialize_nonnegative_long")]
+    #[serde(deserialize_with = "deserialize_value")]
     pub value: u64,
     #[serde(rename = "ergoTree")]
     pub ergo_tree: String,
@@ -417,4 +484,32 @@ pub struct ScalaNipopowProof {
     /// Always `true` on the REST surface (`NipopowApiRoute.scala:69-90`
     /// passes `continuous = true` unconditionally).
     pub continuous: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_digit_bound_refuses_before_materializing_and_keeps_exact_forms() {
+        let long = |decimal| exact_unsigned_decimal(decimal, MAX_LONG_DECIMAL_DIGITS);
+        // A ten-byte exponent spelling never reaches digit materialization.
+        for decimal in ["1e262143", "9.99999e262138", "1e19", "10000000000000000000"] {
+            assert_eq!(long(decimal), Err(DecimalError::TooManyDigits), "{decimal}");
+        }
+        // The bound counts result digits, not spelling length.
+        assert_eq!(
+            long("10000000000000000000e-1"),
+            Ok(BigUint::from(10_u64.pow(18)))
+        );
+        assert_eq!(
+            long("9999999999999999999"),
+            Ok(BigUint::from(9_999_999_999_999_999_999_u64))
+        );
+        assert_eq!(long("0e999999999"), Ok(BigUint::default()));
+        assert_eq!(
+            long("1.5"),
+            Err(DecimalError::Invalid("fractional value is not an integer"))
+        );
+    }
 }

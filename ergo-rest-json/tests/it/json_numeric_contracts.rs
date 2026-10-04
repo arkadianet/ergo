@@ -101,6 +101,53 @@ fn every_output_and_asset_dto_enforces_the_nonnegative_scala_long_domain() {
 }
 
 #[test]
+fn scala_long_range_errors_name_the_field_and_received_value() {
+    let output =
+        serde_json::from_str::<ScalaOutputInput>(&candidate_json("9223372036854775808", "1"))
+            .unwrap_err()
+            .to_string();
+    assert!(
+        output.contains("value 9223372036854775808 exceeds Scala Long.MAX_VALUE"),
+        "{output}"
+    );
+    let asset = serde_json::from_str::<ScalaAsset>(r#"{"tokenId":"aa","amount":"1e19"}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        asset.contains("amount 1e19 exceeds Scala Long.MAX_VALUE"),
+        "{asset}"
+    );
+    let long = format!(r#"{{"tokenId":"aa","amount":"{}"}}"#, "9".repeat(4096));
+    let asset = serde_json::from_str::<ScalaAsset>(&long)
+        .unwrap_err()
+        .to_string();
+    assert!(asset.contains("exceeds Scala Long.MAX_VALUE"), "{asset}");
+    assert!(asset.len() < 200, "range errors keep a bounded excerpt");
+}
+
+#[test]
+fn huge_exponents_are_refused_without_materializing_their_digits() {
+    // Each of these spells a ~2^18-digit integer in a few bytes. Building it
+    // costs tens of milliseconds per value; refusing it costs microseconds.
+    let started = std::time::Instant::now();
+    for _ in 0..64 {
+        for value in ["1e262143", r#""1e262143""#, "9.99999e262138"] {
+            let error = serde_json::from_str::<ScalaAsset>(&format!(
+                r#"{{"tokenId":"aa","amount":{value}}}"#
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("exceeds Scala Long.MAX_VALUE"), "{error}");
+        }
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn programmatically_built_outputs_cannot_bypass_signed_long_conversion() {
     let mut candidate: ScalaOutputInput = serde_json::from_str(&candidate_json("1", "1")).unwrap();
     for mode in [DecodeMode::Submit, DecodeMode::Preserve] {
