@@ -20,6 +20,11 @@
 #   * the valid future date is accepted and the entry is SKIPPED (not FAILed)
 #     for the ordinary "blocked, not yet expired" reason.
 #
+# A third entry runs one clean/patched pair through a stub `cargo` that
+# "builds" a shell detector, so nothing is compiled. It asserts the pair
+# passes and that the entry's source copy and release build directory are
+# removed while its logs remain.
+#
 # Usage: scripts/reinject_gate.selftest.sh   (exits 0 on pass, 1 on failure)
 
 set -euo pipefail
@@ -28,7 +33,8 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 GATE="$REPO_ROOT/scripts/reinject_gate.sh"
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+GATE_TMP="$(mktemp -d)"
+trap 'rm -rf "$WORK" "$GATE_TMP"' EXIT
 
 fail() {
     echo "FAIL: $*" >&2
@@ -61,6 +67,13 @@ wire_reachable = "true"
 trigger_hex = ""
 blocked_on = "PR #2"
 blocked_until = "$FUTURE_DATE"
+
+[[bug]]
+id = "stub_pair"
+class = "panic"
+surface = "ergo_tree"
+wire_reachable = true
+trigger_hex = "00"
 EOF
 
 gate_rc=0
@@ -87,4 +100,51 @@ out2="$WORK/out.valid_future_date"
 grep -q "not a real calendar date" "$out2" && fail "valid_future_date: a real calendar date must not be rejected"
 grep -q "SKIP.*valid_future_date: blocked on PR #2 until $FUTURE_DATE" "$out2" || fail "valid_future_date: expected the ordinary still-blocked SKIP line"
 
+# ----- executed pair: the source copy and release build go, the logs stay -----
+mkdir -p "$WORK/scripts" "$WORK/stub-bin"
+cp "$REPO_ROOT/scripts/reinject-result.py" "$WORK/scripts/"
+printf 'clean\n' >"$WORK/marker.txt"
+cat >"$WORK/ergo-difftest/known_bugs/patches/stub_pair.patch" <<'EOF'
+--- a/marker.txt
++++ b/marker.txt
+@@ -1 +1 @@
+-clean
++patched
+EOF
+cat >"$WORK/stub-bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+# `build --target-dir D` writes a shell detector to D/release/difftest that
+# reports the declared panic marker only after the patch changed marker.txt.
+set -euo pipefail
+case "$1" in
+    build)
+        while [[ $# -gt 0 && "$1" != "--target-dir" ]]; do shift; done
+        mkdir -p "$2/release"
+        printf '%s\n' '#!/usr/bin/env bash' 'grep -q patched marker.txt || exit 0' \
+            'echo "  [BUG] ergo_tree: PANIC: stub detector"' 'exit 1' >"$2/release/difftest"
+        chmod +x "$2/release/difftest"
+        ;;
+    metadata) printf '{"target_directory": "%s"}\n' "$CARGO_TARGET_DIR" ;;
+    *) echo "stub cargo: unexpected $*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$WORK/stub-bin/cargo"
+out3="$WORK/out.stub_pair"
+set +e
+(cd "$WORK" && PATH="$WORK/stub-bin:$PATH" TMPDIR="$GATE_TMP" "$GATE" --only stub_pair) >"$out3" 2>&1
+gate_rc=$?
+set -e
+echo "--- reinject_gate --only stub_pair (exit $gate_rc) ---"
+cat "$out3"
+[[ $gate_rc -eq 0 ]] || fail "stub_pair: expected one passing clean/patched pair, got exit $gate_rc"
+grep -q '\[PASS\] stub_pair' "$out3" || fail "stub_pair: expected a PASS line"
+logs="$(sed -n 's/^  preserved build\/detector logs: //p' "$out3")"
+[[ -n "$logs" && -d "$logs" ]] || fail "stub_pair: preserved log directory is missing"
+for kept in clean-build.log clean.log patch.log patched-build.log patched.log command.txt; do
+    [[ -f "$logs/$kept" ]] || fail "stub_pair: $kept was not preserved"
+done
+[[ ! -e "$logs/source" ]] || fail "stub_pair: the source copy was left behind"
+[[ ! -e "$logs/target" ]] || fail "stub_pair: the release build directory was left behind"
+
 echo "PASS: blocked_until is calendar-validated — impossible dates are rejected, real future dates still SKIP as blocked"
+echo "PASS: an executed pair removes its source copy and release build directory and keeps its logs"

@@ -25,7 +25,8 @@
 #   3  no detector pair executed (all selected entries were skipped)
 #
 # Every selected class uses owned source copies. Build and detector logs survive
-# cleanup of those copies. No caller source or Git worktree is patched.
+# cleanup of those copies and of each release build directory. No caller
+# source or Git worktree is patched.
 # A passing source/unit test does not certify clean/patched detector execution.
 
 set -euo pipefail
@@ -288,7 +289,9 @@ for id in "${BUG_IDS[@]}"; do
     gate_dir="$(mktemp -d "${TMPDIR:-/tmp}/ergo-reinject.XXXXXX")"
     scratch="$gate_dir/source"
     mkdir "$scratch"
-    cleanup_source() { rm -rf -- "$scratch"; }
+    # Each entry builds into its own release target; remove it with the
+    # source copy so only the logs remain.
+    cleanup_source() { rm -rf -- "$scratch" "$gate_dir/target"; }
     trap cleanup_source EXIT
     echo "  preserved build/detector logs: $gate_dir"
     # Copy the current authored source, including uncommitted edits. Both clean
