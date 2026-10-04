@@ -987,7 +987,7 @@ async fn mining_candidate_mining_off_is_mining_disabled_not_404() {
 }
 
 #[tokio::test]
-async fn mining_candidate_with_txs_seam_deferred_route_unavailable() {
+async fn mining_candidate_with_txs_rejects_malformed_body() {
     let (status, v) = send(
         app_full(default_auth()),
         req(
@@ -999,8 +999,8 @@ async fn mining_candidate_with_txs_seam_deferred_route_unavailable() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(v["error"]["reason"], "route_unavailable");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v["error"]["reason"], "bad_request");
 }
 
 #[tokio::test]
@@ -1047,4 +1047,63 @@ async fn voting_candidate_t0_seam_deferred_route_unavailable() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(v["error"]["reason"], "route_unavailable");
+}
+
+#[tokio::test]
+async fn mining_template_and_required_candidates_require_operator_key() {
+    for (method, path) in [
+        (Method::GET, "/api/v1/mining/template"),
+        (Method::POST, "/api/v1/mining/candidate-with-txs"),
+    ] {
+        let (status, value) = send(
+            app_full(default_auth()),
+            req(
+                method,
+                path,
+                None,
+                Some(REMOTE),
+                Some(Body::from(r#"{"transactions":[]}"#)),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(value["error"]["reason"], "unauthorized");
+    }
+}
+
+#[tokio::test]
+async fn required_candidates_forward_valid_request_and_reject_limits() {
+    // This legacy adapter deliberately inherits the unavailable default.
+    let (status, value) = send(
+        app_full(default_auth()),
+        req(
+            Method::POST,
+            "/api/v1/mining/candidate-with-txs",
+            Some("operator-secret"),
+            Some(REMOTE),
+            Some(Body::from(r#"{"transactions":[]}"#)),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(value["error"]["reason"], "candidate_unavailable");
+    for body in [
+        serde_json::json!({"transactions":["zz"]}),
+        serde_json::json!({"transactions":vec!["00"; 257]}),
+        serde_json::json!({"transactions":[],"unexpected":true}),
+    ] {
+        let (status, value) = send(
+            app_full(default_auth()),
+            req(
+                Method::POST,
+                "/api/v1/mining/candidate-with-txs",
+                Some("operator-secret"),
+                Some(REMOTE),
+                Some(Body::from(body.to_string())),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(value["error"]["reason"], "bad_request");
+    }
 }

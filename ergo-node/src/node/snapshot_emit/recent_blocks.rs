@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use ergo_api::types::ApiRecentBlock;
+use ergo_api::types::{ApiBlockFeeObservation, ApiRecentBlock};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::address::{encode_p2pk_from_pubkey, NetworkPrefix};
 use ergo_ser::block_transactions::read_stored_block_transactions;
@@ -313,6 +313,10 @@ fn try_recent_block(
         ts_unix_ms: header.timestamp,
         txs: bt.transactions.len() as u32,
         size_bytes: (header_len + tx_bytes.len() + ext_len + adp_len) as u64,
+        fee_observation: Some(block_fee_observation(
+            &bt.transactions,
+            tx_bytes.len() as u64,
+        )?),
         // `delivered_by` is merged in at snapshot-assembly time from the
         // first-deliverer ring (a transient P2P fact), NOT baked into the
         // tip-keyed recent-blocks cache (committed-state only). See
@@ -320,6 +324,42 @@ fn try_recent_block(
         delivered_by: None,
         miner_pk,
         miner_address,
+    })
+}
+
+/// Extract samples from actual confirmed transactions, not mempool removals.
+fn block_fee_observation(
+    txs: &[ergo_ser::transaction::Transaction],
+    section_bytes: u64,
+) -> Option<ApiBlockFeeObservation> {
+    let mut rates = Vec::new();
+    let mut fee_paying_size_bytes = 0u64;
+    for tx in txs {
+        let fee = tx
+            .output_candidates
+            .iter()
+            .filter(|output| {
+                output.ergo_tree_bytes() == ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES
+            })
+            .fold(0u64, |total, output| total.saturating_add(output.value));
+        if fee == 0 {
+            continue;
+        }
+        let mut writer = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::transaction::write_transaction(&mut writer, tx).ok()?;
+        let bytes = writer.result().len() as u64;
+        if bytes == 0 {
+            continue;
+        }
+        fee_paying_size_bytes = fee_paying_size_bytes.saturating_add(bytes);
+        rates.push(fee / bytes);
+    }
+    rates.sort_unstable();
+    Some(ApiBlockFeeObservation {
+        transactions_size_bytes: section_bytes,
+        fee_paying_transactions: rates.len() as u32,
+        fee_paying_size_bytes,
+        median_fee_per_byte_nano_erg: rates.get(rates.len() / 2).copied(),
     })
 }
 
@@ -346,6 +386,46 @@ mod tests {
     use ergo_ser::modifier_id::{TYPE_AD_PROOFS, TYPE_BLOCK_TRANSACTIONS, TYPE_EXTENSION};
     use ergo_state::store::StateStore;
     use std::time::Instant;
+
+    #[test]
+    fn fee_observations_count_only_fee_outputs_in_actual_block_transactions() {
+        use ergo_ser::ergo_box::ErgoBoxCandidate;
+        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+        use ergo_ser::register::AdditionalRegisters;
+        let ordinary = [0, 8, 0xd3];
+        let output = |value, bytes: &[u8]| {
+            ErgoBoxCandidate::new(
+                value,
+                ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(bytes)).unwrap(),
+                100,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()
+        };
+        let mut confirmed = ergo_ser::transaction::Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes([1; 32]),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![output(1_000_000, &ordinary)],
+        };
+        let without_fee = confirmed.clone();
+        confirmed.output_candidates.push(output(
+            2_000_000,
+            ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES,
+        ));
+        let samples = block_fee_observation(&[confirmed.clone(), without_fee], 10_000).unwrap();
+        assert_eq!(samples.fee_paying_transactions, 1);
+        let mut writer = VlqWriter::new();
+        ergo_ser::transaction::write_transaction(&mut writer, &confirmed).unwrap();
+        assert_eq!(samples.fee_paying_size_bytes, writer.result().len() as u64);
+        assert_eq!(
+            samples.median_fee_per_byte_nano_erg,
+            Some(2_000_000 / samples.fee_paying_size_bytes)
+        );
+    }
 
     // ----- helpers -----
 
@@ -625,6 +705,87 @@ mod tests {
         assert_eq!(third[0].height, 1);
     }
 
+    #[test]
+    fn recent_blocks_cache_replaces_fee_samples_on_same_height_reorg() {
+        let (_tmp, store) = open_store();
+        let (h1, id1, b1) = header(1, [0; 32], 10);
+        let (h2, id2, b2) = header(2, id1, 20);
+        let (fork, fork_id, fork_bytes) = header(2, id1, 21);
+        let ext = vec![0xEE; 4];
+        store_block(&store, &h1, id1, &b1, true, Some(&ext), None);
+        store_block(&store, &h2, id2, &b2, true, Some(&ext), None);
+        store_block(&store, &fork, fork_id, &fork_bytes, false, Some(&ext), None);
+        let mut fork_txs = read_stored_block_transactions(&tx_section(fork_id)).unwrap();
+        fork_txs.transactions[0].output_candidates.push(
+            ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                2_000_000,
+                ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(
+                    ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES,
+                ))
+                .unwrap(),
+                2,
+                vec![],
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+        );
+        let mut writer = VlqWriter::new();
+        ergo_ser::block_transactions::write_block_transactions_with_version(
+            &mut writer,
+            &fork_txs,
+            fork.version,
+        )
+        .unwrap();
+        let expected = ExpectedSections::from_header(
+            &fork_id,
+            fork.transactions_root.as_bytes(),
+            fork.extension_root.as_bytes(),
+            fork.ad_proofs_root.as_bytes(),
+        );
+        store
+            .store_block_section_typed(
+                &expected.transactions_id,
+                &writer.result(),
+                TYPE_BLOCK_TRANSACTIONS,
+            )
+            .unwrap();
+        let backend = StateBackendKind::Utxo(store);
+        let mut cache = None;
+        let previous = recent_blocks_for_tip(&mut cache, &backend, id2, 2, NetworkPrefix::Mainnet);
+        let replacement =
+            recent_blocks_for_tip(&mut cache, &backend, fork_id, 2, NetworkPrefix::Mainnet);
+        assert!(!Arc::ptr_eq(&previous, &replacement));
+        assert_eq!(replacement[0].header_id, hex::encode(fork_id));
+        assert!(replacement
+            .iter()
+            .all(|block| block.header_id != hex::encode(id2)));
+        assert_eq!(
+            replacement[0]
+                .fee_observation
+                .as_ref()
+                .unwrap()
+                .fee_paying_transactions,
+            previous[0]
+                .fee_observation
+                .as_ref()
+                .unwrap()
+                .fee_paying_transactions
+                + 1
+        );
+        assert_ne!(
+            replacement[0]
+                .fee_observation
+                .as_ref()
+                .unwrap()
+                .median_fee_per_byte_nano_erg,
+            previous[0]
+                .fee_observation
+                .as_ref()
+                .unwrap()
+                .median_fee_per_byte_nano_erg
+        );
+    }
+
     /// A transient fault on an *ancestor* section leaves a gap in the tail;
     /// the contiguity guard refuses to cache it, so the next tick (same tip)
     /// recomputes and self-heals once the section reads cleanly — no tip
@@ -774,6 +935,7 @@ mod tests {
             ts_unix_ms: 0,
             txs: 0,
             size_bytes: 0,
+            fee_observation: None,
             delivered_by: None,
             miner_pk: None,
             miner_address: None,

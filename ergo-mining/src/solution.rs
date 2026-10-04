@@ -193,6 +193,7 @@ mod tests {
             last_block_utxo_root,
         };
         Candidate {
+            required_transaction_ids: Vec::new(),
             header: h.clone(),
             validation_ctx,
             transactions: Vec::new(),

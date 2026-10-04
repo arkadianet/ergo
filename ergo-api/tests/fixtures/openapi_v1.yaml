@@ -2323,6 +2323,58 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/mempool/fee-estimate:
+    get:
+      tags:
+      - mempool
+      summary: |-
+        Read-only fee forecast with coverage. Unknown data yields a 200 response
+        with available=false and null amounts; this does not pretend confirmation.
+      operationId: v1_mempool_fee_estimate_get
+      parameters:
+      - name: target_wait_seconds
+        in: query
+        description: Desired wait, default 120; 1..=86400
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: tx_size_bytes
+        in: query
+        description: Signed transaction size, default 1000; 1..=1048576
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: tx_cost_units
+        in: query
+        description: Optional validation cost, default 0 (unknown); pool competition still includes observed costs
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      responses:
+        '200':
+          description: Observed capacity forecast or explicit insufficient_data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiFeeEstimate'
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Chain reader or estimate capability unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
   /api/v1/mempool/fee-histogram:
     get:
       tags:
@@ -2525,14 +2577,37 @@ paths:
       tags:
       - mining
       summary: |-
-        `POST /api/v1/mining/candidate-with-txs` — T1, seam-deferred. The wire shape
-        is documented but no `NodeMining::candidate_with_txs` seam exists,
-        so this answers the honest `route_unavailable` rather than silently ignoring
-        the forced-tx set. Still gated at `Tier::Operator`.
+        Request-specific selection: validate all requested signed transactions and
+        pool ancestors against the frozen candidate context, then fill spare
+        capacity from the pool. Invalid/conflicting/oversized sets fail atomically;
+        successful requests publish a retained template without pool admission.
       operationId: candidate_with_txs
+      requestBody:
+        description: '{transactions: [...]}: at most 256 signed Scala transaction objects or canonical transaction hex strings, at most 1 MiB decoded bytes; dependencies may be unordered; repeated identical IDs are included once'
+        content:
+          application/json:
+            schema: {}
+        required: true
       responses:
+        '200':
+          description: Complete validated template containing all requested transactions
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Malformed, invalid, unresolved, conflicting, or over-budget requested transactions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Forced-transaction candidate building not wired on this node
+          description: Mining unavailable, tip changed, or another requested build is running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Requested build timed out (30 seconds)
           content:
             application/json:
               schema:
@@ -2696,6 +2771,29 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MiningStatus'
+  /api/v1/mining/template:
+    get:
+      tags:
+      - mining
+      summary: |-
+        `GET /api/v1/mining/template` returns the exact frozen template behind
+        mining work. All binary artifacts are canonical hex; hashing the header
+        without PoW yields `work.msg`. This read never starts a candidate build.
+      operationId: v1_mining_template_get
+      responses:
+        '200':
+          description: 'Complete frozen template: work, header_without_pow, ordered transaction IDs/bytes, extension key/value pairs, ad_proofs, and required_transaction_ids'
+          content:
+            application/json:
+              schema: {}
+        '503':
+          description: No current template available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/network/blacklist:
     post:
       tags:
@@ -5700,6 +5798,87 @@ components:
           description: |-
             Number of peers in the quorum that voted for the selected
             manifest. `0` during the `discovery` phase before quorum.
+          minimum: 0
+    ApiFeeEstimate:
+      type: object
+      description: |-
+        Bounded projection from the latest canonical block observations and the
+        current pool. Missing/stale/sparse data yields null estimates, with a reason.
+        Admission costs are observations; candidate generation revalidates them.
+      required:
+      - available
+      - confidence
+      - sample_blocks
+      - confirmed_fee_paying_transactions
+      - target_wait_ms
+      - target_feasible
+      - tx_size_bytes
+      - tx_cost_units
+      - estimate_capped
+      properties:
+        available:
+          type: boolean
+        block_byte_capacity:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        block_cost_capacity:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        confidence:
+          type: string
+        confirmed_fee_paying_transactions:
+          type: integer
+          format: int32
+          minimum: 0
+        estimate_capped:
+          type: boolean
+        estimated_wait_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        observed_block_interval_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        observed_median_fee_per_byte_nano_erg:
+          type:
+          - string
+          - 'null'
+        reason:
+          type:
+          - string
+          - 'null'
+        recommended_fee_nano_erg:
+          type:
+          - string
+          - 'null'
+        sample_blocks:
+          type: integer
+          format: int32
+          minimum: 0
+        target_feasible:
+          type: boolean
+        target_wait_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        tx_cost_units:
+          type: integer
+          format: int64
+          minimum: 0
+        tx_size_bytes:
+          type: integer
+          format: int32
           minimum: 0
     ApiFullBlockRef:
       type: object

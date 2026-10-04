@@ -57,7 +57,9 @@ use std::collections::BTreeMap;
 /// decrease and id-9 votes; while active only `{1..=8, 120}` are accepted.
 const RULE_HDR_VOTES_UNKNOWN: u16 = 215;
 
-use crate::candidate_selection::{select_user_txs_cancellable, CandidateOverlay};
+use crate::candidate_selection::{
+    select_required_txs_cancellable, select_user_txs_cancellable, CandidateOverlay,
+};
 use crate::coinbase::{build_fee_tx, build_pre_eip27_emission_tx};
 use crate::emission_box::lookup_emission_box_from_parent;
 use crate::emission_rules::MonetarySettings;
@@ -127,6 +129,8 @@ pub struct Candidate {
     /// CheckedTransactions aren't Clone, so we keep the raw form and
     /// re-validate on solution submission if a CheckedBlock is needed.
     pub transactions: Vec<Transaction>,
+    /// Explicitly requested transaction IDs, retained with the exact template.
+    pub required_transaction_ids: Vec<[u8; 32]>,
     /// Raw AVL+ proof bytes captured from the dry-run. Wraps with the
     /// header id at FullBlock-assembly time to produce the ADProofs
     /// section.
@@ -239,6 +243,63 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
     // tip and evicts the still-invalid ones. A side-output (not part of the
     // Candidate) because suspects are diagnostic, not consensus artifacts.
     suspects_out: &mut Vec<Digest32>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
+    generate_candidate_with_required_cancellable(
+        view,
+        network,
+        mode,
+        mempool,
+        miner_pk,
+        monetary,
+        reemission,
+        reemission_rules,
+        chain_config,
+        eligible_rent_boxes,
+        voting_targets,
+        voting_settings,
+        custom_extension_fields,
+        suspects_out,
+        &[],
+        should_cancel,
+    )
+}
+
+/// Requested transactions are an indivisible validated prefix of the optional
+/// pool selection. This path never admits or broadcasts them to the live pool.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_candidate_with_required_cancellable<V: CandidateStateView>(
+    view: &V,
+    network: ergo_chain_spec::Network,
+    mode: BuildMode,
+    mempool: &MempoolReadSnapshot,
+    miner_pk: &[u8; 33],
+    monetary: &MonetarySettings,
+    reemission: Option<&ReemissionSettings>,
+    // EIP-27 re-emission VALIDATION rules (distinct from the emission-curve
+    // `reemission` above): threaded into every `TxValidationCtx` this builds so
+    // the candidate's emission tx, fee tx, storage-rent claims, and selected
+    // mempool txs are all checked against the burning condition — closing the
+    // gap where a locally-assembled candidate could carry an EIP-27-invalid tx
+    // that block validation later rejects. `None` where EIP-27 is disabled.
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    chain_config: &DifficultyParams,
+    eligible_rent_boxes: &[ErgoBox],
+    voting_targets: &BTreeMap<u8, i64>,
+    voting_settings: &VotingSettings,
+    // Operator-configured custom extension fields (validated at config time via
+    // `validate_custom_extension_fields`) — the general merge-mining / commitment
+    // hook. Injected into every candidate's extension alongside interlinks; empty
+    // when the operator has configured none.
+    custom_extension_fields: &[([u8; 2], Vec<u8>)],
+    // Side-output: ids of pooled txs whose consensus re-validation
+    // failed during selection (suspected tip-invalid). Written only on the Full
+    // path that runs mempool selection; left untouched for Minimal builds. The
+    // engine forwards these to the node, which re-validates each against the live
+    // tip and evicts the still-invalid ones. A side-output (not part of the
+    // Candidate) because suspects are diagnostic, not consensus artifacts.
+    suspects_out: &mut Vec<Digest32>,
+    required_transactions: &[std::sync::Arc<[u8]>],
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     check_build_cancelled(should_cancel)?;
@@ -624,14 +685,27 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
             .saturating_sub(rent_size)
             .saturating_sub(BLOCK_ASSEMBLY_SIZE_RESERVE);
 
-        let selected = select_user_txs_cancellable(
+        let mut required = select_required_txs_cancellable(
             &mut overlay,
+            required_transactions,
             mempool,
             &ctx,
             &params,
             last_headers.as_slice(),
             cost_budget,
             size_budget,
+            reemission_rules,
+            should_cancel,
+        )?;
+        let required_count = required.checked.len();
+        let selected = select_user_txs_cancellable(
+            &mut overlay,
+            mempool,
+            &ctx,
+            &params,
+            last_headers.as_slice(),
+            cost_budget.saturating_sub(required.total_cost),
+            size_budget.saturating_sub(required.total_size),
             reemission_rules,
             should_cancel,
         )?;
@@ -651,7 +725,8 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
         //     `max_block_cost`. The fee tx is validated against a FRESH overlay
         //     rebuilt from the kept set, so a trimmed tx never leaves a stale
         //     spend behind.
-        let mut user_checked = selected.checked; // Vec<(CheckedTransaction, cost)>
+        required.checked.extend(selected.checked);
+        let mut user_checked = required.checked; // Vec<(CheckedTransaction, cost)>
         let cost_ceiling = max_block_cost.saturating_sub(safety_gap);
         let checked_fee = loop {
             check_build_cancelled(should_cancel)?;
@@ -743,6 +818,11 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
                 final_validation_cost = total_cost;
                 final_section_size = Some(section_size as u64);
                 break checked_fee;
+            }
+            if user_checked.len() <= required_count {
+                return Err(MiningError::RequiredTransactions(
+                    "requested transactions and ancestors do not fit with the block fee transaction".into(),
+                ));
             }
             user_checked.pop();
         };
@@ -881,7 +961,21 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
     };
 
     // 16. Pack the cached candidate.
+    let required_transaction_ids = required_transactions
+        .iter()
+        .map(|bytes| {
+            let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(bytes)).map_err(
+                |e| MiningError::RequiredTransactions(format!("transaction parse: {e:?}")),
+            )?;
+            ergo_ser::transaction::transaction_id(&tx)
+                .map(|id| *id.as_bytes())
+                .map_err(|e| MiningError::RequiredTransactions(format!("transaction id: {e:?}")))
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?
+        .into_iter()
+        .collect();
     let candidate = Candidate {
+        required_transaction_ids,
         header,
         validation_ctx,
         transactions: raw_txs,

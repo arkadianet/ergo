@@ -129,5 +129,64 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
     assert!(confirmed.get("cost").is_none());
     // A populated pool must also respect the configured fee floor.
     assert_eq!(bridge.pool_recommended_fee(1, 1), 2_500_000);
-    assert!(bridge.pool_recommended_fee(1, 10_000) > 2_500_000);
+    // Sparse canonical observations supply the relay floor, not fabricated congestion.
+    assert_eq!(bridge.pool_recommended_fee(1, 10_000), 2_500_000);
+    assert_eq!(
+        bridge.pool_expected_wait_time_ms(2_500_000, 10_000),
+        pool_fee_stats::UNKNOWN_WAIT_MS
+    );
+    assert!(
+        !bridge
+            .pool_fee_estimate(120_000, 1000, 0)
+            .unwrap()
+            .available
+    );
+}
+
+#[test]
+fn fee_model_pauses_during_same_height_reorg_commit_lag() {
+    let mut snap = crate::snapshot::NodeSnapshot::empty(
+        ApiInfo {
+            agent_name: "test".into(),
+            node_name: "test".into(),
+            network: "mainnet".into(),
+            version: "test".into(),
+            started_at_unix_ms: 0,
+            uptime_seconds: 0,
+            target_block_interval_ms: 120_000,
+        },
+        ApiWeightFunction::Cost,
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    snap.recent_blocks = Arc::new(
+        (0..4)
+            .map(|offset| ergo_api::types::ApiRecentBlock {
+                height: 100 - offset,
+                header_id: format!("{:064x}", 100 - offset),
+                ts_unix_ms: now - u64::from(offset) * 120_000,
+                txs: 2,
+                size_bytes: 1000,
+                delivered_by: None,
+                miner_pk: None,
+                miner_address: None,
+                fee_observation: Some(ergo_api::types::ApiBlockFeeObservation {
+                    transactions_size_bytes: 900,
+                    fee_paying_transactions: 1,
+                    fee_paying_size_bytes: 500,
+                    median_fee_per_byte_nano_erg: Some(2),
+                }),
+            })
+            .collect(),
+    );
+    snap.status.best_full_block_height = 100;
+    snap.tip.best_full_block.height = 100;
+    snap.tip.best_full_block.header_id = snap.recent_blocks[0].header_id.clone();
+    assert!(fee_model(&snap).is_some());
+    // The applied tip has switched forks; persisted sections still describe
+    // the old tip at the same height. Never forecast from those orphan samples.
+    snap.tip.best_full_block.header_id = "ab".repeat(32);
+    assert!(fee_model(&snap).is_none());
 }

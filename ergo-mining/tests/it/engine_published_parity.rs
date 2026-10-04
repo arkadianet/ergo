@@ -622,13 +622,15 @@ fn candidate_metrics_describe_retained_transactions_and_collected_fees() {
     };
     let (empty_c, empty_w) = on_loop_build(&store, &regime);
     assert_candidate_metrics(&empty_c, &empty_w, 0, 0);
+    let required = entry.bytes.clone();
+    let pool = MempoolReadSnapshot::from_entries(vec![entry.clone(), entry]);
     let (c, w, _) = generate_candidate(
         &store,
         ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
         // The duplicate input conflicts with the first entry and must be
         // skipped; selected count must describe the template, not pool size.
-        &MempoolReadSnapshot::from_entries(vec![entry.clone(), entry]),
+        &pool,
         &MINER_PK,
         &MonetarySettings::mainnet(),
         None,
@@ -649,6 +651,64 @@ fn candidate_metrics_describe_retained_transactions_and_collected_fees() {
     );
     assert!(w.metrics.validation_cost > empty_w.metrics.validation_cost + 1);
     assert!(w.metrics.transactions_size_bytes > empty_w.metrics.transactions_size_bytes);
+
+    // Exercise the complete requested build, including emission, the required
+    // user transaction, fee collection, AVL proof, roots and retained cache.
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: _tip,
+        chain_seq: 1,
+        synced: true,
+    });
+    let mut intent = build_intent(_tip, regime.parent_height);
+    intent.mempool = Arc::new(pool);
+    let forced = ergo_mining::engine::build_required_candidate(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        &[required.clone(), required],
+        || BUILT_AT_MS,
+        &|| false,
+    )
+    .unwrap()
+    .unwrap();
+    assert_candidate_metrics(&forced.candidate, &forced.work, 1, fee);
+    let required_id = *ergo_ser::transaction::transaction_id(&tx)
+        .unwrap()
+        .as_bytes();
+    assert_eq!(forced.candidate.required_transaction_ids, vec![required_id]);
+    assert_eq!(
+        forced
+            .candidate
+            .transactions
+            .iter()
+            .filter(|tx| ergo_ser::transaction::transaction_id(tx)
+                .unwrap()
+                .as_bytes()
+                == &required_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        handle
+            .cached_full_template_if_synced()
+            .unwrap()
+            .identity
+            .template_seq,
+        forced.identity.template_seq
+    );
+    assert_eq!(
+        *ergo_primitives::digest::blake2b256(
+            &ergo_ser::header::serialize_header_without_pow(&forced.candidate.header).unwrap()
+        )
+        .as_bytes(),
+        forced.work.msg
+    );
+    assert_eq!(
+        intent.mempool.len(),
+        2,
+        "the requested build does not mutate even duplicate pool entries"
+    );
 }
 
 // ----- happy path -----
@@ -2155,4 +2215,76 @@ fn benchmark_same_parent_full_refresh_proof_reuse() {
         let p95 = durations[(durations.len() * 95).div_ceil(100) - 1].as_secs_f64() * 1000.0;
         eprintln!("{label}: median_ms={median:.3} p95_ms={p95:.3} samples={SAMPLES} txs={COUNT}");
     }
+}
+
+#[test]
+fn required_candidate_rejection_does_not_publish_or_mutate_pool_and_success_hash_matches() {
+    use ergo_mining::engine::build_required_candidate;
+    let regime = Regime::pre_eip27();
+    let (_dir, mut store, tip) = synced_store(&regime);
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+    let intent = build_intent(tip, regime.parent_height);
+    let initial = build_required_candidate(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        &[],
+        || BUILT_AT_MS,
+        &|| false,
+    )
+    .unwrap()
+    .unwrap();
+    let bytes = ergo_ser::header::serialize_header_without_pow(&initial.candidate.header).unwrap();
+    assert_eq!(
+        *ergo_primitives::digest::blake2b256(&bytes).as_bytes(),
+        initial.work.msg
+    );
+    let root = store.root_digest();
+    let pool_ids: Vec<_> = intent.mempool.iter().map(|entry| entry.tx_id).collect();
+    let error = build_required_candidate(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        &[Arc::from(vec![0xff])],
+        || BUILT_AT_MS + 1,
+        &|| false,
+    )
+    .unwrap_err();
+    assert!(matches!(error, MiningError::RequiredTransactions(_)));
+    let after = handle.cached_full_template_if_synced().unwrap();
+    assert_eq!(after.identity.template_seq, initial.identity.template_seq);
+    assert_eq!(after.work.msg, initial.work.msg);
+    assert_eq!(store.root_digest(), root);
+    assert_eq!(
+        intent
+            .mempool
+            .iter()
+            .map(|entry| entry.tx_id)
+            .collect::<Vec<_>>(),
+        pool_ids
+    );
+    assert!(matches!(
+        build_required_candidate(
+            &store.reader_handle(),
+            &handle,
+            &intent,
+            &[],
+            || BUILT_AT_MS + 2,
+            &|| true
+        ),
+        Err(MiningError::BuildCancelled)
+    ));
+    assert_eq!(
+        handle
+            .cached_full_template_if_synced()
+            .unwrap()
+            .identity
+            .template_seq,
+        initial.identity.template_seq
+    );
 }

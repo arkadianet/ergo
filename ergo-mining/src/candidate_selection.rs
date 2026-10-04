@@ -347,6 +347,152 @@ pub fn select_user_txs_cancellable(
     Ok(sel)
 }
 
+/// Validate every requested transaction and its pool ancestors before optional
+/// selection. Neither the live pool nor its snapshot is mutated. Repeated IDs
+/// are included once; different witnesses for one requested ID are rejected.
+/// Input and data-input dependencies may be submitted in any order.
+#[allow(clippy::too_many_arguments)]
+pub fn select_required_txs_cancellable(
+    overlay: &mut CandidateOverlay,
+    required: &[std::sync::Arc<[u8]>],
+    snapshot: &MempoolReadSnapshot,
+    ctx: &TransactionContext,
+    params: &ProtocolParams,
+    last_headers: &[Header],
+    cost_budget: u64,
+    size_budget: u64,
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Selected, MiningError> {
+    if required.is_empty() {
+        return Ok(Selected::default());
+    }
+    use std::collections::{HashMap, HashSet};
+    let reject = |reason: String| MiningError::RequiredTransactions(reason);
+    let owners: HashMap<_, _> = snapshot
+        .iter()
+        .flat_map(|entry| entry.outputs.iter().map(move |id| (*id, entry)))
+        .collect();
+    let mut pending = Vec::new();
+    let mut seen = HashMap::new();
+    let mut total_bytes = 0u64;
+    let mut add = |bytes: std::sync::Arc<[u8]>, pending: &mut Vec<_>| -> Result<(), MiningError> {
+        let tx = parse_tx(&bytes).map_err(|e| reject(e.to_string()))?;
+        let id = transaction_id(&tx).map_err(|e| reject(format!("transaction id: {e:?}")))?;
+        if let Some(previous) = seen.get(&id) {
+            if previous != &bytes {
+                return Err(reject(format!(
+                    "different serialized transactions for {}",
+                    hex::encode(id.as_bytes())
+                )));
+            }
+            return Ok(());
+        }
+        total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+        if total_bytes > size_budget {
+            return Err(reject(
+                "requested transactions and ancestors exceed the block byte budget".into(),
+            ));
+        }
+        seen.insert(id, bytes.clone());
+        pending.push((id, tx, bytes));
+        Ok(())
+    };
+    // Explicit request bytes take precedence over a pool entry with the same id.
+    for bytes in required {
+        check_build_cancelled(should_cancel)?;
+        add(bytes.clone(), &mut pending)?;
+    }
+    let mut cursor = 0;
+    let mut expanded = HashSet::new();
+    while cursor < pending.len() {
+        check_build_cancelled(should_cancel)?;
+        let dependencies: Vec<_> = pending[cursor]
+            .1
+            .inputs
+            .iter()
+            .map(|i| i.box_id)
+            .chain(pending[cursor].1.data_inputs.iter().map(|i| i.box_id))
+            .collect();
+        for id in dependencies {
+            if let Some(entry) = owners.get(&id) {
+                if expanded.insert(entry.tx_id)
+                    && !pending
+                        .iter()
+                        .any(|(id, _, _)| id.as_bytes() == entry.tx_id.as_bytes())
+                {
+                    add(entry.bytes.clone(), &mut pending)?;
+                }
+            }
+        }
+        cursor += 1;
+    }
+    let block_cap = JitCost::from_block_cost(params.max_block_cost)
+        .map_err(|e| reject(format!("block cost: {e:?}")))?;
+    let mut selected = Selected::default();
+    while !pending.is_empty() {
+        let before = pending.len();
+        let mut deferred = Vec::new();
+        for (id, tx, bytes) in pending {
+            check_build_cancelled(should_cancel)?;
+            if tx
+                .inputs
+                .iter()
+                .any(|input| overlay.is_spent(&input.box_id))
+            {
+                return Err(reject(format!(
+                    "{} conflicts with a transaction already selected",
+                    hex::encode(id.as_bytes())
+                )));
+            }
+            let Some((inputs, data_inputs)) = overlay.resolve_tx(&tx) else {
+                deferred.push((id, tx, bytes));
+                continue;
+            };
+            let mut cost = CostAccumulator::new(block_cap);
+            let checked = validate_transaction_parsed(
+                tx,
+                &bytes,
+                inputs,
+                data_inputs,
+                false,
+                &mut TxValidationCtx {
+                    ctx,
+                    params,
+                    cost: &mut cost,
+                    last_headers,
+                    rules: TxValidationRules {
+                        reemission: reemission_rules,
+                    },
+                },
+            )
+            .map_err(|e| {
+                reject(format!(
+                    "{} failed candidate validation: {e:?}",
+                    hex::encode(id.as_bytes())
+                ))
+            })?;
+            let tx_cost = cost.total_block_cost();
+            if selected.total_cost.saturating_add(tx_cost) > cost_budget {
+                return Err(reject(
+                    "requested transactions and ancestors exceed the block cost budget".into(),
+                ));
+            }
+            overlay.apply_checked(&checked);
+            selected.total_cost = selected.total_cost.saturating_add(tx_cost);
+            selected.total_size = selected.total_size.saturating_add(bytes.len() as u64);
+            selected.checked.push((checked, tx_cost));
+        }
+        if deferred.len() == before {
+            return Err(reject(
+                "missing inputs or cyclic dependencies in requested transactions".into(),
+            ));
+        }
+        pending = deferred;
+    }
+    Ok(selected)
+}
+
 fn parse_tx(bytes: &[u8]) -> Result<Transaction, MiningError> {
     let mut r = VlqReader::new(bytes);
     let tx = read_transaction(&mut r).map_err(|e| MiningError::Decode {
@@ -443,6 +589,126 @@ mod tests {
         let elapsed = start.elapsed();
         let calls = VALIDATION_CALLS.with(|calls| calls.get());
         println!("1000 independent valid trivial-script txs; {PASSES} passes; budget={budget}; remaining=1; validation_calls/pass={}; elapsed={elapsed:?}; time/pass={:?}", calls / PASSES, elapsed / PASSES as u32);
+    }
+
+    #[test]
+    fn required_transactions_deduplicate_pool_entries_and_resolve_unordered_ancestors() {
+        let input = box_at(1_000_000_000, HEIGHT, 42);
+        let utxo = MapUtxo::new(std::slice::from_ref(&input));
+        let parent = spend_tx(&input, 1_000_000_000, HEIGHT);
+        let parent_id = transaction_id(&parent).unwrap();
+        let output = ErgoBox {
+            candidate: parent.output_candidates[0].clone(),
+            transaction_id: parent_id,
+            index: 0,
+        };
+        let child = spend_tx(&output, 1_000_000_000, HEIGHT);
+        let mut entry = wire_entry(&parent, 0, 1);
+        entry.tx_id = Digest32::from_bytes(*parent_id.as_bytes());
+        entry.outputs = vec![output.box_id().unwrap()];
+        let snapshot = MempoolReadSnapshot::from_entries(vec![entry]);
+        let child_bytes: std::sync::Arc<[u8]> = tx_bytes(&child).into();
+        let parent_bytes: std::sync::Arc<[u8]> = tx_bytes(&parent).into();
+        for requested in [
+            vec![child_bytes.clone()],
+            vec![
+                child_bytes.clone(),
+                parent_bytes.clone(),
+                child_bytes.clone(),
+            ],
+        ] {
+            let mut overlay = CandidateOverlay::new(&utxo);
+            let selected = select_required_txs_cancellable(
+                &mut overlay,
+                &requested,
+                &snapshot,
+                &ctx(),
+                &ProtocolParams::mainnet_default(),
+                &[],
+                u64::MAX,
+                u64::MAX,
+                None,
+                &|| false,
+            )
+            .unwrap();
+            assert_eq!(selected.checked.len(), 2);
+            assert_eq!(*selected.checked[0].0.tx_id(), *parent_id.as_bytes());
+            assert_eq!(
+                *selected.checked[1].0.tx_id(),
+                *transaction_id(&child).unwrap().as_bytes()
+            );
+            let optional = select_user_txs(
+                &mut overlay,
+                &snapshot,
+                &ctx(),
+                &ProtocolParams::mainnet_default(),
+                &[],
+                u64::MAX,
+                u64::MAX,
+                None,
+            )
+            .unwrap();
+            assert!(
+                optional.checked.is_empty(),
+                "required parent must not be selected twice from the pool"
+            );
+            assert_eq!(
+                snapshot.len(),
+                1,
+                "selection never removes the pooled parent"
+            );
+            assert!(utxo.get_box(&input.box_id().unwrap()).is_some());
+        }
+    }
+
+    #[test]
+    fn required_transactions_reject_invalid_conflicting_and_over_budget_sets() {
+        let input = box_at(1_000_000_000, HEIGHT, 43);
+        let utxo = MapUtxo::new(std::slice::from_ref(&input));
+        let tx = spend_tx(&input, 1_000_000_000, HEIGHT);
+        let bytes: std::sync::Arc<[u8]> = tx_bytes(&tx).into();
+        let snapshot = MempoolReadSnapshot::from_entries(vec![wire_entry(&tx, 0, 1)]);
+        let invalid = spend_tx(&input, 1_000_000_001, HEIGHT);
+        let conflict = spend_tx(&input, 1_000_000_000, HEIGHT + 1);
+        for (requested, cost, size) in [
+            (vec![bytes.clone()], 0, u64::MAX),
+            (vec![bytes.clone()], u64::MAX, 1),
+            (
+                vec![std::sync::Arc::from(tx_bytes(&invalid))],
+                u64::MAX,
+                u64::MAX,
+            ),
+            (
+                vec![bytes.clone(), std::sync::Arc::from(tx_bytes(&conflict))],
+                u64::MAX,
+                u64::MAX,
+            ),
+            (vec![std::sync::Arc::from(vec![0xff])], u64::MAX, u64::MAX),
+        ] {
+            let error = select_required_txs_cancellable(
+                &mut CandidateOverlay::new(&utxo),
+                &requested,
+                &snapshot,
+                &ctx(),
+                &ProtocolParams::mainnet_default(),
+                &[],
+                cost,
+                size,
+                None,
+                &|| false,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, MiningError::RequiredTransactions(_)),
+                "{error:?}"
+            );
+            assert_eq!(snapshot.len(), 1);
+            assert_eq!(
+                snapshot.iter().next().unwrap().bytes.as_ref(),
+                bytes.as_ref()
+            );
+            assert!(utxo.get_box(&input.box_id().unwrap()).is_some());
+        }
     }
 
     // ----- helpers -----

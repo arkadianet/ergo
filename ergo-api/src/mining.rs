@@ -25,7 +25,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use ergo_rest_json::mining::{
-    AutolykosSolutionJson, RewardAddressResponse, RewardPublicKeyResponse, WorkMessageJson,
+    AutolykosSolutionJson, MiningTemplateJson, RewardAddressResponse, RewardPublicKeyResponse,
+    WorkMessageJson,
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +50,25 @@ pub trait NodeMining: Send + Sync {
         &self,
         longpoll: Option<String>,
     ) -> Result<Option<WorkMessageJson>, MiningApiError>;
+
+    /// Complete current cached template. Default keeps older trait adapters
+    /// object-safe and reports their unsupported capability explicitly.
+    async fn template(&self) -> Result<Option<MiningTemplateJson>, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "full templates unsupported by this adapter".into(),
+        ))
+    }
+
+    /// Validate and publish a candidate containing every requested signed
+    /// transaction. Does not admit or broadcast these transactions.
+    async fn candidate_with_txs(
+        &self,
+        _transactions: Vec<Vec<u8>>,
+    ) -> Result<MiningTemplateJson, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "required transactions unsupported by this adapter".into(),
+        ))
+    }
 
     /// `POST /mining/solution`. Returns `Ok(())` on accepted-by-executor.
     async fn submit_solution(&self, solution: AutolykosSolutionJson) -> Result<(), MiningApiError>;

@@ -429,6 +429,18 @@ pub trait NodeChainQuery: Send + Sync {
     /// outputs are NOT matched against `box_id` because output box
     /// ids are derived deterministically from `(tx_id, output_index)`
     /// and a caller looking for "this box's existence" would query
+    /// Operator fee estimate with observation coverage and explicit unknowns.
+    /// Compatibility scalar endpoints may fall back to the relay floor when
+    /// recent canonical block observations are insufficient.
+    fn pool_fee_estimate(
+        &self,
+        _target_wait_ms: u64,
+        _tx_size_bytes: u32,
+        _tx_cost_units: u64,
+    ) -> Option<crate::types::ApiFeeEstimate> {
+        None
+    }
+
     /// `/utxo/byId/{boxId}` for confirmed state. Scala's mempool
     /// reader uses the same input-side scoping.
     fn pool_txs_by_box_id(&self, _box_id: &[u8; 32]) -> Vec<ScalaUnconfirmedTransaction> {
@@ -471,8 +483,8 @@ pub trait NodeChainQuery: Send + Sync {
     /// `bins = 10`, `maxtime = 60000` ms (1 minute).
     ///
     /// Per-tx wait-time estimate: bridge ranks pool txs by
-    /// fee-per-byte descending; tx at rank `r` has estimated
-    /// wait `(r / TX_PER_BLOCK) * BLOCK_TIME_MS`. Fee is the sum
+    /// fee-per-byte descending and projects their cumulative bytes/cost
+    /// against observed block intervals and current byte/cost capacity. Fee is the sum
     /// of output values paying to the canonical fee proposition
     /// (matches `ergo-mempool::validator`).
     fn pool_fee_histogram(
@@ -494,8 +506,9 @@ pub trait NodeChainQuery: Send + Sync {
 
     /// `GET /transactions/waitTime?fee=<nanoErgs>&txSize=<bytes>` —
     /// expected wait in milliseconds for a tx with the given
-    /// `fee` and `tx_size_bytes`. Default impl returns 0 (immediate)
-    /// when the pool is empty.
+    /// `fee` and `tx_size_bytes`. The node returns `u64::MAX` when recent
+    /// canonical observations are insufficient; operator forecasts are nullable.
+    /// Default adapter implementations retain their legacy 0 response.
     fn pool_expected_wait_time_ms(&self, _fee: u64, _tx_size_bytes: u32) -> u64 {
         0
     }

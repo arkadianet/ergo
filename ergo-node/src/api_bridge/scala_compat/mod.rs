@@ -727,80 +727,117 @@ impl NodeChainQuery for ScalaCompatBridge {
         maxtime_ms: u64,
     ) -> Vec<ergo_api::compat::types::ScalaFeeHistogramBin> {
         let snap = self.handle.load();
-        let ranked = pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs);
-        // Cap `bins` at MAX_HISTOGRAM_BINS so a caller passing
-        // `u32::MAX` cannot DoS the response with a multi-gigabyte
-        // allocation (4096 entries × 16 bytes = 64 KiB — well
-        // beyond any visualization need; OpenAPI sets no maximum
-        // but a server-side cap is the responsible behavior).
-        // Also avoids the 32-bit target overflow where
-        // `bins as usize + 1` could wrap.
+        let ranked =
+            pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs, &pool_costs(&snap));
+        let model = fee_model(&snap);
         let bin_count = (bins.max(1) as usize).min(pool_fee_stats::MAX_HISTOGRAM_BINS);
         let mut out = vec![
             ergo_api::compat::types::ScalaFeeHistogramBin {
                 n_txns: 0,
-                total_fee: 0,
+                total_fee: 0
             };
             bin_count + 1
         ];
-        for (rank, entry) in ranked.iter().enumerate() {
-            let wait_ms = pool_fee_stats::estimate_wait_ms_from_rank(rank as u64);
-            let bin_index = pool_fee_stats::bin_for_wait_ms(wait_ms, bin_count, maxtime_ms);
-            out[bin_index].n_txns = out[bin_index].n_txns.saturating_add(1);
-            out[bin_index].total_fee = out[bin_index].total_fee.saturating_add(entry.fee);
+        let mut bytes = 0u64;
+        let mut cost = 0u64;
+        for entry in &ranked {
+            bytes = bytes.saturating_add(entry.size_bytes);
+            cost = cost.saturating_add(entry.cost_units);
+            let wait_ms = model
+                .as_ref()
+                .map(|model| model.wait_ms(bytes, cost).0)
+                .unwrap_or(pool_fee_stats::UNKNOWN_WAIT_MS);
+            let index = pool_fee_stats::bin_for_wait_ms(wait_ms, bin_count, maxtime_ms);
+            out[index].n_txns = out[index].n_txns.saturating_add(1);
+            out[index].total_fee = out[index].total_fee.saturating_add(entry.fee);
         }
         out
     }
 
     fn pool_recommended_fee(&self, wait_time_minutes: u32, tx_size_bytes: u32) -> u64 {
-        let floor = self.static_cfg.min_relay_fee_nano_erg;
-        if tx_size_bytes == 0 {
-            return floor;
-        }
-        let snap = self.handle.load();
-        let ranked = pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs);
-        if ranked.is_empty() {
-            return floor;
-        }
-        let target_ms = (wait_time_minutes as u64).saturating_mul(60_000);
-        // Find the highest fee-per-byte that would land within
-        // `target_ms`. The ranking is descending by fee/byte, so the
-        // tx whose estimated wait first exceeds `target_ms` defines
-        // the threshold — bid one above its fee/byte to displace it.
-        let mut threshold_fee_per_byte: u64 = 0;
-        for (rank, entry) in ranked.iter().enumerate() {
-            let wait_ms = pool_fee_stats::estimate_wait_ms_from_rank(rank as u64);
-            if wait_ms <= target_ms {
-                threshold_fee_per_byte = entry.fee_per_byte;
-            } else {
-                break;
-            }
-        }
-        let recommended = threshold_fee_per_byte
-            .saturating_add(1)
-            .saturating_mul(tx_size_bytes as u64);
-        recommended.max(floor)
+        self.pool_fee_estimate(
+            u64::from(wait_time_minutes).saturating_mul(60_000),
+            tx_size_bytes,
+            0,
+        )
+        .and_then(|estimate| {
+            estimate
+                .recommended_fee_nano_erg
+                .and_then(|fee| fee.parse().ok())
+        })
+        .unwrap_or(self.static_cfg.min_relay_fee_nano_erg)
     }
 
     fn pool_expected_wait_time_ms(&self, fee: u64, tx_size_bytes: u32) -> u64 {
         if tx_size_bytes == 0 {
-            return 0;
+            return pool_fee_stats::UNKNOWN_WAIT_MS;
         }
         let snap = self.handle.load();
-        let ranked = pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs);
-        let our_fee_per_byte = fee / tx_size_bytes as u64;
-        // Position = number of pool txs with fee/byte >= ours.
-        // Existing pool entries at equal fee/byte queue AHEAD of a
-        // new submission (they're already in the pool; we'd join
-        // after them under any stable sort policy), so this counts
-        // ">=" not just ">". Counting only strict ">" would
-        // underestimate wait time for tx volumes clustered at a
-        // single fee/byte tier.
-        let rank_count = ranked
-            .iter()
-            .take_while(|e| e.fee_per_byte >= our_fee_per_byte)
-            .count();
-        pool_fee_stats::estimate_wait_ms_from_rank(rank_count as u64)
+        let Some(model) = fee_model(&snap) else {
+            return pool_fee_stats::UNKNOWN_WAIT_MS;
+        };
+        let ranked =
+            pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs, &pool_costs(&snap));
+        model.wait_for_fee(&ranked, fee, tx_size_bytes, 0).0
+    }
+
+    fn pool_fee_estimate(
+        &self,
+        target_wait_ms: u64,
+        tx_size_bytes: u32,
+        tx_cost_units: u64,
+    ) -> Option<ergo_api::types::ApiFeeEstimate> {
+        let snap = self.handle.load();
+        let target_wait_ms = target_wait_ms.min(pool_fee_stats::MAX_ESTIMATE_WAIT_MS);
+        let floor = self.static_cfg.min_relay_fee_nano_erg;
+        let mut estimate = ergo_api::types::ApiFeeEstimate {
+            available: false, confidence: "insufficient_data".into(),
+            reason: Some("need at least four fresh contiguous canonical blocks, three valid timestamp intervals and three confirmed fee-paying transactions".into()),
+            sample_blocks: snap.recent_blocks.len() as u32,
+            confirmed_fee_paying_transactions: snap.recent_blocks.iter().filter_map(|b| b.fee_observation.as_ref())
+                .fold(0u32, |count, sample| count.saturating_add(sample.fee_paying_transactions)),
+            observed_block_interval_ms: None, block_byte_capacity: None, block_cost_capacity: None,
+            observed_median_fee_per_byte_nano_erg: None,
+            target_wait_ms, target_feasible: false, tx_size_bytes, tx_cost_units,
+            recommended_fee_nano_erg: None, estimated_wait_ms: None, estimate_capped: false,
+        };
+        if tx_size_bytes == 0 {
+            estimate.reason = Some("transaction size must be nonzero".into());
+            return Some(estimate);
+        }
+        let Some(model) = fee_model(&snap) else {
+            return Some(estimate);
+        };
+        if u64::from(tx_size_bytes) > model.bytes_per_block || tx_cost_units > model.cost_per_block
+        {
+            estimate.reason = Some("transaction exceeds the projected per-block capacity".into());
+            return Some(estimate);
+        }
+        let ranked =
+            pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs, &pool_costs(&snap));
+        let fee =
+            model.recommendation(&ranked, target_wait_ms, tx_size_bytes, tx_cost_units, floor);
+        let (wait_ms, capped) = model.wait_for_fee(&ranked, fee, tx_size_bytes, tx_cost_units);
+        estimate.available = true;
+        estimate.confidence = if model.sample_blocks >= 16 && model.confirmed_transactions >= 32 {
+            "medium"
+        } else {
+            "low"
+        }
+        .into();
+        estimate.reason = None;
+        estimate.sample_blocks = model.sample_blocks;
+        estimate.confirmed_fee_paying_transactions = model.confirmed_transactions;
+        estimate.observed_block_interval_ms = Some(model.interval_ms);
+        estimate.block_byte_capacity = Some(model.bytes_per_block);
+        estimate.block_cost_capacity = Some(model.cost_per_block);
+        estimate.observed_median_fee_per_byte_nano_erg =
+            model.median_fee_rate.map(|rate| rate.to_string());
+        estimate.target_feasible = target_wait_ms >= model.interval_ms;
+        estimate.recommended_fee_nano_erg = Some(fee.to_string());
+        estimate.estimated_wait_ms = Some(wait_ms);
+        estimate.estimate_capped = capped;
+        Some(estimate)
     }
 
     fn pool_txs_by_registers(
@@ -1163,6 +1200,34 @@ pub(super) fn encode_scala_output_from_raw(
         hex::encode(id),
         hex::encode(parsed.transaction_id.as_bytes()),
         parsed.index,
+    )
+}
+
+/// Observe committed canonical blocks only. A stopped/stale snapshot or a
+/// recent-block tail that does not reach the in-memory tip supplies no forecast.
+fn fee_model(snap: &crate::snapshot::NodeSnapshot) -> Option<pool_fee_stats::FeeCapacityModel> {
+    if snap.produced_at.elapsed() > std::time::Duration::from_secs(60) {
+        return None;
+    }
+    let newest = snap.recent_blocks.first()?;
+    if newest.height != snap.status.best_full_block_height
+        || newest.header_id != snap.tip.best_full_block.header_id
+    {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    if now.saturating_sub(newest.ts_unix_ms) > 3_600_000
+        || newest.ts_unix_ms > now.saturating_add(120_000)
+    {
+        return None;
+    }
+    pool_fee_stats::FeeCapacityModel::from_blocks(
+        &snap.recent_blocks,
+        u64::try_from(snap.active_params.max_block_size).ok()?,
+        u64::try_from(snap.active_params.max_block_cost).ok()?,
     )
 }
 

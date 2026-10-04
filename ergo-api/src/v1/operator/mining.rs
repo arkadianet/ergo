@@ -2,8 +2,8 @@
 //! endpoints (T1) reuse [`NodeMining`](crate::mining::NodeMining) — the existing
 //! PoW/candidate machinery — mapping its [`MiningApiError`] onto the standard
 //! error envelope. `miner-stats` (T0) folds the same headers the compat handler
-//! reads; `status` (T0) composes existing snapshot reads. `candidate-with-txs`
-//! has no trait seam yet, so it answers the honest `route_unavailable`.
+//! reads; `status` (T0) composes existing snapshot reads. Full templates and
+//! requested-transaction candidates use the same mining bridge and validation.
 
 use axum::{
     extract::{Query, State},
@@ -317,19 +317,116 @@ pub(crate) async fn reward_pubkey(State(s): State<OperatorState>) -> Response {
     }
 }
 
-/// `POST /api/v1/mining/candidate-with-txs` — T1, seam-deferred. The wire shape
-/// is documented but no `NodeMining::candidate_with_txs` seam exists,
-/// so this answers the honest `route_unavailable` rather than silently ignoring
-/// the forced-tx set. Still gated at `Tier::Operator`.
+/// `GET /api/v1/mining/template` returns the exact frozen template behind
+/// mining work. All binary artifacts are canonical hex; hashing the header
+/// without PoW yields `work.msg`. This read never starts a candidate build.
 #[utoipa::path(
-    post, path = "/api/v1/mining/candidate-with-txs", tag = "mining",
-    responses((status = 503, description = "Forced-transaction candidate building not wired on this node", body = V1Error)),
+    get, path = "/api/v1/mining/template", operation_id = "v1_mining_template_get", tag = "mining",
+    responses(
+        (status = 200, description = "Complete frozen template: work, header_without_pow, ordered transaction IDs/bytes, extension key/value pairs, ad_proofs, and required_transaction_ids", body = serde_json::Value),
+        (status = 503, description = "No current template available", body = V1Error),
+    ),
     security(("ApiKeyAuth" = [])),
 )]
-pub(crate) async fn candidate_with_txs(State(_s): State<OperatorState>) -> Response {
-    v1_error(
-        Reason::RouteUnavailable,
-        "forced-transaction candidate building is not wired on this node",
-        "POST /mining/candidate-with-txs needs a NodeMining::candidate_with_txs seam (Phase-1 machinery exists; the trait method does not)",
-    )
+pub(crate) async fn template(State(s): State<OperatorState>) -> Response {
+    let mining = match s.mining() {
+        Ok(m) => m,
+        Err(e) => return *e,
+    };
+    match mining.template().await {
+        Ok(Some(template)) => Json(template).into_response(),
+        Ok(None) => v1_error(
+            Reason::CandidateUnavailable,
+            "no current mining template",
+            "retry when mining work is available",
+        ),
+        Err(error) => map_mining_error(error, Reason::CandidateUnavailable),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RequiredTransactionInput {
+    Bytes(String),
+    Transaction(ergo_rest_json::types::ScalaTransactionInput),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequiredTransactionsRequest {
+    transactions: Vec<RequiredTransactionInput>,
+}
+
+/// Request-specific selection: validate all requested signed transactions and
+/// pool ancestors against the frozen candidate context, then fill spare
+/// capacity from the pool. Invalid/conflicting/oversized sets fail atomically;
+/// successful requests publish a retained template without pool admission.
+#[utoipa::path(
+    post, path = "/api/v1/mining/candidate-with-txs", tag = "mining",
+    request_body(content = serde_json::Value, description = "{transactions: [...]}: at most 256 signed Scala transaction objects or canonical transaction hex strings, at most 1 MiB decoded bytes; dependencies may be unordered; repeated identical IDs are included once"),
+    responses(
+        (status = 200, description = "Complete validated template containing all requested transactions", body = serde_json::Value),
+        (status = 400, description = "Malformed, invalid, unresolved, conflicting, or over-budget requested transactions", body = V1Error),
+        (status = 503, description = "Mining unavailable, tip changed, or another requested build is running", body = V1Error),
+        (status = 504, description = "Requested build timed out (30 seconds)", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn candidate_with_txs(
+    State(s): State<OperatorState>,
+    body: axum::body::Bytes,
+) -> Response {
+    let mining = match s.mining() {
+        Ok(m) => m,
+        Err(e) => return *e,
+    };
+    let request: RequiredTransactionsRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return v1_error(
+                Reason::BadRequest,
+                "invalid required transactions request",
+                error.to_string(),
+            )
+        }
+    };
+    if request.transactions.len() > 256 {
+        return v1_error(
+            Reason::BadRequest,
+            "too many requested transactions",
+            "at most 256 transactions per request",
+        );
+    }
+    let mut transactions = Vec::with_capacity(request.transactions.len());
+    let mut size = 0usize;
+    for input in request.transactions {
+        let bytes = match input {
+            RequiredTransactionInput::Bytes(hex_bytes) => {
+                hex::decode(hex_bytes).map_err(|e| e.to_string())
+            }
+            RequiredTransactionInput::Transaction(tx) => {
+                ergo_rest_json::decode::decode_scala_transaction(&tx)
+                    .map_err(|(reason, detail)| format!("{reason}: {detail}"))
+            }
+        };
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return v1_error(Reason::BadRequest, "invalid required transaction", error)
+            }
+        };
+        size = size.saturating_add(bytes.len());
+        if size > 1_048_576 {
+            return v1_error(
+                Reason::BadRequest,
+                "requested transactions exceed byte limit",
+                "at most 1 MiB decoded transaction bytes",
+            );
+        }
+        transactions.push(bytes);
+    }
+    match mining.candidate_with_txs(transactions).await {
+        Ok(template) => Json(template).into_response(),
+        Err(error) => map_mining_error(error, Reason::CandidateUnavailable),
+    }
 }

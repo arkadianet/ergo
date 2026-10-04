@@ -348,8 +348,9 @@ pub(super) async fn action_loop(
                         mining_last_revision = revision_now;
                         mining_last_mempool_signal = Some(now);
                     }
-                    // Startup is only used at the prime call above, never here.
-                    BuildReason::Startup => {}
+                    // Startup primes above; requested builds use their own
+                    // off-loop request channel. Neither is signalled here.
+                    BuildReason::Startup | BuildReason::RequiredTransactions => {}
                 }
             } else {
                 // Header-only transitions do not regenerate an unchanged

@@ -60,6 +60,8 @@ pub enum BuildReason {
     /// builds again on the next candidate request; the eager rebuild is this
     /// node's choice, so a miner polling for work is not left without it.
     SolvedBlockFailed,
+    /// Authenticated, request-scoped transaction selection.
+    RequiredTransactions,
 }
 
 /// How far the header tip may lead the applied full-block tip while mining
@@ -560,6 +562,80 @@ fn generate_from_view<V: CandidateStateView>(
         }
         None => generate!(view),
     }
+}
+
+/// Build one requested template against a committed snapshot without changing
+/// the mempool. The caller bounds concurrency and holds its permit until this
+/// function finishes, including after an HTTP timeout. Requested candidates
+/// omit optional rent sweeping so a miner's requested spend gets priority.
+/// Publication uses the ordinary retained-template and stale-parent rules.
+pub fn build_required_candidate(
+    reader: &ChainStoreReader,
+    handle: &MiningHandle,
+    intent: &BuildIntent,
+    required: &[Arc<[u8]>],
+    now_ms: impl Fn() -> u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<Template>, MiningError> {
+    let Some(snapshot) = reader
+        .committed_snapshot()
+        .map_err(|e| MiningError::StateRead {
+            op: "required_candidate_snapshot",
+            reason: format!("{e:?}"),
+        })?
+    else {
+        return Ok(None);
+    };
+    if snapshot.best_full_block_id() != intent.expected_parent || !handle.best_tip().synced {
+        return Ok(None);
+    }
+    let should_cancel = || {
+        cancelled() || {
+            let tip = handle.best_tip();
+            !tip.synced || tip.parent_id != intent.expected_parent
+        }
+    };
+    let mut suspects = Vec::new();
+    let extension = handle.resolve_extension_fields()?;
+    let Some((candidate, work, _)) =
+        crate::candidate::generate_candidate_with_required_cancellable(
+            &snapshot,
+            handle.network(),
+            BuildMode::Full,
+            &intent.mempool,
+            &intent.miner_pk,
+            handle.monetary(),
+            handle.reemission_ref(),
+            handle.reemission_rules_ref(),
+            handle.chain_config(),
+            &[],
+            &handle.voting_targets(),
+            handle.voting_settings(),
+            &extension,
+            &mut suspects,
+            required,
+            &should_cancel,
+        )?
+    else {
+        return Ok(None);
+    };
+    crate::error::check_build_cancelled(&should_cancel)?;
+    let Some(identity) = handle.publish_if_current(
+        candidate.clone(),
+        work.clone(),
+        &intent.expected_parent,
+        now_ms,
+        BuildReason::RequiredTransactions,
+    ) else {
+        return Ok(None);
+    };
+    // Request failures never evict pooled transactions. Ordinary engine builds
+    // independently recheck suspects against the live tip.
+    Ok(Some(Template {
+        candidate,
+        work,
+        identity,
+    }))
 }
 
 #[cfg(test)]

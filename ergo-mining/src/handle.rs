@@ -640,6 +640,16 @@ impl MiningHandle {
             .map(|t| (t.work.clone(), t.identity.clone()))
     }
 
+    /// Clone all artifacts under the same current-tip check as work-message
+    /// serving. This returns one frozen template, never a mix of refreshes.
+    pub fn cached_full_template_if_synced(&self) -> Option<Template> {
+        let cache = self.cache.read().expect("cache poisoned");
+        if !cache.best_tip.synced {
+            return None;
+        }
+        cache.newest_offered_on(&cache.best_tip.parent_id).cloned()
+    }
+
     /// Convenience constructor for mainnet with a pinned pubkey.
     pub fn mainnet(miner_pk: [u8; 33]) -> Self {
         Self::new(
@@ -1071,6 +1081,7 @@ mod tests {
             last_block_utxo_root: build_last_block_utxo_root(ADDigest::from_bytes([0u8; 33])),
         };
         let candidate = Candidate {
+            required_transaction_ids: Vec::new(),
             header: h,
             validation_ctx,
             transactions: Vec::new(),

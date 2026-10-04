@@ -536,6 +536,16 @@ pub(super) fn handle_mining_request(
                         "mining disabled".into(),
                     )));
                 }
+                crate::mining_bridge::MiningRequest::GetTemplate { reply } => {
+                    let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
+                        "mining disabled".into(),
+                    )));
+                }
+                crate::mining_bridge::MiningRequest::CandidateWithTxs { reply, .. } => {
+                    let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
+                        "mining disabled".into(),
+                    )));
+                }
             }
             return false;
         }
@@ -586,6 +596,12 @@ pub(super) fn handle_mining_request(
                 let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(msg)));
             }
             crate::mining_bridge::MiningRequest::SubmitSolution { reply, .. } => {
+                let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(msg)));
+            }
+            crate::mining_bridge::MiningRequest::GetTemplate { reply } => {
+                let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(msg)));
+            }
+            crate::mining_bridge::MiningRequest::CandidateWithTxs { reply, .. } => {
                 let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(msg)));
             }
             // GetRewardKey is answered before this mining-started gate (above).
@@ -641,6 +657,71 @@ pub(super) fn handle_mining_request(
                     }
                 };
             let _ = reply.send(payload);
+            false
+        }
+        crate::mining_bridge::MiningRequest::GetTemplate { reply } => {
+            let payload = Ok(handle.cached_full_template_if_synced());
+            let _ = reply.send(payload);
+            false
+        }
+        crate::mining_bridge::MiningRequest::CandidateWithTxs {
+            transactions,
+            permit,
+            reply,
+        } => {
+            let Some(store) = state.store.as_utxo() else {
+                let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
+                    "UTXO state required for mining".into(),
+                )));
+                return false;
+            };
+            let miner_pk = match handle.resolve_reward_key(store) {
+                RewardKeyResolution::Ready(pk) => pk,
+                _ => {
+                    let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
+                        "miner reward key unavailable".into(),
+                    )));
+                    return false;
+                }
+            };
+            let tip = MiningTipSnapshot::capture(state);
+            let intent = ergo_mining::engine::BuildIntent {
+                expected_parent: tip.best_full_id,
+                expected_height: tip.best_full_height,
+                mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::from_pool(
+                    &state.mempool,
+                )),
+                miner_pk,
+                reason: BuildReason::RequiredTransactions,
+            };
+            let reader = ergo_state::reader::ChainStoreReader::new_from_db(state.store.db_arc());
+            let handle = handle.clone();
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                if reply.is_closed() {
+                    return;
+                }
+                let payload = match ergo_mining::engine::build_required_candidate(
+                    &reader,
+                    &handle,
+                    &intent,
+                    &transactions,
+                    now_unix_ms,
+                    &|| reply.is_closed(),
+                ) {
+                    Ok(Some(template)) => crate::mining_bridge::template_to_json(template),
+                    Ok(None) | Err(ergo_mining::error::MiningError::BuildCancelled) => {
+                        Err(ergo_api::MiningApiError::Unavailable(
+                            "tip changed or committed tip is not yet visible; retry".into(),
+                        ))
+                    }
+                    Err(ergo_mining::error::MiningError::RequiredTransactions(reason)) => {
+                        Err(ergo_api::MiningApiError::BadRequest(reason))
+                    }
+                    Err(error) => Err(ergo_api::MiningApiError::Internal(error.to_string())),
+                };
+                let _ = reply.send(payload);
+            });
             false
         }
         crate::mining_bridge::MiningRequest::SubmitSolution { solution, reply } => {
