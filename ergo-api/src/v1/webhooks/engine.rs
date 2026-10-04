@@ -632,6 +632,22 @@ impl WebhookEngine {
                 (s.webhook_id.clone(), channel)
             })
             .collect();
+        let hits: Vec<_> = hits
+            .into_iter()
+            .filter(|(id, _)| !g.dedupe.contains(&(id.clone(), event.seq)))
+            .collect();
+        let room = DELIVERY_RING_CAP.saturating_sub(g.deliveries.len())
+            + g.deliveries
+                .iter()
+                .filter(|delivery| !delivery.status.is_open())
+                .count();
+        if hits.len() > room
+            || g.next_dl
+                .checked_add(hits.len() as u64)
+                .is_none_or(|next| next == u64::MAX)
+        {
+            return (0, false);
+        }
         let mut enqueued = 0;
         let mut complete = true;
         for (webhook_id, channel) in hits {
@@ -1135,6 +1151,54 @@ mod tests {
         event.seq = 3;
         event.event = "tx_accepted";
         assert_eq!(engine.enqueue_matches(&event, 0), 0);
+    }
+
+    #[test]
+    fn durable_multi_hook_admission_is_atomic_when_only_one_slot_remains() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        let first = register_blocks(&engine);
+        engine
+            .mutate(|g| {
+                for seq in 1..DELIVERY_RING_CAP as u64 {
+                    assert_eq!(
+                        WebhookEngine::admit_event(g, &blocks_event(seq, true), 0, true).0,
+                        1
+                    );
+                }
+            })
+            .unwrap();
+        let second = register_blocks(&engine);
+        let event = Arc::new(blocks_event(DELIVERY_RING_CAP as u64, true));
+        assert!(!engine.admit_page(std::slice::from_ref(&event), event.seq, 0));
+        assert_eq!(
+            engine
+                .deliveries_for(&first.webhook_id, 0, DELIVERY_RING_CAP)
+                .len(),
+            DELIVERY_RING_CAP - 1
+        );
+        assert!(engine.deliveries_for(&second.webhook_id, 0, 10).is_empty());
+        assert_eq!(engine.replay_seq(), event.seq - 1);
+        drop(engine);
+        let engine = durable(store.clone());
+        let due = engine.take_due(0).remove(0);
+        engine.record_result(&due.delivery_id, DeliveryOutcome::Success(204), 1);
+        assert!(engine.admit_page(std::slice::from_ref(&event), event.seq, 2));
+        assert_eq!(engine.replay_seq(), event.seq);
+        let first_delivery = engine.deliveries_for(&first.webhook_id, 0, 1).remove(0);
+        let second_delivery = engine.deliveries_for(&second.webhook_id, 0, 1).remove(0);
+        drop(engine);
+        let engine = durable(store);
+        assert_eq!(
+            engine.deliveries_for(&first.webhook_id, 0, 1)[0].delivery_id,
+            first_delivery.delivery_id
+        );
+        assert_eq!(
+            engine.deliveries_for(&second.webhook_id, 0, 1)[0].delivery_id,
+            second_delivery.delivery_id
+        );
+        assert!(engine.admit_page(std::slice::from_ref(&event), event.seq, 3));
+        assert_eq!(engine.deliveries_for(&second.webhook_id, 0, 10).len(), 1);
     }
 
     #[test]
