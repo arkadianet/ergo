@@ -161,6 +161,23 @@ pub fn run(command: &crate::config::Command) -> Result<String> {
             discard_backups,
             keep_stale_indexer,
         } => {
+            // Startup may create a fresh data directory; this command must not,
+            // or a mistyped path would report a no-op upgrade of a new empty one.
+            match fs::metadata(data_dir) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    return Err(fail(format!(
+                        "data directory is not a directory: {}",
+                        data_dir.display()
+                    )))
+                }
+                Err(error) => {
+                    return Err(fail(format!(
+                        "cannot use data directory {}: {error}",
+                        data_dir.display()
+                    )))
+                }
+            }
             let lock = crate::data_upgrade::DataDirectoryLock::acquire(data_dir)?;
             let report = crate::data_upgrade::upgrade_with_logging(
                 &lock,
@@ -1351,5 +1368,31 @@ mod tests {
                 .command
                 .is_some());
         }
+    }
+
+    #[test]
+    fn upgrade_data_refuses_missing_or_non_directory_data_dir_without_creating_it() {
+        let parent = tempfile::tempdir().unwrap();
+        let file = parent.path().join("not-a-directory");
+        fs::write(&file, b"keep").unwrap();
+        for (data_dir, expected) in [
+            (
+                parent.path().join("mistyped/ergo-data"),
+                "cannot use data directory",
+            ),
+            (file.clone(), "data directory is not a directory"),
+        ] {
+            let error = run(&crate::config::Command::UpgradeData {
+                data_dir: data_dir.clone(),
+                indexer_db: "indexer.redb".into(),
+                discard_backups: false,
+                keep_stale_indexer: false,
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        assert!(!parent.path().join("mistyped").exists());
+        assert_eq!(fs::read(&file).unwrap(), b"keep");
     }
 }
