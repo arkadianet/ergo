@@ -69,6 +69,7 @@ use super::NodeState;
 pub(super) struct MiningWiring {
     pub(super) handle: MiningHandle,
     pub(super) intent_tx: watch::Sender<Option<BuildIntent>>,
+    pub(super) request_tx: std::sync::mpsc::Sender<super::mining_engine::BuildRequest>,
     /// Debounce window for the same-parent mempool-refresh trigger
     /// (`[mining].block_candidate_generation_interval_ms`). A burst of pool
     /// mutations between tip changes collapses into at most one rebuild per
@@ -512,6 +513,7 @@ pub(super) fn handle_mining_request(
     state: &mut NodeState,
     mining_handle: Option<&ergo_mining::handle::MiningHandle>,
     offline_generation: bool,
+    worker_tx: Option<&std::sync::mpsc::Sender<super::mining_engine::BuildRequest>>,
     req: crate::mining_bridge::MiningRequest,
 ) -> bool {
     let handle = match mining_handle {
@@ -521,7 +523,8 @@ pub(super) fn handle_mining_request(
             // the request carries. We avoid `panic!` even though
             // this branch is unreachable in steady state.
             match req {
-                crate::mining_bridge::MiningRequest::GetCandidate { reply } => {
+                crate::mining_bridge::MiningRequest::GetCandidate { reply }
+                | crate::mining_bridge::MiningRequest::GetCandidateWithTxs { reply, .. } => {
                     let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
                         "mining disabled".into(),
                     )));
@@ -582,7 +585,8 @@ pub(super) fn handle_mining_request(
     if !handle.best_tip().synced {
         let msg = MiningTipSnapshot::capture(state).startup_wait_message(offline_generation);
         match req {
-            crate::mining_bridge::MiningRequest::GetCandidate { reply } => {
+            crate::mining_bridge::MiningRequest::GetCandidate { reply }
+            | crate::mining_bridge::MiningRequest::GetCandidateWithTxs { reply, .. } => {
                 let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(msg)));
             }
             crate::mining_bridge::MiningRequest::SubmitSolution { reply, .. } => {
@@ -597,6 +601,59 @@ pub(super) fn handle_mining_request(
     }
 
     match req {
+        crate::mining_bridge::MiningRequest::GetCandidateWithTxs {
+            transactions,
+            miner_pk,
+            reply,
+            permit,
+        } => {
+            let Some(worker_tx) = worker_tx else {
+                let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
+                    "mining worker unavailable".into(),
+                )));
+                return false;
+            };
+            let miner_pk = match miner_pk {
+                Some(pk) => pk,
+                None => match state
+                    .store
+                    .as_utxo()
+                    .map(|store| handle.resolve_reward_key(store))
+                {
+                    Some(RewardKeyResolution::Ready(pk)) => pk,
+                    Some(RewardKeyResolution::Corrupt) => {
+                        let _ = reply.send(Err(ergo_api::MiningApiError::Internal(
+                            "reward key corrupt".into(),
+                        )));
+                        return false;
+                    }
+                    _ => {
+                        let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
+                            "reward key pending".into(),
+                        )));
+                        return false;
+                    }
+                },
+            };
+            let tip = MiningTipSnapshot::capture(state);
+            let intent = BuildIntent {
+                expected_parent: tip.best_full_id,
+                expected_height: tip.best_full_height,
+                mempool: Arc::new(ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool)),
+                miner_pk,
+                reason: BuildReason::Requested,
+            };
+            // The API-owned permit caps queued requests. Sending is nonblocking;
+            // validation and AVL proof generation run on the existing worker.
+            let request =
+                super::mining_engine::BuildRequest::requested(intent, transactions, reply, permit);
+            if worker_tx.send(request).is_err() {
+                // Dropping the failed request closes its reply and releases its
+                // admission permit; the bridge maps closure to unavailable.
+                tracing::warn!("mining request worker stopped");
+            }
+            false
+        }
         crate::mining_bridge::MiningRequest::GetCandidate { reply } => {
             // Cache-only serve. The off-loop engine is the sole candidate
             // producer (it CAS-publishes one candidate per tip into the shared

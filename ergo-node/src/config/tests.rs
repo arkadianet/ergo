@@ -2432,3 +2432,20 @@ fn api_script_policy_resolves_and_rejects_misspellings_and_invalid_costs() {
         );
     }
 }
+
+#[test]
+fn legacy_mining_auth_requires_a_configured_key() {
+    let file = temp_toml("[api.security]\nallow_unauthenticated_legacy_mining = true\n");
+    let error = NodeConfig::load(minimal_cli(Some(file.path()))).unwrap_err();
+    assert!(error.contains("allow_unauthenticated_legacy_mining requires api_key_hash"));
+}
+
+#[test]
+fn legacy_mining_auth_defaults_closed_and_explicit_opt_in_loads() {
+    let default_file = default_toml();
+    let cfg = NodeConfig::load(minimal_cli(Some(default_file.path()))).unwrap();
+    assert!(!cfg.allow_unauthenticated_legacy_mining);
+    let file = temp_toml(&format!("[api.security]\napi_key_hash = \"{TEST_DEFAULT_API_KEY_HASH}\"\nallow_unauthenticated_legacy_mining = true\n"));
+    let cfg = NodeConfig::load(minimal_cli(Some(file.path()))).unwrap();
+    assert!(cfg.allow_unauthenticated_legacy_mining);
+}

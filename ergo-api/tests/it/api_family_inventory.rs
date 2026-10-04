@@ -458,7 +458,7 @@ fn assert_operation_inventory_matches_fixture(
 fn canonical_scala_and_rust_operation_inventories_are_disjoint() {
     let scala = scala_openapi_operations();
     let rust = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI must merge"));
-    assert_eq!(scala.len(), 125);
+    assert_eq!(scala.len(), 127);
     assert_eq!(rust.len(), 181);
     assert_operation_inventory_matches_fixture(&scala, "api_family_scala_operations.txt");
     assert_operation_inventory_matches_fixture(&rust, "api_family_rust_operations.txt");
@@ -478,12 +478,38 @@ fn canonical_scala_and_rust_operation_inventories_are_disjoint() {
         "/transactions/unconfirmed/outputs/byErgoTree",
         "/transactions/unconfirmed/outputs/byTokenId/{tokenId}",
         "/transactions/unconfirmed/outputs/byRegisters",
-        "/mining/candidateWithTxs",
         "/utxo/getBoxesBinaryProof",
         "/script/executeWithContext",
     ] {
         assert!(!scala.iter().any(|op| op.path == unmounted));
     }
+
+    let document: serde_json::Value =
+        serde_norway::from_str(ergo_api::server::scala_openapi_yaml()).unwrap();
+    let schemas = &document["components"]["schemas"];
+    assert_eq!(
+        schemas["ProofOfUpcomingTransactions"]["properties"]["txProofs"]["items"]["$ref"],
+        "#/components/schemas/UpcomingTransactionMembershipProof"
+    );
+    let mining_proof = &schemas["UpcomingTransactionMembershipProof"];
+    assert_eq!(
+        mining_proof["required"],
+        serde_json::json!(["leaf", "levels"])
+    );
+    assert_eq!(
+        mining_proof["properties"]["levels"]["items"]["type"],
+        "string"
+    );
+    assert!(mining_proof["properties"].get("leafData").is_none());
+    assert_eq!(
+        schemas["MerkleProof"]["required"],
+        serde_json::json!(["leafData", "levels"])
+    );
+    assert_eq!(schemas["WorkMessage"]["properties"]["h"]["type"], "integer");
+    assert!(!schemas["WorkMessage"]["required"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("h")));
 }
 
 /// Rewrites the checked-in family inventory fixtures from the current OpenAPI

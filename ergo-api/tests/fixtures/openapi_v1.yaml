@@ -2525,14 +2525,42 @@ paths:
       tags:
       - mining
       summary: |-
-        `POST /api/v1/mining/candidate-with-txs` — T1, seam-deferred. The wire shape
-        is documented but no `NodeMining::candidate_with_txs` seam exists,
-        so this answers the honest `route_unavailable` rather than silently ignoring
-        the forced-tx set. Still gated at `Tier::Operator`.
+        `POST /api/v1/mining/candidate-with-txs` — T1. Accepts either a Scala
+        transaction array (configured miner key) or `{txs, pk}` (explicit miner key).
+        Decodes directly from the body to preserve context extension ordering.
       operationId: candidate_with_txs
+      requestBody:
+        description: 'A transaction array, or {txs: [...], pk: compressed secp256k1 key hex}. At most 1024 transactions and 2 MiB. Request order and context-extension insertion order are preserved. Returns proofs only for supplied transactions admitted to the candidate.'
+        content:
+          application/json:
+            schema: {}
+        required: true
       responses:
+        '200':
+          description: WorkMessageJson with header preimage and transaction inclusion proofs
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Malformed transactions, invalid miner key, or request limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Mining disabled on this node
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Forced-transaction candidate building not wired on this node
+          description: Candidate unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Candidate build timed out
           content:
             application/json:
               schema:

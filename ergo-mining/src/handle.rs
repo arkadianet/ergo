@@ -107,11 +107,11 @@ use crate::reemission::ReemissionSettings;
 use crate::solution::{verify_solution, SolutionOutcome, SubmittedBlock};
 use crate::work_message::{MinerSolution, WorkMessage};
 
-/// Upper bound on templates retained in the [`MiningCache`] ring — the number
+/// Upper bound on templates retained per class in the [`MiningCache`] ring — the number
 /// of recently-published templates whose in-flight solutions can still be
 /// verified. Deliberately small: it bounds both memory (a handful of full
 /// candidates) and the per-`verify_solution` scan cost (each submit recomputes
-/// the Autolykos hit for at most this many candidates, so it can't be turned
+/// the Autolykos hit for at most twice this many candidates, so it can't be turned
 /// into a large per-submit work amplifier). It covers the last few refresh
 /// cycles — enough for the brief window between a template being served and its
 /// solution arriving, given that longpoll keeps miners on a fresh template
@@ -119,7 +119,9 @@ use crate::work_message::{MinerSolution, WorkMessage};
 /// this window cannot be matched against its original template; verification
 /// falls through to `InvalidPow` if none of the retained templates match, so
 /// the miner must re-poll. For retained
-/// solutions, the submit-time executor recheck remains authoritative. Sized for two publishes
+/// solutions, the submit-time executor recheck remains authoritative. Ordinary
+/// and requested templates each have an independent allowance, so mempool
+/// refreshes cannot evict client-supplied jobs. Sized for two ordinary publishes
 /// per tip (minimal + enriched two-phase publish): 16 slots retain ≈8
 /// tip-changes of in-flight solution history, matching the pre-two-phase
 /// horizon.
@@ -188,7 +190,9 @@ impl MiningCache {
 
     /// The newest offered template built on `parent`.
     fn newest_offered_on(&self, parent: &[u8; 32]) -> Option<&Template> {
-        self.offered().find(|t| t.candidate.parent_id == *parent)
+        self.offered().find(|t| {
+            t.candidate.parent_id == *parent && t.identity.reason != BuildReason::Requested
+        })
     }
 }
 
@@ -519,7 +523,9 @@ impl MiningHandle {
         let template_seq = cache.template_seq;
         let clean_jobs = cache
             .offered()
-            .next()
+            .find(|t| {
+                (t.identity.reason == BuildReason::Requested) == (reason == BuildReason::Requested)
+            })
             .is_none_or(|t| chain_seq > t.identity.chain_seq);
         let identity = TemplateIdentity {
             template_id: candidate.msg,
@@ -539,8 +545,24 @@ impl MiningHandle {
             withdrawn: false,
         });
         // Age-based eviction: keep the ring bounded by dropping the oldest.
-        while cache.templates.len() > MAX_RETAINED_TEMPLATES {
-            cache.templates.pop_front();
+        // Independent bounded histories: ordinary mempool refreshes must never
+        // evict a client's collateral job while its miners are still hashing it.
+        // Both histories remain available to solution verification.
+        let requested = reason == BuildReason::Requested;
+        while cache
+            .templates
+            .iter()
+            .filter(|t| (t.template.identity.reason == BuildReason::Requested) == requested)
+            .count()
+            > MAX_RETAINED_TEMPLATES
+        {
+            if let Some(index) = cache
+                .templates
+                .iter()
+                .position(|t| (t.template.identity.reason == BuildReason::Requested) == requested)
+            {
+                cache.templates.remove(index);
+            }
         }
         drop(cache);
         // Wake longpoll waiters: a monotonic bump so a waiter that already
@@ -573,6 +595,24 @@ impl MiningHandle {
         // template wins, and an older parent's templates are skipped once the
         // tip advances — the wrong-parent-never-served guarantee.
         cache.newest_offered_on(&parent).map(|t| t.work.clone())
+    }
+
+    /// The latest client-requested job, read atomically with the current tip.
+    /// The serial worker calls this immediately after publishing its request.
+    /// Ordinary GET candidate serving always uses the operator's own jobs.
+    pub fn cached_requested_template_if_synced(&self) -> Option<(WorkMessage, TemplateIdentity)> {
+        let cache = self.cache.read().expect("cache poisoned");
+        if !cache.best_tip.synced {
+            return None;
+        }
+        let found = cache
+            .offered()
+            .find(|t| {
+                t.identity.reason == BuildReason::Requested
+                    && t.candidate.parent_id == cache.best_tip.parent_id
+            })
+            .map(|t| (t.work.clone(), t.identity.clone()));
+        found
     }
 
     /// Whether any offered (not withdrawn) template was built against
@@ -708,8 +748,19 @@ impl MiningHandle {
         let cache = self.cache.read().expect("cache poisoned");
         let mut newest = None;
         let mut saw_stale: Option<SolutionOutcome> = None;
+        // Nonce-only submission retains the operator's mining identity. This
+        // also supports candidateWithTxs without an explicit reward key.
+        let selected_pk = solution
+            .pk
+            .or_else(|| match self.resolve_reward_key(state) {
+                RewardKeyResolution::Ready(pk) => Some(pk),
+                RewardKeyResolution::Pending | RewardKeyResolution::Corrupt => None,
+            });
         for retained in cache.templates.iter().rev() {
             let candidate = &retained.template.candidate;
+            if selected_pk != Some(candidate.validation_ctx.pre_header.miner_pubkey) {
+                continue;
+            }
             // Once a fallback accepts, only offered templates on the live full
             // parent can improve selection. Before that, PoW distinguishes
             // stale work from invalid work, including withdrawn templates.
@@ -1085,6 +1136,7 @@ mod tests {
             target: num_bigint::BigUint::from(1u8),
             height: 1,
             pk,
+            proof: None,
             metrics: Default::default(),
         };
         (candidate, work)
@@ -2139,5 +2191,217 @@ mod tests {
         );
         // And the embedded pubkey is at the canonical offset [7..40].
         assert_eq!(&script_from_pinned[7..40], &pk);
+    }
+
+    fn candidate_pair_for_key(
+        parent: [u8; 32],
+        msg: [u8; 32],
+        pk: [u8; 33],
+        timestamp: u64,
+    ) -> (Candidate, WorkMessage) {
+        let (mut candidate, mut work) = candidate_pair_msg_nbits(parent, msg, 0x03000001);
+        candidate.validation_ctx.pre_header.miner_pubkey = pk;
+        candidate.header.timestamp = timestamp;
+        candidate.header.solution = ergo_ser::autolykos::AutolykosSolution::V2 {
+            pk: ergo_primitives::group_element::GroupElement::from(pk),
+            nonce: [0; 8],
+        };
+        work.pk = pk;
+        (candidate, work)
+    }
+
+    fn requested_test_key() -> [u8; 33] {
+        hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap()
+            .try_into()
+            .unwrap()
+    }
+
+    #[test]
+    fn requested_job_survives_more_than_sixteen_background_refreshes() {
+        let operator_pk = [0x02; 33];
+        let requested_pk = requested_test_key();
+        let handle = MiningHandle::mainnet(operator_pk);
+        let parent = [0; 32];
+        handle.set_best_tip(synced_tip(parent));
+        let requested_msg = [0xA1; 32];
+        let (candidate, work) = candidate_pair_for_key(parent, requested_msg, requested_pk, 10);
+        handle
+            .publish_if_current(
+                candidate,
+                work,
+                &parent,
+                || BUILT_AT_MS,
+                BuildReason::Requested,
+            )
+            .unwrap();
+        assert!(
+            handle.cached_work_if_synced().is_none(),
+            "requested work does not become solo work"
+        );
+        let mut last_operator_msg = [0; 32];
+        for refresh in 0..MAX_RETAINED_TEMPLATES + 4 {
+            last_operator_msg = [refresh as u8; 32];
+            let (candidate, work) = candidate_pair_for_key(
+                parent,
+                last_operator_msg,
+                operator_pk,
+                100 + refresh as u64,
+            );
+            let identity = handle
+                .publish_if_current(
+                    candidate,
+                    work,
+                    &parent,
+                    || BUILT_AT_MS,
+                    BuildReason::MempoolRefresh,
+                )
+                .unwrap();
+            assert_eq!(identity.clean_jobs, refresh == 0);
+        }
+        let solo = handle.cached_work_if_synced().unwrap();
+        assert_eq!(solo.pk, operator_pk);
+        assert_eq!(solo.msg, last_operator_msg);
+        assert_eq!(
+            handle.cached_requested_template_if_synced().unwrap().0.msg,
+            requested_msg
+        );
+        assert_eq!(
+            handle.cache.read().unwrap().templates.len(),
+            MAX_RETAINED_TEMPLATES + 1
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        let outcome = handle
+            .verify_solution(
+                &MinerSolution {
+                    nonce: [0; 8],
+                    pk: Some(requested_pk),
+                },
+                &state,
+            )
+            .unwrap();
+        let SolutionOutcome::Accepted(block) = outcome else {
+            panic!("retained requested job accepts")
+        };
+        assert_eq!(block.header.timestamp, 10);
+    }
+
+    #[test]
+    fn requested_jobs_with_same_transactions_are_selected_only_by_matching_key() {
+        let operator_pk = [0x02; 33];
+        let first_pk = requested_test_key();
+        let mut second_pk = first_pk;
+        second_pk[0] = 3;
+        let handle = MiningHandle::mainnet(operator_pk);
+        let parent = [0; 32];
+        handle.set_best_tip(synced_tip(parent));
+        // The same package and work digest must never make the newest key's
+        // candidate stand in for another miner's independently retained job.
+        for (pk, timestamp, reason) in [
+            (first_pk, 10, BuildReason::Requested),
+            (second_pk, 20, BuildReason::Requested),
+            (operator_pk, 30, BuildReason::Tip),
+        ] {
+            let (candidate, work) = candidate_pair_for_key(parent, [0xA2; 32], pk, timestamp);
+            handle
+                .publish_if_current(candidate, work, &parent, || BUILT_AT_MS, reason)
+                .unwrap();
+        }
+        assert_eq!(
+            handle.cached_requested_template_if_synced().unwrap().0.pk,
+            second_pk
+        );
+        assert_eq!(handle.cached_work_if_synced().unwrap().pk, operator_pk);
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        for (pk, timestamp) in [(Some(first_pk), 10), (Some(second_pk), 20), (None, 30)] {
+            let outcome = handle
+                .verify_solution(&MinerSolution { nonce: [0; 8], pk }, &state)
+                .unwrap();
+            let SolutionOutcome::Accepted(block) = outcome else {
+                panic!("matching job accepts")
+            };
+            assert_eq!(block.header.timestamp, timestamp);
+        }
+        assert!(matches!(
+            handle
+                .verify_solution(
+                    &MinerSolution {
+                        nonce: [0; 8],
+                        pk: Some([0x03; 33])
+                    },
+                    &state
+                )
+                .unwrap(),
+            SolutionOutcome::InvalidPow
+        ));
+    }
+
+    #[test]
+    fn requested_foreign_key_cache_never_accepts_a_solution_without_a_key() {
+        let handle = MiningHandle::mainnet([0x02; 33]);
+        let parent = [0; 32];
+        handle.set_best_tip(synced_tip(parent));
+        let (candidate, work) =
+            candidate_pair_for_key(parent, [0xA3; 32], requested_test_key(), 10);
+        handle
+            .publish_if_current(
+                candidate,
+                work,
+                &parent,
+                || BUILT_AT_MS,
+                BuildReason::Requested,
+            )
+            .unwrap();
+        assert!(!handle.has_template_for_parent(&parent));
+        assert!(handle.cached_template_if_synced().is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        assert!(matches!(
+            handle
+                .verify_solution(
+                    &MinerSolution {
+                        nonce: [0; 8],
+                        pk: None
+                    },
+                    &state
+                )
+                .unwrap(),
+            SolutionOutcome::InvalidPow
+        ));
+    }
+
+    #[test]
+    fn requested_operator_key_job_accepts_a_solution_without_an_explicit_key() {
+        let operator_pk = [0x02; 33];
+        let handle = MiningHandle::mainnet(operator_pk);
+        let parent = [0; 32];
+        handle.set_best_tip(synced_tip(parent));
+        let (candidate, work) = candidate_pair_for_key(parent, [0xA4; 32], operator_pk, 40);
+        handle
+            .publish_if_current(
+                candidate,
+                work,
+                &parent,
+                || BUILT_AT_MS,
+                BuildReason::Requested,
+            )
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        let outcome = handle
+            .verify_solution(
+                &MinerSolution {
+                    nonce: [0; 8],
+                    pk: None,
+                },
+                &state,
+            )
+            .unwrap();
+        let SolutionOutcome::Accepted(block) = outcome else {
+            panic!("default-key requested job accepts")
+        };
+        assert_eq!(block.header.timestamp, 40);
     }
 }

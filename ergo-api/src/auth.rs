@@ -60,6 +60,7 @@ pub struct ApiSecurity {
     /// secret API key. Always 64 chars. Compared in constant time
     /// against the hex digest of incoming `api_key` header bytes.
     api_key_hash_hex: String,
+    allow_unauthenticated_legacy_mining: bool,
 }
 
 /// Validation errors for the operator-supplied `api_key_hash`. Surfaced
@@ -95,7 +96,21 @@ impl ApiSecurity {
         {
             return Err(ApiSecurityError::InvalidChars);
         }
-        Ok(Self { api_key_hash_hex })
+        Ok(Self {
+            api_key_hash_hex,
+            allow_unauthenticated_legacy_mining: false,
+        })
+    }
+
+    /// Explicit Scala mining compatibility. Candidate transaction injection
+    /// and the v1 operator API always retain authentication.
+    pub fn with_unauthenticated_legacy_mining(mut self, allow: bool) -> Self {
+        self.allow_unauthenticated_legacy_mining = allow;
+        self
+    }
+
+    pub fn allow_unauthenticated_legacy_mining(&self) -> bool {
+        self.allow_unauthenticated_legacy_mining
     }
 
     /// Lowercase Base16 (hex) of the Blake2b-256 of `raw_key`. Matches

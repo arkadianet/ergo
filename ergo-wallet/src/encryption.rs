@@ -1,8 +1,9 @@
 //! Encryption primitives for the encrypted-secret-file format.
 //!
 //! Scala parity: `AES.scala:62` defines the cipher parameters we
-//! match byte-for-byte. PBKDF2-HMAC-SHA512 with 128,000 iterations
-//! produces a 32-byte key; AES-256-GCM with a fresh 96-bit IV per
+//! match byte-for-byte. Scala/Appkit defaults use PBKDF2-HMAC-SHA256 with
+//! 128,000 iterations and a 32-byte key; HMAC-SHA512 remains supported for
+//! existing Rust wallets. AES-256-GCM with a fresh 96-bit IV per
 //! encryption produces ciphertext followed by a 16-byte GCM tag. Scala's
 //! JSON format calls the first 16 bytes of that stream `authTag` and the
 //! remainder `cipherText`; these historical names do not describe the GCM
@@ -16,22 +17,48 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use pbkdf2::pbkdf2_hmac;
-use sha2::Sha512;
+use sha2::{Sha256, Sha512};
 use zeroize::Zeroizing;
 
-/// PBKDF2-HMAC-SHA512 password → key derivation. Matches Scala
-/// `AES.scala:62` parameters: 128,000 iterations (typically), 32-byte
-/// output. The caller passes the iteration count explicitly so this
-/// helper is reusable for both encryption (uses 128k) and the
-/// `cipherParams.c` field of the encrypted secret file (which the
-/// loader respects).
+/// Supported PBKDF2 pseudorandom functions in encrypted wallet files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pbkdf2Prf {
+    HmacSha256,
+    HmacSha512,
+}
+
+impl Pbkdf2Prf {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "HmacSHA256" => Some(Self::HmacSha256),
+            "HmacSHA512" => Some(Self::HmacSha512),
+            _ => None,
+        }
+    }
+}
+
+/// PBKDF2-HMAC-SHA512 password → key derivation for legacy Rust callers.
+/// New keystore files use [`derive_key_pbkdf2_with_prf`] with HMAC-SHA256.
 ///
 /// Returns a `Zeroizing<[u8; 32]>` so the derived key is zeroed when
 /// it goes out of scope. Callers MUST NOT copy this out into a plain
 /// `[u8; 32]` without re-wrapping.
 pub fn derive_key_pbkdf2(password: &[u8], salt: &[u8], iterations: u32) -> Zeroizing<[u8; 32]> {
+    derive_key_pbkdf2_with_prf(password, salt, iterations, Pbkdf2Prf::HmacSha512)
+}
+
+/// Derive the 256-bit AES key using the file's PBKDF2 PRF and iteration count.
+pub fn derive_key_pbkdf2_with_prf(
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    prf: Pbkdf2Prf,
+) -> Zeroizing<[u8; 32]> {
     let mut key = Zeroizing::new([0u8; 32]);
-    pbkdf2_hmac::<Sha512>(password, salt, iterations, key.as_mut());
+    match prf {
+        Pbkdf2Prf::HmacSha256 => pbkdf2_hmac::<Sha256>(password, salt, iterations, key.as_mut()),
+        Pbkdf2Prf::HmacSha512 => pbkdf2_hmac::<Sha512>(password, salt, iterations, key.as_mut()),
+    }
     key
 }
 

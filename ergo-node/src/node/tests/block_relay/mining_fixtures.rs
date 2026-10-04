@@ -152,6 +152,7 @@ fn mining_handle(block: &SolvedBlock) -> MiningHandle {
         target: block.candidate.target.clone(),
         height: block.candidate.header.height,
         pk: MINER_PK,
+        proof: None,
         metrics: Default::default(),
     };
     assert!(handle
@@ -181,6 +182,7 @@ fn submit(state: &mut NodeState, handle: &MiningHandle, nonce: [u8; 8]) -> Submi
         state,
         Some(handle),
         false,
+        None,
         crate::mining_bridge::MiningRequest::SubmitSolution {
             solution: ergo_rest_json::mining::AutolykosSolutionJson {
                 pk: None,
@@ -218,6 +220,7 @@ fn get_candidate(
         state,
         Some(handle),
         false,
+        None,
         crate::mining_bridge::MiningRequest::GetCandidate { reply },
     );
     assert!(!rebuild, "serving work never asks for a rebuild");

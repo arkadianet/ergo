@@ -743,6 +743,12 @@ list. Read routes and transaction submission remain public. Native script routes
 can additionally require a credential with `[api.script] require_api_key = true`;
 this setting does not alter Scala-compatible script compilation authentication.
 
+Current Lithos clients omit credentials on solo-candidate reads and solution
+submission. `[api.security] allow_unauthenticated_legacy_mining = true` explicitly
+opens the four legacy mining routes while supplied-transaction candidates and
+v1 operator routes retain authentication. This option still requires a configured
+hash. See [Lithos integration](lithos.md) for configuration and wallet-file setup.
+
 Before exposing the API, put public endpoints behind a firewall or reverse proxy
 with per-client rate limits and expose only the endpoints you intend. For a
 proxy terminating on loopback, set `[api] local_reverse_proxy = true` so proxy
