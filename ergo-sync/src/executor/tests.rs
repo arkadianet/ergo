@@ -2126,3 +2126,147 @@ fn hydration_ends_below_the_proof_suffix_head_but_not_in_dense_ancestry() {
         other => panic!("expected the Dense ancestor gap to fail, got {other:?}"),
     }
 }
+
+/// Startup as boot runs it: recent-header hydration, then the index loader.
+fn restarted_executor(store: &ergo_state::StateBackendKind) -> SyncExecutor {
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    executor.hydrate_from_store(store).unwrap();
+    executor.load_header_index(store).unwrap();
+    executor
+}
+
+/// Install a trusted synthetic child of `parent` and feed it to the cache.
+/// `salt` separates same-height siblings.
+fn push_fork_header(
+    executor: &mut SyncExecutor,
+    store: &mut ergo_state::StateBackendKind,
+    template: &Header,
+    parent: [u8; 32],
+    salt: u64,
+    best: bool,
+) -> [u8; 32] {
+    let parent_height = store.get_header_meta(&parent).unwrap().unwrap().height;
+    let mut header = template.clone();
+    header.height = parent_height + 1;
+    header.parent_id = ModifierId::from_bytes(parent);
+    header.timestamp = template.timestamp + u64::from(header.height) + salt;
+    let (processed, bytes) = install_header_cache_fixture(store, header, best);
+    executor.push_validated_header(&processed, &bytes, store);
+    processed.header_id
+}
+
+#[test]
+fn restarted_header_fork_repairs_only_the_indexed_range() {
+    // Real applied empty chain; fork rows are trusted synthetic fixtures.
+    let mut utxo = open_initialized_store();
+    let mut tip = [0; 32];
+    for height in 1..=20 {
+        tip = apply_empty_block(&mut utxo, height, tip);
+    }
+    let template = ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(
+        &utxo.get_header(&tip).unwrap().unwrap(),
+    ))
+    .unwrap();
+    let parent_of_tip = *template.parent_id.as_bytes();
+    let mut store = ergo_state::StateBackendKind::Utxo(utxo);
+
+    // A synced restart indexes nothing: every stored header is applied.
+    let mut executor = restarted_executor(&store);
+    assert_eq!(executor.header_index_len(), 0);
+    let a = push_fork_header(&mut executor, &mut store, &template, tip, 0, true);
+    let b = push_fork_header(&mut executor, &mut store, &template, tip, 1, false);
+    let c = push_fork_header(&mut executor, &mut store, &template, b, 0, true);
+    assert_ne!(a, b);
+    assert_eq!(executor.header_index_len(), 2);
+    assert_eq!(executor.header_index_get(21), Some(b));
+    assert_eq!(executor.header_index_get(22), Some(c));
+    assert_eq!(cached_heights(&executor)[..3], [22, 21, 20]);
+
+    // A winning fork from below the tip with nothing indexed yet records only
+    // the unapplied gap above the applied tip.
+    let mut executor = restarted_executor(&store);
+    let sibling = push_fork_header(
+        &mut executor,
+        &mut store,
+        &template,
+        parent_of_tip,
+        2,
+        false,
+    );
+    let winner = push_fork_header(&mut executor, &mut store, &template, sibling, 2, true);
+    assert_eq!(store.chain_state_meta().best_full_block_height, 20);
+    assert_eq!(executor.header_index_len(), 1);
+    assert_eq!(executor.header_index_get(21), Some(winner));
+}
+
+#[test]
+fn sparse_store_header_fork_repair_never_walks_into_the_proof_prefix() {
+    // Proof prefix {1, 5} and suffix 6..=7, then real headers 8..=10.
+    let headers = mainnet_headers_1_10();
+    let store_through_10 = || {
+        let mut store = sparse_popow_store(&headers, &[1, 5], 6..=7);
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        let mut coordinator = SyncCoordinator::new(0);
+        for height in 8..=10 {
+            executor.execute(
+                validate_header_action(&headers, height),
+                &mut store,
+                &mut coordinator,
+                Instant::now(),
+                None,
+            );
+        }
+        assert_eq!(store.chain_state_meta().best_header_height, 10);
+        store
+    };
+    let tip = *blake2b256(&headers[9].0).as_bytes();
+    let template = headers[9].1.clone();
+
+    // Synced restart after a snapshot install: nothing is unapplied.
+    let mut store = store_through_10();
+    store
+        .as_utxo_mut()
+        .unwrap()
+        .test_force_set_best_full_block_unsafe(tip, 10)
+        .unwrap();
+    let mut restarted = restarted_executor(&store);
+    assert_eq!(cached_heights(&restarted), vec![10, 9, 8, 7, 6, 5]);
+    push_fork_header(&mut restarted, &mut store, &template, tip, 0, true);
+    let b = push_fork_header(&mut restarted, &mut store, &template, tip, 1, false);
+    let c = push_fork_header(&mut restarted, &mut store, &template, b, 0, true);
+    assert_eq!(restarted.header_index_len(), 2);
+    assert_eq!(restarted.header_index_get(11), Some(b));
+    assert_eq!(restarted.header_index_get(12), Some(c));
+
+    // Attached without the startup index loader: the repair covers the
+    // unapplied gap down to the proof's absent prefix, then stops.
+    let mut store = store_through_10();
+    let mut attached = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    attached.hydrate_from_store(&store).unwrap();
+    let parent_of_tip = *template.parent_id.as_bytes();
+    let sibling = push_fork_header(
+        &mut attached,
+        &mut store,
+        &template,
+        parent_of_tip,
+        1,
+        false,
+    );
+    let winner = push_fork_header(&mut attached, &mut store, &template, sibling, 1, true);
+    assert_eq!(attached.header_index_get(11), Some(winner));
+    assert_eq!(attached.header_index_get(10), Some(sibling));
+    assert_eq!(
+        attached.header_index_get(5),
+        Some(*blake2b256(&headers[4].0).as_bytes())
+    );
+    assert_eq!(attached.header_index_len(), 7);
+}

@@ -995,24 +995,39 @@ impl SyncExecutor {
             self.header_index.split_off(&after_tip);
         }
         // The selected header fork can diverge below the applied full tip.
-        // This cache follows best-header ancestry, so only an indexed matching
-        // ancestor (or the pre-genesis boundary) terminates the repair walk.
+        // This cache follows best-header ancestry, so the repair walk replaces
+        // entries down to an indexed matching ancestor. Heights below the
+        // indexed range hold nothing stale: startup loads only the unapplied
+        // gap, which starts above the applied full tip when nothing is indexed.
+        let floor = self.header_index.first_key_value().map_or_else(
+            || {
+                store
+                    .chain_state_meta()
+                    .best_full_block_height
+                    .saturating_add(1)
+            },
+            |(height, _)| *height,
+        );
         let mut current_id = processed.header_id;
         let mut current_height = processed.height;
-        while current_height > 0 && current_id != [0; 32] {
+        while current_height >= floor && current_height > 0 && current_id != [0; 32] {
             if self.header_index.get(&current_height) == Some(&current_id) {
                 break;
             }
-            self.header_index.insert(current_height, current_id);
-            let meta = store
+            let Some(meta) = store
                 .get_header_meta(&current_id)
                 .unwrap_or_else(|error| panic!("best-header index lookup failed: {error}"))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "best-header index ancestor is missing: {}",
-                        hex::encode(current_id)
-                    )
-                });
+            else {
+                // A NiPoPoW proof's sparse prefix ends the stored ancestry.
+                if super::startup::is_sparse_prefix_gap(store, current_height) {
+                    break;
+                }
+                panic!(
+                    "best-header index ancestor is missing: {}",
+                    hex::encode(current_id)
+                );
+            };
+            self.header_index.insert(current_height, current_id);
             current_id = meta.parent_id;
             current_height -= 1;
         }
