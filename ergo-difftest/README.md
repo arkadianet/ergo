@@ -230,7 +230,10 @@ entries and cannot mute a comparison under unbound authority.
 The separate record filename hashes the complete canonical JSON, so different
 processing or execution evidence is preserved. Records are published atomically
 under a filing lock; identical records are idempotent. `runs/` holds immutable
-execution journals and exact primary/verify Scala source archives. Repro commands
+execution journals and exact primary/verify Scala source archives. Every
+`--oracle` campaign writes one, with or without `--minimize`, under
+`--regressions-dir` (default `ergo-difftest/regressions`, relative to the
+current directory). Repro commands
 select those archives, including `DIFFTEST_VERIFY_ORACLE_SCRIPT` for the sidecar.
 The build-script source inventory and running executable hash are diagnostic
 provenance, not a signed build attestation. File synchronization and atomic

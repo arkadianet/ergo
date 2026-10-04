@@ -151,8 +151,10 @@ fn main() -> ExitCode {
         eprintln!("--oracle-script requires --oracle or --methodcall");
         return ExitCode::from(2);
     }
-    if regressions_dir.is_some() && (!oracle_mode || !minimize_mode) {
-        eprintln!("--regressions-dir requires --oracle --minimize");
+    // Every oracle campaign writes its execution journal there; a single
+    // oracle repro writes one only when it files a minimized record.
+    if regressions_dir.is_some() && (!oracle_mode || (repro.is_some() && !minimize_mode)) {
+        eprintln!("--regressions-dir requires an --oracle campaign or --oracle --repro --minimize");
         return ExitCode::from(2);
     }
     if methodcall_mode && (oracle_mode || structured_mode || repro.is_some() || minimize_mode) {
@@ -1171,7 +1173,8 @@ fn print_help() {
          \x20 --minimize       after --oracle campaign: minimize+classify+file each unique\n\
          \x20                  divergence; with --repro: minimize+file that one input\n\
          \x20                  (--repro --minimize requires --surface)\n\
-         \x20 --regressions-dir D  where to file records (default: ergo-difftest/regressions)\n\
+         \x20 --regressions-dir D  execution journals and filed records\n\
+         \x20                  (default: ergo-difftest/regressions)\n\
          \x20 --selftest       verify the harness's own bug-detection has teeth\n\
          \n\
          EXIT CODES:\n\
