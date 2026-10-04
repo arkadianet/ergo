@@ -322,7 +322,5 @@ pub(crate) struct V1OpenApi;
 /// rather than a runtime condition, so this panics instead of serving an
 /// empty spec (mirrors `crate::server::native_openapi_yaml`).
 pub fn v1_openapi_yaml() -> String {
-    V1OpenApi::openapi()
-        .to_yaml()
-        .expect("openapi yaml serialize")
+    crate::server::serialize_openapi_yaml(&V1OpenApi::openapi())
 }

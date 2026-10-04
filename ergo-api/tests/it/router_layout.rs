@@ -879,6 +879,34 @@ async fn api_docs_present_only_scala_and_rust_api_families() {
 }
 
 #[tokio::test]
+async fn served_openapi_yaml_has_no_private_number_mappings() {
+    let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
+    let app = router(
+        read,
+        None,
+        None,
+        None,
+        ergo_ser::address::NetworkPrefix::Mainnet,
+    );
+
+    let mut malformed_specs = Vec::new();
+    for path in [
+        "/api-docs/openapi-v1.yaml",
+        "/api-docs/openapi-native.yaml",
+        "/api-docs/openapi-rust.yaml",
+    ] {
+        let yaml = text_get(app.clone(), path).await;
+        if yaml.contains("serde_json::private") {
+            malformed_specs.push(path);
+        }
+    }
+    assert!(
+        malformed_specs.is_empty(),
+        "served OpenAPI specs expose private number mappings: {malformed_specs:?}"
+    );
+}
+
+#[tokio::test]
 async fn canonical_family_docs_are_unified_and_disjoint() {
     let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
     let app = router(

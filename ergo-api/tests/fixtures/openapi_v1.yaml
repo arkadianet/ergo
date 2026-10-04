@@ -6374,39 +6374,32 @@ components:
         burst:
           type: number
           format: double
-          default:
-            $serde_json::private::Number: '40.0'
+          default: 40.0
         cheap_weight:
           type: number
           format: double
-          default:
-            $serde_json::private::Number: '1.0'
+          default: 1.0
         compute_weight:
           type: number
           format: double
-          default:
-            $serde_json::private::Number: '10.0'
+          default: 10.0
         heavy_weight:
           type: number
           format: double
-          default:
-            $serde_json::private::Number: '4.0'
+          default: 4.0
         idle_prune_after_secs:
           type: integer
           format: int64
-          default:
-            $serde_json::private::Number: '600'
+          default: 600
           minimum: 0
         max_tracked_ips:
           type: integer
-          default:
-            $serde_json::private::Number: '65536'
+          default: 65536
           minimum: 0
         refill_per_sec:
           type: number
           format: double
-          default:
-            $serde_json::private::Number: '20.0'
+          default: 20.0
       additionalProperties: false
     ApiMinerStat:
       type: object
@@ -10049,8 +10042,7 @@ components:
         heartbeat_max_age_ms:
           type: integer
           format: int64
-          default:
-            $serde_json::private::Number: '600000'
+          default: 600000
           minimum: 0
         require_indexer:
           type: boolean
@@ -10061,14 +10053,12 @@ components:
         snapshot_max_age_ms:
           type: integer
           format: int64
-          default:
-            $serde_json::private::Number: '30000'
+          default: 30000
           minimum: 0
         tip_max_age_ms:
           type: integer
           format: int64
-          default:
-            $serde_json::private::Number: '7200000'
+          default: 7200000
           minimum: 0
       additionalProperties: false
     ProbeReport:

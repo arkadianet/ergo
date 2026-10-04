@@ -67,13 +67,13 @@ mod services;
 mod shared;
 pub use services::ApiServices;
 
-pub(crate) use openapi::NativeOpenApi;
 pub use openapi::{
     established_openapi_operations, legacy_rust_openapi, merge_openapi_checked,
     native_openapi_yaml, openapi_operations, rust_openapi, rust_openapi_json, rust_openapi_yaml,
     scala_openapi_operations, scala_openapi_yaml, v1_openapi_fragment, OpenApiMergeError,
     RouteOperation,
 };
+pub(crate) use openapi::{serialize_openapi_yaml, NativeOpenApi};
 pub use route_registry::ApiRouteInventory;
 pub(crate) use shared::{map_submit_error, submit_via_node};
 
