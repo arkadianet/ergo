@@ -783,8 +783,8 @@ mod tests {
         let handle = ergo_mining::handle::MiningHandle::mainnet([0x02; 33])
             .with_policy_store(data_dir.join("mining-policy.json"))
             .unwrap();
-        // The data directory disappears behind a file: the save cannot even
-        // create its temporary.
+        // A file now stands where the data directory was, so nothing can be
+        // saved there.
         std::fs::remove_dir(&data_dir).unwrap();
         std::fs::write(&data_dir, "").unwrap();
         let (tx, _rx) = mpsc::channel(1);
