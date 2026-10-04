@@ -442,6 +442,41 @@ fn schema_two_boot_defers_migration_then_worker_preserves_and_advances() {
 }
 
 #[test]
+fn direct_step_finishes_a_pending_migration_before_polling() {
+    use ergo_indexer_types::IndexerQuery;
+    use std::sync::Arc;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("indexer.redb");
+    let legacy = build(&path, &blocks(), true);
+    let box_count = legacy.read_meta().unwrap().global_box_index;
+    drop(legacy);
+    let handle = boot_legacy(tmp.path());
+    assert!(matches!(
+        handle.status(),
+        ergo_indexer_types::IndexerStatus::Migrating
+    ));
+    let mut task = crate::IndexerTask::new(handle.clone(), Arc::new(MigrationChain));
+    let poll = task.step();
+    assert!(
+        !matches!(poll, crate::IndexerPoll::Halted(_)),
+        "a direct step must migrate, not halt"
+    );
+    assert!(!matches!(
+        handle.status(),
+        ergo_indexer_types::IndexerStatus::Halted(_) | ergo_indexer_types::IndexerStatus::Migrating
+    ));
+    assert_eq!(
+        handle
+            .store()
+            .unwrap()
+            .read_meta()
+            .unwrap()
+            .global_box_index,
+        box_count
+    );
+}
+
+#[test]
 fn schema_two_boot_failure_rebuilds_on_worker_without_blocking_boot() {
     use std::sync::{atomic::AtomicBool, Arc};
     let tmp = tempfile::tempdir().unwrap();

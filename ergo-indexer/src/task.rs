@@ -251,6 +251,13 @@ impl<C: IndexerChainSource> IndexerTask<C> {
         time_budget: Duration,
         byte_budget: u64,
     ) -> IndexerPoll {
+        // `run` finishes a pending schema migration before its first poll; a
+        // caller stepping the task directly must not see a missing store.
+        if matches!(self.handle.status(), IndexerStatus::Migrating) {
+            if let Err(error) = self.handle.finish_boot(&self.cancel) {
+                return IndexerPoll::Halted(error);
+            }
+        }
         let store = match self.handle.store() {
             Some(s) => s,
             None => {
