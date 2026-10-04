@@ -42,7 +42,18 @@ selection and "Retrieve rewards" skip reserved boxes; naming a reserved box as a
 explicit input is refused. Wallet balances still include reserved boxes. Queue entries report
 `queued`, `in_candidate`, `mined`, `conflicted`, `cancelled`, or `expired`.
 `in_candidate` is read from the template currently served when the queue is
-listed and is never stored; it does not imply a block will be found. The node
+listed and is never stored; it does not imply a block will be found. A queued
+transaction that template's build left out shows the build's reason, for example
+`not includable: consensus_validation_failed` when a data input it reads has
+changed or a height-bounded script no longer validates. Such a transaction is
+not included until that changes; give it a deadline or cancel it to release its
+inputs.
+
+A private transaction may spend outputs of a transaction that is still in this
+node's public mempool. It stays `queued` while that parent is pending, and
+candidate assembly selects the parent ahead of it when policy and budgets
+allow. It becomes `conflicted` only once the parent is in neither the mempool
+nor the applied chain. The node
 reconciles the queue with applied blocks when the applied tip changes and
 applies deadlines when one is due, not on every event it handles. Private
 ordering prefers larger integer priorities, then submission order, subject to

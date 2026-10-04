@@ -134,14 +134,16 @@ fn tip_id(state: &NodeState) -> String {
 /// Publish a template on the applied tip whose user transactions are `txs`,
 /// all built as private ones, identified by `msg`.
 fn serve(handle: &MiningHandle, state: &NodeState, txs: Vec<Transaction>, msg: [u8; 32]) {
-    serve_at(handle, state, txs, msg, 0x0101_0000);
+    serve_at(handle, state, txs, &[], msg, 0x0101_0000);
 }
 
-/// [`serve`] at the difficulty encoded by `n_bits`.
+/// [`serve`] at the difficulty encoded by `n_bits`, recording `excluded`
+/// transactions with the reason the build left them out.
 fn serve_at(
     handle: &MiningHandle,
     state: &NodeState,
     txs: Vec<Transaction>,
+    excluded: &[(Digest32, &str)],
     msg: [u8; 32],
     n_bits: u32,
 ) {
@@ -181,6 +183,15 @@ fn serve_at(
                 category: "private",
                 ..Default::default()
             })
+            .collect(),
+        excluded: excluded
+            .iter()
+            .map(
+                |(tx_id, reason)| ergo_mining::inspection::ExcludedTransaction {
+                    tx_id: *tx_id,
+                    reason: (*reason).into(),
+                },
+            )
             .collect(),
         operator_generation: handle.operator_generation(),
         ..Default::default()
@@ -883,8 +894,8 @@ fn a_failing_expiry_write_withdraws_once_and_keeps_mining() {
     // Hard enough that the nonce below is no solution for either template.
     let n_bits =
         ergo_ser::difficulty::encode_compact_bits(&(num_bigint::BigUint::from(1u8) << 200));
-    serve_at(&handle, &state, vec![tx(1)], [0x61; 32], n_bits);
-    serve_at(&handle, &state, vec![], [0x62; 32], n_bits);
+    serve_at(&handle, &state, vec![tx(1)], &[], [0x61; 32], n_bits);
+    serve_at(&handle, &state, vec![], &[], [0x62; 32], n_bits);
     // Every later write of the queue fails.
     std::fs::remove_file(&path).unwrap();
     std::fs::create_dir(&path).unwrap();
@@ -956,4 +967,75 @@ fn a_failing_expiry_write_withdraws_once_and_keeps_mining() {
     );
     assert!(handle.private_queue().reserved_inputs().is_empty());
     assert_eq!(handle.operator_generation(), generation + 1);
+}
+
+// ----- work that cannot be included -----
+
+#[test]
+fn a_queued_transaction_the_build_left_out_shows_why() {
+    let (_dir, mut state) = chain(4);
+    let handle = mining_handle();
+    queue_until(&state, &handle, 1, 100);
+    run_lifecycle(&mut state, &handle);
+    // For example a data input that changed, or a script whose height
+    // bound has passed: every build excludes it.
+    let id = queued_entry(1).tx_id;
+    serve_at(
+        &handle,
+        &state,
+        vec![],
+        &[(id, "consensus_validation_failed")],
+        [0x61; 32],
+        0x0101_0000,
+    );
+    let listed = list(&handle);
+    assert_eq!(listed[0].state, "queued");
+    assert_eq!(
+        listed[0].reason.as_deref(),
+        Some("not includable: consensus_validation_failed")
+    );
+}
+
+#[test]
+fn a_child_of_a_public_mempool_transaction_stays_queued() {
+    let (_dir, mut state) = chain(4);
+    let handle = mining_handle();
+    // A public transaction still in the mempool creates box [0x44; 32],
+    // which the private transaction spends.
+    let parent_output = Digest32::from_bytes([0x44; 32]);
+    state
+        .mempool
+        .pool_mut()
+        .insert(Entry::new(
+            Digest32::from_bytes([0x43; 32]),
+            Arc::from(vec![0x43; 20]),
+            vec![Digest32::from_bytes([0x42; 32])],
+            vec![parent_output],
+            vec![],
+            1_000_000,
+            100,
+            20,
+            1_000,
+            TxSource::Api,
+        ))
+        .unwrap();
+    let tx_id = queue_until(&state, &handle, 0x44, 100);
+    append_block(&mut state, vec![], 0);
+    run_lifecycle(&mut state, &handle);
+    assert_eq!(
+        handle.private_queue().entry(&tx_id).unwrap().state,
+        PrivateTransactionState::Queued,
+        "its input still exists, as an unconfirmed public output"
+    );
+    // Once the parent is gone from the pool and the chain, it conflicts.
+    state.mempool = Mempool::new(
+        MempoolConfig::default(),
+        weight::from_config("cost").unwrap(),
+    );
+    append_block(&mut state, vec![], 0);
+    run_lifecycle(&mut state, &handle);
+    assert_eq!(
+        handle.private_queue().entry(&tx_id).unwrap().state,
+        PrivateTransactionState::Conflicted
+    );
 }

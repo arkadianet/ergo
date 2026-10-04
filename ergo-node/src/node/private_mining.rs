@@ -89,33 +89,69 @@ pub(super) fn api_entry(
     }
 }
 
-/// Private ids in the template currently served for the applied tip.
-fn served_private_ids(handle: &MiningHandle) -> HashSet<String> {
-    handle
-        .inspect_template(None, None)
-        .map(|snapshot| {
-            snapshot
-                .template
+/// What the template currently served for the applied tip says about
+/// private work: the ids it includes, and why the build left others out.
+#[derive(Default)]
+struct ServedTemplate {
+    included: HashSet<String>,
+    excluded: BTreeMap<String, String>,
+}
+
+impl ServedTemplate {
+    fn read(handle: &MiningHandle) -> Self {
+        let Some(snapshot) = handle.inspect_template(None, None) else {
+            return Self::default();
+        };
+        let template = &snapshot.template;
+        Self {
+            included: template
                 .private_transaction_ids()
                 .iter()
                 .map(|id| hex::encode(id.as_bytes()))
-                .collect()
-        })
-        .unwrap_or_default()
+                .collect(),
+            excluded: template
+                .candidate
+                .observation
+                .excluded
+                .iter()
+                .map(|excluded| {
+                    (
+                        hex::encode(excluded.tx_id.as_bytes()),
+                        excluded.reason.clone(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// `entry` with its membership in this template. A queued transaction
+    /// the build left out carries the build's reason, e.g. a data input that
+    /// changed or a script whose height bound passed: it is never included
+    /// until that changes.
+    fn view(
+        &self,
+        mut entry: ergo_mining::private_queue::PrivateTransactionEntry,
+    ) -> ergo_api::mining::PrivateTransactionEntry {
+        let active = entry.state.is_active();
+        let in_candidate = active && self.included.contains(&entry.tx_id);
+        if active && !in_candidate {
+            if let Some(reason) = self.excluded.get(&entry.tx_id) {
+                entry.reason = Some(format!("not includable: {reason}"));
+            }
+        }
+        api_entry(entry, in_candidate)
+    }
 }
 
-/// The queue as the operator sees it, with candidate membership read from
-/// the served template at request time.
+/// The queue as the operator sees it, with candidate membership and build
+/// exclusions read from the served template at request time.
 pub(super) fn list(handle: &MiningHandle) -> Vec<ergo_api::mining::PrivateTransactionEntry> {
-    let served = served_private_ids(handle);
+    let served = ServedTemplate::read(handle);
     handle
         .private_queue()
         .list()
         .into_iter()
-        .map(|entry| {
-            let in_candidate = entry.state.is_active() && served.contains(&entry.tx_id);
-            api_entry(entry, in_candidate)
-        })
+        .map(|entry| served.view(entry))
         .collect()
 }
 
@@ -124,8 +160,7 @@ pub(super) fn view(
     handle: &MiningHandle,
     entry: ergo_mining::private_queue::PrivateTransactionEntry,
 ) -> ergo_api::mining::PrivateTransactionEntry {
-    let in_candidate = entry.state.is_active() && served_private_ids(handle).contains(&entry.tx_id);
-    api_entry(entry, in_candidate)
+    ServedTemplate::read(handle).view(entry)
 }
 
 /// Decline the queue's transactions on every public admission path. Called at
@@ -525,7 +560,12 @@ pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<Reco
         scanned_tip.map(hex::encode).unwrap_or_default(),
         &applied,
         caught_up,
-        |id| reader.lookup_box(id).ok().flatten().is_some(),
+        // A parent still in the public mempool is spendable: candidate
+        // assembly selects it ahead of the private child.
+        |id| {
+            reader.lookup_box(id).ok().flatten().is_some()
+                || state.mempool.creates_output(&Digest32::from_bytes(*id))
+        },
         // Mined entries keep their signed bytes while this node could still
         // roll their block back.
         state

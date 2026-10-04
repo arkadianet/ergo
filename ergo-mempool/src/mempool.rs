@@ -180,6 +180,11 @@ impl Mempool {
         self.pool.is_private_only(id)
     }
 
+    /// Whether a pooled transaction creates the box `box_id`.
+    pub fn creates_output(&self, box_id: &Digest32) -> bool {
+        self.pool.parent_for_output(box_id).is_some()
+    }
+
     /// Whether staging holds `tx_id` (an orphan or a held parent). Staged
     /// bytes came through public admission and may later be promoted.
     pub fn is_staged(&self, tx_id: &TxId) -> bool {
