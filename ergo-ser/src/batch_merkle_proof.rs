@@ -205,11 +205,14 @@ mod tests {
         assert!(batch_proof_size(usize::MAX / 36, usize::MAX / 33).is_err());
         assert!(batch_proof_size(usize::MAX / 36 + 1, 0).is_err());
         assert!(batch_proof_size(0, usize::MAX / 33 + 1).is_err());
-        let indices = usize::MAX / 36;
-        let residual = usize::MAX - indices * 36;
-        if residual < 8 {
-            assert!(batch_proof_size(indices, 0).is_err());
-        }
+        // usize::MAX (2^k - 1 with even k) is a multiple of 3, so some
+        // 36 * indices + 33 * proofs equals it exactly. Only the 8-byte count
+        // header then overflows, on every pointer width.
+        let third = usize::MAX / 3;
+        let proofs = (12 - third % 12) % 12;
+        let indices = (third - 11 * proofs) / 12;
+        assert_eq!(indices * 36 + proofs * 33, usize::MAX);
+        assert!(batch_proof_size(indices, proofs).is_err());
     }
 
     // ----- helpers -----
