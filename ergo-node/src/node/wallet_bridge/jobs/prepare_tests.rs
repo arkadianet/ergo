@@ -126,6 +126,8 @@ struct Funded {
     rules: ergo_validation::ReemissionRuleInputs,
     address: String,
     pubkey: [u8; 33],
+    height: u32,
+    tip: ModifierId,
 }
 
 impl Funded {
@@ -195,10 +197,46 @@ impl Funded {
             rules,
             address,
             pubkey,
+            height: 0,
+            tip: ModifierId::from_bytes([0; 32]),
             store,
             db,
             _directory: directory,
         }
+    }
+
+    /// Apply one more header on top of the committed chain.
+    fn advance(&mut self, voted: Option<ergo_validation::ActiveProtocolParameters>) {
+        let height = self.height + 1;
+        let (bytes, id) = ergo_ser::header::serialize_header(&header(height, self.tip)).unwrap();
+        self.store.store_header(id.as_bytes(), &bytes).unwrap();
+        let root = self.store.root_digest();
+        self.store
+            .apply_block_unchecked_for_test_with_voted_params(
+                height,
+                id.as_bytes(),
+                &root,
+                &[],
+                voted,
+            )
+            .unwrap();
+        self.height = height;
+        self.tip = id;
+    }
+
+    fn set_status(&self, box_id: &str, status: BoxStatus) {
+        let box_id: [u8; 32] = hex::decode(box_id).unwrap().try_into().unwrap();
+        let write = self.db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(WALLET_BOXES).unwrap();
+            let mut record: WalletBox =
+                bincode::deserialize(&table.get(box_id).unwrap().unwrap().value()).unwrap();
+            record.status = status;
+            table
+                .insert(box_id, bincode::serialize(&record).unwrap())
+                .unwrap();
+        }
+        write.commit().unwrap();
     }
 
     fn owned(
@@ -254,28 +292,16 @@ impl Funded {
             });
         }
         self.store.initialize_genesis(&genesis).unwrap();
-        let mut parent = ModifierId::from_bytes([0; 32]);
         for height in 1..=TIP {
-            let (bytes, id) = ergo_ser::header::serialize_header(&header(height, parent)).unwrap();
-            self.store.store_header(id.as_bytes(), &bytes).unwrap();
-            let root = self.store.root_digest();
             // Version 2 activates script version 1, which the mainnet
             // pay-to-reemission contract requires.
-            let voted = (height == EPOCH).then(|| ergo_validation::ActiveProtocolParameters {
-                epoch_start_height: EPOCH,
-                block_version: 2,
-                ..ergo_validation::scala_launch()
-            });
-            self.store
-                .apply_block_unchecked_for_test_with_voted_params(
-                    height,
-                    id.as_bytes(),
-                    &root,
-                    &[],
-                    voted,
-                )
-                .unwrap();
-            parent = id;
+            self.advance(
+                (height == EPOCH).then(|| ergo_validation::ActiveProtocolParameters {
+                    epoch_start_height: EPOCH,
+                    block_version: 2,
+                    ..ergo_validation::scala_launch()
+                }),
+            );
         }
         let write = self.db.begin_write().unwrap();
         {
@@ -545,4 +571,45 @@ async fn approval_requires_an_unlocked_wallet_and_a_bounded_deadline() {
     ));
     request.expires_at_height -= 1;
     create_owned(&funded.context(), request).unwrap();
+}
+
+#[tokio::test]
+async fn prepare_time_conflict_fails_the_approval_for_good() {
+    let mut funded = Funded::new();
+    let source = funded.owned(ERG, &[], &[0]);
+    let box_ids = funded.fund(vec![source]);
+    create_owned(
+        &funded.context(),
+        funded.job(WalletJobTask::Renew {
+            box_ids: box_ids.clone(),
+        }),
+    )
+    .unwrap();
+    let spent = BoxStatus::Spent {
+        spent_in_tx: [0x77; 32],
+        spent_at: TIP,
+    };
+    funded.set_status(&box_ids[0], spent);
+    tick(&funded.context()).await.unwrap();
+    let job = list(&funded.db).unwrap().items.remove(0);
+    assert_eq!(job.state, WalletJobState::Failed);
+    assert_eq!(job.detail.as_deref(), Some(PINNED_INPUT_UNAVAILABLE));
+    assert!(reserved_inputs(&funded.db).unwrap().is_empty());
+    // A rollback revives the input; the failed approval still never signs.
+    funded.set_status(&box_ids[0], BoxStatus::Confirmed);
+    funded.advance(None);
+    tick(&funded.context()).await.unwrap();
+    assert_eq!(
+        list(&funded.db).unwrap().items[0].state,
+        WalletJobState::Failed
+    );
+    // Earlier journals recorded the same conflict as an unsigned Conflicted
+    // job, which must stay final as well.
+    let (key, mut record) = records(&funded.db).unwrap().remove(0);
+    transition(&mut record, WalletJobState::Conflicted, None);
+    save(&funded.db, key, &record).unwrap();
+    funded.advance(None);
+    tick(&funded.context()).await.unwrap();
+    assert_eq!(records(&funded.db).unwrap()[0].1.job.attempts, 1);
+    assert!(funded.queue.0.lock().is_empty());
 }

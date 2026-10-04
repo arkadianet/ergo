@@ -42,12 +42,14 @@ async fn bounded_rpc<T>(
         })
 }
 
+/// Mined and conflicted jobs follow their admitted transaction through reorgs.
+/// Without one there is nothing to follow, and such a job is final.
 fn follows_queue(record: &Record) -> bool {
     !record.job.state.terminal()
-        || matches!(
+        || (matches!(
             record.job.state,
             WalletJobState::Mined | WalletJobState::Conflicted
-        )
+        ) && record.job.tx_id.is_some())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -418,6 +420,8 @@ pub(super) async fn cancel(
 }
 
 const MINED_IN_WALLET: &str = "confirmed in the wallet's chain history";
+const PINNED_INPUT_UNAVAILABLE: &str =
+    "a pinned input is spent or used by another transaction; this approval will not sign";
 
 /// Without private queue knowledge, the wallet's own history tells a mined job
 /// from one that never confirmed. `None` while that history is incomplete.
@@ -892,13 +896,24 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                     record.signed_hex = Some(hex::encode(bytes));
                     transition(&mut record, WalletJobState::Prepared, None);
                 }
+                // A pinned input that is spent or held by another transaction
+                // ends the approval for good: signing it after that input comes
+                // back could repeat an operation the owner has since redone.
+                Err(WalletAdminError::BoxNotFound) => {
+                    transition(
+                        &mut record,
+                        WalletJobState::Failed,
+                        Some(PINNED_INPUT_UNAVAILABLE.into()),
+                    );
+                    save(ctx.db, job_id, &record)?;
+                    return Ok(());
+                }
                 Err(error) => {
-                    let state = if matches!(error, WalletAdminError::BoxNotFound) {
-                        WalletJobState::Conflicted
-                    } else {
-                        WalletJobState::Waiting
-                    };
-                    transition(&mut record, state, Some(error.to_string()));
+                    transition(
+                        &mut record,
+                        WalletJobState::Waiting,
+                        Some(error.to_string()),
+                    );
                     save(ctx.db, job_id, &record)?;
                     return Ok(());
                 }

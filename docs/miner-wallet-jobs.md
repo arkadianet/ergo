@@ -36,6 +36,11 @@ ID. It never builds a second payment from fresh funds. An interrupted unsigned
 preparation restores its reservations before the writer accepts commands.
 There is at most one preparation/submission attempt per applied height and one
 operation per scheduler wake. Mined jobs follow private-queue reorg state.
+If a pinned input is spent or held by another transaction when the job
+prepares, the job fails for good and releases its reservations. It never signs
+later, even if a rollback revives that input; approve a new job if the
+operation is still wanted. Only an admitted transaction is reported as
+conflicted, because a rollback can return that same transaction to the queue.
 The scheduler reads one queue metadata snapshot per wake and waits at most one
 second for each background metadata, admission, or cancellation request. An
 unavailable snapshot holds back only jobs whose transaction may already be
