@@ -1091,7 +1091,16 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
                 "requested"
             },
             validation_cost: cost,
-            fee_nano_erg: 0,
+            fee_nano_erg: c
+                .transaction()
+                .output_candidates
+                .iter()
+                .filter(|output| {
+                    output.ergo_tree_bytes()
+                        == ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES
+                })
+                .map(|output| output.value)
+                .sum(),
             resolved_inputs: c.resolved_inputs().to_vec(),
         });
         checked.push(c);

@@ -683,9 +683,39 @@ pub(super) fn handle_mining_request(
                     }
                 },
             };
+            let operator_key = state
+                .store
+                .as_utxo()
+                .map(|store| handle.resolve_reward_key(store));
+            let own_miner =
+                matches!(operator_key, Some(RewardKeyResolution::Ready(pk)) if pk == miner_pk);
+            if !own_miner {
+                for transaction in &transactions {
+                    let id = match ergo_ser::transaction::transaction_id(transaction) {
+                        Ok(id) => ergo_primitives::digest::Digest32::from_bytes(*id.as_bytes()),
+                        Err(error) => {
+                            let _ = reply.send(Err(ergo_api::MiningApiError::BadRequest(format!(
+                                "transaction id: {error:?}"
+                            ))));
+                            return false;
+                        }
+                    };
+                    if state.mempool.is_private_transaction(&id) {
+                        let _ = reply.send(Err(ergo_api::MiningApiError::BadRequest(format!(
+                            "private transaction {} requires the operator miner key",
+                            hex::encode(id.as_bytes())
+                        ))));
+                        return false;
+                    }
+                }
+            }
             let tip = MiningTipSnapshot::capture(state);
             let (operator_generation, private_transactions) = handle.operator_snapshot(|queue| {
-                queue.selection_entries_at(crate::snapshot::unix_now_ms(), tip.best_full_height)
+                if own_miner {
+                    queue.selection_entries_at(crate::snapshot::unix_now_ms(), tip.best_full_height)
+                } else {
+                    Vec::new()
+                }
             });
             let intent = BuildIntent {
                 expected_parent: tip.best_full_id,

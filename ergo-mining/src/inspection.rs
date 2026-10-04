@@ -31,7 +31,7 @@ pub struct CandidateObservation {
 /// The exact validated cost and origin of one retained transaction.
 #[derive(Debug, Clone, Default)]
 pub struct TransactionObservation {
-    /// `emission`, `rent`, `public`, `private`, or `fees`.
+    /// `emission`, `requested`, `rent`, `public`, `private`, or `fees`.
     pub category: &'static str,
     pub validation_cost: u64,
     pub fee_nano_erg: u64,

@@ -1173,6 +1173,29 @@ async fn lithos_requested_package_proves_and_applies_with_lender_key() {
             serde_json::from_str(&response.body).unwrap();
         assert_eq!(work.pk, fixture["miner_pk"].as_str().unwrap());
         assert_eq!(work.h, Some(CANDIDATE_HEIGHT));
+        let details = http_request(
+            addr,
+            "GET",
+            &format!(
+                "/api/v1/mining/candidate-details?msg={}&template_seq={}",
+                work.msg, work.template_seq
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(details.status, 200, "{}", details.body);
+        let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+            serde_json::from_str(&details.body).unwrap();
+        assert_eq!(details.build_reason, "Requested");
+        assert_eq!(
+            details
+                .transactions
+                .iter()
+                .map(|tx| tx.category.as_str())
+                .collect::<Vec<_>>(),
+            ["emission", "requested", "requested"]
+        );
+        assert!(details.rewards.emission_nano_erg.parse::<u64>().unwrap() > 0);
         let proof = work
             .proof
             .as_ref()
@@ -1248,6 +1271,29 @@ async fn lithos_requested_package_proves_and_applies_with_lender_key() {
             http_request_with_key(addr, "POST", "/mining/solution", Some(&solution), false).await;
         assert_eq!(result.status, 200, "{}", result.body);
         assert!(poll_best_full_height(&handle, CANDIDATE_HEIGHT).await);
+        let history = http_request(addr, "GET", "/api/v1/mining/history", None).await;
+        assert_eq!(history.status, 200, "{}", history.body);
+        let history: ergo_rest_json::mining_inspection::MiningHistoryJson =
+            serde_json::from_str(&history.body).unwrap();
+        assert_eq!(history.retention, 32);
+        let accepted = history
+            .outcomes
+            .iter()
+            .find(|outcome| {
+                outcome.outcome == "accepted" && outcome.msg.as_ref() == Some(&work.msg)
+            })
+            .unwrap();
+        assert_eq!(accepted.template_seq, Some(work.template_seq));
+        assert!(
+            accepted
+                .accounting
+                .as_ref()
+                .unwrap()
+                .emission_nano_erg
+                .parse::<u64>()
+                .unwrap()
+                > 0
+        );
         let next = poll_candidate_at_height(addr, CANDIDATE_HEIGHT + 1).await;
         assert_eq!(next.pk, solo.pk);
         let stale =
@@ -1308,6 +1354,181 @@ async fn requested_transactions_using_operator_key_accept_nonce_only_solution() 
         output_response.status, 200,
         "the requested transaction must have applied: {}",
         output_response.body
+    );
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn requested_private_work_isolated_from_lenders_and_withdrawn_on_cancel() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
+    ))
+    .unwrap();
+    let bytes = hex::decode(fixture["independent_input_box"].as_str().unwrap()).unwrap();
+    let input = ergo_ser::ergo_box::read_ergo_box(&mut VlqReader::new(&bytes)).unwrap();
+    let (_dir, handle, _) = boot_synced_mining_node_with_packages(false, &[input], true).await;
+    let addr = handle.api_addr.unwrap();
+    poll_candidate(addr).await;
+    let admission = http_request(
+        addr,
+        "POST",
+        "/api/v1/mining/private-transactions",
+        Some(
+            &serde_json::json!({"signed_transaction_hex":fixture["transactions"][3], "options":{}})
+                .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(admission.status, 200, "{}", admission.body);
+    let entry: ergo_api::mining::PrivateTransactionEntry =
+        serde_json::from_str(&admission.body).unwrap();
+    let foreign_body = serde_json::json!({"txs":[], "pk":fixture["miner_pk"]}).to_string();
+    let foreign = http_request(
+        addr,
+        "POST",
+        "/mining/candidateWithTxsAndPk",
+        Some(&foreign_body),
+    )
+    .await;
+    assert_eq!(foreign.status, 200, "{}", foreign.body);
+    let foreign: ergo_rest_json::mining::WorkMessageJson =
+        serde_json::from_str(&foreign.body).unwrap();
+    let details = http_request(
+        addr,
+        "GET",
+        &format!(
+            "/api/v1/mining/candidate-details?template_seq={}",
+            foreign.template_seq
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(details.status, 200, "{}", details.body);
+    let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+        serde_json::from_str(&details.body).unwrap();
+    assert!(
+        details.transactions.iter().all(|tx| tx.id != entry.tx_id),
+        "lender received private bytes"
+    );
+    let injection = format!(
+        r#"{{"txs":[{}],"pk":"{}"}}"#,
+        fixture["transactions_json"][3].as_str().unwrap(),
+        foreign.pk
+    );
+    let refused = http_request(
+        addr,
+        "POST",
+        "/mining/candidateWithTxsAndPk",
+        Some(&injection),
+    )
+    .await;
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert!(refused.body.contains("requires the operator miner key"));
+    // Explicitly request the private member, proving it retains its private
+    // category even when it is included in the requested prefix.
+    let own = http_request(
+        addr,
+        "POST",
+        "/mining/candidateWithTxs",
+        Some(&format!(
+            "[{}]",
+            fixture["transactions_json"][3].as_str().unwrap()
+        )),
+    )
+    .await;
+    assert_eq!(own.status, 200, "{}", own.body);
+    let own: ergo_rest_json::mining::WorkMessageJson = serde_json::from_str(&own.body).unwrap();
+    let details = http_request(
+        addr,
+        "GET",
+        &format!(
+            "/api/v1/mining/candidate-details?template_seq={}",
+            own.template_seq
+        ),
+        None,
+    )
+    .await;
+    let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+        serde_json::from_str(&details.body).unwrap();
+    assert_eq!(
+        details
+            .transactions
+            .iter()
+            .find(|tx| tx.id == entry.tx_id)
+            .unwrap()
+            .category,
+        "private"
+    );
+    let cancelled = http_request(
+        addr,
+        "POST",
+        &format!("/api/v1/mining/private-transactions/{}/cancel", entry.tx_id),
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(cancelled.status, 200, "{}", cancelled.body);
+    let details = http_request(
+        addr,
+        "GET",
+        &format!(
+            "/api/v1/mining/candidate-details?template_seq={}",
+            own.template_seq
+        ),
+        None,
+    )
+    .await;
+    let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+        serde_json::from_str(&details.body).unwrap();
+    assert_eq!(details.status, "withdrawn");
+    let nonce = solve(&msg_bytes(&own), CANDIDATE_HEIGHT, &own.b);
+    let rejected = http_request(
+        addr,
+        "POST",
+        "/mining/solution",
+        Some(&format!(r#"{{"n":"{}"}}"#, hex::encode(nonce))),
+    )
+    .await;
+    // Difficulty one lets this nonce also solve unrelated operator work.
+    // A successful submission must apply that work without the cancelled tx.
+    assert_eq!(rejected.status, 200, "{}", rejected.body);
+    assert!(poll_best_full_height(&handle, CANDIDATE_HEIGHT).await);
+    let raw = hex::decode(fixture["transactions"][3].as_str().unwrap()).unwrap();
+    let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(&raw)).unwrap();
+    let output = ErgoBox {
+        candidate: tx.output_candidates[0].clone(),
+        transaction_id: ergo_ser::transaction::transaction_id(&tx).unwrap(),
+        index: 0,
+    };
+    let absent = http_request(
+        addr,
+        "GET",
+        &format!(
+            "/utxo/byId/{}",
+            hex::encode(output.box_id().unwrap().as_bytes())
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(
+        absent.status, 404,
+        "cancelled private tx was applied: {}",
+        absent.body
+    );
+    let details = http_request(
+        addr,
+        "GET",
+        &format!(
+            "/api/v1/mining/candidate-details?template_seq={}",
+            foreign.template_seq
+        ),
+        None,
+    )
+    .await;
+    let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+        serde_json::from_str(&details.body).unwrap();
+    assert_ne!(
+        details.status, "withdrawn",
+        "unrelated lender work survives cancellation"
     );
     handle.shutdown().await.unwrap();
 }

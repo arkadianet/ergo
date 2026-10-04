@@ -1815,83 +1815,90 @@ mod tests {
 
     #[test]
     fn withdrawing_private_work_keeps_unrelated_templates_solvable() {
-        // Cancelling or expiring one private transaction must not discard
-        // proof-of-work found for a template that does not include it.
-        use ergo_crypto::autolykos::common::calc_n;
-        use ergo_crypto::autolykos::v2::hit_for_v2;
-        let h = MiningHandle::mainnet([0x02u8; 33]);
-        let parent = [0u8; 32];
-        let n_bits = ergo_ser::difficulty::encode_compact_bits(&num_bigint::BigUint::from(16u8));
-        let target = ergo_crypto::difficulty::get_target(n_bits);
-        h.set_best_tip(synced_tip(parent));
-        let private_tx = ergo_ser::transaction::Transaction {
-            inputs: vec![],
-            data_inputs: vec![],
-            output_candidates: vec![],
-        };
-        let private_id = Digest32::from_bytes(
-            *ergo_ser::transaction::transaction_id(&private_tx)
-                .unwrap()
-                .as_bytes(),
-        );
-        let (with_msg, without_msg) = ([0x71u8; 32], [0x72u8; 32]);
-        let (mut with, w1) = candidate_pair_msg_nbits(parent, with_msg, n_bits);
-        with.transactions = vec![private_tx];
-        with.observation.transactions = vec![crate::inspection::TransactionObservation {
-            category: "private",
-            ..Default::default()
-        }];
-        h.publish_if_current(with, w1, &parent, || BUILT_AT_MS, BuildReason::Tip)
-            .expect("the template with the private transaction publishes");
-        let (mut without, w2) = candidate_pair_msg_nbits(parent, without_msg, n_bits);
-        without.header.timestamp += 1;
-        h.publish_if_current(without, w2, &parent, || BUILT_AT_MS, BuildReason::Tip)
-            .expect("the unrelated template publishes");
-        let generation = h.operator_generation();
+        for reason in [BuildReason::Tip, BuildReason::Requested] {
+            // Cancelling or expiring one private transaction must not discard
+            // proof-of-work found for a template that does not include it.
+            use ergo_crypto::autolykos::common::calc_n;
+            use ergo_crypto::autolykos::v2::hit_for_v2;
+            let h = MiningHandle::mainnet([0x02u8; 33]);
+            let parent = [0u8; 32];
+            let n_bits =
+                ergo_ser::difficulty::encode_compact_bits(&num_bigint::BigUint::from(16u8));
+            let target = ergo_crypto::difficulty::get_target(n_bits);
+            h.set_best_tip(synced_tip(parent));
+            let private_tx = ergo_ser::transaction::Transaction {
+                inputs: vec![],
+                data_inputs: vec![],
+                output_candidates: vec![],
+            };
+            let private_id = Digest32::from_bytes(
+                *ergo_ser::transaction::transaction_id(&private_tx)
+                    .unwrap()
+                    .as_bytes(),
+            );
+            let (with_msg, without_msg) = ([0x71u8; 32], [0x72u8; 32]);
+            let (mut with, w1) = candidate_pair_msg_nbits(parent, with_msg, n_bits);
+            with.transactions = vec![private_tx];
+            with.observation.transactions = vec![crate::inspection::TransactionObservation {
+                category: "private",
+                ..Default::default()
+            }];
+            h.publish_if_current(with, w1, &parent, || BUILT_AT_MS, reason)
+                .expect("the template with the private transaction publishes");
+            let (mut without, w2) = candidate_pair_msg_nbits(parent, without_msg, n_bits);
+            without.header.timestamp += 1;
+            h.publish_if_current(without, w2, &parent, || BUILT_AT_MS, reason)
+                .expect("the unrelated template publishes");
+            let generation = h.operator_generation();
 
-        let ids = std::collections::HashSet::from([private_id]);
-        assert_eq!(h.withdraw_private_transactions(&ids, true), 1);
-        assert_eq!(
-            h.operator_generation(),
-            generation + 1,
-            "builds frozen before the change cannot publish it"
-        );
-        assert_eq!(
-            h.cached_template_if_synced().expect("still serving").0.msg,
-            without_msg
-        );
-        let n = calc_n(3, 1);
-        let solves = |msg: &[u8; 32], nonce: &[u8; 8]| hit_for_v2(msg, nonce, 1, n) <= target;
-        let only = |msg: [u8; 32], other: [u8; 32]| {
-            (0u64..)
-                .map(u64::to_be_bytes)
-                .find(|nonce| solves(&msg, nonce) && !solves(&other, nonce))
-                .expect("some nonce qualifies")
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let state = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
-        let verify = |nonce| {
-            h.verify_solution(&MinerSolution { nonce, pk: None }, &state)
-                .expect("verify ok")
-        };
-        assert!(
-            matches!(
-                verify(only(without_msg, with_msg)),
-                SolutionOutcome::Accepted(_)
-            ),
-            "work without the withdrawn transaction is accepted"
-        );
-        assert!(
-            matches!(
-                verify(only(with_msg, without_msg)),
-                SolutionOutcome::StaleParent { .. }
-            ),
-            "work with it is stale"
-        );
+            let ids = std::collections::HashSet::from([private_id]);
+            assert_eq!(h.withdraw_private_transactions(&ids, true), 1);
+            assert_eq!(
+                h.operator_generation(),
+                generation + 1,
+                "builds frozen before the change cannot publish it"
+            );
+            assert_eq!(
+                h.inspect_template(Some(without_msg), None)
+                    .expect("retained work")
+                    .template
+                    .work
+                    .msg,
+                without_msg
+            );
+            let n = calc_n(3, 1);
+            let solves = |msg: &[u8; 32], nonce: &[u8; 8]| hit_for_v2(msg, nonce, 1, n) <= target;
+            let only = |msg: [u8; 32], other: [u8; 32]| {
+                (0u64..)
+                    .map(u64::to_be_bytes)
+                    .find(|nonce| solves(&msg, nonce) && !solves(&other, nonce))
+                    .expect("some nonce qualifies")
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let state = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+            let verify = |nonce| {
+                h.verify_solution(&MinerSolution { nonce, pk: None }, &state)
+                    .expect("verify ok")
+            };
+            assert!(
+                matches!(
+                    verify(only(without_msg, with_msg)),
+                    SolutionOutcome::Accepted(_)
+                ),
+                "work without the withdrawn transaction is accepted"
+            );
+            assert!(
+                matches!(
+                    verify(only(with_msg, without_msg)),
+                    SolutionOutcome::StaleParent { .. }
+                ),
+                "work with it is stale"
+            );
 
-        // Work that is not selectable (e.g. conflicted) retires no build.
-        assert_eq!(h.withdraw_private_transactions(&ids, false), 0);
-        assert_eq!(h.operator_generation(), generation + 1);
+            // Work that is not selectable (e.g. conflicted) retires no build.
+            assert_eq!(h.withdraw_private_transactions(&ids, false), 0);
+            assert_eq!(h.operator_generation(), generation + 1);
+        }
     }
 
     // ----- round-trips -----
@@ -3096,5 +3103,58 @@ mod tests {
             panic!("default-key requested job accepts")
         };
         assert_eq!(block.header.timestamp, 40);
+    }
+    #[test]
+    fn requested_templates_obey_policy_and_generation_publication_guards() {
+        for policy_change in [false, true] {
+            let handle = MiningHandle::mainnet([2; 33]);
+            let parent = [0; 32];
+            handle.set_best_tip(synced_tip(parent));
+            let (candidate, work) =
+                candidate_pair_for_key(parent, [0xA6; 32], requested_test_key(), 10);
+            let seq = handle
+                .publish_if_current(
+                    candidate.clone(),
+                    work.clone(),
+                    &parent,
+                    || BUILT_AT_MS,
+                    BuildReason::Requested,
+                )
+                .unwrap()
+                .template_seq;
+            if policy_change {
+                let mut policy = handle.policy();
+                policy.rent_max_cost_basis_points = 0;
+                handle.set_policy(policy).unwrap();
+            } else {
+                handle.invalidate_operator_generation();
+            }
+            assert!(handle.cached_requested_template_if_synced(seq).is_none());
+            assert_eq!(
+                handle.inspect_template(None, Some(seq)).unwrap().status,
+                "withdrawn"
+            );
+            assert!(handle
+                .publish_if_current(
+                    candidate.clone(),
+                    work.clone(),
+                    &parent,
+                    || BUILT_AT_MS,
+                    BuildReason::Requested
+                )
+                .is_none());
+            let mut current = candidate;
+            current.observation.policy_revision = handle.policy_revision();
+            current.observation.operator_generation = handle.operator_generation();
+            assert!(handle
+                .publish_if_current(
+                    current,
+                    work,
+                    &parent,
+                    || BUILT_AT_MS,
+                    BuildReason::Requested
+                )
+                .is_some());
+        }
     }
 }

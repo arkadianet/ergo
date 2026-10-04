@@ -120,3 +120,19 @@ win, and the error names the excluded transaction. Included request members
 satisfy matching operator requirements; remaining requirements retain their
 ordinary priority and never withhold work. Rent limits, token preservation,
 and reservations still apply to the remaining budget.
+
+A request for another miner key never selects the operator's private queue.
+Explicitly requesting a pending private member with another key is refused.
+Requests for the operator key may include private work as ordinary full builds
+do. Cancellation and expiry withdraw every retained template containing the
+private member, including requested templates, and reject older in-flight
+builds. Unrelated retained jobs survive ordinary refreshes and selective queue
+withdrawals. Policy changes and operator invalidation retire all affected jobs.
+
+`candidate-details` accepts the requested work's `template_seq` and message.
+It records `build_reason: "Requested"`, categories for requested and private
+members, and their frozen policy revision and operator generation. A requested
+job may show `superseded` because it is separate from the current solo template;
+that status still permits solving offered work. History includes both classes,
+with up to 16 templates per class (32 total), and journals requested outcomes
+with the reward accounting for that job's miner key.

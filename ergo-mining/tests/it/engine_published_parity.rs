@@ -797,6 +797,17 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
         };
         (cost("emission"), cost("public"), cost("fees"))
     };
+    let requested = spend(1, true).unwrap().0.unwrap();
+    assert_eq!(
+        requested
+            .observation
+            .transactions
+            .iter()
+            .find(|tx| tx.category == "requested")
+            .unwrap()
+            .fee_nano_erg,
+        FEE
+    );
     let (emission, one, fees) = costs(1);
     let per_input = costs(2).1 - one;
     // The largest requirement selection admits (launch cost limit minus the

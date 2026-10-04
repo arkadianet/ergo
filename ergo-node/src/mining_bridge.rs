@@ -430,7 +430,7 @@ impl NodeMining for MiningBridge {
         };
         let handle = self.inspection_handle()?;
         Ok(MiningHistoryJson {
-            retention: ergo_mining::handle::MAX_RETAINED_TEMPLATES,
+            retention: 2 * ergo_mining::handle::MAX_RETAINED_TEMPLATES,
             retained_templates: handle
                 .inspect_history()
                 .into_iter()
