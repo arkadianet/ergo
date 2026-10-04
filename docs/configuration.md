@@ -284,13 +284,21 @@ to retries and cannot be bypassed by alternate routing.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `api_key_hash` | string (hex) | none | Lowercase Base16 of `Blake2b256(<secret>)`. Optional; privileged routes fail closed when absent. Must be exactly 64 lowercase hex characters (`0-9`, `a-f`); uppercase or mixed case is rejected for canonical-form parity. Supplied hashes are validated even when the API is disabled. |
-
-### `[api.security.keys]`, `[api.limits]` and `[api.readiness]`
+| `keys` | array of tables | `[]` | Named scoped credentials; use `[[api.security.keys]]` as described below. Requires a master `api_key_hash`. |
+| `allow_unauthenticated_legacy_mining` | bool | `false` | Explicit Scala/Lithos compatibility: permits unauthenticated `GET /mining/candidate`, `POST /mining/solution`, and reward address/public-key reads. Requires `api_key_hash` when the API is enabled. Supplied-transaction candidate endpoints and all v1 operator routes remain authenticated. |
 
 `[[api.security.keys]]` defines named credentials with `id`, `hash`, `scopes`
 (`mining`, `wallet`, `operator`, `admin`) and `revoked` (default `false`). Scoped
 keys require a master hash. Set `revoked = true` for denial that survives a data
 wipe or old backup restore; API revocations use a data-directory ledger.
+Scoped `mining` keys authorize `POST /mining/candidateWithTxs`,
+`POST /mining/candidateWithTxsAndPk` and
+`POST /api/v1/mining/candidate-with-txs`. These supplied-transaction routes
+require a key even when `allow_unauthenticated_legacy_mining = true`. The flag
+is boot-only; runtime `PATCH /api/v1/node/config` changes only `api_limits`
+and `readiness`.
+
+### `[api.limits]` and `[api.readiness]`
 
 | Limit key | Default | Meaning |
 |---|---|---|
@@ -345,7 +353,7 @@ The API distinguishes public routes from privileged routes:
 |---|---|
 | `/wallet/*`, `/scan/*`, `/api/v1/wallet/*` | Dashboard `/`, `/wallet/ui*` redirects, swagger |
 | `POST /node/shutdown`, `POST /api/v1/node/shutdown`, `POST /peers/connect`, `POST /api/v1/votes`, `POST /blocks` | Read REST, including `GET /api/v1/votes`, `/info`, `/blocks/*`, `/peers/*`, `/blockchain/*` |
-| `/mining/*` (candidate, solution, reward address/public key) | Transaction submission/checks: `POST /transactions`, `/transactions/bytes`, `/transactions/check`, `/transactions/checkBytes`, `/api/v1/mempool/{submit,check}` |
+| `/mining/*` (including supplied-transaction candidates; the four legacy routes can be explicitly opened as above) | Transaction submission/checks: `POST /transactions`, `/transactions/bytes`, `/transactions/check`, `/transactions/checkBytes`, `/api/v1/mempool/{submit,check}` |
 | v1 Operator/Admin routes (node config, network controls, mining controls, operator votes, scans, account management/PSBT, watch writes, private-key export, webhooks); script compute when configured to require a key | Public v1 queries including watch-only account reads, `/emission/*`, `/utils/*`, `/metrics` |
 
 The whole wallet, scan and node prefixes are gated, including unknown subpaths;
@@ -533,6 +541,23 @@ either way.
 | `candidate_base_cache` | bool | `false` | With the default `false`, candidate proofs load only authenticated AVL operation paths from the committed snapshot and retain no full-tree graph between builds. Legacy v1 nodes without child labels may require subtree reads. Setting `true` enables the alternative cache of the hydrated AVL working set between candidate builds, keyed on the committed tip. Same-tip rebuilds reuse the tree and loaded paths; transaction validation and proof generation for changed transaction sets still run. Independently of this setting, the worker can reuse a prior state root and proof for an identical applied parent and ordered transaction bytes after fresh transaction validation. When the tip advances by exactly one block, the engine attempts a single-step incremental advance of the cached tree (replaying the new block's UTXO changes, verifying the resulting digest) before falling back to full rehydration. Full rehydration is always the fallback on multi-block jumps, reorgs, decode errors, or digest mismatches. Holds the full UTXO AVL node graph resident — multi-GB on a mainnet archival node, scaling with the UTXO-set size — so enable it only on a mining node with RAM headroom. |
 | `claim_storage_rent` | bool | `false` | When `true`, the node sweeps storage-rent-eligible boxes into a self-claim transaction paid to the miner's reward key, inserted ahead of mempool selection so any conflicting fee-bearing claim on the same box is excluded. Opt-in: it changes block contents and seizes rent to the miner. Requires `[indexer] enabled = true` (see cross-section rules). While the index backfills, enumeration may be partial but never claims an invalid box — a lagging index only under-collects. |
 | `max_storage_rent_claims` | u32 | `4096` | Safety ceiling on the number of storage-rent boxes swept into one block's self-claim. The block's cost and size budgets are the real binding limit (typically ~3,700 boxes by cost on mainnet); this cap prevents unbounded iteration. Lower it to leave more room for fee-paying user transactions. Only meaningful when `claim_storage_rent = true`. |
+
+The node also accepts authenticated `POST /mining/candidateWithTxs` (a JSON
+transaction array) and `POST /mining/candidateWithTxsAndPk` (`{"txs": [...],
+"pk": "<compressed public key>"}`). Valid supplied transactions are selected
+in request order ahead of automatic rent claims and mempool transactions. They
+may have no fee and may spend earlier package outputs; they still undergo full
+consensus validation and block cost/size limits. Invalid or nonfitting members
+are omitted. The returned `proof.msgPreimage` and `proof.txProofs` prove the
+members actually included in the final candidate. The v1 equivalent accepts
+either request shape at `POST /api/v1/mining/candidate-with-txs`.
+
+Requests are limited to 1024 transactions and 2 MiB, with at most two packages
+queued or building. Builds run on the existing serial worker and cancel when
+the caller disconnects or the tip changes. Requested jobs retain their own
+bounded history (16 templates) independently of ordinary refreshes; solo reads
+always use the operator's reward key. Explicit-key jobs must submit that key.
+See [Lithos integration](lithos.md) for client configuration and keystore export.
 
 Storage-rent claims enforce distinct context-extension variable 127 values from height 1,885,000 on every network, matching Scala 6.0.7. This consensus check applies to blocks regardless of `reject_storage_rent_txs`. The self-collector gives each fully consumed input a separate miner output from that height; if proceeds cannot cover the additional outputs' dust floors, the batch is skipped. Earlier blocks retain the historical rules.
 

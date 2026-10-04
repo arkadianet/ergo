@@ -35,6 +35,10 @@ use thiserror::Error;
 ///   header for interlinks computation failed.
 #[derive(Debug, Error)]
 pub enum MiningError {
+    /// A requested package conflicts with policy, validation or block budgets.
+    #[error("invalid mining request: {0}")]
+    InvalidRequest(String),
+
     /// The applied parent changed while a candidate was being assembled.
     /// This cooperative stop is mapped to a stale-build outcome by the engine,
     /// rather than reported as a validation or storage failure.

@@ -251,7 +251,7 @@ pub(super) fn spawn_engine(
     let engine_handle = handle.clone();
     let task = tokio::spawn(super::super::mining_engine::run_mining_engine(
         engine_handle,
-        req_tx,
+        req_tx.clone(),
         intent_rx,
         cancel_rx,
     ));
@@ -259,6 +259,7 @@ pub(super) fn spawn_engine(
         wiring: Some(super::super::mining_dispatch::MiningWiring {
             handle,
             intent_tx,
+            request_tx: req_tx,
             refresh_debounce: Duration::from_millis(
                 config.mining_config.block_candidate_generation_interval_ms,
             ),

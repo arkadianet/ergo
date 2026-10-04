@@ -171,6 +171,9 @@ peer_details.reverse_dns = false
 
 # [api.security]
 # api_key_hash = "<64 lowercase hex characters>"
+# allow_unauthenticated_legacy_mining = false  # opt in for current Lithos clients.
+# Opens only legacy candidate/solution/reward routes; injected packages and v1 stay keyed.
+# See docs/lithos.md for full-archive, indexer and keystore setup.
 
 [mempool]
 # Reject empty-proof inputs carrying extension variable 127, including mixed transactions.

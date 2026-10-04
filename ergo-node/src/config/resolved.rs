@@ -200,6 +200,9 @@ pub struct NodeConfig {
     /// `ergo_api::auth::ApiSecurity` to gate `/wallet/*` and
     /// `/node/shutdown`.
     pub api_key_hash: Option<String>,
+    /// Explicit Scala-compatible access for the four legacy mining routes.
+    /// Supplied-transaction candidates and all v1 routes remain authenticated.
+    pub allow_unauthenticated_legacy_mining: bool,
     pub api_scoped_keys: Vec<ergo_api::auth::ScopedCredentialConfig>,
     pub api_limits: ergo_api::operator_control::ApiLimits,
     pub api_readiness: ergo_api::operator_control::ProbePolicy,

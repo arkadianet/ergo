@@ -14,7 +14,7 @@
 //!   synchronous [`ergo_mining::engine::build_and_publish_cached`] for each, and
 //!   returns the result over the request's `oneshot`.
 //!
-//! ## Lifecycle: spawner owns the thread, the future owns the sender
+//! ## Lifecycle: spawner owns the thread, request producers own senders
 //!
 //! The build worker is spawned by [`boot`](super::boot) (production) or by the
 //! engine tests, *not* by [`run_mining_engine`]. The spawner keeps the worker's
@@ -25,8 +25,10 @@
 //! then `abort()`s it. At rest the coordinator is parked at `reply_rx.await` — an
 //! abort point — so an abort drops the future. Because the future owns the
 //! sender (not the thread), dropping it on *any* exit — cooperative return or
-//! abort-drop — closes the channel; the worker's `recv()` then errs, it drains
-//! its at-most-one in-flight build, and exits. Shutdown joins the worker thread
+//! abort-drop — releases the background producer. Shutdown also drops the
+//! action loop's request sender and client reply receivers. Once both senders
+//! are gone, the worker cancels abandoned requests, finishes any active
+//! background build, and exits. Shutdown joins the worker thread
 //! *after* the coordinator is gone, via the `JoinHandle` it kept, so a worker
 //! still finishing a build can never detach and keep reading/publishing past
 //! shutdown. Pre-split the worker handle lived inside the future and was dropped
@@ -47,8 +49,9 @@
 //!
 //! The `watch` channel coalesces, so the coordinator always builds the
 //! *latest* intent — rapid tip/mempool churn collapses to one build, never a
-//! backlog. Builds are serial: the coordinator awaits each reply before
-//! issuing the next request, so at most one build is ever in flight.
+//! backlog. The coordinator awaits each reply before issuing the next request.
+//! Up to two admitted API requests share the same worker and caches; all builds
+//! execute serially on its owning thread.
 //!
 //! Two-phase publish per tip: a full candidate build can take seconds, during
 //! which `/mining/candidate` 503s for the new tip. So on a tip's *first* build
@@ -76,7 +79,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ergo_indexer::StorageRentEligibleDto;
 use ergo_mining::candidate::BuildMode;
-use ergo_mining::engine::{build_and_publish_cached, BuildIntent, BuildOutcome};
+use ergo_mining::engine::{
+    build_and_publish_cached, build_requested_and_publish_cached, BuildIntent, BuildOutcome,
+};
 use ergo_mining::error::MiningError;
 use ergo_mining::handle::MiningHandle;
 use ergo_mining::state_view::CandidateProofCache;
@@ -86,6 +91,14 @@ use ergo_state::store::{BaseDisposition, CommittedSnapshot, DryRunBase};
 use ergo_validation::UtxoView;
 use tokio::sync::{oneshot, watch};
 use tracing::{debug, error, info, warn};
+
+#[cfg(test)]
+type RequestedCancelHook = Box<dyn FnMut([u8; 33])>;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static REQUESTED_CANCEL_HOOK: std::cell::RefCell<Option<RequestedCancelHook>> = const { std::cell::RefCell::new(None) };
+}
 
 /// Storage-rent period in blocks (≈ 4 years). Non-votable protocol
 /// constant; mirrors `ergo-validation`'s `storage_period`. A box is
@@ -283,20 +296,22 @@ const MAX_VIS_RETRIES: u32 = 40;
 /// operator-actionable, not routine.
 const SLOW_BUILD_WARN_MS: u64 = 2_000;
 
-/// One build job handed from the coordinator to the build worker. The
-/// coordinator owns every sequencing decision (mode probe, retry budget,
-/// minimal→full refresh); the worker only executes the build serially and
-/// returns the result over `reply`.
+/// One build job handed from the coordinator or mining-request dispatcher to
+/// the serial worker. The coordinator sequences background mode selection and
+/// refreshes; the dispatcher admits full builds for client packages.
 ///
 /// `pub(super)` because the request channel is created by the spawner (boot or
 /// the engine tests) — it owns the worker thread, the coordinator future owns
-/// only the `Sender<BuildRequest>` — so the type must be nameable there even
-/// though only `run_mining_engine` ever constructs a `BuildRequest`.
+/// only a `Sender<BuildRequest>`. The dispatcher also owns a sender, which the
+/// action loop releases during shutdown.
 pub(super) struct BuildRequest {
     intent: BuildIntent,
     mode: BuildMode,
-    /// Response channel. The coordinator awaits exactly one reply per request,
-    /// so the request→reply protocol stays strictly serial (≤1 in flight).
+    /// Client-supplied transactions, empty for ordinary background builds.
+    requested: Vec<Vec<u8>>,
+    forbidden_private_ids: Vec<ergo_primitives::digest::Digest32>,
+    /// Background replies carry an outcome and the dry-run base-cache
+    /// disposition; client replies carry the published work or an API error.
     ///
     /// The reply carries the build result plus the dry-run base-cache
     /// disposition string for the build-complete log line:
@@ -306,7 +321,45 @@ pub(super) struct BuildRequest {
     /// computed on the worker — the only place that can observe the cache slot
     /// state after the build — and threaded back here because the log lines live
     /// on the coordinator.
-    reply: oneshot::Sender<(Result<BuildOutcome, MiningError>, &'static str)>,
+    reply: BuildReply,
+}
+
+/// Replies distinguish ordinary producer builds from client-requested jobs.
+/// Keeping both on one worker preserves the single-owner AVL cache invariant.
+enum BuildReply {
+    Background(oneshot::Sender<(Result<BuildOutcome, MiningError>, &'static str)>),
+    Requested {
+        reply: oneshot::Sender<
+            Result<ergo_rest_json::mining::WorkMessageJson, ergo_api::MiningApiError>,
+        >,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+        deadline: Instant,
+    },
+}
+
+impl BuildRequest {
+    pub(super) fn requested(
+        intent: BuildIntent,
+        requested: Vec<Vec<u8>>,
+        forbidden_private_ids: Vec<ergo_primitives::digest::Digest32>,
+        reply: oneshot::Sender<
+            Result<ergo_rest_json::mining::WorkMessageJson, ergo_api::MiningApiError>,
+        >,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            intent,
+            mode: BuildMode::Full,
+            requested,
+            forbidden_private_ids,
+            reply: BuildReply::Requested {
+                reply,
+                _permit: permit,
+                deadline,
+            },
+        }
+    }
 }
 
 /// Run the build worker loop until the request channel closes.
@@ -318,8 +371,8 @@ pub(super) struct BuildRequest {
 /// things — the indexer and mining handles) so the coordinator stays clock-
 /// and indexer-free, exactly as the inline build did.
 ///
-/// `reply` send errors are ignored: a dropped receiver means the coordinator
-/// has gone, in which case the next `recv()` returns `Err` and the loop exits.
+/// `reply` send errors are ignored. A dropped client receiver cancels its build;
+/// the worker exits once both producers have released their request senders.
 ///
 /// Spawned by [`boot`](super::boot) (production) or directly by the engine
 /// tests, never by [`run_mining_engine`]: the spawner owns the worker
@@ -353,9 +406,19 @@ pub(super) fn run_build_worker(
     while let Ok(BuildRequest {
         intent,
         mode,
+        requested,
+        forbidden_private_ids,
         reply,
     }) = req_rx.recv()
     {
+        let is_requested = matches!(&reply, BuildReply::Requested { .. });
+        let caller_left = match &reply {
+            BuildReply::Requested { reply, .. } => reply.is_closed(),
+            BuildReply::Background(reply) => reply.is_closed(),
+        };
+        if caller_left {
+            continue;
+        }
         // Wall-clock closure, sampled by the engine core at the publish step so
         // the stamped time is when the template is actually published (not when
         // this possibly-retried build started). Lives on the worker, not the
@@ -374,15 +437,20 @@ pub(super) fn run_build_worker(
         // the disposition stays `None` and we fall back to a sensible wire
         // label.
         let mut raw_disposition: Option<BaseDisposition> = None;
-        let result = build_and_publish_cached(
-            &reader,
-            &handle,
-            &intent,
-            mode,
-            use_base_cache.then_some(&mut base),
-            &mut proof_cache,
-            now_ms,
-            |snapshot, h| {
+        let result = loop {
+            let caller_cancelled = || {
+                #[cfg(test)]
+                if matches!(&reply, BuildReply::Requested { .. }) {
+                    REQUESTED_CANCEL_HOOK.with_borrow_mut(|hook| {
+                        if let Some(hook) = hook {
+                            hook(intent.miner_pk);
+                        }
+                    });
+                }
+                matches!(&reply,
+                BuildReply::Requested { reply, deadline, .. } if reply.is_closed() || Instant::now() >= *deadline)
+            };
+            let rent_resolver = |snapshot: &CommittedSnapshot, h: u32| {
                 resolve_eligible_rent_boxes(
                     indexer.as_ref(),
                     snapshot,
@@ -390,12 +458,52 @@ pub(super) fn run_build_worker(
                     handle.max_storage_rent_claims(),
                     &|| {
                         let tip = handle.best_tip();
-                        !tip.synced || tip.parent_id != intent.expected_parent
+                        !tip.synced || tip.parent_id != intent.expected_parent || caller_cancelled()
                     },
                 )
-            },
-            &mut raw_disposition,
-        );
+            };
+            let result = if is_requested {
+                build_requested_and_publish_cached(
+                    &reader,
+                    &handle,
+                    &intent,
+                    &requested,
+                    &forbidden_private_ids,
+                    &caller_cancelled,
+                    use_base_cache.then_some(&mut base),
+                    &mut proof_cache,
+                    now_ms,
+                    rent_resolver,
+                    &mut raw_disposition,
+                )
+            } else {
+                build_and_publish_cached(
+                    &reader,
+                    &handle,
+                    &intent,
+                    mode,
+                    use_base_cache.then_some(&mut base),
+                    &mut proof_cache,
+                    now_ms,
+                    rent_resolver,
+                    &mut raw_disposition,
+                )
+            };
+            if is_requested
+                && matches!(result, Ok(BuildOutcome::TipNotVisible))
+                && !caller_cancelled()
+            {
+                let remaining = match &reply {
+                    BuildReply::Requested { deadline, .. } => {
+                        deadline.saturating_duration_since(Instant::now())
+                    }
+                    BuildReply::Background(_) => VIS_BACKOFF,
+                };
+                std::thread::sleep(VIS_BACKOFF.min(remaining));
+                continue;
+            }
+            break result;
+        };
         // Map the returned disposition to the wire string the coordinator logs.
         // `"off"` when the cache is disabled; `"advanced"` / `"primed"` /
         // `"cold"` / `"cold_fallback"` from the actual path taken.
@@ -422,9 +530,39 @@ pub(super) fn run_build_worker(
                 }
             }
         };
-        // Coordinator gone (receiver dropped) ⇒ ignore; the next `recv()` errs
-        // and the loop exits.
-        let _ = reply.send((result, base_cache));
+        // A producer may have dropped its receiver; sending is best-effort.
+        match reply {
+            BuildReply::Background(reply) => {
+                let _ = reply.send((result, base_cache));
+            }
+            BuildReply::Requested { reply, _permit, .. } => {
+                use ergo_api::MiningApiError;
+                let result = match result {
+                    Ok(BuildOutcome::Published { template_seq, .. }) => handle
+                        .cached_requested_template_if_synced(template_seq, now_ms())
+                        .map(|(work, identity)| {
+                            crate::mining_bridge::work_message_to_json(
+                                work,
+                                identity.template_seq,
+                                identity.clean_jobs,
+                            )
+                        })
+                        .ok_or_else(|| {
+                            MiningApiError::Unavailable("candidate tip moved during build".into())
+                        }),
+                    Ok(outcome) => Err(MiningApiError::Unavailable(format!(
+                        "candidate not published: {outcome:?}"
+                    ))),
+                    Err(MiningError::InvalidRequest(detail)) => {
+                        Err(MiningApiError::BadRequest(detail))
+                    }
+                    Err(error) => Err(MiningApiError::Internal(format!(
+                        "candidate build: {error}"
+                    ))),
+                };
+                let _ = reply.send(result);
+            }
+        }
     }
 }
 
@@ -536,7 +674,9 @@ pub(super) async fn run_mining_engine(
                 .send(BuildRequest {
                     intent: intent.clone(),
                     mode,
-                    reply: reply_tx,
+                    requested: Vec::new(),
+                    forbidden_private_ids: Vec::new(),
+                    reply: BuildReply::Background(reply_tx),
                 })
                 .is_err()
             {
@@ -565,7 +705,7 @@ pub(super) async fn run_mining_engine(
                         _ = tokio::time::sleep(VIS_BACKOFF) => {}
                     }
                 }
-                Ok(BuildOutcome::Published { timings: t }) => {
+                Ok(BuildOutcome::Published { timings: t, .. }) => {
                     let accounted = t.setup
                         + t.rent_resolve
                         + t.assembly
@@ -952,6 +1092,7 @@ mod tests {
         ergo_mining::engine::BuildIntent {
             private_transactions: std::sync::Arc::new(Vec::new()),
             operator_generation: 0,
+            operator_owned: true,
             expected_parent: [0u8; 32],
             expected_height: 0,
             mempool: std::sync::Arc::new(mempool),
@@ -1043,7 +1184,10 @@ mod tests {
                 matches!(req_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
                 "coordinator must retain one request/reply in flight"
             );
-            old.reply
+            let BuildReply::Background(old_reply) = old.reply else {
+                panic!("background build expected")
+            };
+            old_reply
                 .send((Ok(BuildOutcome::DroppedStale), "cold"))
                 .unwrap();
 
@@ -1051,11 +1195,14 @@ mod tests {
             seen_tx
                 .send((latest.intent.expected_parent, latest.mode))
                 .unwrap();
-            latest
-                .reply
+            let BuildReply::Background(latest_reply) = latest.reply else {
+                panic!("background build expected")
+            };
+            latest_reply
                 .send((
                     Ok(BuildOutcome::Published {
                         timings: Default::default(),
+                        template_seq: 0,
                     }),
                     "advanced",
                 ))

@@ -5,9 +5,9 @@
 //! work-message construction.
 //!
 //! Scope / invariants:
-//! - The block carries the coinbase (emission) tx, then mempool user
-//!   transactions selected over an in-block overlay, then a single
-//!   fee-collecting tx — block order `[emission, ...user txs, fee]`. A fee
+//! - The block carries the coinbase (emission), caller-supplied transactions,
+//!   storage-rent claim, mempool transactions, then a single fee-collecting tx.
+//!   Selection uses an evolving in-block overlay. A fee
 //!   tx is emitted only when an included user tx produces a fee-proposition
 //!   output.
 //! - Cost and size are enforced at selection so the assembled block stays
@@ -57,8 +57,10 @@ use std::collections::{BTreeMap, HashSet};
 /// decrease and id-9 votes; while active only `{1..=8, 120}` are accepted.
 const RULE_HDR_VOTES_UNKNOWN: u16 = 215;
 
+use crate::candidate_proof::upcoming_transactions_proof;
 use crate::candidate_selection::{
-    rent_protection, select_user_txs_with_policy_cancellable, CandidateOverlay,
+    rent_protection, select_requested_txs_cancellable, select_user_txs_with_policy_cancellable,
+    CandidateOverlay,
 };
 use crate::coinbase::{build_fee_tx, build_pre_eip27_emission_tx};
 use crate::emission_box::lookup_emission_box_from_parent;
@@ -108,7 +110,7 @@ pub struct PhaseTimings {
 /// What a candidate build includes. `Minimal` is the consensus-complete
 /// emission-only template published the instant a new tip lands (forfeits
 /// only fees for the seconds until the enriched refresh); `Full` adds the
-/// rent self-claim, mempool selection, and the fee tx.
+/// requested transactions, rent self-claim, mempool selection, and the fee tx.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildMode {
     Minimal,
@@ -270,7 +272,53 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
     )
 }
 
-/// Candidate assembly with operator selection and asset preservation policy.
+/// Caller-supplied transactions are validated in order before rent and mempool
+/// selection. They use block policy, including zero fees, and membership proofs
+/// describe only those that survive final assembly. A requested package always
+/// takes the full path so an emission-only preview cannot discard its genesis.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_candidate_with_transactions<V: CandidateStateView>(
+    view: &V,
+    network: ergo_chain_spec::Network,
+    mode: BuildMode,
+    mempool: &MempoolReadSnapshot,
+    prioritized: &[Transaction],
+    miner_pk: &[u8; 33],
+    monetary: &MonetarySettings,
+    reemission: Option<&ReemissionSettings>,
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    chain_config: &DifficultyParams,
+    eligible_rent_boxes: &[ErgoBox],
+    voting_targets: &BTreeMap<u8, i64>,
+    voting_settings: &VotingSettings,
+    custom_extension_fields: &[([u8; 2], Vec<u8>)],
+    suspects_out: &mut Vec<Digest32>,
+) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
+    generate_candidate_with_transactions_cancellable(
+        view,
+        network,
+        mode,
+        mempool,
+        prioritized,
+        miner_pk,
+        monetary,
+        reemission,
+        reemission_rules,
+        chain_config,
+        eligible_rent_boxes,
+        voting_targets,
+        voting_settings,
+        custom_extension_fields,
+        suspects_out,
+        &[],
+        &BlockPolicy::default(),
+        0,
+        0,
+        &|| false,
+    )
+}
+
+/// Cooperatively cancel a supplied-transaction build when its applied parent changes.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
     view: &V,
@@ -280,12 +328,64 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
     miner_pk: &[u8; 33],
     monetary: &MonetarySettings,
     reemission: Option<&ReemissionSettings>,
-    // EIP-27 re-emission VALIDATION rules (distinct from the emission-curve
-    // `reemission` above): threaded into every `TxValidationCtx` this builds so
-    // the candidate's emission tx, fee tx, storage-rent claims, and selected
-    // mempool txs are all checked against the burning condition — closing the
-    // gap where a locally-assembled candidate could carry an EIP-27-invalid tx
-    // that block validation later rejects. `None` where EIP-27 is disabled.
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    chain_config: &DifficultyParams,
+    eligible_rent_boxes: &[ErgoBox],
+    voting_targets: &BTreeMap<u8, i64>,
+    voting_settings: &VotingSettings,
+    // Operator-configured custom extension fields (validated at config time via
+    // `validate_custom_extension_fields`) — the general merge-mining / commitment
+    // hook. Injected into every candidate's extension alongside interlinks; empty
+    // when the operator has configured none.
+    custom_extension_fields: &[([u8; 2], Vec<u8>)],
+    // Side-output: ids of pooled txs whose consensus re-validation
+    // failed during selection (suspected tip-invalid). Written only on the Full
+    // path that runs mempool selection; left untouched for Minimal builds. The
+    // engine forwards these to the node, which re-validates each against the live
+    // tip and evicts the still-invalid ones. A side-output (not part of the
+    // Candidate) because suspects are diagnostic, not consensus artifacts.
+    suspects_out: &mut Vec<Digest32>,
+    private_transactions: &[Entry],
+    policy: &BlockPolicy,
+    policy_revision: u64,
+    operator_generation: u64,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
+    generate_candidate_with_transactions_cancellable(
+        view,
+        network,
+        mode,
+        mempool,
+        &[],
+        miner_pk,
+        monetary,
+        reemission,
+        reemission_rules,
+        chain_config,
+        eligible_rent_boxes,
+        voting_targets,
+        voting_settings,
+        custom_extension_fields,
+        suspects_out,
+        private_transactions,
+        policy,
+        policy_revision,
+        operator_generation,
+        should_cancel,
+    )
+}
+
+/// Cooperatively cancel a supplied-transaction build when its applied parent changes.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
+    view: &V,
+    network: ergo_chain_spec::Network,
+    mode: BuildMode,
+    mempool: &MempoolReadSnapshot,
+    prioritized: &[Transaction],
+    miner_pk: &[u8; 33],
+    monetary: &MonetarySettings,
+    reemission: Option<&ReemissionSettings>,
     reemission_rules: Option<&ReemissionRuleInputs>,
     chain_config: &DifficultyParams,
     eligible_rent_boxes: &[ErgoBox],
@@ -642,7 +742,10 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
     //        overlay, no rent claim, no mempool selection, no fee tx. The
     //        minimal template is the strict [emission] prefix of a full
     //        block — same shape, same consensus pipeline below.
-    let (checked_rent, user_checked, checked_fee) = if mode == BuildMode::Minimal {
+    let mut prioritized_count = 0;
+    let (checked_rent, user_checked, checked_fee) = if mode == BuildMode::Minimal
+        && prioritized.is_empty()
+    {
         (None, Vec::new(), None)
     } else {
         // 9b. Seed an in-block overlay (over the committed state tip — the same
@@ -668,16 +771,74 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
         // Rule306 prices the serialized section against the parent row,
         // while target epoch parameters price the transaction scripts.
         let max_block_size = active_params.max_block_size as u64;
+        let priority = select_requested_txs_cancellable(
+            &mut overlay,
+            prioritized,
+            &ctx,
+            &params,
+            last_headers.as_slice(),
+            max_block_cost
+                .saturating_sub(safety_gap)
+                .saturating_sub(emission_cost),
+            max_block_size
+                .saturating_sub(emission_size)
+                .saturating_sub(BLOCK_ASSEMBLY_SIZE_RESERVE),
+            reemission_rules,
+            policy,
+            true,
+            should_cancel,
+        )?;
+        prioritized_count = priority.checked.len();
+        observation.requested_ids = priority
+            .checked
+            .iter()
+            .map(|(tx, _)| Digest32::from_bytes(*tx.tx_id()))
+            .collect();
+        // Already included request members satisfy operator requirements and
+        // must not reserve rent budget or be selected a second time.
+        let remaining = (!priority.checked.is_empty()).then(|| {
+            let included: HashSet<_> = priority
+                .checked
+                .iter()
+                .map(|(tx, _)| hex::encode(tx.tx_id()))
+                .collect();
+            let pending = |id: &String| !included.contains(&id.to_ascii_lowercase());
+            let mut remaining_policy = policy.clone();
+            remaining_policy.required_tx_ids.retain(pending);
+            for bundle in &mut remaining_policy.required_bundles {
+                bundle.retain(pending);
+            }
+            remaining_policy
+                .required_bundles
+                .retain(|bundle| !bundle.is_empty());
+            let pending_entry =
+                |entry: &&Entry| !included.contains(&hex::encode(entry.tx_id.as_bytes()));
+            (
+                mempool.filtered(|entry| pending_entry(&entry)),
+                private_transactions
+                    .iter()
+                    .filter(pending_entry)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                remaining_policy,
+            )
+        });
+        let (mempool, private_transactions, selection_policy) = remaining.as_ref().map_or(
+            (mempool, private_transactions, policy),
+            |(pool, private, policy)| (pool, private.as_slice(), policy),
+        );
         let phase_start = std::time::Instant::now();
         // Rent is built before user selection, so it must leave room for the
         // operator work selected first: the private reservation while private
         // or required transactions wait, and at least the measured size and
         // admission cost of the available requirements and their ancestors.
-        let protection = rent_protection(mempool, private_transactions, policy)?;
+        let protection = rent_protection(mempool, private_transactions, selection_policy)?;
         let operator_work_waiting = !private_transactions.is_empty() || protection.required_waiting;
         let rent_cost_ceiling = BlockPolicy::rent_ceiling(
             max_block_cost,
-            safety_gap.saturating_add(emission_cost),
+            safety_gap
+                .saturating_add(emission_cost)
+                .saturating_add(priority.total_cost),
             policy.rent_max_cost_basis_points,
             policy.private_reserved_cost_basis_points,
             operator_work_waiting,
@@ -685,7 +846,9 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
         );
         let rent_size_ceiling = BlockPolicy::rent_ceiling(
             max_block_size,
-            emission_size.saturating_add(BLOCK_ASSEMBLY_SIZE_RESERVE),
+            emission_size
+                .saturating_add(BLOCK_ASSEMBLY_SIZE_RESERVE)
+                .saturating_add(priority.total_size),
             policy.rent_max_size_basis_points,
             policy.private_reserved_size_basis_points,
             operator_work_waiting,
@@ -695,7 +858,7 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
             .iter()
             .filter(|box_| {
                 box_.box_id()
-                    .is_ok_and(|id| !protection.inputs.contains(&id))
+                    .is_ok_and(|id| !protection.inputs.contains(&id) && !overlay.is_spent(&id))
             })
             .cloned()
             .collect();
@@ -733,9 +896,11 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
         let cost_budget = max_block_cost
             .saturating_sub(safety_gap)
             .saturating_sub(emission_cost)
+            .saturating_sub(priority.total_cost)
             .saturating_sub(rent_cost);
         let size_budget = max_block_size
             .saturating_sub(emission_size)
+            .saturating_sub(priority.total_size)
             .saturating_sub(rent_size)
             .saturating_sub(BLOCK_ASSEMBLY_SIZE_RESERVE);
 
@@ -749,7 +914,7 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
             size_budget,
             reemission_rules,
             private_transactions,
-            policy,
+            selection_policy,
             should_cancel,
         )?;
 
@@ -770,7 +935,8 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
         //     spend behind.
         observation.excluded.extend(selected.excluded);
         let required_ids = selected.required;
-        let mut user_checked = selected.checked; // Vec<(CheckedTransaction, cost)>
+        let mut user_checked = priority.checked;
+        user_checked.extend(selected.checked);
         let cost_ceiling = max_block_cost.saturating_sub(safety_gap);
         let checked_fee = loop {
             check_build_cancelled(should_cancel)?;
@@ -787,10 +953,14 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
             if let Some(tx) = &checked_emission {
                 fee_overlay.apply_checked(tx);
             }
+            for (c, _) in user_checked.iter().take(prioritized_count) {
+                check_build_cancelled(should_cancel)?;
+                fee_overlay.apply_checked(c);
+            }
             if let Some(cr) = &checked_rent {
                 fee_overlay.apply_checked(cr);
             }
-            for (c, _) in &user_checked {
+            for (c, _) in user_checked.iter().skip(prioritized_count) {
                 check_build_cancelled(should_cancel)?;
                 fee_overlay.apply_checked(c);
             }
@@ -845,10 +1015,11 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
 
             let mut probe: Vec<Transaction> = Vec::with_capacity(3 + user_raw.len());
             probe.extend(emission_tx.iter().cloned());
+            probe.extend(user_raw.iter().take(prioritized_count).cloned());
             if let Some(cr) = &checked_rent {
                 probe.push(cr.transaction().clone());
             }
-            probe.extend(user_raw);
+            probe.extend(user_raw.into_iter().skip(prioritized_count));
             if let Some(ft) = &fee_tx_opt {
                 probe.push(ft.clone());
             }
@@ -859,10 +1030,21 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
             if (total_cost <= cost_ceiling && section_size <= max_block_size as usize)
                 || user_checked.is_empty()
             {
+                if total_cost > cost_ceiling || section_size > max_block_size as usize {
+                    return Err(MiningError::IdComputation {
+                        op: "candidate_block_budget",
+                        reason: "pinned block transactions exceed the block budget".into(),
+                    });
+                }
                 final_fee_cost = fee_cost;
                 final_validation_cost = total_cost;
                 final_section_size = Some(section_size as u64);
                 break checked_fee;
+            }
+            if user_checked.len() <= prioritized_count {
+                return Err(MiningError::InvalidRequest(
+                    "requested prefix and final fee transaction exceed the block budget".into(),
+                ));
             }
             // Selection ordered requirements first, so a required transaction
             // is trimmed only after every optional one; it is then reported
@@ -883,8 +1065,8 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
     };
 
     // 9f. Assemble the final tx list in block order:
-    //     emission, rent, user txs, fee.
-    let selected_transaction_count = user_checked.len() as u32;
+    //     emission, supplied transactions, rent, mempool transactions, fee.
+    let selected_transaction_count = user_checked.len().saturating_sub(prioritized_count) as u32;
     let fees_nano_erg = checked_fee.as_ref().map_or(0, |fee| {
         fee.transaction()
             .output_candidates
@@ -901,6 +1083,30 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
             resolved_inputs: emission.resolved_inputs().to_vec(),
         });
         checked.push(emission);
+    }
+    let mut user_checked = user_checked.into_iter();
+    for (c, cost) in user_checked.by_ref().take(prioritized_count) {
+        let id = Digest32::from_bytes(*c.tx_id());
+        observation.transactions.push(TransactionObservation {
+            category: if private_ids.contains(&id) {
+                "private"
+            } else {
+                "requested"
+            },
+            validation_cost: cost,
+            fee_nano_erg: c
+                .transaction()
+                .output_candidates
+                .iter()
+                .filter(|output| {
+                    output.ergo_tree_bytes()
+                        == ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES
+                })
+                .map(|output| output.value)
+                .sum(),
+            resolved_inputs: c.resolved_inputs().to_vec(),
+        });
+        checked.push(c);
     }
     if let Some(cr) = checked_rent {
         observation.transactions.push(TransactionObservation {
@@ -951,6 +1157,8 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
         Some(size) => size,
         None => block_transactions_section_size(&raw_txs, pre_header.version)? as u64,
     };
+
+    validate_block_transactions_roundtrip(&raw_txs, pre_header.version)?;
 
     // 10. Dry-run AVL+ to obtain new_state_root + raw_proof_bytes.
     check_build_cancelled(should_cancel)?;
@@ -1036,6 +1244,7 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
         target: target.clone(),
         height: candidate_height,
         pk: *miner_pk,
+        proof: upcoming_transactions_proof(&header, &raw_txs, prioritized)?,
         metrics: CandidateMetrics {
             transaction_count: raw_txs.len() as u32,
             selected_transaction_count,
@@ -1112,6 +1321,38 @@ fn block_transactions_section_size(
         }
     })?;
     Ok(w.result().len())
+}
+
+pub(crate) fn validate_block_transactions_roundtrip(
+    txs: &[Transaction],
+    block_version: u8,
+) -> Result<(), MiningError> {
+    let section = BlockTransactions {
+        header_id: Digest32::from_bytes([0; 32]).into(),
+        transactions: txs.to_vec(),
+    };
+    let mut writer = VlqWriter::new();
+    write_block_transactions_with_version(&mut writer, &section, block_version).map_err(
+        |error| MiningError::IdComputation {
+            op: "block_transactions_roundtrip",
+            reason: format!("serialize: {error:?}"),
+        },
+    )?;
+    let bytes = writer.result();
+    let mut reader = VlqReader::new(&bytes);
+    ergo_ser::block_transactions::read_block_transactions(&mut reader).map_err(|error| {
+        MiningError::IdComputation {
+            op: "block_transactions_roundtrip",
+            reason: format!("parse: {error:?}"),
+        }
+    })?;
+    if !reader.is_empty() {
+        return Err(MiningError::IdComputation {
+            op: "block_transactions_roundtrip",
+            reason: "trailing bytes after block transactions".into(),
+        });
+    }
+    Ok(())
 }
 
 fn state_err(e: ergo_state::store::StateError) -> MiningError {
@@ -1771,7 +2012,9 @@ mod tests {
             ),
             StateError,
         > {
-            self.stub.tip_snapshot_params()
+            let (mut params, settings) = self.stub.tip_snapshot_params()?;
+            params.block_version = self.stub.header.version;
+            Ok((params, settings))
         }
         fn candidate_dry_run(
             &self,
@@ -1964,6 +2207,252 @@ mod tests {
             reserved.transactions.contains(&required),
             "{:?}",
             reserved.observation.excluded
+        );
+    }
+
+    #[test]
+    fn requested_prefix_precedes_rent_and_satisfies_operator_requirements() {
+        let mut header = crate::genesis::parent_header();
+        header.height = 1_100_005;
+        header.version = 4;
+        header.n_bits = 16_842_752;
+        let spendable = genesis_era_box(u16::MAX);
+        let private_box = genesis_era_box(u16::MAX - 1);
+        let view = RentView {
+            stub: ExhaustedView { header },
+            utxo: std::collections::HashMap::from([
+                (spendable.box_id().unwrap(), spendable.clone()),
+                (private_box.box_id().unwrap(), private_box.clone()),
+            ]),
+        };
+        let parent = Transaction {
+            inputs: vec![ergo_ser::input::Input {
+                box_id: spendable.box_id().unwrap(),
+                spending_proof: ergo_ser::input::SpendingProof::new(
+                    Vec::new(),
+                    ergo_ser::input::ContextExtension::empty(),
+                )
+                .unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![spendable.candidate.clone()],
+        };
+        let parent_id = ergo_ser::transaction::transaction_id(&parent).unwrap();
+        let created = ErgoBox {
+            candidate: parent.output_candidates[0].clone(),
+            transaction_id: parent_id,
+            index: 0,
+        };
+        let mut child = parent.clone();
+        child.inputs[0].box_id = created.box_id().unwrap();
+        let child_id = ergo_ser::transaction::transaction_id(&child).unwrap();
+        let mut private_tx = parent.clone();
+        private_tx.inputs[0].box_id = private_box.box_id().unwrap();
+        private_tx.output_candidates = vec![private_box.candidate.clone()];
+        let private_id = Digest32::from_bytes(
+            *ergo_ser::transaction::transaction_id(&private_tx)
+                .unwrap()
+                .as_bytes(),
+        );
+        let private_bytes = serialize_tx(&private_tx, "test").unwrap();
+        let private_entry = ergo_mempool::pool::Entry::new(
+            private_id,
+            private_bytes.clone().into(),
+            vec![private_box.box_id().unwrap()],
+            vec![],
+            vec![],
+            0,
+            0,
+            private_bytes.len() as u32,
+            0,
+            ergo_mempool::types::TxSource::Api,
+        );
+        let policy = BlockPolicy {
+            rent_max_cost_basis_points: 10_000,
+            rent_max_size_basis_points: 10_000,
+            required_tx_ids: vec![hex::encode(parent_id.as_bytes())],
+            required_bundles: vec![vec![hex::encode(child_id.as_bytes())]],
+            ..Default::default()
+        };
+        let mut rent_boxes: Vec<_> = (0..600).map(genesis_era_box).collect();
+        rent_boxes.insert(0, spendable);
+        rent_boxes.insert(0, private_box);
+        let (mut candidate, work, _) = generate_candidate_with_transactions_cancellable(
+            &view,
+            ergo_chain_spec::Network::Mainnet,
+            BuildMode::Full,
+            &MempoolReadSnapshot::empty(),
+            &[parent.clone(), child.clone()],
+            &RENT_MINER_PK,
+            &MonetarySettings::mainnet(),
+            None,
+            None,
+            &DifficultyParams::mainnet(),
+            &rent_boxes,
+            &BTreeMap::new(),
+            &VotingSettings::mainnet(),
+            &[],
+            &mut vec![],
+            &[private_entry],
+            &policy,
+            7,
+            9,
+            &|| false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(candidate.transactions[..2], [parent, child]);
+        assert_eq!(
+            candidate
+                .observation
+                .transactions
+                .iter()
+                .map(|t| t.category)
+                .collect::<Vec<_>>(),
+            ["requested", "requested", "rent", "private"]
+        );
+        assert!(
+            candidate.observation.excluded.is_empty(),
+            "{:?}",
+            candidate.observation.excluded
+        );
+        assert_eq!(candidate.observation.policy_revision, 7);
+        assert_eq!(candidate.observation.operator_generation, 9);
+        let mut writer = VlqWriter::new();
+        write_block_transactions_with_version(
+            &mut writer,
+            &BlockTransactions {
+                header_id: ModifierId::from_bytes([0; 32]),
+                transactions: candidate.transactions.clone(),
+            },
+            candidate.header.version,
+        )
+        .unwrap();
+        let bytes = writer.result();
+        let mut reader = VlqReader::new(&bytes);
+        let parsed = ergo_ser::block_transactions::read_block_transactions(&mut reader).unwrap();
+        assert!(reader.is_empty());
+        assert_eq!(candidate.header.version, 4);
+        assert_eq!(parsed.transactions, candidate.transactions);
+        assert_eq!(work.proof.as_ref().unwrap().tx_proofs.len(), 2);
+        assert_eq!(work.metrics.selected_transaction_count, 1);
+        assert_eq!(
+            candidate.observation.transactions.len(),
+            candidate.transactions.len()
+        );
+        // A missing requested observation shifts the private category onto rent,
+        // defeating the cancellation/expiry withdrawal guard.
+        candidate.observation.policy_revision = 0;
+        candidate.observation.operator_generation = 0;
+        candidate.observation.operator_owned = true;
+        let handle = crate::handle::MiningHandle::mainnet(RENT_MINER_PK);
+        let parent = candidate.parent_id;
+        handle.set_best_tip(crate::engine::BestTip {
+            parent_id: parent,
+            chain_seq: 1,
+            synced: true,
+        });
+        let identity = handle
+            .publish_if_current(
+                candidate,
+                work,
+                &parent,
+                || 1,
+                crate::engine::BuildReason::Requested,
+            )
+            .unwrap();
+        let retained = handle
+            .inspect_template(None, Some(identity.template_seq))
+            .unwrap();
+        assert_eq!(retained.template.private_transaction_ids(), [private_id]);
+        assert_eq!(
+            handle.withdraw_private_transactions(&HashSet::from([private_id]), true),
+            1
+        );
+        assert_eq!(
+            handle
+                .inspect_template(None, Some(identity.template_seq))
+                .unwrap()
+                .status,
+            "withdrawn"
+        );
+    }
+
+    #[test]
+    fn assembled_section_roundtrip_rejects_too_new_output_tree() {
+        let box_ = genesis_era_box(0);
+        let mut tree = box_.candidate.ergo_tree().clone();
+        tree.version = 5;
+        let tx = Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                1_000_000_000,
+                tree,
+                15,
+                vec![],
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        assert!(validate_block_transactions_roundtrip(std::slice::from_ref(&tx), 3).is_ok());
+        assert!(matches!(
+            validate_block_transactions_roundtrip(&[tx], 4),
+            Err(MiningError::IdComputation {
+                op: "block_transactions_roundtrip",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn candidate_skips_a_rent_output_newer_than_the_v4_chain() {
+        let mut header = crate::genesis::parent_header();
+        header.height = 1_100_005;
+        header.version = 4;
+        header.n_bits = 16_842_752;
+        let mut historical = genesis_era_box(0);
+        let mut tree = historical.candidate.ergo_tree().clone();
+        tree.version = 5;
+        historical.candidate = ergo_ser::ergo_box::ErgoBoxCandidate::new(
+            1_000_000_000,
+            tree,
+            0,
+            vec![],
+            ergo_ser::register::AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        let view = RentView {
+            stub: ExhaustedView { header },
+            utxo: std::collections::HashMap::from([(
+                historical.box_id().unwrap(),
+                historical.clone(),
+            )]),
+        };
+        let result = generate_candidate_with_policy_cancellable(
+            &view,
+            ergo_chain_spec::Network::Mainnet,
+            BuildMode::Full,
+            &MempoolReadSnapshot::empty(),
+            &RENT_MINER_PK,
+            &MonetarySettings::mainnet(),
+            None,
+            None,
+            &DifficultyParams::mainnet(),
+            &[historical],
+            &BTreeMap::new(),
+            &VotingSettings::mainnet(),
+            &[],
+            &mut vec![],
+            &[],
+            &BlockPolicy::default(),
+            0,
+            0,
+            &|| false,
+        );
+        assert!(
+            matches!(result, Ok(None)),
+            "unparseable rent must be skipped: {result:?}"
         );
     }
 

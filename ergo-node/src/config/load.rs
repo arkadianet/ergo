@@ -724,6 +724,14 @@ impl NodeConfig {
             None
         };
 
+        let allow_unauthenticated_legacy_mining = toml_cfg
+            .api
+            .security
+            .as_ref()
+            .is_some_and(|security| security.allow_unauthenticated_legacy_mining);
+        if allow_unauthenticated_legacy_mining && api_bind.is_some() && api_key_hash.is_none() {
+            return Err("[api.security] allow_unauthenticated_legacy_mining requires api_key_hash for authenticated candidate requests".into());
+        }
         let api_scoped_keys = toml_cfg
             .api
             .security
@@ -1175,6 +1183,7 @@ impl NodeConfig {
             api_bind,
             peer_details: toml_cfg.api.peer_details,
             api_key_hash,
+            allow_unauthenticated_legacy_mining,
             api_scoped_keys,
             api_limits,
             api_readiness,

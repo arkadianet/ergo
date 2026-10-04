@@ -1,10 +1,17 @@
 use crate::autolykos::common::blake2b256;
 
+#[cfg(test)]
+thread_local! {
+    static MERKLE_HASH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const LEAF_PREFIX: u8 = 0x00;
 const INTERNAL_NODE_PREFIX: u8 = 0x01;
 
 /// Compute hash of a Merkle leaf: Blake2b256(0x00 ++ data).
 fn leaf_hash(data: &[u8]) -> [u8; 32] {
+    #[cfg(test)]
+    MERKLE_HASH_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut input = Vec::with_capacity(1 + data.len());
     input.push(LEAF_PREFIX);
     input.extend_from_slice(data);
@@ -168,6 +175,33 @@ pub fn merkle_proof_by_index(elements: &[&[u8]], index: usize) -> Option<MerkleP
 
     let levels = build_levels(elements);
 
+    proof_from_levels(elements, index, &levels)
+}
+
+/// Extract independent inclusion proofs while building the reduction levels once.
+/// Output positions correspond to `indices`; out-of-range indices return `None`.
+pub fn merkle_proofs_by_indices(
+    elements: &[&[u8]],
+    indices: &[usize],
+) -> Vec<Option<MerkleProofRaw>> {
+    if elements.is_empty() || indices.is_empty() {
+        return indices.iter().map(|_| None).collect();
+    }
+    let levels = build_levels(elements);
+    indices
+        .iter()
+        .map(|&index| proof_from_levels(elements, index, &levels))
+        .collect()
+}
+
+fn proof_from_levels(
+    elements: &[&[u8]],
+    index: usize,
+    levels: &[Vec<[u8; 32]>],
+) -> Option<MerkleProofRaw> {
+    if index >= elements.len() {
+        return None;
+    }
     // Walk every level except the root: at each step record the
     // sibling that pairs with the current node and which side our
     // node sits on, then halve the index for the next level up. For a
@@ -206,6 +240,8 @@ pub fn merkle_proof_by_index(elements: &[&[u8]], index: usize) -> Option<MerkleP
 /// 33-byte preimage as scrypto's odd-node reduction (`Node.scala:22`
 /// with `EmptyNode.hash = []`).
 fn internal_hash_dyn(left: &[u8], right: &[u8]) -> [u8; 32] {
+    #[cfg(test)]
+    MERKLE_HASH_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut input = Vec::with_capacity(1 + left.len() + right.len());
     input.push(INTERNAL_NODE_PREFIX);
     input.extend_from_slice(left);
@@ -375,6 +411,32 @@ pub fn extension_root(fields: &[(&[u8], &[u8])]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn many_membership_proofs_hash_one_tree() {
+        for n in [1, 3, 17, 2048] {
+            let data: Vec<_> = (0..n).map(|i: usize| i.to_be_bytes()).collect();
+            let leaves: Vec<_> = data.iter().map(|d| d.as_slice()).collect();
+            let indices: Vec<_> = (0..n.min(1024)).chain(std::iter::once(n)).collect();
+            MERKLE_HASH_CALLS.with(|calls| calls.set(0));
+            let proofs = merkle_proofs_by_indices(&leaves, &indices);
+            let calls = MERKLE_HASH_CALLS.with(|calls| calls.get());
+            assert!(calls <= 2 * n + 16, "{n} leaves used {calls} hashes");
+            assert_eq!(proofs.len(), indices.len());
+            assert!(proofs.last().unwrap().is_none());
+            let root = merkle_tree_root(&leaves);
+            for (index, proof) in proofs.into_iter().take(indices.len() - 1).enumerate() {
+                let proof = proof.unwrap();
+                assert_eq!(proof.leaf_data, leaves[index]);
+                assert!(merkle_proof_verify(&proof, &root));
+                if index == 0 || index == n.min(1024) - 1 {
+                    assert_eq!(Some(proof), merkle_proof_by_index(&leaves, index));
+                }
+            }
+        }
+        assert_eq!(merkle_proofs_by_indices(&[], &[0, 1]), vec![None, None]);
+        assert!(merkle_proofs_by_indices(&[&[1]], &[]).is_empty());
+    }
+
     use super::*;
 
     // ----- oracle parity -----

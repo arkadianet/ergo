@@ -467,6 +467,7 @@ mod tests {
                     target: 1u8.into(),
                     height,
                     pk,
+                    proof: None,
                     metrics: Default::default(),
                 },
                 identity: ergo_mining::engine::TemplateIdentity {

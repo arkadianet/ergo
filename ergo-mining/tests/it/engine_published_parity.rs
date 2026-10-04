@@ -459,6 +459,7 @@ fn build_intent(parent: [u8; 32], parent_height: u32) -> BuildIntent {
     BuildIntent {
         private_transactions: Arc::new(Vec::new()),
         operator_generation: 0,
+        operator_owned: true,
         expected_parent: parent,
         expected_height: parent_height,
         mempool: Arc::new(MempoolReadSnapshot::empty()),
@@ -659,7 +660,7 @@ fn candidate_metrics_describe_retained_transactions_and_collected_fees() {
 #[test]
 fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() {
     use ergo_mempool::{pool::Entry, types::TxSource};
-    use ergo_mining::candidate::generate_candidate_with_policy_cancellable;
+    use ergo_mining::candidate::generate_candidate_with_transactions_cancellable;
     use ergo_ser::{
         ergo_tree::ErgoTree,
         opcode::Expr,
@@ -705,7 +706,7 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
     ))
     .unwrap();
     // Spend the first `n` boxes, paying FEE to the fee proposition.
-    let spend = |n: usize| {
+    let spend = |n: usize, requested: bool| {
         let tx = Transaction {
             inputs: inputs[..n]
                 .iter()
@@ -755,11 +756,16 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
             required_tx_ids: vec![hex::encode(id.as_bytes())],
             ..Default::default()
         };
-        generate_candidate_with_policy_cancellable(
+        generate_candidate_with_transactions_cancellable(
             &store,
             ergo_chain_spec::Network::Mainnet,
             BuildMode::Full,
             &MempoolReadSnapshot::from_entries(vec![entry]),
+            if requested {
+                std::slice::from_ref(&tx)
+            } else {
+                &[]
+            },
             &MINER_PK,
             &MonetarySettings::mainnet(),
             None,
@@ -780,7 +786,7 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
     };
     // Measure the emission, per-input and fee-transaction costs.
     let costs = |n: usize| {
-        let candidate = spend(n).unwrap().0.unwrap();
+        let candidate = spend(n, false).unwrap().0.unwrap();
         let cost = |category: &str| {
             candidate
                 .observation
@@ -792,6 +798,17 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
         };
         (cost("emission"), cost("public"), cost("fees"))
     };
+    let requested = spend(1, true).unwrap().0.unwrap();
+    assert_eq!(
+        requested
+            .observation
+            .transactions
+            .iter()
+            .find(|tx| tx.category == "requested")
+            .unwrap()
+            .fee_nano_erg,
+        FEE
+    );
     let (emission, one, fees) = costs(1);
     let per_input = costs(2).1 - one;
     // The largest requirement selection admits (launch cost limit minus the
@@ -800,7 +817,7 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
     let n = 1 + ((budget - one) / per_input) as usize;
     assert!(per_input < fees && n < inputs.len());
 
-    let (candidate, id) = spend(n).expect("an unmet requirement never fails the build");
+    let (candidate, id) = spend(n, false).expect("an unmet requirement never fails the build");
     let candidate = candidate.expect("the emission-only candidate is published");
     assert_eq!(candidate.transactions.len(), 1, "only the emission remains");
     let reasons: Vec<_> = candidate
@@ -811,6 +828,12 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
         .map(|e| e.reason.as_str())
         .collect();
     assert_eq!(reasons, ["required_final_fee_or_section_budget"]);
+    let error = spend(n, true).unwrap_err();
+    assert!(
+        matches!(error, MiningError::InvalidRequest(ref reason)
+        if reason.contains("final fee transaction exceed the block budget")),
+        "{error}"
+    );
 }
 
 // ----- happy path -----
@@ -946,7 +969,7 @@ fn publish_and_serve_under(regime: &Regime) {
     )
     .expect("build_and_publish ok");
     let timings = match outcome {
-        BuildOutcome::Published { timings } => timings,
+        BuildOutcome::Published { timings, .. } => timings,
         other => {
             panic!("engine must publish a candidate for the committed synced tip, got {other:?}",)
         }
@@ -2276,7 +2299,7 @@ fn benchmark_same_parent_full_refresh_proof_reuse() {
             }
             .unwrap();
             let elapsed = started.elapsed();
-            let BuildOutcome::Published { timings } = outcome else {
+            let BuildOutcome::Published { timings, .. } = outcome else {
                 panic!("benchmark build did not publish: {outcome:?}");
             };
             assert_eq!(timings.proof_reused, path == 1 && pass != 0);
@@ -2317,4 +2340,351 @@ fn benchmark_same_parent_full_refresh_proof_reuse() {
         let p95 = durations[(durations.len() * 95).div_ceil(100) - 1].as_secs_f64() * 1000.0;
         eprintln!("{label}: median_ms={median:.3} p95_ms={p95:.3} samples={SAMPLES} txs={COUNT}");
     }
+}
+
+#[test]
+fn requested_candidate_cancelled_during_input_resolution_produces_no_proof() {
+    use ergo_mining::{
+        candidate::generate_candidate_with_transactions_cancellable, state_view::CandidateStateView,
+    };
+    use ergo_ser::ergo_box::read_ergo_box;
+    use ergo_ser::transaction::read_transaction;
+    use ergo_state::store::StateError;
+    use ergo_validation::{
+        ActiveProtocolParameters, CheckedTransaction, ErgoValidationSettings, UtxoView,
+    };
+    use std::cell::Cell;
+
+    struct WatchingView<'a> {
+        store: &'a StateStore,
+        watched_input: Digest32,
+        cancelled: Cell<bool>,
+        dry_runs: Cell<usize>,
+    }
+    impl UtxoView for WatchingView<'_> {
+        fn get_box(&self, id: &Digest32) -> Option<ErgoBox> {
+            let result = UtxoView::get_box(self.store, id);
+            if *id == self.watched_input {
+                // This is called from the supplied package's input resolution,
+                // after emission validation and after package selection starts.
+                self.cancelled.set(true);
+            }
+            result
+        }
+    }
+    impl CandidateStateView for WatchingView<'_> {
+        fn emission_identity(
+            &self,
+            tip: &[u8; 32],
+        ) -> Result<Option<Option<Digest32>>, StateError> {
+            CandidateStateView::emission_identity(self.store, tip)
+        }
+        fn best_full_block_id(&self) -> [u8; 32] {
+            CandidateStateView::best_full_block_id(self.store)
+        }
+        fn best_full_block_height(&self) -> u32 {
+            CandidateStateView::best_full_block_height(self.store)
+        }
+        fn get_header_bytes(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+            CandidateStateView::get_header_bytes(self.store, id)
+        }
+        fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
+            CandidateStateView::header_id_at_height(self.store, height)
+        }
+        fn block_section(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+            CandidateStateView::block_section(self.store, id)
+        }
+        fn last_applied_chain_window_10(&self) -> Result<[Header; 10], StateError> {
+            CandidateStateView::last_applied_chain_window_10(self.store)
+        }
+        fn tip_snapshot_params(
+            &self,
+        ) -> Result<(ActiveProtocolParameters, ErgoValidationSettings), StateError> {
+            CandidateStateView::tip_snapshot_params(self.store)
+        }
+        fn candidate_dry_run(
+            &self,
+            checked: &[CheckedTransaction],
+        ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
+            self.dry_runs.set(self.dry_runs.get() + 1);
+            CandidateStateView::candidate_dry_run(self.store, checked)
+        }
+        fn mode2_trust_first_epoch_armed(&self) -> Result<bool, StateError> {
+            CandidateStateView::mode2_trust_first_epoch_armed(self.store)
+        }
+    }
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
+    ))
+    .unwrap();
+    let input = read_ergo_box(&mut VlqReader::new(
+        &hex::decode(fixture["input_box"].as_str().unwrap()).unwrap(),
+    ))
+    .unwrap();
+    let requested: Vec<_> = fixture["transactions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(2)
+        .map(|tx| {
+            read_transaction(&mut VlqReader::new(
+                &hex::decode(tx.as_str().unwrap()).unwrap(),
+            ))
+            .unwrap()
+        })
+        .collect();
+    let miner_key: [u8; 33] = hex::decode(fixture["miner_pk"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let regime = Regime::pre_eip27();
+    let (_directory, store, tip) =
+        synced_store_with_inputs(&regime, std::slice::from_ref(&input), |tip| {
+            pack_interlinks(&[ModifierId::from_bytes(*tip)])
+        });
+    let view = WatchingView {
+        store: &store,
+        watched_input: input.box_id().unwrap(),
+        cancelled: Cell::new(false),
+        dry_runs: Cell::new(0),
+    };
+    let result = generate_candidate_with_transactions_cancellable(
+        &view,
+        ergo_chain_spec::Network::Mainnet,
+        BuildMode::Full,
+        &MempoolReadSnapshot::empty(),
+        &requested,
+        &miner_key,
+        &MonetarySettings::mainnet(),
+        None,
+        None,
+        &DifficultyParams::mainnet(),
+        &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
+        &[],
+        &mut Vec::new(),
+        &[],
+        &ergo_mining::policy::BlockPolicy::default(),
+        0,
+        0,
+        &|| view.cancelled.get(),
+    );
+    assert!(
+        view.cancelled.get(),
+        "supplied input resolution must have started"
+    );
+    assert!(matches!(result, Err(MiningError::BuildCancelled)));
+    assert_eq!(
+        view.dry_runs.get(),
+        0,
+        "cancelled package must not generate AVL evidence"
+    );
+    assert_eq!(store.chain_state().best_full_block_id, tip);
+    assert!(UtxoView::get_box(&store, &input.box_id().unwrap()).is_some());
+
+    // The cancelled attempt left no mutation behind; retrying on the unchanged
+    // committed view produces both valid signed transactions and their proofs.
+    let (_, work, _) = generate_candidate_with_transactions_cancellable(
+        &store,
+        ergo_chain_spec::Network::Mainnet,
+        BuildMode::Full,
+        &MempoolReadSnapshot::empty(),
+        &requested,
+        &miner_key,
+        &MonetarySettings::mainnet(),
+        None,
+        None,
+        &DifficultyParams::mainnet(),
+        &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
+        &[],
+        &mut Vec::new(),
+        &[],
+        &ergo_mining::policy::BlockPolicy::default(),
+        0,
+        0,
+        &|| false,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(work.proof.unwrap().tx_proofs.len(), 2);
+}
+
+#[test]
+fn requested_lender_jobs_skip_the_operator_storage_rent_sweep() {
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+    for operator_owned in [false, true] {
+        let handle = handle(&regime).with_rent_config(true, 64);
+        handle.set_best_tip(BestTip {
+            parent_id: tip,
+            chain_seq: 1,
+            synced: true,
+        });
+        let mut intent = build_intent(tip, regime.parent_height);
+        intent.reason = BuildReason::Requested;
+        intent.operator_owned = operator_owned;
+        let called = std::cell::Cell::new(false);
+        let outcome = ergo_mining::engine::build_requested_and_publish_cached(
+            &store.reader_handle(),
+            &handle,
+            &intent,
+            &[],
+            &[],
+            &|| false,
+            None,
+            &mut ergo_mining::state_view::CandidateProofCache::default(),
+            || BUILT_AT_MS,
+            |_, _| {
+                called.set(true);
+                vec![]
+            },
+            &mut None,
+        )
+        .unwrap();
+        let BuildOutcome::Published { template_seq, .. } = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(
+            called.get(),
+            operator_owned,
+            "rent resolver follows frozen ownership"
+        );
+        let template = handle
+            .inspect_template(None, Some(template_seq))
+            .unwrap()
+            .template;
+        assert_eq!(
+            template.candidate.observation.operator_owned,
+            operator_owned
+        );
+        assert!(template
+            .candidate
+            .observation
+            .transactions
+            .iter()
+            .all(|tx| tx.category != "rent"));
+    }
+}
+
+#[test]
+fn requested_foreign_build_ignores_operator_generation_changes() {
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+    for operator_owned in [false, true] {
+        let handle = handle(&regime);
+        handle.set_best_tip(BestTip {
+            parent_id: tip,
+            chain_seq: 1,
+            synced: true,
+        });
+        let mut intent = build_intent(tip, regime.parent_height);
+        intent.reason = BuildReason::Requested;
+        intent.operator_owned = operator_owned;
+        handle.withdraw_private_transactions(&std::collections::HashSet::new(), true);
+        let outcome = ergo_mining::engine::build_requested_and_publish_cached(
+            &store.reader_handle(),
+            &handle,
+            &intent,
+            &[],
+            &[],
+            &|| false,
+            None,
+            &mut ergo_mining::state_view::CandidateProofCache::default(),
+            || BUILT_AT_MS,
+            |_, _| vec![],
+            &mut None,
+        )
+        .unwrap();
+        if operator_owned {
+            assert_eq!(outcome, BuildOutcome::DroppedStale);
+        } else {
+            assert!(
+                matches!(outcome, BuildOutcome::Published { .. }),
+                "{outcome:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn requested_parse_cancellation_is_a_stale_build() {
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+    let mut intent = build_intent(tip, regime.parent_height);
+    intent.reason = BuildReason::Requested;
+    let checks = std::cell::Cell::new(0);
+    let cancelled = || {
+        checks.set(checks.get() + 1);
+        checks.get() >= 2
+    };
+    let outcome = ergo_mining::engine::build_requested_and_publish_cached(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        &[vec![]],
+        &[],
+        &cancelled,
+        None,
+        &mut ergo_mining::state_view::CandidateProofCache::default(),
+        || BUILT_AT_MS,
+        |_, _| vec![],
+        &mut None,
+    )
+    .unwrap();
+    assert_eq!(outcome, BuildOutcome::DroppedStale);
+    assert!(handle.inspect_history().is_empty());
+}
+
+#[test]
+fn requested_worker_reuse_matches_frozen_ownership() {
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+    let mut intent = build_intent(tip, regime.parent_height);
+    intent.reason = BuildReason::Requested;
+    let mut sequences = Vec::new();
+    for operator_owned in [false, true, false, true] {
+        intent.operator_owned = operator_owned;
+        let outcome = ergo_mining::engine::build_requested_and_publish_cached(
+            &store.reader_handle(),
+            &handle,
+            &intent,
+            &[],
+            &[],
+            &|| false,
+            None,
+            &mut ergo_mining::state_view::CandidateProofCache::default(),
+            || BUILT_AT_MS,
+            |_, _| vec![],
+            &mut None,
+        )
+        .unwrap();
+        let BuildOutcome::Published { template_seq, .. } = outcome else {
+            panic!("{outcome:?}")
+        };
+        let job = handle.inspect_template(None, Some(template_seq)).unwrap();
+        assert_eq!(
+            job.template.candidate.observation.operator_owned,
+            operator_owned
+        );
+        sequences.push(template_seq);
+    }
+    assert_ne!(sequences[0], sequences[1]);
+    assert_eq!(sequences[0], sequences[2]);
+    assert_eq!(sequences[1], sequences[3]);
 }

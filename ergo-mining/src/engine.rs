@@ -28,7 +28,7 @@ use ergo_state::reader::ChainStoreReader;
 use ergo_state::store::{BaseDisposition, CommittedSnapshot, DryRunBase};
 
 use crate::candidate::{
-    generate_candidate_with_policy_cancellable, BuildMode, Candidate, PhaseTimings,
+    generate_candidate_with_transactions_cancellable, BuildMode, Candidate, PhaseTimings,
 };
 use crate::error::MiningError;
 use crate::handle::MiningHandle;
@@ -36,11 +36,14 @@ use crate::state_view::{
     CachedSnapshotView, CandidateProofCache, CandidateStateView, ProofCachingView,
 };
 use crate::work_message::WorkMessage;
+use ergo_ser::transaction::Transaction;
 
 /// Why a build was requested. Recorded on the template identity for metrics;
 /// the pool-facing `clean_jobs` signal derives from `chain_seq`, not this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildReason {
+    /// An authenticated external client supplied transactions and/or a reward key.
+    Requested,
     /// Best-full tip advanced (extension or reorg).
     Tip,
     /// Same tip, mempool changed (debounced).
@@ -128,6 +131,8 @@ pub struct BuildIntent {
     /// Reward key resolved on the loop (`Ready` only — the loop does not
     /// signal while the wallet key is `Pending`).
     pub miner_pk: [u8; 33],
+    /// Frozen ownership; nonce-only submissions never resolve the wallet again.
+    pub operator_owned: bool,
     pub reason: BuildReason,
 }
 
@@ -192,6 +197,9 @@ pub enum BuildOutcome {
     /// timings so the driver logs one histogram-friendly line per build.
     Published {
         timings: crate::candidate::PhaseTimings,
+        /// `template_seq` of the template this build published, so a caller
+        /// can read back exactly that template rather than any on the tip.
+        template_seq: u64,
     },
     /// Built, but the live tip moved off the built parent before publish —
     /// discarded (wasted, not wrong).
@@ -286,6 +294,9 @@ pub fn build_and_publish(
         handle,
         intent,
         mode,
+        &[],
+        &[],
+        None,
         base,
         None,
         now_ms,
@@ -316,6 +327,41 @@ pub fn build_and_publish_cached(
         handle,
         intent,
         mode,
+        &[],
+        &[],
+        None,
+        base,
+        Some(proof_cache),
+        now_ms,
+        resolve_rent,
+        disposition_out,
+    )
+}
+
+/// Build an external client's ordered transaction package on the same serial
+/// worker and committed-state boundary used for ordinary mining candidates.
+#[allow(clippy::too_many_arguments)]
+pub fn build_requested_and_publish_cached(
+    reader: &ChainStoreReader,
+    handle: &MiningHandle,
+    intent: &BuildIntent,
+    requested: &[Vec<u8>],
+    forbidden_private_ids: &[Digest32],
+    caller_cancelled: &dyn Fn() -> bool,
+    base: Option<&mut Option<DryRunBase>>,
+    proof_cache: &mut CandidateProofCache,
+    now_ms: impl Fn() -> u64,
+    resolve_rent: impl FnOnce(&CommittedSnapshot, u32) -> Vec<ErgoBox>,
+    disposition_out: &mut Option<BaseDisposition>,
+) -> Result<BuildOutcome, MiningError> {
+    build_and_publish_inner(
+        reader,
+        handle,
+        intent,
+        BuildMode::Full,
+        requested,
+        forbidden_private_ids,
+        Some(caller_cancelled),
         base,
         Some(proof_cache),
         now_ms,
@@ -330,6 +376,9 @@ fn build_and_publish_inner(
     handle: &MiningHandle,
     intent: &BuildIntent,
     mode: BuildMode,
+    requested: &[Vec<u8>],
+    forbidden_private_ids: &[Digest32],
+    caller_cancelled: Option<&dyn Fn() -> bool>,
     base: Option<&mut Option<DryRunBase>>,
     proof_cache: Option<&mut CandidateProofCache>,
     now_ms: impl Fn() -> u64,
@@ -392,11 +441,52 @@ fn build_and_publish_inner(
         let tip = handle.best_tip();
         !tip.synced
             || tip.parent_id != intent.expected_parent
+            || caller_cancelled.is_some_and(|cancelled| cancelled())
             || handle.policy_revision() != policy_revision
-            || handle.operator_generation() != intent.operator_generation
+            || (intent.operator_owned && handle.operator_generation() != intent.operator_generation)
     };
     if should_cancel() {
         return Ok(BuildOutcome::DroppedStale);
+    }
+    let (active, _) = snapshot
+        .tip_snapshot_params()
+        .map_err(|e| MiningError::StateRead {
+            op: "requested_parse_context",
+            reason: format!("{e:?}"),
+        })?;
+    let activated = ergo_validation::derive_activated_script_version(active.block_version);
+    let requested = match parse_requested_transactions(
+        requested,
+        activated,
+        forbidden_private_ids,
+        &should_cancel,
+    ) {
+        Err(MiningError::BuildCancelled) => return Ok(BuildOutcome::DroppedStale),
+        result => result?,
+    };
+    let requested = requested.as_slice();
+    let guarded_private_ids =
+        handle.check_requested_private_work(requested, intent.operator_owned)?;
+    if intent.reason == BuildReason::Requested {
+        let ids = requested
+            .iter()
+            .map(|tx| {
+                ergo_ser::transaction::transaction_id(tx)
+                    .map(|id| Digest32::from_bytes(*id.as_bytes()))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| MiningError::InvalidRequest(format!("requested ID: {e:?}")))?;
+        if let Some((_, identity)) = handle.cached_requested_package_with_ownership(
+            Some(intent.miner_pk),
+            &ids,
+            now_ms(),
+            Some(intent.operator_owned),
+        ) {
+            return Ok(BuildOutcome::Published {
+                timings: crate::candidate::PhaseTimings::default(),
+                template_seq: identity.template_seq,
+            });
+        }
     }
     let mut rent_resolve_time = std::time::Duration::ZERO;
 
@@ -418,7 +508,8 @@ fn build_and_publish_inner(
             // no longer holds; those are skipped and backfilled in the resolver,
             // never claimed blind. The resolver is injected by the node driver (it
             // owns the indexer handle); rent disabled ⇒ never called.
-            let eligible = if handle.claim_storage_rent() {
+            // Operator rent sweeps must never donate proceeds to a lender.
+            let eligible = if handle.claim_storage_rent() && intent.operator_owned {
                 let started = std::time::Instant::now();
                 let eligible = resolve_rent(&snapshot, snapshot.best_full_block_height() + 1);
                 rent_resolve_time = started.elapsed();
@@ -464,6 +555,7 @@ fn build_and_publish_inner(
                 intent,
                 mode,
                 mempool,
+                requested,
                 &eligible_rent_boxes,
                 &voting_targets,
                 &custom_extension_fields,
@@ -483,6 +575,7 @@ fn build_and_publish_inner(
             intent,
             mode,
             mempool,
+            requested,
             &eligible_rent_boxes,
             &voting_targets,
             &custom_extension_fields,
@@ -496,14 +589,31 @@ fn build_and_publish_inner(
         Err(MiningError::BuildCancelled) => return Ok(BuildOutcome::DroppedStale),
         other => other?,
     };
-    let Some((candidate, work, mut timings)) = built else {
+    let Some((mut candidate, work, mut timings)) = built else {
         return Ok(BuildOutcome::Raced);
     };
+    candidate.observation.operator_owned = intent.operator_owned;
+    for (tx, observation) in candidate
+        .transactions
+        .iter()
+        .zip(&mut candidate.observation.transactions)
+    {
+        let id = ergo_ser::transaction::transaction_id(tx).map_err(|error| {
+            MiningError::IdComputation {
+                op: "requested_private_classification",
+                reason: format!("{error:?}"),
+            }
+        })?;
+        if guarded_private_ids.contains(&Digest32::from_bytes(*id.as_bytes())) {
+            observation.category = "private";
+        }
+    }
     timings.setup += engine_setup_time;
     timings.rent_resolve = rent_resolve_time;
     if should_cancel() {
         return Ok(BuildOutcome::DroppedStale);
     }
+    handle.check_requested_private_work(requested, intent.operator_owned)?;
     let publish_start = std::time::Instant::now();
 
     // CAS-publish: serve only if the live tip still matches the parent we
@@ -520,7 +630,7 @@ fn build_and_publish_inner(
         now_ms,
         intent.reason,
     ) {
-        Some(_) => {
+        Some(identity) => {
             // Record the suspect ids alongside the published candidate so the
             // node loop can re-validate them against the live tip and evict the
             // still-invalid ones. Only on publish: a DroppedStale build's
@@ -537,10 +647,47 @@ fn build_and_publish_inner(
                 handle.record_suspects(suspects);
             }
             timings.publish = publish_start.elapsed();
-            Ok(BuildOutcome::Published { timings })
+            Ok(BuildOutcome::Published {
+                timings,
+                template_seq: identity.template_seq,
+            })
         }
         None => Ok(BuildOutcome::DroppedStale),
     }
+}
+
+fn parse_requested_transactions(
+    requested: &[Vec<u8>],
+    activated_script_version: u8,
+    forbidden_private_ids: &[Digest32],
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Vec<Transaction>, MiningError> {
+    let forbidden: std::collections::HashSet<_> = forbidden_private_ids.iter().copied().collect();
+    requested
+        .iter()
+        .map(|bytes| {
+            crate::error::check_build_cancelled(should_cancel)?;
+            let mut reader = ergo_primitives::reader::VlqReader::new(bytes)
+                .with_activated_script_version(activated_script_version);
+            let transaction = ergo_ser::transaction::read_transaction(&mut reader)
+                .map_err(|error| MiningError::InvalidRequest(format!("transaction: {error:?}")))?;
+            if !reader.is_empty() {
+                return Err(MiningError::InvalidRequest(
+                    "trailing bytes after requested transaction".into(),
+                ));
+            }
+            let id = ergo_ser::transaction::transaction_id(&transaction).map_err(|error| {
+                MiningError::InvalidRequest(format!("transaction id: {error:?}"))
+            })?;
+            if forbidden.contains(&Digest32::from_bytes(*id.as_bytes())) {
+                return Err(MiningError::InvalidRequest(format!(
+                    "private transaction {} requires the operator miner key",
+                    hex::encode(id.as_bytes())
+                )));
+            }
+            Ok(transaction)
+        })
+        .collect()
 }
 
 /// Apply the optional proof wrapper to either state-view implementation while
@@ -554,6 +701,7 @@ fn generate_from_view<V: CandidateStateView>(
     intent: &BuildIntent,
     mode: BuildMode,
     mempool: &MempoolReadSnapshot,
+    requested: &[Transaction],
     eligible_rent_boxes: &[ErgoBox],
     voting_targets: &std::collections::BTreeMap<u8, i64>,
     custom_extension_fields: &[([u8; 2], Vec<u8>)],
@@ -564,11 +712,12 @@ fn generate_from_view<V: CandidateStateView>(
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     macro_rules! generate {
         ($view:expr) => {
-            generate_candidate_with_policy_cancellable(
+            generate_candidate_with_transactions_cancellable(
                 $view,
                 handle.network(),
                 mode,
                 mempool,
+                requested,
                 &intent.miner_pk,
                 handle.monetary(),
                 handle.reemission_ref(),
@@ -633,6 +782,7 @@ mod tests {
         BuildIntent {
             private_transactions: Arc::new(Vec::new()),
             operator_generation: 0,
+            operator_owned: true,
             expected_parent: parent,
             expected_height,
             mempool: Arc::new(MempoolReadSnapshot::empty()),
@@ -801,4 +951,70 @@ mod tests {
     // block-transactions (emission) sections at a non-recalc height — the
     // chain harness landed with the action-loop wiring (Phase 2b-ii-b/3),
     // where the end-to-end loop→engine→cache→serve path is exercised.
+    #[test]
+    fn requested_wire_parse_scopes_script_version_and_rejects_trailing_bytes() {
+        use ergo_ser::{
+            ergo_box::ErgoBoxCandidate,
+            ergo_tree::ErgoTree,
+            input::{ContextExtension, Input, SpendingProof},
+            opcode::Expr,
+            register::AdditionalRegisters,
+            sigma_type::SigmaType,
+            sigma_value::{SigmaBoolean, SigmaValue},
+        };
+        let mut tx = Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes([1; 32]),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate::new(
+                1_000_000_000,
+                ErgoTree {
+                    version: 5,
+                    has_size: true,
+                    constant_segregation: false,
+                    reserved_header_bits: 0,
+                    constants: vec![],
+                    body: Expr::Const {
+                        tpe: SigmaType::SSigmaProp,
+                        val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+                    },
+                },
+                15,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        let bytes = |tx: &Transaction| {
+            let mut writer = ergo_primitives::writer::VlqWriter::new();
+            ergo_ser::transaction::write_transaction(&mut writer, tx).unwrap();
+            writer.result()
+        };
+        assert!(parse_requested_transactions(&[bytes(&tx)], 1, &[], &|| false).is_ok());
+        assert!(matches!(
+            parse_requested_transactions(&[bytes(&tx)], 3, &[], &|| false),
+            Err(MiningError::InvalidRequest(_))
+        ));
+        let mut tree = tx.output_candidates[0].ergo_tree().clone();
+        tree.version = 3;
+        tx.output_candidates[0] = ErgoBoxCandidate::new(
+            1_000_000_000,
+            tree,
+            15,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        let good = bytes(&tx);
+        assert!(
+            parse_requested_transactions(std::slice::from_ref(&good), 3, &[], &|| false).is_ok()
+        );
+        let mut trailing = good;
+        trailing.push(0);
+        assert!(
+            matches!(parse_requested_transactions(&[trailing], 3, &[], &|| false), Err(MiningError::InvalidRequest(ref reason)) if reason.contains("trailing bytes"))
+        );
+    }
 }

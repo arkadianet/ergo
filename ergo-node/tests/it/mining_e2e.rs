@@ -279,16 +279,34 @@ fn v2_launch_params() -> ergo_validation::ActiveProtocolParameters {
 /// The store is dropped before returning so the node can reopen the same redb
 /// path. Returns the parent (tip) header id at `PARENT_HEIGHT`.
 fn seed_synced_chain(db: &std::path::Path) -> [u8; 32] {
-    let mut store = StateStore::open_with_launch_params(db, v2_launch_params()).unwrap();
+    seed_synced_chain_with_boxes(db, &[])
+}
+
+fn seed_synced_chain_with_boxes(db: &std::path::Path, extra_boxes: &[ErgoBox]) -> [u8; 32] {
+    seed_synced_chain_with_version(db, extra_boxes, 2)
+}
+
+fn seed_synced_chain_with_version(
+    db: &std::path::Path,
+    extra_boxes: &[ErgoBox],
+    block_version: u8,
+) -> [u8; 32] {
+    let mut params = v2_launch_params();
+    params.block_version = block_version;
+    let mut store = StateStore::open_with_launch_params(db, params).unwrap();
 
     let em_tx = parent_emission_tx();
     let em_box = emission_box_from(&em_tx);
     let em_box_id = *em_box.box_id().expect("emission box id").as_bytes();
     let em_box_bytes = write_box_bytes(&em_box);
 
-    store
-        .initialize_genesis(&[(em_box_id, em_box_bytes)])
-        .unwrap();
+    let mut genesis = vec![(em_box_id, em_box_bytes)];
+    genesis.extend(
+        extra_boxes
+            .iter()
+            .map(|b| (*b.box_id().unwrap().as_bytes(), write_box_bytes(b))),
+    );
+    store.initialize_genesis(&genesis).unwrap();
     let committed_root = store.root_digest();
 
     // Parent header roots are chosen freely (they only key the stored
@@ -397,11 +415,36 @@ async fn boot_synced_mining_node() -> (tempfile::TempDir, RunHandle, [u8; 32]) {
 async fn boot_synced_mining_node_with_cache(
     candidate_base_cache: bool,
 ) -> (tempfile::TempDir, RunHandle, [u8; 32]) {
+    boot_synced_mining_node_with_packages(candidate_base_cache, &[], false).await
+}
+
+async fn boot_synced_mining_node_with_packages(
+    candidate_base_cache: bool,
+    boxes: &[ErgoBox],
+    legacy_mining: bool,
+) -> (tempfile::TempDir, RunHandle, [u8; 32]) {
+    boot_synced_mining_node_with_package_version(candidate_base_cache, boxes, legacy_mining, 2)
+        .await
+}
+
+async fn boot_synced_mining_node_with_package_version(
+    candidate_base_cache: bool,
+    boxes: &[ErgoBox],
+    legacy_mining: bool,
+    block_version: u8,
+) -> (tempfile::TempDir, RunHandle, [u8; 32]) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("state.redb");
-    let parent_tip = seed_synced_chain(&db);
+    let parent_tip = if block_version == 2 && boxes.is_empty() {
+        seed_synced_chain(&db)
+    } else if block_version == 2 {
+        seed_synced_chain_with_boxes(&db, boxes)
+    } else {
+        seed_synced_chain_with_version(&db, boxes, block_version)
+    };
 
     let mut config = make_test_config(dir.path().to_path_buf());
+    config.allow_unauthenticated_legacy_mining = legacy_mining;
     config.mining_config.enabled = true;
     config.mining_config.miner_public_key_hex = Some(hex::encode(MINER_PK));
     config.mining_config.candidate_base_cache = candidate_base_cache;
@@ -438,17 +481,32 @@ async fn http_request(
     path: &str,
     body: Option<&str>,
 ) -> HttpResponse {
+    http_request_with_key(addr, method, path, body, true).await
+}
+
+async fn http_request_with_key(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    authenticated: bool,
+) -> HttpResponse {
     let mut stream = tokio::net::TcpStream::connect(addr)
         .await
         .expect("connect to bound api port");
+    let key_header = if authenticated {
+        "api_key: hello\r\n"
+    } else {
+        ""
+    };
     let req = match body {
         Some(b) => format!(
             "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
-             Content-Length: {len}\r\napi_key: hello\r\nConnection: close\r\n\r\n{b}",
+             Content-Length: {len}\r\n{key_header}Connection: close\r\n\r\n{b}",
             len = b.len(),
         ),
         None => format!(
-            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\napi_key: hello\r\nConnection: close\r\n\r\n"
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{key_header}Connection: close\r\n\r\n"
         ),
     };
     stream
@@ -1083,4 +1141,720 @@ async fn info_reports_is_mining_true_on_a_mining_node() {
     );
 
     handle.shutdown().await.expect("clean shutdown");
+}
+
+/// Drive Lithos's actual request shape with independently signed Scala
+/// transactions. The input script checks the candidate's miner key; the child
+/// spends the parent's in-block output and both intentionally pay no fee.
+#[tokio::test]
+async fn lithos_requested_package_proves_and_applies_with_lender_key() {
+    for cache_enabled in [false, true] {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
+        ))
+        .unwrap();
+        let boxes: Vec<_> = ["input_box", "independent_input_box"]
+            .iter()
+            .map(|name| {
+                let bytes = hex::decode(fixture[name].as_str().unwrap()).unwrap();
+                ergo_ser::ergo_box::read_ergo_box(&mut VlqReader::new(&bytes)).unwrap()
+            })
+            .collect();
+        let (_dir, handle, parent_tip) =
+            boot_synced_mining_node_with_packages(cache_enabled, &boxes, true).await;
+        let addr = handle.api_addr.unwrap();
+        let solo = poll_candidate(addr).await;
+        assert_eq!(solo.pk, hex::encode(MINER_PK));
+        let txs = fixture["transactions_json"].as_array().unwrap();
+        let package = txs
+            .iter()
+            .take(2)
+            .map(|tx| tx.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = format!(
+            r#"{{"txs":[{package}],"pk":"{}"}}"#,
+            fixture["miner_pk"].as_str().unwrap()
+        );
+        let unauthorized = http_request_with_key(
+            addr,
+            "POST",
+            "/mining/candidateWithTxsAndPk",
+            Some(&body),
+            false,
+        )
+        .await;
+        assert_eq!(
+            unauthorized.status, 403,
+            "insertion remains privileged in compatibility mode"
+        );
+        let response =
+            http_request(addr, "POST", "/mining/candidateWithTxsAndPk", Some(&body)).await;
+        assert_eq!(response.status, 200, "{}", response.body);
+        let work: ergo_rest_json::mining::WorkMessageJson =
+            serde_json::from_str(&response.body).unwrap();
+        assert_eq!(work.pk, fixture["miner_pk"].as_str().unwrap());
+        for _ in 0..20 {
+            let repeat =
+                http_request(addr, "POST", "/mining/candidateWithTxsAndPk", Some(&body)).await;
+            assert_eq!(repeat.status, 200, "{}", repeat.body);
+            let repeat: ergo_rest_json::mining::WorkMessageJson =
+                serde_json::from_str(&repeat.body).unwrap();
+            assert_eq!(repeat.template_seq, work.template_seq);
+            assert_eq!(repeat.msg, work.msg);
+        }
+
+        assert_eq!(work.h, Some(CANDIDATE_HEIGHT));
+        let details = http_request(
+            addr,
+            "GET",
+            &format!(
+                "/api/v1/mining/candidate-details?msg={}&template_seq={}",
+                work.msg, work.template_seq
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(details.status, 200, "{}", details.body);
+        let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+            serde_json::from_str(&details.body).unwrap();
+        assert_eq!(details.build_reason, "Requested");
+        assert_eq!(
+            details
+                .transactions
+                .iter()
+                .map(|tx| tx.category.as_str())
+                .collect::<Vec<_>>(),
+            ["emission", "requested", "requested"]
+        );
+        assert!(details.rewards.emission_nano_erg.parse::<u64>().unwrap() > 0);
+        let proof = work
+            .proof
+            .as_ref()
+            .expect("Lithos requires membership proofs");
+        assert_eq!(proof.tx_proofs.len(), 2);
+        let preimage = hex::decode(&proof.msg_preimage).unwrap();
+        assert_eq!(
+            hex::encode(ergo_primitives::digest::blake2b256(&preimage).as_bytes()),
+            work.msg
+        );
+        // Decode the pre-PoW header using the actual solution layout and verify
+        // membership against its committed transactionsRoot, like Lithos does.
+        let mut header_bytes = preimage;
+        header_bytes.extend(hex::decode(&work.pk).unwrap());
+        header_bytes.extend([0u8; 8]);
+        let header = ergo_ser::header::read_header(&mut VlqReader::new(&header_bytes)).unwrap();
+        assert_eq!(header.parent_id.as_bytes(), &parent_tip);
+        for (proof, raw_tx) in proof
+            .tx_proofs
+            .iter()
+            .zip(fixture["transactions"].as_array().unwrap())
+        {
+            let bytes = hex::decode(raw_tx.as_str().unwrap()).unwrap();
+            let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
+            assert_eq!(
+                proof.leaf,
+                hex::encode(
+                    ergo_ser::transaction::transaction_id(&tx)
+                        .unwrap()
+                        .as_bytes()
+                )
+            );
+            let decoded = ergo_crypto::merkle::MerkleProofRaw {
+                leaf_data: hex::decode(&proof.leaf).unwrap(),
+                levels: proof
+                    .levels
+                    .iter()
+                    .map(|level| {
+                        let bytes = hex::decode(level).unwrap();
+                        (bytes[1..].to_vec(), bytes[0])
+                    })
+                    .collect(),
+            };
+            assert!(ergo_crypto::merkle::merkle_proof_verify(
+                &decoded,
+                header.transactions_root.as_bytes()
+            ));
+        }
+        // A new request using the same transactions and another valid key must
+        // validate them anew. The miner-key-sensitive genesis cannot be proven.
+        let wrong = format!(
+            r#"{{"txs":[{package}],"pk":"{}"}}"#,
+            fixture["wrong_miner_pk"].as_str().unwrap()
+        );
+        let response =
+            http_request(addr, "POST", "/mining/candidateWithTxsAndPk", Some(&wrong)).await;
+        assert_eq!(response.status, 400, "{}", response.body);
+        assert!(response.body.contains("consensus_validation_failed"));
+        let fallback = http_request_with_key(addr, "GET", "/mining/candidate", None, false).await;
+        assert_eq!(fallback.status, 200);
+        let fallback: ergo_rest_json::mining::WorkMessageJson =
+            serde_json::from_str(&fallback.body).unwrap();
+        assert_eq!(
+            fallback.pk, solo.pk,
+            "solo fallback never pays the previous lender"
+        );
+        assert!(fallback.proof.is_none());
+        let nonce = solve(&msg_bytes(&work), CANDIDATE_HEIGHT, &work.b);
+        let solution = format!(r#"{{"pk":"{}","n":"{}"}}"#, work.pk, hex::encode(nonce));
+        // Current Lithos submits solutions without credentials. Its explicit
+        // key must select the retained requested job, despite subsequent builds.
+        let result =
+            http_request_with_key(addr, "POST", "/mining/solution", Some(&solution), false).await;
+        assert_eq!(result.status, 200, "{}", result.body);
+        assert!(poll_best_full_height(&handle, CANDIDATE_HEIGHT).await);
+        let history = http_request(addr, "GET", "/api/v1/mining/history", None).await;
+        assert_eq!(history.status, 200, "{}", history.body);
+        let history: ergo_rest_json::mining_inspection::MiningHistoryJson =
+            serde_json::from_str(&history.body).unwrap();
+        assert_eq!(history.retention, 1040);
+        let accepted = history
+            .outcomes
+            .iter()
+            .find(|outcome| {
+                outcome.outcome == "accepted" && outcome.msg.as_ref() == Some(&work.msg)
+            })
+            .unwrap();
+        assert_eq!(accepted.template_seq, Some(work.template_seq));
+        assert!(
+            accepted.accounting.is_none(),
+            "lender rewards are not operator earnings"
+        );
+        let next = poll_candidate_at_height(addr, CANDIDATE_HEIGHT + 1).await;
+        assert_eq!(next.pk, solo.pk);
+        let stale =
+            http_request_with_key(addr, "POST", "/mining/solution", Some(&solution), false).await;
+        assert_eq!(stale.status, 400, "{}", stale.body);
+        assert!(stale.body.contains("stale_candidate"));
+        handle.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn requested_transactions_using_operator_key_accept_nonce_only_solution() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
+    ))
+    .unwrap();
+    let bytes = hex::decode(fixture["independent_input_box"].as_str().unwrap()).unwrap();
+    let input = ergo_ser::ergo_box::read_ergo_box(&mut VlqReader::new(&bytes)).unwrap();
+    let (_dir, handle, _) = boot_synced_mining_node_with_packages(false, &[input], false).await;
+    let addr = handle.api_addr.unwrap();
+    poll_candidate(addr).await;
+    let raw_json = fixture["transactions_json"][3].as_str().unwrap();
+    let response = http_request(
+        addr,
+        "POST",
+        "/mining/candidateWithTxs",
+        Some(&format!("[{raw_json}]")),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    let work: ergo_rest_json::mining::WorkMessageJson =
+        serde_json::from_str(&response.body).unwrap();
+    assert_eq!(work.pk, hex::encode(MINER_PK));
+    assert_eq!(work.proof.as_ref().unwrap().tx_proofs.len(), 1);
+    let nonce = solve(&msg_bytes(&work), CANDIDATE_HEIGHT, &work.b);
+    let solution = format!(r#"{{"n":"{}"}}"#, hex::encode(nonce));
+    let response = http_request(addr, "POST", "/mining/solution", Some(&solution)).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert!(poll_best_full_height(&handle, CANDIDATE_HEIGHT).await);
+    let bytes = hex::decode(fixture["transactions"][3].as_str().unwrap()).unwrap();
+    let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
+    let output = ErgoBox {
+        candidate: tx.output_candidates[0].clone(),
+        transaction_id: ergo_ser::transaction::transaction_id(&tx).unwrap(),
+        index: 0,
+    };
+    let output_response = http_request(
+        addr,
+        "GET",
+        &format!(
+            "/utxo/byId/{}",
+            hex::encode(output.box_id().unwrap().as_bytes())
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(
+        output_response.status, 200,
+        "the requested transaction must have applied: {}",
+        output_response.body
+    );
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn requested_private_work_isolated_from_lenders_and_withdrawn_on_cancel() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
+    ))
+    .unwrap();
+    let bytes = hex::decode(fixture["independent_input_box"].as_str().unwrap()).unwrap();
+    let input = ergo_ser::ergo_box::read_ergo_box(&mut VlqReader::new(&bytes)).unwrap();
+    let (_dir, handle, _) = boot_synced_mining_node_with_packages(false, &[input], true).await;
+    let addr = handle.api_addr.unwrap();
+    poll_candidate(addr).await;
+    let admission = http_request(
+        addr,
+        "POST",
+        "/api/v1/mining/private-transactions",
+        Some(
+            &serde_json::json!({"signed_transaction_hex":fixture["transactions"][3], "options":{}})
+                .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(admission.status, 200, "{}", admission.body);
+    let entry: ergo_api::mining::PrivateTransactionEntry =
+        serde_json::from_str(&admission.body).unwrap();
+    let foreign_body = serde_json::json!({"txs":[], "pk":fixture["miner_pk"]}).to_string();
+    let foreign = http_request(
+        addr,
+        "POST",
+        "/mining/candidateWithTxsAndPk",
+        Some(&foreign_body),
+    )
+    .await;
+    assert_eq!(foreign.status, 200, "{}", foreign.body);
+    let foreign: ergo_rest_json::mining::WorkMessageJson =
+        serde_json::from_str(&foreign.body).unwrap();
+    let details = http_request(
+        addr,
+        "GET",
+        &format!(
+            "/api/v1/mining/candidate-details?template_seq={}",
+            foreign.template_seq
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(details.status, 200, "{}", details.body);
+    let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+        serde_json::from_str(&details.body).unwrap();
+    assert!(
+        details.transactions.iter().all(|tx| tx.id != entry.tx_id),
+        "lender received private bytes"
+    );
+    let injection = format!(
+        r#"{{"txs":[{}],"pk":"{}"}}"#,
+        fixture["transactions_json"][3].as_str().unwrap(),
+        foreign.pk
+    );
+    let refused = http_request(
+        addr,
+        "POST",
+        "/mining/candidateWithTxsAndPk",
+        Some(&injection),
+    )
+    .await;
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert!(refused.body.contains("requires the operator miner key"));
+    // Explicitly request the private member, proving it retains its private
+    // category even when it is included in the requested prefix.
+    let own = http_request(
+        addr,
+        "POST",
+        "/mining/candidateWithTxs",
+        Some(&format!(
+            "[{}]",
+            fixture["transactions_json"][3].as_str().unwrap()
+        )),
+    )
+    .await;
+    assert_eq!(own.status, 200, "{}", own.body);
+    let own: ergo_rest_json::mining::WorkMessageJson = serde_json::from_str(&own.body).unwrap();
+    let details = http_request(
+        addr,
+        "GET",
+        &format!(
+            "/api/v1/mining/candidate-details?template_seq={}",
+            own.template_seq
+        ),
+        None,
+    )
+    .await;
+    let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+        serde_json::from_str(&details.body).unwrap();
+    assert_eq!(
+        details
+            .transactions
+            .iter()
+            .find(|tx| tx.id == entry.tx_id)
+            .unwrap()
+            .category,
+        "private"
+    );
+    let cancelled = http_request(
+        addr,
+        "POST",
+        &format!("/api/v1/mining/private-transactions/{}/cancel", entry.tx_id),
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(cancelled.status, 200, "{}", cancelled.body);
+    let details = http_request(
+        addr,
+        "GET",
+        &format!(
+            "/api/v1/mining/candidate-details?template_seq={}",
+            own.template_seq
+        ),
+        None,
+    )
+    .await;
+    let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+        serde_json::from_str(&details.body).unwrap();
+    assert_eq!(details.status, "withdrawn");
+    let nonce = solve(&msg_bytes(&own), CANDIDATE_HEIGHT, &own.b);
+    let rejected = http_request(
+        addr,
+        "POST",
+        "/mining/solution",
+        Some(&format!(r#"{{"n":"{}"}}"#, hex::encode(nonce))),
+    )
+    .await;
+    // Difficulty one lets this nonce also solve unrelated operator work.
+    // A successful submission must apply that work without the cancelled tx.
+    assert_eq!(rejected.status, 200, "{}", rejected.body);
+    assert!(poll_best_full_height(&handle, CANDIDATE_HEIGHT).await);
+    let raw = hex::decode(fixture["transactions"][3].as_str().unwrap()).unwrap();
+    let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(&raw)).unwrap();
+    let output = ErgoBox {
+        candidate: tx.output_candidates[0].clone(),
+        transaction_id: ergo_ser::transaction::transaction_id(&tx).unwrap(),
+        index: 0,
+    };
+    let absent = http_request(
+        addr,
+        "GET",
+        &format!(
+            "/utxo/byId/{}",
+            hex::encode(output.box_id().unwrap().as_bytes())
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(
+        absent.status, 404,
+        "cancelled private tx was applied: {}",
+        absent.body
+    );
+    let details = http_request(
+        addr,
+        "GET",
+        &format!(
+            "/api/v1/mining/candidate-details?template_seq={}",
+            foreign.template_seq
+        ),
+        None,
+    )
+    .await;
+    let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+        serde_json::from_str(&details.body).unwrap();
+    assert_ne!(
+        details.status, "withdrawn",
+        "unrelated lender work survives cancellation"
+    );
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn requested_output_tree_versions_are_checked_against_the_v4_chain() {
+    use ergo_ser::{
+        ergo_tree::ErgoTree,
+        opcode::Expr,
+        sigma_type::SigmaType,
+        sigma_value::{SigmaBoolean, SigmaValue},
+    };
+    for cache in [false, true] {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
+        ))
+        .unwrap();
+        let bytes = hex::decode(fixture["independent_input_box"].as_str().unwrap()).unwrap();
+        let mut input = ergo_ser::ergo_box::read_ergo_box(&mut VlqReader::new(&bytes)).unwrap();
+        let true_tree = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: false,
+            reserved_header_bits: 0,
+            constants: vec![],
+            body: Expr::Const {
+                tpe: SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+            },
+        };
+        input.candidate = ErgoBoxCandidate::new(
+            1_000_000_000,
+            true_tree,
+            15,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        let (_dir, handle, _) = boot_synced_mining_node_with_package_version(
+            cache,
+            std::slice::from_ref(&input),
+            false,
+            4,
+        )
+        .await;
+        let addr = handle.api_addr.unwrap();
+        poll_candidate(addr).await;
+        // A v0 output can contain an SBox constant with a future-version tree.
+        // DTO decoding and the ambient version-one reader both accept it.
+        let mut nested_tree = input.candidate.ergo_tree().clone();
+        nested_tree.version = 5;
+        nested_tree.has_size = true;
+        let nested_box = ErgoBox {
+            candidate: ErgoBoxCandidate::new(
+                1_000_000_000,
+                nested_tree,
+                15,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+            transaction_id: ModifierId::from_bytes([0; 32]),
+            index: 0,
+        };
+        let tree = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: true,
+            reserved_header_bits: 0,
+            constants: vec![(
+                SigmaType::SBox,
+                SigmaValue::OpaqueBoxBytes(write_box_bytes(&nested_box)),
+            )],
+            body: Expr::Const {
+                tpe: SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+            },
+        };
+        let tx = Transaction {
+            inputs: vec![Input {
+                box_id: input.box_id().unwrap(),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate::new(
+                1_000_000_000,
+                tree,
+                15,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        let mut json: serde_json::Value =
+            serde_json::from_str(fixture["transactions_json"][3].as_str().unwrap()).unwrap();
+        json["inputs"][0]["boxId"] =
+            serde_json::json!(hex::encode(input.box_id().unwrap().as_bytes()));
+        json["inputs"][0]["spendingProof"]["proofBytes"] = serde_json::json!("");
+        let mut good_json = json.clone();
+        good_json["outputs"][0]["ergoTree"] =
+            serde_json::json!(hex::encode(input.candidate.ergo_tree_bytes()));
+        json["outputs"][0]["ergoTree"] =
+            serde_json::json!(hex::encode(tx.output_candidates[0].ergo_tree_bytes()));
+        let request: ergo_rest_json::ScalaTransactionInput =
+            serde_json::from_value(json.clone()).unwrap();
+        let wire = ergo_rest_json::decode_scala_transaction(&request).unwrap();
+        assert!(ergo_ser::transaction::read_transaction(&mut VlqReader::new(&wire)).is_ok());
+        let rejected = http_request(
+            addr,
+            "POST",
+            "/mining/candidateWithTxs",
+            Some(&serde_json::to_string(&vec![json]).unwrap()),
+        )
+        .await;
+        assert_eq!(rejected.status, 400, "{}", rejected.body);
+        // A subsequent valid request still builds and applies a v4 block.
+        let work = http_request(
+            addr,
+            "POST",
+            "/mining/candidateWithTxs",
+            Some(&serde_json::to_string(&vec![good_json]).unwrap()),
+        )
+        .await;
+        assert_eq!(work.status, 200, "{}", work.body);
+        let work: ergo_rest_json::mining::WorkMessageJson =
+            serde_json::from_str(&work.body).unwrap();
+        let details = http_request(
+            addr,
+            "GET",
+            &format!(
+                "/api/v1/mining/candidate-details?template_seq={}",
+                work.template_seq
+            ),
+            None,
+        )
+        .await;
+        let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+            serde_json::from_str(&details.body).unwrap();
+        let transactions: Vec<_> = details
+            .transactions
+            .iter()
+            .map(|tx| {
+                let bytes = hex::decode(&tx.bytes).unwrap();
+                ergo_ser::transaction::read_transaction(
+                    &mut VlqReader::new(&bytes).with_activated_script_version(3),
+                )
+                .unwrap()
+            })
+            .collect();
+        let mut writer = VlqWriter::new();
+        write_block_transactions_with_version(
+            &mut writer,
+            &BlockTransactions {
+                header_id: ModifierId::from_bytes([0; 32]),
+                transactions,
+            },
+            4,
+        )
+        .unwrap();
+        let bytes = writer.result();
+        let mut reader = VlqReader::new(&bytes);
+        let parsed = ergo_ser::block_transactions::read_block_transactions(&mut reader).unwrap();
+        assert!(reader.is_empty());
+        assert_eq!(parsed.transactions.len(), 2);
+        let nonce = solve(&msg_bytes(&work), CANDIDATE_HEIGHT, &work.b);
+        let submitted = http_request(
+            addr,
+            "POST",
+            "/mining/solution",
+            Some(&format!(r#"{{"n":"{}"}}"#, hex::encode(nonce))),
+        )
+        .await;
+        assert_eq!(submitted.status, 200, "{}", submitted.body);
+        assert!(poll_best_full_height(&handle, CANDIDATE_HEIGHT).await);
+        handle.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn requested_signed_extensions_preserve_order_through_http_and_applied_block() {
+    use ergo_ser::{
+        sigma_type::SigmaType,
+        sigma_value::{SigmaBoolean, SigmaValue},
+    };
+    use ergo_wallet::proving::{
+        hints::HintsBag, node_position::NodePosition, randomness::OsRngBackend,
+        schnorr::prove_schnorr,
+    };
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
+    ))
+    .unwrap();
+    let input = ergo_ser::ergo_box::read_ergo_box(&mut VlqReader::new(
+        &hex::decode(fixture["independent_input_box"].as_str().unwrap()).unwrap(),
+    ))
+    .unwrap();
+    let mut tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(
+        &hex::decode(fixture["transactions"][3].as_str().unwrap()).unwrap(),
+    ))
+    .unwrap();
+    let original_proof = hex::encode(&tx.inputs[0].spending_proof.proof);
+    let mut extension = tx.inputs[0].spending_proof.extension().clone();
+    for key in [5, 3, 8] {
+        extension
+            .values
+            .insert(key, (SigmaType::SInt, SigmaValue::Int(key as i32)));
+    }
+    tx.inputs[0].spending_proof = SpendingProof::new(vec![], extension).unwrap();
+    let pk: [u8; 33] = hex::decode(fixture["miner_pk"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let proposition = SigmaBoolean::ProveDlog(pk.into());
+    let message = ergo_ser::transaction::bytes_to_sign(&tx).unwrap();
+    let proof = prove_schnorr(
+        &proposition,
+        &k256::Scalar::ONE,
+        &message,
+        &HintsBag::empty(),
+        NodePosition::crypto_tree_prefix(),
+        &mut OsRngBackend,
+    )
+    .unwrap();
+    tx.inputs[0].spending_proof.proof = proof.clone();
+    let mut sorted = tx.clone();
+    let mut sorted_extension = sorted.inputs[0].spending_proof.extension().clone();
+    sorted_extension.values.sort_keys();
+    sorted.inputs[0].spending_proof = SpendingProof::new(proof.clone(), sorted_extension).unwrap();
+    assert!(
+        !ergo_sigma::verify::verify_sigma_proof(
+            &proposition,
+            &proof,
+            &ergo_ser::transaction::bytes_to_sign(&sorted).unwrap()
+        )
+        .unwrap(),
+        "the signature discriminates sorted extensions"
+    );
+    let body = format!(
+        "[{}]",
+        fixture["transactions_json"][3]
+            .as_str()
+            .unwrap()
+            .replace(&original_proof, &hex::encode(&proof))
+            .replace(
+                "\"extension\":{}",
+                "\"extension\":{\"5\":\"040a\",\"3\":\"0406\",\"8\":\"0410\"}"
+            )
+    );
+    let id = ergo_ser::transaction::transaction_id(&tx).unwrap();
+    for cache_enabled in [false, true] {
+        let (_dir, handle, _) = boot_synced_mining_node_with_packages(
+            cache_enabled,
+            std::slice::from_ref(&input),
+            true,
+        )
+        .await;
+        let addr = handle.api_addr.unwrap();
+        poll_candidate(addr).await;
+        let response = http_request(addr, "POST", "/mining/candidateWithTxs", Some(&body)).await;
+        assert_eq!(response.status, 200, "{}", response.body);
+        let work: ergo_rest_json::mining::WorkMessageJson =
+            serde_json::from_str(&response.body).unwrap();
+        assert_eq!(
+            work.proof.as_ref().unwrap().tx_proofs[0].leaf,
+            hex::encode(id.as_bytes())
+        );
+        let nonce = solve(&msg_bytes(&work), CANDIDATE_HEIGHT, &work.b);
+        let solution = format!(r#"{{"n":"{}"}}"#, hex::encode(nonce));
+        let response = http_request(addr, "POST", "/mining/solution", Some(&solution)).await;
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert!(poll_best_full_height(&handle, CANDIDATE_HEIGHT).await);
+        let block_id = handle.read.tip().best_full_block.header_id;
+        let block = http_request(
+            addr,
+            "GET",
+            &format!("/blocks/{block_id}/transactions"),
+            None,
+        )
+        .await;
+        assert_eq!(block.status, 200, "{}", block.body);
+        let block: ergo_rest_json::ScalaBlockTransactions =
+            serde_json::from_str(&block.body).unwrap();
+        let included = block
+            .transactions
+            .iter()
+            .find(|tx| tx.id == hex::encode(id.as_bytes()))
+            .unwrap();
+        assert_eq!(
+            included.inputs[0]
+                .spending_proof
+                .extension
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["5", "3", "8"]
+        );
+        assert_eq!(
+            included.inputs[0].spending_proof.proof_bytes,
+            hex::encode(&proof)
+        );
+        handle.shutdown().await.unwrap();
+    }
 }

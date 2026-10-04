@@ -226,6 +226,7 @@ fn serve_at(
         target,
         height,
         pk: [2; 33],
+        proof: None,
         metrics: Default::default(),
     };
     handle
@@ -463,6 +464,7 @@ fn cancelling_lets_the_transaction_through_public_admission_again() {
         &mut state,
         Some(&handle),
         false,
+        None,
         crate::mining_bridge::MiningRequest::CancelPrivateTransaction {
             tx_id: tx_id.clone(),
             reply,
@@ -578,6 +580,7 @@ fn a_mining_request_before_reconciliation_does_not_expire_a_confirmed_transactio
         &mut state,
         Some(&handle),
         false,
+        None,
         crate::mining_bridge::MiningRequest::ListPrivateTransactions { reply },
     );
     assert_ne!(
@@ -753,6 +756,7 @@ fn cancel_request(
         state,
         Some(handle),
         false,
+        None,
         crate::mining_bridge::MiningRequest::CancelPrivateTransaction {
             tx_id: tx_id.into(),
             reply,
@@ -966,6 +970,7 @@ fn a_failing_expiry_write_withdraws_once_and_keeps_mining() {
         &mut state,
         Some(&handle),
         false,
+        None,
         crate::mining_bridge::MiningRequest::SubmitSolution {
             solution: ergo_rest_json::mining::AutolykosSolutionJson {
                 pk: None,

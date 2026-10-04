@@ -5,6 +5,7 @@ mod box_selection_oracle;
 mod cli_smoke;
 mod ergo_p2pk_address_oracle;
 mod hints_bag_basic;
+mod keystore_interop;
 mod leading_zero_master_oracle;
 mod multi_sig_oracle;
 mod node_position_basic;

@@ -153,6 +153,7 @@ fn mining_handle(block: &SolvedBlock) -> MiningHandle {
         target: block.candidate.target.clone(),
         height: block.candidate.header.height,
         pk: MINER_PK,
+        proof: None,
         metrics: Default::default(),
     };
     assert!(handle
@@ -182,6 +183,7 @@ fn submit(state: &mut NodeState, handle: &MiningHandle, nonce: [u8; 8]) -> Submi
         state,
         Some(handle),
         false,
+        None,
         crate::mining_bridge::MiningRequest::SubmitSolution {
             solution: ergo_rest_json::mining::AutolykosSolutionJson {
                 pk: None,
@@ -219,6 +221,7 @@ fn get_candidate(
         state,
         Some(handle),
         false,
+        None,
         crate::mining_bridge::MiningRequest::GetCandidate { reply },
     );
     assert!(!rebuild, "serving work never asks for a rebuild");
@@ -422,6 +425,7 @@ fn publish_candidate(state: &NodeState, handle: &MiningHandle) {
     let intent = BuildIntent {
         private_transactions: std::sync::Arc::new(Vec::new()),
         operator_generation: handle.operator_generation(),
+        operator_owned: true,
         expected_parent: parent,
         expected_height: height,
         mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool)),

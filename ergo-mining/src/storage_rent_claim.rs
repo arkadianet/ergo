@@ -480,6 +480,29 @@ pub fn build_budget_bounded_rent_claim_with_policy(
     token_policy: RentTokenPolicy,
     skipped_preservation_out: &mut usize,
 ) -> Result<Option<(CheckedTransaction, u64, u64)>, MiningError> {
+    // Historical boxes can carry scripts that a new block cannot parse. A
+    // full consume emits only the miner script; a recreation emits the old one.
+    let eligible: Vec<_> = eligible
+        .iter()
+        .filter(|box_| {
+            let Ok(bytes) = serialize_ergo_box(box_) else {
+                return false;
+            };
+            let fee = compute_storage_fee(bytes.len() as i32, params.storage_fee_factor);
+            if fee > 0 && box_.candidate.value <= fee as u64 {
+                return true;
+            }
+            let tx = Transaction {
+                inputs: vec![],
+                data_inputs: vec![],
+                output_candidates: vec![box_.candidate.clone()],
+            };
+            crate::candidate::validate_block_transactions_roundtrip(&[tx], ctx.pre_header_version)
+                .is_ok()
+        })
+        .cloned()
+        .collect();
+    let eligible = eligible.as_slice();
     *skipped_preservation_out = 0;
     // Cap on the number of CLAIMABLE boxes. `build_rent_claim` caps on
     // claims (skipping unclaimable boxes), so shrinking this directly drops

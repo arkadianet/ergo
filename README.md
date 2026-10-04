@@ -23,6 +23,7 @@ Repository: <https://github.com/arkadianet/ergo>
 - [`docs/operating.md`](./docs/operating.md) — running, modes, observability.
 - [`docs/operator-recovery.md`](./docs/operator-recovery.md) — verified offline backup/restore, integrity inspection, and wallet discovery on pruned UTXO nodes.
 - [`docs/releasing.md`](./docs/releasing.md) — exact-tag validation and tested binary archives.
+- [`docs/lithos.md`](./docs/lithos.md) — Lithos mining integration and keystore setup.
 - [`docs/compatibility.md`](./docs/compatibility.md) — consensus-compatibility and versioning policy.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`SECURITY.md`](./SECURITY.md) · [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
 

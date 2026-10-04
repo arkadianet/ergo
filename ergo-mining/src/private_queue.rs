@@ -475,6 +475,25 @@ impl PrivateTransactionQueue {
             .collect()
     }
 
+    /// Freeze both public-admission guards under one queue lock.
+    pub fn guard_snapshot(&self) -> (HashSet<[u8; 32]>, BTreeSet<[u8; 32]>) {
+        let queue = self.lock();
+        let ids = queue
+            .records
+            .values()
+            .filter(|r| r.signed_bytes.is_some())
+            .filter_map(|r| decode_id(&r.entry.tx_id).ok())
+            .collect();
+        let inputs = queue
+            .records
+            .values()
+            .filter(|r| r.entry.state.reserves_inputs())
+            .flat_map(|r| &r.entry.input_ids)
+            .filter_map(|id| decode_id(id).ok())
+            .collect();
+        (ids, inputs)
+    }
+
     /// Rebuilt on load, and always revalidated during candidate assembly.
     pub fn selection_entries(&self) -> Vec<Entry> {
         self.selection_entries_at(0, 0)

@@ -53,6 +53,7 @@ fn cfg_with_mode(
         api_bind: None,
         peer_details: Default::default(),
         api_key_hash: None,
+        allow_unauthenticated_legacy_mining: false,
         api_allowed_hosts: Vec::new(),
         api_local_reverse_proxy: false,
         api_script: Default::default(),

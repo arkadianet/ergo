@@ -33,9 +33,10 @@ use std::collections::{HashMap, HashSet};
 use ergo_mempool::{pool::Entry, MempoolReadSnapshot};
 use ergo_primitives::digest::{Digest32, ModifierId};
 use ergo_primitives::reader::VlqReader;
+use ergo_primitives::writer::VlqWriter;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::Header;
-use ergo_ser::transaction::{read_transaction, transaction_id, Transaction};
+use ergo_ser::transaction::{read_transaction, transaction_id, write_transaction, Transaction};
 use ergo_validation::{
     validate_transaction_parsed, CheckedTransaction, CostAccumulator, JitCost, ProtocolParams,
     ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules, UtxoView,
@@ -191,6 +192,112 @@ impl Selected {
     }
 }
 
+/// Validate supplied transactions in request order using the ordinary selector.
+#[allow(clippy::too_many_arguments)]
+pub fn select_prioritized_txs_cancellable(
+    overlay: &mut CandidateOverlay,
+    transactions: &[Transaction],
+    ctx: &TransactionContext,
+    params: &ProtocolParams,
+    last_headers: &[Header],
+    cost_budget: u64,
+    size_budget: u64,
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Selected, MiningError> {
+    select_requested_txs_cancellable(
+        overlay,
+        transactions,
+        ctx,
+        params,
+        last_headers,
+        cost_budget,
+        size_budget,
+        reemission_rules,
+        &BlockPolicy::default(),
+        false,
+        should_cancel,
+    )
+}
+
+/// A requested prefix either fits in full or refuses the candidate. Operator
+/// exclusions win; requirements and private/public work follow the prefix.
+#[allow(clippy::too_many_arguments)]
+pub fn select_requested_txs_cancellable(
+    overlay: &mut CandidateOverlay,
+    transactions: &[Transaction],
+    ctx: &TransactionContext,
+    params: &ProtocolParams,
+    last_headers: &[Header],
+    cost_budget: u64,
+    size_budget: u64,
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    policy: &BlockPolicy,
+    atomic: bool,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Selected, MiningError> {
+    policy.validate()?;
+    let excluded: HashSet<_> = policy.excluded_ids()?.into_iter().collect();
+    let mut entries = Vec::with_capacity(transactions.len());
+    for tx in transactions {
+        check_build_cancelled(should_cancel)?;
+        let id = transaction_id(tx)
+            .map_err(|e| MiningError::InvalidRequest(format!("transaction id: {e:?}")))?;
+        let id = Digest32::from_bytes(*id.as_bytes());
+        if excluded.contains(&id) {
+            return Err(MiningError::InvalidRequest(format!(
+                "requested transaction {} excluded by operator policy",
+                hex::encode(id.as_bytes())
+            )));
+        }
+        let mut writer = VlqWriter::new();
+        write_transaction(&mut writer, tx)
+            .map_err(|e| MiningError::InvalidRequest(format!("transaction: {e:?}")))?;
+        let bytes = writer.result();
+        let size = bytes.len() as u32;
+        entries.push(Entry::new(
+            id,
+            bytes.into(),
+            tx.inputs.iter().map(|i| i.box_id).collect(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            0,
+            size,
+            0,
+            ergo_mempool::types::TxSource::Api,
+        ));
+    }
+    let selected = select_ordered_entries_cancellable(
+        overlay,
+        SelectionPlan {
+            ordered: entries.iter().collect(),
+            required: HashSet::new(),
+            excluded: HashSet::new(),
+            unmet: Vec::new(),
+        },
+        ctx,
+        params,
+        last_headers,
+        cost_budget,
+        size_budget,
+        reemission_rules,
+        should_cancel,
+    )?;
+    if atomic && selected.checked.len() != transactions.len() {
+        let failure = selected
+            .excluded
+            .first()
+            .expect("every selection skip has a reason");
+        return Err(MiningError::InvalidRequest(format!(
+            "requested transaction {}: {}",
+            hex::encode(failure.tx_id.as_bytes()),
+            failure.reason
+        )));
+    }
+    Ok(selected)
+}
+
 /// Greedily select mempool transactions into the candidate.
 ///
 /// `overlay` must already have the pinned txs (emission, and the
@@ -277,17 +384,46 @@ pub fn select_user_txs_with_policy_cancellable(
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<Selected, MiningError> {
     policy.validate()?;
-    let plan = selection_plan(snapshot, private_transactions, policy)?;
+    let mut plan = selection_plan(snapshot, private_transactions, policy)?;
+    for entry in snapshot.iter().chain(private_transactions) {
+        if plan.excluded.contains(&entry.tx_id) {
+            plan.unmet.push(ExcludedTransaction::new(
+                entry.tx_id,
+                "excluded_by_policy",
+                plan.required.contains(&entry.tx_id),
+            ));
+        }
+    }
+    select_ordered_entries_cancellable(
+        overlay,
+        plan,
+        ctx,
+        params,
+        last_headers,
+        cost_budget,
+        size_budget,
+        reemission_rules,
+        should_cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_ordered_entries_cancellable(
+    overlay: &mut CandidateOverlay,
+    plan: SelectionPlan<'_>,
+    ctx: &TransactionContext,
+    params: &ProtocolParams,
+    last_headers: &[Header],
+    cost_budget: u64,
+    size_budget: u64,
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Selected, MiningError> {
     let mut sel = Selected {
         required: plan.required,
         excluded: plan.unmet,
         ..Default::default()
     };
-    for entry in snapshot.iter().chain(private_transactions) {
-        if plan.excluded.contains(&entry.tx_id) {
-            sel.exclude(entry.tx_id, "excluded_by_policy");
-        }
-    }
     check_build_cancelled(should_cancel)?;
     if cost_budget == 0 || size_budget == 0 {
         let reason = if cost_budget == 0 {
@@ -296,9 +432,7 @@ pub fn select_user_txs_with_policy_cancellable(
             "size_budget"
         };
         for entry in plan.ordered {
-            if sel.required.contains(&entry.tx_id) {
-                sel.exclude(entry.tx_id, reason);
-            }
+            sel.exclude(entry.tx_id, reason);
         }
         return Ok(sel);
     }
@@ -337,13 +471,22 @@ pub fn select_user_txs_with_policy_cancellable(
             continue;
         }
 
-        let tx = match parse_tx(&entry.bytes) {
+        let tx = match parse_tx(&entry.bytes, ctx.activated_script_version) {
             Ok(t) => t,
             Err(_) => {
                 sel.exclude(entry.tx_id, "malformed_transaction");
                 continue;
             }
         };
+        if crate::candidate::validate_block_transactions_roundtrip(
+            std::slice::from_ref(&tx),
+            ctx.pre_header_version,
+        )
+        .is_err()
+        {
+            sel.exclude(entry.tx_id, "assembled_transaction_parse");
+            continue;
+        }
         check_build_cancelled(should_cancel)?;
 
         // The structural part of compute_tx_init_cost is a candidate-context
@@ -600,7 +743,10 @@ impl<'a> PoolGraph<'a> {
                 .iter()
                 .filter_map(|box_id| self.output_owners.get(box_id).copied())
                 .collect();
-            if let Ok(tx) = parse_tx(&entry.bytes) {
+            if let Ok(tx) = parse_tx(
+                &entry.bytes,
+                ergo_ser::ergo_tree::DEFAULT_ACTIVATED_SCRIPT_VERSION,
+            ) {
                 parents.extend(
                     tx.data_inputs
                         .iter()
@@ -620,8 +766,8 @@ impl<'a> PoolGraph<'a> {
     }
 }
 
-fn parse_tx(bytes: &[u8]) -> Result<Transaction, MiningError> {
-    let mut r = VlqReader::new(bytes);
+fn parse_tx(bytes: &[u8], activated_script_version: u8) -> Result<Transaction, MiningError> {
+    let mut r = VlqReader::new(bytes).with_activated_script_version(activated_script_version);
     let tx = read_transaction(&mut r).map_err(|e| MiningError::Decode {
         op: "mempool_tx_parse",
         reason: format!("{e:?}"),
@@ -860,6 +1006,48 @@ mod tests {
             pre_header_n_bits: 0,
             pre_header_votes: [0u8; 3],
         }
+    }
+
+    #[test]
+    fn selection_excludes_an_unparseable_assembled_transaction_and_keeps_later_work() {
+        let first = box_at(1_000_000_000, HEIGHT, 1);
+        let second = box_at(1_000_000_000, HEIGHT, 2);
+        let mut bad = spend_tx(&first, 1_000_000_000, HEIGHT);
+        let mut tree = bad.output_candidates[0].ergo_tree().clone();
+        tree.version = 5;
+        bad.output_candidates[0] = ErgoBoxCandidate::new(
+            1_000_000_000,
+            tree,
+            HEIGHT,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        let good = spend_tx(&second, 1_000_000_000, HEIGHT);
+        let snapshot = MempoolReadSnapshot::from_entries(vec![
+            wire_entry(&bad, 0, 1),
+            wire_entry(&good, 0, 2),
+        ]);
+        let mut context = ctx();
+        context.pre_header_version = 4;
+        context.activated_script_version = 1;
+        let utxo = MapUtxo::new(&[first.clone(), second]);
+        let mut overlay = CandidateOverlay::new(&utxo);
+        let selected = select_user_txs(
+            &mut overlay,
+            &snapshot,
+            &context,
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        assert_eq!(selected.checked.len(), 1);
+        assert_eq!(selected.checked[0].0.transaction(), &good);
+        assert!(!overlay.is_spent(&first.box_id().unwrap()));
+        assert_eq!(selected.excluded[0].reason, "assembled_transaction_parse");
     }
 
     // ----- happy path -----

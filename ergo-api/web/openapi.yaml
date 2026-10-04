@@ -25,10 +25,8 @@ info:
       decode-only `/script/addressToTree` and `/script/addressToBytes`
       routes are mounted too.)
 
-    **Mining / UTXO:**
+    **UTXO:**
 
-    - `POST /mining/candidateWithTxs` — out of scope for the
-      external-miner surface (no mandatory-tx candidate path).
     - `POST /utxo/getBoxesBinaryProof` — batch AD-proof for a set of
       box ids; not mounted.
 
@@ -56,9 +54,12 @@ info:
       is always mounted, matching Scala. Not-ready signals
       (tip_unready, ibd_gated, disabled) come from the admission
       pipeline per-request rather than from route registration.
-    - `/mining/candidate`, `/mining/solution`,
-      `/mining/rewardAddress`, `/mining/rewardPublicKey` are
+    - All `/mining/*` routes, including transaction candidates, are
       unmounted when `[mining] enabled = false`.
+      They require the operator `api_key` by default. Explicitly setting
+      `[api.security] allow_unauthenticated_legacy_mining = true` opens
+      only candidate, solution and reward reads for Scala mining clients.
+      Both transaction-candidate routes always require the configured key.
     - `GET /emission/scripts` is served on mainnet; testnet/dev
       return 404 pending an oracle capture.
 
@@ -2395,6 +2396,24 @@ components:
                   type: integer
           example: [['018b7ae20a4acd23e3f1bf38671ce97103ad96d8f1c780b5e5e865e4873ae16337', 0]]
 
+    UpcomingTransactionMembershipProof:
+      type: object
+      description: Mining membership proof for a transaction in the candidate's transaction/witness tree
+      required:
+        - leaf
+        - levels
+      properties:
+        leaf:
+          type: string
+          description: Base16-encoded transaction identifier
+          minLength: 64
+          maxLength: 64
+        levels:
+          type: array
+          items:
+            type: string
+            description: Base16-encoded side byte followed by the sibling digest; an absent sibling is encoded as the side byte alone
+
     ProofOfUpcomingTransactions:
       type: object
       description: Proof that a block corresponding to given header without PoW contains some transactions
@@ -2410,7 +2429,7 @@ components:
           type: array
           description: Merkle proofs of transactions included into blocks (not necessarily all the block transactions)
           items:
-            $ref: '#/components/schemas/MerkleProof'
+            $ref: '#/components/schemas/UpcomingTransactionMembershipProof'
 
     WorkMessage:
       description: Block candidate related data for external miner to perform work
@@ -2424,12 +2443,17 @@ components:
       properties:
         msg:
           type: string
-          description: Base16-encoded block header bytes without PoW solution
+          description: Base16-encoded Blake2b-256 hash of the serialized block header without PoW
           example: '0350e25cee8562697d55275c96bb01b34228f9bd68fd9933f2a25ff195526864f5'
         b:
           type: integer
           description: Work target value
           example: 987654321
+        h:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Optional height of the block candidate
         pk:
           type: string
           description: Base16-encoded miner public key
@@ -5786,7 +5810,16 @@ paths:
     post:
       security:
         - ApiKeyAuth: []
-      summary: Request block candidate
+      summary: Request block candidate with supplied transactions
+      description: >-
+        Takes at most 1024 transactions in dependency order and a request body
+        no larger than 2 MiB. Uses the configured miner public key. Transactions
+        are validated against the upcoming block context before admission;
+        returned proofs cover only supplied transactions actually selected.
+        Proofs bind the exact header preimage and transaction root of the
+        candidate retained for solution submission. Context-extension insertion
+        order is preserved. Authentication is required even when legacy mining
+        compatibility is enabled.
       operationId: miningRequestBlockCandidateWithMandatoryTransactions
       tags:
         - mining
@@ -5805,6 +5838,69 @@ paths:
                 $ref: '#/components/schemas/WorkMessage'
         default:
           description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /mining/candidateWithTxsAndPk:
+    post:
+      security:
+        - ApiKeyAuth: []
+      summary: Request transaction candidate with an explicit miner key
+      description: >-
+        Builds the same candidate as candidateWithTxs using the supplied
+        compressed secp256k1 miner key for the header and reward output.
+        At most 1024 transactions and 2 MiB per request. Request order and
+        context-extension insertion order are preserved. The miner key must
+        decode to a non-identity curve point. This route always requires the
+        configured api_key. The override belongs to this candidate and does
+        not change the configured key used for ordinary candidates.
+      operationId: miningRequestBlockCandidateWithTransactionsAndMinerKey
+      tags:
+        - mining
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [txs, pk]
+              properties:
+                txs:
+                  $ref: '#/components/schemas/Transactions'
+                pk:
+                  type: string
+                  minLength: 66
+                  maxLength: 66
+                  description: Hex-encoded compressed secp256k1 public key
+      responses:
+        '200':
+          description: Candidate with header preimage and admitted transaction proofs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkMessage'
+        '400':
+          description: Malformed request, invalid miner key or request limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Missing or invalid operator API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: Candidate unavailable while the node is not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '504':
+          description: Candidate build timed out
           content:
             application/json:
               schema:

@@ -26,12 +26,16 @@ pub struct CandidateObservation {
     /// Operator queue/policy generation the engine froze for this build.
     pub operator_generation: u64,
     pub policy_requires_transactions: bool,
+    /// The reward key belonged to the operator when this job was built.
+    pub operator_owned: bool,
+    /// Ordered IDs of the caller-supplied package, before ordinary selection.
+    pub requested_ids: Vec<Digest32>,
 }
 
 /// The exact validated cost and origin of one retained transaction.
 #[derive(Debug, Clone, Default)]
 pub struct TransactionObservation {
-    /// `emission`, `rent`, `public`, `private`, or `fees`.
+    /// `emission`, `requested`, `rent`, `public`, `private`, or `fees`.
     pub category: &'static str,
     pub validation_cost: u64,
     pub fee_nano_erg: u64,
@@ -408,6 +412,7 @@ mod tests {
                 target: 1u8.into(),
                 height,
                 pk,
+                proof: None,
                 metrics: Default::default(),
             },
             identity: TemplateIdentity {

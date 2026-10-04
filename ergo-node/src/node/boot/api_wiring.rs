@@ -561,6 +561,9 @@ pub(super) async fn bind(
 fn api_security(
     config: &NodeConfig,
 ) -> Result<Option<Arc<ergo_api::auth::ApiSecurity>>, NodeError> {
+    if config.allow_unauthenticated_legacy_mining && config.api_key_hash.is_none() {
+        return Err("allow_unauthenticated_legacy_mining requires api_key_hash".into());
+    }
     let Some(hash) = config.api_key_hash.clone() else {
         ergo_api::auth::validate_credentials(&config.api_scoped_keys, None)?;
         return Ok(None);
@@ -570,7 +573,8 @@ fn api_security(
         .with_credentials(
             config.api_scoped_keys.clone(),
             config.data_dir.join("credentials-revoked.json"),
-        )?;
+        )?
+        .with_unauthenticated_legacy_mining(config.allow_unauthenticated_legacy_mining);
     Ok(Some(Arc::new(security)))
 }
 

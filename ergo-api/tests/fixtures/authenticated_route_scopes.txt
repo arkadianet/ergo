@@ -100,6 +100,8 @@ POST /api/v1/wallet/transactions/sign wallet
 POST /api/v1/wallet/unlock wallet
 POST /api/v1/webhooks operator
 POST /blocks operator
+POST /mining/candidateWithTxs mining
+POST /mining/candidateWithTxsAndPk mining
 POST /mining/solution mining
 POST /node/shutdown admin
 POST /peers/connect operator

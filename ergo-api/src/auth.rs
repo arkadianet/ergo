@@ -67,6 +67,7 @@ pub struct ApiSecurity {
     /// secret API key. Always 64 chars. Compared in constant time
     /// against the hex digest of incoming `api_key` header bytes.
     api_key_hash_hex: String,
+    allow_unauthenticated_legacy_mining: bool,
     credentials: Option<Arc<credentials::CredentialRegistry>>,
 }
 
@@ -105,8 +106,20 @@ impl ApiSecurity {
         }
         Ok(Self {
             api_key_hash_hex,
+            allow_unauthenticated_legacy_mining: false,
             credentials: None,
         })
+    }
+
+    /// Explicit Scala mining compatibility. Candidate transaction injection
+    /// and the v1 operator API always retain authentication.
+    pub fn with_unauthenticated_legacy_mining(mut self, allow: bool) -> Self {
+        self.allow_unauthenticated_legacy_mining = allow;
+        self
+    }
+
+    pub fn allow_unauthenticated_legacy_mining(&self) -> bool {
+        self.allow_unauthenticated_legacy_mining
     }
 
     pub fn with_credentials(
