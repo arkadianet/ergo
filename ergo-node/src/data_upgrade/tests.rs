@@ -119,7 +119,7 @@ fn current_schema_v2_indexer_is_migrated_and_probe_does_not_write() {
     let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
     let path = dir.path().join("custom-index.redb");
     let bytes = indexer(&path, ergo_indexer::store::INDEXER_SCHEMA_VERSION);
-    let (schema, probe_lock) = legacy_indexer_schema(&path).unwrap();
+    let (schema, probe_lock) = legacy_indexer_schema(&path, &mut |_| {}).unwrap();
     assert_eq!(schema, ergo_indexer::store::INDEXER_SCHEMA_VERSION);
     assert_eq!(fs::read(&path).unwrap(), bytes);
     drop(probe_lock);
@@ -1051,4 +1051,160 @@ fn filesystem_space_provider_queries_a_filtered_filesystem_itself() {
     // procfs has no allocatable disk blocks and is omitted from sysinfo's
     // disk list. Matching it to the root mount returns the wrong filesystem.
     assert_eq!(available_space(Path::new("/proc/self/status")).unwrap(), 0);
+}
+
+#[test]
+fn unclean_indexer_fixture_worker() {
+    let Ok(path) = std::env::var("ERGO_UNCLEAN_INDEXER_FIXTURE") else {
+        return;
+    };
+    let path = Path::new(&path);
+    indexer(path, ergo_indexer::store::INDEXER_SCHEMA_VERSION);
+    let db = redb_legacy::Database::open(path).unwrap();
+    let write = db.begin_write().unwrap();
+    write
+        .open_table(redb_legacy::TableDefinition::<&str, &[u8]>::new("rows"))
+        .unwrap()
+        .insert("before-crash", b"committed".as_slice())
+        .unwrap();
+    write.commit().unwrap();
+    // Leave a real recovery marker and committed transaction, as after SIGKILL.
+    std::process::exit(0);
+}
+
+fn unclean_indexer(path: &Path) -> Vec<u8> {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "data_upgrade::tests::unclean_indexer_fixture_worker",
+        ])
+        .env("ERGO_UNCLEAN_INDEXER_FIXTURE", path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::read(path).unwrap()
+}
+
+#[test]
+fn unclean_legacy_indexer_is_stale_without_repair_and_honors_explicit_retention() {
+    for keep_stale_indexer in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+        let idx = dir.path().join("custom-index.redb");
+        let bytes = unclean_indexer(&idx);
+        let mut warnings = Vec::new();
+        let (schema, probe_lock) =
+            legacy_indexer_schema(&idx, &mut |message| warnings.push(message.to_owned())).unwrap();
+        assert_eq!(schema, 0);
+        assert_eq!(fs::read(&idx).unwrap(), bytes);
+        drop(probe_lock);
+        let report = upgrade_data(
+            &lock,
+            dir.path(),
+            Path::new("custom-index.redb"),
+            &mut UpgradeOptions {
+                discard_backups: false,
+                keep_stale_indexer,
+                indexer_enabled: false,
+                free_space: &|_| panic!("unclean derived index must not be copied"),
+                warning: &mut |message| warnings.push(message.to_owned()),
+                cancelled: &|| false,
+                progress: &mut |_, _, _, _| {},
+                step: &mut |_| Ok(()),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.stale_indexers, 1);
+        assert_eq!(report.migrated, 0);
+        assert!(!idx.exists());
+        assert!(!sibling(&idx, ".redb-upgrade").exists());
+        let messages = warnings.join("\n");
+        assert!(
+            messages.contains("requires repair")
+                && messages.contains("treating this derived index as stale"),
+            "{messages}"
+        );
+        let backup = sibling(&idx, ".redb2-backup");
+        assert_eq!(backup.exists(), keep_stale_indexer);
+        if keep_stale_indexer {
+            assert_eq!(fs::read(&backup).unwrap(), bytes);
+            // Offline discard can also identify the retained unclean index
+            // without repairing it or deleting sole consensus/peer data.
+            assert_eq!(run(&lock, dir.path(), true).discarded_existing_backups, 1);
+            assert!(!backup.exists());
+        }
+    }
+}
+
+#[test]
+fn unclean_non_indexer_databases_still_use_verified_private_copy_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+    let fixture = dir.path().join("fixture.redb");
+    let bytes = unclean_indexer(&fixture);
+    for name in ["state.redb", "peers.redb", "webhooks.redb"] {
+        fs::copy(&fixture, dir.path().join(name)).unwrap();
+    }
+    let report = run(&lock, dir.path(), false);
+    assert_eq!(report.migrated, 3);
+    assert_eq!(report.stale_indexers, 0);
+    for name in ["state.redb", "peers.redb", "webhooks.redb"] {
+        let path = dir.path().join(name);
+        assert_current(&path);
+        assert_eq!(fs::read(sibling(&path, ".redb2-backup")).unwrap(), bytes);
+        let db = redb::ReadOnlyDatabase::open(&path).unwrap();
+        assert_eq!(
+            db.begin_read()
+                .unwrap()
+                .open_table(TableDefinition::<&str, &[u8]>::new("rows"))
+                .unwrap()
+                .get("before-crash")
+                .unwrap()
+                .unwrap()
+                .value(),
+            b"committed"
+        );
+    }
+}
+
+#[test]
+fn malformed_clean_indexer_schema_remains_an_error_without_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+    let path = dir.path().join("custom-index.redb");
+    indexer(&path, 2);
+    let db = redb_legacy::Database::open(&path).unwrap();
+    let write = db.begin_write().unwrap();
+    write
+        .open_table(redb_legacy::TableDefinition::<&str, &[u8]>::new(
+            "indexer_meta",
+        ))
+        .unwrap()
+        .insert("schema_version", [1, 2, 3].as_slice())
+        .unwrap();
+    write.commit().unwrap();
+    drop(db);
+    let bytes = fs::read(&path).unwrap();
+    let error = upgrade_with_logging(
+        &lock,
+        dir.path(),
+        Path::new("custom-index.redb"),
+        false,
+        false,
+        false,
+        &|| false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("invalid legacy indexer schema_version length"),
+        "{error}"
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert!(!sibling(&path, ".redb2-backup").exists());
+    assert!(!sibling(&path, ".redb-upgrade").exists());
 }

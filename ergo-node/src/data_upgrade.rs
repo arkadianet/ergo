@@ -393,7 +393,11 @@ fn recover(path: &Path, options: &mut UpgradeOptions<'_>) -> Result<bool> {
 // check. Current databases must open read-only before their rollback file is
 // removed. A missing non-stale original is never permission to delete its only
 // surviving copy. Hold the legacy writer lock until deletion completes.
-fn discard_existing_backup(path: &Path, indexer: bool) -> Result<bool> {
+fn discard_existing_backup(
+    path: &Path,
+    indexer: bool,
+    warning: &mut dyn FnMut(&str),
+) -> Result<bool> {
     let backup = sibling(path, ".redb2-backup");
     if !regular(&backup)? {
         return Ok(false);
@@ -425,7 +429,7 @@ fn discard_existing_backup(path: &Path, indexer: bool) -> Result<bool> {
             &backup,
         )?)?);
     } else if indexer {
-        let (schema, lock) = legacy_indexer_schema(&backup)?;
+        let (schema, lock) = legacy_indexer_schema(&backup, warning)?;
         if schema >= ergo_indexer::store::INDEXER_SCHEMA_VERSION {
             return Err(fail(format!(
                 "current-schema indexer is missing; retain its only copy at {}",
@@ -550,7 +554,8 @@ pub fn upgrade_data(
                 deleted_indexer = intent.stale_indexer_bytes.map(|size| (path.clone(), size));
             }
         }
-        if options.discard_backups && discard_existing_backup(path, position == 0)? {
+        if options.discard_backups && discard_existing_backup(path, position == 0, options.warning)?
+        {
             report.discarded_existing_backups += 1;
         }
         if !regular(path)? || classify(path)? == FileFormat::Current {
@@ -559,7 +564,7 @@ pub fn upgrade_data(
         let size = fs::metadata(path)?.len();
         let start = Instant::now();
         let (stale, indexer_lock) = if position == 0 {
-            let (schema, lock) = legacy_indexer_schema(path)?;
+            let (schema, lock) = legacy_indexer_schema(path, options.warning)?;
             (
                 schema < ergo_indexer::store::INDEXER_SCHEMA_VERSION,
                 Some(lock),
@@ -721,8 +726,9 @@ pub fn require_current_data(
 
 /// A small header overlay lets the real legacy reader inspect a clean v2
 /// database without writing its open/close recovery marker to disk. All page
-/// writes/resizes are rejected and recovery is explicitly aborted. Reading an
-/// unclean indexer fails safely: stop 0.11 cleanly or use the copy-only converter.
+/// writes/resizes are rejected and recovery is explicitly aborted. For an
+/// unclean indexer, an aborted repair marks the derived data as stale while
+/// retaining the source lock for journaled deletion or explicit retention.
 #[derive(Debug)]
 struct LegacyProbe {
     source: Arc<redb_legacy::backends::FileBackend>,
@@ -771,7 +777,10 @@ impl StorageBackend for LegacyProbe {
     }
 }
 
-fn legacy_indexer_schema(path: &Path) -> Result<(u32, Arc<redb_legacy::backends::FileBackend>)> {
+fn legacy_indexer_schema(
+    path: &Path,
+    warning: &mut dyn FnMut(&str),
+) -> Result<(u32, Arc<redb_legacy::backends::FileBackend>)> {
     let source = Arc::new(redb_legacy::backends::FileBackend::new(File::open(path)?)?);
     let header = Mutex::new(source.read(0, 4096.min(source.len()? as usize))?);
     let probe = LegacyProbe {
@@ -779,9 +788,15 @@ fn legacy_indexer_schema(path: &Path) -> Result<(u32, Arc<redb_legacy::backends:
         header,
     };
     let schema = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<u32> {
-        let db = redb_legacy::Database::builder().set_cache_size(8 * 1024 * 1024)
-            .set_repair_callback(|session| session.abort()).create_with_backend(probe)
-            .map_err(|e| fail(format!("cannot read legacy indexer {} without writing: {e}; shut down 0.11 cleanly or use migrate-redb to another disk", path.display())))?;
+        let db = match redb_legacy::Database::builder().set_cache_size(8 * 1024 * 1024)
+            .set_repair_callback(|session| session.abort()).create_with_backend(probe) {
+            Ok(db) => db,
+            Err(redb_legacy::DatabaseError::RepairAborted) => {
+                warning(&format!("legacy indexer {} requires repair before its schema can be read; treating this derived index as stale", path.display()));
+                return Ok(0);
+            }
+            Err(error) => return Err(fail(format!("cannot read legacy indexer {} without writing: {error}", path.display()))),
+        };
         let read = db.begin_read()?;
         let table = match read.open_table(redb_legacy::TableDefinition::<&str, &[u8]>::new("indexer_meta")) {
             Ok(table) => table,

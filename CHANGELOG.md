@@ -68,7 +68,9 @@ infrastructure.
   with the offline command after stopping. `[store] auto_upgrade_legacy`
   defaults to true. Free-space checks query the path's own filesystem and
   warn and proceed if unavailable, so container overlay mounts do not block
-  startup. See
+  startup. Unclean legacy indexers requiring repair to inspect their schema
+  are treated as stale with a warning; clean current-schema indexes are still
+  migrated, and other databases retain strict verified private-copy recovery. See
   [space, recovery and rollback instructions](docs/operating.md#migrating-legacy-redb-databases).
 - Indexer apply and repair commits now use synchronous `Immediate` durability
   instead of `Eventual`, preserving durable guarantees across platforms with

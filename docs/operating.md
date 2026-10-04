@@ -452,9 +452,11 @@ its backup. Recovery honors a discard decision already recorded in the journal,
 even when the retry uses default startup settings. Existing rollback backups
 are never replaced. Do not manually
 delete upgrade journals or copies between the two renames. An unclean legacy
-indexer requiring repair cannot be schema-probed without writing; cleanly shut
-down 0.11 first, or use `migrate-redb` to repair and verify a private copy on
-another disk. Windows shares the converter's portable directory-sync limit;
+indexer whose schema cannot be read without repair is treated as stale with a
+warning, and deleted by default (or retained on explicit request), without
+repairing the source. A clean legacy indexer at the current schema is migrated.
+State, peers and webhooks still require verified conversion; recovery happens
+only in the converter's private copy. Windows shares the converter's portable directory-sync limit;
 use an external stopped-directory backup for power-loss recovery there.
 
 **Rollback to 0.11.** Version 0.11 cannot open upgraded files. Blocks and wallet
