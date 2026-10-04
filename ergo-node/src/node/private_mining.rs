@@ -194,6 +194,14 @@ fn queue_error(error: PrivateQueueError) -> MiningApiError {
     }
 }
 
+/// Log a committed queue change whose directory entry could not be synced: it
+/// took effect, but may not survive a power loss.
+pub(super) fn log_unsynced(queue: &ergo_mining::private_queue::PrivateTransactionQueue) {
+    if let Some(warning) = queue.take_durability_warning() {
+        tracing::warn!(%warning, "private mining queue change committed without a directory sync");
+    }
+}
+
 fn decode_tx_id(tx_id: &str) -> Option<Digest32> {
     let raw = hex::decode(tx_id).ok()?;
     Some(Digest32::from_bytes(<[u8; 32]>::try_from(raw).ok()?))
@@ -342,6 +350,8 @@ pub(super) fn admit(
 /// changed, a bounded catch-up is unfinished, or a deadline is due.
 pub(super) fn run_lifecycle(state: &mut NodeState, handle: &MiningHandle) {
     let queue = handle.private_queue();
+    // Writes by the requests this loop arm handled (admission, cancellation).
+    log_unsynced(&queue);
     if queue.is_empty() {
         return;
     }
@@ -369,6 +379,7 @@ pub(super) fn run_lifecycle(state: &mut NodeState, handle: &MiningHandle) {
         }
     }
     expire(state, handle);
+    log_unsynced(&queue);
 }
 
 /// Called before every mining request as well as after loop arms; constant

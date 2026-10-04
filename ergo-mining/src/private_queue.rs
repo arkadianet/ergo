@@ -341,6 +341,9 @@ impl Store {
 pub struct PrivateTransactionQueue {
     path: Option<PathBuf>,
     store: Mutex<Store>,
+    /// A committed write whose directory entry could not be synced, kept
+    /// until the node logs it; see [`Self::take_durability_warning`].
+    durability_warning: Mutex<Option<String>>,
 }
 
 impl PrivateTransactionQueue {
@@ -382,7 +385,18 @@ impl PrivateTransactionQueue {
         Ok(Self {
             path: Some(path),
             store: Mutex::new(store),
+            durability_warning: Mutex::new(None),
         })
+    }
+
+    /// The latest committed write whose directory entry could not be synced,
+    /// cleared on read. The change itself took effect; only its durability
+    /// across a power loss is uncertain, so the caller logs it.
+    pub fn take_durability_warning(&self) -> Option<String> {
+        self.durability_warning
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
     }
 
     pub fn revision(&self) -> u64 {
@@ -827,19 +841,41 @@ impl PrivateTransactionQueue {
                 Err(e) => return Err(format!("private queue temporary file: {e}")),
             }
         };
-        let result = (|| {
+        let replaced = (|| {
             file.write_all(&bytes)?;
             file.sync_all()?;
-            std::fs::rename(&tmp, path)?;
-            #[cfg(unix)]
-            std::fs::File::open(parent)?.sync_all()?;
-            Ok(())
+            std::fs::rename(&tmp, path)
         })();
-        if result.is_err() {
+        if let Err(e) = replaced {
             let _ = std::fs::remove_file(&tmp);
+            return Err(format!("private queue commit failed: {e}"));
         }
-        result.map_err(|e: std::io::Error| format!("private queue commit failed: {e}"))
+        // The new file is in place, and a restart reads it: the change is
+        // committed. Failing it now would leave this process disagreeing
+        // with the file (a cancellation reported failed but applied after
+        // restart). A failed directory sync only leaves its durability across
+        // a power loss uncertain, so it is reported instead.
+        if let Err(e) = sync_directory(parent) {
+            *self
+                .durability_warning
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(format!(
+                "{} replaced, but its directory entry was not synced: {e}",
+                path.display()
+            ));
+        }
+        Ok(())
     }
+}
+
+fn sync_directory(directory: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    tests::fail_directory_sync()?;
+    #[cfg(unix)]
+    std::fs::File::open(directory)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = directory;
+    Ok(())
 }
 
 /// A temporary name that cannot repeat across restarts, even when a container
