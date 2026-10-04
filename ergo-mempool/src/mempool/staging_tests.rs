@@ -732,20 +732,27 @@ fn package_admission_traces_each_members_original_source() {
     // suppress an event in this test's temporary subscriber.
     const CHILD_MARKER: &str = "ERGO_TEST_PACKAGE_SOURCE_CHILD";
     if std::env::var_os(CHILD_MARKER).is_none() {
+        let path = concat!(
+            module_path!(),
+            "::package_admission_traces_each_members_original_source"
+        );
+        // The harness filter omits the crate name.
+        let name = path.split_once("::").map_or(path, |(_, name)| name);
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "mempool::staging_tests::package_admission_traces_each_members_original_source",
-                "--test-threads=1",
-            ])
+            .args(["--exact", name, "--test-threads=1"])
             .env(CHILD_MARKER, "1")
             .output()
             .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             output.status.success(),
-            "isolated capture failed: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
+            "isolated capture failed: {stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        // A filter that matches nothing also exits successfully.
+        assert!(
+            stdout.contains("test result: ok. 1 passed"),
+            "isolated capture ran no test: {stdout}"
         );
         return;
     }
