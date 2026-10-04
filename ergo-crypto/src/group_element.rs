@@ -42,13 +42,12 @@
 //!
 //! `ergo-sigma`'s eval-time `decode_group_element` treats `bytes[0] == 0x00`
 //! as a shortcut for the group identity (`ProjectivePoint::IDENTITY`) — valid
-//! at RUN time. At COMPILE time, an `env::lift`ed `GroupElement` literal is
-//! always a JVM-constructed curve point (`decodePoint` is never
-//! constant-folded — golden_seed.txt §23(e)) and cannot be off-curve or
-//! identity by construction, so a `0x00`-prefixed or off-curve 33-byte
-//! literal has no faithful Scala counterpart to mirror. We reject both as a
-//! bounded, reject-side-safe deviation (see the D-T5 ledger note in
-//! `ergo-compiler/src/lib.rs`).
+//! at run time. This compile-time coordinate helper rejects identity because
+//! it cannot return finite affine coordinates for infinity. A JVM environment
+//! can contain infinity; rejecting such a lifted literal is therefore a known
+//! unsupported compiler case, not proof that Scala cannot construct it.
+//! Off-curve compressed points are rejected during reference decoding as well.
+//! See the D-T5 ledger note in `ergo-compiler/src/lib.rs`.
 
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, EncodedPoint};
@@ -56,8 +55,8 @@ use k256::{AffinePoint, EncodedPoint};
 /// Compile-time GroupElement literal validation failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GroupElementError {
-    /// `bytes[0] == 0x00` — the group-identity sentinel. No JVM-constructed
-    /// env value can ever be the identity point; see the module doc.
+    /// `bytes[0] == 0x00` — the group identity has no finite affine
+    /// coordinates for this helper to return; see the module doc.
     #[error("GroupElement literal is the identity point (0x00 prefix)")]
     Identity,
     /// A well-formed SEC1 prefix (`0x02`/`0x03`) whose x-coordinate has no

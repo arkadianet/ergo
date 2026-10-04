@@ -21,6 +21,7 @@ fn inputs_for(
         utxo_bootstrap,
         nipopow_bootstrap,
         mining_enabled: false,
+        mempool_enabled: true,
         extra_index_enabled: false,
         declared_addr: None,
         bind_addr: None,
@@ -763,4 +764,19 @@ fn is_canonical_mode_5_combo_pins_the_contract() {
         -1,
         true
     ));
+}
+
+#[test]
+fn identity_projects_configured_mempool_capability() {
+    let mut cfg = cfg_for_history_mode(crate::config::StateType::Utxo, true, -1, false);
+    for enabled in [false, true] {
+        cfg.mempool_config.enabled = enabled;
+        let identity =
+            build_api_identity(&cfg, 1, crate::node::identity::BootstrapKind::None).unwrap();
+        assert_eq!(identity.mempool_enabled, enabled);
+        assert_eq!(
+            serde_json::to_value(identity).unwrap()["mempool_enabled"],
+            enabled
+        );
+    }
 }

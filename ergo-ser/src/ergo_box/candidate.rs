@@ -103,8 +103,9 @@ pub(super) fn read_ergo_box_candidate_parts(
     // Register block = the CANONICAL re-serialization of the parsed registers,
     // never the verbatim wire slice.
     //
-    // `write_ergo_box_candidate` emits these bytes, and a box id is
-    // `blake2b256` of the box bytes, so this block is what the id commits to.
+    // `write_ergo_box_candidate` emits these bytes, so a newly sealed box's
+    // canonical ID commits to this block. Whole-box readers separately retain
+    // the received ID when the original encoding differs from serialization.
     // Scala derives `ErgoBox.bytes` the same way — from the parsed
     // `ErgoBoxCandidate`, through `ValueSerializer.serialize` on each stored
     // `EvaluatedValue` node — which CANONICALIZES the register encodings the
@@ -112,9 +113,8 @@ pub(super) fn read_ergo_box_candidate_parts(
     // register whose wire bytes are `7f` (the `TrueLeaf` opcode, reachable via
     // `CaseObjectSerialization`), `80` (`FalseLeaf`) or `0105` (a Boolean
     // constant with a non-`0x01` payload) all re-serialize as `0101` / `0100`,
-    // and the box id is computed over THAT. Keeping the verbatim slice would
-    // give such a box a different id than the reference node — a silent
-    // state-root divergence on a box the reference accepts.
+    // and a newly constructed box's ID is computed over THAT. The cached ID
+    // of a parsed whole box instead commits to its original complete encoding.
     //
     // The node FORMS the reference does preserve — `Constant`, `CreateTuple`
     // (`0x86`), `ConcreteCollection` (`0x83` / packed `0x85`) and
@@ -138,6 +138,7 @@ pub(super) fn read_ergo_box_candidate_parts(
         tokens,
         additional_registers,
         register_bytes,
+        received_box_identity: None,
     })
 }
 

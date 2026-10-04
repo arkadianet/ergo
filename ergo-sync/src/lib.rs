@@ -8,7 +8,7 @@
 //!
 //! Module map:
 //!
-//! * [`coordinator`] — the long-running event loop. Consumes peer
+//! * [`coordinator`] — event-to-action decision engine. Consumes peer
 //!   events (`Inv`, `Modifier`, `Disconnect`), schedules
 //!   inv-batch and request-batch outputs, and steps the apply
 //!   pipeline forward as new blocks become assembleable.

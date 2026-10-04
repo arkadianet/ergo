@@ -62,7 +62,8 @@ pub(crate) struct SimulateResponse {
 /// `POST /api/v1/transactions/simulate` — dry-run an assembled tx: accept/reject
 /// + cost + conflicts, NO broadcast and NO mempool mutation.
 #[utoipa::path(
-    post, path = "/api/v1/transactions/simulate", tag = "transactions",
+    post, path = "/api/v1/transactions/simulate",
+    operation_id = "v1_transactions_simulate_post", tag = "transactions",
     request_body = SimulateBody,
     responses(
         (status = 200, description = "Simulation outcome (valid:false is a normal result, not an error)", body = SimulateResponse),

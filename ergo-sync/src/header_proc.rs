@@ -32,6 +32,18 @@ pub enum HeaderProcessError {
     },
     #[error("deserialization failed: {0}")]
     Deserialize(String),
+    #[error(
+        "stored header {} failed integrity checks: {source}",
+        hex::encode(header_id)
+    )]
+    LocalHeaderIntegrity {
+        header_id: [u8; 32],
+        source: HeaderValidationError,
+    },
+    #[error("header finalization bytes do not match the prevalidated ID")]
+    PrevalidatedBytesMismatch,
+    #[error("local header context is invalid: {0}")]
+    LocalContext(String),
     #[error("parent header not found: {}", hex::encode(parent_id))]
     ParentNotFound { parent_id: [u8; 32] },
     #[error("header already known: {}", hex::encode(header_id))]
@@ -83,6 +95,27 @@ pub enum HeaderProcessError {
     Validation(#[from] HeaderValidationError),
     #[error("storage error: {0}")]
     Storage(#[from] ergo_state::store::StateError),
+}
+
+impl HeaderProcessError {
+    /// Storage integrity, retained-byte contract, and arithmetic-context
+    /// failures belong to the local caller/store, not the sending peer.
+    /// Missing ancestor context has separate retryable variants.
+    pub fn is_local_failure(&self) -> bool {
+        match self {
+            Self::Storage(_)
+            | Self::LocalHeaderIntegrity { .. }
+            | Self::PrevalidatedBytesMismatch
+            | Self::LocalContext(_) => true,
+            Self::Validation(HeaderValidationError::Difficulty(error)) => !matches!(
+                error,
+                ergo_crypto::pow::DifficultyError::NbitsMismatch { .. }
+                    | ergo_crypto::pow::DifficultyError::HeightMismatch { .. }
+                    | ergo_crypto::pow::DifficultyError::MissingEpochHeaders
+            ),
+            _ => false,
+        }
+    }
 }
 
 fn check_header_age<S: ChainStateRead + ?Sized>(
@@ -290,9 +323,11 @@ pub struct ProcessedHeader {
 /// A header that has been parsed and PoW-verified but not yet chain-linked
 /// or persisted. This is the output of the parallelizable phase.
 ///
-/// Carries an unforgeable `PowCheckedHeader` proof so the sequential
-/// finalize phase does not re-verify PoW — there is exactly one PoW call
-/// per header in either the single-header or batch path.
+/// Carries an immutable `PowCheckedHeader` result and derives its metadata
+/// from that header. Finalization requires the exact bytes supplied to
+/// prevalidation and checks their ID before touching storage. Non-genesis
+/// finalization consumes the PoW result; the special genesis path verifies
+/// PoW again while checking initial difficulty.
 ///
 /// `Clone` is implemented so a header can be PoW'd once and re-used
 /// across multiple `finalize_header` attempts (e.g. an orphan buffered
@@ -303,11 +338,15 @@ pub struct ProcessedHeader {
 #[derive(Clone)]
 pub struct PreValidatedHeader {
     pow_checked: ergo_validation::header::PowCheckedHeader,
-    pub parent_id: [u8; 32],
-    pub height: u32,
 }
 
 impl PreValidatedHeader {
+    pub fn parent_id(&self) -> [u8; 32] {
+        *self.header().parent_id.as_bytes()
+    }
+    pub fn height(&self) -> u32 {
+        self.header().height
+    }
     pub fn header_id(&self) -> &[u8; 32] {
         self.pow_checked.header_id()
     }
@@ -346,8 +385,6 @@ impl PreValidatedHeader {
             pow_checked: ergo_validation::header::PowCheckedHeader::for_test_unchecked(
                 header, header_id,
             ),
-            parent_id,
-            height,
         }
     }
 }
@@ -389,22 +426,17 @@ pub fn pre_validate_header(header_bytes: &[u8]) -> Result<PreValidatedHeader, He
     ergo_validation::header::validate_header_group_elements(&group_elements)
         .map_err(HeaderProcessError::Validation)?;
 
-    let parent_id = *header.parent_id.as_bytes();
-    let height = header.height;
-
     let pow_checked = ergo_validation::header::PowCheckedHeader::verify_pow(header, header_id)
         .map_err(HeaderProcessError::Validation)?;
 
-    Ok(PreValidatedHeader {
-        pow_checked,
-        parent_id,
-        height,
-    })
+    Ok(PreValidatedHeader { pow_checked })
 }
 
 /// Phase 2 of header processing: chain linkage + difficulty + persist.
 /// Sequential, requires DB access. Caller provides the raw header bytes
 /// (not cloned into PreValidatedHeader to avoid duplicate allocations).
+/// They must be the exact bytes used by prevalidation; a mismatch is a
+/// caller-contract error, not a peer validation verdict.
 ///
 /// `checkpoint` is the operator-supplied header-level trust anchor
 /// ([`HeaderCheckpoint`]); `None` disables it (Scala's default).
@@ -419,7 +451,10 @@ pub fn finalize_header<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     genesis_id: Option<[u8; 32]>,
 ) -> Result<ProcessedHeader, HeaderProcessError> {
     let header_id = *pre.pow_checked.header_id();
-    if pre.height == 1 && pre.parent_id == [0u8; 32] {
+    if *blake2b256(header_bytes).as_bytes() != header_id {
+        return Err(HeaderProcessError::PrevalidatedBytesMismatch);
+    }
+    if pre.height() == 1 && pre.parent_id() == [0u8; 32] {
         if let Some(expected) = genesis_id {
             if header_id != expected {
                 return Err(HeaderProcessError::GenesisIdMismatch {
@@ -439,7 +474,7 @@ pub fn finalize_header<S: HeaderSectionStore + ChainStateRead + ?Sized>(
 
     // Genesis special case — genesis runs its own PoW + initial-difficulty
     // path and doesn't use the proof-consuming validator.
-    if pre.height == 1 && pre.parent_id == [0u8; 32] {
+    if pre.height() == 1 && pre.parent_id() == [0u8; 32] {
         let header = pre.pow_checked.header().clone();
         return process_genesis_header(store, header, header_id, header_bytes, config);
     }
@@ -450,7 +485,7 @@ pub fn finalize_header<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     // `hdrCheckpoint` rule. A mismatch is an INVALID header: the caller's
     // catch-all error arm reports it and penalises the sending peer exactly
     // as it does for a bad PoW or a broken difficulty.
-    check_header_checkpoint(checkpoint, pre.height, &header_id)?;
+    check_header_checkpoint(checkpoint, pre.height(), &header_id)?;
 
     // Chain linkage + difficulty (needs parent from store). Consumes the
     // PoW proof to skip re-verification.
@@ -512,17 +547,20 @@ fn process_header_inner<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     let parent_bytes = store
         .get_header(&parent_id)?
         .ok_or(HeaderProcessError::ParentNotFound { parent_id })?;
-    let parent_header = {
-        let mut r = VlqReader::new(&parent_bytes);
-        read_header(&mut r)
-            .map_err(|e| HeaderProcessError::Deserialize(format!("parent: {e:?}")))?
-    };
     let parent_meta = store
         .get_header_meta(&parent_id)?
         .ok_or(HeaderProcessError::ParentNotFound { parent_id })?;
+    // A durable block-invalid marker is a remote branch verdict, not a
+    // damaged PoW-validation marker to rehydrate.
+    if store.is_durably_invalid(&parent_id)? {
+        return Err(HeaderProcessError::Invalid { header_id });
+    }
+    let parent_header = hydrate_stored_header(&parent_bytes, parent_id, &parent_meta)?;
 
     // 5b. Verify height = parent.height + 1
-    let expected_height = parent_meta.height + 1;
+    let expected_height = parent_meta.height.checked_add(1).ok_or_else(|| {
+        HeaderProcessError::LocalContext("parent height cannot be incremented".into())
+    })?;
     if height != expected_height {
         return Err(HeaderProcessError::HeightMismatch {
             expected: expected_height,
@@ -613,23 +651,6 @@ fn process_header_inner<S: HeaderSectionStore + ChainStateRead + ?Sized>(
 
     // Scala rule 209 uses the FULL tip, including during header-only sync.
     check_header_age(store, parent_meta.height)?;
-
-    // Refuse to extend a branch already reported invalid. `finalize_header`
-    // rejects a header whose own id is flagged, but a NEVER-SEEN header
-    // building on an invalidated parent has no flag of its own yet — the
-    // parent check is what makes invalidity hereditary and permanent (Scala
-    // `HeadersProcessor.validate` fails a header whose parent
-    // `isSemanticallyValid == Invalid`). Without it a peer could re-feed the
-    // dead branch one header at a time and re-grow best_header above the
-    // re-anchor, re-wedging the apply loop.
-    //
-    // DURABLE-only: a session-scoped mark is a transient/IO verdict (the parent
-    // may still apply), so it must not permanently block the whole descendant
-    // subtree for the session. Scala's parent check tests the durable
-    // `isSemanticallyValid == Invalid` row.
-    if store.is_durably_invalid(&parent_id)? {
-        return Err(HeaderProcessError::Invalid { header_id });
-    }
 
     // 8. Compute cumulative score: parent_score + this_header's required difficulty.
     // Uses ergo_ser::difficulty::decode_compact_bits (shared with ergo-crypto),
@@ -824,10 +845,30 @@ pub fn find_header_at_height<S: HeaderSectionStore + ?Sized>(
             .ok_or(HeaderProcessError::EpochHeaderMissing {
                 height: target_height,
             })?;
-    let mut r = VlqReader::new(&header_bytes);
-    read_header(&mut r).map_err(|e| {
-        HeaderProcessError::Deserialize(format!("epoch header at {target_height}: {e:?}"))
-    })
+    let meta =
+        store
+            .get_header_meta(&current_id)?
+            .ok_or(HeaderProcessError::EpochHeaderMissing {
+                height: target_height,
+            })?;
+    hydrate_stored_header(&header_bytes, current_id, &meta)
+}
+
+fn hydrate_stored_header(
+    bytes: &[u8],
+    header_id: [u8; 32],
+    meta: &HeaderMeta,
+) -> Result<ergo_ser::header::Header, HeaderProcessError> {
+    CheckedHeader::from_persisted_parts(
+        bytes,
+        header_id,
+        meta.pow_validity,
+        meta.height,
+        meta.parent_id,
+        meta.timestamp,
+    )
+    .map(|checked| checked.header().clone())
+    .map_err(|source| HeaderProcessError::LocalHeaderIntegrity { header_id, source })
 }
 
 #[cfg(test)]
@@ -835,6 +876,36 @@ mod tests {
     use super::*;
 
     use ergo_state::store::StateError;
+
+    #[test]
+    fn finalize_requires_the_retained_prevalidation_bytes() {
+        let rows: serde_json::Value =
+            serde_json::from_str(include_str!("../../test-vectors/mainnet/headers_1_10.json"))
+                .unwrap();
+        let first = hex::decode(rows[0]["bytes"].as_str().unwrap()).unwrap();
+        let second = hex::decode(rows[1]["bytes"].as_str().unwrap()).unwrap();
+        let pre = pre_validate_header(&first).unwrap();
+        assert_eq!(pre.height(), 1);
+        assert_eq!(pre.parent_id(), [0; 32]);
+        let first_id = *pre.header_id();
+        let dir = tempfile::tempdir().unwrap();
+        let mut store =
+            ergo_state::store::StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        assert!(matches!(
+            finalize_header(
+                &mut store,
+                pre,
+                &second,
+                &DifficultyParams::mainnet(),
+                None,
+                None
+            ),
+            Err(HeaderProcessError::PrevalidatedBytesMismatch)
+        ));
+        assert!(store.get_header(&first_id).unwrap().is_none());
+        assert_eq!(store.chain_state_meta().best_header_height, 0);
+    }
 
     // ----- helpers -----
 

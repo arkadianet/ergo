@@ -1,5 +1,5 @@
 //! NiPoPoW proof verification — the four `is_valid` sub-checks and
-//! the `is_better_than` (≥) comparison from KMZ17 Algorithm 4.
+//! the strict `is_better_than` comparison used by the best-proof reducer.
 //!
 //! Verification logic lives in `ergo-validation` (this crate); the
 //! `NipopowProof` struct itself is a pure-data type in `ergo-ser`.
@@ -101,11 +101,11 @@ pub trait NipopowProofExt {
     /// serializability pre-gate.
     fn is_valid(&self, chain_config: &DifficultyParams) -> bool;
 
-    /// `≥` predicate from KMZ17 Algorithm 4: this proof is at least
-    /// as good as `that`. Returns `true` when this is better OR both
-    /// invalid AND `that` is invalid (matching Scala's exception-
-    /// swallowing fallback). Returns `false` on internal panic, with
-    /// `tracing::error` for diagnostics.
+    /// A valid proof beats an invalid proof. For two valid proofs with a
+    /// common ancestor, compare divergent scores strictly using this
+    /// proof's `m` for both sides. Ties, two invalid proofs, no common
+    /// ancestor, and fallible ancestor computation return `false`.
+    /// This method does not catch Rust panics.
     ///
     /// Scala source: `NipopowProof.scala:52-68`.
     fn is_better_than(&self, that: &NipopowProof, chain_config: &DifficultyParams) -> bool;
@@ -299,10 +299,8 @@ impl NipopowProofExt for NipopowProof {
     }
 
     fn is_better_than(&self, that: &NipopowProof, chain_config: &DifficultyParams) -> bool {
-        // Scala catches Throwable and returns false on any internal
-        // failure (`NipopowProof.scala:63-67`). Rust panics are caught
-        // at the action-loop boundary; here we mirror Scala's "false
-        // on error" with explicit `tracing::error` for diagnostics.
+        // Fallible serialization/ancestor paths return false. This
+        // method has no catch_unwind boundary.
         let this_valid = self.is_valid(chain_config);
         let that_valid = that.is_valid(chain_config);
         if this_valid && that_valid {

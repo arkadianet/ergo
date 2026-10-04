@@ -13,18 +13,24 @@
 //!   Reported separately because the soft-fork "unparsed" path can re-encode
 //!   legitimately differently; these need triage, not an automatic verdict.
 //!
-//! This module is NOT exercised by `cargo test` (it needs `scala-cli` and, on
-//! first run, network). It is driven by `difftest --oracle`.
+//! Hermetic transport and comparison tests run under `cargo test`. Live oracle
+//! tests are explicitly ignored because they require `scala-cli` and resolved
+//! reference dependencies. Campaigns request this layer with `difftest --oracle`.
 
-use std::io::{self, BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::io::{self, Write};
+use std::process::Command;
+
+use sha2::{Digest, Sha256};
 
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
 
 use crate::to_hex;
 
+mod transport;
 mod verify;
+
+use transport::{Deadlines, Transport};
 pub(crate) use verify::verify_verdict;
 
 /// A parse verdict from either implementation.
@@ -56,35 +62,31 @@ pub enum DivergenceKind {
     Canonical,
 }
 
-/// Handle to the long-lived JVM oracle process.
+/// Handle to a bounded, long-lived JVM oracle process.
+///
+/// A failed exchange is terminal. Startup and query deadlines include request
+/// writes and response reads. Sources execute from a private snapshot; actual
+/// JVM properties and resolved JAR hashes are available through `provenance`.
 pub struct Oracle {
-    child: Child,
+    transport: Transport,
     verify_oracle: Option<Box<Oracle>>,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    /// Optional request/response transcript (`DIFFTEST_ORACLE_LOG=<path>`).
-    /// A standing guard is only as trustworthy as its pipe: when a campaign
-    /// reports a verdict a manual re-query cannot reproduce, this is the
-    /// evidence that says whether the harness and the oracle were in step.
     transcript: Option<std::fs::File>,
+    _source_directory: tempfile::TempDir,
+    primary_queried: bool,
+    source_metadata: serde_json::Value,
 }
 
 impl Oracle {
-    /// Spawn `scala-cli run <script>`. The first query blocks through the
-    /// oracle's compile/dependency-resolution; subsequent queries are fast.
+    /// Spawn an oracle from an immutable copy of `script`. The first exchange
+    /// includes compilation and dependency resolution (default 180s); later
+    /// exchanges default to 10s. Environment overrides are documented in README.
     pub fn spawn(script: &str) -> io::Result<Oracle> {
         Self::spawn_command(script, false)
     }
 
     fn spawn_command(script: &str, verify: bool) -> io::Result<Oracle> {
-        // Open the transcript BEFORE spawning: a bad log path must fail the
-        // spawn without ever starting a JVM that nobody would reap.
-        //
-        // APPEND, never truncate: a guard run spawns one oracle process per
-        // surface, and several of them may share a single log path. Truncating
-        // on spawn would leave the artifact holding only the last surface's
-        // transcript — exactly the evidence a post-mortem needs least. The
-        // header line delimits the processes.
+        let deadlines = Deadlines::from_environment()?;
+        // Bad log paths fail before starting a child.
         let mut transcript = match std::env::var("DIFFTEST_ORACLE_LOG") {
             Ok(path) if !path.is_empty() => Some(
                 std::fs::OpenOptions::new()
@@ -94,41 +96,96 @@ impl Oracle {
             ),
             _ => None,
         };
+        let original = std::fs::canonicalize(script)?;
+        let source = std::fs::read(&original)?;
+        let source_utf8 = std::str::from_utf8(&source)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let source_directory = tempfile::tempdir()?;
+        let snapshot = source_directory
+            .path()
+            .join(original.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "oracle source has no filename")
+            })?);
+        std::fs::write(&snapshot, &source)?;
         let mut command = Command::new("scala-cli");
-        command.arg("run").arg(script).arg("--server=false");
+        command
+            .args(["--skip-cli-updates", "run"])
+            .arg(&snapshot)
+            .args([
+                "--server=false",
+                "--java-opt=-XshowSettings:properties",
+                "--suppress-outdated-dependency-warning",
+            ]);
         if verify {
             command.args(["--", "verify"]);
         }
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let command_argv: Vec<String> = std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        let source_metadata = serde_json::json!({
+            "original_source": original,
+            "source_sha256": format!("{:x}", Sha256::digest(&source)),
+            "source_snapshot_utf8": source_utf8,
+            "command_argv": command_argv,
+            "source_contract": "standalone Scala source; relative project/resources are not imported from the caller checkout",
+        });
+        let transport = Transport::spawn(command, deadlines)?;
         if let Some(log) = transcript.as_mut() {
-            let header = writeln!(
+            writeln!(
                 log,
-                "== oracle begin: script={script} pid={} ==",
-                child.id()
-            )
-            .and_then(|()| log.flush());
-            if let Err(e) = header {
-                // The child is already running; do not leave an orphaned JVM
-                // behind a failed spawn. Best effort: the write error is the
-                // one worth reporting.
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e);
-            }
+                "== oracle begin: script={script} pid={} source={} ==",
+                transport.pid(),
+                source_metadata["source_sha256"]
+            )?;
+            log.flush()?;
         }
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-        Ok(Oracle {
-            child,
+        Ok(Self {
+            transport,
             verify_oracle: None,
-            stdin,
-            stdout,
             transcript,
+            _source_directory: source_directory,
+            primary_queried: false,
+            source_metadata,
         })
+    }
+
+    /// Exact source snapshot, command and actual executing JVM/JAR identity.
+    /// This fails if runtime properties were not captured; declared directives
+    /// alone never become runtime provenance. Query the oracle before calling.
+    pub fn provenance(&self) -> io::Result<serde_json::Value> {
+        let mut metadata = self.source_metadata.clone();
+        metadata["actual_runtime"] = if self.primary_queried {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            loop {
+                match runtime_provenance(&self.transport.stderr_prefix()) {
+                    Ok(runtime) => break runtime,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::InvalidData
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(2))
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        } else {
+            serde_json::json!({"status": "NOT_QUERIED: this child has no completed primary exchange"})
+        };
+        if let Some(verify) = self.verify_oracle.as_ref() {
+            metadata["verify_sidecar"] = verify.provenance()?;
+        }
+        Ok(metadata)
+    }
+
+    /// Preserve exact sources even when a failed child has no runtime identity.
+    /// This source-only evidence never substitutes for executing JVM/JAR data.
+    pub fn source_snapshots(&self) -> serde_json::Value {
+        let mut metadata = self.source_metadata.clone();
+        if let Some(verify) = self.verify_oracle.as_ref() {
+            metadata["verify_sidecar"] = verify.source_snapshots();
+        }
+        metadata
     }
 
     /// Ask the JVM reference for its verdict on `bytes` at `surface`.
@@ -144,64 +201,47 @@ impl Oracle {
         Ok(parse_verdict(&line))
     }
 
-    /// Ask the JVM reference and return its RAW response line (trimmed). Used by
-    /// surfaces whose reply is not an ACCEPT/REJECT verdict — e.g. `mc_root`, which
-    /// answers `SIGMA` / `WRAP` / `THROW <exc>` for the MethodCall typechecker-
-    /// registry harness.
+    /// Return the raw trimmed response, including non-verdict protocols such
+    /// as `mc_root`. Each request is one bounded line with a response deadline.
     pub fn query_raw(&mut self, surface: &str, bytes: &[u8]) -> io::Result<String> {
         if surface == "verify" {
             if self.verify_oracle.is_none() {
-                // Resolve from the crate manifest, not the caller's working
-                // directory: `spawn_command` sets no cwd, so a relative path
-                // would break any run started outside the repository root.
-                self.verify_oracle = Some(Box::new(Self::spawn_command(
+                let script = std::env::var("DIFFTEST_VERIFY_ORACLE_SCRIPT").unwrap_or_else(|_| {
                     concat!(
                         env!("CARGO_MANIFEST_DIR"),
                         "/../scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
-                    ),
-                    true,
-                )?));
+                    )
+                    .to_string()
+                });
+                self.verify_oracle = Some(Box::new(Self::spawn_command(&script, true)?));
             }
             let oracle = self
                 .verify_oracle
                 .as_mut()
                 .expect("initialized verify oracle");
-            // Compact valid JSON onto one line. Malformed JSON (including invalid
-            // UTF-8) maps to a request-schema rejection on both implementations.
+            // Compact JSON preserves the existing request-schema rejection policy.
             let request = serde_json::from_slice::<serde_json::Value>(bytes)
-                .map(|v| v.to_string())
+                .map(|value| value.to_string())
                 .unwrap_or_else(|_| "null".into());
-            writeln!(oracle.stdin, "{request}")?;
-            oracle.stdin.flush()?;
-            let mut response = String::new();
-            if oracle.stdout.read_line(&mut response)? == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "verify oracle closed output",
-                ));
-            }
-            if let Some(log) = oracle.transcript.as_mut() {
-                writeln!(log, ">> verify {request}\n<< {}", response.trim())?;
-                log.flush()?;
-            }
-            return Ok(response.trim().to_string());
+            return oracle.exchange("verify", request);
         }
-        let request = to_hex(bytes);
-        writeln!(self.stdin, "{surface} {request}")?;
-        self.stdin.flush()?;
-        let mut line = String::new();
-        let n = self.stdout.read_line(&mut line)?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "oracle closed its output",
-            ));
-        }
-        let response = line.trim().to_string();
+        self.exchange(surface, format!("{surface} {}", to_hex(bytes)))
+    }
+
+    fn exchange(&mut self, surface: &str, request: String) -> io::Result<String> {
+        let response = self.transport.exchange(request.clone())?;
+        self.primary_queried = true;
         if let Some(log) = self.transcript.as_mut() {
-            writeln!(log, ">> {surface} {request}")?;
-            writeln!(log, "<< {response}")?;
-            log.flush()?;
+            let logged = if surface == "verify" {
+                format!("verify {request}")
+            } else {
+                request
+            };
+            let result = writeln!(log, ">> {logged}\n<< {response}").and_then(|()| log.flush());
+            if let Err(error) = result {
+                self.transport.stop();
+                return Err(error);
+            }
         }
         Ok(response)
     }
@@ -209,12 +249,57 @@ impl Oracle {
 
 impl Drop for Oracle {
     fn drop(&mut self) {
-        // Kill the JVM oracle and reap it so it never lingers as a zombie.
-        // (SIGKILL rather than closing stdin for EOF: scala-cli/JVM does not
-        // reliably exit on stdin EOF, and a stuck oracle would hang Drop.)
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Terminate the process before removing its exact source snapshot.
+        self.transport.stop();
     }
+}
+
+fn runtime_provenance(stderr: &[u8]) -> io::Result<serde_json::Value> {
+    let text = std::str::from_utf8(stderr)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let mut properties = serde_json::Map::new();
+    let mut classpath = Vec::new();
+    let mut in_classpath = false;
+    for line in text.lines() {
+        if let Some((key, value)) = line
+            .strip_prefix("    ")
+            .and_then(|line| line.split_once(" = "))
+        {
+            in_classpath = key == "java.class.path";
+            if in_classpath {
+                if !value.is_empty() {
+                    classpath.push(value.to_string());
+                }
+            } else if matches!(
+                key,
+                "java.runtime.version" | "java.vm.name" | "java.vendor" | "java.home"
+            ) {
+                properties.insert(key.into(), value.into());
+            }
+        } else if in_classpath {
+            if let Some(path) = line.strip_prefix("        ") {
+                classpath.push(path.to_string());
+            } else {
+                in_classpath = false;
+            }
+        }
+    }
+    let mut jars = Vec::new();
+    for path in &classpath {
+        let path = std::path::Path::new(path);
+        if path.extension().is_some_and(|extension| extension == "jar") {
+            let bytes = std::fs::read(path)?;
+            let name = path.file_name().map(|name| name.to_string_lossy());
+            jars.push(serde_json::json!({"path": path, "name": name, "bytes": bytes.len(), "sha256": format!("{:x}", Sha256::digest(&bytes))}));
+        }
+    }
+    if !properties.contains_key("java.runtime.version") || jars.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "actual JVM version/classpath provenance unavailable in bounded stderr prefix",
+        ));
+    }
+    Ok(serde_json::json!({"properties": properties, "classpath": classpath, "resolved_jars": jars}))
 }
 
 fn parse_verdict(line: &str) -> Verdict {
@@ -321,8 +406,8 @@ pub fn oracle_surfaces() -> Vec<SurfaceSpec> {
 }
 
 /// The activated script version the JVM oracle runs every surface under
-/// (`ErgoSerdeOracle.scala` `handle`: `VersionContext.withVersions(3, …)`, mainnet
-/// 6.0.2). The node-side readers are scoped to the same version so the
+/// (`ErgoSerdeOracle.scala` `handle`: `VersionContext.withVersions(3, …)`, pinned
+/// sigma-state 6.0.6). The node-side readers are scoped to the same version so the
 /// `ergoTreeVersion <= activatedVersion` gate (`check_tree_version_supported`)
 /// fires on both sides for the same bytes.
 const ORACLE_ACTIVATED_VERSION: u8 = 3;
@@ -860,8 +945,7 @@ fn verify_avl_verdict(bytes: &[u8]) -> (Verdict, usize) {
 
 /// Compute the node's verdict for `bytes` and query the JVM for the same
 /// (possibly truncated) input, returning both plus the exact bytes fed to the
-/// JVM. Shared by [`diff`] and [`crate::regressions::classify`] so both agree
-/// on what "the same input" means for a given [`SurfaceSpec`].
+/// JVM. [`diff`] uses this exact consumed range for its [`SurfaceSpec`].
 pub fn query_verdicts(
     spec: &SurfaceSpec,
     bytes: &[u8],
@@ -883,11 +967,9 @@ pub fn query_verdicts(
 /// Distinguishes an **explicit** agreement (both sides parsed/rejected the
 /// input the same consensus-relevant way) from an **indeterminate** one (the
 /// oracle could not evaluate at least one side, `Verdict::Err`) — a caller
-/// that needs to know "did they actually agree" (e.g.
-/// [`crate::regressions::classify`], reconciling a parse-surface divergence
-/// against a `reduce`/`reduce_ctx` channel) must not fold `Indeterminate` into
-/// `Agree`: an oracle that couldn't evaluate the reduction channel proves
-/// nothing about whether the original divergence is benign.
+/// that needs to know whether they agreed must not fold `Indeterminate` into
+/// `Agree`. Agreement on another surface or context does not establish that an
+/// original divergence is benign; new findings remain pending for review.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reconciliation {
     /// Both sides reached the same consensus-relevant outcome.
@@ -1443,15 +1525,28 @@ mod tests {
             );
             assert_eq!(node, jvm, "[{name}] node vs JVM reduce divergence");
         }
+        let provenance = oracle
+            .provenance()
+            .expect("actual executing JVM/JAR metadata");
+        let snapshot = provenance["source_snapshot_utf8"].as_str().unwrap();
+        assert_eq!(
+            provenance["source_sha256"],
+            format!("{:x}", Sha256::digest(snapshot.as_bytes()))
+        );
+        let jars = provenance["actual_runtime"]["resolved_jars"]
+            .as_array()
+            .unwrap();
+        assert!(jars.iter().any(|jar| jar["name"]
+            .as_str()
+            .is_some_and(|name| name.contains("sigma-state") && name.contains("6.0.6"))));
+        println!("oracle-provenance: {provenance}");
     }
 
     // ----- reconcile: agree vs diverges vs indeterminate -----
     //
     // Pure-logic tests for `reconcile` — no oracle process needed, since the
     // decision only looks at two already-computed `Verdict`s. This is the
-    // regression coverage for classify()'s "None means indeterminate, not
-    // agreement" bug: `reconcile` (used by both `diff` and
-    // `crate::regressions::classify`) must keep `Indeterminate` (a
+    // `reconcile`, used by `diff`, must keep `Indeterminate` (a
     // `Verdict::Err` on either side) distinct from `Agree` (an explicit
     // Reject/Reject or matching Accept/Accept).
 
@@ -1471,6 +1566,27 @@ mod tests {
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn runtime_metadata_hashes_actual_classpath_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let jar = directory.path().join("circe-core_2.12-0.14.15.jar");
+        std::fs::write(&jar, b"metadata-test-content").unwrap();
+        let settings = format!("Property settings:\n    java.class.path = /compiled/source\n        {}\n    java.runtime.version = fixture-runtime\n    java.vm.name = fixture-vm\n", jar.display());
+        let metadata = runtime_provenance(settings.as_bytes()).unwrap();
+        assert_eq!(
+            metadata["properties"]["java.runtime.version"],
+            "fixture-runtime"
+        );
+        assert_eq!(
+            metadata["resolved_jars"][0]["name"],
+            "circe-core_2.12-0.14.15.jar"
+        );
+        assert_eq!(
+            metadata["resolved_jars"][0]["sha256"],
+            format!("{:x}", Sha256::digest(b"metadata-test-content"))
+        );
+    }
 
     #[test]
     fn reconcile_both_reject_agrees() {
@@ -1535,6 +1651,15 @@ mod tests {
     // ----- error paths -----
 
     #[test]
+    fn missing_runtime_metadata_cannot_become_declared_version_evidence() {
+        assert!(runtime_provenance(b"declared dependency6.0.6").is_err());
+        assert!(runtime_provenance(
+            b"Property settings:\n    java.runtime.version = fixture-runtime\n"
+        )
+        .is_err());
+    }
+
+    #[test]
     fn reconcile_rust_err_is_indeterminate_not_agree() {
         // The bug this guards: a reduce/reduce_ctx pipeline error on the node
         // side used to fold into `diff`'s `None`, which `classify` read as
@@ -1588,25 +1713,19 @@ mod tests {
     /// `Oracle::spawn` would — this only needs `Oracle`'s private fields to be
     /// reachable from `oracle::tests`, not a real JVM.
     fn stub_err_oracle(detail: &str) -> Oracle {
-        use std::process::{Command, Stdio};
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "while IFS= read -r _line; do echo 'ERR {detail}'; done"
-            ))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn stub ERR oracle");
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = io::BufReader::new(child.stdout.take().expect("piped stdout"));
+        let mut command = Command::new("sh");
+        command.env("STUB_DETAIL", detail).args([
+            "-c",
+            "while IFS= read -r _line; do printf 'ERR %s\\n' \"$STUB_DETAIL\"; done",
+        ]);
         Oracle {
-            child,
+            transport: Transport::spawn(command, Deadlines::from_environment().unwrap())
+                .expect("spawn stub ERR oracle"),
             verify_oracle: None,
-            stdin,
-            stdout,
             transcript: None,
+            _source_directory: tempfile::tempdir().unwrap(),
+            primary_queried: false,
+            source_metadata: serde_json::json!({"kind": "hermetic ERR stub; no JVM authority"}),
         }
     }
 

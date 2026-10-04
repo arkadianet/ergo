@@ -4,7 +4,8 @@
 assembles consensus-correct block candidates against the committed UTXO tip
 (coinbase + emission/reemission, mempool tx selection, optional storage-rent
 self-claim, AVL dry-run), serves work messages, and accepts Autolykos v2
-solutions back through the block-apply path. No internal CPU miner, no wallet.
+solutions back through the block-apply path. Reward keys may be configured or
+resolved from the wallet's first EIP-3 address; there is no internal CPU miner.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-chain-spec,
 ergo-crypto, ergo-validation, ergo-state, ergo-mempool
@@ -125,6 +126,19 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
   storage-rent self-claim — `src/storage_rent_claim.rs:90,264`
 
 ## Invariants & contracts
+
+- Historical epoch/difficulty height reads use the applied `CHAIN_INDEX`,
+  while the separate best-header API retains `HEADER_CHAIN_INDEX`. Below a
+  UTXO-snapshot anchor, where `CHAIN_INDEX` starts, they fall back to
+  `HEADER_CHAIN_INDEX` only while it still selects the applied tip (Scala's
+  `isInBestChain(parent)` in `requiredDifficultyAfter`). Snapshot
+  and cached snapshot builds keep those ancestry reads in one held transaction;
+  the live-store caller must drain accepted persistence and hold the writer.
+- Complete candidate extensions must fit the 32 KiB serialized section cap,
+  including the fixed header ID, count prefix, interlinks, epoch and custom
+  fields. The genesis generation branch shares that guard.
+- Epoch-extension tests compare the miner and Rust validation helper with
+  identical synthetic context; they do not establish whole peer acceptance.
 - **Applied-tip gate (Scala `CandidateGenerator` parity).** The candidate's
   parent is always the APPLIED full-block tip
   (`CandidateGenerator.scala:530` — `history.bestFullBlockOpt`), and every

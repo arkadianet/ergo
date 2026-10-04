@@ -230,4 +230,25 @@ mod tests {
             .join()
             .unwrap();
     }
+
+    #[test]
+    fn discarded_patterns_and_type_parameters_share_the_recursion_budget() {
+        for layers in [4, MAX_PARSE_DEPTH + 1] {
+            let pattern = format!("{}x{}", "Some(".repeat(layers), ")".repeat(layers));
+            let pattern_source = format!("{{ val {pattern} = 1; 0 }}");
+            let parameter = format!("{}A{}", "A[".repeat(layers), "]".repeat(layers));
+            let parameter_source = format!("{{ def f[{parameter}]() = 1; f() }}");
+            for source in [pattern_source, parameter_source] {
+                let result = parse(&source, 3);
+                if layers == 4 {
+                    result.unwrap();
+                } else {
+                    assert!(
+                        matches!(result, Err(ParseError::TooDeep { .. })),
+                        "{result:?}"
+                    );
+                }
+            }
+        }
+    }
 }

@@ -51,6 +51,19 @@ pub(crate) const ORPHAN_HEADER_IBD_LOOKAHEAD: u32 = 60_000;
 /// SyncInfo keep surfacing genuinely missing parents.
 pub(crate) const ORPHAN_ROOT_WALK_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
+fn is_local_header_failure(error: &HeaderProcessError) -> bool {
+    error.is_local_failure()
+}
+
+fn refuse_local_header_failure(error: &HeaderProcessError) {
+    if is_local_header_failure(error) {
+        // A batch may already have changed its in-memory selection. Match
+        // the flush-failure contract: stop, retain the diagnostic, and recover
+        // from the atomic persisted state on restart; never charge a peer.
+        panic!("local header processing failure is fatal: {error}");
+    }
+}
+
 fn report_header_failure(
     store: &ergo_state::StateBackendKind,
     peer: PeerId,
@@ -161,7 +174,7 @@ impl SyncExecutor {
         if processed.is_new_best && processed.parent_id != previous_best {
             coordinator.prune_pending_to_best_chain(store);
         }
-        self.push_validated_header(&processed, header_bytes);
+        self.push_validated_header(&processed, header_bytes, store);
         let drain_actions = self.drain_orphans(store, coordinator, now);
         Ok((processed, drain_actions))
     }
@@ -200,7 +213,7 @@ impl SyncExecutor {
         self.header_perf.add_headers(1);
 
         let header_id = *pre.header_id();
-        let header_height = pre.height;
+        let header_height = pre.height();
         // Clone before finalize consumes pre — if finalize returns
         // ParentNotFound we use the clone to seed the orphan buffer
         // with a cached PoW proof, so retries skip Phase 1 entirely.
@@ -240,7 +253,7 @@ impl SyncExecutor {
                 if processed.is_new_best && processed.parent_id != previous_best {
                     coordinator.prune_pending_to_best_chain(store);
                 }
-                self.push_validated_header(&processed, header_bytes);
+                self.push_validated_header(&processed, header_bytes, store);
 
                 // Drain orphan buffer — each success may unlock more orphans.
                 followup.extend(self.drain_orphans(store, coordinator, now));
@@ -283,7 +296,8 @@ impl SyncExecutor {
                     peer = %peer,
                     "epoch context incomplete; buffering header for retry (no peer penalty)",
                 );
-                let _kept = self.buffer_or_defer_orphan_header(
+                let context_parent = pre_for_buffer.parent_id();
+                let kept = self.buffer_or_defer_orphan_header(
                     peer,
                     pre_for_buffer,
                     header_bytes.to_vec(),
@@ -292,10 +306,14 @@ impl SyncExecutor {
                     store,
                     coordinator,
                 );
+                if kept {
+                    self.context_retry_parents.insert(context_parent);
+                }
                 Vec::new()
             }
             Err(e) => {
                 report_header_failure(store, peer, "finalize_header", &e);
+                refuse_local_header_failure(&e);
                 coordinator.forget_received_modifier(modifier_id);
                 vec![Action::Penalize {
                     peer,
@@ -385,7 +403,7 @@ impl SyncExecutor {
             match result {
                 Ok(pre) => {
                     let header_id = *pre.header_id();
-                    let header_height = pre.height;
+                    let header_height = pre.height();
                     let pre_for_buffer = pre.clone();
                     match header_proc::finalize_header(
                         store, pre, &bytes, &config, checkpoint, genesis_id,
@@ -406,7 +424,7 @@ impl SyncExecutor {
                                 now,
                             );
                             actions.extend(followup);
-                            self.push_validated_header(&processed, &bytes);
+                            self.push_validated_header(&processed, &bytes, store);
                         }
                         Err(HeaderProcessError::AlreadyKnown { .. }) => {}
                         Err(HeaderProcessError::ParentNotFound { .. }) => {
@@ -428,7 +446,8 @@ impl SyncExecutor {
                                 peer = %peer,
                                 "epoch context incomplete; buffering header for retry (no peer penalty)",
                             );
-                            self.buffer_or_defer_orphan_header(
+                            let context_parent = pre_for_buffer.parent_id();
+                            let kept = self.buffer_or_defer_orphan_header(
                                 peer,
                                 pre_for_buffer,
                                 bytes,
@@ -437,9 +456,13 @@ impl SyncExecutor {
                                 store,
                                 coordinator,
                             );
+                            if kept {
+                                self.context_retry_parents.insert(context_parent);
+                            }
                         }
                         Err(e) => {
                             report_header_failure(store, peer, "finalize_header_batch", &e);
+                            refuse_local_header_failure(&e);
                             coordinator.forget_received_modifier(&modifier_id);
                             actions.push(Action::Penalize {
                                 peer,
@@ -504,13 +527,12 @@ impl SyncExecutor {
     ) -> Vec<Action> {
         let mut all_actions = Vec::new();
 
-        // Take headers installed since last drain — these are the
-        // ONLY parents that could unblock orphans. Skipping the
-        // orphan if parent_id ∉ this set is correct because orphans
-        // entered the buffer with a missing parent; if it was in
-        // store BEFORE last drain it would already be installable;
-        // if it was installed SINCE it's in this set. Cleared on take.
+        // Immediate-parent arrivals unblock parent orphans. Any new header
+        // may also supply an older retarget ancestor for a context-blocked
+        // header. Take those retry keys once; rebuffering during this drain
+        // defers the next context retry until a later progress event.
         let newly_installed = std::mem::take(&mut self.recently_installed);
+        let eligible_parents = self.orphan_retry_parents(&newly_installed);
 
         if self.orphan_headers.is_empty() {
             self.cap_orphan_buffer_and_forget(coordinator);
@@ -524,7 +546,7 @@ impl SyncExecutor {
         // within the drain extends `newly_installed` so children
         // become eligible as their parents land.
         let mut work_queue: Vec<(PeerId, header_proc::PreValidatedHeader, Vec<u8>)> = Vec::new();
-        for parent_id in &newly_installed {
+        for parent_id in &eligible_parents {
             if let Some(children) = self.orphan_headers.remove(parent_id) {
                 self.orphan_headers_len = self.orphan_headers_len.saturating_sub(children.len());
                 work_queue.extend(children);
@@ -538,7 +560,7 @@ impl SyncExecutor {
 
         // Topological order by height inside the work queue — same
         // reasoning as batch_validate_headers.
-        work_queue.sort_by_key(|(_, pre, _)| pre.height);
+        work_queue.sort_by_key(|(_, pre, _)| std::cmp::Reverse(pre.height()));
 
         let orphan_count = work_queue.len() as u64;
         self.header_perf.add_orphan_headers(orphan_count);
@@ -566,7 +588,7 @@ impl SyncExecutor {
         let t_fin = Instant::now();
         while let Some((peer, pre, bytes)) = work_queue.pop() {
             let header_id = *pre.header_id();
-            let header_height = pre.height;
+            let header_height = pre.height();
             let pre_for_buffer = pre.clone();
             match header_proc::finalize_header(store, pre, &bytes, &config, checkpoint, genesis_id)
             {
@@ -581,7 +603,7 @@ impl SyncExecutor {
                         // Re-sort: pop() is LIFO, so later additions
                         // shouldn't reorder mid-stream — but the
                         // height-sort invariant is cheap to maintain.
-                        work_queue.sort_by_key(|(_, pre, _)| pre.height);
+                        work_queue.sort_by_key(|(_, pre, _)| std::cmp::Reverse(pre.height()));
                     }
                     let expected = ExpectedSections::from_header(
                         &processed.header_id,
@@ -598,7 +620,7 @@ impl SyncExecutor {
                         now,
                     );
                     all_actions.extend(followup);
-                    self.push_validated_header(&processed, &bytes);
+                    self.push_validated_header(&processed, &bytes, store);
                 }
                 Err(HeaderProcessError::ParentNotFound { .. }) => {
                     // Defensive — the pre-filter said parent was
@@ -624,7 +646,8 @@ impl SyncExecutor {
                     // permanently lost. Empirically unreachable on
                     // mainnet/testnet preset; matters for custom
                     // configs and partial-window recovery.
-                    self.buffer_or_defer_orphan_header(
+                    let context_parent = pre_for_buffer.parent_id();
+                    let kept = self.buffer_or_defer_orphan_header(
                         peer,
                         pre_for_buffer,
                         bytes,
@@ -633,6 +656,9 @@ impl SyncExecutor {
                         store,
                         coordinator,
                     );
+                    if kept {
+                        self.context_retry_parents.insert(context_parent);
+                    }
                 }
                 Err(
                     e @ (HeaderProcessError::CheckpointMismatch { .. }
@@ -656,7 +682,9 @@ impl SyncExecutor {
                     });
                 }
                 Err(HeaderProcessError::AlreadyKnown { .. }) => {}
-                Err(_) => {
+                Err(e) => {
+                    report_header_failure(store, peer, "finalize_header_orphan_drain", &e);
+                    refuse_local_header_failure(&e);
                     coordinator.forget_received_modifier(&header_id);
                 }
             }
@@ -696,6 +724,17 @@ impl SyncExecutor {
         all_actions
     }
 
+    pub(super) fn orphan_retry_parents(
+        &mut self,
+        newly_installed: &HashSet<[u8; 32]>,
+    ) -> HashSet<[u8; 32]> {
+        let mut eligible = newly_installed.clone();
+        if !newly_installed.is_empty() {
+            eligible.extend(std::mem::take(&mut self.context_retry_parents));
+        }
+        eligible
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn buffer_or_defer_orphan_header(
         &mut self,
@@ -708,7 +747,7 @@ impl SyncExecutor {
         coordinator: &mut SyncCoordinator,
     ) -> bool {
         if self.should_buffer_orphan_header(height, store, coordinator) {
-            let parent_id = pre.parent_id;
+            let parent_id = pre.parent_id();
             self.orphan_headers
                 .entry(parent_id)
                 .or_default()
@@ -773,7 +812,7 @@ impl SyncExecutor {
             Vec::with_capacity(self.orphan_headers_len);
         for (parent_id, children) in &self.orphan_headers {
             for (idx, (_, pre, _)) in children.iter().enumerate() {
-                by_height.push((pre.height, *parent_id, idx));
+                by_height.push((pre.height(), *parent_id, idx));
             }
         }
         // Highest first.
@@ -803,6 +842,7 @@ impl SyncExecutor {
                 }
                 if children.is_empty() {
                     self.orphan_headers.remove(&parent_id);
+                    self.context_retry_parents.remove(&parent_id);
                 }
             }
         }
@@ -920,21 +960,139 @@ impl SyncExecutor {
         actions
     }
 
-    /// Add a newly validated header + raw bytes to the recent-header window.
-    fn push_validated_header(&mut self, processed: &ProcessedHeader, header_bytes: &[u8]) {
-        self.last_headers
-            .push_front((processed.checked.clone(), header_bytes.to_vec()));
-        if self.last_headers.len() > LAST_HEADERS_WINDOW {
-            self.last_headers.pop_back();
+    /// Track every installed header for retries, but cache only best-header
+    /// ancestry. A winning reorg rebuilds its window and changed height index.
+    pub(super) fn push_validated_header(
+        &mut self,
+        processed: &ProcessedHeader,
+        header_bytes: &[u8],
+        store: &ergo_state::StateBackendKind,
+    ) {
+        self.recently_installed.insert(processed.header_id);
+        if !processed.is_new_best {
+            return;
         }
-        if processed.is_new_best {
+        // An empty cache starts at this header. Headers written behind the
+        // executor (a NiPoPoW proof's sparse prefix, a seeded tip) need not
+        // have stored ancestry; startup hydration rebuilds the window.
+        let starts_cache = self.last_headers.is_empty();
+        let extends_cached_tip = self
+            .last_headers
+            .front()
+            .is_some_and(|(header, _)| *header.header_id() == processed.parent_id);
+        if starts_cache || extends_cached_tip {
+            self.last_headers
+                .push_front((processed.checked.clone(), header_bytes.to_vec()));
+            self.last_headers.truncate(LAST_HEADERS_WINDOW);
             self.header_index
                 .insert(processed.height, processed.header_id);
+            return;
         }
-        // Track for the orphan drain's parent-existence pre-filter.
-        // Cleared at the start of each drain — this set means
-        // "headers added since the last drain ran", i.e. potential
-        // newly-unlocked parents.
-        self.recently_installed.insert(processed.header_id);
+        if let Err(error) = self.hydrate_from_store(store) {
+            panic!("best-header cache hydration failed: {error}");
+        }
+        if let Some(after_tip) = processed.height.checked_add(1) {
+            self.header_index.split_off(&after_tip);
+        }
+        // The selected header fork can diverge below the applied full tip.
+        // This cache follows best-header ancestry, so the repair walk replaces
+        // entries down to an indexed matching ancestor. Heights below the
+        // indexed range hold nothing stale: startup loads only the unapplied
+        // gap, which starts above the applied full tip when nothing is indexed.
+        let floor = self.header_index.first_key_value().map_or_else(
+            || {
+                store
+                    .chain_state_meta()
+                    .best_full_block_height
+                    .saturating_add(1)
+            },
+            |(height, _)| *height,
+        );
+        let mut current_id = processed.header_id;
+        let mut current_height = processed.height;
+        while current_height >= floor && current_height > 0 && current_id != [0; 32] {
+            if self.header_index.get(&current_height) == Some(&current_id) {
+                break;
+            }
+            let Some(meta) = store
+                .get_header_meta(&current_id)
+                .unwrap_or_else(|error| panic!("best-header index lookup failed: {error}"))
+            else {
+                // A NiPoPoW proof's sparse prefix ends the stored ancestry.
+                if super::startup::is_sparse_prefix_gap(store, current_height) {
+                    break;
+                }
+                panic!(
+                    "best-header index ancestor is missing: {}",
+                    hex::encode(current_id)
+                );
+            };
+            self.header_index.insert(current_height, current_id);
+            current_id = meta.parent_id;
+            current_height -= 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+    use ergo_crypto::pow::DifficultyError;
+    use ergo_validation::header::HeaderValidationError;
+
+    #[test]
+    fn local_context_and_integrity_failures_are_not_peer_verdicts() {
+        for error in [
+            HeaderProcessError::PrevalidatedBytesMismatch,
+            HeaderProcessError::LocalContext("height arithmetic".into()),
+            HeaderProcessError::LocalHeaderIntegrity {
+                header_id: [1; 32],
+                source: HeaderValidationError::MetaHeightMismatch { meta: 2, header: 3 },
+            },
+            HeaderProcessError::Storage(ergo_state::store::StateError::InvalidPrecondition {
+                what: "local store precondition",
+            }),
+            HeaderProcessError::Validation(HeaderValidationError::Difficulty(
+                DifficultyError::InvalidConfiguration {
+                    field: "desired_interval",
+                },
+            )),
+            HeaderProcessError::Validation(HeaderValidationError::Difficulty(
+                DifficultyError::InvalidEpochWindow {
+                    index: 1,
+                    reason: "local ancestry",
+                },
+            )),
+            HeaderProcessError::Validation(HeaderValidationError::Difficulty(
+                DifficultyError::HeightOverflow {
+                    height: u32::MAX,
+                    increment: 1,
+                },
+            )),
+        ] {
+            assert!(is_local_header_failure(&error), "{error}");
+        }
+        for error in [
+            HeaderProcessError::Deserialize("incoming bytes".into()),
+            HeaderProcessError::Validation(HeaderValidationError::TimestampNotMonotonic {
+                parent_ts: 2,
+                child_ts: 1,
+            }),
+            HeaderProcessError::Validation(HeaderValidationError::Difficulty(
+                DifficultyError::NbitsMismatch {
+                    height: 2,
+                    expected: 1,
+                    actual: 2,
+                },
+            )),
+            HeaderProcessError::Validation(HeaderValidationError::Difficulty(
+                DifficultyError::HeightMismatch {
+                    expected: 2,
+                    actual: 3,
+                },
+            )),
+        ] {
+            assert!(!is_local_header_failure(&error), "{error}");
+        }
     }
 }

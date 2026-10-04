@@ -27,21 +27,21 @@ pub fn scala_launch_mainnet() -> ActiveProtocolParameters {
     }
 }
 
-/// Testnet launch parameters. Mirrors Scala `TestnetLaunchParameters`
-/// (`settings/LaunchParameters.scala`), which is byte-identical to
-/// `MainnetLaunchParameters`: `height = 0`, `parametersTable =
-/// Parameters.DefaultParameters` (so `BlockVersion = 1`), and
-/// `proposedUpdate = ErgoValidationSettingsUpdate.empty`. The two
-/// network-specific Scala objects exist as named symbols only — they
-/// carry no differing data. The validation rules that are disabled on
-/// mainnet today (e.g. 215, 409) reached that state through real
-/// soft-fork voting on the live mainnet chain, never via a seeded
-/// launch row. The Scala objects that DO override `BlockVersion` at
-/// genesis are `DevnetLaunchParameters` (= 50) and
-/// `Devnet60LaunchParameters` (= 60), neither of which is the public
-/// testnet.
+/// Testnet launch parameters from pinned Scala v6.0.5
+/// `settings/LaunchParameters.scala`: version 4 with a *proposed* update
+/// disabling rules 215 and 409. The activated cumulative settings remain
+/// empty until voting activates an update. The public height-1 genesis header
+/// is still version 1; that header exception does not change this launch row.
+/// See `test-vectors/testnet/initial-context/` for source and early captures.
 pub fn scala_launch_testnet() -> ActiveProtocolParameters {
-    scala_launch_mainnet()
+    ActiveProtocolParameters {
+        block_version: 4,
+        proposed_update: ErgoValidationSettingsUpdate {
+            rules_to_disable: vec![215, 409],
+            status_updates: Vec::new(),
+        },
+        ..scala_launch_mainnet()
+    }
 }
 
 /// Launch parameters for the given network. Production callers that
@@ -79,34 +79,39 @@ mod tests {
         assert!(devnet.proposed_update.rules_to_disable.is_empty());
         assert!(devnet.activated_update.rules_to_disable.is_empty());
         assert_eq!(scala_launch_for_network(Network::Mainnet).block_version, 1);
-        assert_eq!(scala_launch_for_network(Network::Testnet).block_version, 1);
+        assert_eq!(scala_launch_for_network(Network::Testnet).block_version, 4);
     }
 
     #[test]
-    fn scala_launch_testnet_matches_mainnet() {
-        // Scala `TestnetLaunchParameters` is byte-identical to
-        // `MainnetLaunchParameters` (see
-        // `ergo-core/src/main/scala/org/ergoplatform/settings/LaunchParameters.scala`).
-        // A regression that re-introduces a divergent testnet launch row
-        // would re-create the h=1024 `exMatchValidationSettings` rejection
-        // that surfaces only after `--network testnet` actually applies
-        // real blocks.
-        assert_eq!(scala_launch_testnet(), scala_launch_mainnet());
+    fn scala_launch_testnet_matches_pinned_source() {
+        let testnet = scala_launch_testnet();
+        assert_eq!(testnet.epoch_start_height, 0);
+        assert_eq!(testnet.block_version, 4);
+        assert_eq!(testnet.proposed_update.rules_to_disable, vec![215, 409]);
+        assert!(testnet.proposed_update.status_updates.is_empty());
+        assert_eq!(
+            testnet.activated_update,
+            ErgoValidationSettingsUpdate::empty()
+        );
+        assert_eq!(testnet.subblocks_per_block, None);
+        // The eight numeric cost/size defaults are shared with mainnet.
+        let mut normalized = testnet;
+        normalized.block_version = 1;
+        normalized.proposed_update = ErgoValidationSettingsUpdate::empty();
+        assert_eq!(normalized, scala_launch_mainnet());
     }
 
     #[test]
-    fn scala_launch_for_network_returns_mainnet_row_on_both_arms() {
-        // Same data on both arms today; this pins the invariant so a
-        // future intentional divergence (e.g. devnet-style block version
-        // override) has to update this test deliberately.
-        let m = scala_launch_for_network(Network::Mainnet);
-        let t = scala_launch_for_network(Network::Testnet);
-        assert_eq!(m, t);
-        assert_eq!(m.block_version, 1);
-        assert_eq!(m.proposed_update.rules_to_disable, Vec::<u16>::new());
-        assert!(m.proposed_update.status_updates.is_empty());
-        assert_eq!(m.activated_update.rules_to_disable, Vec::<u16>::new());
-        assert!(m.activated_update.status_updates.is_empty());
+    fn network_dispatch_preserves_distinct_launch_rows() {
+        assert_eq!(
+            scala_launch_for_network(Network::Mainnet),
+            scala_launch_mainnet()
+        );
+        assert_eq!(
+            scala_launch_for_network(Network::Testnet),
+            scala_launch_testnet()
+        );
+        assert_eq!(scala_launch().block_version, 1);
     }
 
     // ----- oracle parity -----

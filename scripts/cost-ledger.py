@@ -3,7 +3,7 @@
 
     scripts/cost-ledger.py render   # regenerate test-vectors/ergo-sigma/cost-ledger/LEDGER.md
     scripts/cost-ledger.py check    # validate ledger.toml + LEDGER.md freshness + test references
-    scripts/cost-ledger.py check --strict   # release mode: no OPEN/DIVERGENT rows; resolved inventory audit
+    scripts/cost-ledger.py check --strict   # require current passing evidence; no OPEN/DIVERGENT rows
     scripts/cost-ledger.py --selftest       # hermetic checker regression tests
 
 `ledger.toml` is authoritative; `LEDGER.md` is derived. `check` exits non-zero when:
@@ -16,7 +16,8 @@
 
 Passing evidence uses nextest libtest-json events from $COST_LEDGER_TEST_RESULTS
 or target/cost-ledger-test-results.json. Absent results skip only the passing
-check with a note; CI produces fresh results without committing them.
+check with a note in ordinary integrity mode. Strict mode requires results and
+the revision/input/command sidecar produced by scripts/cost_ledger_evidence.py.
 
 Standard library only (tomllib, Python >= 3.11).
 """
@@ -36,6 +37,8 @@ import tomllib
 from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
+
+import cost_ledger_evidence
 
 REPO = Path(__file__).resolve().parent.parent
 LEDGER_DIR = REPO / "test-vectors" / "ergo-sigma" / "cost-ledger"
@@ -212,7 +215,7 @@ def audit_errors(directory: Path) -> list[str]:
     return []
 
 
-def check(meta: dict, rows: list[dict]) -> int:
+def check(meta: dict, rows: list[dict], *, strict: bool = False) -> int:
     errors: list[str] = []
     ids = set()
     for r in rows:
@@ -252,7 +255,10 @@ def check(meta: dict, rows: list[dict]) -> int:
                 if rid not in ids:
                     errors.append(f"{f}: references unknown ledger id {rid}")
     try:
-        results = read_results(Path(os.environ.get("COST_LEDGER_TEST_RESULTS", str(REPO / "target" / "cost-ledger-test-results.json"))))
+        results_path = Path(os.environ.get("COST_LEDGER_TEST_RESULTS", str(REPO / "target" / "cost-ledger-test-results.json")))
+        if strict:
+            cost_ledger_evidence.validate(REPO, results_path)
+        results = read_results(results_path)
         errors.extend(closure_errors(REPO, rows, results))
     except (ValueError, OSError) as exc:
         errors.append(str(exc))
@@ -425,7 +431,8 @@ def selftest() -> int:
             audit = self.repo / "inventory-audit.md"
             with patch.dict(os.environ, {"COST_LEDGER_TEST_RESULTS": str(results)}, clear=True), \
                     patch.dict(globals(), REPO=self.repo, TOML=toml, MD=md, LEDGER_DIR=self.repo), \
-                    patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="sample/tests/it/pin.rs")):
+                    patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="sample/tests/it/pin.rs")), \
+                    patch.object(cost_ledger_evidence, "validate"):
                 for contents, expected, diagnostic in [
                     (None, 1, "STRICT: inventory-audit.md is missing"),
                     ("UNRESOLVED obligation", 1, "STRICT: inventory-audit.md contains UNRESOLVED"),
@@ -461,7 +468,7 @@ def main() -> int:
         MD.write_text(render(meta, rows))
         print(f"wrote {MD.relative_to(REPO)} ({len(rows)} rows)")
         return 0
-    rc = check(meta, rows)
+    rc = check(meta, rows, strict=len(sys.argv) == 3)
     if len(sys.argv) == 3:  # --strict: release mode, no OPEN/DIVERGENT rows allowed
         for error in audit_errors(LEDGER_DIR):
             print(error)

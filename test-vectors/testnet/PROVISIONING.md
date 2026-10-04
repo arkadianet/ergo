@@ -1,94 +1,73 @@
 # Testnet vector extraction
 
-This directory is the testnet counterpart to `test-vectors/mainnet/`. It holds
-genesis boxes, header / transaction / box / cost / digest fixtures extracted
-from a running Scala testnet node, used as oracle inputs by the Rust node's
-testnet-parity tests.
+This directory contains public Scala testnet observations and derived oracle
+inputs. `genesis_boxes.json` is embedded by `GenesisParams::testnet()`.
+The public configuration currently supplies both the height-1 genesis ID and
+boxes; the node's `validate_supported` gate does not require manually changing
+`None` fields before startup. Compare any recapture against the configured
+network identity before proposing a change to those constants.
 
-The public testnet was reset in `ergoplatform/ergo` PR #2252 ("New public
-testnet parameters", merged 2026-02-26 into v6.0.3). Provision a Scala node
-running v6.0.3 or later — the previous PaiNet (`:9022`, magic `[2,0,2,3]`,
-checkpoint `h=91320 / fd06abdf…`) has been retired.
+## Committed observations
 
-## What lives here
+- `initial-context/` records Scala 6.0.3 REST blocks 1, 2, 128 and 1024, genesis
+  boxes and independent explorer genesis agreement captured on 2026-10-04.
+  It also ships pinned v6.0.5 launch/context source and actual Sigma 6.0.6
+  header serialization with dependency hashes. See its README for finite
+  reproduction and limits. Height 128 is the first testnet epoch boundary.
+- `headers_json/scala_headers_442325_442334.json` contains ten consecutive
+  version-4 header responses, preserving their JSON field types.
+- `mining_json/scala_candidate_522032.json` is a Scala 6.0.3 candidate response
+  captured on 2026-09-03. Its target `b` is a bare JSON number beyond f64's
+  exact integer range; the REST JSON consumer uses arbitrary precision.
 
-Required before testnet startup unlocks (the `validate_supported` gate in
-`ergo-node::config` reads `chain_spec.genesis.{header_id, boxes_json}`):
+Bulk ranges are gitignored and must be acquired before running their ignored
+consumers. The small committed captures do not establish continuous chain
+membership, a complete reference-node execution or full Rust testnet sync.
 
-- `genesis_boxes.json` — height-0 boxes, drives `GenesisParams.boxes_json`
-- `header_height_1.json` — the first mined header; its id is `GenesisParams.header_id`
-- `state_digest_height_1.json` — AVL state root at height 1, for the embedded
-  digest round-trip test
+## Provision a reference node
 
-Committed JSON-shape oracles (small, verbatim captures — the on-wire JSON
-*type* of each field is the thing under test, so these must never be
-re-serialized or reformatted):
+Use the public testnet profile from Scala v6.0.3 or later; earlier profiles
+may describe the retired PaiNet (`:9022`, magic `[2,0,2,3]`). Pin a concrete
+upstream revision and dependency graph in the resulting fixture provenance.
+From that checkout, build with `sbt -mem 4096 assembly`. The pinned v6.0.5
+build uses Scala 2.12, so select its assembly under `target/scala-2.12/`:
 
-- `headers_json/scala_headers_442325_442334.json` — 10 consecutive v4 header
-  bodies, `GET /blocks/{id}/header`
-- `mining_json/scala_candidate_522032.json` — one `GET /mining/candidate`
-  response (h=522032, 6.0.3, captured 2026-09-03). Pins that Scala emits the
-  mining target `b` as a **bare JSON number**, not a string:
-  `WorkMessage` carries `b: BigInt` and `ApiCodecs.bigIntEncoder` is
-  `JsonNumber.fromDecimalStringUnsafe`. The value is ~2^222, past f64's
-  exact-integer range, so reading it needs arbitrary precision. Backs
-  `mining::tests::work_message_*_scala_candidate_*` in `ergo-rest-json`.
+```bash
+java -jar target/scala-2.12/ergo-*.jar --testnet \
+  -c src/main/resources/testnet.conf
+```
 
-Bulk range extractions (`headers_*_NNNNNN*.json` etc.) are gitignored and
-regenerable from a running Scala testnet node.
+Confirm the node reports `network: testnet` and the expected genesis ID via
+`/info`. The public profile uses REST port 9052; its configured P2P port is
+9023. `extraIndex = true` is needed only for indexed address/token extraction.
+Wait until the specific heights requested below are available.
 
-## Provisioning a Scala testnet node
+## Extract ranges and genesis boxes
 
-1. Clone `ergoplatform/ergo` at tag `v6.0.3` (or later) — earlier releases
-   point at the retired public testnet.
-2. Build: `sbt -mem 4096 assembly` from the `ergo` root.
-3. Run with the bundled testnet profile:
-
-   ```bash
-   java -jar target/scala-2.13/ergo-*.jar --testnet \
-        --networkType testnet \
-        -c src/main/resources/testnet.conf
-   ```
-
-   The v6.0.3 testnet config binds P2P to `:9023` and the REST API to
-   `:9052` (default). `extraIndex = true` is required for the
-   address/token vector scripts.
-
-4. Wait until the node has imported the early-chain blocks the extraction
-   scripts need (height ~10_000 is enough for the Phase 3 vectors above).
-   Full tip sync is only required for the eventual cross-network drift
-   workflow.
-
-## Extracting vectors
-
-The existing scripts under `test-vectors/scripts/` are network-agnostic: they
-read `NODE_URL` from the environment. Point at the testnet REST port:
+The scripts use `NODE_URL`. `extract_headers.sh` also requires a working
+`SCALA_CLI` executable and downloads the dependencies declared in its helper;
+that graph must be recorded separately from the pinned finite capture above.
 
 ```bash
 export NODE_URL=http://localhost:9052
-
+export SCALA_CLI=/path/to/scala-cli
 cd test-vectors/scripts
-
-# Initial set required to unlock --network testnet startup.
-./extract_headers.sh 1 1     ../testnet/header_height_1.json
+./extract_headers.sh 1 1 ../testnet/header_height_1.json
 ./extract_headers.sh 1 10000 ../testnet/headers_1_10000.json
-./extract_utxo_digests.sh 1  ../testnet/state_digest_height_1.json
-
-# Genesis boxes are at height 0; use the boxes script
-./extract_boxes.sh 0 ../testnet/genesis_boxes.json
+./extract_utxo_digests.sh 1 1 ../testnet/state_digest_height_1.json
+curl --fail --silent --show-error "$NODE_URL/utxo/genesis" \
+  > ../testnet/genesis_boxes.json
 ```
 
-After extraction, edit `ergo-chain-spec/src/lib.rs`'s
-`GenesisParams::testnet()` to switch `header_id: None` to
-`Some(parse_bytes32_hex("<height-1 header id>"))` and
-`boxes_json: None` to
-`Some(include_str!("../../test-vectors/testnet/genesis_boxes.json"))`.
-The runtime gate auto-lifts once both fields are `Some(_)`.
+The header and digest scripts each require **start, end, output**. Genesis
+boxes come from `/utxo/genesis`; `extract_boxes.sh` consumes a transaction
+vector file and is not a height-0 query. The generated height-1 header and
+digest files are optional oracle inputs, not runtime startup prerequisites.
+Check counts, IDs, complete decoding and independent expected values before
+committing regenerated fixtures; script completion alone is not validation.
 
-## Provenance
-
-Vectors must come from a Scala testnet node, never from a self-oracle.
-Per `CLAUDE.md` §10 (Test conventions): "for codecs, hashes, IDs, and any
-byte-format that must agree with Scala/sigma-state, the expected value MUST
-come from an external oracle (Scala node REST, mainnet block bytes,
-sigma-state vector) — never from `let expected = my_fn(input)`."
+Fixtures must use an external oracle as required by `CONTRIBUTING.md` and
+`docs/compatibility.md`. Record endpoint/version/network/revision, exact input
+and output hashes, serializer dependencies and what was actually asserted.
+Do not rewrite old launch rows or relabel historical fixture outcomes based
+solely on a new public observation.

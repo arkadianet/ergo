@@ -8,6 +8,7 @@ pub struct IndexerConfig {
     /// is not constructed and the polling task never spawns.
     pub enabled: bool,
     /// Sleep interval (in ms) when the chain tip has not advanced.
+    /// The worker uses at least 50 ms, including when this is zero.
     pub poll_idle_ms: u64,
     /// File name (relative to the node data directory) for the
     /// indexer's redb database.

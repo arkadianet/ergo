@@ -442,43 +442,41 @@ impl<'tx> WalletReader<'tx> {
 // lives in this crate (ergo-state) so the dep direction is
 // ergo-wallet → ergo-state (clean, non-cyclic).
 impl<'tx> crate::wallet::hydration::HydrationSource for WalletReader<'tx> {
-    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_> {
+    fn tracked_pubkeys(&self) -> Result<Vec<(u64, [u8; 33])>, String> {
         let tbl = match self.txn.open_table(WALLET_TRACKED_PUBKEYS) {
             Ok(t) => t,
-            Err(_) => return Box::new(std::iter::empty()),
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.to_string()),
         };
-        // Collect inside the txn (can't return a borrow across the
-        // txn boundary). For typical wallet sizes (≤ tens of pubkeys)
-        // this is fine; revisit if multi-scan makes it a hot path.
         let mut pairs = Vec::new();
-        if let Ok(iter) = tbl.iter() {
-            for (k, _) in iter.flatten() {
-                let k_bytes: [u8; 41] = k.value();
-                pairs.push(parse_tracked_pubkey_key(&k_bytes));
-            }
+        for entry in tbl.iter().map_err(|e| e.to_string())? {
+            let (k, _) = entry.map_err(|e| e.to_string())?;
+            pairs.push(parse_tracked_pubkey_key(&k.value()));
         }
-        Box::new(pairs.into_iter())
+        Ok(pairs)
     }
 
-    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_> {
+    fn visible_pubkeys(&self) -> Result<Vec<(u32, [u8; 33])>, String> {
         let tbl = match self.txn.open_table(WALLET_VISIBLE_ADDRESSES) {
             Ok(t) => t,
-            Err(_) => return Box::new(std::iter::empty()),
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.to_string()),
         };
-        // Collect — redb iteration gives keys in ASC byte order,
-        // which for u32 keys = numeric ASC order natively.
         let mut pairs = Vec::new();
-        if let Ok(iter) = tbl.iter() {
-            for (k, v) in iter.flatten() {
-                pairs.push((k.value(), v.value()));
-            }
+        for entry in tbl.iter().map_err(|e| e.to_string())? {
+            let (k, v) = entry.map_err(|e| e.to_string())?;
+            pairs.push((k.value(), v.value()));
         }
-        Box::new(pairs.into_iter())
+        Ok(pairs)
     }
 
-    fn change_address_pubkey(&self) -> Option<[u8; 33]> {
-        let tbl = self.txn.open_table(WALLET_CHANGE_ADDRESS).ok()?;
-        tbl.get(()).ok().flatten().map(|g| g.value())
+    fn change_address_pubkey(&self) -> Result<Option<[u8; 33]>, String> {
+        let tbl = match self.txn.open_table(WALLET_CHANGE_ADDRESS) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        Ok(tbl.get(()).map_err(|e| e.to_string())?.map(|g| g.value()))
     }
 }
 
@@ -494,6 +492,42 @@ mod tests {
 
     const EIP3_PATH: [u32; 5] = EIP3_FIRST_ADDRESS_PATH;
     const MASTER_PATH: &[u32] = &[]; // master key has an empty path
+
+    #[test]
+    fn hydration_missing_tables_are_empty_but_wrong_table_types_are_errors() {
+        use crate::wallet::hydration::HydrationSource;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::create(dir.path().join("hydration.redb")).unwrap();
+        {
+            let read = db.begin_read().unwrap();
+            let reader = WalletReader::new(&read);
+            assert!(reader.tracked_pubkeys().unwrap().is_empty());
+            assert!(reader.visible_pubkeys().unwrap().is_empty());
+            assert!(reader.change_address_pubkey().unwrap().is_none());
+        }
+        let write = db.begin_write().unwrap();
+        write
+            .open_table(redb::TableDefinition::<u32, u32>::new(
+                "wallet_tracked_pubkeys",
+            ))
+            .unwrap();
+        write
+            .open_table(redb::TableDefinition::<u32, u32>::new(
+                "wallet_visible_addresses",
+            ))
+            .unwrap();
+        write
+            .open_table(redb::TableDefinition::<u32, u32>::new(
+                "wallet_change_address",
+            ))
+            .unwrap();
+        write.commit().unwrap();
+        let read = db.begin_read().unwrap();
+        let reader = WalletReader::new(&read);
+        assert!(reader.tracked_pubkeys().is_err());
+        assert!(reader.visible_pubkeys().is_err());
+        assert!(reader.change_address_pubkey().is_err());
+    }
 
     fn pk(b: u8) -> [u8; 33] {
         let mut p = [b; 33];

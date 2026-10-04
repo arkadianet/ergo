@@ -354,9 +354,8 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
 
     // Full-tx bytes in priority order: (tx_id, serialized bytes) per
     // pool entry. Drives the unconfirmed full-tx endpoints
-    // (`/transactions/unconfirmed?offset=&limit=`, `byTransactionId/{id}`,
-    // `POST byTransactionIds`). `Arc<[u8]>` is shared with the
-    // mempool's own Entry, so no copy here.
+    // (`/transactions/unconfirmed?offset=&limit=`, `byTransactionId/{id}`).
+    // `Arc<[u8]>` is shared with the mempool's own Entry, so no copy here.
     let pool_full_txs: Arc<Vec<(ergo_primitives::digest::Digest32, Arc<[u8]>)>> = Arc::new(
         state
             .mempool

@@ -35,12 +35,11 @@ pub const IDENTITY_ENCODING: [u8; GROUP_ELEMENT_LENGTH] = [0u8; GROUP_ELEMENT_LE
 /// CryptoContext.default.infinity`. So EVERY 33-byte sequence starting with
 /// `0x00` decodes to the same identity point, whatever the remaining 32 bytes
 /// hold — and `serialize` then writes that point back as 33 zeroes
-/// (`:21-22`). The reference therefore accepts `07 00 AA..AA` in a register
-/// and re-serializes it as `07 00*33`; since a box id is `blake2b256` of the
-/// re-serialized box bytes, the id is computed over the ZEROED form.
-/// Preserving the original trailing garbage would give such a box a different
-/// id than the reference node computes — a UTXO-set / AVL-root divergence on a
-/// box the reference accepts.
+/// (`:21-22`). Canonical writers therefore serialize zero-prefix identity
+/// encodings as zeroes. Identity ownership is format-specific: transaction
+/// signing and newly sealed box candidates use canonical parsed forms, while
+/// unchanged parsed whole boxes can retain a received wire ID. This value
+/// normalization alone does not establish box identity or a chain consequence.
 ///
 /// A `0x02` / `0x03` compressed encoding needs no normalization: Scala
 /// re-encodes it from the decoded affine coordinates, which for any point
@@ -86,9 +85,8 @@ pub fn read_group_element(
     }
     // Normalize exactly as `GroupElementSerializer.parse` does: a `0x00` lead
     // IS the identity point, whatever follows, and the identity's encoding is
-    // 33 zeroes. Storing the verbatim trailing bytes would leak a non-value
-    // distinction into box ids, `bytes_to_sign`, and script-level equality —
-    // see `canonical_encoding`.
+    // 33 zeroes. The sideband records this parsed value; original input bytes
+    // remain accessible from the reader for codecs with received-wire identity.
     let bytes = canonical_encoding(bytes);
     r.record_group_element(bytes);
     Ok(GroupElement::from_bytes(bytes))
@@ -115,6 +113,20 @@ impl AsRef<[u8]> for GroupElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_normalizes_sideband_without_changing_wire_or_consumption() {
+        let mut wire = [0xaa; 34];
+        wire[0] = 0;
+        wire[33] = 0x42;
+        let mut reader = crate::reader::VlqReader::new(&wire);
+        let point = read_group_element(&mut reader).unwrap();
+        assert_eq!(point.as_bytes(), &IDENTITY_ENCODING);
+        assert_eq!(reader.group_elements(), &[IDENTITY_ENCODING]);
+        assert_eq!(reader.position(), 33);
+        assert_eq!(reader.data_slice(0, 33), &wire[..33]);
+        assert_eq!(reader.get_u8().unwrap(), 0x42);
+    }
 
     #[test]
     fn group_element_length_const_matches_array_size() {

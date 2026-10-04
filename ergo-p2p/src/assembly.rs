@@ -2,7 +2,9 @@
 //! header and determines when a full block can be assembled.
 //!
 //! Per P2P protocol spec Section 9:
-//! - A full block in UTXO mode requires: Header + BlockTransactions + Extension
+//! - Completion requires transactions + extension and, when the caller
+//!   requires them for block application, ADProofs. Production UTXO and digest
+//!   backends both consume shipped ADProofs.
 //! - Sections are keyed by their computed modifier_id (not header_id)
 //! - Section ID = blake2b256_prefixed(type_id, header_id, section_digest)
 //! - Duplicate sections for the same modifier_id are ignored
@@ -37,10 +39,9 @@ struct SectionState {
     has_transactions: bool,
     has_extension: bool,
     has_ad_proofs: bool,
-    /// Digest-verifier (Mode 5) block application needs the ADProofs section to
-    /// verify the UTXO-set transition, so completion must wait for it. A UTXO
-    /// node stores the set itself and needs only transactions + extension, so
-    /// this is `false` and `has_ad_proofs` never gates completion.
+    /// Whether completion waits for ADProofs as well as transactions and
+    /// extension. Production UTXO and digest backends both consume them;
+    /// callers can opt out only when their application path does not.
     requires_ad_proofs: bool,
 }
 

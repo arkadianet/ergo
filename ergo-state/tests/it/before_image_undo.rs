@@ -256,18 +256,16 @@ fn randomized_100_ops_with_repeated_rollback() {
 }
 
 // ============================================================
-// Category 3: Crash safety across atomic transaction boundary
+// Category 3: Changelog clearing and in-memory reconstruction
 // ============================================================
 
-// This test uses the persistent StateStore with tempdir.
-// Apply blocks 1-5, "crash" (drop store), reopen, verify state.
-// Then apply block 6 to confirm the tree is usable after recovery.
-// (Already covered by crash_recovery_restores_state in persistent_blocks_1_10.rs,
-// but we add a variant that verifies the change_log is empty after recovery.)
+// This uses an in-memory tree and copies its nodes into a new arena. Clean
+// persistent reopen is covered in persistent_blocks_1_10.rs; this test does
+// not open a database or terminate a process.
 
 #[test]
 fn recovery_starts_with_empty_changelog() {
-    // After crash recovery, the change_log must be empty.
+    // A reconstructed tree's change_log must start empty.
     // This is verified implicitly: if recovery loaded a non-empty changelog,
     // the first apply_block's take_change_log would include stale entries.
     let mut tree = AvlTree::new();

@@ -1,0 +1,97 @@
+{
+  "oracle": {
+    "sigma_state": "6.0.6",
+    "sigma_state_jar_sha256": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898",
+    "ergo_core": "6.0.6",
+    "scala": "2.12.21",
+    "capture_date": "2026-10-04",
+    "compiler_source_sha256": "2254f25bed01189b39484093d8c0d7c2ae993c122c31b355dd4fac29e9dd9781",
+    "evaluator_source_sha256": "7035ee2453e49c171951dedb192458034e4b276bf603a7f8d3746f6a7083ae88",
+    "transcript_sha256": "7822f0a2ef1186b8e86c9caf379af4ed37a54138e514931de500103c99733e84",
+    "authority": "Real cached published org.scorexfoundation:sigma-state_2.12:6.0.6 compiler/serializer/evaluator with ErgoSerdeOracle pinned org.ergoplatform:ergo-core:6.0.6; no current live network/whole-node authority claim",
+    "ergo_core_jar_sha256": "382da71e318f662da713dc7a6542b0e4527e7d035aaa65aea97545d85f9ece9f",
+    "capture_command": "scala-cli run Capture.scala ../collection-types/ErgoSerdeOracle.scala --server=false --jvm system --main-class AuditMixedCollectionProbe",
+    "capture_environment": {
+      "JAVA_HOME": "Java17",
+      "COURSIER_REPOSITORIES": "ivy2Local|https://repo.maven.apache.org/maven2"
+    }
+  },
+  "context": {
+    "height": 0,
+    "activated_version": 3,
+    "tree_version": 3,
+    "cost_init": 0,
+    "pre_header_version": 4,
+    "pre_header_timestamp": 3,
+    "empty_proof": true,
+    "empty_message": true
+  },
+  "cases": [
+    {
+      "id": "flatmap-mixed-width-token-first",
+      "source": "{ val ys = Coll(HEIGHT, HEIGHT + 1).flatMap{(x: Int) => Coll((if (x == HEIGHT) Coll[Byte](1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte) else Coll[Byte](x.toByte), x.toLong))}; sigmaProp(ys.size == 2 && ys(0)._1.size == 32 && ys(1)._1.size == 1) }",
+      "tree_hex": "1bdb012604020201020102010201020102010201020102010201020102010201020102010201020102010201020102010201020102010201020102010201020102010201020104040400044004020402d801d601dc0c0f830204a39aa3730001d901010483014d0e860295937201a3832002730173027303730473057306730773087309730a730b730c730d730e730f7310731173127313731473157316731773187319731a731b731c731d731e731f73208301027d7201027e720105d1eded93b17201732193b18cb2720173220001732393b18cb27201732400017325",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 665,
+      "expected_verified": true,
+      "expected_verify_cost": 66
+    },
+    {
+      "id": "flatmap-mixed-width-generic-first",
+      "source": "{ val ys = Coll(HEIGHT + 1, HEIGHT).flatMap{(x: Int) => Coll((if (x == HEIGHT) Coll[Byte](1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte,1.toByte) else Coll[Byte](x.toByte), x.toLong))}; sigmaProp(ys.size == 2 && ys(0)._1.size == 1 && ys(1)._1.size == 32) }",
+      "tree_hex": "1bdb012604020201020102010201020102010201020102010201020102010201020102010201020102010201020102010201020102010201020102010201020102010201020104040400040204020440d801d601dc0c0f8302049aa37300a301d901010483014d0e860295937201a3832002730173027303730473057306730773087309730a730b730c730d730e730f7310731173127313731473157316731773187319731a731b731c731d731e731f73208301027d7201027e720105d1eded93b17201732193b18cb2720173220001732393b18cb27201732400017325",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 665,
+      "expected_verified": true,
+      "expected_verify_cost": 66
+    },
+    {
+      "id": "flatmap-mixed-box-generic-first",
+      "source": "sigmaProp(Coll(HEIGHT, HEIGHT + 1).flatMap{(x: Int) => if (x == HEIGHT) Coll(SELF).reverse else Coll(SELF)}.size == 2)",
+      "tree_hex": "1b2a0204020404d193b1dc0c0f830204a39aa3730001d901010495937201a3db0c1e830163a7830163a77301",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 384,
+      "expected_verified": true,
+      "expected_verify_cost": 38
+    },
+    {
+      "id": "flatmap-mixed-box-specialized-first",
+      "source": "sigmaProp(Coll(HEIGHT + 1, HEIGHT).flatMap{(x: Int) => if (x == HEIGHT) Coll(SELF).reverse else Coll(SELF)}.size == 2)",
+      "tree_hex": "1b2a0204020404d193b1dc0c0f8302049aa37300a301d901010495937201a3db0c1e830163a7830163a77301",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 384,
+      "expected_verified": true,
+      "expected_verify_cost": 38
+    },
+    {
+      "id": "flatmap-box-input-lazy-first",
+      "source": "sigmaProp(Coll(HEIGHT, HEIGHT + 1).flatMap{(x: Int) => if (x == HEIGHT) INPUTS else Coll(SELF)}.size == 2)",
+      "tree_hex": "1b240204020404d193b1dc0c0f830204a39aa3730001d901010495937201a3a4830163a77301",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 338,
+      "expected_verified": true,
+      "expected_verify_cost": 33
+    },
+    {
+      "id": "flatmap-box-input-materialized-first",
+      "source": "sigmaProp(Coll(HEIGHT + 1, HEIGHT).flatMap{(x: Int) => if (x == HEIGHT) INPUTS else Coll(SELF)}.size == 2)",
+      "tree_hex": "1b240204020404d193b1dc0c0f8302049aa37300a301d901010495937201a3a4830163a77301",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 338,
+      "expected_verified": true,
+      "expected_verify_cost": 33
+    }
+  ]
+}

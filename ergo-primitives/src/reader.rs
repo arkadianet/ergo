@@ -75,19 +75,10 @@ pub struct VlqReader<'a> {
     /// means the reader may be partway through a Scala reader whose earlier
     /// bindings it never saw, so absence proves nothing.
     val_bindings: Option<std::collections::BTreeSet<u32>>,
-    /// Optional override for the version that gates V6-EMBEDDABLE TYPE CODES
-    /// (`SUnsignedBigInt` = code 9, …) — the ACTIVATED version, per Scala
-    /// `TypeSerializer.getEmbeddableType` selecting `embeddableV5`/`embeddableV6`
-    /// by `VersionContext.current.isV6Activated` (the ACTIVATED version, NOT the
-    /// tree header). When `Some(v)`, the type decoder gates embeddable codes on
-    /// `v` instead of the header version [`ergo_tree_version`](Self::ergo_tree_version).
-    ///
-    /// `None` (the default) preserves the header-version gating every consensus
-    /// caller uses — this knob is BYTE-INERT for them. It is set ONLY by the
-    /// ergo-compiler post-write self-check (`read_ergo_tree_with_activated_version`),
-    /// which emits a header-v0 tree but must accept the V6 type codes a
-    /// `tree_version >= 3` (V6-activated) compile legitimately produces and Scala
-    /// re-parses on a V6-activated network. See that function's docs.
+    /// Low-level override for embeddable type-table membership. Ordinary trees
+    /// select the table from their header; headerless typed-expression contexts
+    /// may explicitly select another table. This does not certify whole-tree
+    /// acceptance. The public activated ErgoTree helper clears and restores it.
     embeddable_activated_version: Option<u8>,
     /// Trusted (already-validated) source: when `true`, the box-script ACCEPTANCE
     /// gates (ErgoTree version cap / size-bit / method-resolution / sigma-root) are
@@ -306,14 +297,15 @@ impl<'a> VlqReader<'a> {
         self.header_spans.as_deref().unwrap_or(&[])
     }
 
-    /// Record a group-element encoding seen during the parse (the raw 33 bytes,
-    /// exactly as on the wire). Called by the deserializers at every point the
-    /// Scala reference would curve-check a group element.
+    /// Record a parsed group-element encoding for deferred curve validation.
+    /// The group reader normalizes every zero-prefix identity to 33 zero bytes;
+    /// this sideband is not the original wire slice. Use `data_slice` with
+    /// recorded positions when original bytes are required.
     pub fn record_group_element(&mut self, ge: [u8; 33]) {
         self.group_elements.push(ge);
     }
 
-    /// All group-element encodings seen so far.
+    /// All parsed/normalized group-element encodings recorded so far.
     pub fn group_elements(&self) -> &[[u8; 33]] {
         &self.group_elements
     }
@@ -429,9 +421,9 @@ impl<'a> VlqReader<'a> {
         self.embeddable_activated_version
     }
 
-    /// Set the activated-version override for V6-embeddable TYPE-code gating.
-    /// `None` restores header-version gating. Set ONLY by the ergo-compiler
-    /// self-check; byte-inert for consensus callers (which never touch it).
+    /// Set the low-level embeddable type-table override. `None` restores
+    /// header-based membership. Prefer whole-tree parsing for acceptance checks;
+    /// an explicit override can admit types the emitted header does not support.
     pub fn set_embeddable_activated_version(&mut self, version: Option<u8>) {
         self.embeddable_activated_version = version;
     }

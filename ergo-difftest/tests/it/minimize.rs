@@ -15,7 +15,9 @@
 //!   `KnownArtifact` records are not.
 
 use ergo_difftest::minimize::minimize;
-use ergo_difftest::regressions::{auto_file, build_record, DivergenceRecord, SeedInfo, Triage};
+use ergo_difftest::regressions::{
+    auto_file, build_record, record_after_minimization, DivergenceRecord, SeedInfo, Triage,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Minimizer mechanics
@@ -219,12 +221,12 @@ fn record_json_round_trip() {
 }
 
 /// `auto_file` for a `Pending` record must:
-/// * write the JSON to `<dir>/<surface>/<hash16>.json`,
-/// * append a line to `QUEUE.md`.
+/// * atomically write JSON to `<dir>/<surface>/<full-record-sha256>.json`,
+/// * regenerate a line in the derived `QUEUE.md`.
 ///
 /// `auto_file` for a `KnownArtifact` record must:
-/// * write to `<dir>/artifacts/<surface>/<hash16>.json`,
-/// * NOT touch `QUEUE.md`.
+/// * write to `<dir>/artifacts/<surface>/<full-record-sha256>.json`,
+/// * preserve the pending entries in `QUEUE.md`.
 #[test]
 fn auto_file_pending_appends_to_queue_artifact_does_not() {
     let dir = tempfile::tempdir().expect("tmpdir");
@@ -321,4 +323,152 @@ fn auto_file_is_idempotent_same_path() {
         1,
         "re-filing the same record must not duplicate its QUEUE.md line"
     );
+}
+
+// Failure recovery checks diagnostic record mechanics, not Scala verdicts.
+#[test]
+fn failed_minimization_preserves_original_pending_evidence() {
+    let original = ergo_difftest::oracle::Divergence {
+        surface: "ergo_tree",
+        kind: ergo_difftest::oracle::DivergenceKind::Canonical,
+        input_hex: "deadbeef".into(),
+        rust: ergo_difftest::oracle::Verdict::Accept("00".into()),
+        jvm: ergo_difftest::oracle::Verdict::Accept("01".into()),
+    };
+    let directory = tempfile::tempdir().unwrap();
+    for kind in [
+        std::io::ErrorKind::TimedOut,
+        std::io::ErrorKind::InvalidData,
+        std::io::ErrorKind::Other,
+        std::io::ErrorKind::BrokenPipe,
+    ] {
+        let record = record_after_minimization(
+            &original,
+            Err(std::io::Error::new(kind, "ordinary processing fixture")),
+            Some(SeedInfo { seed: 7, iter: 42 }),
+            "structured-gen",
+        );
+        assert_eq!(record.input_hex, original.input_hex);
+        assert_eq!(record.rust.detail, "00");
+        assert_eq!(record.jvm.detail, "01");
+        assert_eq!(record.seed, Some(SeedInfo { seed: 7, iter: 42 }));
+        assert_eq!(record.triage, "PENDING");
+        assert!(!record.minimized);
+        assert!(record
+            .processing_error
+            .as_ref()
+            .unwrap()
+            .contains(&format!("{kind:?}")));
+        let path = auto_file(&record, directory.path()).unwrap();
+        let stored: DivergenceRecord =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(stored, record);
+    }
+}
+
+#[test]
+fn successful_minimization_uses_reverified_input_and_stays_pending() {
+    let original = ergo_difftest::oracle::Divergence {
+        surface: "ergo_tree",
+        kind: ergo_difftest::oracle::DivergenceKind::Canonical,
+        input_hex: "deadbeef".into(),
+        rust: ergo_difftest::oracle::Verdict::Accept("00".into()),
+        jvm: ergo_difftest::oracle::Verdict::Accept("01".into()),
+    };
+    let mut minimized = original.clone();
+    minimized.input_hex = "dead".into();
+    let record = record_after_minimization(&original, Ok(minimized), None, "repro");
+    assert_eq!(record.input_hex, "dead");
+    assert!(record.minimized);
+    assert_eq!(record.triage, "PENDING");
+    assert!(record.processing_error.is_none());
+}
+
+// Diagnostic filing identity includes the full record, not only input bytes.
+#[test]
+fn same_input_under_distinct_authorities_keeps_both_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = make_record(Triage::Pending);
+    let mut second = first.clone();
+    second.execution = Some(
+        serde_json::json!({"comparison_contract": {"oracle_source_sha256": "different fixture authority"}}),
+    );
+    let first_path = auto_file(&first, directory.path()).unwrap();
+    let second_path = auto_file(&second, directory.path()).unwrap();
+    assert_ne!(first_path, second_path);
+    assert_eq!(first_path.file_stem().unwrap().to_str().unwrap().len(), 64);
+    assert_eq!(
+        serde_json::from_slice::<DivergenceRecord>(&std::fs::read(first_path).unwrap()).unwrap(),
+        first
+    );
+    assert_eq!(
+        serde_json::from_slice::<DivergenceRecord>(&std::fs::read(second_path).unwrap()).unwrap(),
+        second
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("QUEUE.md"))
+            .unwrap()
+            .matches("[PENDING]")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn concurrent_filing_is_complete_and_queue_is_idempotent() {
+    let directory = tempfile::tempdir().unwrap();
+    let record = make_record(Triage::Pending);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let paths: Vec<_> = std::thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let record = &record;
+            let root = directory.path();
+            workers.push(scope.spawn(move || {
+                barrier.wait();
+                auto_file(record, root).unwrap()
+            }));
+        }
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    assert_eq!(paths[0], paths[1]);
+    let stored: DivergenceRecord =
+        serde_json::from_slice(&std::fs::read(&paths[0]).unwrap()).unwrap();
+    assert_eq!(stored, record);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("QUEUE.md"))
+            .unwrap()
+            .matches("[PENDING]")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn corrupt_existing_record_is_not_overwritten() {
+    let directory = tempfile::tempdir().unwrap();
+    let record = make_record(Triage::Pending);
+    let path = auto_file(&record, directory.path()).unwrap();
+    std::fs::write(&path, b"{").unwrap();
+    assert_eq!(
+        auto_file(&record, directory.path()).unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"{");
+}
+
+#[test]
+fn filing_rejects_surface_path_components() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut record = make_record(Triage::Pending);
+    record.surface = "../foreign".into();
+    assert_eq!(
+        auto_file(&record, directory.path()).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert!(!directory.path().join(".filing.lock").exists());
 }

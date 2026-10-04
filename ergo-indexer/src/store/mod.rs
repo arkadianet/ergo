@@ -29,7 +29,10 @@ use crate::token::IndexedToken;
 use crate::{BoxId, TokenId, TxId};
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use redb::Database;
 
@@ -50,14 +53,14 @@ pub enum OpenOutcome {
 }
 
 /// Owning handle around `redb::Database` plus the path it lives at.
-/// Cheap to `Clone` (Arc-wrapped). `read_meta` / `read_undo` /
-/// The read methods snapshot under their own redb read transaction;
-/// the `apply_block` / `rollback_one_block` paths are layered on top
-/// via the `commit_apply_meta_only` / `commit_rollback_meta_only`
-/// helpers below.
+/// Clones share the database and repair ownership. Read methods hold their own
+/// snapshots; block transitions compare the complete persisted checkpoint inside
+/// their writer. Checkpoint-only maintenance helpers are separate low-level APIs.
 #[derive(Clone)]
 pub struct IndexerStore {
     db: Arc<Database>,
+    /// Shared across clones; only one multi-transaction repair may run.
+    repair_running: Arc<AtomicBool>,
     path: PathBuf,
     redb_cache_bytes: usize,
     /// Undo-retention window (max serviceable rollback depth). Defaults to
@@ -93,7 +96,22 @@ pub(crate) struct TestRawRows<'a> {
     pub indexed_token: Option<TestRawRow<'a>>,
 }
 
+pub(crate) struct RepairGuard<'a>(&'a AtomicBool);
+
+impl Drop for RepairGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 impl IndexerStore {
+    pub(crate) fn acquire_repair(&self) -> Result<RepairGuard<'_>, IndexerError> {
+        self.repair_running
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map_err(|_| IndexerError::RepairInProgress)?;
+        Ok(RepairGuard(&self.repair_running))
+    }
+
     /// On-disk path of the indexer redb file. Used for storage-error
     /// observability (issue #281) so a halt's diagnostics carry the same
     /// `database_path` shape as the state store's.
@@ -154,10 +172,12 @@ impl IndexerStore {
                 Err(IndexerError::SchemaCorruption)
             }
             Some(v) if v == INDEXER_SCHEMA_VERSION => {
+                meta::read_meta(&read_txn)?;
                 drop(read_txn);
                 Ok((
                     Self {
                         db: Arc::new(db),
+                        repair_running: Arc::new(AtomicBool::new(false)),
                         path: path.to_path_buf(),
                         redb_cache_bytes: cache_bytes,
                         rollback_window: ROLLBACK_WINDOW,
@@ -200,6 +220,7 @@ impl IndexerStore {
         write_txn.commit()?;
         Ok(Self {
             db: Arc::new(db),
+            repair_running: Arc::new(AtomicBool::new(false)),
             path: path.to_path_buf(),
             redb_cache_bytes: cache_bytes,
             rollback_window: ROLLBACK_WINDOW,
@@ -375,9 +396,8 @@ impl IndexerStore {
     }
 
     /// Fetch the `IndexedTemplate` parent record keyed by `template_hash`.
-    /// `None` means no output ever indexed under that template (e.g.
-    /// every output's tree was soft-fork-wrapped, or the template
-    /// hasn't been touched on this chain).
+    /// `None` means no output was ever indexed under that template on
+    /// this chain.
     pub fn read_template(
         &self,
         template_hash: &Digest32,
@@ -672,9 +692,7 @@ impl IndexerStore {
         segment::read_spill_in(&read_txn, segment_id)
     }
 
-    /// Begin a write transaction. Exactly one block per txn — the
-    /// apply / rollback paths each call `commit_block_txn` to wrap a
-    /// full block's worth of mutations.
+    /// Begin a write transaction for a block, bounded batch or repair chunk.
     ///
     /// Delegates to [`ergo_state::begin_write_qr`] so every indexer
     /// write commit carries quick-repair; see that helper's module
@@ -694,6 +712,7 @@ impl IndexerStore {
         undo: &UndoEntry,
     ) -> Result<(), IndexerError> {
         let write_txn = self.begin_write()?;
+        meta::check_no_repair(&write_txn)?;
         meta::write_meta(&write_txn, meta)?;
         undo::write_undo(&write_txn, undo_height, undo)?;
         undo::prune_below_window(&write_txn, undo_height, self.rollback_window)?;
@@ -709,6 +728,7 @@ impl IndexerStore {
         height_removed: u64,
     ) -> Result<(), IndexerError> {
         let write_txn = self.begin_write()?;
+        meta::check_no_repair(&write_txn)?;
         meta::write_meta(&write_txn, meta)?;
         {
             let mut table = write_txn.open_table(tables::INDEXER_UNDO)?;
@@ -757,5 +777,190 @@ mod cache_budget_tests {
         assert!(matches!(outcome, OpenOutcome::WipedAndRecreated { .. }));
         assert_eq!(store.redb_cache_capacity_bytes(), 16384);
         assert_eq!(store.read_meta().unwrap().indexed_height, 0);
+    }
+}
+
+#[cfg(test)]
+mod repair_exclusion_tests {
+    use super::*;
+
+    // ----- error paths -----
+    #[test]
+    fn repair_ownership_is_shared_by_clones_and_released_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = IndexerStore::open(&dir.path().join("indexer.redb")).unwrap();
+        let clone = store.clone();
+        let guard = store.acquire_repair().unwrap();
+        assert!(matches!(
+            clone.acquire_repair(),
+            Err(IndexerError::RepairInProgress)
+        ));
+        drop(guard);
+        let guard = clone.acquire_repair().unwrap();
+        assert!(matches!(
+            store.acquire_repair(),
+            Err(IndexerError::RepairInProgress)
+        ));
+        drop(guard);
+        assert!(store.acquire_repair().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod spill_topology_tests {
+    use super::*;
+    use crate::address::write_indexed_address;
+    use crate::segment::{write_segment, Segment, SEGMENT_THRESHOLD};
+    use crate::segment_id::{box_segment_id, token_unique_id, tx_segment_id};
+    use crate::template::write_indexed_template;
+    use crate::token::write_indexed_token;
+    use ergo_primitives::reader::ReadError;
+    use ergo_primitives::writer::VlqWriter;
+
+    fn write_parents(
+        store: &IndexerStore,
+        id: Digest32,
+        address: &IndexedAddress,
+        template: &IndexedTemplate,
+        token: &IndexedToken,
+    ) {
+        let write = store.begin_write().unwrap();
+        let mut writer = VlqWriter::new();
+        write_indexed_address(&mut writer, address);
+        write
+            .open_table(tables::INDEXED_ADDRESS)
+            .unwrap()
+            .insert(id.as_bytes().as_slice(), writer.as_slice())
+            .unwrap();
+        writer.clear();
+        write_indexed_template(&mut writer, template);
+        write
+            .open_table(tables::INDEXED_TEMPLATE)
+            .unwrap()
+            .insert(id.as_bytes().as_slice(), writer.as_slice())
+            .unwrap();
+        writer.clear();
+        write_indexed_token(&mut writer, token);
+        let token_key = token_unique_id(&id);
+        write
+            .open_table(tables::INDEXED_TOKEN)
+            .unwrap()
+            .insert(token_key.as_bytes().as_slice(), writer.as_slice())
+            .unwrap();
+        write.commit().unwrap();
+    }
+
+    /// The persisted-row bound, not another decode failure, refused the row.
+    fn refused_over_threshold<T: std::fmt::Debug>(result: Result<T, IndexerError>) {
+        match result {
+            Err(IndexerError::DbDecode {
+                source: ReadError::InvalidData(message),
+                ..
+            }) if message.contains("exceeds 512") => {}
+            other => panic!("expected the 512-entry stored-row bound, got {other:?}"),
+        }
+    }
+
+    // ----- error paths -----
+
+    /// Apply spills before it persists a row, so a stored parent head over
+    /// 512 entries is corruption. The parent decoders, shared with the apply
+    /// and rollback loaders, refuse it rather than load and rewrite it.
+    #[test]
+    fn stored_parent_heads_over_the_threshold_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = IndexerStore::open(&dir.path().join("indexer.redb")).unwrap();
+        let id = Digest32::from_bytes([8; 32]);
+        let over: Vec<i64> = (0..=SEGMENT_THRESHOLD as i64).collect();
+        let mut address = IndexedAddress::empty(id);
+        address.segment.boxes = over.clone();
+        let mut template = IndexedTemplate::empty(id);
+        template.segment.boxes = over.clone();
+        let mut token = IndexedToken::empty(id);
+        token.segment.boxes = over;
+        write_parents(&store, id, &address, &template, &token);
+        refused_over_threshold(store.read_address(&id));
+        refused_over_threshold(store.read_template(&id));
+        refused_over_threshold(store.read_token(&id));
+    }
+
+    /// Every stored spill row holds exactly 512 entries; a larger one is
+    /// corruption the spill readers must refuse.
+    #[test]
+    fn stored_spill_rows_over_the_threshold_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = IndexerStore::open(&dir.path().join("indexer.redb")).unwrap();
+        let id = Digest32::from_bytes([9; 32]);
+        let mut address = IndexedAddress::empty(id);
+        address.segment.box_segment_count = 1;
+        address.segment.tx_segment_count = 1;
+        let mut template = IndexedTemplate::empty(id);
+        template.segment.box_segment_count = 1;
+        let mut token = IndexedToken::empty(id);
+        token.segment.box_segment_count = 1;
+        write_parents(&store, id, &address, &template, &token);
+        let over: Vec<i64> = (0..=SEGMENT_THRESHOLD as i64).collect();
+        let boxes = Segment {
+            txs: vec![],
+            boxes: over.clone(),
+            box_segment_count: 0,
+            tx_segment_count: 0,
+        };
+        let txs = Segment {
+            txs: over,
+            boxes: vec![],
+            box_segment_count: 0,
+            tx_segment_count: 0,
+        };
+        let write = store.begin_write().unwrap();
+        {
+            let mut table = write.open_table(tables::SEGMENTS).unwrap();
+            // The address and template spills share this parent id.
+            for (seg_id, spill) in [
+                (box_segment_id(&id, 0), &boxes),
+                (tx_segment_id(&id, 0), &txs),
+                (box_segment_id(&token_unique_id(&id), 0), &boxes),
+            ] {
+                let mut writer = VlqWriter::new();
+                write_segment(&mut writer, spill);
+                table
+                    .insert(seg_id.as_bytes().as_slice(), writer.as_slice())
+                    .unwrap();
+            }
+        }
+        write.commit().unwrap();
+        refused_over_threshold(store.read_address_box_entries(&id));
+        refused_over_threshold(store.read_address_tx_entries(&id));
+        refused_over_threshold(store.read_template_box_entries(&id));
+        refused_over_threshold(store.read_token_box_entries(&id));
+    }
+
+    #[test]
+    fn huge_parent_spill_counts_report_missing_first_spill_for_every_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = IndexerStore::open(&dir.path().join("indexer.redb")).unwrap();
+        let id = Digest32::from_bytes([7; 32]);
+        // A corrupt counter claims the most spills a row can encode, behind an
+        // empty head. Reserving entries from it (about 8.8 TB) fails
+        // allocation and aborts; readers grow only after a decoded spill.
+        let mut address = IndexedAddress::empty(id);
+        address.segment.box_segment_count = i32::MAX;
+        address.segment.tx_segment_count = i32::MAX;
+        let mut template = IndexedTemplate::empty(id);
+        template.segment.box_segment_count = i32::MAX;
+        let mut token = IndexedToken::empty(id);
+        token.segment.box_segment_count = i32::MAX;
+        write_parents(&store, id, &address, &template, &token);
+        for result in [
+            store.read_address_box_entries(&id),
+            store.read_address_tx_entries(&id),
+            store.read_template_box_entries(&id),
+            store.read_token_box_entries(&id),
+        ] {
+            assert!(matches!(
+                result,
+                Err(IndexerError::SpillMissingFromParent { seg_num: 0, .. })
+            ));
+        }
     }
 }

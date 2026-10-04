@@ -186,3 +186,12 @@ ergo-validation, ergo-state, gf2_192
   message. Zeroization alone does not enforce that protocol rule.
 - **No `sigma-rust` at runtime.** Crypto is `k256` + `hmac-sha512` + `bip39`
   + `gf2_192`; sigma-rust is dev/test oracle only.
+
+Modern master construction is `ExtendedSecretKey::derive_master_key(seed)`;
+legacy construction is `ExtendedSecretKeyLegacy::derive_master_key(seed)`.
+Master bytes stay32wide in both modes, while legacy children remain variable
+length. Unlock binds the master to the persisted keys
+(`SecretStorage::bind_tracked_keys`): a legacy wallet whose keys all come from
+the earlier Rust trimmed master keeps that derivation, and any other mismatch
+refuses the unlock. See `test-vectors/wallet/leading-zero-master/README.md` for
+independent Scala vectors and recovery of earlier Rust master trimming.

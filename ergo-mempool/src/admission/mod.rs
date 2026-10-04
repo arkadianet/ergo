@@ -46,7 +46,8 @@ pub use outcome::{AdmissionOutcome, CheckOutcome, RejectReason};
 pub use revalidate::revalidate_pooled;
 pub(crate) use revalidate::{is_recheck_evictable, record_failed_tx};
 
-use outcome::{classify, ReplacementDecision};
+pub(crate) use outcome::classify;
+use outcome::ReplacementDecision;
 
 /// Pure-logic admission. No `&mut self` on the mempool here — callers
 /// thread the individual pieces in. The top-level `Mempool::process()`
@@ -300,6 +301,20 @@ pub(crate) fn check_capturing_held<V: Validator>(
         );
     }
 
+    // ── Step 8 — Duplicate, before any validation ────────────────────
+    // Scala `ErgoMemPool.process` declines a pooled id in `pool.canAccept`
+    // before `validateWithCost`, so a resubmission runs no scripts and
+    // consumes no budget. The id excludes proofs: other proof bytes for a
+    // pooled id are neither validated nor recorded against it.
+    if cx.pool.contains(&peek_fee_value.tx_id) {
+        return (
+            CheckOutcome::Rejected {
+                reason: RejectReason::Duplicate,
+            },
+            actions,
+        );
+    }
+
     // Scala #2577: reject the entire transaction, including mixed inputs,
     // before UTXO resolution/script evaluation. A policy decline earns no peer penalty.
     if cx.config.reject_storage_rent_txs && peek_fee_value.contains_storage_rent_claim {
@@ -383,6 +398,11 @@ pub(crate) fn check_capturing_held<V: Validator>(
         }
     };
 
+    // Full validation spent this cost regardless of the later pool decision.
+    if !budget_exempt {
+        cx.budgets.charge(budget_source, validated.consumed_cost);
+    }
+
     // No invalidation-cache check here, deliberately. The cache is a
     // FETCH filter, consumed only by `Mempool::is_invalidated` on the
     // Inv path (ergo-node messaging) — exactly Scala's sole use of
@@ -396,16 +416,6 @@ pub(crate) fn check_capturing_held<V: Validator>(
     // the proof-malleability poisoning surface: a third party
     // mangling a victim tx's proofs can suppress our Inv fetch (as
     // on Scala) but cannot block direct (re)submission.
-
-    // ── Step 8 — Duplicate ───────────────────────────────────────────
-    if cx.pool.contains(&validated.tx_id) {
-        return (
-            CheckOutcome::Rejected {
-                reason: RejectReason::Duplicate,
-            },
-            actions,
-        );
-    }
 
     // ── Step 10 — Min-fee consistency assert ─────────────────────────
     // Step 3.5 already gated on `peek_fee`; reaching here means we
@@ -449,10 +459,6 @@ pub(crate) fn check_capturing_held<V: Validator>(
         if (weight as u128) > avg {
             ReplacementDecision::Replace(conflicts.clone())
         } else {
-            // Losing the double-spend still charges cost (skipped for demoted).
-            if !budget_exempt {
-                cx.budgets.charge(budget_source, validated.consumed_cost);
-            }
             actions.push(MempoolAction::Observe {
                 event: ObservedEvent::DroppedDoubleSpendLoser {
                     tx_id: validated.tx_id,
@@ -472,10 +478,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
         }
     };
 
-    // ── Step 14 — Charge cost, check capacity plan.
-    if !budget_exempt {
-        cx.budgets.charge(budget_source, validated.consumed_cost);
-    }
+    // ── Step 14 — Check capacity plan (validation cost already charged).
 
     // Capacity plan: check whether the new tx can fit after replacements.
     // Commit step loops evictions until both budgets clear; this phase

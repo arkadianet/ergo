@@ -1,16 +1,27 @@
-diff --git a/ergo-ser/src/ergo_tree.rs b/ergo-ser/src/ergo_tree.rs
-index e9a1426..51fd660 100644
---- a/ergo-ser/src/ergo_tree.rs
-+++ b/ergo-ser/src/ergo_tree.rs
-@@ -53,13 +53,6 @@ pub struct ErgoTree {
+diff --git a/ergo-ser/src/ergo_tree/mod.rs b/ergo-ser/src/ergo_tree/mod.rs
+--- a/ergo-ser/src/ergo_tree/mod.rs
++++ b/ergo-ser/src/ergo_tree/mod.rs
+@@ -90,25 +90,6 @@
  
  /// Serialize an ErgoTree to bytes.
  pub fn write_ergo_tree(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteError> {
 -    // A soft-fork-wrapped (unparsed) tree re-emits its preserved original bytes
 -    // verbatim — header + size + body, byte-identical to the wire form — exactly
 -    // as Scala re-serializes an `UnparsedErgoTree` from its kept `propositionBytes`.
+-    //
+-    // Refuse propositionBytes that are not self-delimiting on re-parse (empty
+-    // `numBytes == 0` regions, or mid-VLQ truncations from negative declared
+-    // size). Emitting those makes the next decode fail with `UnexpectedEnd`.
+-    // Callers / difftest treat this as `WriteRejected`, not a codec Bug.
+-    // Box writers do NOT go through this path for Unparsed trees — they emit
+-    // preserved `ergo_tree_bytes` verbatim for Scala id-parity.
 -    if let crate::opcode::Expr::Unparsed(raw) = &tree.body {
--        w.put_bytes(raw);
+-        if !unparsed_proposition_bytes_self_delimiting(&raw.bytes) {
+-            return Err(WriteError::InvalidData(
+-                "UnparsedErgoTree propositionBytes are not self-delimiting on re-parse".into(),
+-            ));
+-        }
+-        w.put_bytes(&raw.bytes);
 -        return Ok(());
 -    }
      let header = (tree.version & VERSION_MASK)

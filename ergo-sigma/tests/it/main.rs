@@ -1,6 +1,7 @@
 mod auction_divergence;
 mod avl_scala_oracle_parity;
 mod avl_verifier_panic_differential;
+mod collection_types;
 mod cost_ledger_fixtures;
 mod cost_pin;
 mod cost_trace_smoke;

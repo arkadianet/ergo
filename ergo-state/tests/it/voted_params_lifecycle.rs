@@ -258,6 +258,30 @@ fn open_writes_genesis_row_on_fresh_store() {
 }
 
 #[test]
+fn fresh_testnet_launch_row_and_settings_survive_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.redb");
+    let launch = ergo_validation::scala_launch_testnet();
+    for _ in 0..2 {
+        let store = StateStore::open_with_cache_launch_voting(
+            &db_path,
+            4 * 1024 * 1024,
+            launch.clone(),
+            ergo_chain_spec::VotingParams::testnet(),
+        )
+        .unwrap();
+        assert_eq!(store.height(), 0);
+        assert_eq!(store.active_params(), &launch);
+        assert_eq!(
+            store.validation_settings(),
+            &ergo_validation::ErgoValidationSettings::empty()
+        );
+    }
+    assert_eq!(read_voted_params_keys(&db_path), vec![0]);
+    assert_eq!(read_voted_params_at(&db_path, 0).unwrap(), launch);
+}
+
+#[test]
 fn open_is_idempotent_when_table_already_complete() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("state.redb");

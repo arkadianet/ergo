@@ -38,6 +38,7 @@ mod nipopow_routes_parity;
 mod openapi_native_runtime_mount;
 mod openapi_native_snapshot;
 mod openapi_v1_snapshot;
+mod published_schema;
 mod recent_blocks_route;
 mod router_layout;
 mod scala_parity;

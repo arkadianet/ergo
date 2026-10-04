@@ -1,8 +1,8 @@
 //! Integration tests for `AddressBook` persistence semantics.
 //!
 //! These exercise the on-disk file end-to-end: open → write → drop →
-//! reopen → load. Unit tests in `address_book.rs` cover the codec and
-//! eviction logic; this file covers what survives a process restart.
+//! reopen → load. Unit tests in `address_book/mod.rs` cover the codec and
+//! eviction logic; this file covers clean object drop/reopen, not process exit or power loss.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, SystemTime};
@@ -246,7 +246,7 @@ fn add_known_does_not_overwrite_handshaked_record() {
 
 #[test]
 fn peer_manager_restores_known_peers_and_bans_from_persisted_address_book() {
-    // End-to-end restore-on-restart: persist a handful of peers + a
+    // Restore across clean object reopen: persist a handful of peers + a
     // ban via AddressBook, drop the book, reopen from the same path,
     // call load_all, hydrate a PeerManager via restore_known_peer +
     // restore_ban, and verify the PeerManager's observable state

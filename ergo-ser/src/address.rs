@@ -57,8 +57,9 @@ const CHECKSUM_LEN: usize = 4;
 /// bare `SigmaPropConst(ProveDlog(_))` with no segregated constants,
 /// otherwise P2S over the verbatim `ergo_tree_bytes`.
 ///
-/// `ergo_tree_bytes` must be the canonical wire bytes of `tree` (the
-/// caller normally has these from `ErgoBoxCandidate::ergo_tree_bytes`).
+/// `ergo_tree_bytes` must be the proposition bytes represented by `tree`.
+/// `ErgoBoxCandidate::ergo_tree_bytes` retains accepted received bytes; they can
+/// differ from canonical reserialization. P2S embeds the supplied bytes verbatim.
 pub fn encode_address(network: NetworkPrefix, tree: &ErgoTree, ergo_tree_bytes: &[u8]) -> String {
     if let Some(pubkey) = detect_p2pk(tree) {
         encode_p2pk(network, pubkey)
@@ -167,7 +168,7 @@ pub enum AddressDecodeError {
 const P2PK_BODY_PREFIX: [u8; 3] = [0x00, 0x08, 0xCD];
 const P2PK_PUBKEY_LEN: usize = 33;
 
-/// Decode an Ergo address string into its canonical `ErgoTree` bytes.
+/// Decode an Ergo address string into its proposition bytes.
 ///
 /// - **P2PK** (`type=0x01`): bytes are reconstructed as the canonical
 ///   `[0x00, 0x08, 0xCD, ...pubkey_33B]` (no version, no size, no
@@ -222,7 +223,7 @@ pub fn decode_address_to_tree_bytes(
 }
 
 /// Decode an address and return its `tree_hash` — the blake2b256 of the
-/// canonical `ErgoTree` bytes. This is the redb key for the indexer's
+/// decoded proposition bytes (verbatim for P2S). This is the indexer's key for
 /// `INDEXED_ADDRESS` table; the balance / byAddress routes look up
 /// records by this hash.
 ///

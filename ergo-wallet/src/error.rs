@@ -62,6 +62,11 @@ pub enum WalletError {
     #[error("wallet uninitialized — call POST /wallet/init or /wallet/restore first")]
     WalletUninitialized,
 
+    /// Initialization or restore was requested for storage that already has a
+    /// wallet. Existing encrypted and unlocked state remains unchanged.
+    #[error("wallet already initialized")]
+    WalletAlreadyInitialized,
+
     /// Restoring a wallet from a mnemonic requires the chain to be
     /// fully archived (`blocks_to_keep = -1`). Pruned nodes can't
     /// rescan from genesis. Matches Scala
@@ -74,6 +79,15 @@ pub enum WalletError {
     /// POST /wallet/updateChangeAddress with a tracked address.
     #[error("change_address_untracked — call /wallet/updateChangeAddress with a tracked pubkey")]
     ChangeAddressUntracked,
+
+    /// A persisted tracked public key is not the key the unlocked secret
+    /// derives at its recorded path. The string is the rendered path. The
+    /// wallet refuses to pair that key with a secret it does not control.
+    #[error(
+        "tracked key at {0} is not derived by the unlocked secret: the wallet tables belong to \
+         another secret or mix key derivations; unlock with the secret file that created them"
+    )]
+    TrackedKeyMismatch(String),
 
     /// Proof generation failed — typically a secret key is missing for
     /// a required sigma branch (e.g., trying to prove ProveDlog(pk) when

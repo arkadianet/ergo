@@ -1,5 +1,5 @@
 //! Slice 4: Apply blocks 1-10 with redb persistence and atomic commit.
-//! Verify state digest at each height and test crash recovery.
+//! Verify captured state digests, ordinary clean reopen and rollback.
 
 use ergo_primitives::digest::{ADDigest, ModifierId};
 use ergo_primitives::reader::VlqReader;
@@ -104,6 +104,287 @@ fn parse_block_tx(tx_hex: &str) -> Transaction {
 
 // ----- happy path -----
 
+/// Replay a genuinely non-empty next block through the public cached prover.
+/// Both committed roots come from the captured mainnet headers, while proof
+/// bytes are compared against fresh snapshot/live hydration of the same state.
+#[test]
+fn cached_nonempty_mainnet_advance_matches_roots_fresh_proofs_and_reopen() {
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::block_transactions::{write_block_transactions_with_version, BlockTransactions};
+    use ergo_ser::header::{read_header, serialize_header};
+    use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
+    use ergo_state::store::BaseDisposition;
+
+    let headers: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/headers_1_10.json"
+    ))
+    .unwrap();
+    let txs: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/transactions_1_10.json"
+    ))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.redb");
+    let mut store = StateStore::open(&path).unwrap();
+    init_genesis(&mut store);
+    let mut base = None;
+    let mut root_one = None;
+    let mut expected_tip = [0; 32];
+    for height in 1..=2 {
+        let row = headers.iter().find(|r| r["height"] == height).unwrap();
+        let bytes = hex::decode(row["bytes"].as_str().unwrap()).unwrap();
+        let mut reader = VlqReader::new(&bytes);
+        let header = read_header(&mut reader).unwrap();
+        assert_eq!(reader.remaining(), 0);
+        let id: [u8; 32] = hex::decode(row["id"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(serialize_header(&header).unwrap().1.as_bytes(), &id);
+        let tx = parse_block_tx(
+            txs.iter().find(|r| r["height"] == height).unwrap()["bytes"]
+                .as_str()
+                .unwrap(),
+        );
+        assert!(!tx.inputs.is_empty());
+        assert!(!tx.output_candidates.is_empty());
+        let section = BlockTransactions {
+            header_id: ModifierId::from_bytes(id),
+            transactions: vec![tx.clone()],
+        };
+        let mut writer = VlqWriter::new();
+        write_block_transactions_with_version(&mut writer, &section, header.version).unwrap();
+        let section_id = compute_section_id(
+            TYPE_BLOCK_TRANSACTIONS,
+            &id,
+            header.transactions_root.as_bytes(),
+        );
+        store.store_header(&id, &bytes).unwrap();
+        store
+            .store_block_section(&section_id, &writer.result())
+            .unwrap();
+        store
+            .apply_block_unchecked_for_test(height, &id, &header.state_root, &[tx])
+            .unwrap();
+        assert_eq!(store.root_digest(), header.state_root);
+        let snapshot = store.committed_snapshot().unwrap().unwrap();
+        let mut disposition = None;
+        let got = snapshot
+            .candidate_dry_run_cached(&mut base, &[], &mut disposition)
+            .unwrap();
+        assert_eq!(got, snapshot.candidate_dry_run(&[]).unwrap());
+        assert_eq!(got, store.candidate_dry_run(&[]).unwrap());
+        assert_eq!(got.0, header.state_root);
+        assert_eq!(got.2, id);
+        assert_eq!(base.as_ref().unwrap().tip_id(), id);
+        if height == 1 {
+            root_one = Some(got.0);
+            assert_eq!(disposition, Some(BaseDisposition::Rehydrated));
+        } else {
+            assert_ne!(root_one.unwrap(), got.0, "N+1 must change the UTXO tree");
+            assert_eq!(disposition, Some(BaseDisposition::Advanced));
+            let mut hit = None;
+            assert_eq!(
+                snapshot
+                    .candidate_dry_run_cached(&mut base, &[], &mut hit)
+                    .unwrap(),
+                got
+            );
+            assert_eq!(hit, Some(BaseDisposition::Hit));
+        }
+        expected_tip = id;
+    }
+    let expected_root = store.root_digest();
+    drop(base);
+    drop(store);
+    let mut reopened = StateStore::open(&path).unwrap();
+    assert_eq!(reopened.height(), 2);
+    assert_eq!(reopened.root_digest(), expected_root);
+    assert_eq!(reopened.chain_state().best_full_block_id, expected_tip);
+    let snapshot = reopened.committed_snapshot().unwrap().unwrap();
+    assert_eq!(
+        snapshot.candidate_dry_run(&[]).unwrap(),
+        reopened.candidate_dry_run(&[]).unwrap()
+    );
+}
+
+#[test]
+fn snapshot_install_preserves_mainnet_lookups_forward_apply_and_reopen() {
+    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_ser::header::read_header;
+    use ergo_state::avl::snapshot_codec::reconstruct_tree;
+    use ergo_state::chain::HeaderMeta;
+
+    /// Rebuild the committed tree from every persisted node. Cached labels
+    /// and single-box lookups miss nodes overwritten by a stale allocator.
+    fn committed_tree_root(store: &StateStore) -> ADDigest {
+        let digest = store
+            .committed_snapshot()
+            .unwrap()
+            .unwrap()
+            .hydrate_prover()
+            .unwrap()
+            .digest()
+            .unwrap();
+        ADDigest::from_bytes(digest.as_ref().try_into().unwrap())
+    }
+
+    let headers: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/headers_1_10.json"
+    ))
+    .unwrap();
+    let tx_rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/transactions_1_10.json"
+    ))
+    .unwrap();
+    let parsed: Vec<_> = headers
+        .iter()
+        .map(|row| {
+            let bytes = hex::decode(row["bytes"].as_str().unwrap()).unwrap();
+            let header = read_header(&mut VlqReader::new(&bytes)).unwrap();
+            let id: [u8; 32] = hex::decode(row["id"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let tx = tx_rows
+                .iter()
+                .find(|tx| tx["height"].as_u64() == Some(u64::from(header.height)))
+                .unwrap();
+            (
+                header,
+                id,
+                bytes,
+                parse_block_tx(tx["bytes"].as_str().unwrap()),
+            )
+        })
+        .collect();
+    let source_dir = tempfile::tempdir().unwrap();
+    let mut source = StateStore::open(&source_dir.path().join("state.redb")).unwrap();
+    init_genesis(&mut source);
+    for (header, id, _, tx) in parsed.iter().take(9) {
+        source
+            .apply_block_unchecked_for_test(
+                header.height,
+                id,
+                &header.state_root,
+                std::slice::from_ref(tx),
+            )
+            .unwrap();
+    }
+    let pinned_root = parsed[8].0.state_root;
+    assert_eq!(source.root_digest(), pinned_root);
+    let served = source.build_snapshot_at_tip(2).unwrap();
+    let chunks = served.chunks.iter().cloned().collect();
+    let spend_id = *parsed[9].3.inputs[0].box_id.as_bytes();
+    let spend_bytes = source.get_box_bytes(&spend_id).unwrap();
+
+    for (pipelined, reopen_before_install) in [(false, true), (true, false), (true, true)] {
+        for reopen_before_apply in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.redb");
+            let mut store = StateStore::open(&path).unwrap();
+            init_genesis(&mut store);
+            if reopen_before_install {
+                // An ordinary reopen materializes the genesis allocator row.
+                drop(store);
+                store = StateStore::open(&path).unwrap();
+            }
+            for (header, id, bytes, _) in &parsed {
+                let meta = HeaderMeta {
+                    height: header.height,
+                    parent_id: *header.parent_id.as_bytes(),
+                    timestamp: header.timestamp,
+                    cumulative_score: u64::from(header.height).to_be_bytes().to_vec(),
+                    pow_validity: 1,
+                };
+                store
+                    .store_validated_header(
+                        id,
+                        bytes,
+                        &meta,
+                        Some((header.height, meta.cumulative_score.clone())),
+                    )
+                    .unwrap();
+            }
+            if pipelined {
+                store.enable_persist_pipeline(2).unwrap();
+            }
+            let old_root = store.root_digest();
+            let old_committed = store.committed_snapshot().unwrap().unwrap();
+            store
+                .install_snapshot_state(
+                    reconstruct_tree(&served.manifest_bytes, &chunks).unwrap(),
+                    9,
+                    parsed[8].1,
+                    &pinned_root,
+                )
+                .unwrap();
+            assert_eq!(store.height(), 9);
+            assert_eq!(store.root_digest(), pinned_root);
+            assert_eq!(old_committed.state_root(), old_root);
+            assert_eq!(old_committed.lookup_box(&spend_id).unwrap(), None);
+            drop(old_committed);
+            assert_eq!(store.get_box_bytes(&spend_id), Some(spend_bytes.clone()));
+            let committed = store.committed_snapshot().unwrap().unwrap();
+            assert_eq!(
+                committed.lookup_box(&spend_id).unwrap(),
+                Some(spend_bytes.clone())
+            );
+            assert_eq!(
+                committed
+                    .hydrate_prover()
+                    .unwrap()
+                    .digest()
+                    .unwrap()
+                    .as_ref(),
+                pinned_root.as_bytes()
+            );
+            drop(committed);
+
+            if reopen_before_apply {
+                store.shutdown_cleanly().unwrap();
+                drop(store);
+                store = StateStore::open(&path).unwrap();
+                assert_eq!(store.height(), 9);
+                assert_eq!(store.get_box_bytes(&spend_id), Some(spend_bytes.clone()));
+                if pipelined {
+                    store.enable_persist_pipeline(2).unwrap();
+                }
+            }
+            store
+                .apply_block_unchecked_for_test(
+                    10,
+                    &parsed[9].1,
+                    &parsed[9].0.state_root,
+                    std::slice::from_ref(&parsed[9].3),
+                )
+                .unwrap();
+            store.flush_persist_pipeline().unwrap();
+            if pipelined {
+                let progress = store.persistence_progress().unwrap();
+                assert_eq!(progress.enqueued_jobs, 1);
+                assert_eq!(progress.committed_jobs, 1);
+                // The worker must publish commit progress to the arena the
+                // install created, or committed nodes stay pinned for good.
+                assert_eq!(store.metrics().arena_unpersisted_pinned_bytes, 0);
+            }
+            assert_eq!(store.root_digest(), parsed[9].0.state_root);
+            assert_eq!(committed_tree_root(&store), parsed[9].0.state_root);
+            store.rollback_to(9, None, None).unwrap();
+            assert_eq!(store.root_digest(), pinned_root);
+            assert_eq!(store.get_box_bytes(&spend_id), Some(spend_bytes.clone()));
+            assert_eq!(committed_tree_root(&store), pinned_root);
+            store.shutdown_cleanly().unwrap();
+            drop(store);
+            let mut reopened = StateStore::open(&path).unwrap();
+            assert_eq!(reopened.height(), 9);
+            assert_eq!(reopened.root_digest(), pinned_root);
+            assert_eq!(reopened.get_box_bytes(&spend_id), Some(spend_bytes.clone()));
+            assert_eq!(committed_tree_root(&reopened), pinned_root);
+        }
+    }
+}
+
 #[test]
 fn blocks_1_10_digests_match_with_persistence() {
     let dir = tempfile::tempdir().unwrap();
@@ -164,7 +445,7 @@ fn blocks_1_10_digests_match_with_persistence() {
 }
 
 #[test]
-fn crash_recovery_restores_state() {
+fn clean_reopen_restores_state() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("state.redb");
 
@@ -211,7 +492,8 @@ fn crash_recovery_restores_state() {
         }
 
         assert_eq!(store.height(), 5);
-        // store dropped here — simulates crash
+        // Ordinary Drop closes the store; this does not simulate process exit
+        // or physical power loss.
     }
 
     // Reopen — should recover from committed state
@@ -437,7 +719,7 @@ fn rollback_to_genesis_then_reapply() {
 
 /// Regression: rollback restores correct state, digests match, re-apply works.
 #[test]
-fn rollback_to_height_3_then_reapply() {
+fn rollback_to_height_4_then_reapply() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("state.redb");
     let mut store = StateStore::open(&db_path).unwrap();
@@ -490,21 +772,18 @@ fn rollback_to_height_3_then_reapply() {
     let (reachable, arena, tree_h) = store.debug_tree_stats();
     eprintln!("after rollback to 4: reachable={reachable} arena={arena} tree_h={tree_h}");
 
-    let expected_3 = digests.iter().find(|d| d.height == 4).unwrap();
-    let expected_digest_3 = ADDigest::from_bytes(
-        hex::decode(&expected_3.state_root)
+    let expected_4 = digests.iter().find(|d| d.height == 4).unwrap();
+    let expected_digest_4 = ADDigest::from_bytes(
+        hex::decode(&expected_4.state_root)
             .unwrap()
             .try_into()
             .unwrap(),
     );
     assert_eq!(
         store.root_digest(),
-        expected_digest_3,
-        "digest after rollback to height 3 should match original"
+        expected_digest_4,
+        "digest after rollback to height 4 should match original"
     );
-
-    // Verify all boxes that should exist at height 3 can be looked up
-    // (the emission box and its predecessors should be in the UTXO set)
 
     // Re-apply block 5 — must produce the same digest
     for height in 5u32..=5 {
@@ -666,8 +945,8 @@ fn undo_entries_within_window_survive() {
 /// This is the key invariant for batched persistence: after a clean
 /// shutdown the database reflects exactly the blocks applied, regardless
 /// of whether commits were one-per-block or N-per-batch. The persist
-/// pipeline coalesces queued jobs into a single redb transaction (see
-/// MAX_BATCH_BLOCKS); this test exercises the path that production runs.
+/// pipeline may coalesce queued jobs into a redb transaction; scheduling here
+/// does not prove that any particular batch contains multiple jobs.
 #[test]
 fn persist_pipeline_batched_commits_restore_correctly() {
     let dir = tempfile::tempdir().unwrap();

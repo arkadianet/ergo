@@ -149,7 +149,7 @@ fn transactions_root_blocks_700000_700010() {
     eprintln!("{} v2 blocks verified", blocks.len());
 }
 
-fn verify_extension_root(block: &BlockVector, _header: &Header) {
+fn verify_extension_root(block: &BlockVector, header: &Header) {
     let ext = block
         .extension
         .as_ref()
@@ -164,6 +164,13 @@ fn verify_extension_root(block: &BlockVector, _header: &Header) {
         .map(|(k, v)| (k.as_slice(), v.as_slice()))
         .collect();
     let computed = extension_root(&field_refs);
+    assert_eq!(block.height, header.height);
+    assert_eq!(
+        computed,
+        *header.extension_root.as_bytes(),
+        "extension commitment differs from captured header at h={}",
+        block.height
+    );
     let expected = hex::decode(&ext.digest).unwrap();
     assert_eq!(
         computed,
