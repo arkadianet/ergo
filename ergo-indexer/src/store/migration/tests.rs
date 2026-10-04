@@ -548,10 +548,26 @@ fn schema_two_parallel_scan_matches_serial_additions_and_uses_workers() {
     assert!(!serial.is_empty());
     for workers in [1, 2, 4, 7] {
         let threads = Mutex::new(HashSet::new());
-        let parallel = scan_boxes_parallel(&legacy.db, total, workers, &|| Ok(()), &|| {
-            threads.lock().unwrap().insert(std::thread::current().id());
+        let log_path = tmp.path().join(format!("workers-{workers}.log"));
+        let log = std::fs::File::create(&log_path).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || log.try_clone().unwrap())
+            .finish();
+        let parallel = tracing::subscriber::with_default(subscriber, || {
+            scan_boxes_parallel(&legacy.db, total, workers, &|| Ok(()), &|| {
+                threads.lock().unwrap().insert(std::thread::current().id());
+                tracing::info!("migration worker snapshot");
+            })
         })
         .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(log_path)
+                .unwrap()
+                .matches("migration worker snapshot")
+                .count(),
+            workers
+        );
         assert_eq!(
             threads.into_inner().unwrap().len(),
             workers,
@@ -563,4 +579,81 @@ fn schema_two_parallel_scan_matches_serial_additions_and_uses_workers() {
         }
     }
     assert_eq!(meta::read_schema_version(&read).unwrap(), Some(2));
+}
+
+fn migrate_copy(source: &std::path::Path) -> tempfile::TempDir {
+    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let copy = tempfile::Builder::new()
+        .prefix("indexer-schema-bench-")
+        .tempdir_in(target)
+        .unwrap();
+    let path = copy.path().join("indexer.redb");
+    let copy_start = Instant::now();
+    let bytes =
+        std::fs::copy(source, &path).expect("copy index; source is never opened for writing");
+    eprintln!(
+        "copy: {bytes} bytes in {:.3}s -> {}",
+        copy_start.elapsed().as_secs_f64(),
+        path.display()
+    );
+    let open_start = Instant::now();
+    let (store, outcome) =
+        IndexerStore::open_for_boot(&path, ergo_state::DEFAULT_REDB_CACHE_BYTES).unwrap();
+    assert_eq!(
+        outcome,
+        OpenOutcome::MigrationPending,
+        "source must be a redb-4 schema-2 index"
+    );
+    eprintln!("open: {:.3}s", open_start.elapsed().as_secs_f64());
+    let before = store.read_meta().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    // Use the migration directly: failures must fail the benchmark, not rebuild its copy.
+    tracing::subscriber::with_default(subscriber, || migrate_schema_2_to_3(&store.db)).unwrap();
+    assert_eq!(
+        store.read_meta().unwrap(),
+        before,
+        "checkpoint must be preserved"
+    );
+    assert_eq!(
+        meta::read_schema_version(&store.db.begin_read().unwrap()).unwrap(),
+        Some(3)
+    );
+    eprintln!(
+        "preserved: height={}, boxes={}, transactions={}",
+        before.indexed_height, before.global_box_index, before.global_tx_index
+    );
+    drop(store);
+    copy
+}
+
+#[test]
+fn schema_two_copy_harness_never_changes_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source.redb");
+    drop(build(&source, &blocks(), true));
+    let before = std::fs::read(&source).unwrap();
+    let copy = migrate_copy(&source);
+    assert!(
+        std::fs::read(&source).unwrap() == before,
+        "harness changed source bytes"
+    );
+    let (migrated, outcome) = IndexerStore::open(&copy.path().join("indexer.redb")).unwrap();
+    assert_eq!(outcome, OpenOutcome::Resumed);
+    assert_eq!(migrated.read_meta().unwrap().indexed_height, 3);
+}
+
+#[test]
+#[ignore = "copies ERGO_INDEXER_MIGRATION_SOURCE into worktree target before benchmarking"]
+fn schema_two_real_data_copy_benchmark() {
+    let source = std::env::var_os("ERGO_INDEXER_MIGRATION_SOURCE")
+        .expect("set ERGO_INDEXER_MIGRATION_SOURCE to an offline redb-4 schema-2 index");
+    let copy = migrate_copy(std::path::Path::new(&source));
+    eprintln!("migrated copy retained at {}", copy.keep().display());
 }

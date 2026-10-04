@@ -83,6 +83,7 @@ fn migrate_controlled(
         height = checkpoint.indexed_height,
         "migrating schema-2 index in place"
     );
+    let token_start = Instant::now();
     let mut changed_tokens = 0_u64;
     let mut scanned_tokens = 0_u64;
     {
@@ -142,12 +143,14 @@ fn migrate_controlled(
     }
     tracing::info!(
         event = "indexer_schema_migration_tokens_complete",
+        phase_secs = token_start.elapsed().as_secs_f64(),
         scanned_tokens,
         changed_tokens,
         elapsed_secs = start.elapsed().as_secs_f64(),
         "token metadata migration complete"
     );
 
+    let box_start = Instant::now();
     // Only newly keyable boxes are retained in memory. Existing entries are
     // merged from the old snapshot one spill at a time, including when a wrapped
     // tree shares its v3 key with an already-indexed structured tree.
@@ -168,6 +171,16 @@ fn migrate_controlled(
     let mut additions: Vec<_> = additions.into_iter().collect();
     additions.sort_unstable_by_key(|(hash, _)| *hash.as_bytes());
     let affected_templates = additions.len();
+    tracing::info!(
+        event = "indexer_schema_migration_boxes_complete",
+        phase_secs = box_start.elapsed().as_secs_f64(),
+        workers,
+        scanned_boxes = checkpoint.global_box_index,
+        affected_boxes,
+        affected_templates,
+        "box scan and deterministic merge complete"
+    );
+    let template_start = Instant::now();
     {
         let mut templates = write.open_table(INDEXED_TEMPLATE)?;
         let mut segments = write.open_table(SEGMENTS)?;
@@ -247,6 +260,13 @@ fn migrate_controlled(
             observer()?;
         }
     }
+    tracing::info!(
+        event = "indexer_schema_migration_templates_complete",
+        phase_secs = template_start.elapsed().as_secs_f64(),
+        affected_templates,
+        "template writes staged"
+    );
+    let undo_start = Instant::now();
     // UndoEntry contains ONLY prior checkpoint pointers, never projection
     // deltas. Rollback re-derives template hashes from the supplied block bytes
     // using v3, so the existing entries are already identical to a fresh v3
@@ -259,11 +279,19 @@ fn migrate_controlled(
     }
     observer()?;
     let undo_entries = undo.len()?;
+    tracing::info!(
+        event = "indexer_schema_migration_undo_complete",
+        phase_secs = undo_start.elapsed().as_secs_f64(),
+        undo_entries,
+        "retained undo entries validated"
+    );
     meta::write_schema_version(&write, INDEXER_SCHEMA_VERSION)?;
     check()?;
+    let commit_start = Instant::now();
     write.commit()?;
     tracing::info!(
         event = "indexer_schema_migration_complete",
+        commit_secs = commit_start.elapsed().as_secs_f64(),
         changed_tokens,
         scanned_tokens,
         scanned_boxes = checkpoint.global_box_index,
@@ -308,25 +336,28 @@ fn scan_boxes_parallel(
             })?;
             let failed = &failed;
             let first_error = &first_error;
+            let dispatch = tracing::dispatcher::get_default(Clone::clone);
             let thread = std::thread::Builder::new()
                 .name(format!("index-migrate-{worker}"))
                 .stack_size(ergo_ser::decode_stack::DECODE_THREAD_STACK_BYTES)
                 .spawn_scoped(scope, move || {
-                    on_worker();
-                    scan_box_range(&read, range, &|| {
-                        check()?;
-                        if failed.load(Ordering::Acquire) {
-                            Err(invalid("box scan aborted after worker failure"))
-                        } else {
-                            Ok(())
-                        }
-                    })
-                    .map_err(|error| {
-                        let mut first = first_error.lock().unwrap_or_else(|p| p.into_inner());
-                        if first.is_none() {
-                            *first = Some(error);
-                        }
-                        failed.store(true, Ordering::Release);
+                    tracing::dispatcher::with_default(&dispatch, || {
+                        on_worker();
+                        scan_box_range(&read, range, &|| {
+                            check()?;
+                            if failed.load(Ordering::Acquire) {
+                                Err(invalid("box scan aborted after worker failure"))
+                            } else {
+                                Ok(())
+                            }
+                        })
+                        .map_err(|error| {
+                            let mut first = first_error.lock().unwrap_or_else(|p| p.into_inner());
+                            if first.is_none() {
+                                *first = Some(error);
+                            }
+                            failed.store(true, Ordering::Release);
+                        })
                     })
                 })
                 .map_err(|source| {
