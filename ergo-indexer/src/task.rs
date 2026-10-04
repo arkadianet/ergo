@@ -665,6 +665,10 @@ const MIN_POLL_DELAY: Duration = Duration::from_millis(50);
 #[path = "task_batch_tests.rs"]
 mod batch_tests;
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "task_mainnet_bench.rs"]
+mod task_mainnet_bench;
+
 /// Returns `true` if the sleep elapsed; `false` if the cancel flag
 /// flipped during sleep. Used by the driver loop to exit promptly on
 /// shutdown.
