@@ -56,9 +56,9 @@ infrastructure.
   requested IDs that are pooled, in pool order, instead of full transactions.
 - Upgrade normal storage to redb 4.3 and automatically convert 0.11 redb 2.6
   data directories before opening storage. Verified, journaled swaps retain
-  `*.redb2-backup` originals and recover after interruption. Stale legacy
-  indexers are deleted first to reclaim space for the state copy; both the new
-  node and a rollback to 0.11 rebuild the derived index. `--keep-stale-indexer`
+  `*.redb2-backup` originals and recover after interruption. Unsupported or
+  space-constrained legacy indexers are deleted first to reclaim space for the
+  state copy; both the new node and a rollback to 0.11 rebuild the deleted index. `--keep-stale-indexer`
   or `[store] auto_upgrade_keep_stale_indexer = true` explicitly retains it.
   `ergo-node upgrade-data DATA_DIR --indexer-db NAME` runs offline; `--discard-backups` trades local rollback
   copies for space. Every startup warns with retained backup paths, sizes and
@@ -77,10 +77,13 @@ infrastructure.
   possible additional flush latency. The startup upgrade inventory fails
   closed on unsupported formats, corruption and access errors, preserving
   database files before normal storage opens.
-- Indexer schema 3: on first start an existing indexer database is deleted
-  and rebuilt from genesis, and `/blockchain/*` answers `503 indexer-syncing`
-  until it catches up. The rebuild applies two Scala-parity corrections to
-  already-indexed history: EIP-4 token names, descriptions and decimals use
+- Indexer schema 3: schema-2 indexes migrate in place atomically, preserving
+  indexed history and rollback. Legacy 0.11 indexes are converted and kept
+  when space covers both indexer and state conversions; on tight disks the
+  indexer is deleted first so state can upgrade. Older schemas or failed
+  migrations rebuild from genesis, with `/blockchain/*` answering
+  `503 indexer-syncing` until caught up. The migration applies two Scala-parity
+  corrections to already-indexed history: EIP-4 token names, descriptions and decimals use
   the JVM text and digit projections, and outputs with soft-fork-wrapped
   scripts are listed under the template hash Scala records for them (for
   example the mainnet block 1,702,686 output).

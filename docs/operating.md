@@ -353,14 +353,22 @@ The inventory is `state.redb` (UTXO/digest and all embedded wallet tables),
 `indexer.redb`). Encrypted wallet secrets, the private mining queue, mining
 policy/history and maintenance journals are files/JSON, not separate redb
 databases. Missing databases are left for normal startup to create; current
-files are skipped. A stale legacy indexer (including schema 2) is deleted
-**first**, through the crash-safe journal, freeing its space before the state
-copy. Schema 3 needs a rebuild from genesis anyway; rolling back to 0.11 also
-rebuilds the deleted index. A legacy indexer already at schema 3 is migrated.
+files are skipped. A clean legacy schema-2 indexer is converted and kept when
+free space covers both its conversion and the remaining database conversions,
+using the same file-size-plus-headroom rule for each. On indexer open, schema 2
+is migrated to schema 3 in one atomic transaction: token metadata is recomputed
+from issuing boxes and wrapped-script template entries are added, preserving
+indexed height and rollback history. Progress logs report scanned boxes,
+changed tokens, affected boxes/templates and elapsed time every ten seconds.
+If space is insufficient or unknown, the indexer is deleted **first**, through
+the crash-safe journal, so the state upgrade has priority. Older schemas and
+failed schema migrations rebuild from genesis. Rolling back to 0.11 rebuilds a
+deleted index. A legacy indexer already at schema 3 is converted and kept.
 To retain stale derived data explicitly, pass `--keep-stale-indexer` to the
 offline command, or set `[store] auto_upgrade_keep_stale_indexer = true` for
-startup (default `false`). Retention frees no space and may prevent upgrading
-on a nearly full disk. `--keep-stale-indexer` conflicts with `--discard-backups`.
+startup (default `false`). This retains the legacy file as a rollback backup
+and rebuilds the index, including for schema 2. Retention frees no space and
+may prevent upgrading on a nearly full disk. `--keep-stale-indexer` conflicts with `--discard-backups`.
 
 To perform the upgrade separately from startup, using the new binary:
 
@@ -454,7 +462,8 @@ are never replaced. Do not manually
 delete upgrade journals or copies between the two renames. An unclean legacy
 indexer whose schema cannot be read without repair is treated as stale with a
 warning, and deleted by default (or retained on explicit request), without
-repairing the source. A clean legacy indexer at the current schema is migrated.
+repairing the source. Clean schema-2 indexes are preserved when space allows;
+current-schema legacy indexes are always converted.
 State, peers and webhooks still require verified conversion; recovery happens
 only in the converter's private copy. Windows shares the converter's portable directory-sync limit;
 use an external stopped-directory backup for power-loss recovery there.
