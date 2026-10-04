@@ -87,10 +87,11 @@ fn fail(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> 
     std::io::Error::other(message.into()).into()
 }
 
-fn safe_relative(name: &str) -> Result<&Path> {
-    let path = Path::new(name);
+fn safe_relative(name: &str) -> Result<PathBuf> {
+    let path: PathBuf = name.split('/').collect();
     if name.is_empty()
-        || name.contains('\\')
+        || name.contains(['\\', ':'])
+        || name.split('/').any(|part| part.is_empty() || part == "." || part == "..")
         || path
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
@@ -341,9 +342,10 @@ pub fn backup(data_dir: &Path, destination: &Path) -> Result<BackupManifest> {
     for path in &files {
         let mut file = copy_checked(&data_dir.join(path), &staging.path().join(path))?;
         file.path = path
-            .to_str()
-            .ok_or_else(|| fail("non-UTF8 filename"))?
-            .to_owned();
+            .components()
+            .map(|component| component.as_os_str().to_str().ok_or_else(|| fail("non-UTF8 filename")))
+            .collect::<Result<Vec<_>>>()?
+            .join("/");
         safe_relative(&file.path)?;
         copied.push(file);
     }
@@ -580,6 +582,19 @@ mod tests {
             .to_string()
             .contains("symlinks"));
         assert!(!parent.path().join("backup").exists());
+    }
+
+    #[test]
+    fn manifest_paths_are_portable_and_reject_windows_prefixes() {
+        let data = seeded_directory();
+        let parent = tempfile::tempdir().unwrap();
+        let manifest = backup(data.path(), &parent.path().join("backup")).unwrap();
+        assert!(manifest.files.iter().any(|f| f.path == "wallet/encrypted-seed"));
+        assert!(manifest.files.iter().all(|f| !f.path.contains('\\')));
+        assert_eq!(safe_relative("wallet/encrypted-seed").unwrap(), Path::new("wallet").join("encrypted-seed"));
+        for path in [r"wallet\encrypted-seed", "C:/secret", "C:secret", "../secret", "/secret", "wallet//secret", "wallet/./secret"] {
+            assert!(safe_relative(path).is_err(), "accepted {path:?}");
+        }
     }
 
     #[test]
