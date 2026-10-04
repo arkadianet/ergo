@@ -57,6 +57,8 @@ pub struct PrivateTransactionOptions {
 #[serde(rename_all = "snake_case")]
 pub enum PrivateTransactionState {
     Queued,
+    /// Never stored: candidate membership is derived from the served template
+    /// when listing. A file that stored it is read as `Queued`.
     InCandidate,
     Mined,
     Conflicted,
@@ -415,7 +417,7 @@ impl PrivateTransactionQueue {
     }
 
     /// Every tracked id, to recognize confirmations while scanning blocks.
-    pub fn record_ids(&self) -> std::collections::HashSet<[u8; 32]> {
+    pub fn record_ids(&self) -> HashSet<[u8; 32]> {
         self.lock()
             .records
             .keys()
@@ -447,7 +449,8 @@ impl PrivateTransactionQueue {
     }
 
     /// Inputs stay reserved across restart, conflict, and rollback until an
-    /// explicit cancellation or expiry withdraws the transaction permanently.
+    /// explicit cancellation or expiry withdraws the transaction permanently,
+    /// or its confirmation is deeper than the rollback window.
     pub fn reserved_inputs(&self) -> BTreeSet<[u8; 32]> {
         self.lock()
             .records
