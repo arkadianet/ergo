@@ -37,6 +37,8 @@ use std::sync::{
 
 use redb::Database;
 
+type SchemaMigration = fn(&Database) -> Result<(), IndexerError>;
+
 use crate::error::IndexerError;
 use ergo_indexer_types::IndexerHaltReason;
 
@@ -150,7 +152,7 @@ impl IndexerStore {
     fn open_with_migration(
         path: &Path,
         cache_bytes: usize,
-        migrate: fn(&Database) -> Result<(), IndexerError>,
+        migrate: SchemaMigration,
     ) -> Result<(Self, OpenOutcome), IndexerError> {
         Self::open_inner(path, cache_bytes, Some(migrate))
     }
@@ -165,7 +167,7 @@ impl IndexerStore {
     fn open_inner(
         path: &Path,
         cache_bytes: usize,
-        migrate: Option<fn(&Database) -> Result<(), IndexerError>>,
+        migrate: Option<SchemaMigration>,
     ) -> Result<(Self, OpenOutcome), IndexerError> {
         if !path.exists() {
             return Self::create_fresh(path, cache_bytes).map(|s| (s, OpenOutcome::CreatedFresh));
