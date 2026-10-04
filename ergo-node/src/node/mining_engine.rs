@@ -77,13 +77,14 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ergo_indexer::StorageRentEligibleDto;
+use ergo_indexer::{IndexerQuery, StorageRentEligibleDto};
 use ergo_mining::candidate::BuildMode;
 use ergo_mining::engine::{
     build_and_publish_cached, build_requested_and_publish_cached, BuildIntent, BuildOutcome,
 };
 use ergo_mining::error::MiningError;
 use ergo_mining::handle::MiningHandle;
+use ergo_mining::rent_state::RentSelfClaimState;
 use ergo_mining::state_view::CandidateProofCache;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
@@ -107,8 +108,8 @@ const STORAGE_PERIOD_BLOCKS: u32 = 1_051_200;
 
 /// Hard bound on indexer pages fetched per build. Stale rows (indexer lag or
 /// a recent reorg) are filtered against the build snapshot and backfilled
-/// from subsequent pages; this caps the worst-case scan when the index is
-/// badly behind so a build never stalls on unbounded indexer reads.
+/// from subsequent pages; this caps reads during small apply/reorg lag.
+/// Larger height gaps pause the scan entirely.
 ///
 /// Page size is `max_storage_rent_claims`, so the worst-case scan is
 /// `MAX_RENT_PAGES * max_claims` rows: a small claim cap also shrinks the
@@ -117,6 +118,30 @@ const STORAGE_PERIOD_BLOCKS: u32 = 1_051_200;
 /// candidate (the missed boxes stay eligible for the next build once the
 /// index catches up). Correctness never depends on collecting every box.
 const MAX_RENT_PAGES: u32 = 4;
+
+fn update_rent_self_claim_state(
+    handle: &MiningHandle,
+    indexed_height: u64,
+    parent_height: u32,
+) -> RentSelfClaimState {
+    let next = RentSelfClaimState::at_height(
+        handle.claim_storage_rent() && handle.max_storage_rent_claims() > 0,
+        indexed_height,
+        parent_height,
+    );
+    let previous = handle.set_rent_self_claim_state(next);
+    match (previous, next) {
+        (RentSelfClaimState::PausedIndexerBehind { .. }, RentSelfClaimState::Active) => {
+            info!("storage-rent self-claims resumed: indexer at height {indexed_height}, chain at {parent_height}");
+        }
+        (RentSelfClaimState::PausedIndexerBehind { .. }, _) => {}
+        (_, RentSelfClaimState::PausedIndexerBehind { .. }) => {
+            warn!("storage-rent self-claims paused: indexer at height {indexed_height}, chain at {parent_height}; claims resume when the index catches up");
+        }
+        _ => {}
+    }
+    next
+}
 
 /// Enumerate storage-rent-eligible boxes for the miner self-claim:
 /// oldest-first, capped at `max_claims`, each materialized to a full
@@ -139,40 +164,56 @@ fn resolve_eligible_rent_boxes(
     indexer: Option<&ergo_indexer::IndexerHandle>,
     snapshot: &CommittedSnapshot,
     candidate_height: u32,
-    max_claims: u32,
+    handle: &MiningHandle,
     should_cancel: &dyn Fn() -> bool,
 ) -> Vec<ErgoBox> {
     if should_cancel() {
         return Vec::new();
     }
-    let Some(store_idx) = indexer.and_then(|h| h.store()) else {
-        // Boot-time config validation requires the indexer when rent claiming
-        // is enabled, so an absent store here means the indexer halted —
-        // surfaced so "rent stopped working" is distinguishable from "no
-        // eligible boxes".
-        warn!(
-            "mining: rent claiming enabled but indexer store unavailable; building without rent self-claim"
-        );
-        return Vec::new();
-    };
-    // Silent: a chain younger than one storage period simply has no eligible
-    // boxes yet — normal on young chains, not operator-actionable.
-    let Some(height_cutoff) = candidate_height.checked_sub(STORAGE_PERIOD_BLOCKS) else {
-        return Vec::new();
-    };
-    page_rent_boxes_cancellable(
-        |off, lim| {
-            store_idx.read_storage_rent_eligible_paged(
-                height_cutoff,
-                off,
-                lim,
-                ergo_indexer::SortDir::Asc,
+    resolve_rent_boxes_at_height(
+        handle,
+        indexer.map_or(0, IndexerQuery::indexed_height),
+        candidate_height.saturating_sub(1),
+        || {
+            let Some(store_idx) = indexer.and_then(|h| h.store()) else {
+                warn!(
+                    "mining: rent claiming enabled but indexer store unavailable; building without rent self-claim"
+                );
+                return Vec::new();
+            };
+            // Young chains have no eligible boxes yet.
+            let Some(height_cutoff) = candidate_height.checked_sub(STORAGE_PERIOD_BLOCKS) else {
+                return Vec::new();
+            };
+            page_rent_boxes_cancellable(
+                |off, lim| {
+                    store_idx.read_storage_rent_eligible_paged(
+                        height_cutoff,
+                        off,
+                        lim,
+                        ergo_indexer::SortDir::Asc,
+                    )
+                },
+                |id| snapshot.get_box(id),
+                handle.max_storage_rent_claims(),
+                should_cancel,
             )
         },
-        |id| snapshot.get_box(id),
-        max_claims,
-        should_cancel,
     )
+}
+
+fn resolve_rent_boxes_at_height(
+    handle: &MiningHandle,
+    indexed_height: u64,
+    parent_height: u32,
+    scan: impl FnOnce() -> Vec<ErgoBox>,
+) -> Vec<ErgoBox> {
+    if update_rent_self_claim_state(handle, indexed_height, parent_height)
+        != RentSelfClaimState::Active
+    {
+        return Vec::new();
+    }
+    scan()
 }
 
 /// Page through eligible-box rows, materializing each against the build
@@ -419,6 +460,11 @@ pub(super) fn run_build_worker(
         if caller_left {
             continue;
         }
+        update_rent_self_claim_state(
+            &handle,
+            indexer.as_ref().map_or(0, IndexerQuery::indexed_height),
+            intent.expected_height,
+        );
         // Wall-clock closure, sampled by the engine core at the publish step so
         // the stamped time is when the template is actually published (not when
         // this possibly-retried build started). Lives on the worker, not the
@@ -451,16 +497,10 @@ pub(super) fn run_build_worker(
                 BuildReply::Requested { reply, deadline, .. } if reply.is_closed() || Instant::now() >= *deadline)
             };
             let rent_resolver = |snapshot: &CommittedSnapshot, h: u32| {
-                resolve_eligible_rent_boxes(
-                    indexer.as_ref(),
-                    snapshot,
-                    h,
-                    handle.max_storage_rent_claims(),
-                    &|| {
-                        let tip = handle.best_tip();
-                        !tip.synced || tip.parent_id != intent.expected_parent || caller_cancelled()
-                    },
-                )
+                resolve_eligible_rent_boxes(indexer.as_ref(), snapshot, h, &handle, &|| {
+                    let tip = handle.best_tip();
+                    !tip.synced || tip.parent_id != intent.expected_parent || caller_cancelled()
+                })
             };
             let result = if is_requested {
                 build_requested_and_publish_cached(
@@ -909,6 +949,126 @@ mod tests {
             };
             Ok(page)
         }
+    }
+
+    #[test]
+    fn rent_self_claim_skips_pages_while_behind_and_resumes() {
+        let handle = plain_handle().with_rent_config(true, 4);
+        let parent = STORAGE_PERIOD_BLOCKS + 100;
+        let fetches = Cell::new(0);
+        let rows = [row(1)];
+        for (indexed_height, expected_boxes, expected_fetches) in [
+            (u64::from(parent - 3), 0, 0),
+            (u64::from(parent - 20), 0, 0),
+            (u64::from(parent), 1, 1),
+        ] {
+            let boxes = resolve_rent_boxes_at_height(&handle, indexed_height, parent, || {
+                page_rent_boxes(pager(&rows, &fetches), resolver(&[1]), 4)
+            });
+            assert_eq!(boxes.len(), expected_boxes);
+            assert_eq!(fetches.get(), expected_fetches);
+        }
+    }
+
+    #[test]
+    fn rent_self_claim_small_apply_lag_stays_active() {
+        let handle = plain_handle().with_rent_config(true, 4);
+        let parent = STORAGE_PERIOD_BLOCKS + 100;
+        let rows = [row(1)];
+        for lag in 0..=2 {
+            let fetches = Cell::new(0);
+            let boxes =
+                resolve_rent_boxes_at_height(&handle, u64::from(parent - lag), parent, || {
+                    page_rent_boxes(pager(&rows, &fetches), resolver(&[1]), 4)
+                });
+            assert_eq!(boxes.len(), 1, "lag {lag}");
+            assert_eq!(fetches.get(), 1, "lag {lag}");
+            assert_eq!(handle.rent_self_claim_state(), RentSelfClaimState::Active);
+        }
+        assert_eq!(
+            RentSelfClaimState::at_height(true, u64::MAX, parent),
+            RentSelfClaimState::Active
+        );
+    }
+
+    #[test]
+    fn rent_self_claim_disabled_never_scans() {
+        for (enabled, cap) in [(false, 4), (true, 0)] {
+            let handle = plain_handle().with_rent_config(enabled, cap);
+            let fetches = Cell::new(0);
+            let rows = [row(1)];
+            let boxes = resolve_rent_boxes_at_height(&handle, 100, 100, || {
+                page_rent_boxes(pager(&rows, &fetches), resolver(&[1]), 4)
+            });
+            assert!(boxes.is_empty());
+            assert_eq!(fetches.get(), 0);
+            assert_eq!(handle.rent_self_claim_state(), RentSelfClaimState::Disabled);
+        }
+    }
+
+    #[test]
+    fn rent_self_claim_transitions_log_once_in_each_direction() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::prelude::*;
+
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        struct Events(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut message = Message(String::new());
+                event.record(&mut message);
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((*event.metadata().level(), message.0));
+            }
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Events(events.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let handle = plain_handle().with_rent_config(true, 4);
+            update_rent_self_claim_state(&handle, 100, 100);
+            update_rent_self_claim_state(&handle, 90, 100);
+            update_rent_self_claim_state(&handle, 91, 101);
+            assert_eq!(
+                handle.rent_self_claim_state(),
+                RentSelfClaimState::PausedIndexerBehind {
+                    indexed_height: 91,
+                    chain_height: 101,
+                }
+            );
+            update_rent_self_claim_state(&handle, 99, 101);
+            update_rent_self_claim_state(&handle, 101, 101);
+            assert_eq!(
+                *events.lock().unwrap(),
+                [
+                    (tracing::Level::WARN, "storage-rent self-claims paused: indexer at height 90, chain at 100; claims resume when the index catches up".into()),
+                    (tracing::Level::INFO, "storage-rent self-claims resumed: indexer at height 99, chain at 101".into()),
+                ]
+            );
+            update_rent_self_claim_state(&handle, 90, 101);
+            update_rent_self_claim_state(&handle, 101, 101);
+        });
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                (tracing::Level::WARN, "storage-rent self-claims paused: indexer at height 90, chain at 100; claims resume when the index catches up".into()),
+                (tracing::Level::INFO, "storage-rent self-claims resumed: indexer at height 99, chain at 101".into()),
+                (tracing::Level::WARN, "storage-rent self-claims paused: indexer at height 90, chain at 101; claims resume when the index catches up".into()),
+                (tracing::Level::INFO, "storage-rent self-claims resumed: indexer at height 101, chain at 101".into()),
+            ]
+        );
     }
 
     // ----- happy path -----
