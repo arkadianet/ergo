@@ -114,6 +114,11 @@ impl Drop for RepairGuard<'_> {
 }
 
 impl IndexerStore {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn test_snapshot(&self) -> redb::ReadTransaction {
+        self.db.begin_read().unwrap()
+    }
+
     pub(crate) fn acquire_repair(&self) -> Result<RepairGuard<'_>, IndexerError> {
         self.repair_running
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)

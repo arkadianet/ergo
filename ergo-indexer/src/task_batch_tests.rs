@@ -772,3 +772,222 @@ fn best_header_evidence_read_failure_halts_without_unwinding() {
     assert_eq!(store.read_undo(2).unwrap(), undo);
     assert_eq!(handle.indexed_height(), 2);
 }
+
+fn empty_blocks(end: u32) -> Vec<IndexerFullBlock> {
+    (1_u32..=end)
+        .map(|height| {
+            let mut id = [0; 32];
+            id[..4].copy_from_slice(&height.to_be_bytes());
+            IndexerFullBlock {
+                height: height as i32,
+                header_id: Digest32::from_bytes(id),
+                transactions: vec![],
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn adaptive_batches_expand_far_behind_and_publish_per_block_near_tip() {
+    let blocks = empty_blocks(600);
+    let (_tmp, handle, chain, mut task) = setup(&blocks);
+    assert!(matches!(task.step_batch(), IndexerPoll::Applied(256)));
+    assert_eq!(handle.indexed_height(), 256);
+    assert!(matches!(task.step_batch(), IndexerPoll::Applied(512)));
+    // A moving State tip can bring the next poll inside the near-tip margin.
+    chain.tip.store(544, Ordering::Relaxed);
+    assert!(matches!(task.step_batch(), IndexerPoll::Applied(513)));
+    chain.tip.store(546, Ordering::Relaxed); // 33 behind: batching resumes
+    assert!(matches!(task.step_batch(), IndexerPoll::Applied(514)));
+    while handle.indexed_height() < 546 {
+        let next = handle.indexed_height() + 1;
+        assert!(matches!(task.step_batch(), IndexerPoll::Applied(h) if h == next));
+    }
+    assert!(matches!(task.step_batch(), IndexerPoll::Idle));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn adaptive_replay_reopen_and_rollback_match_every_table() {
+    let blocks = corpus();
+    let (_a, reference, _ca, mut single) = setup(&blocks);
+    let (tmp, handle, chain, mut batched) = setup(&blocks);
+    // Force a boundary within the corpus, then exercise the public adaptive path.
+    assert!(matches!(
+        unlimited_time(&mut batched, 73),
+        IndexerPoll::Applied(73)
+    ));
+    while handle.indexed_height() < 200 {
+        assert!(matches!(batched.step_batch(), IndexerPoll::Applied(_)));
+    }
+    for _ in &blocks {
+        assert!(matches!(single.step(), IndexerPoll::Applied(_)));
+    }
+    super::task_mainnet_bench::assert_all_rows_equal(
+        &reference.store().unwrap().test_snapshot(),
+        &handle.store().unwrap().test_snapshot(),
+    );
+    // Retain every per-height undo across a large batch and its boundary.
+    chain.tip.store(65, Ordering::Relaxed);
+    chain.headers.lock().unwrap().truncate(65);
+    for height in (66..=200).rev() {
+        assert!(matches!(batched.step_batch(), IndexerPoll::RolledBack(h) if h == height));
+    }
+    drop(batched);
+    drop(handle);
+    let (store, _) = IndexerStore::open(&tmp.path().join("indexer.redb")).unwrap();
+    let resumed = IndexerHandle::with_store(store, 65);
+    let mut task = IndexerTask::new(resumed.clone(), Arc::new(Chain::new(&blocks)));
+    while resumed.indexed_height() < 200 {
+        assert!(matches!(task.step_batch(), IndexerPoll::Applied(_)));
+    }
+    super::task_mainnet_bench::assert_all_rows_equal(
+        &reference.store().unwrap().test_snapshot(),
+        &resumed.store().unwrap().test_snapshot(),
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn adaptive_cancelled_prefix_reopens_and_resumes_identically() {
+    let blocks = corpus();
+    let (tmp, handle, chain, mut task) = setup(&blocks);
+    let cancel = task.cancel.clone();
+    *chain.hook.lock().unwrap() = Some(Box::new(move |height| {
+        if height == 80 {
+            cancel.store(true, Ordering::Release);
+        }
+    }));
+    assert!(matches!(task.step_batch(), IndexerPoll::Applied(79)));
+    drop(task);
+    drop(handle);
+    let (store, _) = IndexerStore::open(&tmp.path().join("indexer.redb")).unwrap();
+    assert_eq!(store.read_meta().unwrap().indexed_height, 79);
+    let handle = IndexerHandle::with_store(store, 79);
+    let mut task = IndexerTask::new(handle.clone(), Arc::new(Chain::new(&blocks)));
+    while handle.indexed_height() < 200 {
+        assert!(matches!(task.step_batch(), IndexerPoll::Applied(_)));
+    }
+    let (_tmp, reference, _chain, mut single) = setup(&blocks);
+    for _ in &blocks {
+        assert!(matches!(single.step(), IndexerPoll::Applied(_)));
+    }
+    super::task_mainnet_bench::assert_all_rows_equal(
+        &reference.store().unwrap().test_snapshot(),
+        &handle.store().unwrap().test_snapshot(),
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "subprocess helper for abrupt indexer termination"]
+fn abrupt_catchup_child() {
+    let path = std::path::PathBuf::from(std::env::var("INDEXER_CRASH_INDEX").unwrap());
+    let (store, _) = IndexerStore::open(&path).unwrap();
+    let handle = IndexerHandle::with_store(store, 0);
+    let blocks = corpus();
+    let chain = Arc::new(Chain::new(&blocks));
+    let mut task = IndexerTask::new(handle, chain.clone());
+    assert!(matches!(
+        unlimited_time(&mut task, 16),
+        IndexerPoll::Applied(16)
+    ));
+    let stage = std::env::var("INDEXER_CRASH_STAGE").unwrap();
+    if stage == "uncommitted" {
+        *chain.hook.lock().unwrap() = Some(Box::new(|height| {
+            if height == 80 {
+                // Exit without running database or transaction destructors.
+                std::process::exit(0);
+            }
+        }));
+        task.step_batch();
+        panic!("catch-up did not reach the crash hook");
+    }
+    assert!(matches!(task.step_batch(), IndexerPoll::Applied(_)));
+    std::process::exit(0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn abrupt_catchup_reopens_old_or_committed_checkpoint_and_resumes_all_rows() {
+    for stage in ["uncommitted", "committed"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("crash.redb");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "task::batch_tests::abrupt_catchup_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("INDEXER_CRASH_INDEX", &path)
+            .env("INDEXER_CRASH_STAGE", stage)
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let (store, _) = IndexerStore::open(&path).unwrap();
+        let height = store.read_meta().unwrap().indexed_height;
+        if stage == "uncommitted" {
+            assert_eq!(height, 16);
+        } else {
+            assert!(height > 16);
+        }
+        let handle = IndexerHandle::with_store(store, height);
+        let blocks = corpus();
+        let mut task = IndexerTask::new(handle.clone(), Arc::new(Chain::new(&blocks)));
+        while handle.indexed_height() < 200 {
+            assert!(matches!(task.step_batch(), IndexerPoll::Applied(_)));
+        }
+        let (_tmp, reference, _chain, mut single) = setup(&blocks);
+        for _ in &blocks {
+            assert!(matches!(single.step(), IndexerPoll::Applied(_)));
+        }
+        super::task_mainnet_bench::assert_all_rows_equal(
+            &reference.store().unwrap().test_snapshot(),
+            &handle.store().unwrap().test_snapshot(),
+        );
+    }
+}
+
+#[test]
+fn adaptive_byte_budget_commits_the_completed_large_block_prefix() {
+    use ergo_indexer_types::PROTOCOL_GENESIS_BOX_IDS_MAINNET;
+    use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+    let mut blocks = empty_blocks(600);
+    let input = Input {
+        box_id: Digest32::from_bytes(PROTOCOL_GENESIS_BOX_IDS_MAINNET[0]),
+        spending_proof: SpendingProof::new(vec![0; 65000], ContextExtension::empty()).unwrap(),
+    };
+    // Each synthetic block serializes slightly over 8 MiB. Budget accounting
+    // includes proofs; input identities isolate batching from spend lookup.
+    for block in &mut blocks[..6] {
+        block.transactions = vec![Transaction {
+            inputs: vec![input.clone(); 130],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        }];
+    }
+    let (_tmp, handle, _chain, mut task) = setup(&blocks);
+    assert!(matches!(task.step_batch(), IndexerPoll::Applied(4)));
+    assert_eq!(
+        handle.store().unwrap().read_meta().unwrap().indexed_height,
+        4
+    );
+}
+
+#[test]
+fn adaptive_time_budget_includes_later_block_loading_and_keeps_the_prefix() {
+    let blocks = empty_blocks(600);
+    let (_tmp, handle, chain, mut task) = setup(&blocks);
+    *chain.hook.lock().unwrap() = Some(Box::new(|height| match height {
+        2 => std::thread::sleep(Duration::from_millis(100)),
+        3 => std::thread::sleep(Duration::from_millis(1000)),
+        _ => {}
+    }));
+    assert!(matches!(task.step_batch(), IndexerPoll::Applied(2)));
+    assert_eq!(handle.indexed_height(), 2);
+}
