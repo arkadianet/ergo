@@ -138,7 +138,7 @@ pub enum ActiveParamsError {
     #[error("extra entry has duplicate id {0}")]
     ExtraDuplicateId(u8),
     /// The persistent field count does not fit its one-byte encoding.
-    #[error("codec: parameter count {0} exceeds255")]
+    #[error("codec: parameter count {0} exceeds 255")]
     TooManyParameters(usize),
     /// Persistence-codec input was truncated.
     #[error("codec: unexpected end of input")]
