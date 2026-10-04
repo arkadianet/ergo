@@ -15,6 +15,11 @@ thread_local! {
     static CANCELLED: std::cell::RefCell<Option<Arc<AtomicBool>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    static BEFORE_UTXO_VISIT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
 #[cfg(all(test, target_os = "linux"))]
 thread_local! {
     static BEFORE_PUBLISH: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
@@ -27,15 +32,31 @@ fn check_interrupted() -> Result<()> {
             .is_some_and(|f| f.load(Ordering::Relaxed))
     }) {
         return Err(fail(
-            "operator command interrupted; staging copy cleaned up",
+            "operator command interrupted; any staging copy cleaned up",
         ));
     }
     Ok(())
 }
 
-/// Keep signal handling alive until the blocking copy has closed its files and
-/// dropped its staging guard. Cancellation is checked between copy/hash chunks.
+fn requires_interruption_cleanup(command: &crate::config::Command) -> bool {
+    use crate::config::Command;
+    match command {
+        Command::Backup { .. } | Command::Restore { .. } => true,
+        Command::MigrateRedb { .. }
+        | Command::VerifyBackup { .. }
+        | Command::Doctor { .. }
+        | Command::UtxoStats { .. }
+        | Command::WalletScanUtxo { .. } => false,
+    }
+}
+
+/// Backup/restore keep signal handling alive until the worker drops staging.
+/// Other commands retain the default signal action on every platform.
 pub async fn run_interruptible(command: &crate::config::Command) -> Result<String> {
+    if !requires_interruption_cleanup(command) {
+        let command = command.clone();
+        return tokio::task::spawn_blocking(move || run(&command)).await?;
+    }
     #[cfg(unix)]
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     #[cfg(unix)]
@@ -302,7 +323,21 @@ fn inspect(databases: &BTreeMap<String, ReadOnlyDatabase>) -> Result<DoctorRepor
     let tip = inspect_tip(&txn)?;
     let utxo = if tip.state_type.as_deref().is_none_or(|v| v == "utxo") && tip.state_root.is_some()
     {
-        Some(visit_utxos(&txn, |_, _, _| Ok(()))?)
+        #[cfg(test)]
+        BEFORE_UTXO_VISIT.with(|hook| {
+            if let Some(check) = hook.get() {
+                check();
+            }
+        });
+        let mut leaves = 0u64;
+        Some(visit_utxos(&txn, |_, _, _| {
+            if leaves.is_multiple_of(4096) {
+                check_interrupted()
+                    .map_err(|_| ergo_state::store::StateError::OperatorInterrupted)?;
+            }
+            leaves += 1;
+            Ok(())
+        })?)
     } else {
         None
     };
@@ -661,6 +696,106 @@ fn restore_with_options(
 mod tests {
     use super::*;
     use ergo_state::store::StateStore;
+
+    #[test]
+    fn only_staging_commands_require_interruption_cleanup() {
+        use clap::Parser;
+        for (args, expected) in [
+            (vec!["ergo-node", "migrate-redb", "/old", "/new"], false),
+            (vec!["ergo-node", "backup", "/data", "/backup"], true),
+            (vec!["ergo-node", "verify-backup", "/backup"], false),
+            (vec!["ergo-node", "restore", "/backup", "/restored"], true),
+            (vec!["ergo-node", "doctor", "/data"], false),
+            (vec!["ergo-node", "utxo-stats", "/data"], false),
+            (vec!["ergo-node", "wallet-scan-utxo", "/data"], false),
+        ] {
+            let cli = crate::config::Cli::try_parse_from(&args).unwrap();
+            assert_eq!(
+                requires_interruption_cleanup(cli.command.as_ref().unwrap()),
+                expected,
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn backup_interrupts_inspection_before_staging() {
+        assert_inspection_interrupts("backup");
+    }
+
+    #[test]
+    fn restore_interrupts_inspection_before_staging() {
+        assert_inspection_interrupts("restore");
+    }
+
+    fn assert_inspection_interrupts(operation: &str) {
+        struct ResetCancellation;
+        impl Drop for ResetCancellation {
+            fn drop(&mut self) {
+                CANCELLED.with(|flag| *flag.borrow_mut() = None);
+                BEFORE_UTXO_VISIT.with(|hook| hook.set(None));
+            }
+        }
+        fn cancel() {
+            CANCELLED.with(|flag| {
+                flag.borrow()
+                    .as_ref()
+                    .unwrap()
+                    .store(true, Ordering::Relaxed);
+            });
+        }
+
+        let data = seeded_directory();
+        let parent = tempfile::tempdir().unwrap();
+        let source_backup = parent.path().join("source-backup");
+        backup(data.path(), &source_backup).unwrap();
+        let source_before = digest_file(&data.path().join("state.redb")).unwrap();
+        let backup_before = digest_file(&source_backup.join("state.redb")).unwrap();
+        fs::write(parent.path().join("keep"), b"existing destination contents").unwrap();
+        let _reset = ResetCancellation;
+        let cancellation = Arc::new(AtomicBool::new(false));
+        CANCELLED.with(|flag| *flag.borrow_mut() = Some(cancellation.clone()));
+        let destination = parent.path().join(operation);
+        if operation == "backup" {
+            cancellation.store(true, Ordering::Relaxed);
+        } else {
+            // Let checksum verification finish, then signal before its UTXO walk.
+            cancellation.store(false, Ordering::Relaxed);
+            BEFORE_UTXO_VISIT.with(|hook| hook.set(Some(cancel)));
+        }
+        let error = if operation == "backup" {
+            backup(data.path(), &destination).unwrap_err()
+        } else {
+            restore(&source_backup, &destination).unwrap_err()
+        };
+        assert!(
+            matches!(
+                error.downcast_ref::<ergo_state::store::StateError>(),
+                Some(ergo_state::store::StateError::OperatorInterrupted)
+            ),
+            "inspection must report operator interruption: {error}"
+        );
+        assert_eq!(error.to_string(), "operator command interrupted");
+        assert!(!destination.exists());
+        assert!(!parent
+            .path()
+            .join(format!(".{operation}.ergo-{operation}-staging"))
+            .exists());
+        assert_eq!(
+            fs::read(parent.path().join("keep")).unwrap(),
+            b"existing destination contents"
+        );
+        cancellation.store(false, Ordering::Relaxed);
+        BEFORE_UTXO_VISIT.with(|hook| hook.set(None));
+        assert_eq!(
+            digest_file(&data.path().join("state.redb")).unwrap(),
+            source_before
+        );
+        assert_eq!(
+            digest_file(&source_backup.join("state.redb")).unwrap(),
+            backup_before
+        );
+    }
 
     fn seeded_directory() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
