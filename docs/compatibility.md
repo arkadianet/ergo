@@ -214,9 +214,10 @@ closure criteria.
 
 ### Partial (landed but incomplete)
 
-- **Mode 3 (pruned / suffix window)** — schema, handshake,
-  `block_sections` eviction, and activation at the headers-synced flip
-  have landed; a standard pruned config boots. A normal Mode 3
+- **Mode 3 (pruned / suffix window)** — schema, handshake and
+  `block_sections` eviction after apply have landed; a standard pruned
+  config boots and replays full blocks from genesis before pruning (see
+  below). A normal Mode 3
   (`state_type = utxo`, `verify = true`, `blocks_to_keep` at or above the
   rollback-window floor of `keep_versions + SAFETY_MARGIN`, i.e. 250 at
   the defaults) loads and runs. Only configurations that would undermine
