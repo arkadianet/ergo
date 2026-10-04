@@ -844,6 +844,10 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
 mod scheduler_tests;
 
 #[cfg(test)]
+#[path = "jobs/prepare_tests.rs"]
+mod prepare_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
