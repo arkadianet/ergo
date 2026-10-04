@@ -183,21 +183,26 @@ async fn native_ranges_apply_latest_window_to_persisted_global_counters() {
     };
     apply_block(&store, &store.read_meta().unwrap(), &block).unwrap();
     handle.set_status(IndexerStatus::CaughtUp);
-    let expected_box = hex::encode(
-        handle
-            .box_by_global_index(1)
-            .unwrap()
-            .unwrap()
-            .box_data
-            .box_id()
-            .unwrap()
-            .as_bytes(),
-    );
+    let box_id = |n| {
+        hex::encode(
+            handle
+                .box_by_global_index(n)
+                .unwrap()
+                .unwrap()
+                .box_data
+                .box_id()
+                .unwrap()
+                .as_bytes(),
+        )
+    };
+    // Three boxes: the window ending one before the latest, newest first
+    // ([1, 0]), not the forward window starting at offset 1 ([1, 2]).
+    let expected_boxes = [box_id(1), box_id(0)];
     let expected_tx = hex::encode(transaction_id(&transactions[0]).unwrap().as_bytes());
     let app = build_app(Arc::new(handle));
-    let (status, body) = json_get(app.clone(), "/blockchain/box/range?offset=1&limit=1").await;
+    let (status, body) = json_get(app.clone(), "/blockchain/box/range?offset=1&limit=2").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, serde_json::json!([expected_box]));
+    assert_eq!(body, serde_json::json!(expected_boxes));
     let (status, body) =
         json_post_empty(app, "/blockchain/transaction/range?offset=1&limit=1").await;
     assert_eq!(status, StatusCode::OK);
