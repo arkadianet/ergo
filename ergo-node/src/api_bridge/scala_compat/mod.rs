@@ -44,6 +44,7 @@ pub struct ScalaCompatBridge {
     /// (`/nipopow/proof/*`). Wired from `chain_spec.difficulty` at
     /// boot, mirroring `StateStore::set_difficulty_params`.
     difficulty_params: ergo_chain_spec::DifficultyParams,
+    fee_ranking: std::sync::Mutex<Option<pool_fee_stats::PoolFeeRankingCache>>,
 }
 
 impl ScalaCompatBridge {
@@ -58,7 +59,45 @@ impl ScalaCompatBridge {
             static_cfg: Arc::new(static_cfg),
             store_reader,
             difficulty_params,
+            fee_ranking: std::sync::Mutex::new(None),
         }
+    }
+
+    fn ranked_pool(
+        &self,
+        snap: &Arc<crate::snapshot::NodeSnapshot>,
+    ) -> Arc<[pool_fee_stats::PoolFeeEntry]> {
+        let mut cache = self
+            .fee_ranking
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(cached) = cache.as_ref() {
+            if cached
+                .snapshot
+                .upgrade()
+                .is_some_and(|previous| Arc::ptr_eq(&previous, snap))
+            {
+                return cached.ranked.clone();
+            }
+        }
+        let ranked: Arc<[_]> =
+            pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs, &pool_costs(snap))
+                .into();
+        *cache = Some(pool_fee_stats::PoolFeeRankingCache {
+            snapshot: Arc::downgrade(snap),
+            ranked: ranked.clone(),
+        });
+        ranked
+    }
+
+    fn observed_fee_model(
+        &self,
+        snap: &crate::snapshot::NodeSnapshot,
+    ) -> Option<pool_fee_stats::FeeCapacityModel> {
+        if self.static_cfg.state_type != crate::config::StateType::Utxo {
+            return None;
+        }
+        fee_model(snap, self.store_reader.committed_tip().ok().flatten())
     }
 
     pub fn into_dyn(self) -> Arc<dyn NodeChainQuery> {
@@ -751,9 +790,8 @@ impl NodeChainQuery for ScalaCompatBridge {
         maxtime_ms: u64,
     ) -> Vec<ergo_api::compat::types::ScalaFeeHistogramBin> {
         let snap = self.handle.load();
-        let ranked =
-            pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs, &pool_costs(&snap));
-        let model = fee_model(&snap);
+        let ranked = self.ranked_pool(&snap);
+        let model = self.observed_fee_model(&snap);
         let bin_count = (bins.max(1) as usize).min(pool_fee_stats::MAX_HISTOGRAM_BINS);
         let mut out = vec![
             ergo_api::compat::types::ScalaFeeHistogramBin {
@@ -764,7 +802,7 @@ impl NodeChainQuery for ScalaCompatBridge {
         ];
         let mut bytes = 0u64;
         let mut cost = 0u64;
-        for entry in &ranked {
+        for entry in ranked.iter() {
             bytes = bytes.saturating_add(entry.size_bytes);
             cost = cost.saturating_add(entry.cost_units);
             let wait_ms = model
@@ -790,11 +828,11 @@ impl NodeChainQuery for ScalaCompatBridge {
                 .and_then(|fee| fee.parse().ok())
         })
         .unwrap_or(self.static_cfg.min_relay_fee_nano_erg)
+        .min(i64::MAX as u64)
     }
 
     fn pool_expected_wait_time_ms(&self, fee: u64, tx_size_bytes: u32) -> u64 {
-        self.pool_wait_estimate_ms(fee, tx_size_bytes)
-            .unwrap_or(pool_fee_stats::UNKNOWN_WAIT_MS)
+        self.pool_wait_estimate_ms(fee, tx_size_bytes).unwrap_or(0)
     }
 
     fn pool_wait_estimate_ms(&self, fee: u64, tx_size_bytes: u32) -> Option<u64> {
@@ -802,9 +840,8 @@ impl NodeChainQuery for ScalaCompatBridge {
             return None;
         }
         let snap = self.handle.load();
-        let model = fee_model(&snap)?;
-        let ranked =
-            pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs, &pool_costs(&snap));
+        let model = self.observed_fee_model(&snap)?;
+        let ranked = self.ranked_pool(&snap);
         Some(model.wait_for_fee(&ranked, fee, tx_size_bytes, 0).0)
     }
 
@@ -828,11 +865,15 @@ impl NodeChainQuery for ScalaCompatBridge {
             target_wait_ms, target_feasible: false, tx_size_bytes, tx_cost_units,
             recommended_fee_nano_erg: None, estimated_wait_ms: None, estimate_capped: false,
         };
+        if self.static_cfg.state_type != crate::config::StateType::Utxo {
+            estimate.reason = Some("observed fee estimates require UTXO state".into());
+            return Some(estimate);
+        }
         if tx_size_bytes == 0 {
             estimate.reason = Some("transaction size must be nonzero".into());
             return Some(estimate);
         }
-        let Some(model) = fee_model(&snap) else {
+        let Some(model) = self.observed_fee_model(&snap) else {
             return Some(estimate);
         };
         if u64::from(tx_size_bytes) > model.bytes_per_block || tx_cost_units > model.cost_per_block
@@ -840,8 +881,7 @@ impl NodeChainQuery for ScalaCompatBridge {
             estimate.reason = Some("transaction exceeds the projected per-block capacity".into());
             return Some(estimate);
         }
-        let ranked =
-            pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs, &pool_costs(&snap));
+        let ranked = self.ranked_pool(&snap);
         let fee =
             model.recommendation(&ranked, target_wait_ms, tx_size_bytes, tx_cost_units, floor);
         let (wait_ms, capped) = model.wait_for_fee(&ranked, fee, tx_size_bytes, tx_cost_units);
@@ -1231,15 +1271,17 @@ pub(super) fn encode_scala_output_from_raw(
 }
 
 /// Observe committed canonical blocks only. A stopped/stale snapshot or a
-/// recent-block tail that does not reach the in-memory tip supplies no forecast.
-fn fee_model(snap: &crate::snapshot::NodeSnapshot) -> Option<pool_fee_stats::FeeCapacityModel> {
+/// recent-block tail that does not reach the committed tip supplies no forecast.
+fn fee_model(
+    snap: &crate::snapshot::NodeSnapshot,
+    committed_tip: Option<(u32, [u8; 32])>,
+) -> Option<pool_fee_stats::FeeCapacityModel> {
     if snap.produced_at.elapsed() > std::time::Duration::from_secs(60) {
         return None;
     }
     let newest = snap.recent_blocks.first()?;
-    if newest.height != snap.status.best_full_block_height
-        || newest.header_id != snap.tip.best_full_block.header_id
-    {
+    let (committed_height, committed_id) = committed_tip?;
+    if newest.height != committed_height || newest.header_id != hex::encode(committed_id) {
         return None;
     }
     let now = std::time::SystemTime::now()

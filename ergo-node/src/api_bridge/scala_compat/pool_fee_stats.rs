@@ -33,6 +33,11 @@ pub(super) struct PoolFeeEntry {
     pub(super) cost_units: u64,
 }
 
+pub(super) struct PoolFeeRankingCache {
+    pub snapshot: std::sync::Weak<crate::snapshot::NodeSnapshot>,
+    pub ranked: std::sync::Arc<[PoolFeeEntry]>,
+}
+
 /// Build a fee-per-byte descending ranking of every pool tx in the
 /// snapshot. Parse-failures and zero-fee txs are dropped (a tx
 /// with no fee output cannot land via the normal admission path —

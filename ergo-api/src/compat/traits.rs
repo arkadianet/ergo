@@ -522,9 +522,8 @@ pub trait NodeChainQuery: Send + Sync {
 
     /// `GET /transactions/waitTime?fee=<nanoErgs>&txSize=<bytes>` —
     /// expected wait in milliseconds for a tx with the given
-    /// `fee` and `tx_size_bytes`. The node returns `u64::MAX` when recent
-    /// canonical observations are insufficient; operator forecasts are nullable.
-    /// Default adapter implementations retain their legacy 0 response.
+    /// `fee` and `tx_size_bytes`. Returns 0 without sufficient observed
+    /// statistics, matching Scala; native estimates remain optional.
     fn pool_expected_wait_time_ms(&self, _fee: u64, _tx_size_bytes: u32) -> u64 {
         0
     }

@@ -101,6 +101,12 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
         store.reader_handle(),
         ergo_chain_spec::DifficultyParams::mainnet(),
     );
+    let first_snapshot = handle.load_full();
+    let ranked = bridge.ranked_pool(&first_snapshot);
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].cost_units, 21_456);
+    assert!(Arc::ptr_eq(&ranked, &bridge.ranked_pool(&first_snapshot)));
+    drop(first_snapshot);
     let responses = [
         bridge.pool_txs_paged(0, 10).remove(0),
         bridge.pool_tx_by_id(&id_hex).unwrap(),
@@ -122,6 +128,15 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
     let mut snap = Arc::try_unwrap(old).ok().unwrap();
     snap.mempool_transactions.transactions.clear();
     handle.store(Arc::new(snap));
+    let next_snapshot = handle.load_full();
+    let next_ranked = bridge.ranked_pool(&next_snapshot);
+    assert!(!Arc::ptr_eq(&ranked, &next_ranked));
+    assert_eq!(next_ranked[0].cost_units, 0);
+    assert!(Arc::ptr_eq(
+        &next_ranked,
+        &bridge.ranked_pool(&next_snapshot)
+    ));
+    drop(next_snapshot);
     let unknown = serde_json::to_value(bridge.pool_tx_by_id(&id_hex).unwrap()).unwrap();
     assert!(unknown.get("cost").unwrap().is_null());
     let confirmed =
@@ -131,20 +146,34 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
     assert_eq!(bridge.pool_recommended_fee(1, 1), 2_500_000);
     // Sparse canonical observations supply the relay floor, not fabricated congestion.
     assert_eq!(bridge.pool_recommended_fee(1, 10_000), 2_500_000);
-    assert_eq!(
-        bridge.pool_expected_wait_time_ms(2_500_000, 10_000),
-        pool_fee_stats::UNKNOWN_WAIT_MS
-    );
+    assert_eq!(bridge.pool_expected_wait_time_ms(2_500_000, 10_000), 0);
     assert!(
         !bridge
             .pool_fee_estimate(120_000, 1000, 0)
             .unwrap()
             .available
     );
+    assert_eq!(bridge.pool_wait_estimate_ms(2_500_000, 10_000), None);
+    assert_eq!(bridge.pool_expected_wait_time_ms(2_500_000, 0), 0);
+    let mut digest = bridge;
+    Arc::make_mut(&mut digest.static_cfg).state_type = crate::config::StateType::Digest;
+    let estimate = digest.pool_fee_estimate(120_000, 1000, 0).unwrap();
+    assert!(!estimate.available);
+    assert_eq!(
+        estimate.reason.as_deref(),
+        Some("observed fee estimates require UTXO state")
+    );
+    assert_eq!(digest.pool_expected_wait_time_ms(2_500_000, 1000), 0);
+    assert_eq!(digest.pool_recommended_fee(1, 1000), 2_500_000);
+    Arc::make_mut(&mut digest.static_cfg).min_relay_fee_nano_erg = u64::MAX;
+    assert_eq!(
+        digest.pool_recommended_fee(u32::MAX, u32::MAX),
+        i64::MAX as u64
+    );
 }
 
 #[test]
-fn fee_model_pauses_during_same_height_reorg_commit_lag() {
+fn fee_model_uses_committed_tip_during_apply_lag_and_rejects_replaced_samples() {
     let mut snap = crate::snapshot::NodeSnapshot::empty(
         ApiInfo {
             agent_name: "test".into(),
@@ -184,9 +213,28 @@ fn fee_model_pauses_during_same_height_reorg_commit_lag() {
     snap.status.best_full_block_height = 100;
     snap.tip.best_full_block.height = 100;
     snap.tip.best_full_block.header_id = snap.recent_blocks[0].header_id.clone();
-    assert!(fee_model(&snap).is_some());
-    // The applied tip has switched forks; persisted sections still describe
-    // the old tip at the same height. Never forecast from those orphan samples.
+    let committed_id = hex::decode(&snap.recent_blocks[0].header_id)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(fee_model(&snap, Some((100, committed_id))).is_some());
+    // In-memory apply can lead the durable chain by a tick. Keep using the
+    // committed window until the persist pipeline catches up.
+    snap.status.best_full_block_height = 101;
+    snap.tip.best_full_block.height = 101;
     snap.tip.best_full_block.header_id = "ab".repeat(32);
-    assert!(fee_model(&snap).is_none());
+    assert!(fee_model(&snap, Some((100, committed_id))).is_some());
+    // Once the committed chain changes, old cached samples cannot forecast.
+    assert!(fee_model(&snap, Some((100, [0xab; 32]))).is_none());
+    let mut replacement = (*snap.recent_blocks).clone();
+    replacement[0].header_id = "ab".repeat(32);
+    replacement[0]
+        .fee_observation
+        .as_mut()
+        .unwrap()
+        .median_fee_per_byte_nano_erg = Some(20);
+    snap.recent_blocks = Arc::new(replacement);
+    assert!(fee_model(&snap, Some((100, [0xab; 32]))).is_some());
+    snap.produced_at -= std::time::Duration::from_secs(61);
+    assert!(fee_model(&snap, Some((100, [0xab; 32]))).is_none());
 }
