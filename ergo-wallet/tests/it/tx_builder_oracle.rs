@@ -508,3 +508,30 @@ fn auto_select_rejects_sending_the_reemission_token() {
         "expected ReemissionTokenOnOutput, got {err:?}"
     );
 }
+
+#[test]
+fn zero_fee_builder_omits_miner_output_and_preserves_change() {
+    let exact = [erg_summary(1, 1_000_000_000)];
+    let requests = [erg_request(1_000_000_000)];
+    let tx = builder(&exact, 0, 1_000_000).build(&requests).unwrap();
+    assert_eq!(tx.output_candidates.len(), 1);
+    assert_eq!(tx.output_candidates[0].value, 1_000_000_000);
+    let available = [erg_summary(1, 2_000_000_000)];
+    let tx = builder(&available, 0, 1_000_000).build(&requests).unwrap();
+    assert_eq!(tx.output_candidates.len(), 2);
+    assert_eq!(
+        tx.output_candidates.iter().map(|o| o.value).sum::<u64>(),
+        2_000_000_000
+    );
+    assert!(tx.output_candidates.iter().all(|o| o.value > 0));
+}
+
+#[test]
+fn zero_fee_builder_rejects_dust_without_silently_increasing_fee() {
+    let available = [erg_summary(1, 1_000_500_000)];
+    let requests = [erg_request(1_000_000_000)];
+    let error = builder(&available, 0, 1_000_000)
+        .build(&requests)
+        .unwrap_err();
+    assert!(error.to_string().contains("zero-fee"));
+}

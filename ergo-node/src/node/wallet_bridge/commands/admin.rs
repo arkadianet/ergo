@@ -1269,7 +1269,7 @@ pub(crate) async fn native_boxes(
             .into_iter()
             .skip(offset as usize)
             .take(limit as usize)
-            .map(box_to_summary)
+            .map(|wb| box_to_summary(ctx, wb))
             .collect::<Result<Vec<_>, WalletAdminError>>()?;
         Ok(BoxPage {
             items,
@@ -1298,7 +1298,7 @@ pub(crate) async fn native_box_by_id(
         let wb = reader
             .box_by_id(&box_id)
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        wb.map(box_to_summary).transpose()
+        wb.map(|wb| box_to_summary(ctx, wb)).transpose()
     })();
     let _ = reply.send(result);
 }
@@ -1385,12 +1385,22 @@ fn decode_hex32(s: &str) -> Result<[u8; 32], WalletAdminError> {
 /// scan id that does not fit `u16` is corrupt storage, surfaced as `internal`
 /// rather than silently truncated to `65535`.
 fn box_to_summary(
+    ctx: &WriterContext<'_>,
     wb: ergo_state::wallet::types::WalletBox,
 ) -> Result<ergo_api::wallet::native::dto::WalletBoxSummary, WalletAdminError> {
     use ergo_api::wallet::native::dto::{
         BoxProvenanceDto, BoxStatusDto, WalletAssetDto, WalletBoxSummary,
     };
     use ergo_state::wallet::types::{BoxProvenance, BoxStatus};
+    // Storage rent counts from the height the box declares, not from the
+    // block that included it; only the unspent box itself carries it.
+    let declared_creation_height = match wb.status {
+        BoxStatus::Spent { .. } => None,
+        _ => ctx
+            .chain
+            .lookup_utxo(&wb.box_id)
+            .map(|ergo_box| ergo_box.candidate.creation_height),
+    };
     let status = match wb.status {
         BoxStatus::Confirmed => BoxStatusDto::Confirmed,
         BoxStatus::Immature { matures_at } => BoxStatusDto::Immature {
@@ -1430,6 +1440,7 @@ fn box_to_summary(
         creation_tx_id: hex::encode(wb.creation_tx_id),
         creation_output_index: wb.creation_output_index,
         creation_height: wb.creation_height,
+        declared_creation_height,
         status,
         provenance,
     })

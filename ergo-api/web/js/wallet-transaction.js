@@ -45,7 +45,7 @@ export function makeIntent(recipients, fee, balance, changeAddress, allowReemiss
     });
     return { type: 'payment', address, value, assets };
   });
-  const feeRaw = amount(fee);
+  const feeRaw = /^0+(?:\.0+)?$/.test(String(fee).trim()) ? '0' : amount(fee);
   if (total + integer(feeRaw) > integer(balance.nanoErg.available)) throw new Error('Payments and fee exceed your available ERG.');
   if (!changeAddress) throw new Error('A tracked change address is required.');
   return { outputs, fee: feeRaw, changeAddress, inputs: { type: 'auto' }, allowReemissionSpend, allowTokenBurn: false };
@@ -85,17 +85,21 @@ export class TransactionSession {
   constructor(api, active = () => true) {
     this.api = api; this.active = active; this.version = 0; this.busy = false;
     this.plan = null; this.intent = null; this.signed = null; this.txId = null;
+    this.delivery = 'broadcast'; this.privateOptions = null;
   }
   invalidate() { this.version++; this.plan = this.intent = this.signed = this.txId = null; }
-  async build(intent) {
+  async build(intent, delivery = 'broadcast', privateOptions = null) {
+    if (!['broadcast', 'mine_private'].includes(delivery)) throw new Error('Choose a valid delivery mode.');
+    if (delivery === 'broadcast' && integer(intent.fee) === 0n) throw new Error('A zero-fee payment must use mining-only delivery.');
     if (this.busy) throw new Error('A wallet operation is already in progress.');
     this.invalidate(); this.busy = true;
-    const version = this.version, snapshot = structuredClone(intent);
+    const version = this.version, snapshot = structuredClone(intent), options = structuredClone(privateOptions);
     try {
       const plan = result(await this.api.build(snapshot));
       if (!this.active() || version !== this.version) throw new Error('Draft or wallet access changed. Build again.');
       checkPlan(snapshot, plan);
       this.intent = snapshot; this.plan = structuredClone(plan);
+      this.delivery = delivery; this.privateOptions = options;
       return this.plan;
     } finally { this.busy = false; }
   }
@@ -117,7 +121,7 @@ export class TransactionSession {
         this.signed = structuredClone(signed.signedTransaction); this.txId = signed.txId;
       }
       if (!current()) throw new Error('Wallet access changed.');
-      const sent = result(await this.api.submitSigned(structuredClone(this.signed)));
+      const sent = result(await this.api.submitSigned(structuredClone(this.signed), this.delivery, structuredClone(this.privateOptions)));
       if (!sent.accepted || sent.txId !== this.txId) throw new Error('Submission outcome is uncertain. Check the transaction ID before retrying.');
       return sent;
     } finally { this.busy = false; }

@@ -30,7 +30,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ergo_mempool::MempoolReadSnapshot;
+use ergo_mempool::{pool::Entry, MempoolReadSnapshot};
 use ergo_primitives::digest::{Digest32, ModifierId};
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
@@ -44,6 +44,8 @@ use ergo_validation::{
 };
 
 use crate::error::{check_build_cancelled, MiningError};
+use crate::inspection::ExcludedTransaction;
+use crate::policy::BlockPolicy;
 
 /// Intra-block UTXO overlay over a base `UtxoView` (the committed state
 /// tip). Tracks boxes created and spent by txs already placed in the
@@ -174,6 +176,20 @@ pub struct Selected {
     /// NOT collected — they are in-block ordering / fit losses, not tx
     /// invalidity, and would be re-validated as non-hard-invalid (kept) anyway.
     pub suspects: Vec<Digest32>,
+    /// Exact transaction IDs excluded by local policy, ordering or budgets,
+    /// including requirements this candidate could not satisfy.
+    pub excluded: Vec<ExcludedTransaction>,
+    /// Required IDs, including their available in-block ancestors.
+    pub required: HashSet<Digest32>,
+}
+
+impl Selected {
+    /// Record a skipped transaction, marking a skipped requirement.
+    fn exclude(&mut self, tx_id: Digest32, reason: &str) {
+        let required = self.required.contains(&tx_id);
+        self.excluded
+            .push(ExcludedTransaction::new(tx_id, reason, required));
+    }
 }
 
 /// Validate caller-supplied transactions in their original dependency order.
@@ -318,9 +334,65 @@ pub fn select_user_txs_cancellable(
     reemission_rules: Option<&ReemissionRuleInputs>,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<Selected, MiningError> {
+    select_user_txs_with_policy_cancellable(
+        overlay,
+        snapshot,
+        ctx,
+        params,
+        last_headers,
+        cost_budget,
+        size_budget,
+        reemission_rules,
+        &[],
+        &BlockPolicy::default(),
+        should_cancel,
+    )
+}
+
+/// Select mandatory transactions, their ancestors, then private transactions,
+/// and finally public transactions. Every transaction receives the usual
+/// frozen-context consensus validation. Requirements never bypass a limit,
+/// and an unmet requirement never withholds the candidate: it is recorded in
+/// [`Selected::excluded`] with a `required_` reason instead.
+#[allow(clippy::too_many_arguments)]
+pub fn select_user_txs_with_policy_cancellable(
+    overlay: &mut CandidateOverlay,
+    snapshot: &MempoolReadSnapshot,
+    ctx: &TransactionContext,
+    params: &ProtocolParams,
+    last_headers: &[Header],
+    cost_budget: u64,
+    size_budget: u64,
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    private_transactions: &[Entry],
+    policy: &BlockPolicy,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Selected, MiningError> {
+    policy.validate()?;
+    let plan = selection_plan(snapshot, private_transactions, policy)?;
+    let mut sel = Selected {
+        required: plan.required,
+        excluded: plan.unmet,
+        ..Default::default()
+    };
+    for entry in snapshot.iter().chain(private_transactions) {
+        if plan.excluded.contains(&entry.tx_id) {
+            sel.exclude(entry.tx_id, "excluded_by_policy");
+        }
+    }
     check_build_cancelled(should_cancel)?;
     if cost_budget == 0 || size_budget == 0 {
-        return Ok(Selected::default());
+        let reason = if cost_budget == 0 {
+            "cost_budget"
+        } else {
+            "size_budget"
+        };
+        for entry in plan.ordered {
+            if sel.required.contains(&entry.tx_id) {
+                sel.exclude(entry.tx_id, reason);
+            }
+        }
+        return Ok(sel);
     }
     let block_cap = JitCost::from_block_cost(params.max_block_cost).map_err(|e| {
         MiningError::IdComputation {
@@ -329,7 +401,6 @@ pub fn select_user_txs_cancellable(
         }
     })?;
 
-    let mut sel = Selected::default();
     // Every valid tx has at least one input and output, and scripts are on.
     // Entry::cost is an observation at admission, not a lower bound: a changed
     // context can take a cheaper script branch or change voted cost parameters.
@@ -337,15 +408,16 @@ pub fn select_user_txs_cancellable(
         .saturating_add(params.input_cost)
         .saturating_add(params.output_cost);
 
-    for entry in snapshot.iter() {
+    for entry in plan.ordered {
         check_build_cancelled(should_cancel)?;
         let remaining_cost = cost_budget.saturating_sub(sel.total_cost);
         if remaining_cost < minimum_tx_cost {
-            // No later valid transaction can fit, even with a cheaper script.
-            break;
+            sel.exclude(entry.tx_id, "cost_budget");
+            continue;
         }
         // A large priority entry must not block smaller independent entries.
         if sel.total_size.saturating_add(u64::from(entry.size_bytes)) > size_budget {
+            sel.exclude(entry.tx_id, "size_budget");
             continue;
         }
 
@@ -353,12 +425,16 @@ pub fn select_user_txs_cancellable(
         // ids before parsing. Excludes fee-bearing bot claims on a box the
         // pinned rent tx already consumed, and intra-block double-spends.
         if entry.inputs.iter().any(|id| overlay.is_spent(id)) {
+            sel.exclude(entry.tx_id, "input_conflict");
             continue;
         }
 
         let tx = match parse_tx(&entry.bytes) {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(_) => {
+                sel.exclude(entry.tx_id, "malformed_transaction");
+                continue;
+            }
         };
         check_build_cancelled(should_cancel)?;
 
@@ -370,6 +446,7 @@ pub fn select_user_txs_cancellable(
             .saturating_add((tx.data_inputs.len() as u64).saturating_mul(params.data_input_cost))
             .saturating_add((tx.output_candidates.len() as u64).saturating_mul(params.output_cost));
         if structural_cost > remaining_cost {
+            sel.exclude(entry.tx_id, "cost_budget");
             continue;
         }
 
@@ -377,9 +454,11 @@ pub fn select_user_txs_cancellable(
         // means an input is already spent in-block or not yet available
         // (e.g. a child whose parent was not included) — skip the tx.
         let Some(resolved_inputs) = overlay.resolve_inputs(&tx) else {
+            sel.exclude(entry.tx_id, "input_unavailable");
             continue;
         };
         let Some(resolved_data_inputs) = overlay.resolve_data_inputs(&tx) else {
+            sel.exclude(entry.tx_id, "data_input_unavailable");
             continue;
         };
         check_build_cancelled(should_cancel)?;
@@ -416,6 +495,7 @@ pub fn select_user_txs_cancellable(
                     // the next full recheck pass. (Only this skip class is
                     // collected; see `Selected::suspects`.)
                     sel.suspects.push(entry.tx_id);
+                    sel.exclude(entry.tx_id, "consensus_validation_failed");
                     continue;
                 }
             }
@@ -426,6 +506,7 @@ pub fn select_user_txs_cancellable(
         // A budget skip is a fit decision, never a consensus-invalid suspect.
         let tx_cost = cost.total_block_cost();
         if sel.total_cost.saturating_add(tx_cost) > cost_budget {
+            sel.exclude(entry.tx_id, "cost_budget");
             continue;
         }
 
@@ -437,6 +518,198 @@ pub fn select_user_txs_cancellable(
     }
 
     Ok(sel)
+}
+
+struct SelectionPlan<'a> {
+    ordered: Vec<&'a Entry>,
+    required: HashSet<Digest32>,
+    excluded: HashSet<Digest32>,
+    /// Requirements no selection could satisfy: absent from both pools, or
+    /// depending on an excluded transaction.
+    unmet: Vec<ExcludedTransaction>,
+}
+
+/// What the rent prefix must leave to user selection, which runs after it.
+#[derive(Debug, Default)]
+pub struct RentProtection {
+    /// Inputs owned by the private lane or an available required
+    /// transaction/ancestor; rent must not sweep them.
+    pub inputs: HashSet<Digest32>,
+    /// Whether any required transaction is available to select.
+    pub required_waiting: bool,
+    /// Summed admission cost of the available required transactions and
+    /// their ancestors. Selection revalidates them; this sizes rent's gap.
+    pub required_cost: u64,
+    /// Summed serialized size of the same transactions.
+    pub required_size: u64,
+}
+
+/// Measure the operator work the rent prefix must not crowd out.
+pub fn rent_protection(
+    snapshot: &MempoolReadSnapshot,
+    private: &[Entry],
+    policy: &BlockPolicy,
+) -> Result<RentProtection, MiningError> {
+    let plan = selection_plan(snapshot, private, policy)?;
+    let mut protection = RentProtection {
+        inputs: private
+            .iter()
+            .flat_map(|entry| entry.inputs.iter().copied())
+            .collect(),
+        ..Default::default()
+    };
+    for entry in plan
+        .ordered
+        .into_iter()
+        .filter(|entry| plan.required.contains(&entry.tx_id))
+    {
+        protection.inputs.extend(entry.inputs.iter().copied());
+        protection.required_waiting = true;
+        protection.required_cost = protection.required_cost.saturating_add(entry.cost);
+        protection.required_size = protection
+            .required_size
+            .saturating_add(u64::from(entry.size_bytes));
+    }
+    Ok(protection)
+}
+
+fn selection_plan<'a>(
+    snapshot: &'a MempoolReadSnapshot,
+    private: &'a [Entry],
+    policy: &BlockPolicy,
+) -> Result<SelectionPlan<'a>, MiningError> {
+    let entries: HashMap<_, _> = snapshot
+        .iter()
+        .chain(private)
+        .map(|entry| (entry.tx_id, entry))
+        .collect();
+    let output_owners: HashMap<_, _> = entries
+        .values()
+        .flat_map(|entry| entry.outputs.iter().map(|id| (*id, entry.tx_id)))
+        .collect();
+    let graph = PoolGraph {
+        entries,
+        output_owners,
+        excluded: policy.excluded_ids()?.into_iter().collect(),
+    };
+    let mut plan = SelectionPlan {
+        ordered: Vec::with_capacity(graph.entries.len()),
+        required: HashSet::new(),
+        excluded: HashSet::new(),
+        unmet: Vec::new(),
+    };
+    let mut done = HashSet::new();
+    let mut requirements = HashSet::new();
+    for id in policy.required_ids()? {
+        if !requirements.insert(id) {
+            continue;
+        }
+        // A requirement takes priority only together with its whole available
+        // ancestry. A failed walk plans nothing, so its ancestors keep their
+        // ordinary private or public position instead of becoming required.
+        match graph.ancestry(id, true, &done)? {
+            Ok(walk) => {
+                for entry in walk {
+                    done.insert(entry.tx_id);
+                    plan.required.insert(entry.tx_id);
+                    plan.ordered.push(entry);
+                }
+            }
+            Err(reason) => {
+                plan.unmet.push(ExcludedTransaction::new(id, reason, true));
+                // Absent, or never includable without its excluded ancestor:
+                // an ordinary walk must not try it again.
+                done.insert(id);
+            }
+        }
+    }
+    for seed in private.iter().chain(snapshot.iter()) {
+        // Ordinary walks skip missing and excluded transactions; they never fail.
+        let walk = graph
+            .ancestry(seed.tx_id, false, &done)?
+            .unwrap_or_default();
+        for entry in walk {
+            done.insert(entry.tx_id);
+            plan.ordered.push(entry);
+        }
+    }
+    plan.excluded = graph.excluded;
+    Ok(plan)
+}
+
+/// Dependency edges between the pooled transactions selection may use.
+struct PoolGraph<'a> {
+    entries: HashMap<Digest32, &'a Entry>,
+    output_owners: HashMap<Digest32, Digest32>,
+    excluded: HashSet<Digest32>,
+}
+
+impl<'a> PoolGraph<'a> {
+    /// `seed` and its pooled ancestors not yet in `done`, parents first. A
+    /// mandatory walk answers why it cannot be planned (`unavailable` or
+    /// `excluded_ancestor`) where an ordinary walk skips the transaction.
+    fn ancestry(
+        &self,
+        seed: Digest32,
+        mandatory: bool,
+        done: &HashSet<Digest32>,
+    ) -> Result<Result<Vec<&'a Entry>, &'static str>, MiningError> {
+        let mut walk = Vec::new();
+        let mut planned = HashSet::new();
+        let mut stack = vec![(seed, false)];
+        let mut active = HashSet::new();
+        while let Some((id, expanded)) = stack.pop() {
+            if self.excluded.contains(&id) {
+                if mandatory {
+                    return Ok(Err("excluded_ancestor"));
+                }
+                continue;
+            }
+            let Some(entry) = self.entries.get(&id) else {
+                if mandatory {
+                    return Ok(Err("unavailable"));
+                }
+                continue;
+            };
+            if expanded {
+                active.remove(&id);
+                if planned.insert(id) {
+                    walk.push(*entry);
+                }
+                continue;
+            }
+            if done.contains(&id) || planned.contains(&id) {
+                continue;
+            }
+            if !active.insert(id) {
+                return Err(MiningError::InvalidConfig(
+                    "transaction dependency cycle in block policy".into(),
+                ));
+            }
+            stack.push((id, true));
+            let mut parents: Vec<_> = entry
+                .inputs
+                .iter()
+                .filter_map(|box_id| self.output_owners.get(box_id).copied())
+                .collect();
+            if let Ok(tx) = parse_tx(&entry.bytes) {
+                parents.extend(
+                    tx.data_inputs
+                        .iter()
+                        .filter_map(|input| self.output_owners.get(&input.box_id).copied()),
+                );
+            }
+            parents.extend(entry.parents_in_pool.iter().copied());
+            parents.sort_unstable_by_key(|id| *id.as_bytes());
+            parents.dedup();
+            for parent in parents.into_iter().rev() {
+                if self.entries.contains_key(&parent) {
+                    stack.push((parent, false));
+                }
+            }
+        }
+        Ok(Ok(walk))
+    }
 }
 
 fn parse_tx(bytes: &[u8]) -> Result<Transaction, MiningError> {
@@ -1572,5 +1845,259 @@ mod tests {
             sel.checked.is_empty(),
             "a fee-bearing claim conflicting with the pinned rent claim must be excluded",
         );
+    }
+
+    fn policy_entry(tx: &Transaction, fee: u64) -> Entry {
+        let mut entry = wire_entry(tx, fee, 0);
+        let id = transaction_id(tx).unwrap();
+        entry.tx_id = Digest32::from_bytes(*id.as_bytes());
+        entry.outputs = tx
+            .output_candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                ErgoBox {
+                    candidate: candidate.clone(),
+                    transaction_id: id,
+                    index: index as u16,
+                }
+                .box_id()
+                .unwrap()
+            })
+            .collect();
+        entry
+    }
+
+    #[test]
+    fn private_transaction_wins_conflict_against_public_fee_transaction() {
+        let input = box_at(1_000_000_000, HEIGHT, 0x11);
+        let utxo = MapUtxo::new(std::slice::from_ref(&input));
+        let private = spend_tx(&input, 1_000_000_000, HEIGHT);
+        let mut public = private.clone();
+        public.output_candidates[0].creation_height = HEIGHT - 1;
+        let private = policy_entry(&private, 0);
+        let public = policy_entry(&public, 1_000_000);
+        let public_id = public.tx_id;
+        let snapshot = MempoolReadSnapshot::from_entries(vec![public]);
+        let selected = select_user_txs_with_policy_cancellable(
+            &mut CandidateOverlay::new(&utxo),
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+            std::slice::from_ref(&private),
+            &BlockPolicy::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(selected.checked.len(), 1);
+        assert_eq!(selected.checked[0].0.tx_id(), private.tx_id.as_bytes());
+        assert!(selected
+            .excluded
+            .iter()
+            .any(|e| e.tx_id == public_id && e.reason == "input_conflict"));
+        let protection = rent_protection(&snapshot, &[private], &BlockPolicy::default()).unwrap();
+        assert!(protection.inputs.contains(&input.box_id().unwrap()));
+        assert!(!protection.required_waiting);
+    }
+
+    /// Reasons recorded for `id`, in recording order.
+    fn reasons(selected: &Selected, id: Digest32) -> Vec<&str> {
+        selected
+            .excluded
+            .iter()
+            .filter(|e| e.tx_id == id)
+            .map(|e| e.reason.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn mandatory_child_includes_parent_before_it_and_unmet_bundle_is_reported() {
+        let input = box_at(1_000_000_000, HEIGHT, 0x12);
+        let utxo = MapUtxo::new(std::slice::from_ref(&input));
+        let parent_tx = spend_tx(&input, 1_000_000_000, HEIGHT);
+        let parent_id = transaction_id(&parent_tx).unwrap();
+        let parent_output = ErgoBox {
+            candidate: parent_tx.output_candidates[0].clone(),
+            transaction_id: parent_id,
+            index: 0,
+        };
+        let child = policy_entry(&spend_tx(&parent_output, 1_000_000_000, HEIGHT), 0);
+        let parent = policy_entry(&parent_tx, 0);
+        let policy = BlockPolicy {
+            required_bundles: vec![vec![hex::encode(child.tx_id.as_bytes())]],
+            ..Default::default()
+        };
+        let snapshot = MempoolReadSnapshot::from_entries(vec![child.clone(), parent.clone()]);
+        let selected = select_user_txs_with_policy_cancellable(
+            &mut CandidateOverlay::new(&utxo),
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+            &[],
+            &policy,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(selected.checked.len(), 2);
+        assert_eq!(selected.checked[0].0.tx_id(), parent.tx_id.as_bytes());
+        assert_eq!(selected.checked[1].0.tx_id(), child.tx_id.as_bytes());
+        assert_eq!(selected.required.len(), 2);
+        assert!(selected.excluded.is_empty());
+
+        // Room for the parent only: the parent is still included and the
+        // child is reported instead of failing the whole selection.
+        let partial = select_user_txs_with_policy_cancellable(
+            &mut CandidateOverlay::new(&utxo),
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::from(parent.size_bytes),
+            None,
+            &[],
+            &policy,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(partial.checked.len(), 1);
+        assert_eq!(partial.checked[0].0.tx_id(), parent.tx_id.as_bytes());
+        assert_eq!(reasons(&partial, child.tx_id), ["required_size_budget"]);
+
+        // An excluded ancestor leaves the requirement unmet before selection,
+        // and the child is not tried again in its ordinary position.
+        let excluded_parent = BlockPolicy {
+            excluded_tx_ids: vec![hex::encode(parent.tx_id.as_bytes())],
+            ..policy
+        };
+        let blocked = select_user_txs_with_policy_cancellable(
+            &mut CandidateOverlay::new(&utxo),
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+            &[],
+            &excluded_parent,
+            &|| false,
+        )
+        .unwrap();
+        assert!(blocked.checked.is_empty());
+        assert!(blocked.required.is_empty());
+        assert_eq!(
+            reasons(&blocked, child.tx_id),
+            ["required_excluded_ancestor"]
+        );
+        assert_eq!(reasons(&blocked, parent.tx_id), ["excluded_by_policy"]);
+    }
+
+    #[test]
+    fn missing_requirement_is_reported_without_failing_selection() {
+        let input = box_at(1_000_000_000, HEIGHT, 0x13);
+        let utxo = MapUtxo::new(std::slice::from_ref(&input));
+        let public = policy_entry(&spend_tx(&input, 1_000_000_000, HEIGHT), 0);
+        let missing = Digest32::from_bytes([0xAB; 32]);
+        let policy = BlockPolicy {
+            required_tx_ids: vec![hex::encode(missing.as_bytes())],
+            ..Default::default()
+        };
+        for (snapshot, cost_budget) in [
+            (MempoolReadSnapshot::empty(), u64::MAX),
+            (MempoolReadSnapshot::from_entries(vec![public.clone()]), 0),
+            (
+                MempoolReadSnapshot::from_entries(vec![public.clone()]),
+                u64::MAX,
+            ),
+        ] {
+            let selected = select_user_txs_with_policy_cancellable(
+                &mut CandidateOverlay::new(&utxo),
+                &snapshot,
+                &ctx(),
+                &ProtocolParams::mainnet_default(),
+                &[],
+                cost_budget,
+                u64::MAX,
+                None,
+                &[],
+                &policy,
+                &|| false,
+            )
+            .unwrap();
+            assert_eq!(reasons(&selected, missing), ["required_unavailable"]);
+            assert!(selected.required.is_empty());
+            let included = !snapshot.is_empty() && cost_budget > 0;
+            assert_eq!(selected.checked.len(), usize::from(included));
+        }
+    }
+
+    #[test]
+    fn failed_requirement_leaves_its_walked_ancestors_unrequired() {
+        // The requirement spends the outputs of two pooled parents. The
+        // lower-id parent is walked first; the excluded one then fails the
+        // walk. The walked parent keeps its ordinary position and protection.
+        let output = |seed: u8| Digest32::from_bytes([seed; 32]);
+        let pooled = |seed: u8, inputs: Vec<Digest32>, outputs: Vec<Digest32>| {
+            let input = box_at(1_000_000_000, HEIGHT, seed);
+            let mut entry = entry(&spend_tx(&input, 1_000_000_000, HEIGHT), 0, 100, seed);
+            entry.inputs = inputs;
+            entry.outputs = outputs;
+            entry
+        };
+        let walked = pooled(0x01, vec![output(0x51)], vec![output(0x61)]);
+        let excluded = pooled(0x02, vec![output(0x52)], vec![output(0x62)]);
+        let required = pooled(0x03, vec![output(0x61), output(0x62)], vec![]);
+        let snapshot =
+            MempoolReadSnapshot::from_entries(vec![required.clone(), walked.clone(), excluded]);
+        let policy = BlockPolicy {
+            required_tx_ids: vec![hex::encode(required.tx_id.as_bytes())],
+            excluded_tx_ids: vec![hex::encode([0x02; 32])],
+            ..Default::default()
+        };
+        let plan = selection_plan(&snapshot, &[], &policy).unwrap();
+        assert!(plan.required.is_empty());
+        assert_eq!(plan.unmet.len(), 1);
+        assert_eq!(plan.unmet[0].reason, "required_excluded_ancestor");
+        let ordered: Vec<_> = plan.ordered.iter().map(|e| e.tx_id).collect();
+        assert_eq!(ordered, [walked.tx_id]);
+        let protection = rent_protection(&snapshot, &[], &policy).unwrap();
+        assert!(!protection.inputs.contains(&output(0x51)));
+        assert!(!protection.required_waiting);
+    }
+
+    #[test]
+    fn rent_protection_measures_available_requirements_and_ancestors() {
+        let output = |seed: u8| Digest32::from_bytes([seed; 32]);
+        let pooled = |seed: u8, cost: u64, size: u32, inputs, outputs| {
+            let input = box_at(1_000_000_000, HEIGHT, seed);
+            let mut entry = entry(&spend_tx(&input, 1_000_000_000, HEIGHT), 0, size, seed);
+            entry.cost = cost;
+            entry.inputs = inputs;
+            entry.outputs = outputs;
+            entry
+        };
+        let parent = pooled(0x01, 30_000, 200, vec![output(0x51)], vec![output(0x61)]);
+        let child = pooled(0x02, 20_000, 100, vec![output(0x61)], vec![]);
+        let unrelated = pooled(0x03, 90_000, 900, vec![output(0x53)], vec![]);
+        let snapshot = MempoolReadSnapshot::from_entries(vec![child.clone(), parent, unrelated]);
+        let policy = BlockPolicy {
+            required_tx_ids: vec![hex::encode(child.tx_id.as_bytes()), "ab".repeat(32)],
+            ..Default::default()
+        };
+        let protection = rent_protection(&snapshot, &[], &policy).unwrap();
+        assert!(protection.required_waiting);
+        assert_eq!(protection.required_cost, 50_000);
+        assert_eq!(protection.required_size, 300);
+        assert!(protection.inputs.contains(&output(0x51)));
+        assert!(!protection.inputs.contains(&output(0x53)));
     }
 }

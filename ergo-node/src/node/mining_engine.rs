@@ -259,14 +259,17 @@ fn page_rent_boxes_cancellable<E: std::fmt::Debug>(
 }
 
 /// Whether the enriched (Full) refresh after a minimal publish would add
-/// nothing: an empty frozen pool with rent claiming off makes the full build
-/// byte-equivalent to the minimal one (modulo timestamp), so a second publish
-/// is pure template-ring churn.
+/// nothing: an empty frozen pool and private queue with rent claiming off
+/// make the full build byte-equivalent to the minimal one (modulo timestamp),
+/// so a second publish is pure template-ring churn. Only Full builds select
+/// private transactions.
 fn full_refresh_adds_nothing(
     intent: &ergo_mining::engine::BuildIntent,
     handle: &MiningHandle,
 ) -> bool {
-    intent.mempool.is_empty() && !handle.claim_storage_rent()
+    intent.mempool.is_empty()
+        && intent.private_transactions.is_empty()
+        && !handle.claim_storage_rent()
 }
 
 /// Backoff between commit-visibility retries (the committed redb tip trailing
@@ -1056,6 +1059,8 @@ mod tests {
         mempool: ergo_mempool::MempoolReadSnapshot,
     ) -> ergo_mining::engine::BuildIntent {
         ergo_mining::engine::BuildIntent {
+            private_transactions: std::sync::Arc::new(Vec::new()),
+            operator_generation: 0,
             expected_parent: [0u8; 32],
             expected_height: 0,
             mempool: std::sync::Arc::new(mempool),
@@ -1107,6 +1112,17 @@ mod tests {
         assert!(
             !full_refresh_adds_nothing(&intent, &handle),
             "non-empty pool means the full build would add fee txs",
+        );
+    }
+
+    #[test]
+    fn full_refresh_not_skipped_when_private_work_waits() {
+        let mut intent = minimal_intent(ergo_mempool::MempoolReadSnapshot::empty());
+        intent.private_transactions = std::sync::Arc::new(vec![synth_entry(1)]);
+        let handle = plain_handle(); // rent off
+        assert!(
+            !full_refresh_adds_nothing(&intent, &handle),
+            "queued private work is selected only by the full build",
         );
     }
 

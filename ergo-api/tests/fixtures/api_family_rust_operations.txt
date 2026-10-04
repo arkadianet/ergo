@@ -69,9 +69,16 @@ get /api/v1/mempool/summary
 get /api/v1/mempool/transactions
 get /api/v1/mempool/transactions/{tx_id}
 get /api/v1/mining/candidate
+get /api/v1/mining/candidate-details
 post /api/v1/mining/candidate-with-txs
+get /api/v1/mining/history
 get /api/v1/mining/miner-stats
 get /api/v1/mining/minerStats
+get /api/v1/mining/policy
+put /api/v1/mining/policy
+get /api/v1/mining/private-transactions
+post /api/v1/mining/private-transactions
+post /api/v1/mining/private-transactions/{tx_id}/cancel
 get /api/v1/mining/reward-address
 get /api/v1/mining/reward-pubkey
 post /api/v1/mining/solution
@@ -158,6 +165,9 @@ get /api/v1/wallet/change-address
 put /api/v1/wallet/change-address
 post /api/v1/wallet/init
 post /api/v1/wallet/lock
+get /api/v1/wallet/mining-jobs
+post /api/v1/wallet/mining-jobs
+post /api/v1/wallet/mining-jobs/{job_id}/cancel
 post /api/v1/wallet/mnemonic/verify
 post /api/v1/wallet/rescan
 post /api/v1/wallet/restore

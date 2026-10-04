@@ -65,6 +65,9 @@ pub enum BuildReason {
     /// builds again on the next candidate request; the eager rebuild is this
     /// node's choice, so a miner polling for work is not left without it.
     SolvedBlockFailed,
+    /// The private mining queue changed on the same tip: an admission, a
+    /// cancellation, an expiry, or a confirmation found while catching up.
+    PrivateQueue,
 }
 
 /// How far the header tip may lead the applied full-block tip while mining
@@ -121,6 +124,10 @@ pub struct BuildIntent {
     pub expected_height: u32,
     /// Frozen mempool view (built on the loop, where `&Mempool` lives).
     pub mempool: Arc<MempoolReadSnapshot>,
+    /// Trusted transactions excluded from every public mempool/relay view.
+    pub private_transactions: Arc<Vec<ergo_mempool::pool::Entry>>,
+    /// Captured operator state; stale work must never publish after withdrawal.
+    pub operator_generation: u64,
     /// Reward key resolved on the loop (`Ready` only — the loop does not
     /// signal while the wallet key is `Pending`).
     pub miner_pk: [u8; 33],
@@ -163,6 +170,21 @@ pub struct Template {
     pub candidate: Candidate,
     pub work: WorkMessage,
     pub identity: TemplateIdentity,
+}
+
+impl Template {
+    /// Ids of the operator-private transactions this template includes. Only
+    /// transactions the build categorized as private are hashed.
+    pub fn private_transaction_ids(&self) -> Vec<Digest32> {
+        self.candidate
+            .transactions
+            .iter()
+            .zip(&self.candidate.observation.transactions)
+            .filter(|(_, observation)| observation.category == "private")
+            .filter_map(|(tx, _)| ergo_ser::transaction::transaction_id(tx).ok())
+            .map(|id| Digest32::from_bytes(*id.as_bytes()))
+            .collect()
+    }
 }
 
 /// Result of a single [`build_and_publish`] attempt. The async driver uses
@@ -407,11 +429,14 @@ fn build_and_publish_inner(
     }
     // Same-parent mempool changes deliberately do not cancel the in-flight
     // candidate: allowing it to publish prevents starvation under steady load.
+    let (policy_revision, policy) = handle.policy_snapshot();
     let should_cancel = || {
         let tip = handle.best_tip();
         !tip.synced
             || tip.parent_id != intent.expected_parent
             || caller_cancelled.is_some_and(|cancelled| cancelled())
+            || handle.policy_revision() != policy_revision
+            || handle.operator_generation() != intent.operator_generation
     };
     if should_cancel() {
         return Ok(BuildOutcome::DroppedStale);
@@ -486,6 +511,8 @@ fn build_and_publish_inner(
                 &eligible_rent_boxes,
                 &voting_targets,
                 &custom_extension_fields,
+                &policy,
+                policy_revision,
                 &mut suspects,
                 &should_cancel,
             );
@@ -504,6 +531,8 @@ fn build_and_publish_inner(
             &eligible_rent_boxes,
             &voting_targets,
             &custom_extension_fields,
+            &policy,
+            policy_revision,
             &mut suspects,
             &should_cancel,
         ),
@@ -577,6 +606,8 @@ fn generate_from_view<V: CandidateStateView>(
     eligible_rent_boxes: &[ErgoBox],
     voting_targets: &std::collections::BTreeMap<u8, i64>,
     custom_extension_fields: &[([u8; 2], Vec<u8>)],
+    policy: &crate::policy::BlockPolicy,
+    policy_revision: u64,
     suspects: &mut Vec<Digest32>,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
@@ -598,6 +629,14 @@ fn generate_from_view<V: CandidateStateView>(
                 handle.voting_settings(),
                 custom_extension_fields,
                 suspects,
+                if mode == BuildMode::Full {
+                    intent.private_transactions.as_slice()
+                } else {
+                    &[]
+                },
+                policy,
+                policy_revision,
+                intent.operator_generation,
                 should_cancel,
             )
         };
@@ -642,6 +681,8 @@ mod tests {
 
     fn intent(parent: [u8; 32], expected_height: u32) -> BuildIntent {
         BuildIntent {
+            private_transactions: Arc::new(Vec::new()),
+            operator_generation: 0,
             expected_parent: parent,
             expected_height,
             mempool: Arc::new(MempoolReadSnapshot::empty()),

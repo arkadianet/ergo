@@ -29,8 +29,14 @@ use ergo_rest_json::mining::{
     AutolykosSolutionJson, CandidateWithTxsAndPkRequest, RewardAddressResponse,
     RewardPublicKeyResponse, WorkMessageJson,
 };
+use ergo_rest_json::mining_inspection::{
+    CandidateDetailsJson, MiningFreshnessJson, MiningHistoryJson,
+};
 use ergo_rest_json::types::ScalaTransactionInput;
 use serde::{Deserialize, Serialize};
+
+mod private;
+pub use private::{PrivateTransactionEntry, PrivateTransactionOptions, PrivateTransactionRequest};
 
 /// Trait the node implements to surface its mining subsystem to the
 /// API server. Each call crosses into the node's main loop and awaits
@@ -67,6 +73,46 @@ pub trait NodeMining: Send + Sync {
         ))
     }
 
+    /// Authenticated exact-template inspection. Both selectors are matched
+    /// against the same retained template; no selector chooses current work.
+    async fn candidate_details(
+        &self,
+        _msg: Option<String>,
+        _template_seq: Option<u64>,
+    ) -> Result<Option<CandidateDetailsJson>, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "candidate inspection unsupported".into(),
+        ))
+    }
+
+    /// Operator-only bounded template and local submission history.
+    async fn mining_history(&self) -> Result<MiningHistoryJson, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "mining history unsupported".into(),
+        ))
+    }
+
+    /// Public freshness has no transaction or wallet content.
+    async fn mining_freshness(&self) -> Result<MiningFreshnessJson, MiningApiError> {
+        Ok(MiningFreshnessJson::default())
+    }
+
+    /// Validated runtime block selection policy. A JSON seam preserves the
+    /// API crate's independence from the concrete mining implementation.
+    async fn block_policy(&self) -> Result<serde_json::Value, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "block policy unsupported".into(),
+        ))
+    }
+    async fn set_block_policy(
+        &self,
+        _policy: serde_json::Value,
+    ) -> Result<serde_json::Value, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "block policy unsupported".into(),
+        ))
+    }
+
     /// `POST /mining/solution`. Returns `Ok(())` on accepted-by-executor.
     async fn submit_solution(&self, solution: AutolykosSolutionJson) -> Result<(), MiningApiError>;
 
@@ -76,6 +122,34 @@ pub trait NodeMining: Send + Sync {
     /// initialized, and `Internal` (500) if wallet tracking is inconsistent —
     /// never a stale or fabricated address.
     async fn reward_address(&self) -> Result<String, MiningApiError>;
+
+    /// List private transactions, available only through authenticated routes.
+    async fn private_transactions(&self) -> Result<Vec<PrivateTransactionEntry>, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "private mining queue is unavailable".into(),
+        ))
+    }
+
+    /// Validate and durably retain signed bytes for this miner alone.
+    async fn submit_private_transaction(
+        &self,
+        _bytes: Vec<u8>,
+        _options: PrivateTransactionOptions,
+    ) -> Result<PrivateTransactionEntry, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "private mining queue is unavailable".into(),
+        ))
+    }
+
+    /// Withdraw pending work before releasing its reserved wallet inputs.
+    async fn cancel_private_transaction(
+        &self,
+        _tx_id: String,
+    ) -> Result<PrivateTransactionEntry, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "private mining queue is unavailable".into(),
+        ))
+    }
 
     /// `GET /mining/rewardPublicKey`. Hex-encoded 33-byte compressed
     /// secp256k1 miner pubkey. Same fallibility as [`Self::reward_address`].

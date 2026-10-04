@@ -246,3 +246,78 @@ async fn legacy_opt_in_opens_existing_routes_and_updates_served_docs() {
         );
     }
 }
+
+#[tokio::test]
+async fn mining_candidate_inventory_and_history_require_operator_key() {
+    for path in [
+        "/api/v1/mining/candidate-details",
+        "/api/v1/mining/history",
+        "/api/v1/mining/policy",
+    ] {
+        assert_eq!(
+            app().oneshot(get(path)).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} must not expose private candidate content"
+        );
+        assert_eq!(
+            app().oneshot(with_key(get(path))).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{path} must reach the authenticated handler"
+        );
+    }
+}
+
+#[tokio::test]
+async fn mining_policy_mutation_requires_operator_key() {
+    let request = || {
+        axum::http::Request::builder()
+            .method("PUT")
+            .uri("/api/v1/mining/policy")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from("{}"))
+            .unwrap()
+    };
+    assert_eq!(
+        app().oneshot(request()).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app().oneshot(with_key(request())).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
+async fn private_queue_routes_require_owner_key_before_parsing_signed_bytes() {
+    let requests = [
+        get("/api/v1/mining/private-transactions"),
+        post_json("/api/v1/mining/private-transactions", r#"{"signed_transaction_hex":"00","options":{}}"#),
+        post("/api/v1/mining/private-transactions/0000000000000000000000000000000000000000000000000000000000000000/cancel"),
+    ];
+    for req in requests {
+        let response = app().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let response = app()
+        .oneshot(with_key(get("/api/v1/mining/private-transactions")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[test]
+fn private_wallet_options_require_explicit_private_delivery() {
+    use ergo_api::wallet::native::dto::{SendTxRequest, TxDelivery};
+    let value = serde_json::json!({"type":"signed", "signedTransaction":{"type":"bytes", "bytes":"00"}, "privateOptions":{"expires_at_height":100}});
+    assert!(serde_json::from_value::<SendTxRequest>(value.clone()).is_err());
+    let mut private = value;
+    private["delivery"] = serde_json::json!("mine_private");
+    let request: SendTxRequest = serde_json::from_value(private).unwrap();
+    assert!(matches!(
+        request,
+        SendTxRequest::Signed {
+            delivery: TxDelivery::MinePrivate,
+            ..
+        }
+    ));
+}
