@@ -8,7 +8,7 @@ use ergo_mempool::admission::Validator;
 use ergo_mempool::pool::Entry;
 use ergo_mempool::types::TxSource;
 use ergo_mining::handle::MiningHandle;
-use ergo_mining::private_queue::PrivateTransactionState;
+use ergo_mining::private_queue::{PrivateTransactionState, Reconciled};
 use ergo_primitives::cost::{CostAccumulator, JitCost};
 use ergo_primitives::digest::Digest32;
 use ergo_state::HeaderSectionStore;
@@ -46,27 +46,21 @@ pub(super) fn api_entry(
 }
 
 /// Decline the queue's transactions on every public admission path. Called at
-/// startup, whether or not mining is enabled. Cancelled and expired entries
-/// are no longer this miner's work, so they stay publicly admissible.
+/// startup, whether or not mining is enabled. Cancelled and expired entries,
+/// and confirmations deeper than the rollback window, are no longer this
+/// miner's work, so they stay publicly admissible.
 pub(super) fn register_queued(
     mempool: &mut ergo_mempool::Mempool,
     queue: &ergo_mining::private_queue::PrivateTransactionQueue,
 ) {
-    for entry in queue.list() {
-        if matches!(
-            entry.state,
-            PrivateTransactionState::Cancelled | PrivateTransactionState::Expired
-        ) {
-            continue;
-        }
-        if let Some(id) = decode_tx_id(&entry.tx_id) {
-            mempool.register_private_transaction(id);
-        }
+    for id in queue.guarded_ids() {
+        mempool.register_private_transaction(Digest32::from_bytes(id));
     }
 }
 
-/// Let a withdrawn (cancelled or expired) transaction through public
-/// admission again; the operator may now broadcast it through this node.
+/// Let a transaction this node will no longer mine (cancelled, expired, or a
+/// settled confirmation) through public admission again; the operator may now
+/// broadcast it through this node.
 pub(super) fn release_withdrawn(mempool: &mut ergo_mempool::Mempool, tx_ids: &[String]) {
     for id in tx_ids.iter().filter_map(|id| decode_tx_id(id)) {
         mempool.unregister_private_transaction(&id);
@@ -95,13 +89,12 @@ pub(super) fn admit(
         MiningApiError::BadRequest(format!("private transaction decode failed: {e:?}"))
     })?;
     let id = hex::encode(peek.tx_id.as_bytes());
+    // Resubmitting tracked work is idempotent; a cancelled or expired id is
+    // validated again and queued as a fresh item.
     if let Some(existing) = queue.entry(&id) {
-        if existing.state.is_active() || existing.state == PrivateTransactionState::Mined {
+        if existing.state.is_pending() || existing.state == PrivateTransactionState::Mined {
             return Ok(api_entry(existing));
         }
-        return Err(MiningApiError::BadRequest(
-            "this private transaction is already cancelled, expired, or conflicted".into(),
-        ));
     }
     // Staged orphans and held parents came through public admission and can
     // still be promoted and relayed, like a pooled transaction.
@@ -217,8 +210,11 @@ pub(super) fn admit(
 /// Reconcile applied history first, then apply deadlines, so a transaction
 /// confirmed in its last eligible block is recorded as mined, not expired.
 pub(super) fn run_lifecycle(state: &mut NodeState, handle: &MiningHandle) {
-    if let Err(error) = reconcile(state, handle) {
-        tracing::warn!(%error, "private mining queue waits for confirmation history");
+    match reconcile(state, handle) {
+        Ok(outcome) => release_withdrawn(&mut state.mempool, &outcome.released),
+        Err(error) => {
+            tracing::warn!(%error, "private mining queue waits for confirmation history");
+        }
     }
     if let Err(error) = expire(state, handle) {
         tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
@@ -259,14 +255,14 @@ pub(super) fn expire(state: &mut NodeState, handle: &MiningHandle) -> Result<boo
 /// Incrementally inspect applied history, including after an offline interval.
 /// At most 32 blocks are decoded on an iteration. Confirmation classification
 /// waits until catch-up has reached the applied tip.
-pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<bool, String> {
+pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<Reconciled, String> {
     let queue = handle.private_queue();
     if queue.list().is_empty() {
-        return Ok(false);
+        return Ok(Reconciled::default());
     }
     let reader = state.store.reader_handle();
     let Some((height, tip)) = reader.committed_tip().map_err(|e| e.to_string())? else {
-        return Ok(false);
+        return Ok(Reconciled::default());
     };
     let mut rolled_back = BTreeSet::new();
     for entry in queue
@@ -330,8 +326,8 @@ pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<bool
                 .map_err(|e| e.to_string())?
                 != previous_id
         {
-            queue.set_observation_cursor(cursor, previous_id.map(hex::encode))?;
-            return Ok(false);
+            queue.set_observation_cursor(cursor, previous_id.map(hex::encode));
+            return Ok(Reconciled::default());
         }
     }
     let mut applied = BTreeMap::new();
@@ -381,7 +377,7 @@ pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<bool
             .applied_header_id_at_height(scanned)
             .map_err(|e| e.to_string())?
     };
-    let changed = queue.reconcile(
+    let outcome = queue.reconcile(
         scanned,
         scanned_tip.map(hex::encode).unwrap_or_default(),
         &applied,
@@ -398,11 +394,17 @@ pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<bool
                 || private_outputs.contains_key(&Digest32::from_bytes(*id))
         },
         &candidate_ids,
+        // Mined entries keep their signed bytes while this node could still
+        // roll their block back.
+        state
+            .store
+            .max_rollback_depth()
+            .unwrap_or(ergo_state::store::ROLLBACK_WINDOW),
     )?;
     if before != queue.reserved_inputs() {
         handle.invalidate_operator_generation();
     }
-    Ok(changed)
+    Ok(outcome)
 }
 
 #[cfg(test)]

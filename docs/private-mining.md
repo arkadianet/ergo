@@ -71,13 +71,22 @@ If the node restarts with mining disabled while this file exists, the queue
 still loads: its inputs stay reserved and its transactions stay out of public
 admission. Nothing in it is mined, confirmed, expired, or cancellable until
 mining is enabled again.
-The queue is bounded to 1,024 retained records and 16 MiB of transaction bytes.
+
+The queue holds at most 1,024 unfinished (queued or conflicted) transactions
+and 16 MiB of their signed bytes. Finished entries never count against those
+bounds. Cancelled and expired entries drop their signed bytes and input ids at
+once. A mined entry keeps them while this node could still roll its block back,
+until it is deeper than the node's rollback window (`[node] keep_versions`);
+past 1,024 such entries or 16 MiB, the oldest confirmations release early. Up
+to 1,024 finished entries stay listed without bytes, so resubmitting the same
+signed transaction stays idempotent; the oldest are forgotten first.
 
 Applied transaction IDs and their exact block identities determine confirmation.
 If a mined block is rolled back and inputs become available, pending work can
 return to the queue. A competing spend produces `conflicted`; a rollback can
 recover it. Original input IDs stay reserved for conflicted and mined entries
-until cancellation or expiry; already-spent IDs do not affect current wallet
+until cancellation, expiry, or the confirmation settles beyond the rollback
+window; already-spent IDs do not affect current wallet
 selection, while restored inputs are protected immediately after rollback. Cancelled and expired work stays withdrawn across rollback. Deep or
 offline history is inspected in bounded batches. If necessary applied history is
 unavailable on a pruned node, confirmation classification waits for that history
@@ -106,8 +115,9 @@ Content-Type: application/json
 
 Use `GET /api/v1/mining/private-transactions` to list lifecycle metadata and
 `POST /api/v1/mining/private-transactions/<tx_id>/cancel` to withdraw pending
-work. Repeating admission of the same active or mined transaction is idempotent;
-a cancelled, expired, or conflicted ID cannot be re-admitted as a fresh item.
+work. Repeating admission of a queued, conflicted, or mined transaction returns
+its current entry. A cancelled or expired transaction can be submitted again; it
+is validated and queued as a fresh item.
 
 Native wallet delivery uses the same queue:
 

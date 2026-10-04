@@ -383,6 +383,35 @@ fn a_mining_request_before_reconciliation_does_not_expire_a_confirmed_transactio
 }
 
 #[test]
+fn a_confirmation_deeper_than_the_rollback_window_releases_bytes_and_guard() {
+    let (_dir, mut state) = chain(4);
+    state.store.as_utxo_mut().unwrap().set_rollback_window(3);
+    let handle = mining_handle();
+    let tx_id = queue_until(&state, &handle, 1, 100);
+    let id = queued_entry(1).tx_id;
+    state.mempool.register_private_transaction(id);
+    append_block(&mut state, vec![tx(1)], 0);
+    run_lifecycle(&mut state, &handle);
+    for _ in 0..2 {
+        append_block(&mut state, vec![], 0);
+        run_lifecycle(&mut state, &handle);
+    }
+    assert_eq!(
+        handle.private_queue().guarded_ids().len(),
+        1,
+        "still rollbackable"
+    );
+    assert!(state.mempool.is_private_transaction(&id));
+    append_block(&mut state, vec![], 0);
+    run_lifecycle(&mut state, &handle);
+    assert!(handle.private_queue().guarded_ids().is_empty());
+    assert!(!state.mempool.is_private_transaction(&id));
+    let item = handle.private_queue().entry(&tx_id).unwrap();
+    assert_eq!(item.state, PrivateTransactionState::Mined);
+    assert!(item.input_ids.is_empty(), "no reservation once settled");
+}
+
+#[test]
 fn an_unconfirmed_transaction_expires_once_its_last_height_is_reconciled() {
     let (_dir, mut state) = chain(4);
     let handle = mining_handle();

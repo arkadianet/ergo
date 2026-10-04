@@ -18,9 +18,29 @@ use ergo_primitives::reader::VlqReader;
 use ergo_ser::transaction::{read_transaction, transaction_id};
 use serde::{Deserialize, Serialize};
 
-/// Bound persistent queue work and the size of each atomic rewrite.
+/// Bound unfinished queue work: queued or conflicted records and their signed
+/// bytes. Finished records never count, so lifetime use cannot fill the queue.
 pub const MAX_PRIVATE_TRANSACTIONS: usize = 1024;
 const MAX_PRIVATE_BYTES: usize = 16 * 1024 * 1024;
+/// Mined transactions keep their signed bytes and input reservations while a
+/// rollback could still return them, until they are deeper than the node's
+/// rollback window. Beyond these bounds the oldest confirmations release
+/// their bytes early instead of blocking new admissions.
+const MAX_RECOVERABLE_MINED: usize = MAX_PRIVATE_TRANSACTIONS;
+const MAX_RECOVERABLE_MINED_BYTES: usize = MAX_PRIVATE_BYTES;
+/// Finished records (cancelled, expired, or settled confirmations) are kept as
+/// tombstones without signed bytes or input ids, for idempotent resubmission
+/// and rollback of a confirmation. The oldest are forgotten first.
+const MAX_FINISHED_RECORDS: usize = 1024;
+/// Cursor-only progress is written at most once per this many blocks; after
+/// a restart the queue re-reads at most this much applied history.
+const CURSOR_PERSIST_INTERVAL: u32 = 32;
+/// Startup refuses larger files. Pending and recoverable mined bytes are each
+/// bounded by `MAX_PRIVATE_BYTES` and cost about four JSON characters per
+/// signed byte together with their hex input ids; per-record metadata of at
+/// most `2 * MAX_PRIVATE_TRANSACTIONS + MAX_FINISHED_RECORDS` records fits in
+/// the remainder.
+const MAX_FILE_BYTES: usize = 9 * MAX_PRIVATE_BYTES;
 
 /// Operator policy for one transaction. Expiry is a local queue deadline.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -49,12 +69,28 @@ impl PrivateTransactionState {
         matches!(self, Self::Queued | Self::InCandidate)
     }
 
+    /// Unfinished work that counts against the queue bounds.
+    pub fn is_pending(self) -> bool {
+        matches!(self, Self::Queued | Self::InCandidate | Self::Conflicted)
+    }
+
     /// Mined and conflicted transactions can return after rollback. Holding
     /// their original input ids closes the interval before chain catch-up;
-    /// spent inputs are absent from ordinary wallet selection anyway.
+    /// spent inputs are absent from ordinary wallet selection anyway. A
+    /// confirmation deeper than the rollback window keeps no input ids.
     pub fn reserves_inputs(self) -> bool {
         !matches!(self, Self::Cancelled | Self::Expired)
     }
+}
+
+/// Outcome of [`PrivateTransactionQueue::reconcile`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reconciled {
+    /// Some record changed state or released its signed bytes.
+    pub changed: bool,
+    /// Confirmations that released their signed bytes. This node will not
+    /// mine them again, so public admission no longer needs to decline them.
+    pub released: Vec<String>,
 }
 
 /// Owner-only metadata. Signed bytes intentionally have a separate record.
@@ -79,14 +115,31 @@ pub struct PrivateTransactionEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Record {
     entry: PrivateTransactionEntry,
-    signed_bytes: String,
+    /// Hex signed bytes while this node may still mine the transaction:
+    /// pending, or mined within the rollback window. `None` for a tombstone.
+    #[serde(default)]
+    signed_bytes: Option<String>,
     /// Cancelled or Expired state a confirmation overrode. A rollback of that
     /// confirmation restores it instead of queueing withdrawn work again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     withdrawn: Option<PrivateTransactionState>,
+    /// When the record became a tombstone; the oldest is forgotten first.
+    #[serde(default)]
+    finished_seq: u64,
 }
 
 impl Record {
+    fn signed_len(&self) -> usize {
+        self.signed_bytes.as_ref().map_or(0, |hex| hex.len() / 2)
+    }
+
+    /// Drop the signed bytes and input ids of work this node will not mine.
+    fn release(&mut self, finished_seq: u64) {
+        self.signed_bytes = None;
+        self.entry.input_ids.clear();
+        self.finished_seq = finished_seq;
+    }
+
     /// Undo a confirmation whose block left the applied chain: withdrawn work
     /// returns to its withdrawn state, anything else waits in the queue again.
     fn unconfirm(&mut self) {
@@ -97,6 +150,12 @@ impl Record {
             Some(state) => {
                 e.state = state;
                 e.reason = Some(withdrawal_reason(state).into());
+            }
+            // Released bytes cannot be mined again by this node.
+            None if self.signed_bytes.is_none() => {
+                e.state = PrivateTransactionState::Expired;
+                e.reason =
+                    Some("mined block rolled back after its signed bytes were released".into());
             }
             None => {
                 e.state = PrivateTransactionState::Queued;
@@ -122,6 +181,12 @@ struct Store {
     /// Last applied height inspected for confirmation, persisted for restart.
     observed_height: u32,
     observed_tip: Option<String>,
+    /// Source of `Record::finished_seq`.
+    #[serde(default)]
+    finished_seq: u64,
+    /// Cursor height last written to disk (runtime only).
+    #[serde(skip)]
+    persisted_height: u32,
 }
 
 impl Default for Store {
@@ -132,6 +197,74 @@ impl Default for Store {
             revision: 0,
             observed_height: 0,
             observed_tip: None,
+            finished_seq: 0,
+            persisted_height: 0,
+        }
+    }
+}
+
+impl Store {
+    /// Withdraw pending work: it keeps no signed bytes or input reservation.
+    fn finish(&mut self, tx_id: &str, state: PrivateTransactionState) {
+        self.finished_seq += 1;
+        let finished_seq = self.finished_seq;
+        if let Some(record) = self.records.get_mut(tx_id) {
+            record.entry.state = state;
+            record.entry.reason = Some(withdrawal_reason(state).into());
+            record.release(finished_seq);
+        }
+    }
+
+    /// Release the signed bytes of confirmations deeper than the rollback
+    /// window, then of the oldest confirmations beyond the recoverable
+    /// bounds. Returns the released ids.
+    fn release_settled(&mut self, height: u32, rollback_window: u32) -> Vec<String> {
+        let mut mined: Vec<(u32, String, usize)> = self
+            .records
+            .values()
+            .filter(|r| r.entry.state == PrivateTransactionState::Mined && r.signed_bytes.is_some())
+            .map(|r| {
+                let h = r.entry.mined_height.unwrap_or(0);
+                (h, r.entry.tx_id.clone(), r.signed_len())
+            })
+            .collect();
+        // Newest confirmations first: they are the most likely to roll back.
+        mined.sort_by(|a, b| b.cmp(a));
+        let mut kept_bytes = 0usize;
+        let mut released = Vec::new();
+        for (kept, (mined_height, tx_id, bytes)) in mined.into_iter().enumerate() {
+            kept_bytes = kept_bytes.saturating_add(bytes);
+            let settled = height.saturating_sub(mined_height) >= rollback_window;
+            if settled || kept >= MAX_RECOVERABLE_MINED || kept_bytes > MAX_RECOVERABLE_MINED_BYTES
+            {
+                released.push(tx_id);
+            }
+        }
+        for tx_id in &released {
+            self.finished_seq += 1;
+            let finished_seq = self.finished_seq;
+            if let Some(record) = self.records.get_mut(tx_id) {
+                record.release(finished_seq);
+            }
+        }
+        released
+    }
+
+    /// Keep at most `MAX_FINISHED_RECORDS` tombstones, forgetting the oldest.
+    fn forget_oldest_finished(&mut self) {
+        let mut finished: Vec<(u64, String)> = self
+            .records
+            .values()
+            .filter(|r| r.signed_bytes.is_none())
+            .map(|r| (r.finished_seq, r.entry.tx_id.clone()))
+            .collect();
+        if finished.len() <= MAX_FINISHED_RECORDS {
+            return;
+        }
+        finished.sort();
+        let excess = finished.len() - MAX_FINISHED_RECORDS;
+        for (_, tx_id) in finished.into_iter().take(excess) {
+            self.records.remove(&tx_id);
         }
     }
 }
@@ -150,17 +283,24 @@ impl PrivateTransactionQueue {
         sweep_temporaries(&path);
         let store = match std::fs::read(&path) {
             Ok(bytes) => {
-                if bytes.len() > MAX_PRIVATE_BYTES * 3 {
+                if bytes.len() > MAX_FILE_BYTES {
                     return Err("private queue file exceeds its bounded size".into());
                 }
-                let store: Store = serde_json::from_slice(&bytes)
+                let mut store: Store = serde_json::from_slice(&bytes)
                     .map_err(|_| "private queue file is invalid".to_string())?;
-                if store.version != 1 || store.records.len() > MAX_PRIVATE_TRANSACTIONS {
+                if store.version != 1
+                    || store.records.len() > 2 * MAX_PRIVATE_TRANSACTIONS + MAX_FINISHED_RECORDS
+                {
                     return Err("private queue version or record count is unsupported".into());
                 }
                 for record in store.records.values() {
-                    materialize(record)?;
+                    if record.signed_bytes.is_some() {
+                        materialize(record)?;
+                    } else if record.entry.state.is_pending() {
+                        return Err("private queue pending record has no signed bytes".into());
+                    }
                 }
+                store.persisted_height = store.observed_height;
                 store
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::default(),
@@ -186,6 +326,17 @@ impl PrivateTransactionQueue {
 
     pub fn entry(&self, tx_id: &str) -> Option<PrivateTransactionEntry> {
         self.lock().records.get(tx_id).map(|r| r.entry.clone())
+    }
+
+    /// Ids this node may still mine privately (records that keep signed
+    /// bytes); public admission must decline them.
+    pub fn guarded_ids(&self) -> Vec<[u8; 32]> {
+        self.lock()
+            .records
+            .values()
+            .filter(|r| r.signed_bytes.is_some())
+            .filter_map(|r| decode_id(&r.entry.tx_id).ok())
+            .collect()
     }
 
     /// Inputs stay reserved across restart, conflict, and rollback until an
@@ -270,21 +421,23 @@ impl PrivateTransactionQueue {
         let mut store = self.lock();
         let tx_id = hex::encode(entry.tx_id.as_bytes());
         if let Some(record) = store.records.get(&tx_id) {
-            if record.entry.state.is_active()
+            if record.entry.state.is_pending()
                 || record.entry.state == PrivateTransactionState::Mined
             {
                 return Ok(record.entry.clone());
             }
-            return Err("transaction has already been cancelled, expired, or conflicted".into());
+            // A cancelled or expired id may be queued again as a fresh item.
         }
-        if store.records.len() >= MAX_PRIVATE_TRANSACTIONS {
+        let pending = || {
+            store
+                .records
+                .values()
+                .filter(|r| r.entry.state.is_pending())
+        };
+        if pending().count() >= MAX_PRIVATE_TRANSACTIONS {
             return Err("private transaction queue is full".into());
         }
-        let bytes: usize = store
-            .records
-            .values()
-            .map(|r| r.signed_bytes.len() / 2)
-            .sum();
+        let bytes: usize = pending().map(Record::signed_len).sum();
         if bytes.saturating_add(entry.bytes.len()) > MAX_PRIVATE_BYTES {
             return Err("private transaction queue byte budget exhausted".into());
         }
@@ -324,63 +477,61 @@ impl PrivateTransactionQueue {
             tx_id,
             Record {
                 entry: result.clone(),
-                signed_bytes: hex::encode(&entry.bytes),
+                signed_bytes: Some(hex::encode(&entry.bytes)),
                 withdrawn: None,
+                finished_seq: 0,
             },
         );
-        updated.revision = updated.revision.wrapping_add(1);
-        self.persist(&updated)?;
-        *store = updated;
+        self.commit(&mut store, updated)?;
         Ok(result)
     }
 
+    /// Withdraw pending work. Repeating a cancellation is idempotent.
     pub fn cancel(&self, tx_id: &str) -> Result<PrivateTransactionEntry, String> {
-        self.update(|store| {
-            let record = store
-                .records
-                .get_mut(tx_id)
-                .ok_or("private transaction not found")?;
-            if record.entry.state == PrivateTransactionState::Mined {
-                return Err("a confirmed transaction cannot be cancelled".into());
-            }
-            if record.entry.state.is_active()
-                || record.entry.state == PrivateTransactionState::Conflicted
-            {
-                record.entry.state = PrivateTransactionState::Cancelled;
-                record.entry.reason =
-                    Some(withdrawal_reason(PrivateTransactionState::Cancelled).into());
-            }
-            Ok(record.entry.clone())
-        })
+        let mut store = self.lock();
+        let record = store
+            .records
+            .get(tx_id)
+            .ok_or("private transaction not found")?;
+        if record.entry.state == PrivateTransactionState::Mined {
+            return Err("a confirmed transaction cannot be cancelled".into());
+        }
+        if !record.entry.state.is_pending() {
+            return Ok(record.entry.clone());
+        }
+        let mut updated = store.clone();
+        updated.finish(tx_id, PrivateTransactionState::Cancelled);
+        updated.forget_oldest_finished();
+        let result = updated.records[tx_id].entry.clone();
+        self.commit(&mut store, updated)?;
+        Ok(result)
     }
 
     /// Deadlines withdraw pending work; they never broadcast the transaction.
     /// Returns the ids that expired.
     pub fn expire(&self, now_ms: u64, parent_height: u32) -> Result<Vec<String>, String> {
         let mut store = self.lock();
+        let expired: Vec<String> = store
+            .records
+            .values()
+            .filter(|r| {
+                r.entry.state.is_pending()
+                    && (r.entry.expires_at_ms.is_some_and(|d| d <= now_ms)
+                        || r.entry
+                            .expires_at_height
+                            .is_some_and(|d| d <= parent_height))
+            })
+            .map(|r| r.entry.tx_id.clone())
+            .collect();
+        if expired.is_empty() {
+            return Ok(expired);
+        }
         let mut updated = store.clone();
-        let mut expired = Vec::new();
-        for r in updated.records.values_mut() {
-            if matches!(
-                r.entry.state,
-                PrivateTransactionState::Queued
-                    | PrivateTransactionState::InCandidate
-                    | PrivateTransactionState::Conflicted
-            ) && (r.entry.expires_at_ms.is_some_and(|d| d <= now_ms)
-                || r.entry
-                    .expires_at_height
-                    .is_some_and(|d| d <= parent_height))
-            {
-                r.entry.state = PrivateTransactionState::Expired;
-                r.entry.reason = Some(withdrawal_reason(PrivateTransactionState::Expired).into());
-                expired.push(r.entry.tx_id.clone());
-            }
+        for tx_id in &expired {
+            updated.finish(tx_id, PrivateTransactionState::Expired);
         }
-        if !expired.is_empty() {
-            updated.revision = updated.revision.wrapping_add(1);
-            self.persist(&updated)?;
-            *store = updated;
-        }
+        updated.forget_oldest_finished();
+        self.commit(&mut store, updated)?;
         Ok(expired)
     }
 
@@ -395,31 +546,39 @@ impl PrivateTransactionQueue {
         if tx_ids.is_empty() {
             return Ok(false);
         }
-        self.update(|store| {
-            let mut changed = false;
-            for id in tx_ids {
-                if let Some(record) = store.records.get_mut(id) {
-                    if record.entry.state == PrivateTransactionState::Mined {
-                        record.unconfirm();
-                        changed = true;
-                    }
+        let mut store = self.lock();
+        if !tx_ids.iter().any(|id| {
+            store
+                .records
+                .get(id)
+                .is_some_and(|r| r.entry.state == PrivateTransactionState::Mined)
+        }) {
+            return Ok(false);
+        }
+        let mut updated = store.clone();
+        for id in tx_ids {
+            if let Some(record) = updated.records.get_mut(id) {
+                if record.entry.state == PrivateTransactionState::Mined {
+                    record.unconfirm();
                 }
             }
-            Ok(changed)
-        })
+        }
+        self.commit(&mut store, updated)?;
+        Ok(true)
     }
 
-    /// Persist incremental ancestry progress during a deep rollback.
-    pub fn set_observation_cursor(&self, height: u32, tip: Option<String>) -> Result<(), String> {
-        self.update(|store| {
-            store.observed_height = height;
-            store.observed_tip = tip;
-            Ok(())
-        })
+    /// Record incremental ancestry progress during a deep rollback. Kept in
+    /// memory: a restart repeats the bounded walk from the persisted cursor.
+    pub fn set_observation_cursor(&self, height: u32, tip: Option<String>) {
+        let mut store = self.lock();
+        store.observed_height = height;
+        store.observed_tip = tip;
     }
 
     /// Reconcile exact applied transactions and canonical mined-block identity.
     /// Missing inputs can recover after a rollback; cancellation/expiry cannot.
+    /// Confirmations deeper than `rollback_window` release their signed bytes.
+    #[allow(clippy::too_many_arguments)]
     pub fn reconcile(
         &self,
         height: u32,
@@ -428,7 +587,8 @@ impl PrivateTransactionQueue {
         canonical: impl Fn(u32, &str) -> bool,
         input_available: impl Fn(&[u8; 32]) -> bool,
         candidate_ids: &BTreeSet<String>,
-    ) -> Result<bool, String> {
+        rollback_window: u32,
+    ) -> Result<Reconciled, String> {
         let mut store = self.lock();
         let mut updated = store.clone();
         let mut changed = false;
@@ -465,8 +625,9 @@ impl PrivateTransactionQueue {
                 .is_some_and(|(h, id)| canonical(h, id))
             {
                 e.state = PrivateTransactionState::Mined;
-            } else if record.withdrawn.is_some() {
-                // Its confirmation left the applied chain; it stays withdrawn.
+            } else if record.withdrawn.is_some() || record.signed_bytes.is_none() {
+                // Its confirmation left the applied chain, but this node will
+                // not mine it again.
                 record.unconfirm();
             } else {
                 e.mined_height = None;
@@ -490,26 +651,40 @@ impl PrivateTransactionQueue {
             }
             changed |= previous != record.entry.state;
         }
-        let cursor_changed =
-            updated.observed_height != height || updated.observed_tip.as_deref() != Some(&tip_id);
+        let released = updated.release_settled(height, rollback_window);
+        if !released.is_empty() {
+            updated.forget_oldest_finished();
+            changed = true;
+        }
         updated.observed_height = height;
         updated.observed_tip = Some(tip_id);
-        if changed || cursor_changed {
-            updated.revision = updated.revision.wrapping_add(u64::from(changed));
+        if changed {
+            self.commit(&mut store, updated)?;
+        } else if height
+            >= store
+                .persisted_height
+                .saturating_add(CURSOR_PERSIST_INTERVAL)
+        {
+            // Cursor-only progress is written in bounded steps; between them
+            // a restart re-reads at most CURSOR_PERSIST_INTERVAL blocks.
             self.persist(&updated)?;
+            updated.persisted_height = height;
             *store = updated;
+        } else {
+            store.observed_height = updated.observed_height;
+            store.observed_tip = updated.observed_tip;
         }
-        Ok(changed)
+        Ok(Reconciled { changed, released })
     }
 
-    fn update<T>(&self, f: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {
-        let mut store = self.lock();
-        let mut updated = store.clone();
-        let result = f(&mut updated)?;
+    /// Persist a changed store, then make it current. On failure nothing
+    /// changes, so reservations and pending work survive a failed write.
+    fn commit(&self, store: &mut Store, mut updated: Store) -> Result<(), String> {
         updated.revision = updated.revision.wrapping_add(1);
         self.persist(&updated)?;
+        updated.persisted_height = updated.observed_height;
         *store = updated;
-        Ok(result)
+        Ok(())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Store> {
@@ -612,8 +787,11 @@ fn decode_id(id: &str) -> Result<[u8; 32], String> {
 }
 
 fn materialize(record: &Record) -> Result<Entry, String> {
-    let bytes = hex::decode(&record.signed_bytes)
-        .map_err(|_| "private queue has invalid transaction bytes")?;
+    let signed = record
+        .signed_bytes
+        .as_deref()
+        .ok_or("private queue record has no signed bytes")?;
+    let bytes = hex::decode(signed).map_err(|_| "private queue has invalid transaction bytes")?;
     let mut reader = VlqReader::new(&bytes);
     let tx =
         read_transaction(&mut reader).map_err(|_| "private queue transaction cannot be decoded")?;
