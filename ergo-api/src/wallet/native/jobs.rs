@@ -43,7 +43,7 @@ pub(crate) async fn create(
 #[utoipa::path(
     post, path = "/api/v1/wallet/mining-jobs/{job_id}/cancel", tag = "wallet",
     params(("job_id" = String, Path, description = "Durable decimal job ID")),
-    responses((status = 200, description = "Cancelled job and unpublished private work", body = dto::WalletJob)),
+    responses((status = 200, description = "Cancelled job. Queued private work is withdrawn; a signed transaction stays valid until one of its inputs is spent", body = dto::WalletJob)),
     security(("ApiKeyAuth" = [])),
 )]
 pub(crate) async fn cancel(

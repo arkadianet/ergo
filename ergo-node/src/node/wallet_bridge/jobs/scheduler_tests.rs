@@ -260,6 +260,37 @@ async fn one_bulk_snapshot_updates_every_retained_job_including_recovered_confli
 }
 
 #[tokio::test(start_paused = true)]
+async fn retired_jobs_drop_their_unpublished_signed_bytes() {
+    let harness = Harness::new();
+    let cancelled = harness.seed(WalletJobState::Prepared, true);
+    let expired = harness.seed_until(WalletJobState::Prepared, true, 10);
+    let exhausted = harness.seed(WalletJobState::Prepared, true);
+    let mut record = records(&harness.db).unwrap().remove(2).1;
+    record.job.attempts = record.job.request.max_attempts;
+    save(&harness.db, exhausted, &record).unwrap();
+    let mined = harness.seed(WalletJobState::Queued, true);
+    harness.queue_entry(mined, "mined");
+    cancel(&harness.context(), &cancelled.to_string())
+        .await
+        .unwrap();
+    tick(&harness.context()).await.unwrap();
+    let jobs: BTreeMap<_, _> = records(&harness.db).unwrap().into_iter().collect();
+    for (key, state) in [
+        (cancelled, WalletJobState::Cancelled),
+        (expired, WalletJobState::Expired),
+        (exhausted, WalletJobState::Failed),
+    ] {
+        assert_eq!(jobs[&key].job.state, state);
+        assert_eq!(jobs[&key].signed_hex, None, "{state:?}");
+        assert_eq!(jobs[&key].job.tx_id, Some(format!("{key:064x}")));
+    }
+    // Mined work still follows queue reorgs with its exact bytes.
+    assert_eq!(jobs[&mined].job.state, WalletJobState::Mined);
+    assert_eq!(jobs[&mined].signed_hex.as_deref(), Some("abcd"));
+    assert!(harness.probe.submissions.lock().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn unsigned_locked_job_needs_no_queue_rpc_or_retry_attempt() {
     let harness = Harness::new();
     harness.seed(WalletJobState::Waiting, false);

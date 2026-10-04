@@ -125,7 +125,7 @@ export function createWalletMaintenance(root, { onJobs } = {}) {
       for (const line of recipientLines(description)) row.append(el('p', line, 'wb-note'));
       if (job.txId) row.append(el('p', `Transaction ${job.txId}`, 'wb-note'));
       if (job.detail) row.append(el('p', job.detail, 'wb-note'));
-      if (canCancelMaintenance(job.state)) { const cancel = el('button', 'Cancel operation', 'btn btn--sm'); cancel.type = 'button'; cancel.addEventListener('click', async () => { if (busy) return; busy = true; cancel.disabled = true; const result = await api.wallet.cancelMiningJob(job.id); busy = false; if (disposed) return; note.textContent = result.ok ? 'Operation cancelled.' : result.reason || 'Cancellation failed.'; await refresh(); }); row.append(cancel); }
+      if (canCancelMaintenance(job.state)) { const cancel = el('button', 'Cancel operation', 'btn btn--sm'); cancel.type = 'button'; cancel.addEventListener('click', async () => { if (busy) return; busy = true; cancel.disabled = true; const result = await api.wallet.cancelMiningJob(job.id); busy = false; if (disposed) return; note.textContent = result.ok ? (job.txId ? 'Operation cancelled. Its signed transaction stays valid until one of its inputs is spent.' : 'Operation cancelled.') : result.reason || 'Cancellation failed.'; await refresh(); }); row.append(cancel); }
       history.append(row);
     }
     if (!(result.data.items || []).length) history.append(el('p', 'No approved operations.', 'wb-note'));

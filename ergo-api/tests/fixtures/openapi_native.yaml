@@ -753,7 +753,7 @@ paths:
           type: string
       responses:
         '200':
-          description: Cancelled job and unpublished private work
+          description: Cancelled job. Queued private work is withdrawn; a signed transaction stays valid until one of its inputs is spent
           content:
             application/json:
               schema:

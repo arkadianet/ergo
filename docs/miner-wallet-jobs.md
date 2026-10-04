@@ -63,10 +63,15 @@ necessary. Each record is bounded to 512 KiB. A signed transaction above the
 configured `[mempool] max_tx_size_bytes`, or one whose record would exceed that
 bound, is neither journaled nor submitted; the job records the error and counts
 the attempt. A failing job never stops the wallet writer; only a job journal
-that cannot be read or written does. Signed bytes remain in the node's
-journal and are omitted from job API responses. Deadlines and cancellation
-retire unpublished private mining work; a transaction already mined cannot be
-undone by cancellation. Historical terminal jobs remain visible while retained.
+that cannot be read or written does. Signed bytes stay in the journal only
+while a job follows the private queue and are omitted from job API responses;
+cancellation, expiry and failure delete them, and cancellation and deadlines
+withdraw the transaction from private mining. Neither revokes the signature: a
+signed transaction stays valid until one of its inputs is spent, so a mined
+transaction cannot be undone and any retained copy could still be published. A
+queue stored while mining is disabled keeps work admitted earlier, which can be
+mined until its deadline once mining is enabled again. Historical terminal jobs
+remain visible while retained.
 
 ## Authenticated native API
 

@@ -55,7 +55,8 @@ fn follows_queue(record: &Record) -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Record {
     job: WalletJob,
-    /// Not included in the API response. Durable recovery uses these exact bytes.
+    /// Not included in the API response. Durable recovery uses these exact
+    /// bytes, so they are kept only while the job follows the private queue.
     signed_hex: Option<String>,
     /// Retry at most once per applied height; wall-clock polling cannot exhaust
     /// the owner's retry allowance while a chain is quiet.
@@ -388,6 +389,11 @@ fn transition(record: &mut Record, state: WalletJobState, detail: Option<String>
     record.job.state = state;
     record.job.detail = detail;
     record.job.updated_at_ms = now_ms();
+    // A cancelled, expired or failed job never submits again, so its
+    // unpublished signed transaction need not stay at rest in the journal.
+    if !follows_queue(record) {
+        record.signed_hex = None;
+    }
 }
 
 pub(super) async fn cancel(
