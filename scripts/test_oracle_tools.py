@@ -1,10 +1,12 @@
 """Finite offline checks: no oracle helper or HTTP failure may become a pass."""
 
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -30,6 +32,20 @@ class MessageTests(unittest.TestCase):
         for entries in ([], {}, [dict(id="0", bytes="a", bytesToSign="cd")]):
             with self.subTest(entries=entries), self.assertRaises(ValueError):
                 messages.verify(entries, ["fixture-helper"])
+
+    def test_report_keeps_the_replaced_mode_or_the_umask_default(self):
+        previous = os.umask(0o027)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                report = Path(directory) / "report.json"
+                messages.write_report(report, [])
+                self.assertEqual(report.stat().st_mode & 0o777, 0o640)
+                report.chmod(0o644)
+                messages.write_report(report, [dict(id="0")])
+                self.assertEqual(report.stat().st_mode & 0o777, 0o644)
+                self.assertEqual(json.loads(report.read_text()), [dict(id="0")])
+        finally:
+            os.umask(previous)
 
 
 class CorpusTests(unittest.TestCase):

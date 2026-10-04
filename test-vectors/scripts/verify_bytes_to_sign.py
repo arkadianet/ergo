@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,14 @@ def verify(entries, command):
 
 
 def write_report(path, data):
+    # NamedTemporaryFile creates owner-only files. Keep the replaced report's
+    # mode, or give a new report the mode open() would under the umask.
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
         temporary = Path(stream.name)
         try:
@@ -45,6 +54,7 @@ def write_report(path, data):
             temporary.unlink(missing_ok=True)
             raise
     try:
+        temporary.chmod(mode)
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
