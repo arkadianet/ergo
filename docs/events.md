@@ -85,6 +85,11 @@ the same address. Reorg inverses use `token_reverted` with the opposite
 direction and `confirmed:false`; amount is positive in either direction. Mint
 and burn amounts can therefore appear without an opposite pair.
 
+Rollback inverses exist only for rollbacks observed while the relevant live
+feed is active. Rollbacks during downtime do not generate inverses on restart,
+and `tx_confirmed` has no inverse event. Reconcile transaction and chain state
+from REST after downtime even if retained replay reports no cursor gap.
+
 These feeds follow successful indexer commits and may trail the consensus tip
 or replay an indexer catch-up interval. The payload height names the indexed
 change. They are bounded observations, not a chain audit log: boot catch-up
@@ -101,7 +106,9 @@ classes; they never hold an indexer commit open. The shared bus is a bounded sou
 successful admission. Its worker catches up from retained observations after
 subscriber queue overflow or restart. A full pending-delivery ring stops the
 admission cursor until space returns. Expired or uncertain source history
-pauses active subscriptions with `auto_disabled_reason: source_gap`; reconcile
+first admits the contiguous retained prefix, then pauses affected subscriptions
+with `auto_disabled_reason: source_gap`; hooks registered after the missing
+interval remain active. Reconcile
 from REST before explicitly re-enabling them. Confirmed-only hooks still
 receive `box_reverted`, `box_unspent`, and `token_reverted` invalidations,
 including `previous_seq` and `height` when available.
@@ -119,11 +126,15 @@ produce these box/token observations.
   The journal is asynchronous: a live event or its publish cursor alone does
   **not** acknowledge durable persistence. Reconcile after a gap and discard
   an old cursor if it is ahead of this data directory's latest cursor.
-- The journal queue holds **512** observations, committing batches of up to
-  **128** on a dedicated thread. Publishing and indexer commits never wait for
-  disk. Queue overflow or a storage error leaves live delivery available while
-  reserved cursor space remains, but can lose restart history. Errors stop
-  persistence until restart; reservation exhaustion stops new observations.
+- The journal queue holds **8192** observations as shared references. A
+  dedicated thread drains everything available, bounded to the queue size plus
+  its first observation, per commit. Publishing and indexer commits never wait
+  for disk. Overflow or a storage error can lose restart history. A write error
+  is logged once and stops persistence until restart; failed batches, pending
+  entries and subsequent observations are counted as losses. Live delivery
+  continues within the boot epoch reserved before publishers start: **2^40**
+  cursors (about 1.1 trillion). That capacity limit is independent of disk health.
+  A failed epoch stays reserved across shutdown, exposing a restart gap.
 - Durable history retains at most **8192** events and **64 MiB** of encoded
   records, evicting oldest first. A single encoded record over **1 MiB** stops
   journal persistence rather than growing the store without a bound. The live
@@ -166,7 +177,7 @@ REST state even if the page contains useful records.
   observations are still possible; this is not a contiguous acknowledgement.
 - `complete_through_seq`: contiguous confirmed history through this boundary;
   inspect `gap` too, because older records can expire from retention.
-- `dropped_events`: observations rejected by the journal queue this session.
+- `dropped_events`: observations lost by journal admission or failed writes this session.
 - `available`: whether journal persistence is currently operating.
 
 Records above the confirmed boundary can be live-only. When a notification
@@ -179,7 +190,20 @@ New webhook registrations record the bus boundary inside their serialized
 management operation, so replay does not send them observations from before
 registration. Previously admitted deliveries retain their IDs, bodies and
 retry deadlines across restart; receivers must deduplicate the delivery ID
-because an unknown HTTP acknowledgement can still be retried.
+because an unknown HTTP acknowledgement can still be retried. Admission is
+atomic for all hooks matching an event, and a catch-up page commits once.
+Unmatched observations advance the admission cursor in memory; active hooks
+checkpoint skips after at most 1024 observations or five seconds. No active
+hooks means no catch-up checkpoint write.
+
+Before downgrading to a binary predating persistent operator replay, reconcile
+REST state and explicitly re-enable every subscription marked `source_gap`
+using the current binary. The old snapshot reader cannot decode this new reason;
+a downgrade with any such marker disables the webhook subsystem when loading
+the registry. Re-enabling clears the marker durably. If reconciliation is not
+possible, keep the current binary and retain the paused subscriptions. Back up
+`webhooks.redb` before changing versions; do not replace it with a fresh file to
+bypass this compatibility check.
 
 ## Transport limits
 
