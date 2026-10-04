@@ -210,7 +210,7 @@ impl MiningCache {
 pub struct MiningHandle {
     cache: Arc<RwLock<MiningCache>>,
     /// "Serve-state changed" signal for longpoll waiters in the API task. Bumped
-    /// on every change to what `cached_*_if_synced` would return: a publish
+    /// on changes to the ordinary served work: an ordinary publish
     /// ([`MiningHandle::publish_if_current`] `Some` path), a tip transition
     /// ([`MiningHandle::set_best_tip`] with a parent change or synced-bit flip),
     /// or a withdrawal ([`MiningHandle::withdraw_templates_for_parent`]
@@ -1039,7 +1039,9 @@ impl MiningHandle {
         // changed", not the value). Only on the publish (`Some`) path — a
         // dropped (parent-mismatch) build returns early above and never bumps.
         // The send happens after the cache lock is released.
-        self.serve_notify.send_modify(|v| *v = v.wrapping_add(1));
+        if reason != BuildReason::Requested {
+            self.serve_notify.send_modify(|v| *v = v.wrapping_add(1));
+        }
         Some(identity)
     }
 
@@ -3518,5 +3520,37 @@ mod tests {
                 .sum::<usize>()
                 <= MAX_REQUESTED_TEMPLATE_BYTES
         );
+    }
+    #[test]
+    fn requested_publication_does_not_wake_ordinary_longpoll() {
+        let handle = MiningHandle::mainnet([2; 33]);
+        let parent = [0; 32];
+        handle.set_best_tip(synced_tip(parent));
+        let mut changes = handle.subscribe_serve_changes();
+        for reason in [
+            BuildReason::Requested,
+            BuildReason::Tip,
+            BuildReason::Requested,
+        ] {
+            let (candidate, work) = candidate_pair_msg(parent, [reason as u8; 32]);
+            let identity = handle
+                .publish_if_current(candidate, work, &parent, || BUILT_AT_MS, reason)
+                .unwrap();
+            assert_eq!(
+                changes.has_changed().unwrap(),
+                reason != BuildReason::Requested
+            );
+            if reason == BuildReason::Requested {
+                assert!(handle
+                    .cached_requested_template_if_synced(identity.template_seq)
+                    .is_some());
+            } else {
+                assert_eq!(
+                    handle.cached_template_if_synced().unwrap().1.template_seq,
+                    identity.template_seq
+                );
+            }
+            changes.borrow_and_update();
+        }
     }
 }
