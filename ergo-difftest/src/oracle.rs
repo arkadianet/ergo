@@ -443,6 +443,12 @@ fn ergo_box_candidate_verdict(bytes: &[u8]) -> (Verdict, usize) {
         Err(e) => (Verdict::Reject(format!("{e:?}")), r.position()),
         Ok(candidate) => {
             let consumed = r.position();
+            // Scala curve-checks each group element while parsing the box; the
+            // node defers that check to transaction validation, which every
+            // consensus path runs on these same recorded points.
+            if let Err(e) = drain_and_check_group_elements(&mut r) {
+                return (Verdict::Reject(e), consumed);
+            }
             let mut w = VlqWriter::new();
             let v = match ergo_ser::ergo_box::write_ergo_box_candidate(&mut w, &candidate) {
                 Ok(()) => Verdict::Accept(to_hex(&w.result())),
@@ -459,6 +465,11 @@ fn transaction_verdict(bytes: &[u8]) -> (Verdict, usize) {
         Err(e) => (Verdict::Reject(format!("{e:?}")), r.position()),
         Ok(tx) => {
             let consumed = r.position();
+            // As for a box candidate: the node's deferred curve check of every
+            // group element the transaction carries (validation stage 1.5).
+            if let Err(e) = drain_and_check_group_elements(&mut r) {
+                return (Verdict::Reject(e), consumed);
+            }
             let mut w = VlqWriter::new();
             let v = match ergo_ser::transaction::write_transaction(&mut w, &tx) {
                 Ok(()) => Verdict::Accept(to_hex(&w.result())),
@@ -489,9 +500,10 @@ fn header_verdict(bytes: &[u8]) -> (Verdict, usize) {
 /// curve-check each the way Scala's `GroupElementSerializer.parse` does at
 /// deserialize time (`0x00`-lead identity accepted; any other lead must be an
 /// on-curve SecP256K1 point). This is the exact production consensus check
-/// (`ergo-validation` `tx::ge::validate_group_elements`); the box-script surfaces
-/// run it so an off-curve point is a reject, matching the node and the JVM oracle
-/// instead of a false accept-invalid divergence.
+/// (`ergo-validation` `tx::ge::validate_group_elements`); the box-script,
+/// box-candidate, transaction and validate surfaces run it so an off-curve point
+/// is a reject, matching the node and the JVM oracle instead of a false
+/// accept-invalid divergence.
 fn drain_and_check_group_elements(r: &mut VlqReader) -> Result<(), String> {
     for ge in r.take_group_elements() {
         ergo_sigma::evaluator::validate_group_element(ge)
@@ -875,6 +887,11 @@ fn validate_verdict(bytes: &[u8]) -> (Verdict, usize) {
         Ok(tx) => tx,
     };
     let consumed = r.position();
+    // Production order: deserialize, curve-check the recorded group elements
+    // (stage 1.5), then the structural rules.
+    if let Err(e) = drain_and_check_group_elements(&mut r) {
+        return (Verdict::Reject(e), consumed);
+    }
     let params = ergo_validation::context::ProtocolParams::mainnet_default();
     match ergo_validation::tx::structural::validate_structural(&tx, &params) {
         Ok(()) => (Verdict::Accept(String::new()), consumed),
@@ -1750,6 +1767,58 @@ mod tests {
             msg.contains("jvm verdict was Err") && msg.contains("synthetic-jvm-failure"),
             "error should name which side erred and carry the detail: {msg:?}"
         );
+    }
+
+    // ----- deferred group-element check -----
+
+    /// Minimized by the main-branch consensus guard (run 37186758918): a box
+    /// whose sizeless v0 P2PK tree carries `03ff…ff`, which is not a secp256k1
+    /// point. Scala rejects it while parsing; the node's crypto-free parse
+    /// records the point and rejects it at transaction validation.
+    const OFF_CURVE_P2PK_BOX: &str =
+        "c0843d0008cd03ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff010000";
+    /// The same box carrying the secp256k1 generator instead.
+    const GENERATOR_P2PK_BOX: &str =
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798010000";
+
+    /// A one-input transaction whose only output is `box_hex`.
+    fn transaction_with_output(box_hex: &str) -> Vec<u8> {
+        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+        let bytes = from_hex(box_hex).unwrap();
+        let candidate = ergo_ser::ergo_box::read_ergo_box_candidate(&mut VlqReader::new(&bytes))
+            .expect("the codec parses either point");
+        let tx = ergo_ser::transaction::Transaction {
+            inputs: vec![Input {
+                box_id: ergo_primitives::digest::Digest32::from_bytes([7; 32]),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![candidate],
+        };
+        let mut w = VlqWriter::new();
+        ergo_ser::transaction::write_transaction(&mut w, &tx).unwrap();
+        w.result()
+    }
+
+    fn is_curve_reject(verdict: &Verdict) -> bool {
+        matches!(verdict, Verdict::Reject(reason) if reason.starts_with("invalid group element"))
+    }
+
+    #[test]
+    fn off_curve_points_reject_on_box_transaction_and_validate_surfaces() {
+        let (verdict, _) = ergo_box_candidate_verdict(&from_hex(OFF_CURVE_P2PK_BOX).unwrap());
+        assert!(is_curve_reject(&verdict), "{verdict:?}");
+        let off_curve_tx = transaction_with_output(OFF_CURVE_P2PK_BOX);
+        let (verdict, _) = transaction_verdict(&off_curve_tx);
+        assert!(is_curve_reject(&verdict), "{verdict:?}");
+        let (verdict, _) = validate_verdict(&off_curve_tx);
+        assert!(is_curve_reject(&verdict), "{verdict:?}");
+
+        // A valid point is accepted, so the rejection is the curve check.
+        let (verdict, _) = ergo_box_candidate_verdict(&from_hex(GENERATOR_P2PK_BOX).unwrap());
+        assert!(matches!(verdict, Verdict::Accept(_)), "{verdict:?}");
+        let (verdict, _) = transaction_verdict(&transaction_with_output(GENERATOR_P2PK_BOX));
+        assert!(matches!(verdict, Verdict::Accept(_)), "{verdict:?}");
     }
 
     #[test]
