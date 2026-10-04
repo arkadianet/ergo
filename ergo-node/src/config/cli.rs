@@ -27,6 +27,9 @@ pub enum Command {
         /// Remove legacy rollback copies after verification; requires an external backup to roll back.
         #[arg(long)]
         discard_backups: bool,
+        /// Retain a stale legacy indexer instead of deleting derived data before the state upgrade.
+        #[arg(long, conflicts_with = "discard_backups")]
+        keep_stale_indexer: bool,
     },
     /// Verify and copy a stopped node's complete data directory.
     Backup {

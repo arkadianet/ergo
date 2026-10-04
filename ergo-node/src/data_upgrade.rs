@@ -224,6 +224,9 @@ pub fn required_space(bytes: u64) -> u64 {
 
 pub struct UpgradeOptions<'a> {
     pub discard_backups: bool,
+    pub keep_stale_indexer: bool,
+    pub indexer_enabled: bool,
+    pub warning: &'a mut dyn FnMut(&str),
     pub free_space: &'a dyn Fn(&Path) -> Result<u64>,
     pub cancelled: &'a dyn Fn() -> bool,
     pub progress: &'a mut dyn FnMut(&Path, u64, Duration, &MigrationProgress),
@@ -235,6 +238,8 @@ pub struct UpgradeOptions<'a> {
 struct Intent {
     stale_indexer: bool,
     discard_backup: bool,
+    #[serde(default)]
+    stale_indexer_bytes: Option<u64>,
 }
 
 fn write_intent(stage: &Path, intent: &Intent) -> Result<()> {
@@ -463,6 +468,60 @@ fn discard_existing_backup(path: &Path, indexer: bool) -> Result<bool> {
     Ok(true)
 }
 
+fn log_warning(message: &str) {
+    if tracing::enabled!(tracing::Level::WARN) {
+        tracing::warn!("{message}");
+    } else {
+        eprintln!("WARN upgrade-data: {message}");
+    }
+}
+
+fn warn_backup(path: &Path, warning: &mut dyn FnMut(&str)) -> Result<()> {
+    let bytes = fs::metadata(path)?.len();
+    warning(&format!("retained legacy backup {} ({bytes} bytes): this is a plain file the node never opens; deleting it is safe while the node runs once you are satisfied with the upgrade. Alternatively, stop the node and run ergo-node upgrade-data DATA_DIR --indexer-db INDEXER_DB --discard-backups", path.display()));
+    Ok(())
+}
+
+fn warn_retained_backups(
+    directory: &Path,
+    indexer_filename: &Path,
+    warning: &mut dyn FnMut(&str),
+) -> Result<()> {
+    fn visit(directory: &Path, warning: &mut dyn FnMut(&str)) -> Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                visit(&entry.path(), warning)?;
+            } else if kind.is_file()
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".redb2-backup")
+            {
+                warn_backup(&entry.path(), warning)?;
+            }
+        }
+        Ok(())
+    }
+    visit(directory, warning)?;
+    let indexer = directory.join(indexer_filename);
+    let backup = sibling(&indexer, ".redb2-backup");
+    if regular(&backup)? && !fs::canonicalize(&backup)?.starts_with(fs::canonicalize(directory)?) {
+        warn_backup(&backup, warning)?;
+    }
+    Ok(())
+}
+
+fn check_space(path: &Path, size: u64, options: &mut UpgradeOptions<'_>) -> Result<()> {
+    let needed = required_space(size);
+    let available = (options.free_space)(path)?;
+    if available < needed {
+        return Err(fail(format!("insufficient space for {}: need {needed} bytes, available {available} bytes; free space, use --discard-backups, or use ergo-node migrate-redb to another disk", path.display())));
+    }
+    Ok(())
+}
+
 /// Caller must retain this lock across subsequent database opens at startup.
 pub fn upgrade_data(
     _lock: &DataDirectoryLock,
@@ -472,13 +531,24 @@ pub fn upgrade_data(
 ) -> Result<UpgradeReport> {
     _lock.check_directory(directory)?;
     let paths = database_paths(directory, indexer_filename)?;
+    warn_retained_backups(directory, indexer_filename, options.warning)?;
     let mut report = UpgradeReport::default();
+    let mut deleted_indexer = None;
     for (position, path) in paths.iter().enumerate() {
         if (options.cancelled)() {
             return Err(MigrationError::Interrupted.into());
         }
+        let ready = sibling(path, ".redb-upgrade").join("ready");
+        let pending = if position == 0 && regular(&ready)? {
+            Some(serde_json::from_slice::<Intent>(&fs::read(ready)?)?)
+        } else {
+            None
+        };
         if recover(path, options)? {
             report.recovered += 1;
+            if let Some(intent) = pending.filter(|i| i.stale_indexer && i.discard_backup) {
+                deleted_indexer = intent.stale_indexer_bytes.map(|size| (path.clone(), size));
+            }
         }
         if options.discard_backups && discard_existing_backup(path, position == 0)? {
             report.discarded_existing_backups += 1;
@@ -504,10 +574,14 @@ pub fn upgrade_data(
             None
         };
         if !stale {
-            let needed = required_space(size);
-            let available = (options.free_space)(path)?;
-            if available < needed {
-                return Err(fail(format!("insufficient space for {}: need {needed} bytes, available {available} bytes; free space, use --discard-backups, or use ergo-node migrate-redb to another disk", path.display())));
+            check_space(path, size, options)?;
+        } else if options.keep_stale_indexer {
+            // Retaining the index frees no space. Reject a known state-space
+            // shortage before moving the index or creating any upgrade journal.
+            for other in &paths[1..] {
+                if regular(other)? && classify(other)? == FileFormat::LegacyV2 {
+                    check_space(other, fs::metadata(other)?.len(), options)?;
+                }
             }
         }
         let backup = sibling(path, ".redb2-backup");
@@ -527,7 +601,8 @@ pub fn upgrade_data(
         builder.create(&stage)?;
         let intent = Intent {
             stale_indexer: stale,
-            discard_backup: options.discard_backups,
+            discard_backup: options.discard_backups || (stale && !options.keep_stale_indexer),
+            stale_indexer_bytes: stale.then_some(size),
         };
         let result = (|| -> Result<()> {
             sync_directory(
@@ -540,6 +615,10 @@ pub fn upgrade_data(
                 (options.step)(UpgradeStep::Ready)?;
                 finish_swap(path, &stage, &intent, true, options)?;
                 report.stale_indexers += 1;
+                if intent.discard_backup {
+                    deleted_indexer = Some((path.clone(), size));
+                }
+                (options.warning)("stale legacy indexer will be rebuilt from genesis; rolling back to 0.11 rebuilds this index too");
             } else {
                 migrate_database_observed(path, &stage.join("copy.redb"), &mut |event| {
                     if (options.cancelled)() {
@@ -580,7 +659,11 @@ pub fn upgrade_data(
                 path.display(),
                 size,
                 if stale {
-                    "stale indexer moved aside"
+                    if intent.discard_backup {
+                        "stale indexer deleted"
+                    } else {
+                        "stale indexer retained"
+                    }
                 } else {
                     "upgrade complete"
                 },
@@ -597,8 +680,22 @@ pub fn upgrade_data(
         }
         result?;
         drop(indexer_lock);
+        if regular(&backup)? {
+            warn_backup(&backup, options.warning)?;
+        }
         if (options.cancelled)() {
             return Err(MigrationError::Interrupted.into());
+        }
+    }
+    if options.indexer_enabled {
+        if let Some((path, size)) = deleted_indexer {
+            let parent = path
+                .parent()
+                .ok_or_else(|| fail("indexer needs a parent"))?;
+            let available = (options.free_space)(parent)?;
+            if available < size {
+                (options.warning)(&format!("indexer rebuild at {} needs about {size} bytes (the deleted indexer's size), but only {available} bytes are free; remove retained state backups once satisfied with the upgrade, or free space before rebuilding", path.display()));
+            }
         }
     }
     Ok(report)
@@ -705,16 +802,25 @@ pub async fn prepare_startup(config: &crate::config::NodeConfig) -> Result<Arc<D
     let directory = config.data_dir.clone();
     let indexer = PathBuf::from(&config.indexer_config.db_filename);
     let automatic = config.auto_upgrade_legacy;
+    let keep_stale_indexer = config.auto_upgrade_keep_stale_indexer;
+    let indexer_enabled = config.indexer_config.enabled;
     crate::maintenance::run_cancellable(move |cancelled| {
         let lock = Arc::new(DataDirectoryLock::acquire(&directory)?);
         if automatic {
-            let report = upgrade_with_logging(&lock, &directory, &indexer, false, &|| {
-                cancelled.load(std::sync::atomic::Ordering::Relaxed)
-            })?;
+            let report = upgrade_with_logging(
+                &lock,
+                &directory,
+                &indexer,
+                false,
+                keep_stale_indexer,
+                indexer_enabled,
+                &|| cancelled.load(std::sync::atomic::Ordering::Relaxed),
+            )?;
             if report.is_noop() {
                 tracing::info!("data-directory upgrade: no-op; no legacy databases");
             }
         } else {
+            warn_retained_backups(&directory, &indexer, &mut log_warning)?;
             require_current_data(&lock, &directory, &indexer)?;
         }
         Ok(lock)
@@ -728,6 +834,8 @@ pub fn upgrade_with_logging(
     directory: &Path,
     indexer_filename: &Path,
     discard_backups: bool,
+    keep_stale_indexer: bool,
+    indexer_enabled: bool,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<UpgradeReport> {
     if discard_backups {
@@ -740,6 +848,9 @@ pub fn upgrade_with_logging(
         indexer_filename,
         &mut UpgradeOptions {
             discard_backups,
+            keep_stale_indexer,
+            indexer_enabled,
+            warning: &mut log_warning,
             free_space: &available_space,
             cancelled,
             step: &mut |_| Ok(()),

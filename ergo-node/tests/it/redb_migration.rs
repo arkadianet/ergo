@@ -464,8 +464,9 @@ fn assert_upgraded_directory(
 ) {
     for (name, bytes) in originals {
         let backup = directory.join(format!("{name}.redb2-backup"));
-        assert_eq!(backup.exists(), !discard);
-        if !discard {
+        let retained = !discard && !(name == "archive-index.redb" && stale);
+        assert_eq!(backup.exists(), retained);
+        if retained {
             assert_eq!(fs::read(backup).unwrap(), *bytes);
         }
         if name == "archive-index.redb" && stale {

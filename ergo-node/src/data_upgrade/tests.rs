@@ -71,6 +71,9 @@ fn run(lock: &DataDirectoryLock, dir: &Path, discard: bool) -> UpgradeReport {
         Path::new("custom-index.redb"),
         &mut UpgradeOptions {
             discard_backups: discard,
+            keep_stale_indexer: true,
+            indexer_enabled: false,
+            warning: &mut |_| {},
             free_space: &|_| Ok(u64::MAX),
             cancelled: &|| false,
             progress: &mut |_, _, _, _| {},
@@ -153,6 +156,9 @@ fn every_swap_step_can_be_retried_without_losing_original_data() {
                 Path::new("custom-index.redb"),
                 &mut UpgradeOptions {
                     discard_backups: discard,
+                    keep_stale_indexer: true,
+                    indexer_enabled: false,
+                    warning: &mut |_| {},
                     free_space: &|_| Ok(u64::MAX),
                     cancelled: &|| false,
                     progress: &mut |_, _, _, _| {},
@@ -215,6 +221,9 @@ fn stale_indexer_steps_retry_and_discard_precedes_state_space_query() {
                 Path::new("custom-index.redb"),
                 &mut UpgradeOptions {
                     discard_backups: discard,
+                    keep_stale_indexer: true,
+                    indexer_enabled: false,
+                    warning: &mut |_| {},
                     free_space: &|_| panic!("stale indexer should not be copied"),
                     cancelled: &|| false,
                     progress: &mut |_, _, _, _| {},
@@ -234,6 +243,9 @@ fn stale_indexer_steps_retry_and_discard_precedes_state_space_query() {
                 Path::new("custom-index.redb"),
                 &mut UpgradeOptions {
                     discard_backups: discard,
+                    keep_stale_indexer: true,
+                    indexer_enabled: false,
+                    warning: &mut |_| {},
                     free_space: &|path| {
                         assert_eq!(path, state);
                         assert!(!idx.exists());
@@ -268,6 +280,9 @@ fn space_error_has_numbers_and_options_without_changing_file() {
         Path::new("custom-index.redb"),
         &mut UpgradeOptions {
             discard_backups: false,
+            keep_stale_indexer: true,
+            indexer_enabled: false,
+            warning: &mut |_| {},
             free_space: &|_| Ok(17),
             cancelled: &|| false,
             progress: &mut |_, _, _, _| {},
@@ -304,6 +319,9 @@ fn cancellation_mid_copy_and_verification_removes_all_temporaries() {
             Path::new("custom-index.redb"),
             &mut UpgradeOptions {
                 discard_backups: false,
+                keep_stale_indexer: true,
+                indexer_enabled: false,
+                warning: &mut |_| {},
                 free_space: &|_| Ok(u64::MAX),
                 cancelled: &|| cancelled.get(),
                 progress: &mut |_, _, _, event| {
@@ -363,6 +381,8 @@ fn exclusive_directory_lock_invalid_files_and_backup_collisions_fail_closed() {
         dir.path(),
         Path::new("custom-index.redb"),
         false,
+        false,
+        false,
         &|| false
     )
     .is_err());
@@ -371,9 +391,16 @@ fn exclusive_directory_lock_invalid_files_and_backup_collisions_fail_closed() {
         fs::read(sibling(&path, ".redb2-backup")).unwrap(),
         b"existing backup"
     );
-    assert!(
-        upgrade_with_logging(&lock, dir.path(), Path::new("state.redb"), true, &|| false).is_err()
-    );
+    assert!(upgrade_with_logging(
+        &lock,
+        dir.path(),
+        Path::new("state.redb"),
+        true,
+        false,
+        false,
+        &|| false
+    )
+    .is_err());
 }
 
 #[test]
@@ -390,6 +417,9 @@ fn abrupt_worker_exit() {
         Path::new("custom-index.redb"),
         &mut UpgradeOptions {
             discard_backups: false,
+            keep_stale_indexer: true,
+            indexer_enabled: false,
+            warning: &mut |_| {},
             free_space: &|_| Ok(u64::MAX),
             cancelled: &|| false,
             progress: &mut |_, _, _, _| {},
@@ -455,6 +485,9 @@ async fn signal_copy_worker() {
             Path::new("custom-index.redb"),
             &mut UpgradeOptions {
                 discard_backups: false,
+                keep_stale_indexer: true,
+                indexer_enabled: false,
+                warning: &mut |_| {},
                 free_space: &|_| Ok(u64::MAX),
                 cancelled: &|| cancelled.load(std::sync::atomic::Ordering::Relaxed),
                 progress: &mut |_, _, _, event| {
@@ -530,6 +563,9 @@ fn missing_indexer_parent_is_skipped_and_lock_must_cover_requested_directory() {
     let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
     let mut options = UpgradeOptions {
         discard_backups: false,
+        keep_stale_indexer: true,
+        indexer_enabled: false,
+        warning: &mut |_| {},
         free_space: &|_| panic!("no database to migrate"),
         cancelled: &|| false,
         progress: &mut |_, _, _, _| {},
@@ -565,6 +601,9 @@ fn missing_verified_copy_restores_original_before_retrying() {
         Path::new("custom-index.redb"),
         &mut UpgradeOptions {
             discard_backups: false,
+            keep_stale_indexer: true,
+            indexer_enabled: false,
+            warning: &mut |_| {},
             free_space: &|_| Ok(u64::MAX),
             cancelled: &|| false,
             progress: &mut |_, _, _, _| {},
@@ -602,6 +641,8 @@ fn configured_indexer_cannot_consume_a_retained_rollback_backup() {
         dir.path(),
         Path::new("state.redb.redb2-backup"),
         true,
+        false,
+        false,
         &|| false,
     )
     .unwrap_err()
@@ -616,10 +657,14 @@ fn discard_retry_reclaims_stale_backup_before_checking_state_space() {
     let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
     let idx = dir.path().join("custom-index.redb");
     indexer(&idx, 2);
+    run(&lock, dir.path(), false);
     let state = dir.path().join("state.redb");
     let bytes = legacy(&state);
     let mut options = UpgradeOptions {
         discard_backups: false,
+        keep_stale_indexer: true,
+        indexer_enabled: false,
+        warning: &mut |_| {},
         free_space: &|path| {
             assert_eq!(path, state);
             Ok(0)
@@ -700,6 +745,8 @@ fn discard_refuses_to_delete_a_sole_state_or_current_schema_indexer_backup() {
             dir.path(),
             Path::new("custom-index.redb"),
             true,
+            false,
+            false,
             &|| false,
         )
         .unwrap_err()
@@ -709,5 +756,229 @@ fn discard_refuses_to_delete_a_sole_state_or_current_schema_indexer_backup() {
             "{error}"
         );
         assert_eq!(fs::read(&backup).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn constrained_drive_deletes_stale_index_before_state_copy_and_warns_about_rebuild() {
+    for keep_stale_indexer in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+        let idx = dir.path().join("custom-index.redb");
+        let idx_bytes = indexer(&idx, 2);
+        let state = dir.path().join("state.redb");
+        let state_bytes = legacy(&state);
+        let needed = required_space(state_bytes.len() as u64);
+        let idx_size = idx_bytes.len() as u64;
+        let initial_free = needed - idx_size / 2;
+        let mut warnings = Vec::new();
+        let result = upgrade_data(
+            &lock,
+            dir.path(),
+            Path::new("custom-index.redb"),
+            &mut UpgradeOptions {
+                discard_backups: false,
+                keep_stale_indexer,
+                indexer_enabled: true,
+                free_space: &|path| {
+                    let retained_index = idx.exists() || sibling(&idx, ".redb2-backup").exists();
+                    let free = initial_free + if retained_index { 0 } else { idx_size };
+                    assert!(path == state || path == dir.path());
+                    let copied_state = sibling(&state, ".redb2-backup").exists();
+                    // Model a copy using its full preflight budget, including
+                    // page-growth headroom; the retained source frees nothing.
+                    Ok(free - if copied_state { needed } else { 0 })
+                },
+                warning: &mut |message| warnings.push(message.to_owned()),
+                cancelled: &|| false,
+                progress: &mut |_, _, _, _| {},
+                step: &mut |_| Ok(()),
+            },
+        );
+        if keep_stale_indexer {
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains(&needed.to_string()) && error.contains(&initial_free.to_string()),
+                "{error}"
+            );
+            assert_eq!(fs::read(&idx).unwrap(), idx_bytes);
+            assert_eq!(fs::read(&state).unwrap(), state_bytes);
+            for path in [&idx, &state] {
+                assert!(!sibling(path, ".redb2-backup").exists());
+                assert!(!sibling(path, ".redb-upgrade").exists());
+            }
+        } else {
+            assert_eq!(result.unwrap().migrated, 1);
+            assert!(!idx.exists());
+            assert!(!sibling(&idx, ".redb2-backup").exists());
+            assert_current(&state);
+            assert_eq!(
+                fs::read(sibling(&state, ".redb2-backup")).unwrap(),
+                state_bytes
+            );
+            let messages = warnings.join("\n");
+            for expected in [
+                "rolling back to 0.11 rebuilds",
+                "state.redb.redb2-backup",
+                "plain file",
+                "safe while the node runs",
+                "--discard-backups",
+                "indexer rebuild",
+                &idx_size.to_string(),
+                &(idx_size / 2).to_string(),
+            ] {
+                assert!(
+                    messages.contains(expected),
+                    "missing {expected}: {messages}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn backup_warning_startup_worker() {
+    use clap::Parser;
+    let Ok(directory) = std::env::var("ERGO_BACKUP_WARNING_DIRECTORY") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    let log = File::create(directory.join("startup.log")).unwrap();
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || log.try_clone().unwrap())
+            .finish(),
+    )
+    .unwrap();
+    let cli = crate::config::Cli::try_parse_from([
+        "ergo-node",
+        "--data-dir",
+        directory.to_str().unwrap(),
+        "--config",
+        directory.join("node.toml").to_str().unwrap(),
+    ])
+    .unwrap();
+    let config = crate::config::NodeConfig::load(cli).unwrap();
+    let _lock = prepare_startup(&config).await.unwrap();
+}
+
+#[test]
+fn every_startup_warns_about_existing_backups_even_when_conversion_is_disabled() {
+    for automatic in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("archive");
+        fs::create_dir(&nested).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let paths = [
+            dir.path().join("state.redb.redb2-backup"),
+            nested.join("old.redb2-backup"),
+            external.path().join("index.redb.redb2-backup"),
+        ];
+        for path in &paths {
+            fs::write(path, b"retained").unwrap();
+        }
+        fs::write(
+            dir.path().join("node.toml"),
+            format!(
+                "[store]\nauto_upgrade_legacy = {automatic}\n[indexer]\ndb_filename = {:?}\n",
+                external.path().join("index.redb").to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        // A new process gives startup's blocking worker a real tracing
+        // subscriber, without changing the parallel test runner's subscriber.
+        for _ in 0..2 {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "data_upgrade::tests::backup_warning_startup_worker",
+                ])
+                .env("ERGO_BACKUP_WARNING_DIRECTORY", dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let log = fs::read_to_string(dir.path().join("startup.log")).unwrap();
+            for path in &paths {
+                assert!(log.contains(path.to_str().unwrap()), "{log}");
+            }
+            for expected in [
+                "WARN",
+                "8 bytes",
+                "safe while the node runs",
+                "stop the node",
+                "--discard-backups",
+            ] {
+                assert!(log.contains(expected), "missing {expected}: {log}");
+            }
+        }
+    }
+}
+
+#[test]
+fn default_stale_indexer_deletion_recovers_and_remembers_rebuild_size() {
+    for crash_at in [
+        UpgradeStep::Ready,
+        UpgradeStep::OriginalRenamed,
+        UpgradeStep::DirectorySynced,
+        UpgradeStep::BackupDiscarded,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+        let idx = dir.path().join("custom-index.redb");
+        let size = indexer(&idx, 2).len();
+        let mut warnings = Vec::new();
+        let mut options = UpgradeOptions {
+            discard_backups: false,
+            keep_stale_indexer: false,
+            indexer_enabled: true,
+            free_space: &|_| Ok(0),
+            warning: &mut |message| warnings.push(message.to_owned()),
+            cancelled: &|| false,
+            progress: &mut |_, _, _, _| {},
+            step: &mut |at| {
+                if at == crash_at {
+                    Err(fail("injected crash"))
+                } else {
+                    Ok(())
+                }
+            },
+        };
+        assert!(upgrade_data(
+            &lock,
+            dir.path(),
+            Path::new("custom-index.redb"),
+            &mut options
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("injected crash"));
+        // The journal's deletion intent survives an explicit retain request.
+        options.keep_stale_indexer = true;
+        let mut resume = |_| Ok(());
+        options.step = &mut resume;
+        assert_eq!(
+            upgrade_data(
+                &lock,
+                dir.path(),
+                Path::new("custom-index.redb"),
+                &mut options
+            )
+            .unwrap()
+            .recovered,
+            1
+        );
+        assert!(!idx.exists());
+        assert!(!sibling(&idx, ".redb2-backup").exists());
+        assert!(!sibling(&idx, ".redb-upgrade").exists());
+        let warnings = warnings.join("\n");
+        assert!(
+            warnings.contains("indexer rebuild") && warnings.contains(&size.to_string()),
+            "{warnings}"
+        );
     }
 }

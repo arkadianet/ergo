@@ -159,6 +159,7 @@ pub fn run(command: &crate::config::Command) -> Result<String> {
             data_dir,
             indexer_db,
             discard_backups,
+            keep_stale_indexer,
         } => {
             let lock = crate::data_upgrade::DataDirectoryLock::acquire(data_dir)?;
             let report = crate::data_upgrade::upgrade_with_logging(
@@ -166,12 +167,14 @@ pub fn run(command: &crate::config::Command) -> Result<String> {
                 data_dir,
                 indexer_db,
                 *discard_backups,
+                *keep_stale_indexer,
+                false,
                 &|| check_interrupted().is_err(),
             )?;
             return Ok(if report.is_noop() {
                 "upgrade-data: no-op; no legacy databases or unfinished upgrades".into()
             } else {
-                format!("upgrade-data: {} databases migrated, {} stale indexers moved aside, {} interrupted upgrades recovered, {} retained backups discarded", report.migrated, report.stale_indexers, report.recovered, report.discarded_existing_backups)
+                format!("upgrade-data: {} databases migrated, {} stale indexers handled, {} interrupted upgrades recovered, {} retained backups discarded", report.migrated, report.stale_indexers, report.recovered, report.discarded_existing_backups)
             });
         }
         Command::Backup {

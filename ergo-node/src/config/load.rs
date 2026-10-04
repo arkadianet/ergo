@@ -1178,6 +1178,10 @@ impl NodeConfig {
             cache_bytes,
             redb_cache_budgets,
             auto_upgrade_legacy: toml_cfg.store.auto_upgrade_legacy.unwrap_or(true),
+            auto_upgrade_keep_stale_indexer: toml_cfg
+                .store
+                .auto_upgrade_keep_stale_indexer
+                .unwrap_or(false),
             script_validation_checkpoint,
             header_checkpoint,
             genesis_id,

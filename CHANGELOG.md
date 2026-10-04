@@ -56,10 +56,17 @@ infrastructure.
   requested IDs that are pooled, in pool order, instead of full transactions.
 - Upgrade normal storage to redb 4.3 and automatically convert 0.11 redb 2.6
   data directories before opening storage. Verified, journaled swaps retain
-  `*.redb2-backup` originals and recover after interruption. Stale indexers are
-  moved aside first for a schema-3 rebuild. `ergo-node upgrade-data DATA_DIR
-  --indexer-db NAME` runs offline; `--discard-backups` trades local rollback
-  copies for space. `[store] auto_upgrade_legacy` defaults to true. See
+  `*.redb2-backup` originals and recover after interruption. Stale legacy
+  indexers are deleted first to reclaim space for the state copy; both the new
+  node and a rollback to 0.11 rebuild the derived index. `--keep-stale-indexer`
+  or `[store] auto_upgrade_keep_stale_indexer = true` explicitly retains it.
+  `ergo-node upgrade-data DATA_DIR --indexer-db NAME` runs offline; `--discard-backups` trades local rollback
+  copies for space. Every startup warns with retained backup paths, sizes and
+  removal instructions; enabled indexers also warn when the rebuild needs
+  more free space than remains after upgrading. Backups are plain files the
+  node never opens and can be deleted while it runs once satisfied, or removed
+  with the offline command after stopping. `[store] auto_upgrade_legacy`
+  defaults to true. See
   [space, recovery and rollback instructions](docs/operating.md#migrating-legacy-redb-databases).
 - Indexer apply and repair commits now use synchronous `Immediate` durability
   instead of `Eventual`, preserving durable guarantees across platforms with

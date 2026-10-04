@@ -353,9 +353,14 @@ The inventory is `state.redb` (UTXO/digest and all embedded wallet tables),
 `indexer.redb`). Encrypted wallet secrets, the private mining queue, mining
 policy/history and maintenance journals are files/JSON, not separate redb
 databases. Missing databases are left for normal startup to create; current
-files are skipped. The schema-2 indexer is moved aside **first**, without
-copying it, because schema 3 needs a rebuild from genesis anyway. A legacy
-indexer already at schema 3 is migrated and retained.
+files are skipped. A stale legacy indexer (including schema 2) is deleted
+**first**, through the crash-safe journal, freeing its space before the state
+copy. Schema 3 needs a rebuild from genesis anyway; rolling back to 0.11 also
+rebuilds the deleted index. A legacy indexer already at schema 3 is migrated.
+To retain stale derived data explicitly, pass `--keep-stale-indexer` to the
+offline command, or set `[store] auto_upgrade_keep_stale_indexer = true` for
+startup (default `false`). Retention frees no space and may prevent upgrading
+on a nearly full disk. `--keep-stale-indexer` conflicts with `--discard-backups`.
 
 To perform the upgrade separately from startup, using the new binary:
 
@@ -389,10 +394,19 @@ bytes on that filesystem equal to its file size plus the larger of **10% or
 256 MiB**. Conversion may still fail if other processes consume that space;
 originals remain recoverable. Each original becomes `<filename>.redb2-backup`
 after its replacement passes both readers' integrity and typed row verification.
-The verified file and the rename directories are synced. Renaming a stale
-indexer avoids allocating another index copy but does **not** free its space
-while its backup is retained. For a 41 GB state and 42 GB stale index, allow
-about 45.1 GB additional free space with the default retained backups.
+The verified file and the rename directories are synced. State, peer and
+webhook backups are retained by default; stale indexer backups are retained
+only on explicit request. A 41.7 GiB state needs about 45.9 GiB free for its
+copy; deleting a stale 42.2 GiB index can make an upgrade fit a drive with
+24 GB initially free.
+
+The rebuilt index still needs about as much space as the deleted index. When
+the indexer is enabled, startup warns if free space after the upgrade is below
+that size. Keeping both state copies can leave too little space for rebuilding.
+Every startup, even with automatic conversion disabled, logs a **WARN** for
+each `*.redb2-backup` with its path and size. These backups are plain files the
+node never opens: deleting them is safe while it runs once you are satisfied
+with the upgrade. Alternatively, stop the node and run the command below.
 
 If space is limited, free space or explicitly discard rollback copies:
 
@@ -401,13 +415,13 @@ If space is limited, free space or explicitly discard rollback copies:
 # Add --indexer-db archive-index.redb if configured.
 ```
 
-This deletes the stale indexer before copying state, and deletes each other
-legacy backup immediately after the verified replacement is durable. The
+This deletes each legacy backup immediately after the verified replacement
+is durable; the stale indexer is already deleted by default. The
 command logs that **rollback to 0.11 then requires an external backup**. It also removes retained backups from earlier attempts when their current database
 opens read-only, or when the only indexer copy is a stale schema-2 backup. It
 refuses to delete the only surviving copy of any other database. The same
-per-file space check still applies. Startup always keeps backups; discarding
-them requires this explicit command.
+per-file space check still applies. Startup keeps backups of migrated
+databases; discarding those automatically requires this explicit command.
 
 For another disk, the existing copy-only converter remains available:
 
@@ -447,7 +461,7 @@ observations recorded only by 0.12 must be downloaded/scanned again.
    upgrade with `upgrade-data` before following the completed-upgrade commands
    below. Alternatively restore the entire external pre-upgrade backup.
 2. Restore **every** retained legacy database over its current file, including
-   a stale indexer backup. For the default filenames:
+   an explicitly retained stale indexer backup. For the default filenames:
 
    ```bash
    cd ./ergo-data
@@ -461,7 +475,8 @@ observations recorded only by 0.12 must be downloaded/scanned again.
    Replace `indexer.redb` with the configured indexer filename/path. This is an
    offline rollback action; never run it while either binary is running.
 3. Remove redb 4 databases that the new binary created where no legacy file
-   existed before the upgrade. In particular, if the indexer, peer or webhook
+   existed before the upgrade, or the stale indexer was deleted. In particular,
+   if the indexer, peer or webhook
    database had no pre-upgrade file/backup, remove that newly created file:
    `rm -- indexer.redb`, `rm -- peers.redb`, or `rm -- webhooks.redb`, as applicable.
    Do not delete `state.redb` if its backup is unavailable: restore the external

@@ -322,6 +322,7 @@ pub(super) struct TomlHeaderCheckpoint {
 #[serde(default)]
 pub(super) struct TomlStore {
     pub(super) auto_upgrade_legacy: Option<bool>,
+    pub(super) auto_upgrade_keep_stale_indexer: Option<bool>,
     /// AVL arena clean-node LRU budget (separate from redb caches), in bytes. Override
     /// `StateStore::DEFAULT_CACHE_BYTES`.
     pub(super) cache_bytes: Option<usize>,

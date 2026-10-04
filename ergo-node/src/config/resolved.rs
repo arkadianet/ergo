@@ -170,6 +170,8 @@ pub struct NodeConfig {
     pub redb_cache_budgets: RedbCacheBudgets,
     /// Upgrade legacy file-format databases before opening any node storage.
     pub auto_upgrade_legacy: bool,
+    /// Retain stale derived indexer data during automatic upgrades (default false).
+    pub auto_upgrade_keep_stale_indexer: bool,
     /// Script-validation checkpoint: blocks at or below this height skip
     /// per-input ErgoScript evaluation. `None` → fully validate every block.
     /// `Some((h, id))` → skip below `h`, assert observed header_id at `h`
