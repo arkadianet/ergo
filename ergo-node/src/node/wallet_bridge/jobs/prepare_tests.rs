@@ -395,6 +395,19 @@ impl Funded {
     }
 }
 
+/// Renewal of 70 boxes near the 4096-byte box limit: a ~283 KB signed
+/// transaction, whose hex record would not fit the 512 KiB journal bound.
+fn heavy_renewal(funded: &mut Funded) -> WalletJobRequest {
+    // R4 = Coll[Byte] of 3,900 bytes (VLQ length 0xbc 0x1e).
+    let mut registers = vec![1, 0x0e, 0xbc, 0x1e];
+    registers.resize(registers.len() + 3_900, 0x5a);
+    let boxes = (0..70)
+        .map(|_| funded.owned(ERG / 100, &[], &registers))
+        .collect();
+    let box_ids = funded.fund(boxes);
+    funded.job(WalletJobTask::Renew { box_ids })
+}
+
 fn tracked_tree(funded: &Funded) -> Vec<u8> {
     ergo_ser::address::build_p2pk_tree_bytes(&funded.pubkey).unwrap()
 }
@@ -611,5 +624,41 @@ async fn prepare_time_conflict_fails_the_approval_for_good() {
     funded.advance(None);
     tick(&funded.context()).await.unwrap();
     assert_eq!(records(&funded.db).unwrap()[0].1.job.attempts, 1);
+    assert!(funded.queue.0.lock().is_empty());
+}
+
+#[tokio::test]
+async fn oversized_job_transaction_waits_instead_of_stopping_the_writer() {
+    let mut funded = Funded::new();
+    let request = heavy_renewal(&mut funded);
+    create(&funded.db, request).unwrap();
+    tick(&funded.context()).await.unwrap();
+    let (_, record) = records(&funded.db).unwrap().remove(0);
+    assert_eq!(record.job.state, WalletJobState::Waiting);
+    assert_eq!(record.job.attempts, 1);
+    assert!(record
+        .job
+        .detail
+        .unwrap()
+        .contains("configured 98304-byte limit"));
+    assert!(record.signed_hex.is_none());
+    assert!(funded.queue.0.lock().is_empty());
+}
+
+#[tokio::test]
+async fn signed_bytes_the_journal_cannot_hold_are_never_submitted() {
+    let mut funded = Funded::new();
+    funded.config.max_tx_size_bytes = 1_000_000;
+    let request = heavy_renewal(&mut funded);
+    create(&funded.db, request).unwrap();
+    tick(&funded.context()).await.unwrap();
+    let (_, record) = records(&funded.db).unwrap().remove(0);
+    assert_eq!(record.job.state, WalletJobState::Waiting);
+    assert_eq!(
+        record.job.detail.as_deref(),
+        Some("bad request: job transaction exceeds journal size limit")
+    );
+    assert_eq!(record.job.tx_id, None);
+    assert!(record.signed_hex.is_none());
     assert!(funded.queue.0.lock().is_empty());
 }

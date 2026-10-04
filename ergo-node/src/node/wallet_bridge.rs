@@ -1475,6 +1475,8 @@ pub async fn run_wallet_writer_supervised(
             biased;
             _ = shutdown.changed() => { rescan.stop(); rx.close(); break; },
             command = rx.recv() => match command { Some(command) => command, None => break },
+            // A failing job is recorded on that job; only a job journal that
+            // cannot be read or written stops the writer.
             _ = jobs_tick.tick() => {
                 if let Err(error) = jobs::tick(&ctx).await {
                     tracing::error!(%error, "wallet mining job journal failure");

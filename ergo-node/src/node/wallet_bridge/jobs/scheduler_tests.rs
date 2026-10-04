@@ -86,7 +86,10 @@ impl TxSubmitter for Probe {
     }
 }
 
+/// Applied tip height; `UNREADABLE_TIP` makes tip reads fail.
 struct Chain(AtomicU32);
+
+const UNREADABLE_TIP: u32 = u32::MAX;
 
 impl ChainStateAccessor for Chain {
     fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
@@ -94,7 +97,12 @@ impl ChainStateAccessor for Chain {
     }
 
     fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
-        Ok(self.0.load(Ordering::SeqCst))
+        match self.0.load(Ordering::SeqCst) {
+            UNREADABLE_TIP => Err(ergo_state::store::StateError::InternalInvariant {
+                what: "test tip read failure",
+            }),
+            height => Ok(height),
+        }
     }
 
     fn is_pruned(&self) -> bool {
@@ -357,6 +365,17 @@ async fn unavailable_snapshot_is_bounded_and_preserves_uncertain_admissions() {
         assert_eq!(record.job.attempts, 0);
     }
     assert!(!harness.rescan.stopping());
+}
+
+#[tokio::test(start_paused = true)]
+async fn unreadable_chain_tip_skips_the_wake_without_stopping_the_writer() {
+    let harness = Harness::new();
+    harness.seed(WalletJobState::Waiting, false);
+    harness.height.0.store(UNREADABLE_TIP, Ordering::SeqCst);
+    tick(&harness.context()).await.unwrap();
+    let job = list(&harness.db).unwrap().items.remove(0);
+    assert_eq!(job.state, WalletJobState::Waiting);
+    assert_eq!(job.attempts, 0);
 }
 
 #[tokio::test(start_paused = true)]

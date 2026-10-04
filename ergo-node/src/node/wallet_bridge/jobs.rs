@@ -163,13 +163,18 @@ fn records(db: &redb::Database) -> Result<Vec<(u64, Record)>, WalletAdminError> 
     Ok(result)
 }
 
-fn save(db: &redb::Database, job_id: u64, record: &Record) -> Result<(), WalletAdminError> {
+fn encode(record: &Record) -> Result<Vec<u8>, WalletAdminError> {
     let bytes = serde_json::to_vec(record).map_err(internal)?;
     if bytes.len() > MAX_RECORD_BYTES {
         return Err(WalletAdminError::BadRequest(
             "job transaction exceeds journal size limit".into(),
         ));
     }
+    Ok(bytes)
+}
+
+fn save(db: &redb::Database, job_id: u64, record: &Record) -> Result<(), WalletAdminError> {
+    let bytes = encode(record)?;
     let write = db.begin_write().map_err(internal)?;
     write
         .open_table(JOBS)
@@ -698,6 +703,16 @@ async fn prepare(ctx: &WriterContext<'_>, record: &Record) -> Result<Vec<u8>, Wa
     ctx.chain
         .ensure_snapshot_current(&snapshot)
         .map_err(super::map_chain_error)?;
+    // Private admission enforces the same limit; refusing here keeps an
+    // oversized transaction out of the journal.
+    if signed.len() > ctx.cfg.max_tx_size_bytes {
+        return Err(WalletAdminError::BadRequest(format!(
+            "signed job transaction is {} bytes, above the configured {}-byte limit; \
+             approve fewer boxes per job",
+            signed.len(),
+            ctx.cfg.max_tx_size_bytes
+        )));
+    }
     Ok(signed)
 }
 
@@ -713,6 +728,8 @@ enum Queue {
 
 /// Perform at most one due preparation/submission per wake. This runs inside
 /// the existing wallet writer so lock, cancel and shutdown retain its ordering.
+/// A failing job records its error and the wake ends; only a journal that
+/// cannot be read or written is returned as an error, which stops the writer.
 pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError> {
     if ctx.rescan.stopping() {
         return Ok(());
@@ -721,7 +738,13 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
     if jobs.is_empty() {
         return Ok(());
     }
-    let height = ctx.chain.tip_height().map_err(internal)?;
+    let height = match ctx.chain.tip_height() {
+        Ok(height) => height,
+        Err(error) => {
+            tracing::warn!(%error, "wallet jobs wait for a readable chain tip");
+            return Ok(());
+        }
+    };
     // One queue RPC per wake, regardless of retained job count. An unavailable
     // snapshot is never evidence that an uncertain admission disappeared, so it
     // holds back only jobs with an admitted transaction, and only until their
@@ -890,9 +913,13 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
         if record.signed_hex.is_none() {
             transition(&mut record, WalletJobState::Preparing, None);
             save(ctx.db, job_id, &record)?;
-            match prepare(ctx, &record).await {
-                Ok(bytes) => {
-                    record.job.tx_id = Some(sign_submit::signed_tx_id_hex(&bytes)?);
+            let prepared = match prepare(ctx, &record).await {
+                Ok(bytes) => sign_submit::signed_tx_id_hex(&bytes).map(|tx_id| (tx_id, bytes)),
+                Err(error) => Err(error),
+            };
+            match prepared {
+                Ok((tx_id, bytes)) => {
+                    record.job.tx_id = Some(tx_id);
                     record.signed_hex = Some(hex::encode(bytes));
                     transition(&mut record, WalletJobState::Prepared, None);
                 }
@@ -921,6 +948,18 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
         }
         // This commit is the recovery boundary: only after it succeeds may
         // the signed bytes leave the journal for the private mining queue.
+        // Bytes the journal cannot hold are never submitted.
+        if let Err(error) = encode(&record) {
+            record.signed_hex = None;
+            record.job.tx_id = None;
+            transition(
+                &mut record,
+                WalletJobState::Waiting,
+                Some(error.to_string()),
+            );
+            save(ctx.db, job_id, &record)?;
+            return Ok(());
+        }
         save(ctx.db, job_id, &record)?;
         let bytes = hex::decode(
             record

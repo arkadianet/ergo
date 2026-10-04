@@ -56,7 +56,11 @@ signing or spending attempts; their deadline and cancellation then take effect
 locally, since nothing is queued on such a node.
 
 The journal holds at most 256 jobs, pruning the oldest terminal record when
-necessary. Each record is bounded to 512 KiB. Signed bytes remain in the node's
+necessary. Each record is bounded to 512 KiB. A signed transaction above the
+configured `[mempool] max_tx_size_bytes`, or one whose record would exceed that
+bound, is neither journaled nor submitted; the job records the error and counts
+the attempt. A failing job never stops the wallet writer; only a job journal
+that cannot be read or written does. Signed bytes remain in the node's
 journal and are omitted from job API responses. Deadlines and cancellation
 retire unpublished private mining work; a transaction already mined cannot be
 undone by cancellation. Historical terminal jobs remain visible while retained.
