@@ -13,6 +13,7 @@ pub mod decode_stack;
 pub mod genesis;
 pub mod incidents;
 pub mod indexer_chain;
+pub mod maintenance;
 pub mod mem_csv;
 pub mod mem_probe;
 pub mod mem_smaps;
@@ -24,6 +25,7 @@ pub mod peer_details;
 pub mod peer_loop;
 pub mod realtime_indexer_bridge;
 pub mod realtime_mempool_bridge;
+pub mod runtime_control;
 pub mod snapshot;
 pub mod wallet_boot;
 

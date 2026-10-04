@@ -62,6 +62,9 @@ pub struct ApiRecentBlock {
     pub ts_unix_ms: u64,
     pub txs: u32,
     pub size_bytes: u64,
+    /// Confirmed fee observations from this canonical full block only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_observation: Option<ApiBlockFeeObservation>,
     /// Socket address (`ip:port`) of the FIRST peer that delivered this
     /// block's header to us — the peer whose `Modifier` carried the
     /// header bytes we accepted. A freshly-mined block is typically
@@ -83,6 +86,17 @@ pub struct ApiRecentBlock {
     /// show. `None` only if address encoding failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub miner_address: Option<String>,
+}
+
+/// Block transaction-section observations used by operator fee estimates.
+/// Conflict evictions are never included: samples come from canonical block
+/// contents and are replaced when the committed full tip changes on a reorg.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiBlockFeeObservation {
+    pub transactions_size_bytes: u64,
+    pub fee_paying_transactions: u32,
+    pub fee_paying_size_bytes: u64,
+    pub median_fee_per_byte_nano_erg: Option<u64>,
 }
 
 /// One sample in the difficulty time series returned by

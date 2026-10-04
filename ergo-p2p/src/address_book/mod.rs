@@ -9,10 +9,11 @@
 //! Persisted state:
 //! - **Peers**: addresses we've handshaked OR routable addresses learnt
 //!   via gossip. Handshaked records carry `agent_name` / `version`.
-//! - **Bans**: per-IP TTL'd bans. Expired entries are deleted on load.
+//! - **Bans**: operator per-IP TTL'd bans. Expired and legacy automatic entries
+//!   are deleted on load.
 //!
 //! Diverges from Scala: Scala persists peers in LevelDB at `data_dir/peers/`
-//! but holds bans in-memory. We persist both.
+//! but holds bans in-memory. We persist peers and operator bans.
 
 use redb::ReadableDatabase;
 use std::fs;
@@ -184,6 +185,7 @@ pub struct BanRecord {
     pub until: SystemTime,
     pub count: u32,
     pub permanent: bool,
+    pub operator: bool,
 }
 
 /// What `load_all` returns. The caller wires this into `PeerManager`.
@@ -194,6 +196,7 @@ pub struct LoadedState {
     pub stale_skipped: usize,
     pub corrupt_skipped: usize,
     pub expired_bans_purged: usize,
+    pub automatic_bans_purged: usize,
     /// Rows dropped from disk because the address is not dialable —
     /// learned (non-seed) entries on loopback / unspecified / RFC1918 /
     /// link-local / multicast addresses, or port 0. Older nodes
@@ -341,7 +344,7 @@ impl AddressBook {
         })
     }
 
-    /// Read every row, filtering stale + corrupt; purge expired bans in
+    /// Read every row, filtering stale + corrupt; purge expired and automatic bans in
     /// the same write txn that returns to the caller.
     /// `allow_local` is the operator's `[peers] allow_local`; it widens
     /// the routability rule the sanitisation pass applies, so a LAN
@@ -431,8 +434,15 @@ impl AddressBook {
                             }
                         };
                         match decode_ban(ip, v.value()) {
+                            Ok(b) if !b.operator => {
+                                to_purge.push(k.value().to_vec());
+                                state.automatic_bans_purged += 1;
+                            }
                             Ok(b) if b.until > now_wall || b.permanent => state.bans.push(b),
-                            Ok(_) => to_purge.push(k.value().to_vec()),
+                            Ok(_) => {
+                                to_purge.push(k.value().to_vec());
+                                state.expired_bans_purged += 1;
+                            }
                             Err(_) => state.corrupt_skipped += 1,
                         }
                     }
@@ -451,7 +461,6 @@ impl AddressBook {
                 }
             }
             write_txn.commit()?;
-            state.expired_bans_purged = to_purge.len();
         }
 
         Ok(state)
@@ -756,6 +765,7 @@ const _: fn() = || {
 mod tests {
     use super::codec::{KIND_IPV4, MAX_NAME_LEN, SCHEMA_TAG_PEER};
     use super::*;
+    use redb::ReadableTableMetadata;
     use std::net::Ipv6Addr;
 
     fn v4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
@@ -1177,6 +1187,7 @@ mod tests {
             until,
             count: 3,
             permanent: false,
+            operator: true,
         };
         let bytes = encode_ban(&b);
         let decoded = decode_ban(ip, &bytes).expect("decode");
@@ -1187,6 +1198,87 @@ mod tests {
     }
 
     #[test]
+    fn legacy_ban_row_decodes_as_automatic() {
+        // Original schema-1 row: tag, until (seconds), count, permanent.
+        let bytes = hex::decode("01000000006553f1000000000301").unwrap();
+        assert_eq!(bytes.len(), 14);
+        let ban = decode_ban(IpAddr::from([203, 0, 113, 8]), &bytes).unwrap();
+        assert_eq!(ban.until, UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        assert_eq!(ban.count, 3);
+        assert!(ban.permanent);
+        assert!(!ban.operator);
+    }
+
+    #[test]
+    fn load_discards_legacy_bans_in_batch_and_preserves_operator_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peers.redb");
+        let book = AddressBook::open_at(&path).unwrap();
+        let operator_ip = IpAddr::from([203, 0, 113, 8]);
+        let future = now_secs() + Duration::from_secs(3600);
+        book.record_ban(&BanRecord {
+            ip: operator_ip,
+            until: future,
+            count: 1,
+            permanent: false,
+            operator: true,
+        })
+        .unwrap();
+        book.record_ban(&BanRecord {
+            ip: IpAddr::from([203, 0, 113, 9]),
+            until: UNIX_EPOCH,
+            count: 1,
+            permanent: false,
+            operator: true,
+        })
+        .unwrap();
+        // Seed the old layout directly in one transaction, including expired
+        // permanent bans and a new-layout automatic row with an explicit marker.
+        let txn = begin_write_qr(&book.db).unwrap();
+        {
+            let mut table = txn.open_table(BANS).unwrap();
+            for i in 1..=10_000u128 {
+                let ip = IpAddr::V6(Ipv6Addr::from(i));
+                let key = encode_ip_key(ip);
+                let mut row = vec![codec::SCHEMA_TAG_BAN];
+                row.extend_from_slice(
+                    &future
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                        .to_be_bytes(),
+                );
+                row.extend_from_slice(&3u32.to_be_bytes());
+                row.push(0);
+                if i == 1 {
+                    row[1..9].copy_from_slice(&0u64.to_be_bytes());
+                    row[13] = 1;
+                } else if i == 2 {
+                    row.push(0);
+                }
+                table.insert(key.as_slice(), row.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+        let loaded = book.load_all(false).unwrap();
+        assert_eq!(loaded.automatic_bans_purged, 10_000);
+        assert_eq!(loaded.expired_bans_purged, 1);
+        assert_eq!(loaded.bans.len(), 1);
+        assert_eq!(loaded.bans[0].ip, operator_ip);
+        assert!(loaded.bans[0].operator);
+        // Check actual durable contents, rather than filtering on another load.
+        let read = book.db.begin_read().unwrap();
+        assert_eq!(read.open_table(BANS).unwrap().len().unwrap(), 1);
+        drop(read);
+        drop(book);
+        let reopened = AddressBook::open_at(&path).unwrap();
+        let loaded = reopened.load_all(false).unwrap();
+        assert_eq!(loaded.bans.len(), 1);
+        assert_eq!(loaded.automatic_bans_purged, 0);
+        assert_eq!(loaded.expired_bans_purged, 0);
+    }
+
+    #[test]
     fn ban_record_permanent_flag_persists() {
         let ip = IpAddr::from([10, 0, 0, 1]);
         let b = BanRecord {
@@ -1194,6 +1286,7 @@ mod tests {
             until: UNIX_EPOCH + Duration::from_secs(99_999_999_999),
             count: 1,
             permanent: true,
+            operator: true,
         };
         let decoded = decode_ban(ip, &encode_ban(&b)).expect("decode");
         assert!(decoded.permanent);

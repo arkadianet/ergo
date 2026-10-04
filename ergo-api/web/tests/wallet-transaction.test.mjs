@@ -142,3 +142,16 @@ test('private delivery and deadlines survive caller edits and uncertain retries'
     assert.deepEqual(call[1], { type: 'bytes', bytes: 'cafe' });
   }
 });
+
+// Legacy status returns the persisted invalidation message, while native
+// errors use a code. Both must guide a pruned restore to offline discovery.
+test('wallet recovery banner recognizes persisted legacy invalidation', async () => {
+  const { walletRecoveryMessage } = await import('../js/wallet-transaction.js');
+  for (const error of ['scan_invalidated', 'wallet scan invalidated — run a full rescan (fromHeight=0)']) {
+    assert.match(walletRecoveryMessage(error), /wallet-scan-utxo/);
+    assert.match(walletRecoveryMessage(error), /pruned or snapshot/);
+    assert.match(walletRecoveryMessage(error), /balances and boxes are unavailable/);
+  }
+  assert.equal(walletRecoveryMessage(''), null);
+  assert.equal(walletRecoveryMessage(undefined), null);
+});

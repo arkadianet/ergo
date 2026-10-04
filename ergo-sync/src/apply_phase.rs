@@ -2,8 +2,8 @@
 //!
 //! Snapshot heights can lag while the action loop is inside
 //! [`crate::block_proc::process_block`]. These atomics are updated around
-//! that call so `/metrics` can show `apply_in_progress` without waiting for
-//! the next snapshot publish.
+//! block applies and snapshot rebuild/install operations so `/metrics` can show
+//! `apply_in_progress` without waiting for the next snapshot publish.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -22,7 +22,7 @@ pub struct ApplyPhaseMetrics {
     current_started_unix_ms: AtomicU64,
 }
 
-/// RAII: sets `in_progress` for the duration of one `process_block` call.
+/// RAII: sets `in_progress` for one block apply or snapshot rebuild/install.
 #[must_use = "the guard clears apply_in_progress on drop; discarding it ends the phase immediately"]
 pub struct ApplyPhaseGuard<'a> {
     metrics: &'a ApplyPhaseMetrics,

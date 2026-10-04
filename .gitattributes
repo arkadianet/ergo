@@ -10,6 +10,8 @@ ergo-api/tests/fixtures/openapi_v1.yaml text eol=lf
 # generated `(method, path)` lines with '\n' and string-compares against the
 # fixture, so a CRLF checkout fails on every line.
 ergo-api/tests/fixtures/api_family_*_operations.txt text eol=lf
+# The authenticated-route scope inventory is string-compared the same way.
+ergo-api/tests/fixtures/authenticated_route_scopes.txt text eol=lf
 
 # test-vectors are byte-exact oracle artifacts (JVM-oracle-captured corpus
 # sources, verdict/seed JSON, wire hex). EOL conversion must never touch them:

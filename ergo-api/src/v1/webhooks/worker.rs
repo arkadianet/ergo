@@ -18,8 +18,10 @@
 //! **Never stalls the bus.** The worker owns a bounded [`crate::v1::realtime::BusSubscription`]; a
 //! slow endpoint only backs up that webhook's own deliveries (bounded ring +
 //! per-webhook in-flight cap in the engine), and the bus's own slow-consumer
-//! drop policy protects the fan-out if the worker itself falls behind. Those
-//! pre-admission drops do not create durable obligations or webhook gap markers.
+//! drop policy protects the fan-out if the worker itself falls behind. The
+//! worker catches up from retained history rather than trusting queue contents.
+//! If that history has a gap, active subscriptions visibly pause with
+//! `source_gap`; admitted obligations stay retained.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -133,7 +135,7 @@ fn spawn_worker(
             }
             return;
         }
-        let mut sub = bus.subscribe_with_filter(filter);
+        let mut sub = bus.subscribe_with_filter(filter.clone());
 
         let mut ticker = tokio::time::interval(tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -157,8 +159,8 @@ fn spawn_worker(
                         Some(ev) => {
                             // Accepted persistence work runs to completion even
                             // when the stop signal becomes ready in the meantime.
-                            let now = now_unix_ms();
-                            if let Err(error) = executor.run_worker(move |engine| engine.enqueue_matches(&ev, now)).await {
+                            let _ = ev; // queue entries are bounded wakeups, not the source of truth
+                            if let Err(error) = catch_up(&bus, &filter, &executor).await {
                                 tracing::error!(%error, "webhook event admission failed");
                                 break;
                             }
@@ -167,6 +169,10 @@ fn spawn_worker(
                     }
                 }
                 _ = ticker.tick() => {
+                    if let Err(error) = catch_up(&bus, &filter, &executor).await {
+                        tracing::error!(%error, "webhook replay admission failed");
+                        break;
+                    }
                     if let Err(error) = drain_due(&executor, &sink, &mut deliveries).await {
                         tracing::error!(%error, "webhook delivery reservation failed");
                         break;
@@ -182,6 +188,11 @@ fn spawn_worker(
                 }
             }
         }
+        match executor.run_worker(|engine| engine.flush_replay()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!(%error, "webhook cursor flush failed"),
+            Err(error) => tracing::error!(%error, "webhook cursor flush could not run"),
+        }
         // Dropping cancelled attempts only enqueues their reserved completion
         // jobs. Observe those writes before returning or releasing the store.
         if owns_executor {
@@ -190,6 +201,70 @@ fn spawn_worker(
             tracing::error!(%error, "webhook outcomes failed to drain");
         }
     })
+}
+
+/// Drain up to one retained window per wakeup, in small pages that let other
+/// persistence operations run between admissions. The page budget preserves
+/// scheduler fairness during a sustained burst. A full durable delivery
+/// ring leaves this event uncheckpointed; the next tick retries admission after
+/// delivery acknowledgements free space. Subscriber queue overflow is harmless
+/// while the replay window still covers this checkpoint.
+async fn catch_up(
+    bus: &Arc<RealtimeBus>,
+    filter: &Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
+    executor: &Arc<WebhookExecutor>,
+) -> Result<(), super::blocking::WebhookExecutionError> {
+    let latest = bus.latest_seq();
+    let since = executor
+        .run_worker(move |engine| {
+            engine
+                .replay_seq()
+                .max(engine.earliest_active_start().unwrap_or(latest))
+        })
+        .await?;
+    if filter.read().unwrap_or_else(|e| e.into_inner()).is_empty() {
+        return Ok(());
+    }
+    let mut since = since;
+    for _ in 0..64 {
+        let mut page = bus.backfill_all(since, 128);
+        let truncated = page.truncated;
+        let mut through = if truncated {
+            page.events.last().map(|event| event.seq).unwrap_or(since)
+        } else {
+            page.latest_seq
+        };
+        if let Some(missing) = page.first_missing_seq {
+            through = through.min(missing - 1);
+            page.events.retain(|event| event.seq < missing);
+        }
+        let missing = page.first_missing_seq;
+        let gap_end = page.missing_through_seq;
+        let complete = executor
+            .run_worker(move |engine| engine.admit_page(&page.events, through, now_unix_ms()))
+            .await?;
+        if !complete {
+            break;
+        }
+        if missing.is_some_and(|missing| through >= missing - 1) {
+            let gap_end = gap_end.expect("missing interval has an end");
+            executor
+                .run_worker(move |engine| engine.record_source_gap(gap_end))
+                .await?;
+            tracing::error!(
+                since,
+                gap_end,
+                "webhook source gap; affected subscriptions paused pending REST reconciliation"
+            );
+            break;
+        }
+        if !truncated {
+            break;
+        }
+        since = through;
+    }
+
+    Ok(())
 }
 
 /// Take every due request and spawn a bounded send task per request; each task
@@ -517,6 +592,401 @@ mod tests {
             0,
         )
         .unwrap();
+    }
+
+    fn block(height: u32) -> crate::v1::realtime::RealtimeEventBody {
+        crate::v1::realtime::RealtimeEventBody::block_applied(
+            u64::from(height),
+            format!("header-{height}"),
+            height,
+            1,
+            100,
+        )
+    }
+
+    #[derive(Default)]
+    struct CountingStore {
+        snapshot: Mutex<Option<Vec<u8>>>,
+        commits: std::sync::atomic::AtomicUsize,
+    }
+    impl super::super::engine::WebhookStore for CountingStore {
+        fn load(&self) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.snapshot.lock().unwrap().clone())
+        }
+        fn commit(&self, snapshot: &[u8]) -> Result<(), String> {
+            *self.snapshot.lock().unwrap() = Some(snapshot.to_vec());
+            self.commits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn orderly_worker_shutdown_flushes_a_lazy_skip_cursor() {
+        let store = Arc::new(CountingStore::default());
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+        register_blocks(&engine);
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        bus.publish(block(1));
+        assert!(engine.admit_page(&bus.backfill_all(0, 1).events, 1, now_unix_ms()));
+        let request = engine.take_due(now_unix_ms()).remove(0);
+        engine.record_result(
+            &request.delivery_id,
+            DeliveryOutcome::Success(204),
+            now_unix_ms(),
+        );
+        let mut skipped = block(2);
+        skipped.routes = vec!["peers".into()];
+        bus.publish(skipped);
+        assert!(engine.admit_page(&bus.backfill_all(1, 1).events, 2, now_unix_ms()));
+        let saved: serde_json::Value =
+            serde_json::from_slice(store.snapshot.lock().unwrap().as_ref().unwrap()).unwrap();
+        assert_eq!(saved["replay_seq"], 1);
+        let (stop, signal) = tokio::sync::oneshot::channel();
+        let worker = spawn_webhook_worker_with_shutdown(
+            bus.clone(),
+            engine.clone(),
+            FakeSink::new(DeliveryOutcome::Success(204)),
+            Duration::from_secs(3600),
+            signal,
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while bus.subscriber_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send(()).unwrap();
+        worker.await.unwrap();
+        drop(engine);
+        let recovered = WebhookEngine::durable(Default::default(), store).unwrap();
+        assert_eq!(recovered.replay_seq(), 2);
+    }
+
+    #[tokio::test]
+    async fn catch_up_without_hooks_never_checkpoints_source() {
+        let store = Arc::new(CountingStore::default());
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        engine.attach_filter(filter.clone());
+        let executor = Arc::new(WebhookExecutor::new(engine));
+        for height in 1..=2000 {
+            bus.publish(block(height));
+        }
+        let before = store.commits.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..3 {
+            catch_up(&bus, &filter, &executor).await.unwrap();
+        }
+        assert_eq!(
+            store.commits.load(std::sync::atomic::Ordering::SeqCst),
+            before
+        );
+        executor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reconciled_resume_skips_expired_pause_history_and_retains_obligations() {
+        for source_gap in [false, true] {
+            let store = Arc::new(CountingStore::default());
+            let engine =
+                Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+            register_blocks(&engine);
+            let id = engine.list(0, 1).remove(0).webhook_id;
+            let bus = Arc::new(RealtimeBus::blocks_only());
+            let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+            engine.attach_filter(filter.clone());
+            let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+            bus.publish(block(1));
+            catch_up(&bus, &filter, &executor).await.unwrap();
+            if source_gap {
+                engine.record_source_gap(2);
+            } else {
+                engine.set_active(&id, false).unwrap();
+            }
+            for height in 2..=10_000 {
+                bus.publish(block(height));
+            }
+            catch_up(&bus, &filter, &executor).await.unwrap();
+            let resume_id = id.clone();
+            let resume_bus = bus.clone();
+            executor
+                .run_worker(move |engine| {
+                    engine
+                        .set_active_after(&resume_id, true, resume_bus.latest_seq())
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+            catch_up(&bus, &filter, &executor).await.unwrap();
+            assert!(engine.get(&id).unwrap().active);
+            assert_eq!(engine.deliveries_for(&id, 0, 10).len(), 1);
+            bus.publish(block(10_001));
+            catch_up(&bus, &filter, &executor).await.unwrap();
+            assert_eq!(engine.deliveries_for(&id, 0, 10).len(), 2);
+            executor.shutdown().await;
+            drop(engine);
+            let recovered = WebhookEngine::durable(Default::default(), store).unwrap();
+            assert_eq!(recovered.get(&id).unwrap().start_seq, 10_000);
+            assert!(recovered.get(&id).unwrap().active);
+        }
+    }
+
+    #[tokio::test]
+    async fn catch_up_batches_snapshots_and_bounds_skip_checkpoints() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let store = Arc::new(CountingStore::default());
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        engine.attach_filter(filter.clone());
+        let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+        for height in 1..=128 {
+            bus.publish(block(height));
+        }
+        register_blocks(&engine);
+        let before = store.commits.load(SeqCst);
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(
+            store.commits.load(SeqCst),
+            before + 1,
+            "one commit per page"
+        );
+        assert_eq!(engine.replay_seq(), 128);
+        for height in 129..=1024 {
+            let mut event = block(height);
+            event.routes = vec!["peers".into()];
+            bus.publish(event);
+        }
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(
+            store.commits.load(SeqCst),
+            before + 1,
+            "skip-only pages stay in RAM"
+        );
+        for height in 1025..=1152 {
+            let mut event = block(height);
+            event.routes = vec!["peers".into()];
+            bus.publish(event);
+        }
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(
+            store.commits.load(SeqCst),
+            before + 2,
+            "bounded lazy checkpoint"
+        );
+        for _ in 0..3 {
+            catch_up(&bus, &filter, &executor).await.unwrap();
+        }
+        assert_eq!(store.commits.load(SeqCst), before + 2);
+        executor.shutdown().await;
+        drop(engine);
+        let recovered = WebhookEngine::durable(Default::default(), store).unwrap();
+        assert_eq!(recovered.replay_seq(), 1152);
+    }
+
+    #[tokio::test]
+    async fn catch_up_recovers_more_than_the_subscriber_queue_without_duplicates() {
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        let engine = Arc::new(WebhookEngine::new(Default::default()));
+        register_blocks(&engine);
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        engine.attach_filter(filter.clone());
+        let sub = bus.subscribe_with_filter(filter.clone());
+        for height in 1..=1000 {
+            bus.publish(block(height));
+        }
+        assert!(sub.lagged.load(std::sync::atomic::Ordering::Acquire));
+        let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+        for _ in 0..8 {
+            catch_up(&bus, &filter, &executor).await.unwrap();
+        }
+        assert_eq!(engine.replay_seq(), 1000);
+        let subscription = engine.list(0, 1).remove(0);
+        assert_eq!(
+            engine
+                .deliveries_for(&subscription.webhook_id, 0, 1100)
+                .len(),
+            1000
+        );
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(
+            engine
+                .deliveries_for(&subscription.webhook_id, 0, 1100)
+                .len(),
+            1000
+        );
+        executor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn nonmatching_bursts_drain_before_the_next_wakeup_expires_history() {
+        let store = Arc::new(CountingStore::default());
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store).unwrap());
+        register_blocks(&engine);
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        engine.attach_filter(filter.clone());
+        let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+        for end in [6000, 12000] {
+            for height in end - 5999..=end {
+                let mut event = block(height);
+                event.routes = vec!["peers".into()];
+                bus.publish(event);
+            }
+            catch_up(&bus, &filter, &executor).await.unwrap();
+            assert_eq!(engine.replay_seq(), u64::from(end));
+            assert!(engine.list(0, 1)[0].active);
+        }
+        bus.publish(block(12001));
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        let id = engine.list(0, 1).remove(0).webhook_id;
+        assert_eq!(engine.deliveries_for(&id, 0, 10).len(), 1);
+        assert_eq!(engine.replay_seq(), 12001);
+        executor.shutdown().await;
+    }
+
+    struct CrashReplayStore;
+    impl crate::v1::realtime::journal::RealtimeStore for CrashReplayStore {
+        fn load_events(&self) -> Result<crate::v1::realtime::journal::JournalRecovery, String> {
+            let source = RealtimeBus::blocks_only();
+            for height in 1..=260 {
+                source.publish(block(height));
+            }
+            Ok(crate::v1::realtime::journal::JournalRecovery {
+                next_seq: 1000,
+                events: source
+                    .backfill_all(0, 260)
+                    .events
+                    .iter()
+                    .map(|event| crate::v1::realtime::journal::ReplayEvent::from(event.as_ref()))
+                    .collect(),
+            })
+        }
+        fn reserve_cursor(&self, _: u64) -> Result<(), String> {
+            Ok(())
+        }
+        fn append_events(
+            &self,
+            _: &[crate::v1::realtime::journal::ReplayEvent],
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn crash_catch_up_admits_contiguous_prefix_before_pausing_affected_hooks() {
+        let store = Arc::new(CountingStore::default());
+        let engine = WebhookEngine::durable(Default::default(), store.clone()).unwrap();
+        register_blocks(&engine);
+        let old = engine.list(0, 1).remove(0).webhook_id;
+        let bus = Arc::new(
+            RealtimeBus::durable(
+                [crate::v1::realtime::ChannelClass::Blocks]
+                    .into_iter()
+                    .collect(),
+                Arc::new(CrashReplayStore),
+                1,
+            )
+            .unwrap(),
+        );
+        for event in bus.backfill_all(0, 5).events {
+            engine.enqueue_matches(&event, 0);
+        }
+        engine.checkpoint_replay(5);
+        drop(engine);
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+        let fresh = engine
+            .register_after(
+                "https://fresh.example/hook".into(),
+                vec!["blocks".into()],
+                None,
+                1,
+                0,
+                999,
+            )
+            .unwrap();
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        engine.attach_filter(filter.clone());
+        let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+        catch_up(&bus, &filter, &executor).await.unwrap();
+
+        assert_eq!(engine.replay_seq(), 999);
+        assert_eq!(engine.deliveries_for(&old, 0, 300).len(), 260);
+        assert!(!engine.get(&old).unwrap().active);
+        assert!(
+            engine.get(&fresh.webhook_id).unwrap().active,
+            "registration after gap is unaffected"
+        );
+        executor.shutdown().await;
+        drop(engine);
+        let recovered = WebhookEngine::durable(Default::default(), store).unwrap();
+        assert_eq!(recovered.replay_seq(), 999);
+        assert_eq!(recovered.deliveries_for(&old, 0, 300).len(), 260);
+    }
+
+    #[tokio::test]
+    async fn catch_up_preserves_full_backlog_cursor_until_admission_succeeds() {
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        let engine = Arc::new(WebhookEngine::new(Default::default()));
+        register_blocks(&engine);
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        engine.attach_filter(filter.clone());
+        let limit = super::super::engine::DELIVERY_RING_CAP as u32;
+        for height in 1..=limit {
+            bus.publish(block(height));
+        }
+        let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+        for _ in 0..(limit / 128) {
+            catch_up(&bus, &filter, &executor).await.unwrap();
+        }
+        bus.publish(block(limit + 1));
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(engine.replay_seq(), u64::from(limit));
+        let first = engine.take_due(u64::MAX).remove(0);
+        engine.record_result(&first.delivery_id, DeliveryOutcome::Success(204), u64::MAX);
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(engine.replay_seq(), u64::from(limit + 1));
+        assert!(engine.list(0, 1)[0].active);
+        executor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn expired_source_window_pauses_hooks_and_new_registration_skips_old_history() {
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        let engine = Arc::new(WebhookEngine::new(Default::default()));
+        register_blocks(&engine);
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        engine.attach_filter(filter.clone());
+        for height in 1..=(crate::v1::realtime::bus::RESUME_WINDOW as u32 + 1) {
+            bus.publish(block(height));
+        }
+        let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        let paused = engine.list(0, 1).remove(0);
+        assert!(!paused.active);
+        assert_eq!(
+            paused.auto_disabled_reason,
+            Some(super::super::model::AutoDisabledReason::SourceGap)
+        );
+        let fresh = engine
+            .register_after(
+                "https://new.example/hook".into(),
+                vec!["blocks".into()],
+                None,
+                1,
+                0,
+                bus.latest_seq(),
+            )
+            .unwrap();
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert!(engine.get(&fresh.webhook_id).unwrap().active);
+        assert!(engine.deliveries_for(&fresh.webhook_id, 0, 10).is_empty());
+        bus.publish(block(99999));
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(engine.deliveries_for(&fresh.webhook_id, 0, 10).len(), 1);
+        executor.shutdown().await;
     }
 
     // ----- drain drives the sink + records outcomes -----

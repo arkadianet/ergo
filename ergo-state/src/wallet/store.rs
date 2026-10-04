@@ -189,15 +189,17 @@ impl WalletRead for RedbWalletRead {
     }
 
     fn scan_invalidated(&self) -> Result<bool, WalletStoreError> {
-        let table = match self
+        let persisted = match self
             .txn
             .open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)
         {
-            Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+            Ok(table) => table.get(())?.is_some_and(|row| row.value()),
+            Err(redb::TableError::TableDoesNotExist(_)) => false,
             Err(error) => return Err(error.into()),
         };
-        Ok(table.get(())?.map(|row| row.value()).unwrap_or(false))
+        Ok(persisted
+            || crate::wallet::utxo_scan::requires_discovery(&self.txn)
+                .map_err(|error| WalletStoreError::Decode(error.to_string()))?)
     }
 
     fn rescan_state(&self) -> Result<RescanState, WalletStoreError> {

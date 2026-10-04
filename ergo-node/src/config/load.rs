@@ -732,6 +732,28 @@ impl NodeConfig {
         if allow_unauthenticated_legacy_mining && api_bind.is_some() && api_key_hash.is_none() {
             return Err("[api.security] allow_unauthenticated_legacy_mining requires api_key_hash for authenticated candidate requests".into());
         }
+        let api_scoped_keys = toml_cfg
+            .api
+            .security
+            .as_ref()
+            .map(|s| s.keys.clone())
+            .unwrap_or_default();
+        ergo_api::auth::validate_credentials(
+            &api_scoped_keys,
+            toml_cfg
+                .api
+                .security
+                .as_ref()
+                .and_then(|security| security.api_key_hash.as_deref()),
+        )?;
+        let api_limits = toml_cfg.api.limits.clone();
+        api_limits
+            .validate()
+            .map_err(|e| format!("[api.limits] {e}"))?;
+        let api_readiness = toml_cfg.api.readiness.clone();
+        api_readiness
+            .validate()
+            .map_err(|e| format!("[api.readiness] {e}"))?;
 
         // [api] allowed_hosts — extra `Host` header values the DNS-
         // rebinding guard accepts; see `ResolvedConfig::api_allowed_hosts`
@@ -1162,6 +1184,9 @@ impl NodeConfig {
             peer_details: toml_cfg.api.peer_details,
             api_key_hash,
             allow_unauthenticated_legacy_mining,
+            api_scoped_keys,
+            api_limits,
+            api_readiness,
             api_allowed_hosts,
             api_local_reverse_proxy,
             api_script,

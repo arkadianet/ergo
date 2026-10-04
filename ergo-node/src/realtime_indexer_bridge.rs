@@ -103,9 +103,10 @@ impl RealtimeIndexerObserver {
         if inverse {
             body.previous_seq = originals.entries.remove(&key);
         }
-        let seq = bus.publish(body);
-        if !inverse {
-            originals.remember(key, seq);
+        if let Some(seq) = bus.try_publish(body) {
+            if !inverse {
+                originals.remember(key, seq);
+            }
         }
     }
 }
@@ -272,6 +273,14 @@ mod tests {
                 record,
             }],
         }
+    }
+
+    #[test]
+    fn rejected_original_observations_never_enter_the_inverse_ledger() {
+        let (bus, observer) = setup();
+        bus.advance_cursor_to(u64::MAX);
+        observer.on_committed(changes(BoxChangeKind::Created, id(9)));
+        assert!(observer.originals.lock().unwrap().entries.is_empty());
     }
 
     #[test]

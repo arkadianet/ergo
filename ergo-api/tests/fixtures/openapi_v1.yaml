@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ergo Rust Node — RUST API
-  description: 'Compatibility fragment for RUST API product routes under `/api/v1/*`: chain/boxes/tokens/addresses/mempool/transactions reads, tx-intelligence (build/simulate/fee-estimate/status), the ErgoScript playground (`script/*`), semantic decode (`protocols/*`, `boxes/decode`), light-client trustless-sync proofs (`light/*`), time-series analytics (`stats/*`), operator diagnostics, webhooks, real-time WebSocket subscriptions, the scan/accounts surface, and node/network/mining/voting operator controls. The canonical complete document is served at `/api-docs/openapi-rust.yaml`. Every error from these routes follows the nested error envelope (`error.reason`/`error.message`/`error.detail`); `reason` is the stable machine-readable field to switch on. Query `GET /api/v1/node/health` to confirm a running node''s state.'
+  description: 'Compatibility fragment for RUST API product routes under `/api/v1/*`: chain/boxes/tokens/addresses/mempool/transactions reads, tx-intelligence (build/simulate/fee-estimate/status), the ErgoScript playground (`script/*`), semantic decode (`protocols/*`, `boxes/decode`), light-client trustless-sync proofs (`light/*`), time-series analytics (`stats/*`), operator diagnostics, webhooks, real-time WebSocket subscriptions, the scan/accounts surface, and node/network/mining/voting operator controls. The canonical complete document is served at `/api-docs/openapi-rust.yaml`. Every error from these routes follows the nested error envelope (`error.reason`/`error.message`/`error.detail`); `reason` is the stable machine-readable field to switch on. Query `GET /api/v1/node/health` to confirm a running node''s state. Realtime and webhook cursors (`seq`, `previous_seq`, `event_seq`, `since`, `next_seq`, `oldest_seq`, `latest_seq`, `last_seq` and persistence watermarks) are unsigned 64-bit JSON integers and can exceed 2^53-1 after crash reservations. Clients must preserve them exactly with a lossless JSON parser; JavaScript Number and ordinary JSON.parse are unsafe. Use BigInt with a lossless parser and send cursor query parameters as decimal text.'
   license:
     name: MIT OR Apache-2.0
     identifier: MIT OR Apache-2.0
@@ -1920,6 +1920,53 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TipHealth'
+  /api/v1/events/replay:
+    get:
+      tags:
+      - realtime
+      operationId: v1_events_replay
+      parameters:
+      - name: channels
+        in: query
+        description: Comma-separated WebSocket channel keys; at most 64
+        required: true
+        schema:
+          type: string
+      - name: since
+        in: query
+        description: Exclusive unsigned 64-bit realtime cursor as decimal text; default 0; preserve exactly, never JavaScript Number
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      - name: limit
+        in: query
+        description: Page size, 1..1024; default 100
+        required: false
+        schema:
+          type: integer
+          maximum: 1024
+          minimum: 1
+      responses:
+        '200':
+          description: Bounded realtime history with explicit retention/crash gap and confirmed persistence watermark
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayPage'
+        '400':
+          description: Invalid channel, limit or future cursor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Realtime disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
   /api/v1/light/bootstrap-proof:
     get:
       tags:
@@ -2319,6 +2366,58 @@ paths:
                 $ref: '#/components/schemas/V1Error'
         '409':
           description: Mempool filtering not wired on this node
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+  /api/v1/mempool/fee-estimate:
+    get:
+      tags:
+      - mempool
+      summary: |-
+        Read-only fee forecast with coverage. Unknown data yields a 200 response
+        with available=false and null amounts; this does not pretend confirmation.
+      operationId: v1_mempool_fee_estimate_get
+      parameters:
+      - name: target_wait_seconds
+        in: query
+        description: Desired wait, default 120; 1..=86400
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: tx_size_bytes
+        in: query
+        description: Signed transaction size, default 1000; 1..=1048576
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: tx_cost_units
+        in: query
+        description: Optional validation cost, default 0 (unknown); pool competition still includes observed costs
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      responses:
+        '200':
+          description: Observed capacity forecast or explicit insufficient_data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiFeeEstimate'
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Chain reader or estimate capability unavailable
           content:
             application/json:
               schema:
@@ -2877,14 +2976,24 @@ paths:
     post:
       tags:
       - network
-      summary: |-
-        `POST /api/v1/network/blacklist` — T1, seam-deferred. No manual-ban write
-        path exists on the peer manager yet, so this answers the honest
-        `route_unavailable` rather than pretending to ban.
       operationId: blacklist_add
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BanRequest'
+        required: true
       responses:
+        '204':
+          description: IP-wide timed ban persisted and sessions disconnected
+        '400':
+          description: Invalid address or duration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Manual peer blacklisting not wired on this node
+          description: Persistence or runtime unavailable
           content:
             application/json:
               schema:
@@ -2895,20 +3004,19 @@ paths:
     delete:
       tags:
       - network
-      summary: |-
-        `DELETE /api/v1/network/blacklist/{addr}` — T1, seam-deferred (same gap as
-        [`blacklist_add`]).
       operationId: blacklist_remove
       parameters:
       - name: addr
         in: path
-        description: Peer address to un-blacklist
+        description: IP or socket address to unban, including IPv6
         required: true
         schema:
           type: string
       responses:
-        '503':
-          description: Manual peer un-blacklisting not wired on this node
+        '204':
+          description: Unban persisted
+        '400':
+          description: Invalid address
           content:
             application/json:
               schema:
@@ -3036,6 +3144,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/network/disconnect:
+    post:
+      tags:
+      - network
+      operationId: disconnect
+      requestBody:
+        content:
+          text/plain:
+            schema:
+              type: string
+        required: true
+      responses:
+        '200':
+          description: Reports whether a session was closed; future dialing remains enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerControlResult'
+      security:
+      - ApiKeyAuth: []
   /api/v1/network/peers:
     get:
       tags:
@@ -3072,6 +3200,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/network/peers/{addr}:
+    delete:
+      tags:
+      - network
+      operationId: remove
+      parameters:
+      - name: addr
+        in: path
+        description: Socket address to remove from saved peers
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Saved dial metadata removed; reports whether a session was closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerControlResult'
+      security:
+      - ApiKeyAuth: []
   /api/v1/network/sync-info:
     get:
       tags:
@@ -3139,15 +3288,13 @@ paths:
     get:
       tags:
       - node
-      summary: |-
-        `GET /api/v1/node/config` — T1. No `NodeConfigView` seam exists on the node
-        yet, so this answers the honest
-        `route_unavailable` (503) rather than fabricating or half-projecting a config
-        tree. Gated at `Tier::Operator` so the closed shape is still auth-bounded.
+      summary: '`GET /api/v1/node/config` — authenticated allowlisted effective settings.'
       operationId: config_get
       responses:
+        '200':
+          description: Redacted boot and live operational settings
         '503':
-          description: Effective-config read not wired on this node
+          description: Control bridge unavailable
           content:
             application/json:
               schema:
@@ -3157,15 +3304,70 @@ paths:
     patch:
       tags:
       - node
-      summary: |-
-        `PATCH /api/v1/node/config` — T2. Config mutation is the more dangerous half
-        of `node/config`, so it sits at `Tier::Admin` (loopback-preferred). No
-        `apply_config_patch` seam exists yet, so it answers `route_unavailable`
-        rather than exposing a mutation that isn't safely backed.
+      summary: '`PATCH /api/v1/node/config` — validate all members before applying any.'
       operationId: config_patch
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuntimeConfigPatch'
+        required: true
       responses:
+        '200':
+          description: Updated live operational settings
+        '400':
+          description: Invalid or restart-only setting
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Revision conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/node/credentials:
+    get:
+      tags:
+      - node
+      operationId: credentials
+      responses:
+        '200':
+          description: Named credential scopes and revocation flags; no hashes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CredentialInfo'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/node/credentials/{id}:
+    delete:
+      tags:
+      - node
+      operationId: revoke_credential
+      parameters:
+      - name: id
+        in: path
+        description: Named credential id; master key is not revocable through this endpoint
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Credential revoked durably
+        '404':
+          description: Unknown credential id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Config mutation not wired on this node
+          description: Ledger could not be persisted
           content:
             application/json:
               schema:
@@ -3235,6 +3437,60 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiInfo'
+  /api/v1/node/liveness:
+    get:
+      tags:
+      - node
+      operationId: liveness
+      responses:
+        '200':
+          description: Runtime heartbeat fresh
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
+        '503':
+          description: Runtime stopped or heartbeat stale
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
+  /api/v1/node/readiness:
+    get:
+      tags:
+      - node
+      operationId: readiness
+      responses:
+        '200':
+          description: Chain service ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
+        '503':
+          description: Sync, freshness or dependency checks failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
+  /api/v1/node/startup:
+    get:
+      tags:
+      - node
+      operationId: startup
+      responses:
+        '200':
+          description: Runtime started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
+        '503':
+          description: Runtime not started or stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
   /api/v1/node/status:
     get:
       tags:
@@ -5878,6 +6134,87 @@ components:
             Number of peers in the quorum that voted for the selected
             manifest. `0` during the `discovery` phase before quorum.
           minimum: 0
+    ApiFeeEstimate:
+      type: object
+      description: |-
+        Bounded projection from the latest canonical block observations and the
+        current pool. Missing/stale/sparse data yields null estimates, with a reason.
+        Admission costs are observations; candidate generation revalidates them.
+      required:
+      - available
+      - confidence
+      - sample_blocks
+      - confirmed_fee_paying_transactions
+      - target_wait_ms
+      - target_feasible
+      - tx_size_bytes
+      - tx_cost_units
+      - estimate_capped
+      properties:
+        available:
+          type: boolean
+        block_byte_capacity:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        block_cost_capacity:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        confidence:
+          type: string
+        confirmed_fee_paying_transactions:
+          type: integer
+          format: int32
+          minimum: 0
+        estimate_capped:
+          type: boolean
+        estimated_wait_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        observed_block_interval_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        observed_median_fee_per_byte_nano_erg:
+          type:
+          - string
+          - 'null'
+        reason:
+          type:
+          - string
+          - 'null'
+        recommended_fee_nano_erg:
+          type:
+          - string
+          - 'null'
+        sample_blocks:
+          type: integer
+          format: int32
+          minimum: 0
+        target_feasible:
+          type: boolean
+        target_wait_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        tx_cost_units:
+          type: integer
+          format: int64
+          minimum: 0
+        tx_size_bytes:
+          type: integer
+          format: int32
+          minimum: 0
     ApiFullBlockRef:
       type: object
       required:
@@ -6236,6 +6573,42 @@ components:
           minimum: 0
         version:
           type: string
+    ApiLimits:
+      type: object
+      description: |-
+        Request budgets which may be changed without rebuilding the API router.
+        Proxy trust and loopback exemptions are intentionally restart-only.
+      properties:
+        burst:
+          type: number
+          format: double
+          default: 40.0
+        cheap_weight:
+          type: number
+          format: double
+          default: 1.0
+        compute_weight:
+          type: number
+          format: double
+          default: 10.0
+        heavy_weight:
+          type: number
+          format: double
+          default: 4.0
+        idle_prune_after_secs:
+          type: integer
+          format: int64
+          default: 600
+          minimum: 0
+        max_tracked_ips:
+          type: integer
+          default: 65536
+          minimum: 0
+        refill_per_sec:
+          type: number
+          format: double
+          default: 20.0
+      additionalProperties: false
     ApiMinerStat:
       type: object
       description: One miner's aggregate over the `minerStats` window.
@@ -7240,6 +7613,18 @@ components:
       - box
       properties:
         box: {}
+      additionalProperties: false
+    BanRequest:
+      type: object
+      required:
+      - addr
+      properties:
+        addr:
+          type: string
+        duration_secs:
+          type: integer
+          format: int64
+          minimum: 0
       additionalProperties: false
     BatchItemRequest:
       type: object
@@ -8449,6 +8834,28 @@ components:
           minimum: 0
         within_block_limit:
           type: boolean
+    CredentialInfo:
+      type: object
+      required:
+      - id
+      - scopes
+      - revoked
+      properties:
+        id:
+          type: string
+        revoked:
+          type: boolean
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialScope'
+    CredentialScope:
+      type: string
+      enum:
+      - mining
+      - wallet
+      - operator
+      - admin
     DataInputsDto:
       oneOf:
       - type: object
@@ -9061,6 +9468,42 @@ components:
         size:
           type: integer
           minimum: 0
+    JournalStatus:
+      type: object
+      required:
+      - committed_seq
+      - complete_through_seq
+      - complete_from_seq
+      - dropped_events
+      - available
+      properties:
+        available:
+          type: boolean
+        committed_seq:
+          type: integer
+          format: int64
+          description: |-
+            Largest event cursor confirmed committed, not an acknowledgement of
+            every lower cursor: inspect gap / dropped_events as well.
+          minimum: 0
+        complete_from_seq:
+          type: integer
+          format: int64
+          description: |-
+            Exclusive start of the latest contiguous committed segment. Equal to
+            complete_through_seq when no event in the current segment is committed.
+          minimum: 0
+        complete_through_seq:
+          type: integer
+          format: int64
+          description: |-
+            Every cursor in (complete_from_seq, complete_through_seq] was committed.
+            Earlier missing intervals still require reconciliation via replay gap.
+          minimum: 0
+        dropped_events:
+          type: integer
+          format: int64
+          minimum: 0
     LightBatchElement:
       type: object
       description: |-
@@ -9451,6 +9894,14 @@ components:
       properties:
         active:
           type: boolean
+    PeerControlResult:
+      type: object
+      properties:
+        session_closed:
+          type:
+          - boolean
+          - 'null'
+          description: 'Present for disconnect/remove: whether an active session was closed.'
     PeerQuality:
       type: object
       required:
@@ -9829,6 +10280,72 @@ components:
         signed_transaction_hex:
           type: string
       additionalProperties: false
+    ProbePolicy:
+      type: object
+      properties:
+        heartbeat_max_age_ms:
+          type: integer
+          format: int64
+          default: 600000
+          minimum: 0
+        require_indexer:
+          type: boolean
+          default: false
+        require_wallet:
+          type: boolean
+          default: false
+        snapshot_max_age_ms:
+          type: integer
+          format: int64
+          default: 30000
+          minimum: 0
+        tip_max_age_ms:
+          type: integer
+          format: int64
+          default: 7200000
+          minimum: 0
+      additionalProperties: false
+    ProbeReport:
+      type: object
+      required:
+      - ready
+      - reasons
+      - snapshot_age_ms
+      properties:
+        heartbeat_age_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        indexer_height:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        ready:
+          type: boolean
+        reasons:
+          type: array
+          items:
+            type: string
+        snapshot_age_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        tip_age_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        wallet_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
     ProtocolDetail:
       type: object
       description: '`GET /api/v1/protocols/{id}` detail body.'
@@ -10000,6 +10517,7 @@ components:
       - protocol_not_found
       - webhook_not_found
       - account_not_found
+      - credential_not_found
       - address_not_watched
       - tx_not_in_block
       - not_blacklisted
@@ -10104,6 +10622,7 @@ components:
       - slow_consumer
       - idle_timeout
       - already_blacklisted
+      - config_conflict
       - internal_error
     RegisterRequest:
       type: object
@@ -10128,6 +10647,93 @@ components:
           - 'null'
         url:
           type: string
+    ReplayEvent:
+      type: object
+      description: Owned, versioned storage/wire representation; no process-local references.
+      required:
+      - seq
+      - emitted_at_unix_ms
+      - routes
+      - event
+      - confirmed
+      - data
+      properties:
+        confirmed:
+          type: boolean
+        data: {}
+        emitted_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        event:
+          type: string
+        height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        previous_seq:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        routes:
+          type: array
+          items:
+            type: string
+        seq:
+          type: integer
+          format: int64
+          description: Unsigned 64-bit cursor; preserve with lossless JSON parsing, never JavaScript Number.
+          minimum: 0
+    ReplayPage:
+      type: object
+      required:
+      - events
+      - latest_seq
+      - next_seq
+      - has_more
+      - gap
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReplayEvent'
+        gap:
+          type: boolean
+          description: |-
+            Missing source observations, retention expiry or an uncertain crash
+            interval. A page can contain useful records and still require REST reconciliation.
+        has_more:
+          type: boolean
+        latest_seq:
+          type: integer
+          format: int64
+          description: Unsigned 64-bit cursor; use lossless JSON parsing, never JavaScript Number.
+          minimum: 0
+        next_seq:
+          type: integer
+          format: int64
+          description: |-
+            Pass this unsigned 64-bit cursor as `since` on the next page, including
+            empty pages. Preserve it with lossless JSON parsing, never JavaScript Number.
+          minimum: 0
+        oldest_seq:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Unsigned 64-bit cursor; use lossless JSON parsing, never JavaScript Number.
+          minimum: 0
+        persistence:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/JournalStatus'
+            description: |-
+              None means this node has no durable replay store. Live records above
+              complete_through_seq are not covered by a contiguous durable acknowledgement.
     RewardAddress:
       type: object
       description: |-
@@ -10147,6 +10753,17 @@ components:
       properties:
         reward_pubkey:
           type: string
+    RuntimeConfigPatch:
+      type: object
+      description: PATCH members merge into the live settings; unknown members are rejected.
+      properties:
+        api_limits: {}
+        expected_revision:
+          type:
+          - string
+          - 'null'
+        readiness: {}
+      additionalProperties: false
     ScanBoxView:
       type: object
       description: |-

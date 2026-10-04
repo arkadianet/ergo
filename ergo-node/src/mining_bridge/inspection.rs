@@ -243,6 +243,15 @@ pub(super) fn candidate_details(
     let metrics = &template.work.metrics;
     Ok(CandidateDetailsJson {
         msg: hex::encode(candidate.msg),
+        work: super::work_message_to_json(
+            template.work.clone(),
+            identity.template_seq,
+            identity.clean_jobs,
+        ),
+        header_without_pow: hex::encode(
+            ergo_ser::header::serialize_header_without_pow(&candidate.header).map_err(internal)?,
+        ),
+        ad_proofs: hex::encode(&candidate.ad_proof_bytes),
         template_seq: identity.template_seq,
         parent_id: hex::encode(candidate.parent_id),
         height: candidate.header.height,
@@ -473,6 +482,48 @@ mod tests {
             }),
             status: "current",
         }
+    }
+
+    #[test]
+    fn full_artifacts_belong_to_the_retained_inspection_snapshot() {
+        let pk = hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let mut snapshot = eip27_emission_snapshot(1_850_000, pk);
+        let template = std::sync::Arc::make_mut(&mut snapshot.template);
+        let header =
+            ergo_ser::header::serialize_header_without_pow(&template.candidate.header).unwrap();
+        let msg = *ergo_primitives::digest::blake2b256(&header).as_bytes();
+        template.candidate.msg = msg;
+        template.work.msg = msg;
+        template.candidate.ad_proof_bytes = vec![1, 2, 3];
+        template.candidate.extension_fields = vec![(vec![0, 1], vec![4, 5])];
+        snapshot.status = "superseded";
+        let frozen = snapshot.clone();
+        std::sync::Arc::make_mut(&mut snapshot.template)
+            .candidate
+            .ad_proof_bytes
+            .clear();
+        let details =
+            candidate_details(frozen, ergo_ser::address::NetworkPrefix::Mainnet, None, 0).unwrap();
+        let json = serde_json::to_value(details).unwrap();
+        assert_eq!(json["header_without_pow"], hex::encode(header));
+        assert_eq!(json["work"]["msg"], hex::encode(msg));
+        assert_eq!(json["work"]["template_seq"], json["template_seq"]);
+        assert_eq!(json["work"]["h"], json["height"]);
+        assert_eq!(json["ad_proofs"], "010203");
+        assert_eq!(json["status"], "superseded");
+        assert_eq!(json["extensions"][0]["value"], "0405");
+        let bytes = hex::decode(json["transactions"][0]["bytes"].as_str().unwrap()).unwrap();
+        let tx = ergo_ser::transaction::read_transaction(
+            &mut ergo_primitives::reader::VlqReader::new(&bytes),
+        )
+        .unwrap();
+        assert_eq!(
+            json["transactions"][0]["id"],
+            hex::encode(transaction_id(&tx).unwrap().as_bytes())
+        );
     }
 
     #[test]

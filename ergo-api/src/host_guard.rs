@@ -33,6 +33,9 @@
 //! absent, and only allows the request through unconditionally when
 //! *both* are absent.
 //!
+//! Startup, liveness and readiness GET/HEAD probes bypass this guard; their
+//! reports disclose only availability and required dependency heights.
+//!
 //! Enforcement posture:
 //! * Loopback binds (`127.0.0.1`, `::1`, an IPv4-mapped IPv6 loopback
 //!   like `::ffff:127.0.0.1`, …) are always checked — the loopback bind
@@ -228,7 +231,14 @@ pub async fn require_allowed_host(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    if allowlist.enforce() {
+    let probe = matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) && matches!(
+        req.uri().path(),
+        "/api/v1/node/startup" | "/api/v1/node/liveness" | "/api/v1/node/readiness"
+    );
+    if allowlist.enforce() && !probe {
         match req.headers().get(header::HOST) {
             Some(header_val) => match header_val.to_str() {
                 Ok(host) => {

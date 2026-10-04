@@ -399,6 +399,7 @@ pub fn rollback_block_from_wallet(
     // (missing section / read error) where wallet history cannot
     // be replayed.
     rescan_guard.abort_in_progress(txn)?;
+    crate::wallet::utxo_scan::invalidate_below_anchor(txn, block_height)?;
     let mut boxes_tbl = txn.open_table(WALLET_BOXES)?;
     let mut idx_tbl = txn.open_table(WALLET_BOXES_BY_TX)?;
     let mut box_bytes_tbl = txn.open_table(WALLET_BOX_BYTES)?;
@@ -438,8 +439,12 @@ pub fn rollback_block_from_wallet(
                         // creation_height + REWARD_MATURITY_MAINNET.
                         wb.status = match wb.provenance {
                             BoxProvenance::MinerReward => {
-                                let matures_at =
-                                    wb.creation_height.saturating_add(REWARD_MATURITY_MAINNET);
+                                let matures_at = crate::wallet::utxo_scan::reward_creation_height(
+                                    txn,
+                                    wb.box_id,
+                                    wb.creation_height,
+                                )?
+                                .saturating_add(REWARD_MATURITY_MAINNET);
                                 if matures_at > block_height.saturating_sub(1) {
                                     BoxStatus::Immature { matures_at }
                                 } else {

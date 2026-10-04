@@ -1019,7 +1019,7 @@ async fn config_patch_t2_hard_deny_allows_loopback_then_seam_deferred() {
             "/api/v1/node/config",
             Some("operator-secret"),
             Some(LOCAL),
-            None,
+            Some(Body::from("{}")),
         ),
     )
     .await;
@@ -1146,4 +1146,95 @@ async fn voting_candidate_t0_seam_deferred_route_unavailable() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(v["error"]["reason"], "route_unavailable");
+}
+
+#[tokio::test]
+async fn probes_survive_exhausted_public_ip_budget() {
+    let app = app_full(default_auth());
+    for _ in 0..45 {
+        send(
+            app.clone(),
+            req(Method::GET, "/api/v1/node/info", None, Some(REMOTE), None),
+        )
+        .await;
+    }
+    assert_eq!(
+        send(
+            app.clone(),
+            req(Method::GET, "/api/v1/node/info", None, Some(REMOTE), None)
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    for name in ["startup", "liveness", "readiness"] {
+        let (status, _) = send(
+            app.clone(),
+            req(
+                Method::GET,
+                &format!("/api/v1/node/{name}"),
+                None,
+                Some(REMOTE),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stub probe should report unavailable, not exhaust the public budget"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sensitive_control_responses_are_not_cacheable() {
+    struct ConfigAdmin;
+    impl NodeAdmin for ConfigAdmin {
+        fn request_shutdown(&self) {}
+        fn effective_config(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({"revision":"boot:0"}))
+        }
+        fn apply_config_patch(
+            &self,
+            _: ergo_api::operator_control::RuntimeConfigPatch,
+        ) -> Result<serde_json::Value, ergo_api::operator_control::OperatorControlError> {
+            Ok(self.effective_config().unwrap())
+        }
+        fn credentials(&self) -> Option<Vec<ergo_api::auth::CredentialInfo>> {
+            Some(vec![])
+        }
+    }
+    let app = operator_router(
+        OperatorState {
+            blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
+            read: Arc::new(StubRead),
+            chain: None,
+            admin: Some(Arc::new(ConfigAdmin)),
+            mining: None,
+            network: NetworkPrefix::Mainnet,
+        },
+        Governor::new(Default::default()).unwrap(),
+        default_auth(),
+    );
+    use tower::ServiceExt;
+    for (method, path) in [
+        (Method::GET, "/api/v1/node/config"),
+        (Method::PATCH, "/api/v1/node/config"),
+        (Method::GET, "/api/v1/node/credentials"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(req(
+                method,
+                path,
+                Some("operator-secret"),
+                Some(LOCAL),
+                Some(Body::from("{}")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
 }

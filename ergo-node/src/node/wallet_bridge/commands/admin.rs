@@ -194,10 +194,6 @@ pub(crate) async fn restore(
     use_pre_1627: bool,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
-    if ctx.chain.is_pruned() {
-        let _ = reply.send(Err(WalletAdminError::RestorePruningUnsupported));
-        return;
-    }
     let mut storage = ctx.storage.write();
     // Refuse to overwrite an existing wallet (same safety guard as `init`).
     if !matches!(
@@ -206,6 +202,24 @@ pub(crate) async fn restore(
     ) {
         let _ = reply.send(Err(WalletAdminError::WalletExists));
         return;
+    }
+    if ctx.chain.is_pruned() {
+        // Publish invalidation before the seed: a crash must never expose a
+        // restored wallet as complete when historical replay is unavailable.
+        let invalidation = (|| -> Result<(), WalletAdminError> {
+            let txn = ergo_state::begin_write_qr(ctx.db)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            txn.open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .insert((), true)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            txn.commit()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))
+        })();
+        if let Err(error) = invalidation {
+            let _ = reply.send(Err(error));
+            return;
+        }
     }
     let result = storage
         .restore(&mnemonic, &mnemonic_pass, &pass, use_pre_1627)
@@ -254,6 +268,28 @@ pub(crate) async fn rescan(
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
     if from_height > 0 {
+        let coverage = ctx
+            .db
+            .begin_read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))
+            .and_then(|txn| {
+                ergo_state::wallet::utxo_scan::coverage(&txn)
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))
+            });
+        match coverage {
+            Ok(Some(_)) => {
+                let _ = reply.send(Err(WalletAdminError::BadRequest(
+                    "UTXO-discovered wallets require a full historical rebuild (fromHeight=0)"
+                        .into(),
+                )));
+                return;
+            }
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                return;
+            }
+            Ok(None) => {}
+        }
         if let Err(e) = super::super::scan_guard::require_valid_scan(ctx.store.as_ref()) {
             let _ = reply.send(Err(e));
             return;
@@ -1114,6 +1150,9 @@ pub(crate) async fn native_status(
             // changeAddress is persisted PUBLIC metadata — surfaced regardless of
             // lock state (it must not disappear when locked); `null` only
             // when unset. Read the stored pubkey + render to the network address.
+            let scan_invalidated = scan_invalidated
+                || ergo_state::wallet::utxo_scan::requires_discovery(&read_txn)
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
             let change_address = match read_txn
                 .open_table(ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS)
             {
@@ -1164,7 +1203,7 @@ pub(crate) async fn native_status(
                 }
                 ergo_state::wallet::RescanState::Idle if ctx.chain.is_pruned() => {
                     RescanStateDto::Unavailable {
-                        detail: "node is pruned; block replay unavailable".to_string(),
+                        detail: "node is pruned; block replay unavailable; stopped UTXO nodes can use wallet-scan-utxo".to_string(),
                     }
                 }
                 ergo_state::wallet::RescanState::Idle => RescanStateDto::Idle,
@@ -1179,6 +1218,23 @@ pub(crate) async fn native_status(
                 eip27_active,
                 rescan,
                 scan_invalidated,
+                discovery: ergo_state::wallet::utxo_scan::coverage(&read_txn)
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                    .map(|v| {
+                        let uncovered_pubkeys =
+                            ergo_state::wallet::utxo_scan::uncovered_pubkeys(&read_txn, &v)
+                                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+                        Ok::<_, WalletAdminError>(
+                            ergo_api::wallet::native::dto::DiscoveryCoverageDto {
+                                anchor_height: v.anchor_height,
+                                anchor_header_id: v.anchor_header_id,
+                                history_complete: v.history_complete,
+                                covered_pubkeys: v.covered_pubkeys,
+                                uncovered_pubkeys,
+                            },
+                        )
+                    })
+                    .transpose()?,
             })
         })();
     let _ = reply.send(result);
@@ -1269,7 +1325,7 @@ pub(crate) async fn native_boxes(
             .into_iter()
             .skip(offset as usize)
             .take(limit as usize)
-            .map(|wb| box_to_summary(ctx, wb))
+            .map(|wb| box_to_summary_at(ctx, &read_txn, wb))
             .collect::<Result<Vec<_>, WalletAdminError>>()?;
         Ok(BoxPage {
             items,
@@ -1298,7 +1354,8 @@ pub(crate) async fn native_box_by_id(
         let wb = reader
             .box_by_id(&box_id)
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        wb.map(|wb| box_to_summary(ctx, wb)).transpose()
+        wb.map(|wb| box_to_summary_at(ctx, &read_txn, wb))
+            .transpose()
     })();
     let _ = reply.send(result);
 }
@@ -1440,10 +1497,23 @@ fn box_to_summary(
         creation_tx_id: hex::encode(wb.creation_tx_id),
         creation_output_index: wb.creation_output_index,
         creation_height: wb.creation_height,
+        inclusion_height_known: true,
         declared_creation_height,
         status,
         provenance,
     })
+}
+
+fn box_to_summary_at(
+    ctx: &WriterContext<'_>,
+    txn: &redb::ReadTransaction,
+    wb: ergo_state::wallet::types::WalletBox,
+) -> Result<ergo_api::wallet::native::dto::WalletBoxSummary, WalletAdminError> {
+    let known = ergo_state::wallet::utxo_scan::inclusion_height_known(txn, wb.box_id)
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let mut summary = box_to_summary(ctx, wb)?;
+    summary.inclusion_height_known = known;
+    Ok(summary)
 }
 
 /// Map a stored [`ergo_state::wallet::types::WalletTransaction`] to the lean summary.

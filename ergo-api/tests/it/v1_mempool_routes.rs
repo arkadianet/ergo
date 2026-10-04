@@ -233,6 +233,31 @@ impl NodeChainQuery for StubChain {
     fn pool_txs_by_token_id(&self, _token_id: &[u8; 32]) -> Vec<ScalaUnconfirmedTransaction> {
         vec![scala_tx(id_a()).into()]
     }
+    fn pool_fee_estimate(
+        &self,
+        target_wait_ms: u64,
+        tx_size_bytes: u32,
+        tx_cost_units: u64,
+    ) -> Option<ergo_api::types::ApiFeeEstimate> {
+        Some(ergo_api::types::ApiFeeEstimate {
+            available: false,
+            confidence: "insufficient_data".into(),
+            reason: Some("sample window is empty".into()),
+            sample_blocks: 0,
+            confirmed_fee_paying_transactions: 0,
+            observed_block_interval_ms: None,
+            block_byte_capacity: None,
+            block_cost_capacity: None,
+            observed_median_fee_per_byte_nano_erg: None,
+            target_wait_ms,
+            target_feasible: false,
+            tx_size_bytes,
+            tx_cost_units,
+            recommended_fee_nano_erg: None,
+            estimated_wait_ms: None,
+            estimate_capped: false,
+        })
+    }
     fn pool_fee_histogram(&self, _bins: u32, _maxtime_ms: u64) -> Vec<ScalaFeeHistogramBin> {
         vec![
             ScalaFeeHistogramBin {
@@ -781,4 +806,32 @@ async fn detail_with_populated_view_renders_real_io_boxes() {
     assert_eq!(ins.len(), 1);
     assert_eq!(ins[0]["value"].as_str(), Some("3000000"));
     assert!(ins[0]["address"].is_string(), "input address: {body}");
+}
+
+#[tokio::test]
+async fn fee_estimate_returns_explicit_unknowns_and_validates_query_bounds() {
+    let (status, body) = get(
+        app(),
+        "/api/v1/mempool/fee-estimate?target_wait_seconds=240&tx_size_bytes=150&tx_cost_units=50",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["available"], false);
+    assert_eq!(body["confidence"], "insufficient_data");
+    assert!(body["recommended_fee_nano_erg"].is_null());
+    assert!(body["estimated_wait_ms"].is_null());
+    assert_eq!(body["target_wait_ms"], 240_000);
+    assert_eq!(body["tx_size_bytes"], 150);
+    assert_eq!(body["tx_cost_units"], 50);
+    for query in [
+        "tx_size_bytes=0",
+        "tx_size_bytes=1048577",
+        "target_wait_seconds=0",
+        "target_wait_seconds=86401",
+        "target_wait_seconds=abc",
+    ] {
+        let (status, body) = get(app(), &format!("/api/v1/mempool/fee-estimate?{query}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["reason"], "invalid_params");
+    }
 }

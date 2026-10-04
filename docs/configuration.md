@@ -181,7 +181,11 @@ Operator webhook registrations, HMAC secrets, bounded delivery history and pendi
 retry state are stored in `<data_dir>/webhooks.redb`. The file uses owner-only
 permissions on Unix. Back up this private database with the node data directory.
 A failed open, corrupt snapshot or failed commit disables webhook management and
-outbound deliveries until restart; other API routes remain available.
+outbound deliveries until restart; other API routes remain available. If the
+notification database cannot open or its cursor cannot initialize safely,
+live realtime and durable replay are disabled too. See
+[notification storage recovery](events.md#recovering-notification-storage)
+for backup, compatibility and corruption recovery steps.
 On a commit error, RAM changes are rolled back, but a failed disk flush may leave
 either atomic snapshot visible after restart. A failed API request can therefore
 have persisted; reconcile registrations and delivery history after reopening.
@@ -281,6 +285,38 @@ to retries and cannot be bypassed by alternate routing.
 |---|---|---|---|
 | `api_key_hash` | string (hex) | none | Lowercase Base16 of `Blake2b256(<secret>)`. Optional; privileged routes fail closed when absent. Must be exactly 64 lowercase hex characters (`0-9`, `a-f`); uppercase or mixed case is rejected for canonical-form parity. Supplied hashes are validated even when the API is disabled. |
 | `allow_unauthenticated_legacy_mining` | bool | `false` | Explicit Scala/Lithos compatibility: permits unauthenticated `GET /mining/candidate`, `POST /mining/solution`, and reward address/public-key reads. Requires `api_key_hash` when the API is enabled. Supplied-transaction candidate endpoints and all v1 operator routes remain authenticated. |
+
+### `[api.security.keys]`, `[api.limits]` and `[api.readiness]`
+
+`[[api.security.keys]]` defines named credentials with `id`, `hash`, `scopes`
+(`mining`, `wallet`, `operator`, `admin`) and `revoked` (default `false`). Scoped
+keys require a master hash. Set `revoked = true` for denial that survives a data
+wipe or old backup restore; API revocations use a data-directory ledger.
+
+| Limit key | Default | Meaning |
+|---|---|---|
+| `refill_per_sec` | `20.0` | Tokens added per second. |
+| `burst` | `40.0` | Maximum bucket size; must admit each request class. |
+| `cheap_weight` | `1.0` | Tokens per cheap read. |
+| `heavy_weight` | `4.0` | Tokens per heavy read. |
+| `compute_weight` | `10.0` | Tokens per compute request. |
+| `max_tracked_ips` | `65536` | Bucket table bound (`1..1000000`). |
+| `idle_prune_after_secs` | `600` | Idle bucket retention (`1..86400`). |
+
+| Readiness key | Default | Meaning |
+|---|---|---|
+| `heartbeat_max_age_ms` | `600000` | Maximum idle action-loop heartbeat age. Active applies below the 600-second stuck threshold remain live. |
+| `snapshot_max_age_ms` | `30000` | Maximum runtime snapshot age. |
+| `tip_max_age_ms` | `7200000` | Maximum chain-tip age; two hours accommodates normal block gaps. |
+| `require_indexer` | `false` | Require a healthy indexer caught up to the chain. |
+| `require_wallet` | `false` | Require a healthy wallet caught up to the chain. |
+
+Rates/weights must be finite and positive. Age thresholds accept
+`1000..86400000` milliseconds. Limits and readiness can also be changed for the
+current process with `PATCH /api/v1/node/config`. Authentication, proxy trust
+and other boot settings require a restart. Probes have their own unthrottled
+mount. See [operator controls](operator-controls.md) for scope assignments,
+revocation durability and runtime patch examples.
 
 ### `[api.script]`
 
@@ -644,3 +680,5 @@ operator template at
 Configuration is unstable until 1.0; keys and shapes may change between
 minor versions — see [`./compatibility.md`](./compatibility.md) for the
 versioning policy.
+
+See [operator controls](operator-controls.md) for configurable API request budgets, readiness policy, named credentials, runtime changes and durable peer administration.

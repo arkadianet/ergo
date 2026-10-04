@@ -22,6 +22,8 @@
 //! Webhooks subscribe to this same bus and share its cursor and event bodies.
 
 pub mod bus;
+pub mod history;
+pub mod journal;
 pub mod model;
 pub mod protocol;
 pub mod ws;

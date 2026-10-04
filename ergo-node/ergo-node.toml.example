@@ -153,7 +153,7 @@ peer_details.reverse_dns = false
 # All clients on the proxy peer IP (127.0.0.1 or ::1) share one v1 governor
 # bucket: burst 40, refill 20 tokens/s, Compute cost 10. Direct local operator
 # access also loses its exemption. Rate-limit per client at the proxy; raising
-# governor limits currently requires a code change (no TOML setting).
+# governor limits are configured in [api.limits] or patched through node/config.
 # The realtime cap is 16 sockets TOTAL per peer IP across proxied and direct
 # local clients, regardless of this flag. Budget WebSocket concurrency.
 # With this flag, ALL API tx submissions use the public mempool global budget,

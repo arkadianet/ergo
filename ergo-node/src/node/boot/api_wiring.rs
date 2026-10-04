@@ -29,6 +29,7 @@ use super::super::NodeError;
 /// subsystem (which needs [`voting_targets_slot`](Self::voting_targets_slot)).
 pub(super) struct Scaffold {
     pub api_info: ergo_api::types::ApiInfo,
+    pub runtime_control: Arc<crate::runtime_control::RuntimeControl>,
     pub identity_slot: crate::api_bridge::IdentitySlot,
     pub snapshot_publisher: SnapshotPublisher,
     pub voting_targets_slot: Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
@@ -53,6 +54,7 @@ pub(super) fn build_scaffold(
     // started; the publisher itself stays cheap (one ArcSwap) and is
     // updated unconditionally so disabling/enabling the API never
     // changes the main loop's hot path.
+    let runtime_control = crate::runtime_control::RuntimeControl::new(config)?;
     let api_info = ergo_api::types::ApiInfo {
         agent_name: config.agent_name.clone(),
         node_name: config.node_name.clone(),
@@ -115,6 +117,7 @@ pub(super) fn build_scaffold(
         live_telemetry,
     )
     .with_peer_details(peer_details)
+    .with_runtime_control(runtime_control.clone())
     .into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =
         SubmitBridge::new(submit_tx.clone(), event_tx.clone())
@@ -123,6 +126,7 @@ pub(super) fn build_scaffold(
 
     Ok(Scaffold {
         api_info,
+        runtime_control,
         identity_slot,
         snapshot_publisher,
         voting_targets_slot,
@@ -197,8 +201,16 @@ pub(super) async fn bind(
     voting_targets_slot: Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
     shutdown_notify: &Arc<tokio::sync::Notify>,
     peer_connect_tx: &mpsc::Sender<std::net::SocketAddr>,
+    peer_control_tx: &mpsc::Sender<crate::runtime_control::PeerControlRequest>,
+    runtime_control: Arc<crate::runtime_control::RuntimeControl>,
     votes_changed_tx: &mpsc::Sender<()>,
 ) -> Result<ApiBind, NodeError> {
+    // Validate/load the revocation ledger before spawning storage-owning tasks.
+    let security = if config.api_bind.is_some() {
+        api_security(config)?
+    } else {
+        None
+    };
     let network_prefix = config.chain_spec.network_params.address_prefix;
     // P5 mempool overlay: hand the snapshot-backed view to
     // the API so `/blockchain/balance` (and future unspent
@@ -214,6 +226,42 @@ pub(super) async fn bind(
     // state behind RwLocks; the writer task is a dedicated tokio
     // task receiving commands via a channel.
     let db_arc = store.db_arc();
+    let indexer_probe = indexer_handle.clone();
+    let wallet_probe_db = db_arc.clone();
+    runtime_control.set_dependencies(Arc::new(move |require_indexer, require_wallet| {
+        use ergo_indexer::IndexerQuery;
+        let indexer_height = require_indexer
+            .then(|| indexer_probe.as_ref().map(|handle| handle.indexed_height()))
+            .flatten();
+        let indexer_healthy = require_indexer
+            && indexer_probe
+                .as_ref()
+                .is_some_and(|handle| handle.is_caught_up());
+        let (wallet_height, wallet_healthy) = if require_wallet {
+            wallet_probe_db
+                .begin_read()
+                .ok()
+                .and_then(|txn| {
+                    let cursor = ergo_state::wallet::reader::WalletReader::new(&txn)
+                        .scan_cursor()
+                        .ok()??;
+                    let tip = ergo_state::reader::committed_tip_in(&txn).ok()??;
+                    Some((
+                        Some(cursor.height),
+                        cursor.height == tip.0 && cursor.header_id == Some(tip.1),
+                    ))
+                })
+                .unwrap_or((None, false))
+        } else {
+            (None, false)
+        };
+        crate::runtime_control::Dependencies {
+            indexer_height,
+            indexer_healthy,
+            wallet_height,
+            wallet_healthy,
+        }
+    }));
     let wallet_store: Arc<dyn ergo_state::wallet::WalletStore> =
         Arc::new(ergo_state::wallet::RedbWalletStore::new(db_arc.clone()));
     recover_wallet_for_boot(wallet_store.as_ref())?;
@@ -392,46 +440,54 @@ pub(super) async fn bind(
     let indexer_for_api: Option<Arc<dyn ergo_indexer::IndexerQuery>> = indexer_handle
         .clone()
         .map(|h| Arc::new(h) as Arc<dyn ergo_indexer::IndexerQuery>);
-    let security = api_security(config)?;
     // Restore admitted delivery obligations before node-owned realtime observers
     // and the API listener start. An unavailable store disables webhooks rather
     // than acknowledging registrations that would disappear at restart.
     let webhook_path = config.data_dir.join("webhooks.redb");
     let api_services = tokio::task::spawn_blocking(move || {
-        let webhook_engine = crate::webhook_store::RedbWebhookStore::open(&webhook_path)
-            .and_then(|store| {
-                ergo_api::v1::WebhookEngine::durable(Default::default(), Arc::new(store))
-            })
-            .map(Arc::new);
-        let webhook_engine = match webhook_engine {
-            Ok(engine) => Some(engine),
+        let store = match crate::webhook_store::RedbWebhookStore::open(&webhook_path) {
+            Ok(store) => Arc::new(store),
+            Err(error) => {
+                tracing::error!(%error, "notification store unavailable; live realtime, durable replay and webhooks disabled");
+                return Err(error);
+            }
+        };
+        let webhook_engine = match ergo_api::v1::WebhookEngine::durable(Default::default(), store.clone()) {
+            Ok(engine) => Some(Arc::new(engine)),
             Err(error) => {
                 tracing::error!(%error, "durable webhook store unavailable; webhooks disabled");
                 None
             }
         };
-        Arc::new(ergo_api::ApiServices::with_webhooks(webhook_engine))
+        ergo_api::ApiServices::with_durable_realtime(webhook_engine, store).map(Arc::new)
     })
-    .await
-    .unwrap_or_else(|error| {
-        tracing::error!(%error, "webhook storage initialization failed; webhooks disabled");
-        Arc::new(ergo_api::ApiServices::with_webhooks(None))
-    });
+    .await;
+    let api_services = match api_services
+        .map_err(|error| error.to_string())
+        .and_then(|result| result)
+    {
+        Ok(services) => services,
+        Err(error) => {
+            tracing::error!(%error, "notification cursor initialization failed; realtime and webhooks disabled");
+            Arc::new(ergo_api::ApiServices::without_notifications())
+        }
+    };
     // Realtime WS bridge (A2): the same node-owned bus the
     // router feeds the `blocks` coarse-ring bridge into. Wiring
     // it as a `MempoolObserver` lets admit/evict publish
     // `tx_accepted`/`tx_dropped` on the `mempool` channel
     // directly from the admission hot path, bypassing the
     // coarse ring (which only carries block/reorg/peer events).
-    mempool.set_observer(Some(Arc::new(
-        crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
-            api_services.realtime.bus.clone(),
-        ),
-    )));
-    // Restore any durable webhook cursor before activating this observer.
-    // Disabled indexers and boot failures without a store have no observer.
-    if let Some(observer) = indexer_event_observer {
-        observer.activate(api_services.realtime.bus.clone());
+    if api_services.realtime.bus.is_enabled() {
+        mempool.set_observer(Some(Arc::new(
+            crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
+                api_services.realtime.bus.clone(),
+            ),
+        )));
+        // Restore durable cursors before activating the indexer source.
+        if let Some(observer) = indexer_event_observer {
+            observer.activate(api_services.realtime.bus.clone());
+        }
     }
     let mut admin = crate::api_bridge::ShutdownAdmin::new(
         shutdown_notify.clone(),
@@ -439,7 +495,8 @@ pub(super) async fn bind(
     )
     // Held regardless of mining state to keep the channel open; only
     // fired on a successful vote update (which requires mining).
-    .with_votes_changed_signal(votes_changed_tx.clone());
+    .with_votes_changed_signal(votes_changed_tx.clone())
+    .with_operator_control(runtime_control, peer_control_tx.clone(), security.clone());
     // Expose the runtime voting write only when mining is enabled —
     // votes have no effect without a candidate builder, so
     // `POST /api/v1/votes` otherwise returns `MiningDisabled`.
@@ -507,18 +564,18 @@ fn api_security(
     if config.allow_unauthenticated_legacy_mining && config.api_key_hash.is_none() {
         return Err("allow_unauthenticated_legacy_mining requires api_key_hash".into());
     }
-    config
-        .api_key_hash
-        .clone()
-        .map(|hash| {
-            ergo_api::auth::ApiSecurity::new(hash).map(|security| {
-                security
-                    .with_unauthenticated_legacy_mining(config.allow_unauthenticated_legacy_mining)
-            })
-        })
-        .transpose()
-        .map(|security| security.map(Arc::new))
-        .map_err(|e| -> NodeError { format!("invalid api_key_hash in NodeConfig: {e}").into() })
+    let Some(hash) = config.api_key_hash.clone() else {
+        ergo_api::auth::validate_credentials(&config.api_scoped_keys, None)?;
+        return Ok(None);
+    };
+    let security = ergo_api::auth::ApiSecurity::new(hash)
+        .map_err(|e| -> NodeError { format!("invalid api_key_hash in NodeConfig: {e}").into() })?
+        .with_credentials(
+            config.api_scoped_keys.clone(),
+            config.data_dir.join("credentials-revoked.json"),
+        )?
+        .with_unauthenticated_legacy_mining(config.allow_unauthenticated_legacy_mining);
+    Ok(Some(Arc::new(security)))
 }
 
 #[cfg(test)]
@@ -555,6 +612,78 @@ mod tests {
         fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
             Err(redb::Error::Io(std::io::Error::other("injected recovery write failure")).into())
         }
+    }
+
+    #[tokio::test]
+    async fn unreadable_replay_cursor_never_falls_back_to_reused_session_cursors() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("node.toml");
+        std::fs::write(&config_path, "[api]\nbind = \"127.0.0.1:0\"\n").unwrap();
+        let cli = crate::config::Cli::parse_from([
+            "ergo-node",
+            "--network",
+            "devnet",
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "--peers",
+            "127.0.0.1:1",
+        ]);
+        let config = NodeConfig::load(cli).unwrap();
+        let path = directory.path().join("webhooks.redb");
+        {
+            let db = redb::Database::create(&path).unwrap();
+            let write = db.begin_write().unwrap();
+            {
+                let mut table = write
+                    .open_table(redb::TableDefinition::<&str, &[u8]>::new(
+                        "realtime_metadata_v1",
+                    ))
+                    .unwrap();
+                table
+                    .insert(
+                        "state",
+                        br#"{"version":2,"next_seq":100000,"retained_bytes":0}"#.as_slice(),
+                    )
+                    .unwrap();
+            }
+            write.commit().unwrap();
+        }
+        let handle = crate::node::run_inner(config).await.unwrap();
+        let address = handle.api_addr.expect("other API routes remain available");
+        let bus = &handle.api_services.as_ref().unwrap().realtime.bus;
+        let published = bus.try_publish(ergo_api::v1::realtime::RealtimeEventBody::block_applied(
+            1,
+            "rejected".into(),
+            1,
+            1,
+            100,
+        ));
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .get(format!(
+                "http://{address}/api/v1/events/replay?channels=blocks"
+            ))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let value: serde_json::Value = response.json().await.unwrap();
+        client
+            .get(format!("http://{address}/api/v1/info"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        handle.shutdown().await.unwrap();
+        assert_eq!(
+            published, None,
+            "uncertain persisted cursors must disable notification publication"
+        );
+        assert_eq!(status, reqwest::StatusCode::CONFLICT);
+        assert_eq!(value["error"]["reason"], "realtime_disabled");
     }
 
     // ----- happy path -----

@@ -15,6 +15,17 @@ fn canonical_json() -> serde_json::Value {
     serde_json::to_value(rust_openapi().expect("canonical RUST OpenAPI")).unwrap()
 }
 
+#[test]
+fn replay_openapi_matches_disabled_status_and_limit_bounds() {
+    let document = canonical_json();
+    let operation = get_operation(&document, "/api/v1/events/replay", "get");
+    assert!(operation["responses"].get("409").is_some());
+    assert!(operation["responses"].get("503").is_none());
+    let limit = parameter(operation, "limit");
+    assert_eq!(limit["schema"]["minimum"].as_f64(), Some(1.0));
+    assert_eq!(limit["schema"]["maximum"].as_f64(), Some(1024.0));
+}
+
 fn get_operation<'a>(
     document: &'a serde_json::Value,
     path: &str,
@@ -338,7 +349,7 @@ fn assert_storage_paging_contract(operation: &serde_json::Value) {
     assert_eq!(offset["schema"]["default"], 0);
 
     let limit = parameter(operation, "limit");
-    assert_eq!(limit["schema"]["minimum"], 1);
+    assert_eq!(limit["schema"]["minimum"].as_f64(), Some(1.0));
     assert_eq!(limit["schema"]["maximum"], 16_384);
     assert_eq!(limit["schema"]["default"], 100);
 
@@ -459,7 +470,12 @@ fn canonical_scala_and_rust_operation_inventories_are_disjoint() {
     let scala = scala_openapi_operations();
     let rust = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI must merge"));
     assert_eq!(scala.len(), 127);
-    assert_eq!(rust.len(), 191);
+    assert_eq!(
+        rust.len(),
+        include_str!("../fixtures/api_family_rust_operations.txt")
+            .lines()
+            .count()
+    );
     assert_operation_inventory_matches_fixture(&scala, "api_family_scala_operations.txt");
     assert_operation_inventory_matches_fixture(&rust, "api_family_rust_operations.txt");
 

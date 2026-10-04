@@ -276,7 +276,7 @@ or the top-level `data_dir` key. The node creates the following under it:
 | `peers.redb` | Peer address book (known peers + bans); independent of the consensus DB | Always |
 | `wallet/` | Encrypted (AES-GCM) wallet secret storage | When the wallet is initialized |
 | `indexer.redb` | Extra-index (address / token / template) DB | Only when `[indexer] enabled = true` |
-| `webhooks.redb` | Private webhook registrations, signing secrets, delivery history and pending retries | When the API listener is enabled |
+| `webhooks.redb` | Private webhook registrations, signing secrets, delivery history, pending retries and bounded realtime replay | When the API listener is enabled |
 | `logs/` (or the configured `[logging.file].dir`) | Rotated log files | Only when `[logging.file]` is configured |
 | `ergo-node.toml` | Config file, when you keep it in the data dir | Operator-placed |
 
@@ -790,7 +790,10 @@ drains accepted API compute and tracked service tasks, drains the persistence
 pipeline and performs the final durable flush. Realtime, sampler and webhook
 services belong to the running node and are joined or aborted on shutdown;
 restarting a node creates fresh workers and restores durable webhook
-registrations and admitted retries. A failed persistence batch is terminal for
+registrations, admitted retries and retained realtime replay. The replay journal
+reserves cursors before use, confirms persistence asynchronously and drains
+off the API reactor during shutdown. See [Operator events](events.md) for
+watermarks, bounded retention and source-gap recovery. A failed persistence batch is terminal for
 that worker, and later dependent writes are
 refused until recovery against committed state.
 

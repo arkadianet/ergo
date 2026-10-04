@@ -13,6 +13,29 @@ use ergo_node::node::wallet_bridge::{
 
 struct StubChainAccessor;
 
+struct PrunedChainAccessor;
+
+impl ChainStateAccessor for PrunedChainAccessor {
+    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(0)
+    }
+    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(0)
+    }
+    fn is_pruned(&self) -> bool {
+        true
+    }
+    fn read_block_at(
+        &self,
+        _: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    > {
+        Ok(None)
+    }
+}
+
 impl ChainStateAccessor for StubChainAccessor {
     fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
         Ok(0)
@@ -392,6 +415,119 @@ async fn rescan_on_genesis_tip_is_accepted() {
     while admin.rescan_control().in_progress() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+#[tokio::test]
+async fn pruned_restore_and_discovery_coverage_remain_visible_while_locked() {
+    use ergo_state::wallet::tables::*;
+    let (admin, db, _dir) =
+        spawn_writer_with_chain(Arc::new(PrunedChainAccessor), Arc::new(StubTxSubmitter));
+    let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    admin
+        .restore(phrase.into(), String::new(), "pw".into(), false)
+        .await
+        .unwrap();
+    let status = admin.native_status().await.unwrap();
+    assert!(status.scan_invalidated);
+    assert!(matches!(
+        status.rescan,
+        ergo_api::wallet::native::dto::RescanStateDto::Required { ref detail } if detail.contains("wallet-scan-utxo")
+    ));
+    assert_eq!(
+        admin.status().await.unwrap().error,
+        WalletAdminError::ScanInvalidated.to_string()
+    );
+    assert!(matches!(
+        admin.native_balance(false).await,
+        Err(WalletAdminError::ScanInvalidated)
+    ));
+    assert!(matches!(
+        admin.native_boxes(0, 10).await,
+        Err(WalletAdminError::ScanInvalidated)
+    ));
+    admin.unlock("pw".into()).await.unwrap();
+    assert!(
+        !ergo_state::wallet::reader::WalletReader::new(&db.begin_read().unwrap())
+            .tracked_pubkeys_with_paths()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(admin.native_status().await.unwrap().scan_invalidated);
+    assert!(matches!(
+        admin.balances().await,
+        Err(WalletAdminError::ScanInvalidated)
+    ));
+    admin.lock().await.unwrap();
+    let txn = db.begin_write().unwrap();
+    let coverage = ergo_state::wallet::utxo_scan::DiscoveryCoverage {
+        version: 1,
+        anchor_height: 0,
+        anchor_header_id: "00".repeat(32),
+        state_root: "00".repeat(33),
+        history_complete: false,
+        matched_boxes: 1,
+        covered_pubkeys: ergo_state::wallet::reader::WalletReader::new(&db.begin_read().unwrap())
+            .tracked_pubkeys_with_paths()
+            .unwrap()
+            .into_iter()
+            .map(|(_, pk, _)| hex::encode(pk))
+            .collect(),
+    };
+    txn.open_table(WALLET_UTXO_DISCOVERY)
+        .unwrap()
+        .insert((), serde_json::to_vec(&coverage).unwrap())
+        .unwrap();
+    let wb = ergo_state::wallet::types::WalletBox {
+        box_id: [0x11; 32],
+        creation_tx_id: [0x22; 32],
+        creation_output_index: 0,
+        creation_height: 0,
+        value: 1_000_000,
+        assets: vec![],
+        status: ergo_state::wallet::types::BoxStatus::Confirmed,
+        provenance: ergo_state::wallet::types::BoxProvenance::Owned,
+    };
+    txn.open_table(WALLET_BOXES)
+        .unwrap()
+        .insert(wb.box_id, bincode::serialize(&wb).unwrap())
+        .unwrap();
+    txn.open_table(WALLET_DISCOVERED_BOXES)
+        .unwrap()
+        .insert(wb.box_id, 0)
+        .unwrap();
+    // Emulate the atomic discovery publication below; invalidation clears
+    // only together with the verified holdings and coverage.
+    txn.open_table(WALLET_SCAN_INVALIDATED)
+        .unwrap()
+        .insert((), false)
+        .unwrap();
+    txn.commit().unwrap();
+    let status = admin.native_status().await.unwrap();
+    assert!(status.locked);
+    assert!(!status.discovery.unwrap().history_complete);
+    let boxes = admin.native_boxes(0, 10).await.unwrap();
+    assert!(!boxes.items[0].inclusion_height_known);
+    assert!(
+        !admin
+            .native_box_by_id(hex::encode(wb.box_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .inclusion_height_known
+    );
+    assert!(matches!(
+        admin.rescan(1).await.unwrap_err(),
+        WalletAdminError::BadRequest(_)
+    ));
+    assert!(!admin.rescan_control().in_progress());
+    assert!(!admin.native_status().await.unwrap().scan_invalidated);
+    assert!(matches!(
+        admin
+            .restore(phrase.into(), String::new(), "pw2".into(), false)
+            .await
+            .unwrap_err(),
+        WalletAdminError::WalletExists
+    ));
 }
 
 #[tokio::test]

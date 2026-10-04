@@ -86,5 +86,15 @@ async fn corrupt_webhook_store_disables_hooks_while_api_remains_available() {
         .unwrap()
         .error_for_status()
         .unwrap();
+    let replay = client
+        .get(format!(
+            "http://{address}/api/v1/events/replay?channels=blocks"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), reqwest::StatusCode::CONFLICT);
+    let value: serde_json::Value = replay.json().await.unwrap();
+    assert_eq!(value["error"]["reason"], "realtime_disabled");
     node.shutdown().await.unwrap();
 }

@@ -879,6 +879,34 @@ async fn api_docs_present_only_scala_and_rust_api_families() {
 }
 
 #[tokio::test]
+async fn served_openapi_yaml_has_no_private_number_mappings() {
+    let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
+    let app = router(
+        read,
+        None,
+        None,
+        None,
+        ergo_ser::address::NetworkPrefix::Mainnet,
+    );
+
+    let mut malformed_specs = Vec::new();
+    for path in [
+        "/api-docs/openapi-v1.yaml",
+        "/api-docs/openapi-native.yaml",
+        "/api-docs/openapi-rust.yaml",
+    ] {
+        let yaml = text_get(app.clone(), path).await;
+        if yaml.contains("serde_json::private") {
+            malformed_specs.push(path);
+        }
+    }
+    assert!(
+        malformed_specs.is_empty(),
+        "served OpenAPI specs expose private number mappings: {malformed_specs:?}"
+    );
+}
+
+#[tokio::test]
 async fn canonical_family_docs_are_unified_and_disjoint() {
     let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
     let app = router(
@@ -2379,4 +2407,30 @@ async fn get_blocks_proof_for_tx_404s_when_compat_disabled() {
     let path = format!("/blocks/{HEADER_ID_HEX_AA}/proofFor/{tx}");
     let (s, _) = json_get(app, &path).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn served_openapi_yaml_has_no_duplicate_keys() {
+    let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
+    let app = router(
+        read,
+        None,
+        None,
+        None,
+        ergo_ser::address::NetworkPrefix::Mainnet,
+    );
+    for path in [
+        "/api-docs/openapi.yaml",
+        "/api-docs/openapi-scala.yaml",
+        "/api-docs/openapi-rust.yaml",
+        "/api-docs/openapi-native.yaml",
+        "/api-docs/openapi-v1.yaml",
+    ] {
+        let yaml = text_get(app.clone(), path).await;
+        // A YAML mapping value rejects duplicate keys, like Swagger UI's
+        // parser; last-wins parsers silently hide a shadowed definition.
+        if let Err(error) = serde_norway::from_str::<serde_norway::Value>(&yaml) {
+            panic!("{path} is not valid strict YAML: {error}");
+        }
+    }
 }

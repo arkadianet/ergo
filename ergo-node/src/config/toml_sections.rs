@@ -186,6 +186,8 @@ pub(super) struct TomlApi {
     /// routes stay closed; supplied hashes are validated at load.
     pub(super) security: Option<TomlApiSecurity>,
     pub(super) script: TomlApiScript,
+    pub(super) limits: ergo_api::operator_control::ApiLimits,
+    pub(super) readiness: ergo_api::operator_control::ProbePolicy,
 }
 
 /// `[api.security]` TOML subsection. Carries the operator's
@@ -201,6 +203,7 @@ pub(super) struct TomlApiSecurity {
     /// and solution submission. Default false; still requires a configured key
     /// for supplied-transaction candidate building.
     pub(super) allow_unauthenticated_legacy_mining: bool,
+    pub(super) keys: Vec<ergo_api::auth::ScopedCredentialConfig>,
 }
 
 /// Native script playground policy, validated before binding the API.

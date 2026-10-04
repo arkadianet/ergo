@@ -21,6 +21,15 @@ use crate::types::{
     ApiWeightFunction, HealthStatus, RawTransactionBytes, SyncStateLabel,
 };
 
+pub(crate) fn serialize_openapi_yaml(spec: &OpenApiDocument) -> String {
+    // JSON text preserves field order and normalizes arbitrary-precision numbers
+    // before YAML serialization can expose serde_json's private Number mapping.
+    let json = serde_json::to_string(spec).expect("OpenAPI JSON serialize");
+    let value: serde_norway::Value =
+        serde_norway::from_str(&json).expect("OpenAPI JSON parse as YAML");
+    serde_norway::to_string(&value).expect("OpenAPI YAML serialize")
+}
+
 /// OpenAPI aggregator for the Rust-native `/api/v1/*` surface.
 ///
 /// Defined here in `server.rs` so the derive can name the private handler
@@ -700,11 +709,8 @@ pub fn rust_openapi_json() -> &'static OpenApiDocument {
 }
 
 pub fn rust_openapi_yaml() -> &'static str {
-    static RUST_OPENAPI_YAML: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        rust_openapi_json()
-            .to_yaml()
-            .expect("OpenAPI YAML serialize")
-    });
+    static RUST_OPENAPI_YAML: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| serialize_openapi_yaml(rust_openapi_json()));
     RUST_OPENAPI_YAML.as_str()
 }
 
@@ -855,9 +861,7 @@ pub fn scala_openapi_operations() -> BTreeSet<RouteOperation> {
 /// bug rather than a runtime condition, so this panics instead of serving
 /// an empty spec.
 pub fn native_openapi_yaml() -> String {
-    NativeOpenApi::openapi()
-        .to_yaml()
-        .expect("openapi yaml serialize")
+    serialize_openapi_yaml(&NativeOpenApi::openapi())
 }
 
 #[cfg(test)]

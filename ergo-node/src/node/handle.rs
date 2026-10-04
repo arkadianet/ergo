@@ -270,8 +270,6 @@ impl RunHandle {
                 }
             }
         }
-        // Drain the API + inbound surfaces with graceful semantics.
-        self.drain_api_and_inbound().await;
         // Blocking writes cannot be aborted safely. Join the dedicated
         // worker after its atomic step (or cancellable rebuild chunk) finishes,
         // so explicit shutdown cannot return while it still owns DB references.
@@ -295,6 +293,9 @@ impl RunHandle {
             Ok(r) => r,
             Err(join_err) => Err(Box::new(join_err) as NodeError),
         };
+        // Final indexer and action-loop observations must reach the journal
+        // before API services close and release its unused cursor reservation.
+        self.drain_api_and_inbound().await;
         let result = wallet_result.and(result);
         let elapsed_ms = shutdown_started.elapsed().as_millis() as u64;
         match &result {

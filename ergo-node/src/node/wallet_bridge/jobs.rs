@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use super::commands::WriterContext;
 use super::support::{generate_sign, sign_submit, tx_build};
 
-const JOBS: TableDefinition<u64, &[u8]> = TableDefinition::new("wallet_mining_jobs_v1");
+use ergo_state::wallet::mining_jobs::JOURNAL as JOBS;
 const META: TableDefinition<&str, u64> = TableDefinition::new("wallet_mining_jobs_meta_v1");
 const MAX_JOBS: usize = 256;
 const MAX_BOXES: usize = 100;
@@ -1252,6 +1252,44 @@ mod tests {
         save(&db, 1, &record).unwrap();
         assert_eq!(create(&db, request()).unwrap().id, "257");
         assert_eq!(list(&db).unwrap().items.len(), MAX_JOBS);
+    }
+
+    #[test]
+    fn job_reservations_survive_removed_wallet_rows_and_quarantine_is_inert() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("jobs.redb")).unwrap();
+        create(&db, request()).unwrap();
+        let before = reserved_inputs(&db).unwrap();
+        let txn = ergo_state::begin_write_qr(&db).unwrap();
+        txn.open_table(ergo_state::wallet::tables::WALLET_BOXES)
+            .unwrap()
+            .retain(|_, _| false)
+            .unwrap();
+        txn.open_table(ergo_state::wallet::tables::WALLET_TXS)
+            .unwrap()
+            .retain(|_, _| false)
+            .unwrap();
+        txn.commit().unwrap();
+        assert_eq!(reserved_inputs(&db).unwrap(), before);
+        assert_eq!(
+            ergo_state::wallet::mining_jobs::pending_jobs(&db.begin_read().unwrap()).unwrap(),
+            vec![1]
+        );
+        let original = records(&db).unwrap().remove(0).1;
+        assert_eq!(ergo_state::wallet::mining_jobs::quarantine(&db).unwrap(), 1);
+        assert!(list(&db).unwrap().items.is_empty());
+        assert!(reserved_inputs(&db).unwrap().is_empty());
+        let read = db.begin_read().unwrap();
+        let raw = read
+            .open_table(ergo_state::wallet::mining_jobs::QUARANTINE)
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .unwrap()
+            .value()
+            .to_vec();
+        let saved: Record = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(saved.job, original.job);
     }
 
     // ----- round-trips -----
