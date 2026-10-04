@@ -298,6 +298,12 @@ impl RealtimeBus {
     /// never-block drop policy. Returns the assigned `seq`. If the u64 cursor
     /// is exhausted, drops the event and returns the last assigned cursor.
     pub fn publish(&self, body: RealtimeEventBody) -> u64 {
+        self.try_publish(body).unwrap_or_else(|| self.latest_seq())
+    }
+
+    /// Publish and return only a cursor assigned to this observation. Sources
+    /// retaining inverse links must not remember a rejected observation.
+    pub fn try_publish(&self, body: RealtimeEventBody) -> Option<u64> {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let seq = g.next_seq;
         if self
@@ -308,11 +314,11 @@ impl RealtimeBus {
             tracing::error!(
                 "realtime bus closed or boot cursor epoch exhausted; observation dropped"
             );
-            return seq - 1;
+            return None;
         }
         let Some(next_seq) = g.next_seq.checked_add(1) else {
             tracing::error!("realtime cursor exhausted; event dropped");
-            return g.next_seq - 1;
+            return None;
         };
         g.next_seq = next_seq;
         let event = Arc::new(RealtimeEvent {
@@ -354,7 +360,7 @@ impl RealtimeBus {
         for id in reap {
             g.subs.remove(&id);
         }
-        seq
+        Some(seq)
     }
 
     /// Bounded resume backfill: events with `seq > since` matching
