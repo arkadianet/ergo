@@ -1917,6 +1917,227 @@ fn process_header_at_eip37_boundary_with_truncated_lookback_buffers_not_penalize
     );
 }
 
+// ---------------------------------------------------------------------------
+// A header buffered on EpochContextIncomplete waits under its parent, which is
+// already installed, so only its context-retry registration brings it back on
+// later header progress once the older retarget ancestors are stored.
+// ---------------------------------------------------------------------------
+
+/// Real EIP-37 activation header and its parent, the newest of the nine
+/// 128-block retarget boundaries in its difficulty window.
+const EIP37_CHILD: u32 = 844_673;
+const EIP37_PARENT: u32 = 844_672;
+
+fn eip37_synthetic_id(height: u32) -> [u8; 32] {
+    let mut id = [0xE3; 32];
+    id[..4].copy_from_slice(&height.to_be_bytes());
+    id
+}
+
+/// Store real header bytes with metadata consistent with them.
+fn store_header_row(store: &StateStore, bytes: &[u8], cumulative_score: Vec<u8>) -> [u8; 32] {
+    let header = read_header(&mut VlqReader::new(bytes)).unwrap();
+    let id = *ergo_primitives::digest::blake2b256(bytes).as_bytes();
+    store.store_header(&id, bytes).unwrap();
+    store
+        .store_header_meta(
+            &id,
+            &HeaderMeta {
+                parent_id: *header.parent_id.as_bytes(),
+                height: header.height,
+                cumulative_score,
+                pow_validity: 1,
+                timestamp: header.timestamp,
+            },
+        )
+        .unwrap();
+    id
+}
+
+/// 844_672 as best header without its older retarget ancestors, plus mainnet
+/// header 1 off the best chain, so headers 2 and 3 are real-PoW header
+/// progress that leaves the best header alone.
+fn eip37_context_store(
+    dir: &std::path::Path,
+    eip37: &[serde_json::Value],
+    early: &[serde_json::Value],
+) -> ergo_state::StateBackendKind {
+    let mut store = StateStore::open(&dir.join("state.redb"))
+        .unwrap()
+        .with_non_durable_commits_for_test();
+    init_genesis(&mut store);
+    let best_score = vec![0xFF; 16];
+    let parent_id = store_header_row(
+        &store,
+        &get_header_bytes(eip37, EIP37_PARENT),
+        best_score.clone(),
+    );
+    store
+        .test_force_set_best_header_unsafe(parent_id, EIP37_PARENT, best_score)
+        .unwrap();
+    // The best-chain index rewrite for the child stops at its parent's row.
+    store
+        .test_force_put_header_chain_index(EIP37_PARENT, &parent_id)
+        .unwrap();
+    store_header_row(&store, &get_header_bytes(early, 1), vec![1]);
+    ergo_state::StateBackendKind::Utxo(store)
+}
+
+/// Store the eight older retarget boundaries, linked to 844_672 by per-height
+/// parent metadata. The difficulty walk follows parent links between the
+/// boundaries and reads header bytes only at them.
+fn store_eip37_retarget_ancestors(store: &StateStore, eip37: &[serde_json::Value]) {
+    let boundaries: Vec<u32> = (0..=8)
+        .rev()
+        .map(|epochs| EIP37_PARENT - 128 * epochs)
+        .collect();
+    for pair in boundaries.windows(2) {
+        let (low, high) = (pair[0], pair[1]);
+        let low_id = store_header_row(store, &get_header_bytes(eip37, low), vec![1]);
+        let high_header = read_header(&mut VlqReader::new(&get_header_bytes(eip37, high))).unwrap();
+        let mut id = *high_header.parent_id.as_bytes();
+        for height in (low + 1..high).rev() {
+            let parent_id = if height == low + 1 {
+                low_id
+            } else {
+                eip37_synthetic_id(height - 1)
+            };
+            store
+                .store_header_meta(
+                    &id,
+                    &HeaderMeta {
+                        parent_id,
+                        height,
+                        cumulative_score: vec![1],
+                        pow_validity: 1,
+                        timestamp: 0,
+                    },
+                )
+                .unwrap();
+            id = parent_id;
+        }
+    }
+}
+
+fn validate_header(headers: &[serde_json::Value], height: u32) -> ergo_sync::coordinator::Action {
+    ergo_sync::coordinator::Action::ValidateHeader {
+        peer: "10.0.0.24:9030".parse().unwrap(),
+        modifier_id: get_header_id(headers, height),
+        header_bytes: get_header_bytes(headers, height),
+    }
+}
+
+fn penalizes(actions: &[ergo_sync::coordinator::Action]) -> bool {
+    actions
+        .iter()
+        .any(|action| matches!(action, ergo_sync::coordinator::Action::Penalize { .. }))
+}
+
+#[test]
+fn epoch_context_blocked_header_retries_on_later_header_progress() {
+    use ergo_sync::coordinator::SyncCoordinator;
+    use ergo_sync::executor::SyncExecutor;
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let eip37 = load_headers_file("headers_eip37_curated.json");
+    let early = load_headers();
+    let mut store = eip37_context_store(dir.path(), &eip37, &early);
+    let mut coordinator = SyncCoordinator::new(0);
+    let mut executor = SyncExecutor::new(
+        ergo_validation::context::ProtocolParams::mainnet_default(),
+        ergo_crypto::difficulty::DifficultyParams::mainnet(),
+    );
+    let child_id = get_header_id(&eip37, EIP37_CHILD);
+
+    // Single-header path: buffered under its installed parent.
+    let actions = executor.execute(
+        validate_header(&eip37, EIP37_CHILD),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(!penalizes(&actions), "{actions:?}");
+    assert_eq!(executor.orphan_headers_len(), 1);
+
+    // Progress before the ancestors arrive retries it in the orphan drain,
+    // which buffers it again.
+    executor.execute(
+        validate_header(&early, 2),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(store
+        .get_header(&get_header_id(&early, 2))
+        .unwrap()
+        .is_some());
+    assert!(store.get_header(&child_id).unwrap().is_none());
+    assert_eq!(executor.orphan_headers_len(), 1);
+
+    // With the retarget ancestors stored, the next progress installs it.
+    store_eip37_retarget_ancestors(store.as_utxo().unwrap(), &eip37);
+    let actions = executor.execute(
+        validate_header(&early, 3),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(!penalizes(&actions), "{actions:?}");
+    assert!(store.get_header(&child_id).unwrap().is_some());
+    assert_eq!(store.chain_state_meta().best_header_id, child_id);
+    assert_eq!(executor.orphan_headers_len(), 0);
+}
+
+#[test]
+fn epoch_context_blocked_batch_header_retries_on_later_header_progress() {
+    use ergo_sync::coordinator::SyncCoordinator;
+    use ergo_sync::executor::SyncExecutor;
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let eip37 = load_headers_file("headers_eip37_curated.json");
+    let early = load_headers();
+    let mut store = eip37_context_store(dir.path(), &eip37, &early);
+    let mut coordinator = SyncCoordinator::new(0);
+    let mut executor = SyncExecutor::new(
+        ergo_validation::context::ProtocolParams::mainnet_default(),
+        ergo_crypto::difficulty::DifficultyParams::mainnet(),
+    );
+    let child_id = get_header_id(&eip37, EIP37_CHILD);
+
+    // Batch path; the already-known companion installs nothing, so the
+    // batch's own drain leaves the retry for later progress.
+    let actions = executor.execute_all(
+        vec![
+            validate_header(&eip37, EIP37_CHILD),
+            validate_header(&early, 1),
+        ],
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(!penalizes(&actions), "{actions:?}");
+    assert_eq!(executor.orphan_headers_len(), 1);
+
+    store_eip37_retarget_ancestors(store.as_utxo().unwrap(), &eip37);
+    let actions = executor.execute(
+        validate_header(&early, 2),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(!penalizes(&actions), "{actions:?}");
+    assert!(store.get_header(&child_id).unwrap().is_some());
+    assert_eq!(store.chain_state_meta().best_header_id, child_id);
+    assert_eq!(executor.orphan_headers_len(), 0);
+}
+
 /// `recover_coordinator` walks `best_full_block+1 .. best_header` to
 /// rebuild the pending-block queue. Same trust contract as hydrate_*:
 /// every walked id must resolve to a header row whose bytes hash to the
