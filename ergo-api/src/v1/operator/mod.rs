@@ -22,7 +22,7 @@
 //! [`NodeMining`] traits the compat surface reads —
 //! reshaped into the standard envelope + snake_case glossary. Where a
 //! capability has no trait seam yet (manual peer-ban, config read/patch,
-//! forced-tx candidate, next-block vote preview), the endpoint mounts and
+//! next-block vote preview), the endpoint mounts and
 //! answers the honest `route_unavailable` rather than a bare 404.
 
 pub(crate) mod mining;

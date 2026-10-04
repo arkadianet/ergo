@@ -460,3 +460,26 @@ mod tests {
         );
     }
 }
+
+/// Bounded projection from the latest canonical block observations and the
+/// current pool. Missing/stale/sparse data yields null estimates, with a reason.
+/// Admission costs are observations; candidate generation revalidates them.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiFeeEstimate {
+    pub available: bool,
+    pub confidence: String,
+    pub reason: Option<String>,
+    pub sample_blocks: u32,
+    pub confirmed_fee_paying_transactions: u32,
+    pub observed_block_interval_ms: Option<u64>,
+    pub block_byte_capacity: Option<u64>,
+    pub block_cost_capacity: Option<u64>,
+    pub observed_median_fee_per_byte_nano_erg: Option<String>,
+    pub target_wait_ms: u64,
+    pub target_feasible: bool,
+    pub tx_size_bytes: u32,
+    pub tx_cost_units: u64,
+    pub recommended_fee_nano_erg: Option<String>,
+    pub estimated_wait_ms: Option<u64>,
+    pub estimate_capped: bool,
+}
