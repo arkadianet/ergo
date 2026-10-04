@@ -517,10 +517,11 @@ fn query_space(path: &Path, options: &mut UpgradeOptions<'_>) -> Option<u64> {
 
 // Reserve copy headroom for the index AND the remaining legacy conversions.
 // Originals retained as backups still occupy space after each conversion.
-fn can_preserve_schema_two(
+fn can_preserve_migratable_indexer(
     indexer: &Path,
     paths: &[PathBuf],
     size: u64,
+    schema: u32,
     options: &mut UpgradeOptions<'_>,
 ) -> Result<bool> {
     let mut needed = required_space(size);
@@ -545,14 +546,14 @@ fn can_preserve_schema_two(
     let available = match (options.free_space)(indexer) {
         Ok(available) => Some(available),
         Err(error) => {
-            (options.warning)(&format!("cannot determine available bytes for {}: {error}; deleting schema-2 indexer before state conversion", indexer.display()));
+            (options.warning)(&format!("cannot determine available bytes for {}: {error}; deleting schema-{schema} indexer before state conversion", indexer.display()));
             None
         }
     };
     match available {
         Some(available) if available >= needed => Ok(true),
         available => {
-            (options.warning)(&format!("schema-2 legacy indexer cannot be preserved: indexer and remaining database conversions need {needed} bytes, available {}; deleting the indexer first so the state upgrade has priority", available.map_or_else(|| "unknown".to_owned(), |n| n.to_string())));
+            (options.warning)(&format!("schema-{schema} legacy indexer cannot be preserved: indexer and remaining database conversions need {needed} bytes, available {}; deleting the indexer first so the state upgrade has priority", available.map_or_else(|| "unknown".to_owned(), |n| n.to_string())));
             Ok(false)
         }
     }
@@ -575,6 +576,22 @@ pub fn upgrade_data(
     directory: &Path,
     indexer_filename: &Path,
     options: &mut UpgradeOptions<'_>,
+) -> Result<UpgradeReport> {
+    upgrade_data_with_migration_path(
+        _lock,
+        directory,
+        indexer_filename,
+        options,
+        ergo_indexer::store::has_migration_path,
+    )
+}
+
+fn upgrade_data_with_migration_path(
+    _lock: &DataDirectoryLock,
+    directory: &Path,
+    indexer_filename: &Path,
+    options: &mut UpgradeOptions<'_>,
+    has_migration_path: impl Fn(u32) -> bool,
 ) -> Result<UpgradeReport> {
     _lock.check_directory(directory)?;
     let paths = database_paths(directory, indexer_filename)?;
@@ -610,9 +627,15 @@ pub fn upgrade_data(
             let (schema, lock) = legacy_indexer_schema(path, options.warning)?;
             (
                 schema < ergo_indexer::store::INDEXER_SCHEMA_VERSION
-                    && !(schema == 2
+                    && !(has_migration_path(schema)
                         && !options.keep_stale_indexer
-                        && can_preserve_schema_two(path, &paths[1..], size, options)?),
+                        && can_preserve_migratable_indexer(
+                            path,
+                            &paths[1..],
+                            size,
+                            schema,
+                            options,
+                        )?),
                 Some(lock),
             )
         } else {
@@ -707,7 +730,7 @@ pub fn upgrade_data(
                 })?;
                 report.migrated += 1;
                 if position == 0 {
-                    (options.warning)("legacy indexer file-format conversion verified; a schema-2 index will migrate its projections in place on indexer open");
+                    (options.warning)("legacy indexer file-format conversion verified; registered schema migrations run in place on the background indexer worker when needed");
                 }
             }
             eprintln!(

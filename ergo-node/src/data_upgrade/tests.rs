@@ -1391,6 +1391,64 @@ fn complete_schema_two_indexer(path: &Path) -> Vec<u8> {
 }
 
 #[test]
+fn legacy_indexer_preservation_follows_registered_path_and_space_policy() {
+    for (schema, registered, enough_space, keep_stale) in [
+        (1, true, true, false),
+        (1, true, false, false),
+        (1, true, true, true),
+        (2, false, true, false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+        let idx = dir.path().join("custom-index.redb");
+        let original = indexer(&idx, schema);
+        let state = dir.path().join("state.redb");
+        let state_bytes = legacy(&state);
+        let combined =
+            required_space(original.len() as u64) + required_space(state_bytes.len() as u64);
+        let mut warnings = Vec::new();
+        let report = upgrade_data_with_migration_path(
+            &lock,
+            dir.path(),
+            Path::new("custom-index.redb"),
+            &mut UpgradeOptions {
+                discard_backups: false,
+                keep_stale_indexer: keep_stale,
+                indexer_enabled: true,
+                warning: &mut |s| warnings.push(s.to_owned()),
+                free_space: &|_| Ok(if enough_space { combined } else { combined - 1 }),
+                cancelled: &|| false,
+                progress: &mut |_, _, _, _| {},
+                step: &mut |_| Ok(()),
+            },
+            // Model a future registry accepting schema 1, or dropping schema 2.
+            |version| registered && version == schema,
+        )
+        .unwrap();
+        assert_current(&state);
+        let preserved = registered && enough_space && !keep_stale;
+        assert_eq!(report.migrated, if preserved { 2 } else { 1 });
+        assert_eq!(report.stale_indexers, usize::from(!preserved));
+        assert_eq!(idx.exists(), preserved);
+        if preserved {
+            assert_current(&idx);
+            assert!(warnings
+                .iter()
+                .any(|s| s.contains("registered schema migrations")));
+        } else if registered && !enough_space && !keep_stale {
+            assert!(warnings
+                .iter()
+                .any(|s| s.contains("schema-1 legacy indexer cannot be preserved")));
+        }
+        if preserved || keep_stale {
+            assert_eq!(fs::read(sibling(&idx, ".redb2-backup")).unwrap(), original);
+        } else {
+            assert!(!sibling(&idx, ".redb2-backup").exists());
+        }
+    }
+}
+
+#[test]
 fn schema_two_indexer_is_converted_and_migrated_only_with_combined_headroom() {
     for enough_space in [true, false] {
         let dir = tempfile::tempdir().unwrap();
