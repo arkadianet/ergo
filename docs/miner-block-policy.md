@@ -38,15 +38,20 @@ The emission transaction and mandatory framing/cost margin are deducted
 first. The rent ceiling is the lower of:
 
 - The configured rent share of the voted block limit, minus overhead.
-- The available budget after reserving the configured private share when
-  private transactions are waiting.
+- The available budget after leaving room for operator work: the configured
+  private share while private or required transactions are waiting, and never
+  less than the measured serialized size and admission cost of the available
+  required transactions and their ancestors.
 
-Reservations keep rent from crowding out private work. They are not hard caps
-on the private lane: after the rent prefix, private transactions and their
-available ancestors are selected before ordinary public transactions. Public
-transactions can fill the remaining budget. A zero reservation disables that
-additional protection; it does not exclude private transactions. Rent claims
-also avoid inputs reserved by private or required transactions.
+Reservations keep rent from crowding out private and required work. They are
+not hard caps on those lanes: after the rent prefix, required transactions,
+then private transactions, and their available ancestors are selected before
+ordinary public transactions. Public transactions can fill the remaining
+budget. A zero reservation disables the private share; it does not exclude
+private transactions, and required work is still measured. Selection
+revalidates every transaction, so a requirement whose cost grew since
+admission can still miss the budget and be reported. Rent claims also avoid
+inputs reserved by private or required transactions.
 
 The final fee-collection transaction is measured and validated too. Assembly
 may trim transactions from the tail until the complete section fits. Required

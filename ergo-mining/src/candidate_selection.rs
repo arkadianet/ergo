@@ -437,24 +437,48 @@ struct SelectionPlan<'a> {
     unmet: Vec<ExcludedTransaction>,
 }
 
-/// Inputs owned by the private lane or a required transaction/ancestor must
-/// not be swept by the rent prefix before user selection gets to them.
-pub fn protected_rent_inputs(
+/// What the rent prefix must leave to user selection, which runs after it.
+#[derive(Debug, Default)]
+pub struct RentProtection {
+    /// Inputs owned by the private lane or an available required
+    /// transaction/ancestor; rent must not sweep them.
+    pub inputs: HashSet<Digest32>,
+    /// Whether any required transaction is available to select.
+    pub required_waiting: bool,
+    /// Summed admission cost of the available required transactions and
+    /// their ancestors. Selection revalidates them; this sizes rent's gap.
+    pub required_cost: u64,
+    /// Summed serialized size of the same transactions.
+    pub required_size: u64,
+}
+
+/// Measure the operator work the rent prefix must not crowd out.
+pub fn rent_protection(
     snapshot: &MempoolReadSnapshot,
     private: &[Entry],
     policy: &BlockPolicy,
-) -> Result<HashSet<Digest32>, MiningError> {
+) -> Result<RentProtection, MiningError> {
     let plan = selection_plan(snapshot, private, policy)?;
-    Ok(private
-        .iter()
-        .flat_map(|entry| entry.inputs.iter().copied())
-        .chain(
-            plan.ordered
-                .into_iter()
-                .filter(|entry| plan.required.contains(&entry.tx_id))
-                .flat_map(|entry| entry.inputs.iter().copied()),
-        )
-        .collect())
+    let mut protection = RentProtection {
+        inputs: private
+            .iter()
+            .flat_map(|entry| entry.inputs.iter().copied())
+            .collect(),
+        ..Default::default()
+    };
+    for entry in plan
+        .ordered
+        .into_iter()
+        .filter(|entry| plan.required.contains(&entry.tx_id))
+    {
+        protection.inputs.extend(entry.inputs.iter().copied());
+        protection.required_waiting = true;
+        protection.required_cost = protection.required_cost.saturating_add(entry.cost);
+        protection.required_size = protection
+            .required_size
+            .saturating_add(u64::from(entry.size_bytes));
+    }
+    Ok(protection)
 }
 
 fn selection_plan<'a>(
@@ -1783,11 +1807,9 @@ mod tests {
             .excluded
             .iter()
             .any(|e| e.tx_id == public_id && e.reason == "input_conflict"));
-        assert!(
-            protected_rent_inputs(&snapshot, &[private], &BlockPolicy::default())
-                .unwrap()
-                .contains(&input.box_id().unwrap())
-        );
+        let protection = rent_protection(&snapshot, &[private], &BlockPolicy::default()).unwrap();
+        assert!(protection.inputs.contains(&input.box_id().unwrap()));
+        assert!(!protection.required_waiting);
     }
 
     /// Reasons recorded for `id`, in recording order.
@@ -1955,8 +1977,35 @@ mod tests {
         assert_eq!(plan.unmet[0].reason, "required_excluded_ancestor");
         let ordered: Vec<_> = plan.ordered.iter().map(|e| e.tx_id).collect();
         assert_eq!(ordered, [walked.tx_id]);
-        assert!(!protected_rent_inputs(&snapshot, &[], &policy)
-            .unwrap()
-            .contains(&output(0x51)));
+        let protection = rent_protection(&snapshot, &[], &policy).unwrap();
+        assert!(!protection.inputs.contains(&output(0x51)));
+        assert!(!protection.required_waiting);
+    }
+
+    #[test]
+    fn rent_protection_measures_available_requirements_and_ancestors() {
+        let output = |seed: u8| Digest32::from_bytes([seed; 32]);
+        let pooled = |seed: u8, cost: u64, size: u32, inputs, outputs| {
+            let input = box_at(1_000_000_000, HEIGHT, seed);
+            let mut entry = entry(&spend_tx(&input, 1_000_000_000, HEIGHT), 0, size, seed);
+            entry.cost = cost;
+            entry.inputs = inputs;
+            entry.outputs = outputs;
+            entry
+        };
+        let parent = pooled(0x01, 30_000, 200, vec![output(0x51)], vec![output(0x61)]);
+        let child = pooled(0x02, 20_000, 100, vec![output(0x61)], vec![]);
+        let unrelated = pooled(0x03, 90_000, 900, vec![output(0x53)], vec![]);
+        let snapshot = MempoolReadSnapshot::from_entries(vec![child.clone(), parent, unrelated]);
+        let policy = BlockPolicy {
+            required_tx_ids: vec![hex::encode(child.tx_id.as_bytes()), "ab".repeat(32)],
+            ..Default::default()
+        };
+        let protection = rent_protection(&snapshot, &[], &policy).unwrap();
+        assert!(protection.required_waiting);
+        assert_eq!(protection.required_cost, 50_000);
+        assert_eq!(protection.required_size, 300);
+        assert!(protection.inputs.contains(&output(0x51)));
+        assert!(!protection.inputs.contains(&output(0x53)));
     }
 }

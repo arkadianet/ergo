@@ -68,10 +68,10 @@ export function miningPolicy() {
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
           <label>Maximum rent validation cost (%)<input name="rent_cost" type="number" min="0" max="100" step="0.01" required></label>
           <label>Maximum rent block size (%)<input name="rent_size" type="number" min="0" max="100" step="0.01" required></label>
-          <label>Reserve validation cost for private transactions (%)<input name="private_cost" type="number" min="0" max="100" step="0.01" required></label>
-          <label>Reserve block size for private transactions (%)<input name="private_size" type="number" min="0" max="100" step="0.01" required></label>
+          <label>Reserve validation cost for private and required transactions (%)<input name="private_cost" type="number" min="0" max="100" step="0.01" required></label>
+          <label>Reserve block size for private and required transactions (%)<input name="private_size" type="number" min="0" max="100" step="0.01" required></label>
         </div>
-        <p class="muted">Reservations limit rent while private transactions are waiting. Mandatory block overhead is deducted, and consensus limits always apply.</p>
+        <p class="muted">Reservations limit rent while private or required transactions are waiting, and rent always leaves room for the measured size and cost of required transactions. Mandatory block overhead is deducted, and consensus limits always apply.</p>
         <label>Recovered storage-rent tokens
           <select name="tokens"><option value="preserve">Preserve tokens; defer claims that cannot fit</option><option value="burn_overflow">Allow overflow tokens to be burned</option></select>
         </label>
