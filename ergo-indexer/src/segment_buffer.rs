@@ -1129,6 +1129,48 @@ mod tests {
     /// trailing-bytes guard the public `store::segment::read_spill_in`
     /// reader uses. Without it a malformed spill row would be silently
     /// normalised by mutation.
+    /// Apply and rollback load stored spills here; a row over 512 entries is
+    /// corruption that must halt rather than be mutated and rewritten.
+    #[test]
+    fn read_spill_from_table_refuses_rows_over_the_threshold() {
+        use crate::segment::write_segment;
+        use crate::store::tables::SEGMENTS;
+        use crate::IndexerError;
+        use ergo_primitives::reader::ReadError;
+        use ergo_primitives::writer::VlqWriter;
+        use redb::Database;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = Database::create(tmp.path().join("spill_bound.redb")).unwrap();
+        let seg_id = Digest32::from_bytes([0x78; 32]);
+        let mut w = VlqWriter::new();
+        write_segment(
+            &mut w,
+            &Segment {
+                txs: vec![],
+                boxes: (0..=SEGMENT_THRESHOLD as i64).collect(),
+                box_segment_count: 0,
+                tx_segment_count: 0,
+            },
+        );
+        let wtxn = db.begin_write().unwrap();
+        let mut table = wtxn.open_table(SEGMENTS).unwrap();
+        table
+            .insert(seg_id.as_bytes().as_slice(), w.result().as_slice())
+            .unwrap();
+        let result = read_spill_from_table(&table, &seg_id);
+        assert!(
+            matches!(
+                &result,
+                Err(IndexerError::DbDecode {
+                    source: ReadError::InvalidData(message),
+                    ..
+                }) if message.contains("exceeds 512")
+            ),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn read_spill_from_table_rejects_trailing_bytes() {
         use crate::segment::write_segment;

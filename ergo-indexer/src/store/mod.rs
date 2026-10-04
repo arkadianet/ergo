@@ -810,12 +810,131 @@ mod repair_exclusion_tests {
 mod spill_topology_tests {
     use super::*;
     use crate::address::write_indexed_address;
-    use crate::segment_id::token_unique_id;
+    use crate::segment::{write_segment, Segment, SEGMENT_THRESHOLD};
+    use crate::segment_id::{box_segment_id, token_unique_id, tx_segment_id};
     use crate::template::write_indexed_template;
     use crate::token::write_indexed_token;
+    use ergo_primitives::reader::ReadError;
     use ergo_primitives::writer::VlqWriter;
 
+    fn write_parents(
+        store: &IndexerStore,
+        id: Digest32,
+        address: &IndexedAddress,
+        template: &IndexedTemplate,
+        token: &IndexedToken,
+    ) {
+        let write = store.begin_write().unwrap();
+        let mut writer = VlqWriter::new();
+        write_indexed_address(&mut writer, address);
+        write
+            .open_table(tables::INDEXED_ADDRESS)
+            .unwrap()
+            .insert(id.as_bytes().as_slice(), writer.as_slice())
+            .unwrap();
+        writer.clear();
+        write_indexed_template(&mut writer, template);
+        write
+            .open_table(tables::INDEXED_TEMPLATE)
+            .unwrap()
+            .insert(id.as_bytes().as_slice(), writer.as_slice())
+            .unwrap();
+        writer.clear();
+        write_indexed_token(&mut writer, token);
+        let token_key = token_unique_id(&id);
+        write
+            .open_table(tables::INDEXED_TOKEN)
+            .unwrap()
+            .insert(token_key.as_bytes().as_slice(), writer.as_slice())
+            .unwrap();
+        write.commit().unwrap();
+    }
+
+    /// The persisted-row bound, not another decode failure, refused the row.
+    fn refused_over_threshold<T: std::fmt::Debug>(result: Result<T, IndexerError>) {
+        match result {
+            Err(IndexerError::DbDecode {
+                source: ReadError::InvalidData(message),
+                ..
+            }) if message.contains("exceeds 512") => {}
+            other => panic!("expected the 512-entry stored-row bound, got {other:?}"),
+        }
+    }
+
     // ----- error paths -----
+
+    /// Apply spills before it persists a row, so a stored parent head over
+    /// 512 entries is corruption. The parent decoders, shared with the apply
+    /// and rollback loaders, refuse it rather than load and rewrite it.
+    #[test]
+    fn stored_parent_heads_over_the_threshold_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = IndexerStore::open(&dir.path().join("indexer.redb")).unwrap();
+        let id = Digest32::from_bytes([8; 32]);
+        let over: Vec<i64> = (0..=SEGMENT_THRESHOLD as i64).collect();
+        let mut address = IndexedAddress::empty(id);
+        address.segment.boxes = over.clone();
+        let mut template = IndexedTemplate::empty(id);
+        template.segment.boxes = over.clone();
+        let mut token = IndexedToken::empty(id);
+        token.segment.boxes = over;
+        write_parents(&store, id, &address, &template, &token);
+        refused_over_threshold(store.read_address(&id));
+        refused_over_threshold(store.read_template(&id));
+        refused_over_threshold(store.read_token(&id));
+    }
+
+    /// Every stored spill row holds exactly 512 entries; a larger one is
+    /// corruption the spill readers must refuse.
+    #[test]
+    fn stored_spill_rows_over_the_threshold_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = IndexerStore::open(&dir.path().join("indexer.redb")).unwrap();
+        let id = Digest32::from_bytes([9; 32]);
+        let mut address = IndexedAddress::empty(id);
+        address.segment.box_segment_count = 1;
+        address.segment.tx_segment_count = 1;
+        let mut template = IndexedTemplate::empty(id);
+        template.segment.box_segment_count = 1;
+        let mut token = IndexedToken::empty(id);
+        token.segment.box_segment_count = 1;
+        write_parents(&store, id, &address, &template, &token);
+        let over: Vec<i64> = (0..=SEGMENT_THRESHOLD as i64).collect();
+        let boxes = Segment {
+            txs: vec![],
+            boxes: over.clone(),
+            box_segment_count: 0,
+            tx_segment_count: 0,
+        };
+        let txs = Segment {
+            txs: over,
+            boxes: vec![],
+            box_segment_count: 0,
+            tx_segment_count: 0,
+        };
+        let write = store.begin_write().unwrap();
+        {
+            let mut table = write.open_table(tables::SEGMENTS).unwrap();
+            // The address and template spills share this parent id.
+            for (seg_id, spill) in [
+                (box_segment_id(&id, 0), &boxes),
+                (tx_segment_id(&id, 0), &txs),
+                (box_segment_id(&token_unique_id(&id), 0), &boxes),
+            ] {
+                let mut writer = VlqWriter::new();
+                write_segment(&mut writer, spill);
+                table
+                    .insert(seg_id.as_bytes().as_slice(), writer.as_slice())
+                    .unwrap();
+            }
+        }
+        write.commit().unwrap();
+        refused_over_threshold(store.read_address_box_entries(&id));
+        refused_over_threshold(store.read_address_tx_entries(&id));
+        refused_over_threshold(store.read_template_box_entries(&id));
+        refused_over_threshold(store.read_token_box_entries(&id));
+    }
+
     #[test]
     fn huge_parent_spill_counts_report_missing_first_spill_for_every_list() {
         let dir = tempfile::tempdir().unwrap();
@@ -831,30 +950,7 @@ mod spill_topology_tests {
         template.segment.box_segment_count = i32::MAX;
         let mut token = IndexedToken::empty(id);
         token.segment.box_segment_count = i32::MAX;
-        let write = store.begin_write().unwrap();
-        let mut writer = VlqWriter::new();
-        write_indexed_address(&mut writer, &address);
-        write
-            .open_table(tables::INDEXED_ADDRESS)
-            .unwrap()
-            .insert(id.as_bytes().as_slice(), writer.as_slice())
-            .unwrap();
-        writer.clear();
-        write_indexed_template(&mut writer, &template);
-        write
-            .open_table(tables::INDEXED_TEMPLATE)
-            .unwrap()
-            .insert(id.as_bytes().as_slice(), writer.as_slice())
-            .unwrap();
-        writer.clear();
-        write_indexed_token(&mut writer, &token);
-        let token_key = token_unique_id(&id);
-        write
-            .open_table(tables::INDEXED_TOKEN)
-            .unwrap()
-            .insert(token_key.as_bytes().as_slice(), writer.as_slice())
-            .unwrap();
-        write.commit().unwrap();
+        write_parents(&store, id, &address, &template, &token);
         for result in [
             store.read_address_box_entries(&id),
             store.read_address_tx_entries(&id),
