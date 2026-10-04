@@ -128,12 +128,18 @@ impl StateStore {
                             .get("root")?
                             .map(|guard| StateMeta::deserialize(guard.value()))
                             .transpose()?;
-                        if meta.as_ref().is_some_and(|meta| meta.root_node_id == 0)
-                            && table.get(UTXO_BOOTSTRAP_INSTALLED_V1_KEY)?.is_some()
+                        // Older snapshot imports wrote the root at node zero.
+                        // Applied blocks keep node IDs, and a root rotation
+                        // moves node zero into an internal child, so look for
+                        // the row itself as well as a zero root. Genesis and
+                        // current installs allocate from one.
+                        if table.get(UTXO_BOOTSTRAP_INSTALLED_V1_KEY)?.is_some()
+                            && (meta.as_ref().is_some_and(|meta| meta.root_node_id == 0)
+                                || Self::has_null_node_row(&read_txn)?)
                         {
-                            // Relocating only the current root would leave its
-                            // children and historical undo references inconsistent.
-                            // Refuse before allocator migration or mutable use.
+                            // Relocating node zero would leave its parent and
+                            // historical undo references inconsistent. Refuse
+                            // before allocator migration or mutable use.
                             return Err(StateError::LegacySnapshotNodeIds);
                         }
                         let (has_alloc, alloc_nid) = match table.get("allocator")? {

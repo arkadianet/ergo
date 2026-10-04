@@ -4272,6 +4272,15 @@ impl StateStore {
         Ok(crate::avl::arena::CommitDurability::Durable)
     }
 
+    /// Whether `AVL_NODES` holds a row at the null node ID. One point lookup.
+    fn has_null_node_row(read_txn: &redb::ReadTransaction) -> Result<bool, StateError> {
+        match read_txn.open_table(AVL_NODES) {
+            Ok(table) => Ok(table.get(crate::avl::node::NULL_NODE)?.is_some()),
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Derive next_id by scanning the AVL_NODES table for the max key.
     /// One-time migration cost when AllocMeta is absent (pre-upgrade DB).
     fn derive_next_id_from_scan(read_txn: &redb::ReadTransaction) -> Result<u64, StateError> {
@@ -4340,6 +4349,63 @@ mod tests {
         let read = db.begin_read().unwrap();
         let table = read.open_table(STATE_META).unwrap();
         assert!(table.get("allocator").unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_node_zero_rotated_into_an_internal_child_is_refused() {
+        // Older installs stored the snapshot root at node zero. Applied
+        // blocks keep node IDs, so a root rotation leaves node zero as an
+        // internal child under a nonzero root. Reproduce that layout from a
+        // real install by storing the root's internal left child at node zero.
+        let (mut store, _directory) = fresh_store();
+        let path = store.db_path.clone();
+        store.initialize_genesis(&[]).unwrap();
+        let (height, header_id) =
+            crate::test_helpers::seed_dense_mainnet_headers(&mut store, 1).unwrap()[0];
+        let (reconstructed, root) = crate::test_helpers::reconstructed_snapshot_fixture(24, height);
+        store
+            .install_snapshot_state(reconstructed, height, header_id, &root)
+            .unwrap();
+        drop(store);
+
+        let db = Arc::new(Database::create(&path).unwrap());
+        let txn = crate::begin_write_qr(&db).unwrap();
+        {
+            let meta = txn.open_table(STATE_META).unwrap();
+            let root_id = StateMeta::deserialize(meta.get("root").unwrap().unwrap().value())
+                .unwrap()
+                .root_node_id;
+            assert_ne!(root_id, 0);
+            let mut nodes = txn.open_table(AVL_NODES).unwrap();
+            assert!(nodes.get(0).unwrap().is_none());
+            let mut root_node =
+                node_from_bytes(nodes.get(root_id).unwrap().unwrap().value()).unwrap();
+            let AvlNode::Internal { left, .. } = &mut root_node else {
+                panic!("fixture root must be internal");
+            };
+            let child = std::mem::replace(left, 0);
+            let child_bytes = nodes.remove(child).unwrap().unwrap().value().to_vec();
+            assert!(matches!(
+                node_from_bytes(&child_bytes).unwrap(),
+                AvlNode::Internal { .. }
+            ));
+            nodes.insert(0, child_bytes.as_slice()).unwrap();
+            nodes
+                .insert(root_id, node_to_bytes(&root_node).as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+        // Committed reads below node zero treat it as a null child.
+        assert!(matches!(
+            crate::reader::ChainStoreReader::new_from_db(Arc::clone(&db)).lookup_box(&[0x10; 32]),
+            Err(StateError::DbCorruption { .. })
+        ));
+        drop(db);
+
+        assert!(matches!(
+            StateStore::open(&path),
+            Err(StateError::LegacySnapshotNodeIds)
+        ));
     }
 
     #[test]
