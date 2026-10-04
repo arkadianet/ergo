@@ -4,7 +4,7 @@ The Rust operator API provides full mining artifacts and observed fee forecasts 
 
 ## Inspect the current template
 
-Use the authenticated `GET /api/v1/mining/candidate-details` to inspect a retained candidate. See [block policy and candidate inspection](miner-block-policy.md).
+Use the authenticated `GET /api/v1/mining/candidate-details` to inspect a retained candidate. Its `work`, `header_without_pow` and `ad_proofs` fields accompany the existing ordered transactions (with canonical bytes), extensions, votes, metrics and accounting. Binary fields are lowercase hex; the BLAKE2b-256 hash of the decoded header equals `work.msg`. Optional `msg` and `template_seq` selectors inspect the same retained snapshot, including superseded work. Serialization runs outside the cache lock using the retained `Arc`. See [block policy and candidate inspection](miner-block-policy.md).
 
 ## Estimate fees from current observations
 
