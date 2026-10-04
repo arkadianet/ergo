@@ -603,13 +603,57 @@ impl MiningHandle {
         detail: Option<String>,
         at_ms: u64,
     ) {
-        let template = msg.and_then(|id| self.inspect_template(Some(id), None));
-        let template_seq = template.as_ref().map(|s| s.template.identity.template_seq);
+        let template = msg
+            .and_then(|id| self.inspect_template(Some(id), None))
+            .map(|s| s.template);
+        self.append_outcome(msg, template, block_id, outcome, detail, at_ms);
+    }
+
+    /// Solved headers identify a retained job by both digest and miner key.
+    /// Fee-free work after emission ends can share a digest across keys.
+    pub fn record_miner_outcome(
+        &self,
+        identity: Option<([u8; 32], [u8; 33])>,
+        block_id: Option<[u8; 32]>,
+        outcome: &str,
+        detail: Option<String>,
+        at_ms: u64,
+    ) {
+        let template = identity.and_then(|(msg, pk)| {
+            self.cache
+                .read()
+                .expect("cache poisoned")
+                .templates
+                .iter()
+                .rev()
+                .find(|t| t.template.work.msg == msg && t.template.work.pk == pk)
+                .map(|t| t.template.clone())
+        });
+        self.append_outcome(
+            identity.map(|(msg, _)| msg),
+            template,
+            block_id,
+            outcome,
+            detail,
+            at_ms,
+        );
+    }
+
+    fn append_outcome(
+        &self,
+        msg: Option<[u8; 32]>,
+        template: Option<Arc<Template>>,
+        block_id: Option<[u8; 32]>,
+        outcome: &str,
+        detail: Option<String>,
+        at_ms: u64,
+    ) {
+        let template_seq = template.as_ref().map(|t| t.identity.template_seq);
         let accounting = (outcome == "accepted")
             .then(|| {
-                template.as_ref().map(|s| {
-                    crate::inspection::outcome_accounting(&s.template, self.reemission_ref())
-                })
+                template
+                    .as_ref()
+                    .map(|t| crate::inspection::outcome_accounting(t, self.reemission_ref()))
             })
             .flatten();
         let detail = detail.map(|text| text.chars().take(4096).collect());
@@ -3156,5 +3200,48 @@ mod tests {
                 )
                 .is_some());
         }
+    }
+    #[test]
+    fn requested_outcome_journal_matches_the_solved_jobs_miner_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mining-history.json");
+        let handle = MiningHandle::mainnet([2; 33]).with_outcome_journal(&path);
+        let parent = [0; 32];
+        let msg = [0xA7; 32];
+        let first_pk = requested_test_key();
+        let mut second_pk = first_pk;
+        second_pk[0] = 3;
+        handle.set_best_tip(synced_tip(parent));
+        let mut seqs = Vec::new();
+        for (pk, timestamp) in [(first_pk, 10), (second_pk, 20)] {
+            let (candidate, work) = candidate_pair_for_key(parent, msg, pk, timestamp);
+            seqs.push(
+                handle
+                    .publish_if_current(
+                        candidate,
+                        work,
+                        &parent,
+                        || BUILT_AT_MS,
+                        BuildReason::Requested,
+                    )
+                    .unwrap()
+                    .template_seq,
+            );
+        }
+        handle.record_miner_outcome(Some((msg, first_pk)), Some([3; 32]), "accepted", None, 10);
+        handle.record_miner_outcome(Some((msg, second_pk)), Some([4; 32]), "rejected", None, 20);
+        handle.record_miner_outcome(Some((msg, [4; 33])), None, "rejected", None, 30);
+        let restored = MiningHandle::mainnet([2; 33])
+            .with_outcome_journal(&path)
+            .mining_outcomes();
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored[2].template_seq, Some(seqs[0]));
+        assert!(restored[2].accounting.is_some());
+        assert_eq!(restored[1].template_seq, Some(seqs[1]));
+        assert!(restored[1].accounting.is_none());
+        assert_eq!(
+            restored[0].template_seq, None,
+            "unknown keys never borrow another miner's identity"
+        );
     }
 }

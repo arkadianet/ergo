@@ -861,9 +861,14 @@ pub(super) fn handle_mining_request(
                     return false;
                 }
             };
-            let solved_msg = ergo_ser::header::serialize_header_without_pow(&block.header)
+            let solved_identity = ergo_ser::header::serialize_header_without_pow(&block.header)
                 .ok()
-                .map(|bytes| *ergo_primitives::digest::blake2b256(&bytes).as_bytes());
+                .map(|bytes| {
+                    (
+                        *ergo_primitives::digest::blake2b256(&bytes).as_bytes(),
+                        *block.header.solution.pk().as_bytes(),
+                    )
+                });
             let parent_id = block.parent_id;
             // 2. Recheck parent_id under the action-loop lock (the
             //    consensus-bearing TOCTOU close) and serialize the header
@@ -1163,7 +1168,13 @@ pub(super) fn handle_mining_request(
                 state, header_id, parent_id, submitted, follow_ups,
             ) {
                 info!(id = %hex::encode(header_id), apply_ms, "mined block applied");
-                handle.record_outcome(solved_msg, Some(header_id), "accepted", None, now_unix_ms());
+                handle.record_miner_outcome(
+                    solved_identity,
+                    Some(header_id),
+                    "accepted",
+                    None,
+                    now_unix_ms(),
+                );
                 let _ = reply.send(Ok(()));
                 false
             } else {
@@ -1222,8 +1233,8 @@ pub(super) fn handle_mining_request(
                         "mining: withdrew the failed block's parent templates; rebuilding",
                     );
                 }
-                handle.record_outcome(
-                    solved_msg,
+                handle.record_miner_outcome(
+                    solved_identity,
                     Some(header_id),
                     "rejected",
                     Some(failure.clone()),
