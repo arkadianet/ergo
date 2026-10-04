@@ -109,11 +109,12 @@ fn check_configured_genesis(
     Ok(())
 }
 
+/// Shadow-validation task, spawned only after boot succeeds.
+type ShadowFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 /// Everything [`setup`] produces, threaded into [`super::run_inner_with_backend`]'s
 /// `NodeState` construction and (for `chain_meta`/`bootstrap_kind`) the
 /// handshake + identity building that follows.
-type ShadowFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-
 pub(super) struct SyncSetup {
     pub coordinator: SyncCoordinator,
     pub executor: SyncExecutor,
