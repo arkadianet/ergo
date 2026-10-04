@@ -1123,7 +1123,11 @@ impl PeerManager {
         // Bans are IP-wide, including other ports and pending handshakes.
         self.peers
             .retain(|addr, _| crate::peer::canonical_ip(addr.ip()) != ip);
-        if self.bans.get(&ip).is_some_and(|entry| entry.operator) {
+        if self
+            .bans
+            .get(&ip)
+            .is_some_and(|entry| entry.operator && now < entry.until)
+        {
             return;
         }
         let existing_count = self.bans.get(&ip).map(|e| e.count).unwrap_or(0);

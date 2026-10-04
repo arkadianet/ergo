@@ -156,6 +156,40 @@ mod tests {
     }
 
     #[test]
+    fn expired_unswept_operator_bans_allow_automatic_bans() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = Arc::new(
+            crate::address_book::AddressBook::open_at(&dir.path().join("peers.redb")).unwrap(),
+        );
+        let now = Instant::now();
+        let ip: IpAddr = "203.0.113.8".parse().unwrap();
+        let addr = SocketAddr::new(ip, 9030);
+        for delay in [60, 61] {
+            let mut manager = PeerManager::new(1);
+            manager.set_address_book(book.clone());
+            manager
+                .operator_ban(ip, Duration::from_secs(60), now)
+                .unwrap();
+            manager.record_ban(ip, now + Duration::from_secs(59), true);
+            assert!(manager.bans[&ip].operator);
+            let expired = now + Duration::from_secs(delay);
+            assert!(!manager.is_banned(&addr, expired));
+            manager.record_ban(ip, expired, false);
+            assert!(manager.is_banned(&addr, expired));
+            assert!(!manager.bans[&ip].operator);
+            assert_eq!(
+                manager.bans[&ip].until,
+                expired + Duration::from_secs(2 * 60 * 60)
+            );
+            // Automatic penalties remain ephemeral, even after an operator TTL.
+            let rows = book.load_all(false).unwrap().bans;
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].operator);
+            assert_eq!(rows[0].count, 1);
+        }
+    }
+
+    #[test]
     fn automatic_bans_are_not_written_to_disk() {
         let dir = tempfile::tempdir().unwrap();
         let book = Arc::new(
