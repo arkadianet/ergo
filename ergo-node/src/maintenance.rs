@@ -229,6 +229,8 @@ fn secure_directory(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -460,7 +462,7 @@ mod tests {
         .unwrap();
         // Operators can configure a non-.redb indexer filename.
         let db = redb::Database::create(dir.path().join("custom-index-file")).unwrap();
-        let txn = db.begin_write().unwrap();
+        let txn = ergo_state::begin_write_qr(&db).unwrap();
         txn.open_table(redb::TableDefinition::<u32, u32>::new("test"))
             .unwrap()
             .insert(1, 2)

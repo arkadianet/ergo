@@ -93,7 +93,7 @@ fn checkpoint(
     job: &Job,
     pending: &mut Vec<([u8; 32], Vec<u8>)>,
 ) -> Result<(), StateError> {
-    let txn = db.begin_write()?;
+    let txn = crate::begin_write_qr(db)?;
     {
         let mut staged = txn.open_table(STAGING)?;
         for (id, bytes) in pending.iter() {
@@ -152,7 +152,7 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
         }
         previous
     } else {
-        let txn = db.begin_write()?;
+        let txn = crate::begin_write_qr(db)?;
         txn.open_table(STAGING)?.retain(|_, _| false)?;
         txn.open_table(JOB)?.remove(())?;
         txn.commit()?;
@@ -220,7 +220,7 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
         history_complete: false,
         matched_boxes: job.matched,
     };
-    let txn = db.begin_write()?;
+    let txn = crate::begin_write_qr(db)?;
     {
         let staged = txn.open_table(STAGING)?;
         use redb::ReadableTableMetadata;

@@ -386,7 +386,7 @@ pub(crate) fn test_set_tip(db: &redb::Database, height: u32) -> [u8; 32] {
     use redb::ReadableTable;
 
     assert!(height > 0);
-    let txn = db.begin_write().unwrap();
+    let txn = crate::begin_write_qr(db).unwrap();
     let mut root = txn
         .open_table(STATE_META)
         .unwrap()
@@ -530,7 +530,7 @@ mod tests {
         }
 
         fn mutate(&self, mutation: impl FnOnce(&WriteTransaction)) {
-            let txn = self.db.begin_write().unwrap();
+            let txn = crate::begin_write_qr(&self.db).unwrap();
             mutation(&txn);
             txn.commit().unwrap();
         }
@@ -667,7 +667,7 @@ mod tests {
         let db = store.db_arc();
         let header = test_header(1, root);
         let (bytes, id) = serialize_header(&header).unwrap();
-        let txn = db.begin_write().unwrap();
+        let txn = crate::begin_write_qr(&db).unwrap();
         txn.open_table(HEADERS)
             .unwrap()
             .insert(id.as_bytes().as_slice(), bytes.as_slice())
@@ -691,7 +691,7 @@ mod tests {
         assert_eq!(tip.state_type.as_deref(), Some("digest-verifier"));
         assert_eq!(tip.state_root, Some(hex::encode(root)));
         assert_eq!(tip.header_id, hex::encode(id.as_bytes()));
-        let txn = db.begin_write().unwrap();
+        let txn = crate::begin_write_qr(&db).unwrap();
         txn.open_table(CHAIN_STATE_META)
             .unwrap()
             .remove(DATA_DIR_STATE_TYPE_KEY)
@@ -706,7 +706,7 @@ mod tests {
             .get(DATA_DIR_STATE_TYPE_KEY)
             .unwrap()
             .is_none());
-        let txn = db.begin_write().unwrap();
+        let txn = crate::begin_write_qr(&db).unwrap();
         txn.open_table(CHAIN_INDEX).unwrap().remove(1).unwrap();
         txn.commit().unwrap();
         rejected(

@@ -44,7 +44,7 @@ fn fixture_at(count: u16, height: u32) -> (tempfile::TempDir, Arc<Database>, Box
     if height > 0 {
         crate::maintenance::test_set_tip(&db, height);
     }
-    let txn = db.begin_write().unwrap();
+    let txn = crate::begin_write_qr(&db).unwrap();
     let pk: [u8; 33] = hex::decode(PK).unwrap().try_into().unwrap();
     let meta = super::super::types::TrackedPubkeyMeta {
         derivation_path: vec![],
@@ -154,7 +154,7 @@ fn changed_tip_and_corrupt_checkpoint_do_not_replace_visible_wallet() {
     );
     assert_eq!(discover(&db, true).unwrap().anchor_height, 1001);
     seed_checkpoint(&db, &boxes[..4]);
-    let txn = db.begin_write().unwrap();
+    let txn = crate::begin_write_qr(&db).unwrap();
     {
         let mut staged = txn.open_table(STAGING).unwrap();
         let first = staged.iter().unwrap().next().unwrap().unwrap().0.value();
@@ -178,7 +178,7 @@ fn changed_tip_and_corrupt_checkpoint_do_not_replace_visible_wallet() {
 fn reward_maturity_and_anchor_invalidation_are_correct_on_rollback() {
     let (_dir, db, _) = fixture(4);
     discover(&db, false).unwrap();
-    let txn = db.begin_write().unwrap();
+    let txn = crate::begin_write_qr(&db).unwrap();
     assert_eq!(
         super::super::maturity::unpromote_matured_boxes(&txn, 1000).unwrap(),
         0
@@ -224,7 +224,7 @@ fn unsupported_partial_rescan_leaves_discovered_wallet_valid() {
 #[test]
 fn custom_scan_table_errors_fail_before_wallet_changes() {
     let (_dir, db, _) = fixture(4);
-    let txn = db.begin_write().unwrap();
+    let txn = crate::begin_write_qr(&db).unwrap();
     txn.open_table(TableDefinition::<u16, u32>::new("wallet_scans"))
         .unwrap()
         .insert(11, 5)
@@ -262,7 +262,7 @@ fn discovery_survives_wallet_migration_at_genesis_and_sparse_snapshot_tip() {
     );
 
     let (_dir, db, _) = fixture(4);
-    let txn = db.begin_write().unwrap();
+    let txn = crate::begin_write_qr(&db).unwrap();
     txn.delete_table(crate::store::CHAIN_INDEX).unwrap();
     txn.commit().unwrap();
     discover(&db, false).unwrap();
@@ -290,13 +290,13 @@ fn discovery_survives_wallet_migration_at_genesis_and_sparse_snapshot_tip() {
 #[test]
 fn sparse_snapshot_discovery_anchor_mismatch_invalidates_on_migration() {
     let (_dir, db, _) = fixture(4);
-    let txn = db.begin_write().unwrap();
+    let txn = crate::begin_write_qr(&db).unwrap();
     txn.delete_table(crate::store::CHAIN_INDEX).unwrap();
     txn.commit().unwrap();
     discover(&db, false).unwrap();
     let mut meta = coverage(&db.begin_read().unwrap()).unwrap().unwrap();
     meta.anchor_header_id = "ff".repeat(32);
-    let txn = db.begin_write().unwrap();
+    let txn = crate::begin_write_qr(&db).unwrap();
     txn.open_table(WALLET_UTXO_DISCOVERY)
         .unwrap()
         .insert((), serde_json::to_vec(&meta).unwrap())
