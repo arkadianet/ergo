@@ -816,9 +816,24 @@ impl Mempool {
                 Err(PackageValidationError::Validation(
                     ValidationErr::UnresolvedInput | ValidationErr::UnresolvedDataInput,
                 )) => return None,
-                // Hard-invalid (or other) → drop the child; the held ancestors stay.
+                // Hard-invalid (or other) → drop the child; the held ancestors
+                // stay. The package pass is where the child's failure surfaced,
+                // so it gets single-tx admission's penalty and cache routing.
                 Err(PackageValidationError::Validation(error)) => {
-                    return Some(rejected(admission::classify(&error, tip_ctx).0));
+                    let (reason, penalty) = admission::classify(&error, tip_ctx);
+                    let mut actions = Vec::new();
+                    if let (Some(peer), Some(kind)) = (source.peer(), penalty) {
+                        actions.push(MempoolAction::Penalize { peer, kind });
+                    }
+                    admission::record_failed_tx(
+                        &mut self.invalidation,
+                        &mut self.unresolved,
+                        s.tx_id,
+                        c_bytes,
+                        &error,
+                        now,
+                    );
+                    return Some((AdmissionOutcome::Rejected { reason }, actions));
                 }
                 Err(PackageValidationError::Budget(reason)) => return Some(rejected(reason)),
             };

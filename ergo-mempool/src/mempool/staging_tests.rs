@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::admission::{PeekedStructure, PeekedTx, Validated, ValidationErr, Validator};
-use crate::types::{AppliedTx, TxDiff};
+use crate::types::{AppliedTx, PenaltyKind, TxDiff};
 use crate::weight::ByCost;
 use ergo_primitives::cost::JitCost;
 use ergo_primitives::digest::{Digest32, ModifierId};
@@ -828,6 +828,64 @@ fn package_admission_traces_each_members_original_source() {
             .all(|a| matches!(a, MempoolAction::BroadcastInv { except: None, .. })),
         "routing exclusion follows the triggering Wallet child"
     );
+}
+
+#[test]
+fn package_hard_invalid_child_is_penalized_and_blacklisted() {
+    // The child resolves only through its held parent, so its script failure
+    // surfaces in the package pass, not in single-tx admission.
+    let mut mp = Mempool::new(
+        MempoolConfig {
+            max_pool_size: 2,
+            ..base_cfg()
+        },
+        Box::new(ByCost),
+    );
+    let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(10, 1_000_000, &[0x90], &[0x9A])
+        .plan(11, 3_000_000, &[0x91], &[0x9B])
+        .plan(1, 1_000_000, &[0x70], &[0x71])
+        .plan_height_gated(2, 10_000_000, 999, &[0x71], &[0x72]);
+    let now = Instant::now();
+    for tx in [10, 11, 1] {
+        mp.process(&tx_bytes(tx), TxSource::Api, now, &tip.view(&utxo), &v);
+    }
+    assert_eq!(mp.staging_len(), 1, "parent held");
+    let peer = "127.0.0.1:9000".parse().unwrap();
+    let (outcome, actions) = mp.process(
+        &tx_bytes(2),
+        TxSource::Peer(peer),
+        now,
+        &tip.view(&utxo),
+        &v,
+    );
+    assert_eq!(
+        outcome,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::ValidationFailed {
+                kind: ValidationErr::ScriptFailed
+            }
+        }
+    );
+    assert_eq!(
+        v.calls.borrow()[&tx_bytes(2)],
+        2,
+        "single-tx then package pass"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            MempoolAction::Penalize { peer: p, kind: PenaltyKind::Misbehavior } if *p == peer
+        )),
+        "{actions:?}"
+    );
+    assert!(
+        mp.is_invalidated(&d(2)),
+        "Inv fetch filter learns the child"
+    );
+    assert_eq!(mp.staging_len(), 1, "held parent stays");
 }
 
 #[test]
