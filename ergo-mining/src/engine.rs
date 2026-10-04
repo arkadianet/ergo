@@ -465,6 +465,8 @@ fn build_and_publish_inner(
         result => result?,
     };
     let requested = requested.as_slice();
+    let guarded_private_ids =
+        handle.check_requested_private_work(requested, intent.operator_owned)?;
     if intent.reason == BuildReason::Requested {
         let ids = requested
             .iter()
@@ -591,11 +593,27 @@ fn build_and_publish_inner(
         return Ok(BuildOutcome::Raced);
     };
     candidate.observation.operator_owned = intent.operator_owned;
+    for (tx, observation) in candidate
+        .transactions
+        .iter()
+        .zip(&mut candidate.observation.transactions)
+    {
+        let id = ergo_ser::transaction::transaction_id(tx).map_err(|error| {
+            MiningError::IdComputation {
+                op: "requested_private_classification",
+                reason: format!("{error:?}"),
+            }
+        })?;
+        if guarded_private_ids.contains(&Digest32::from_bytes(*id.as_bytes())) {
+            observation.category = "private";
+        }
+    }
     timings.setup += engine_setup_time;
     timings.rent_resolve = rent_resolve_time;
     if should_cancel() {
         return Ok(BuildOutcome::DroppedStale);
     }
+    handle.check_requested_private_work(requested, intent.operator_owned)?;
     let publish_start = std::time::Instant::now();
 
     // CAS-publish: serve only if the live tip still matches the parent we

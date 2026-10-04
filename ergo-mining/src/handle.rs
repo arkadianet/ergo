@@ -1092,6 +1092,66 @@ impl MiningHandle {
         cache.newest_offered_on(&parent).map(|t| t.work.clone())
     }
 
+    /// Guard client packages with the same retained IDs and reservations as
+    /// public admission, including conflicted work and unpersisted expiry.
+    pub fn check_requested_private_work<'a>(
+        &self,
+        transactions: impl IntoIterator<Item = &'a ergo_ser::transaction::Transaction>,
+        operator_owned: bool,
+    ) -> Result<std::collections::HashSet<Digest32>, MiningError> {
+        let (guarded, reserved) = self.private_queue.guard_snapshot();
+        if !operator_owned {
+            for tx in transactions {
+                let id = ergo_ser::transaction::transaction_id(tx).map_err(|error| {
+                    MiningError::InvalidRequest(format!("requested ID: {error:?}"))
+                })?;
+                if guarded.contains(id.as_bytes()) {
+                    return Err(MiningError::InvalidRequest(
+                        "private transaction requires the operator miner key".into(),
+                    ));
+                }
+                if tx
+                    .inputs
+                    .iter()
+                    .any(|input| reserved.contains(input.box_id.as_bytes()))
+                {
+                    return Err(MiningError::InvalidRequest(
+                        "requested transaction spends a reserved private input".into(),
+                    ));
+                }
+            }
+        }
+        Ok(guarded.into_iter().map(Digest32::from_bytes).collect())
+    }
+
+    fn requested_template_allowed(&self, candidate: &Candidate) -> bool {
+        let ids: std::collections::HashSet<_> = candidate
+            .observation
+            .requested_ids
+            .iter()
+            .copied()
+            .collect();
+        let requested = candidate.transactions.iter().filter(|tx| {
+            ergo_ser::transaction::transaction_id(tx)
+                .is_ok_and(|id| ids.contains(&Digest32::from_bytes(*id.as_bytes())))
+        });
+        let Ok(guarded) =
+            self.check_requested_private_work(requested, candidate.observation.operator_owned)
+        else {
+            return false;
+        };
+        candidate
+            .transactions
+            .iter()
+            .zip(&candidate.observation.transactions)
+            .all(|(tx, observation)| {
+                ergo_ser::transaction::transaction_id(tx).is_ok_and(|id| {
+                    !guarded.contains(&Digest32::from_bytes(*id.as_bytes()))
+                        || observation.category == "private"
+                })
+            })
+    }
+
     /// Reuse offered live-parent work for exactly the same ordered package.
     /// Ownership is frozen, so the default-key lookup needs no wallet read.
     pub fn cached_requested_package(
@@ -1125,6 +1185,10 @@ impl MiningHandle {
                 !retained.withdrawn
                     && t.identity.reason == BuildReason::Requested
                     && t.candidate.parent_id == parent
+                    && self.requested_template_allowed(&t.candidate)
+                    && !self
+                        .private_queue
+                        .deadline_due(now_ms, t.work.height.saturating_sub(1))
                     && pk.map_or(t.candidate.observation.operator_owned, |pk| t.work.pk == pk)
                     && operator_owned
                         .is_none_or(|owned| t.candidate.observation.operator_owned == owned)
@@ -1170,6 +1234,10 @@ impl MiningHandle {
                     && t.identity.template_seq == template_seq
                     && t.identity.reason == BuildReason::Requested
                     && t.candidate.parent_id == parent
+                    && self.requested_template_allowed(&t.candidate)
+                    && !self
+                        .private_queue
+                        .deadline_due(now_ms, t.work.height.saturating_sub(1))
             })
             .map(|t| {
                 t.last_served_ms = t.last_served_ms.max(now_ms);

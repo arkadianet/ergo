@@ -396,29 +396,166 @@ async fn requested_visibility_wait_uses_the_request_deadline() {
     let (state, handle) = devnet_node(dir.path());
     let (_, height) = sync_handle_to_tip(&state, &handle);
     let parent = [0x42; 32];
-    handle.set_best_tip(ergo_mining::engine::BestTip { parent_id: parent, chain_seq: 2, synced: true });
+    handle.set_best_tip(ergo_mining::engine::BestTip {
+        parent_id: parent,
+        chain_seq: 2,
+        synced: true,
+    });
     let intent = ergo_mining::engine::BuildIntent {
-        expected_parent: parent, expected_height: height + 1,
+        expected_parent: parent,
+        expected_height: height + 1,
         mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::empty()),
         private_transactions: std::sync::Arc::new(vec![]),
-        operator_generation: handle.operator_generation(), operator_owned: false,
-        miner_pk: MINER_PK, reason: BuildReason::Requested,
+        operator_generation: handle.operator_generation(),
+        operator_owned: false,
+        miner_pk: MINER_PK,
+        reason: BuildReason::Requested,
     };
     let (tx, rx) = std::sync::mpsc::channel();
     let (reply, response) = tokio::sync::oneshot::channel();
     let started = std::time::Instant::now();
     let deadline = started + Duration::from_millis(1_400);
     let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
-    tx.send(BuildRequest::requested(intent, vec![], vec![], reply,
-        slots.clone().try_acquire_owned().unwrap(), deadline)).unwrap();
+    tx.send(BuildRequest::requested(
+        intent,
+        vec![],
+        vec![],
+        reply,
+        slots.clone().try_acquire_owned().unwrap(),
+        deadline,
+    ))
+    .unwrap();
     drop(tx);
     let reader = state.store.as_utxo().unwrap().reader_handle();
     let worker_handle = handle.clone();
-    let worker = std::thread::spawn(move || run_build_worker(reader, worker_handle, None, false, rx));
-    let result = tokio::time::timeout(Duration::from_secs(5), response).await.unwrap().unwrap();
+    let worker =
+        std::thread::spawn(move || run_build_worker(reader, worker_handle, None, false, rx));
+    let result = tokio::time::timeout(Duration::from_secs(5), response)
+        .await
+        .unwrap()
+        .unwrap();
     worker.join().unwrap();
-    assert!(matches!(result, Err(ergo_api::MiningApiError::Unavailable(_))), "{result:?}");
-    assert!(std::time::Instant::now() >= deadline, "must retry beyond the old one-second cap");
+    assert!(
+        matches!(result, Err(ergo_api::MiningApiError::Unavailable(_))),
+        "{result:?}"
+    );
+    assert!(
+        std::time::Instant::now() >= deadline,
+        "must retry beyond the old one-second cap"
+    );
     assert!(handle.inspect_history().is_empty());
     assert_eq!(slots.available_permits(), 1);
+}
+
+fn check_requested_private_guards(scenario: &str) {
+    use ergo_mining::engine::{build_requested_and_publish_cached, BuildIntent, BuildOutcome};
+    let dir = tempfile::tempdir().unwrap();
+    let input = spendable_box(77);
+    let (state, handle) = devnet_node_with_boxes(dir.path(), std::slice::from_ref(&input));
+    let (parent, height) = sync_handle_to_tip(&state, &handle);
+    let private = pooled(&spend(&input));
+    let mut competing_tx = spend(&input);
+    competing_tx.output_candidates[0].creation_height = 1;
+    let competing = pooled(&competing_tx);
+    let mut intent = BuildIntent {
+        expected_parent: parent,
+        expected_height: height,
+        mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::empty()),
+        private_transactions: std::sync::Arc::new(vec![]),
+        operator_generation: handle.operator_generation(),
+        operator_owned: false,
+        miner_pk: MINER_PK,
+        reason: BuildReason::Requested,
+    };
+    let build = |intent: &BuildIntent, entry: &ergo_mempool::Entry| {
+        build_requested_and_publish_cached(
+            &state.store.as_utxo().unwrap().reader_handle(),
+            &handle,
+            intent,
+            &[entry.bytes.to_vec()],
+            &[],
+            &|| false,
+            None,
+            &mut ergo_mining::state_view::CandidateProofCache::default(),
+            wall_clock_ms,
+            |_, _| vec![],
+            &mut None,
+        )
+    };
+    let mut sequences = Vec::new();
+    for entry in [&private, &competing] {
+        let BuildOutcome::Published { template_seq, .. } = build(&intent, entry).unwrap() else {
+            panic!("must publish")
+        };
+        sequences.push(template_seq);
+        assert!(handle
+            .cached_requested_package(Some(MINER_PK), &[entry.tx_id], wall_clock_ms())
+            .is_some());
+    }
+    let queue = handle.private_queue();
+    queue
+        .admit(&private, Default::default(), wall_clock_ms(), height)
+        .unwrap();
+    queue
+        .reconcile(
+            height,
+            hex::encode(parent),
+            &std::collections::BTreeMap::new(),
+            true,
+            |_| false,
+            100,
+        )
+        .unwrap();
+    assert!(
+        queue
+            .selection_entries_at(wall_clock_ms(), height)
+            .is_empty(),
+        "conflicted work is guarded but not selectable"
+    );
+    for (entry, sequence) in [&private, &competing].into_iter().zip(sequences) {
+        if scenario == "cache" {
+            assert!(handle
+                .cached_requested_package(Some(MINER_PK), &[entry.tx_id], wall_clock_ms())
+                .is_none());
+            assert!(handle
+                .cached_requested_template_if_synced(sequence, wall_clock_ms())
+                .is_none());
+        }
+        if scenario == "build" {
+            assert!(matches!(
+                build(&intent, entry),
+                Err(ergo_mining::MiningError::InvalidRequest(_))
+            ));
+        }
+    }
+    if scenario != "classification" {
+        return;
+    }
+    intent.operator_owned = true;
+    let BuildOutcome::Published { template_seq, .. } = build(&intent, &private).unwrap() else {
+        panic!("operator package must publish")
+    };
+    let template = handle.inspect_template(None, Some(template_seq)).unwrap();
+    assert_eq!(template.template.private_transaction_ids(), [private.tx_id]);
+    queue
+        .cancel(&hex::encode(private.tx_id.as_bytes()))
+        .unwrap();
+    let affected = std::collections::HashSet::from([private.tx_id]);
+    assert_eq!(handle.withdraw_private_transactions(&affected, true), 1);
+    assert!(handle
+        .cached_requested_template_if_synced(template_seq, wall_clock_ms())
+        .is_none());
+}
+
+#[test]
+fn requested_private_guards_cache_hits() {
+    check_requested_private_guards("cache");
+}
+#[test]
+fn requested_private_guards_builds_and_reserved_inputs() {
+    check_requested_private_guards("build");
+}
+#[test]
+fn requested_private_guards_classification_and_withdrawal() {
+    check_requested_private_guards("classification");
 }

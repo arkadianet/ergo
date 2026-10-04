@@ -711,9 +711,11 @@ pub(super) fn handle_mining_request(
             let forbidden_private_ids = if own_miner {
                 Vec::new()
             } else {
-                private_transactions
-                    .iter()
-                    .map(|entry| entry.tx_id)
+                handle
+                    .private_queue()
+                    .guarded_ids()
+                    .into_iter()
+                    .map(ergo_primitives::digest::Digest32::from_bytes)
                     .collect()
             };
             let private_transactions = if own_miner {
