@@ -93,14 +93,15 @@ impl TxSubmitter for Probe {
     }
 }
 
-/// Applied tip height; `UNREADABLE_TIP` makes tip reads fail.
-struct Chain(AtomicU32);
+/// Applied tip height, and how many blocks the wallet scan trails it;
+/// `UNREADABLE_TIP` makes tip reads fail.
+struct Chain(AtomicU32, AtomicU32);
 
 const UNREADABLE_TIP: u32 = u32::MAX;
 
 impl ChainStateAccessor for Chain {
     fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
-        self.tip_height()
+        Ok(self.tip_height()? - self.1.load(Ordering::SeqCst))
     }
 
     fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
@@ -146,7 +147,7 @@ impl Harness {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let db = Arc::new(redb::Database::create(directory.path().join("jobs.redb")).unwrap());
-        let height = Arc::new(Chain(AtomicU32::new(10)));
+        let height = Arc::new(Chain(AtomicU32::new(10), AtomicU32::new(0)));
         let probe = Arc::new(Probe::default());
         Self {
             storage: Arc::new(RwLock::new(ergo_wallet::storage::SecretStorage::open(
@@ -216,6 +217,31 @@ impl Harness {
         transition(&mut record, state, None);
         save(&self.db, key, &record).unwrap();
         key
+    }
+
+    /// Record job `key`'s transaction in the wallet's history at `height`.
+    fn confirm_in_wallet(&self, key: u64, height: u32) {
+        let tx_id: [u8; 32] = hex::decode(format!("{key:064x}"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let write = self.db.begin_write().unwrap();
+        write
+            .open_table(ergo_state::wallet::tables::WALLET_TXS)
+            .unwrap()
+            .insert(
+                ergo_state::wallet::tables::wallet_tx_key(height, &tx_id),
+                bincode::serialize(&ergo_state::wallet::types::WalletTransaction {
+                    tx_id,
+                    block_height: height,
+                    block_id: [0x33; 32],
+                    wallet_outputs: Vec::new(),
+                    wallet_inputs: vec![[0x11; 32]],
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        write.commit().unwrap();
     }
 
     fn queue_entry(&self, key: u64, state: &str) {
@@ -343,27 +369,7 @@ async fn deadline_without_queue_knowledge_reports_a_wallet_confirmed_transaction
     let harness = Harness::new();
     let confirmed = harness.seed_until(WalletJobState::Queued, true, 10);
     let unconfirmed = harness.seed_until(WalletJobState::Queued, true, 10);
-    let tx_id: [u8; 32] = hex::decode(format!("{confirmed:064x}"))
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let write = harness.db.begin_write().unwrap();
-    write
-        .open_table(ergo_state::wallet::tables::WALLET_TXS)
-        .unwrap()
-        .insert(
-            ergo_state::wallet::tables::wallet_tx_key(10, &tx_id),
-            bincode::serialize(&ergo_state::wallet::types::WalletTransaction {
-                tx_id,
-                block_height: 10,
-                block_id: [0x33; 32],
-                wallet_outputs: Vec::new(),
-                wallet_inputs: vec![[0x11; 32]],
-            })
-            .unwrap(),
-        )
-        .unwrap();
-    write.commit().unwrap();
+    harness.confirm_in_wallet(confirmed, 10);
     harness.probe.snapshot_fails.store(true, Ordering::SeqCst);
     tick(&harness.context()).await.unwrap();
     let jobs: BTreeMap<_, _> = records(&harness.db).unwrap().into_iter().collect();
@@ -373,6 +379,52 @@ async fn deadline_without_queue_knowledge_reports_a_wallet_confirmed_transaction
         Some(MINED_IN_WALLET)
     );
     assert_eq!(jobs[&unconfirmed].job.state, WalletJobState::Expired);
+}
+
+#[tokio::test(start_paused = true)]
+async fn deadline_block_confirmation_reported_late_by_the_queue_is_kept() {
+    let harness = Harness::new();
+    let key = harness.seed_until(WalletJobState::Queued, true, 10);
+    // Block 10 mined the transaction; the queue has not read it yet.
+    harness.queue_entry(key, "queued");
+    tick(&harness.context()).await.unwrap();
+    assert_eq!(
+        harness.probe.cancellations.load(Ordering::SeqCst),
+        0,
+        "a possible confirmation is not withdrawn at the deadline height"
+    );
+    assert_eq!(
+        list(&harness.db).unwrap().items[0].state,
+        WalletJobState::Queued
+    );
+    harness.probe.entries.lock()[0].state = "mined".into();
+    tick(&harness.context()).await.unwrap();
+    assert_eq!(
+        list(&harness.db).unwrap().items[0].state,
+        WalletJobState::Mined
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn deadline_without_queue_knowledge_waits_for_the_wallet_to_scan_its_block() {
+    let harness = Harness::new();
+    let key = harness.seed_until(WalletJobState::Queued, true, 10);
+    harness.probe.snapshot_fails.store(true, Ordering::SeqCst);
+    // The wallet has scanned through block 9 only.
+    harness.height.1.store(1, Ordering::SeqCst);
+    tick(&harness.context()).await.unwrap();
+    assert_eq!(
+        list(&harness.db).unwrap().items[0].state,
+        WalletJobState::Queued,
+        "history that stops short of the deadline block cannot tell"
+    );
+    harness.confirm_in_wallet(key, 10);
+    harness.height.1.store(0, Ordering::SeqCst);
+    tick(&harness.context()).await.unwrap();
+    assert_eq!(
+        list(&harness.db).unwrap().items[0].state,
+        WalletJobState::Mined
+    );
 }
 
 // ----- error paths -----
@@ -471,7 +523,8 @@ async fn expiring_many_jobs_attempts_only_one_bounded_cancellation_per_wake() {
         let key = harness.seed(WalletJobState::Queued, true);
         harness.queue_entry(key, "queued");
     }
-    harness.height.0.store(100, Ordering::SeqCst);
+    // A block past the deadline the queue still lists them as unfinished.
+    harness.height.0.store(101, Ordering::SeqCst);
     harness.probe.cancel_hangs.store(true, Ordering::SeqCst);
     let start = tokio::time::Instant::now();
     tick(&harness.context()).await.unwrap();

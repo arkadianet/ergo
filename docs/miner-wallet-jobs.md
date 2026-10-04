@@ -59,10 +59,13 @@ The scheduler reads one queue metadata snapshot per wake and waits at most one
 second for each background metadata, admission, or cancellation request. An
 unavailable snapshot holds back only jobs whose transaction may already be
 admitted, and only until their deadline: the queue applies the same height
-deadline, so expiry never waits for it. An uncertain admission keeps its
-prepared bytes; only a successful later snapshot showing absence permits
-resubmission of those same bytes. When the queue cannot report a deadline's
-outcome, the wallet's own chain history tells a mined job from an expired one.
+deadline, so expiry never waits for it. A transaction the queue still lists as
+unfinished at the deadline height gets one more block for the queue's verdict,
+so one mined in its last eligible block is reported as mined, not expired. An
+uncertain admission keeps its prepared bytes; only a successful later snapshot
+showing absence permits resubmission of those same bytes. When the queue cannot
+report a deadline's outcome, the wallet's own chain history, once scanned
+through the deadline block, tells a mined job from an expired one.
 
 Jobs need private mining, so a node without `[mining] enabled = true` refuses
 approvals. If mining is disabled after approval, pending jobs wait without

@@ -415,8 +415,9 @@ pub(super) async fn cancel(
     if let Some(tx_id) = &record.job.tx_id {
         if !ctx.submit_handle.private_mining_configured() {
             // Nothing is queued on a node without private mining, so absence is
-            // definitive; only an already mined transaction cannot be cancelled.
-            if mined_in_wallet(ctx, tx_id)? == Some(true) {
+            // definitive; only a confirmation the wallet's history already
+            // shows refuses the cancellation.
+            if mined_in_wallet(ctx, tx_id, 0)? == Some(true) {
                 transition(
                     &mut record,
                     WalletJobState::Mined,
@@ -447,10 +448,19 @@ const PINNED_INPUT_UNAVAILABLE: &str =
     "a pinned input is spent or used by another transaction; this approval will not sign";
 
 /// Without private queue knowledge, the wallet's own history tells a mined job
-/// from one that never confirmed. `None` while that history is incomplete.
-fn mined_in_wallet(ctx: &WriterContext<'_>, tx_id: &str) -> Result<Option<bool>, WalletAdminError> {
+/// from one that never confirmed. `None` while that history is incomplete, or
+/// has not yet scanned through `through_height`.
+fn mined_in_wallet(
+    ctx: &WriterContext<'_>,
+    tx_id: &str,
+    through_height: u32,
+) -> Result<Option<bool>, WalletAdminError> {
     if ctx.rescan.in_progress()
         || super::scan_guard::require_valid_scan(ctx.store.as_ref()).is_err()
+        || !ctx
+            .chain
+            .wallet_scan_height()
+            .is_ok_and(|scanned| scanned >= through_height)
     {
         return Ok(None);
     }
@@ -984,7 +994,13 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                 _ => {}
             }
         }
-        if height >= record.job.request.expires_at_height {
+        // The queue applies the same height deadline once it has read that
+        // block, so a transaction mined in its last eligible block is reported
+        // as mined. A queue still listing the transaction as unfinished at the
+        // deadline height may not have read the block yet: withdrawing it
+        // then would report a confirmed transaction as expired. Wait a block.
+        let deadline = record.job.request.expires_at_height;
+        if height > deadline || (height == deadline && !queue_known) {
             if let Some(tx_id) = record.job.tx_id.as_ref() {
                 if queue_known {
                     match bounded_rpc(ctx.submit_handle.cancel_private_transaction(tx_id.clone()))
@@ -1000,8 +1016,9 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                     }
                 } else if !matches!(queue, Queue::Entries(_)) {
                     // The transaction may have confirmed at the deadline height
-                    // while the queue could not report it.
-                    match mined_in_wallet(ctx, tx_id)? {
+                    // while the queue could not report it. The wallet's history
+                    // decides once it has scanned that block.
+                    match mined_in_wallet(ctx, tx_id, deadline)? {
                         None => continue,
                         Some(true) => {
                             transition(
