@@ -118,7 +118,11 @@ instead of guessing that a spent input proves your transaction was mined.
 ## Operator API
 
 All three queue routes require the operator `api_key` header and respond with
-owner-only metadata. Queue listing omits signed bytes.
+owner-only metadata. Queue listing omits signed bytes. A request the queue
+refuses (invalid transaction, elapsed deadline, reserved input, unknown or mined
+cancel target) answers `400`; a queue write that fails on the node answers
+`500 internal_error`, and nothing changes. A rollback event never lists a
+private transaction among the transactions returned to the mempool.
 
 ```http
 POST /api/v1/mining/private-transactions

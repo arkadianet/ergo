@@ -9,7 +9,7 @@ use ergo_mempool::admission::Validator;
 use ergo_mempool::pool::Entry;
 use ergo_mempool::types::TxSource;
 use ergo_mining::handle::MiningHandle;
-use ergo_mining::private_queue::{PrivateTransactionState, Reconciled};
+use ergo_mining::private_queue::{PrivateQueueError, PrivateTransactionState, Reconciled};
 use ergo_primitives::cost::{CostAccumulator, JitCost};
 use ergo_primitives::digest::Digest32;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
@@ -185,6 +185,15 @@ pub(super) fn release_withdrawn(mempool: &mut ergo_mempool::Mempool, tx_ids: &[S
     }
 }
 
+/// A rejected request is the caller's error (400); a failed durable write is
+/// the node's (500).
+fn queue_error(error: PrivateQueueError) -> MiningApiError {
+    match error {
+        PrivateQueueError::Rejected(reason) => MiningApiError::BadRequest(reason),
+        PrivateQueueError::Storage(reason) => MiningApiError::Internal(reason),
+    }
+}
+
 fn decode_tx_id(tx_id: &str) -> Option<Digest32> {
     let raw = hex::decode(tx_id).ok()?;
     Some(Digest32::from_bytes(<[u8; 32]>::try_from(raw).ok()?))
@@ -319,7 +328,7 @@ pub(super) fn admit(
             owned.tip.height,
             Some(hex::encode(owned.tip.header_id.as_bytes())),
         )
-        .map_err(MiningApiError::BadRequest)?;
+        .map_err(queue_error)?;
     state.mempool.register_private_transaction(entry.tx_id);
     // Nothing served becomes wrong by adding work: current templates keep
     // serving and accepting solutions, and the queue revision change asks the
@@ -451,7 +460,7 @@ pub(super) fn cancel(
     // Only templates that include it stop serving, before its inputs are
     // released; in-flight builds retire only if they could have selected it.
     withdraw(handle, std::iter::once(tx_id), entry.state.is_active());
-    let cancelled = queue.cancel(tx_id).map_err(MiningApiError::BadRequest)?;
+    let cancelled = queue.cancel(tx_id).map_err(queue_error)?;
     release_withdrawn(&mut state.mempool, std::slice::from_ref(&cancelled.tx_id));
     Ok(view(handle, cancelled))
 }

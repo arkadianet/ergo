@@ -440,7 +440,7 @@ pub(super) async fn action_loop(
     shutdown_result.map_err(|e| Box::new(e) as NodeError)
 }
 
-fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandle>) {
+pub(super) fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandle>) {
     if !state.mempool.config().enabled {
         return;
     }
@@ -470,7 +470,14 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
     let outcome = state.mempool_notifier.poll(utxo);
     let tip_changed = match outcome {
         PollOutcome::Initialized(_) | PollOutcome::NoChange => false,
-        PollOutcome::Emit(state_diff) => {
+        PollOutcome::Emit(mut state_diff) => {
+            // Private mining transactions never return to the public mempool:
+            // the rollback neither replays them nor reports them as returned.
+            state_diff.demoted.retain(|tx| {
+                !state.mempool.is_private_transaction(
+                    &ergo_primitives::digest::Digest32::from_bytes(tx.tx_id),
+                )
+            });
             // Workstream C: a rollback (non-empty `demoted`) captures its
             // enrichment HERE — the only place the returned-tx set and the
             // winning tip meet — for the event differ to attach by tip id.
@@ -491,10 +498,7 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
                         .map(|f| f.peer.to_string()),
                 });
             }
-            let mut mempool_diff: ergo_mempool::types::TxDiff = state_diff.into();
-            mempool_diff
-                .demoted
-                .retain(|tx| !state.mempool.is_private_transaction(&tx.tx_id));
+            let mempool_diff: ergo_mempool::types::TxDiff = state_diff.into();
             let mempool_actions = state.mempool.on_tip_change(&mempool_diff);
             let routed = route_mempool_actions(state, mempool_actions);
             flush_actions(state, routed);

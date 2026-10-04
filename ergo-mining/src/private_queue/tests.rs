@@ -614,3 +614,35 @@ fn cursor_only_progress_is_written_in_bounded_steps() {
     observe(100 + CURSOR_PERSIST_INTERVAL);
     assert_eq!(on_disk(), (132, Some("tip-132".into())));
 }
+
+#[test]
+fn a_failed_write_is_a_storage_error_and_a_bad_request_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.json");
+    let queue = PrivateTransactionQueue::open(&path).unwrap();
+    let item = queue
+        .admit(&entry(1), PrivateTransactionOptions::default(), 10, 100)
+        .unwrap();
+    let elapsed = PrivateTransactionOptions {
+        expires_at_height: Some(100),
+        ..Default::default()
+    };
+    assert!(matches!(
+        queue.admit(&entry(2), elapsed, 10, 100),
+        Err(PrivateQueueError::Rejected(_))
+    ));
+    assert!(matches!(
+        queue.cancel(&"ab".repeat(32)),
+        Err(PrivateQueueError::Rejected(_))
+    ));
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(matches!(
+        queue.admit(&entry(3), PrivateTransactionOptions::default(), 10, 100),
+        Err(PrivateQueueError::Storage(_))
+    ));
+    assert!(matches!(
+        queue.cancel(&item.tx_id),
+        Err(PrivateQueueError::Storage(_))
+    ));
+}

@@ -1039,3 +1039,93 @@ fn a_child_of_a_public_mempool_transaction_stays_queued() {
         PrivateTransactionState::Conflicted
     );
 }
+
+// ----- error classes -----
+
+#[test]
+fn a_failed_queue_write_is_a_server_error_not_a_bad_request() {
+    let boxes = [
+        spendable_box(1_000_000_000, 0x31),
+        spendable_box(1_000_000_000, 0x32),
+    ];
+    let (dir, mut state) = admitting_chain(4, &boxes);
+    let path = dir.path().join("queue.json");
+    let handle = persisted_handle(&path);
+    let queued = admit(&mut state, &handle, &spend(&boxes[0]), Default::default()).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(matches!(
+        admit(&mut state, &handle, &spend(&boxes[1]), Default::default()),
+        Err(MiningApiError::Internal(_))
+    ));
+    assert!(matches!(
+        cancel_request(&mut state, &handle, &queued.tx_id),
+        Err(MiningApiError::Internal(_))
+    ));
+    assert!(matches!(
+        cancel_request(&mut state, &handle, &"ab".repeat(32)),
+        Err(MiningApiError::BadRequest(_))
+    ));
+}
+
+#[test]
+fn a_rollback_does_not_report_private_transactions_as_returned_to_the_mempool() {
+    let (_dir, mut state) = chain(4);
+    let id = |input| hex::encode(transaction_id(&tx(input)).unwrap().as_bytes());
+    let (private, public) = (id(1), id(2));
+    state
+        .mempool
+        .register_private_transaction(decode_tx_id(&private).unwrap());
+    crate::node::action_loop::handle_mempool_tick(&mut state, None);
+    append_block(&mut state, vec![tx(1), tx(2)], 0);
+    crate::node::action_loop::handle_mempool_tick(&mut state, None);
+    // A competing branch replaces the block holding both.
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .rollback_to(4, None, None)
+        .unwrap();
+    append_block(&mut state, vec![], 1);
+    append_block(&mut state, vec![], 1);
+    crate::node::action_loop::handle_mempool_tick(&mut state, None);
+    let returned = &state
+        .last_reorg_enrichment
+        .as_ref()
+        .expect("the rollback returned public work")
+        .returned_tx_ids;
+    assert!(returned.contains(&public));
+    assert!(
+        !returned.contains(&private),
+        "a private transaction never returns to the public mempool"
+    );
+}
+
+#[test]
+fn admission_is_idempotent_validates_and_requeues_withdrawn_work() {
+    let boxes = [spendable_box(1_000_000_000, 0x31)];
+    let (_dir, mut state) = admitting_chain(4, &boxes);
+    let handle = mining_handle();
+    let bytes = spend(&boxes[0]);
+    let first = admit(&mut state, &handle, &bytes, Default::default()).unwrap();
+    let id = decode_tx_id(&first.tx_id).unwrap();
+    assert!(state.mempool.is_private_transaction(&id));
+    let again = admit(&mut state, &handle, &bytes, Default::default()).unwrap();
+    assert_eq!(
+        (again.tx_id.as_str(), again.created_at_ms),
+        (first.tx_id.as_str(), first.created_at_ms),
+        "resubmitting the same bytes returns the queued entry"
+    );
+
+    cancel_request(&mut state, &handle, &first.tx_id).unwrap();
+    assert!(!state.mempool.is_private_transaction(&id));
+    let requeued = admit(&mut state, &handle, &bytes, Default::default()).unwrap();
+    assert_eq!(requeued.state, "queued", "a withdrawn id is queued afresh");
+    assert!(state.mempool.is_private_transaction(&id));
+
+    let missing_input = spend(&spendable_box(1_000_000_000, 0x99));
+    assert!(matches!(
+        admit(&mut state, &handle, &missing_input, Default::default()),
+        Err(MiningApiError::BadRequest(_))
+    ));
+}

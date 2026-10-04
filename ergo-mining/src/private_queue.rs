@@ -83,6 +83,23 @@ impl PrivateTransactionState {
     }
 }
 
+/// Why an operator request on the queue failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivateQueueError {
+    /// The request is not acceptable as made; nothing changed.
+    Rejected(String),
+    /// The durable write failed; nothing changed. A server-side fault.
+    Storage(String),
+}
+
+impl std::fmt::Display for PrivateQueueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(reason) | Self::Storage(reason) => f.write_str(reason),
+        }
+    }
+}
+
 /// Outcome of [`PrivateTransactionQueue::reconcile`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reconciled {
@@ -479,7 +496,7 @@ impl PrivateTransactionQueue {
         options: PrivateTransactionOptions,
         now_ms: u64,
         tip_height: u32,
-    ) -> Result<PrivateTransactionEntry, String> {
+    ) -> Result<PrivateTransactionEntry, PrivateQueueError> {
         self.admit_at_tip(entry, options, now_ms, tip_height, None)
     }
 
@@ -492,21 +509,27 @@ impl PrivateTransactionQueue {
         now_ms: u64,
         tip_height: u32,
         tip_id: Option<String>,
-    ) -> Result<PrivateTransactionEntry, String> {
+    ) -> Result<PrivateTransactionEntry, PrivateQueueError> {
         if options
             .expires_at_ms
             .is_some_and(|deadline| deadline <= now_ms)
         {
-            return Err("private transaction deadline has already elapsed".into());
+            return Err(PrivateQueueError::Rejected(
+                "private transaction deadline has already elapsed".into(),
+            ));
         }
         if options
             .expires_at_height
             .is_some_and(|height| height <= tip_height)
         {
-            return Err("private transaction height deadline has already elapsed".into());
+            return Err(PrivateQueueError::Rejected(
+                "private transaction height deadline has already elapsed".into(),
+            ));
         }
         if options.label.as_ref().is_some_and(|s| s.len() > 200) {
-            return Err("private transaction label exceeds 200 bytes".into());
+            return Err(PrivateQueueError::Rejected(
+                "private transaction label exceeds 200 bytes".into(),
+            ));
         }
         let mut store = self.lock();
         let tx_id = hex::encode(entry.tx_id.as_bytes());
@@ -525,11 +548,15 @@ impl PrivateTransactionQueue {
                 .filter(|r| r.entry.state.is_pending())
         };
         if pending().count() >= MAX_PRIVATE_TRANSACTIONS {
-            return Err("private transaction queue is full".into());
+            return Err(PrivateQueueError::Rejected(
+                "private transaction queue is full".into(),
+            ));
         }
         let bytes: usize = pending().map(Record::signed_len).sum();
         if bytes.saturating_add(entry.bytes.len()) > MAX_PRIVATE_BYTES {
-            return Err("private transaction queue byte budget exhausted".into());
+            return Err(PrivateQueueError::Rejected(
+                "private transaction queue byte budget exhausted".into(),
+            ));
         }
         let input_ids: Vec<String> = entry
             .inputs
@@ -540,7 +567,9 @@ impl PrivateTransactionQueue {
             r.entry.state.reserves_inputs()
                 && r.entry.input_ids.iter().any(|id| input_ids.contains(id))
         }) {
-            return Err("an input is already reserved by another private transaction".into());
+            return Err(PrivateQueueError::Rejected(
+                "an input is already reserved by another private transaction".into(),
+            ));
         }
         let result = PrivateTransactionEntry {
             tx_id: tx_id.clone(),
@@ -572,19 +601,22 @@ impl PrivateTransactionQueue {
                 finished_seq: 0,
             },
         );
-        self.commit(&mut store, updated)?;
+        self.commit(&mut store, updated)
+            .map_err(PrivateQueueError::Storage)?;
         Ok(result)
     }
 
     /// Withdraw pending work. Repeating a cancellation is idempotent.
-    pub fn cancel(&self, tx_id: &str) -> Result<PrivateTransactionEntry, String> {
+    pub fn cancel(&self, tx_id: &str) -> Result<PrivateTransactionEntry, PrivateQueueError> {
         let mut store = self.lock();
         let record = store
             .records
             .get(tx_id)
-            .ok_or("private transaction not found")?;
+            .ok_or_else(|| PrivateQueueError::Rejected("private transaction not found".into()))?;
         if record.entry.state == PrivateTransactionState::Mined {
-            return Err("a confirmed transaction cannot be cancelled".into());
+            return Err(PrivateQueueError::Rejected(
+                "a confirmed transaction cannot be cancelled".into(),
+            ));
         }
         if !record.entry.state.is_pending() {
             return Ok(record.entry.clone());
@@ -593,7 +625,8 @@ impl PrivateTransactionQueue {
         updated.finish(tx_id, PrivateTransactionState::Cancelled);
         updated.forget_oldest_finished();
         let result = updated.records[tx_id].entry.clone();
-        self.commit(&mut store, updated)?;
+        self.commit(&mut store, updated)
+            .map_err(PrivateQueueError::Storage)?;
         Ok(result)
     }
 
