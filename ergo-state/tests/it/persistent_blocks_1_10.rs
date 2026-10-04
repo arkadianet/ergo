@@ -215,6 +215,20 @@ fn snapshot_install_preserves_mainnet_lookups_forward_apply_and_reopen() {
     use ergo_state::avl::snapshot_codec::reconstruct_tree;
     use ergo_state::chain::HeaderMeta;
 
+    /// Rebuild the committed tree from every persisted node. Cached labels
+    /// and single-box lookups miss nodes overwritten by a stale allocator.
+    fn committed_tree_root(store: &StateStore) -> ADDigest {
+        let digest = store
+            .committed_snapshot()
+            .unwrap()
+            .unwrap()
+            .hydrate_prover()
+            .unwrap()
+            .digest()
+            .unwrap();
+        ADDigest::from_bytes(digest.as_ref().try_into().unwrap())
+    }
+
     let headers: Vec<serde_json::Value> = serde_json::from_str(include_str!(
         "../../../test-vectors/mainnet/headers_1_10.json"
     ))
@@ -350,17 +364,23 @@ fn snapshot_install_preserves_mainnet_lookups_forward_apply_and_reopen() {
                 let progress = store.persistence_progress().unwrap();
                 assert_eq!(progress.enqueued_jobs, 1);
                 assert_eq!(progress.committed_jobs, 1);
+                // The worker must publish commit progress to the arena the
+                // install created, or committed nodes stay pinned for good.
+                assert_eq!(store.metrics().arena_unpersisted_pinned_bytes, 0);
             }
             assert_eq!(store.root_digest(), parsed[9].0.state_root);
+            assert_eq!(committed_tree_root(&store), parsed[9].0.state_root);
             store.rollback_to(9, None, None).unwrap();
             assert_eq!(store.root_digest(), pinned_root);
             assert_eq!(store.get_box_bytes(&spend_id), Some(spend_bytes.clone()));
+            assert_eq!(committed_tree_root(&store), pinned_root);
             store.shutdown_cleanly().unwrap();
             drop(store);
             let mut reopened = StateStore::open(&path).unwrap();
             assert_eq!(reopened.height(), 9);
             assert_eq!(reopened.root_digest(), pinned_root);
             assert_eq!(reopened.get_box_bytes(&spend_id), Some(spend_bytes.clone()));
+            assert_eq!(committed_tree_root(&reopened), pinned_root);
         }
     }
 }
