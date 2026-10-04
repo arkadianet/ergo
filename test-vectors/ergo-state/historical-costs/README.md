@@ -57,7 +57,10 @@ Verification uses explicit errors that remain active under Python optimization. 
 configuration root explicitly, records commands/jar hashes/stdout/stderr,
 and compares every emitted box, header, context, parameter and transaction
 against the saved observations. It performs no HTTP requests, starts no
-node and performs no signing. The native consumer runs in normal tests:
+node and performs no signing. Those exact commands are in the output
+directory's `results.json`. `provenance.json` pins hashes but records no
+commands, whatever the header comment of the hash-pinned helper says. The
+native consumer runs in normal tests:
 
 ```bash
 cargo test --locked -p ergo-state --test it historical_activation_costs
