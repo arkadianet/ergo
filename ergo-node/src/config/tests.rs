@@ -2461,11 +2461,24 @@ scopes = ["mining"]
         "[api.limits]\nburst = 1.0\n",
         "[api.limits]\nexempt_loopback = false\n",
         "[api.readiness]\ntip_max_age_ms = 0\n",
-        "[api.security]\n[[api.security.keys]]\nid = \"pool\"\nhash = \"bad\"\nscopes = [\"mining\"]\n",
     ] {
         let path = temp_toml(source);
-        assert!(NodeConfig::load(minimal_cli(Some(&path))).is_err(), "{source}");
+        assert!(
+            NodeConfig::load(minimal_cli(Some(&path))).is_err(),
+            "{source}"
+        );
     }
+}
+
+#[test]
+fn scoped_bad_hash_reaches_hash_validation_with_a_master() {
+    let source = format!("[api.security]\napi_key_hash = \"{TEST_DEFAULT_API_KEY_HASH}\"\n[[api.security.keys]]\nid = \"pool\"\nhash = \"bad\"\nscopes = [\"mining\"]\n");
+    let path = temp_toml(&source);
+    let error = NodeConfig::load(minimal_cli(Some(&path)))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("64"), "must reject the hash length: {error}");
+    assert!(!error.contains("require a master"));
 }
 
 #[test]

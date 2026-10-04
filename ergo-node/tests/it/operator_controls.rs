@@ -321,3 +321,41 @@ async fn controls_are_authenticated_atomic_and_survive_restart_where_promised() 
     let book = ergo_p2p::address_book::AddressBook::open(directory.path()).unwrap();
     assert!(book.load_all(false).unwrap().bans.is_empty());
 }
+
+#[tokio::test]
+async fn config_patch_changes_the_live_http_rate_limiter() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = config(dir.path());
+    settings.api_local_reverse_proxy = true;
+    settings.api_limits.refill_per_sec = 0.01;
+    settings.api_limits.burst = 10.0;
+    settings.api_limits.cheap_weight = 10.0;
+    let node = spawn_node(settings).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let base = format!("http://{}", node.api_addr.unwrap());
+    let info = format!("{base}/api/v1/node/info");
+    assert_eq!(
+        client.get(&info).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client.get(&info).send().await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let response = client
+        .patch(format!("{base}/api/v1/node/config"))
+        .header("api_key", "hello")
+        .json(&json!({"api_limits":{"refill_per_sec":1000.0,"burst":100.0,"cheap_weight":1.0}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    for _ in 0..5 {
+        assert_eq!(
+            client.get(&info).send().await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+    node.shutdown().await.unwrap();
+}
