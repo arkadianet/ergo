@@ -27,7 +27,8 @@ export async function lookupJson(path) {
   } catch {
     throw new ReadError(0, 'request failed');
   }
-  const error = r.status === 403 ? await r.clone().json().catch(() => null) : null;
+  // Failure envelopes carry the reason callers distinguish (auth, index gate).
+  const error = r.ok || r.status === 404 ? null : await r.clone().json().catch(() => null);
   report(r.status, false, key, error?.reason);
   if (r.status === 404) return null;
   if (!r.ok) throw new ReadError(r.status, error?.reason || `HTTP ${r.status}`);

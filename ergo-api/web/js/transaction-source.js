@@ -9,7 +9,7 @@ export async function loadTransaction(id, read = lookupJson) {
     read(`/api/v1/transactions/${id}/detail`),
   ]);
   const [rich, pool, slim] = results.map((r) => r.status === 'fulfilled' ? r.value : null);
-  const failed = results.some((r) => r.status === 'rejected');
-  const status = rich ? 'confirmed' : pool ? 'unconfirmed' : slim ? 'unknown' : failed ? 'unavailable' : 'absent';
-  return { rich, pool, slim, status };
+  const failures = results.filter((r) => r.status === 'rejected').map((r) => r.reason);
+  const status = rich ? 'confirmed' : pool ? 'unconfirmed' : slim ? 'unknown' : failures.length ? 'unavailable' : 'absent';
+  return { rich, pool, slim, status, failures };
 }
