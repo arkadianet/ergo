@@ -192,7 +192,7 @@ pub fn spawn(
                                 event = "apply_wall_clock_wedge",
                                 apply_age_ms = age_ms,
                                 threshold_secs = APPLY_WEDGED_THRESHOLD.as_secs(),
-                                "block apply exceeds wall-clock wedge threshold — \
+                                "block apply or snapshot rebuild/install exceeds wall-clock wedge threshold — \
                                  runtime telemetry may be starved; attribute memory via \
                                  /proc/<pid>/smaps_rollup (Pss_Anon) before restarting"
                             );

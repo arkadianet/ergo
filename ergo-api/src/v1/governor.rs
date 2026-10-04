@@ -177,7 +177,7 @@ struct Bucket {
 /// ([`Governor::state`]) for each mounted subtree.
 #[derive(Debug)]
 pub struct Governor {
-    config: GovernorConfig,
+    config: std::sync::RwLock<GovernorConfig>,
     buckets: Mutex<HashMap<IpAddr, Bucket>>,
 }
 
@@ -194,9 +194,42 @@ impl Governor {
     pub fn new(config: GovernorConfig) -> Result<Arc<Self>, GovernorConfigError> {
         config.validate()?;
         Ok(Arc::new(Self {
-            config,
+            config: std::sync::RwLock::new(config),
             buckets: Mutex::new(HashMap::new()),
         }))
+    }
+
+    /// Validate and replace request budgets without resetting client debt.
+    pub fn reconfigure(&self, config: GovernorConfig) -> Result<(), GovernorConfigError> {
+        config.validate()?;
+        let mut current = self.config.write().expect("governor config poisoned");
+        let mut buckets = self.buckets.lock().expect("governor mutex poisoned");
+        let now = Instant::now();
+        for bucket in buckets.values_mut() {
+            let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
+            bucket.tokens = (bucket.tokens + elapsed * current.refill_per_sec)
+                .min(current.burst)
+                .min(config.burst);
+            bucket.last = now;
+        }
+        if buckets.len() > config.max_tracked_ips {
+            // A live cap reduction can remove many entries at once. Sort once
+            // instead of leaving repeated full-table scans to the next charge.
+            // As with normal cap eviction, retain the most depleted clients.
+            let mut candidates: Vec<_> = buckets
+                .iter()
+                .map(|(&ip, bucket)| (ip, bucket.tokens))
+                .collect();
+            candidates.sort_unstable_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let remove_count = buckets.len() - config.max_tracked_ips;
+            for (ip, _) in candidates.into_iter().take(remove_count) {
+                buckets.remove(&ip);
+            }
+        }
+        *current = config;
+        Ok(())
     }
 
     /// Per-route middleware state for `from_fn_with_state`, pinning the
@@ -212,9 +245,10 @@ impl Governor {
     /// refills first (elapsed × refill, capped at burst). Deterministic in
     /// `now` for testing; [`Governor::charge`] supplies `Instant::now()`.
     fn charge_at(&self, ip: IpAddr, cost: f64, now: Instant) -> Charge {
+        let config = self.config.read().expect("governor config poisoned");
         let mut map = self.buckets.lock().expect("governor mutex poisoned");
-        let refill = self.config.refill_per_sec;
-        let burst = self.config.burst;
+        let refill = config.refill_per_sec;
+        let burst = config.burst;
 
         let bucket = map.entry(ip).or_insert(Bucket {
             tokens: burst,
@@ -239,8 +273,8 @@ impl Governor {
             }
         };
 
-        if map.len() > self.config.max_tracked_ips {
-            let cutoff = self.config.idle_prune_after;
+        if map.len() > config.max_tracked_ips {
+            let cutoff = config.idle_prune_after;
             // Virtual token count: stored tokens plus the refill accrued while
             // idle (capped at burst) — the SAME recompute the live charge does.
             // An idle bucket's stored `tokens` is stale, so the passes below must
@@ -268,7 +302,7 @@ impl Governor {
             // correct trade against unbounded memory. Only a fresh insert can
             // exceed the cap, so in steady state this evicts at most one bucket
             // per charge.
-            while map.len() > self.config.max_tracked_ips {
+            while map.len() > config.max_tracked_ips {
                 let Some(victim) = map
                     .iter()
                     .max_by(|(_, a), (_, b)| {
@@ -296,7 +330,10 @@ impl Governor {
     /// and any other non-middleware caller draws from, rather than inventing
     /// a second per-endpoint cost vocabulary.
     pub(crate) fn class_weight(&self, class: RouteClass) -> f64 {
-        self.config.weight(class)
+        self.config
+            .read()
+            .expect("governor config poisoned")
+            .weight(class)
     }
 
     /// Charge `cost` tokens against `ip`'s bucket right now, returning the
@@ -319,7 +356,8 @@ impl Governor {
     /// charge agrees with what the per-route middleware would have decided
     /// for the same peer.
     pub(crate) fn exempt_loopback(&self, req: &Request<Body>) -> bool {
-        self.config.exempt_loopback && is_trusted_loopback(req, self.config.local_reverse_proxy)
+        let config = self.config.read().expect("governor config poisoned");
+        config.exempt_loopback && is_trusted_loopback(req, config.local_reverse_proxy)
     }
 }
 
@@ -339,7 +377,12 @@ pub async fn governor_mw(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let cfg = &state.governor.config;
+    let cfg = state
+        .governor
+        .config
+        .read()
+        .expect("governor config poisoned")
+        .clone();
 
     if cfg.exempt_loopback && is_trusted_loopback(&req, cfg.local_reverse_proxy) {
         return next.run(req).await;
@@ -378,6 +421,62 @@ mod tests {
 
     /// A governor whose bucket holds exactly `burst` tokens and refills slowly,
     /// so charges are deterministic within a test's wall-clock window.
+    #[test]
+    fn reconfigure_retains_depleted_client_budgets() {
+        let governor = Governor::new(GovernorConfig {
+            refill_per_sec: 1e-9,
+            burst: 10.0,
+            ..Default::default()
+        })
+        .unwrap();
+        let ip = "203.0.113.9".parse().unwrap();
+        assert!(governor.try_charge(ip, 10.0).is_ok());
+        governor
+            .reconfigure(GovernorConfig {
+                refill_per_sec: 1e-9,
+                burst: 80.0,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            governor.try_charge(ip, 1.0).is_err(),
+            "raising burst must not refund existing debt"
+        );
+        assert!(governor
+            .reconfigure(GovernorConfig {
+                burst: -1.0,
+                ..Default::default()
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn reconfigure_reduces_ip_cap_immediately_and_retains_debt() {
+        let governor = Governor::new(GovernorConfig {
+            refill_per_sec: 1e-9,
+            burst: 10.0,
+            max_tracked_ips: 8,
+            ..Default::default()
+        })
+        .unwrap();
+        let depleted = "203.0.113.1".parse().unwrap();
+        assert!(governor.try_charge(depleted, 10.0).is_ok());
+        for suffix in 2..=8 {
+            let ip = format!("203.0.113.{suffix}").parse().unwrap();
+            assert!(governor.try_charge(ip, 1.0).is_ok());
+        }
+        governor
+            .reconfigure(GovernorConfig {
+                refill_per_sec: 1e-9,
+                burst: 10.0,
+                max_tracked_ips: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(governor.buckets.lock().unwrap().len(), 1);
+        assert!(governor.try_charge(depleted, 1.0).is_err());
+    }
+
     fn tight_governor(burst: f64) -> Arc<Governor> {
         Governor::new(GovernorConfig {
             refill_per_sec: 0.0001,
@@ -443,12 +542,12 @@ mod tests {
         let now = Instant::now();
         assert!(allowed(gov.charge_at(
             ip(3),
-            gov.config.weight(RouteClass::Compute),
+            gov.config.read().unwrap().weight(RouteClass::Compute),
             now,
         )));
         assert!(!allowed(gov.charge_at(
             ip(3),
-            gov.config.weight(RouteClass::CheapRead),
+            gov.config.read().unwrap().weight(RouteClass::CheapRead),
             now,
         )));
     }
@@ -460,7 +559,7 @@ mod tests {
         let now = Instant::now();
         assert!(allowed(gov.charge_at(
             ip(4),
-            gov.config.weight(RouteClass::HeavyRead),
+            gov.config.read().unwrap().weight(RouteClass::HeavyRead),
             now,
         )));
         assert!(!allowed(gov.charge_at(ip(4), 1.0, now)));

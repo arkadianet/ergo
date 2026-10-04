@@ -1,8 +1,8 @@
 //! `node/*` handlers. Reads (T0) reuse
 //! [`NodeReadState`](crate::traits::NodeReadState) verbatim (its DTOs are
 //! already snake_case, no reshape); `shutdown` (T2) reuses
-//! [`NodeAdmin::request_shutdown`](crate::traits::NodeAdmin). `config` GET/PATCH
-//! has no node-side trait seam yet, so it answers the honest `route_unavailable`.
+//! [`NodeAdmin::request_shutdown`](crate::traits::NodeAdmin). Operational config
+//! and probes use explicit node-side control and heartbeat bridges.
 
 use axum::{
     extract::State,
@@ -124,41 +124,139 @@ pub(crate) async fn version(State(s): State<OperatorState>) -> Response {
     .into_response()
 }
 
-/// `GET /api/v1/node/config` — T1. No `NodeConfigView` seam exists on the node
-/// yet, so this answers the honest
-/// `route_unavailable` (503) rather than fabricating or half-projecting a config
-/// tree. Gated at `Tier::Operator` so the closed shape is still auth-bounded.
-#[utoipa::path(
-    get, path = "/api/v1/node/config", tag = "node",
-    responses((status = 503, description = "Effective-config read not wired on this node", body = V1Error)),
-    security(("ApiKeyAuth" = [])),
-)]
-pub(crate) async fn config_get(State(_s): State<OperatorState>) -> Response {
-    v1_error(
-        Reason::RouteUnavailable,
-        "effective-config read is not wired on this node",
-        "GET /node/config needs a NodeConfigView seam (Phase-2); not yet available",
-    )
+/// `GET /api/v1/node/config` — authenticated allowlisted effective settings.
+#[utoipa::path(get, path = "/api/v1/node/config", tag = "node",
+    responses((status = 200, description = "Redacted boot and live operational settings"),
+        (status = 503, description = "Control bridge unavailable", body = V1Error)),
+    security(("ApiKeyAuth" = [])))]
+pub(crate) async fn config_get(State(s): State<OperatorState>) -> Response {
+    match s.admin().and_then(|admin| {
+        admin.effective_config().ok_or_else(|| {
+            Box::new(v1_error(
+                Reason::RouteUnavailable,
+                "effective config is unavailable",
+                "this node does not expose an operator configuration bridge",
+            ))
+        })
+    }) {
+        Ok(config) => ([(header::CACHE_CONTROL, "no-store")], Json(config)).into_response(),
+        Err(error) => *error,
+    }
 }
 
-/// `PATCH /api/v1/node/config` — T2. Config mutation is the more dangerous half
-/// of `node/config`, so it sits at `Tier::Admin` (loopback-preferred). No
-/// `apply_config_patch` seam exists yet, so it answers `route_unavailable`
-/// rather than exposing a mutation that isn't safely backed.
-#[utoipa::path(
-    patch, path = "/api/v1/node/config", tag = "node",
-    responses((status = 503, description = "Config mutation not wired on this node", body = V1Error)),
-    security(("ApiKeyAuth" = [])),
-)]
-pub(crate) async fn config_patch(State(_s): State<OperatorState>) -> Response {
-    v1_error(
-        Reason::RouteUnavailable,
-        "config mutation is not wired on this node",
-        "PATCH /node/config needs a NodeAdmin::apply_config_patch seam (Phase-2); not yet available",
-    )
+/// `PATCH /api/v1/node/config` — validate all members before applying any.
+#[utoipa::path(patch, path = "/api/v1/node/config", tag = "node",
+    request_body = crate::operator_control::RuntimeConfigPatch,
+    responses((status = 200, description = "Updated live operational settings"),
+        (status = 400, description = "Invalid or restart-only setting", body = V1Error),
+        (status = 409, description = "Revision conflict", body = V1Error)),
+    security(("ApiKeyAuth" = [])))]
+pub(crate) async fn config_patch(
+    State(s): State<OperatorState>,
+    body: axum::body::Bytes,
+) -> Response {
+    let admin = match s.admin() {
+        Ok(admin) => admin,
+        Err(error) => return *error,
+    };
+    let patch = match serde_json::from_slice(&body) {
+        Ok(patch) => patch,
+        Err(error) => {
+            return v1_error(
+                Reason::NotHotReloadable,
+                "invalid runtime config patch",
+                format!("only api_limits/readiness are reloadable: {error}"),
+            )
+        }
+    };
+    match admin.apply_config_patch(patch) {
+        Ok(config) => ([(header::CACHE_CONTROL, "no-store")], Json(config)).into_response(),
+        Err(error) => super::control_error(error),
+    }
 }
 
-// NOTE: `POST /api/v1/node/shutdown` (T2) is served by the frozen compat admin
-// mount at that exact path (`server.rs`, `NodeAdmin::request_shutdown` via
-// `require_api_key`). This group does not re-mount it — see the T2 note in
-// `super::operator_router`.
+fn probe_response(s: OperatorState, kind: &str) -> Response {
+    let Some(probes) = s.read.probes() else {
+        return v1_error(
+            Reason::RouteUnavailable,
+            "runtime probes are unavailable",
+            "use a node with a runtime heartbeat bridge",
+        );
+    };
+    let report = match kind {
+        "startup" => probes.startup,
+        "liveness" => probes.liveness,
+        _ => probes.readiness,
+    };
+    let code = if report.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, Json(report)).into_response()
+}
+
+#[utoipa::path(get, path = "/api/v1/node/startup", tag = "node",
+    responses((status = 200, description = "Runtime started", body = crate::operator_control::ProbeReport),
+        (status = 503, description = "Runtime not started or stopped", body = crate::operator_control::ProbeReport)))]
+pub(crate) async fn startup(State(s): State<OperatorState>) -> Response {
+    probe_response(s, "startup")
+}
+
+#[utoipa::path(get, path = "/api/v1/node/liveness", tag = "node",
+    responses((status = 200, description = "Runtime heartbeat fresh", body = crate::operator_control::ProbeReport),
+        (status = 503, description = "Runtime stopped or heartbeat stale", body = crate::operator_control::ProbeReport)))]
+pub(crate) async fn liveness(State(s): State<OperatorState>) -> Response {
+    probe_response(s, "liveness")
+}
+
+#[utoipa::path(get, path = "/api/v1/node/readiness", tag = "node",
+    responses((status = 200, description = "Chain service ready", body = crate::operator_control::ProbeReport),
+        (status = 503, description = "Sync, freshness or dependency checks failed", body = crate::operator_control::ProbeReport)))]
+pub(crate) async fn readiness(State(s): State<OperatorState>) -> Response {
+    probe_response(s, "readiness")
+}
+
+#[utoipa::path(get, path = "/api/v1/node/credentials", tag = "node",
+    responses((status = 200, description = "Named credential scopes and revocation flags; no hashes", body = Vec<crate::auth::CredentialInfo>)),
+    security(("ApiKeyAuth" = [])))]
+pub(crate) async fn credentials(State(s): State<OperatorState>) -> Response {
+    let admin = match s.admin() {
+        Ok(admin) => admin,
+        Err(error) => return *error,
+    };
+    match admin.credentials() {
+        Some(keys) => ([(header::CACHE_CONTROL, "no-store")], Json(keys)).into_response(),
+        None => v1_error(
+            Reason::RouteUnavailable,
+            "credential control unavailable",
+            "configure API security on this node",
+        ),
+    }
+}
+
+#[utoipa::path(delete, path = "/api/v1/node/credentials/{id}", tag = "node",
+    params(("id" = String, Path, description = "Named credential id; master key is not revocable through this endpoint")),
+    responses((status = 204, description = "Credential revoked durably"),
+        (status = 404, description = "Unknown credential id", body = V1Error),
+        (status = 503, description = "Ledger could not be persisted", body = V1Error)),
+    security(("ApiKeyAuth" = [])))]
+pub(crate) async fn revoke_credential(
+    State(s): State<OperatorState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let admin = match s.admin() {
+        Ok(admin) => admin,
+        Err(error) => return *error,
+    };
+    let admin = admin.clone();
+    match tokio::task::spawn_blocking(move || admin.revoke_credential(&id)).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(error)) => super::control_error(error),
+        Err(error) => v1_error(
+            Reason::InternalError,
+            "credential revoke failed",
+            error.to_string(),
+        ),
+    }
+}

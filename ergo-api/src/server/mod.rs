@@ -67,13 +67,13 @@ mod services;
 mod shared;
 pub use services::ApiServices;
 
-pub(crate) use openapi::NativeOpenApi;
 pub use openapi::{
     established_openapi_operations, legacy_rust_openapi, merge_openapi_checked,
     native_openapi_yaml, openapi_operations, rust_openapi, rust_openapi_json, rust_openapi_yaml,
     scala_openapi_operations, scala_openapi_yaml, v1_openapi_fragment, OpenApiMergeError,
     RouteOperation,
 };
+pub(crate) use openapi::{serialize_openapi_yaml, NativeOpenApi};
 pub use route_registry::ApiRouteInventory;
 pub(crate) use shared::{map_submit_error, submit_via_node};
 
@@ -713,6 +713,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     // `voting/*`). Cloned up front because `admin` / `mining` are moved into
     // the Scala-compat mounts further down; the group mounts unconditionally
     // and gates inside each handler on the honest `*_unavailable` reason.
+    let operator_governor = admin.as_ref().and_then(|control| control.api_governor());
     let v1_op_read = read.clone();
     let v1_op_chain = compat.clone();
     let v1_op_admin = admin.clone();
@@ -937,11 +938,13 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         realtime: Some(v1_realtime),
         network,
     };
-    let v1_governor = crate::v1::governor::Governor::new(crate::v1::governor::GovernorConfig {
-        local_reverse_proxy,
-        ..Default::default()
-    })
-    .expect("GovernorConfig is valid");
+    let v1_governor = operator_governor.unwrap_or_else(|| {
+        crate::v1::governor::Governor::new(crate::v1::governor::GovernorConfig {
+            local_reverse_proxy,
+            ..Default::default()
+        })
+        .expect("GovernorConfig is valid")
+    });
     // The `script/*` playground shares the one per-node governor (bounded
     // at the `Compute` class — the load-bearing anti-DoS control) and the
     // one v1 auth config (so `[api.script] require_api_key` can flip the group

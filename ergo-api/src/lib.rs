@@ -22,6 +22,7 @@ pub mod compat;
 pub mod emission;
 pub mod host_guard;
 pub mod mining;
+pub mod operator_control;
 pub mod script;
 pub mod server;
 pub mod traits;

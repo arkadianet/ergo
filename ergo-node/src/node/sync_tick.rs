@@ -784,7 +784,12 @@ fn drive_chunk_download(state: &mut NodeState, now: Instant) {
         let manifest_bytes = state.pending_manifest_bytes.take();
         match (chunks, manifest_bytes) {
             (Some(chunks), Some(bytes)) => {
-                match ergo_state::avl::snapshot_codec::reconstruct_tree(&bytes, &chunks) {
+                let result = {
+                    let phase = state.executor.apply_phase_metrics();
+                    let _apply = phase.begin();
+                    ergo_state::avl::snapshot_codec::reconstruct_tree(&bytes, &chunks)
+                };
+                match result {
                     Ok(tree) => {
                         info!(
                             root_label = %hex::encode(tree.root_label.as_bytes()),
@@ -984,7 +989,6 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
     let Some(reconstructed) = state.reconstructed_tree.take() else {
         return;
     };
-
     // Pull snapshot_height from the bootstrap state.
     let (snapshot_height, manifest_id) = match state.snapshot_bootstrap.state() {
         BootstrapState::ManifestVerified {
@@ -1153,6 +1157,8 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
         }
     }
 
+    let phase = state.executor.apply_phase_metrics();
+    let _apply = phase.begin();
     match state
         .store
         .as_utxo_mut()
@@ -1263,6 +1269,8 @@ fn maybe_rebuild_serve_snapshot(state: &mut NodeState) {
     if state.snapshot_state.cached_height() == Some(tip) {
         return;
     }
+    let phase = state.executor.apply_phase_metrics();
+    let _apply = phase.begin();
     match state
         .store
         .as_utxo()
@@ -1831,16 +1839,27 @@ mod tests {
             .test_remove_header_chain_index_row(DENSE_TIP_HEIGHT)
             .unwrap();
 
-        let manifest_id = [0xABu8; 32];
+        let header_bytes = store.get_header(&canonical_id).unwrap().unwrap();
+        let header = read_header(&mut VlqReader::new(&header_bytes)).unwrap();
+        let manifest_id = header.state_root.as_bytes()[..32].try_into().unwrap();
         let mut state = crate::node::tests::make_state_with_store(store);
         state.snapshot_bootstrap = verified_bootstrap(DENSE_TIP_HEIGHT as i32, manifest_id, 1);
         state.reconstructed_tree = Some(ergo_state::avl::snapshot_codec::ReconstructedTree {
             nodes: Vec::new(),
             root_label: ergo_primitives::digest::Digest32::from_bytes(manifest_id),
-            tree_height: 0,
+            tree_height: header.state_root.tree_height_byte(),
         });
 
-        install_reconstructed_snapshot(&mut state);
+        let metrics = state.executor.apply_phase_metrics();
+        for _ in 0..2 {
+            install_reconstructed_snapshot(&mut state);
+            assert!(
+                metrics.last_apply_age_ms().is_none(),
+                "deferral must not record an apply"
+            );
+            assert!(!metrics.in_progress());
+            assert_eq!(metrics.current_started_unix_ms(), 0);
+        }
 
         assert!(
             state.reconstructed_tree.is_some(),
@@ -1858,7 +1877,7 @@ mod tests {
         );
 
         // And the retry actually resolves: once the index row is written
-        // (bounded forward catch-up completing), install succeeds on the
+        // (bounded forward catch-up completing), installation is attempted on the
         // very next tick and consumes the restored tree.
         state
             .store
@@ -1872,6 +1891,71 @@ mod tests {
             state.reconstructed_tree.is_none(),
             "install must consume the restored tree once the gap resolves",
         );
+        assert!(
+            state
+                .executor
+                .apply_phase_metrics()
+                .last_apply_age_ms()
+                .is_some(),
+            "snapshot installation must be visible to live apply telemetry"
+        );
+    }
+
+    #[test]
+    fn snapshot_checkpoint_deferral_does_not_refresh_apply_telemetry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = popow_sparse_store(&dir);
+        let id = store
+            .get_header_id_at_height(DENSE_TIP_HEIGHT)
+            .unwrap()
+            .unwrap();
+        let bytes = store.get_header(&id).unwrap().unwrap();
+        let header = read_header(&mut VlqReader::new(&bytes)).unwrap();
+        let manifest_id = header.state_root.as_bytes()[..32].try_into().unwrap();
+        let mut state = crate::node::tests::make_state_with_store(store);
+        state.snapshot_bootstrap = verified_bootstrap(DENSE_TIP_HEIGHT as i32, manifest_id, 1);
+        state.reconstructed_tree = Some(ergo_state::avl::snapshot_codec::ReconstructedTree {
+            nodes: Vec::new(),
+            root_label: ergo_primitives::digest::Digest32::from_bytes(manifest_id),
+            tree_height: header.state_root.tree_height_byte(),
+        });
+        state
+            .executor
+            .set_header_checkpoint(Some(ergo_sync::header_proc::HeaderCheckpoint {
+                height: SPARSE_PREFIX_HEIGHT,
+                block_id: [0xAA; 32],
+            }));
+        let metrics = state.executor.apply_phase_metrics();
+        for _ in 0..2 {
+            install_reconstructed_snapshot(&mut state);
+            assert!(state.reconstructed_tree.is_some());
+            assert!(state.snapshot_anchor_refusal_warned);
+            assert!(metrics.last_apply_age_ms().is_none());
+            assert!(!metrics.in_progress());
+        }
+        state.executor.set_header_checkpoint(None);
+        install_reconstructed_snapshot(&mut state);
+        assert!(
+            metrics.last_apply_age_ms().is_some(),
+            "store attempts must be timed"
+        );
+    }
+
+    #[test]
+    fn snapshot_reconstruction_attempt_updates_apply_telemetry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        state.utxo_bootstrap_enabled = true;
+        state.snapshot_bootstrap = verified_bootstrap(100, [0xAA; 32], 1);
+        state.pending_manifest_bytes = Some(vec![1]);
+        state.chunk_assembly = Some(ergo_sync::snapshot_bootstrap::ChunkAssembly::new(vec![]));
+        let metrics = state.executor.apply_phase_metrics();
+        assert!(metrics.last_apply_age_ms().is_none());
+        super::drive_chunk_download(&mut state, std::time::Instant::now());
+        assert!(metrics.last_apply_age_ms().is_some());
+        assert!(!metrics.in_progress());
+        assert_eq!(metrics.current_started_unix_ms(), 0);
+        assert!(state.reconstructed_tree.is_none());
     }
 
     #[test]

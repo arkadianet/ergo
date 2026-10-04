@@ -724,6 +724,29 @@ impl NodeConfig {
             None
         };
 
+        let api_scoped_keys = toml_cfg
+            .api
+            .security
+            .as_ref()
+            .map(|s| s.keys.clone())
+            .unwrap_or_default();
+        ergo_api::auth::validate_credentials(
+            &api_scoped_keys,
+            toml_cfg
+                .api
+                .security
+                .as_ref()
+                .and_then(|security| security.api_key_hash.as_deref()),
+        )?;
+        let api_limits = toml_cfg.api.limits.clone();
+        api_limits
+            .validate()
+            .map_err(|e| format!("[api.limits] {e}"))?;
+        let api_readiness = toml_cfg.api.readiness.clone();
+        api_readiness
+            .validate()
+            .map_err(|e| format!("[api.readiness] {e}"))?;
+
         // [api] allowed_hosts — extra `Host` header values the DNS-
         // rebinding guard accepts; see `ResolvedConfig::api_allowed_hosts`
         // and `ergo_api::host_guard`. Empty by default. No validation
@@ -1152,6 +1175,9 @@ impl NodeConfig {
             api_bind,
             peer_details: toml_cfg.api.peer_details,
             api_key_hash,
+            api_scoped_keys,
+            api_limits,
+            api_readiness,
             api_allowed_hosts,
             api_local_reverse_proxy,
             api_script,

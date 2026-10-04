@@ -4,7 +4,7 @@
 use ergo_p2p::address_book::{AddressBook, AddressBookError};
 use ergo_p2p::peer_manager::{KnownPeer, PeerManager, PeerOrigin};
 
-use super::super::util::{rand_session_id, wall_to_instant};
+use super::super::util::{ban_expiry_to_instant, rand_session_id, wall_to_instant};
 use crate::config::NodeConfig;
 use crate::node::NodeError;
 
@@ -48,7 +48,7 @@ pub(super) fn setup(config: &NodeConfig) -> Result<(i64, PeerManager), NodeError
                     for b in &state.bans {
                         peer_manager.restore_ban(
                             b.ip,
-                            wall_to_instant(b.until, mono_now, wall_now),
+                            ban_expiry_to_instant(b.until, mono_now, wall_now),
                             b.count,
                         );
                     }
@@ -59,6 +59,7 @@ pub(super) fn setup(config: &NodeConfig) -> Result<(i64, PeerManager), NodeError
                         corrupt_skipped = state.corrupt_skipped,
                         nonroutable_purged = state.nonroutable_purged,
                         expired_bans_purged = state.expired_bans_purged,
+                        automatic_bans_purged = state.automatic_bans_purged,
                         "address_book restored",
                     );
                 }

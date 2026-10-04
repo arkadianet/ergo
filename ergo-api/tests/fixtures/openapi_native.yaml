@@ -1321,6 +1321,35 @@ components:
         reason:
           type: string
           description: Operator-facing rejection reason (the `BlockProcessError` Display).
+    ApiBlockFeeObservation:
+      type: object
+      description: |-
+        Block transaction-section observations used by operator fee estimates.
+        Conflict evictions are never included: samples come from canonical block
+        contents and are replaced when the committed full tip changes on a reorg.
+      required:
+      - transactions_size_bytes
+      - fee_paying_transactions
+      - fee_paying_size_bytes
+      properties:
+        fee_paying_size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        fee_paying_transactions:
+          type: integer
+          format: int32
+          minimum: 0
+        median_fee_per_byte_nano_erg:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        transactions_size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
     ApiBootstrapPhase:
       type: string
       description: |-
@@ -2658,6 +2687,11 @@ components:
             the bounded first-deliverer ring captured it, the entry has since
             been FIFO-evicted, or the block was applied locally (self-mined).
             Pure observability — never affects validation.
+        fee_observation:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiBlockFeeObservation'
+            description: Confirmed fee observations from this canonical full block only.
         header_id:
           type: string
         height:

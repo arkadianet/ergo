@@ -56,6 +56,7 @@ pub enum Reason {
     ProtocolNotFound,
     WebhookNotFound,
     AccountNotFound,
+    CredentialNotFound,
     AddressNotWatched,
     TxNotInBlock,
     NotBlacklisted,
@@ -192,6 +193,7 @@ pub enum Reason {
 
     // ----- state-conflict (409) / internal (500) -----
     AlreadyBlacklisted,
+    ConfigConflict,
     InternalError,
 }
 
@@ -213,6 +215,7 @@ impl Reason {
             | ProtocolNotFound
             | WebhookNotFound
             | AccountNotFound
+            | CredentialNotFound
             | AddressNotWatched
             | TxNotInBlock
             | NotBlacklisted
@@ -278,7 +281,9 @@ impl Reason {
             // 409 — subsystem-off (config) + state-conflict
             IndexerDisabled | IndexerSyncing | IndexerHalted | SubmitDisabled
             | MempoolViewDisabled | RealtimeDisabled | WebhooksDisabled | SnapshotDisabled
-            | MiningDisabled | SensitiveOpDisabled | AlreadyBlacklisted => StatusCode::CONFLICT,
+            | MiningDisabled | SensitiveOpDisabled | AlreadyBlacklisted | ConfigConflict => {
+                StatusCode::CONFLICT
+            }
 
             // 501 — built-without / not-configured
             CompilerUnavailable | OracleUnavailable => StatusCode::NOT_IMPLEMENTED,
@@ -435,6 +440,7 @@ mod tests {
             (ProtocolNotFound, "protocol_not_found", nf),
             (WebhookNotFound, "webhook_not_found", nf),
             (AccountNotFound, "account_not_found", nf),
+            (CredentialNotFound, "credential_not_found", nf),
             (AddressNotWatched, "address_not_watched", nf),
             (TxNotInBlock, "tx_not_in_block", nf),
             (NotBlacklisted, "not_blacklisted", nf),
@@ -559,6 +565,7 @@ mod tests {
             (IdleTimeout, "idle_timeout", StatusCode::REQUEST_TIMEOUT),
             // state-conflict / internal
             (AlreadyBlacklisted, "already_blacklisted", cf),
+            (ConfigConflict, "config_conflict", cf),
             (
                 InternalError,
                 "internal_error",
@@ -612,11 +619,11 @@ mod tests {
     }
 
     #[test]
-    fn contract_covers_exactly_one_hundred_fourteen_reasons_no_duplicates() {
+    fn contract_covers_exactly_one_hundred_sixteen_reasons_no_duplicates() {
         use std::collections::BTreeSet;
         let rows = contract();
-        assert_eq!(rows.len(), 114, "expected 114 canonical reasons");
+        assert_eq!(rows.len(), 116, "expected 116 canonical reasons");
         let wires: BTreeSet<&str> = rows.iter().map(|(_, w, _)| *w).collect();
-        assert_eq!(wires.len(), 114, "wire strings must be unique");
+        assert_eq!(wires.len(), 116, "wire strings must be unique");
     }
 }

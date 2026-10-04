@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CandidateDetailsJson {
     pub msg: String,
+    pub work: crate::mining::WorkMessageJson,
+    /// Canonical header bytes excluding the proof of work, in hexadecimal.
+    pub header_without_pow: String,
+    /// Frozen AVL+ authentication proof bytes, in hexadecimal.
+    pub ad_proofs: String,
     pub template_seq: u64,
     pub parent_id: String,
     pub height: u32,

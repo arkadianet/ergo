@@ -71,6 +71,11 @@ Every error from these routes follows the nested error envelope \
         crate::v1::operator::node::identity,
         crate::v1::operator::node::host,
         crate::v1::operator::node::health,
+        crate::v1::operator::node::startup,
+        crate::v1::operator::node::liveness,
+        crate::v1::operator::node::readiness,
+        crate::v1::operator::node::credentials,
+        crate::v1::operator::node::revoke_credential,
         crate::v1::operator::node::version,
         crate::v1::operator::node::config_get,
         crate::v1::operator::node::config_patch,
@@ -80,6 +85,8 @@ Every error from these routes follows the nested error envelope \
         crate::v1::operator::network::sync_info,
         crate::v1::operator::network::track_info,
         crate::v1::operator::network::connect,
+        crate::v1::operator::network::disconnect,
+        crate::v1::operator::network::remove,
         crate::v1::operator::network::blacklist_add,
         crate::v1::operator::network::blacklist_remove,
         crate::v1::operator::mining::miner_stats,
@@ -137,6 +144,7 @@ Every error from these routes follows the nested error envelope \
         crate::v1::routes::mempool::by_box_id,
         crate::v1::routes::mempool::by_token_id,
         crate::v1::routes::mempool::fee_histogram,
+        crate::v1::routes::mempool::fee_estimate,
         crate::v1::routes::transactions::tx_by_id,
         crate::v1::routes::transactions::submit,
         crate::v1::routes::transactions::check,
@@ -208,6 +216,12 @@ Every error from these routes follows the nested error envelope \
             crate::v1::operator::network::SyncInfoEntry,
             crate::v1::operator::network::TrackInfo,
             crate::v1::operator::node::NodeVersion,
+            crate::operator_control::ApiLimits,
+            crate::operator_control::ProbePolicy,
+            crate::operator_control::ProbeReport,
+            crate::operator_control::RuntimeConfigPatch,
+            crate::auth::CredentialInfo,
+            crate::v1::operator::network::BanRequest,
             crate::v1::operator::voting::ConfiguredVote,
             crate::v1::operator::voting::PublicVotes,
             crate::v1::operator::voting::SetVotesRequest,
@@ -309,7 +323,5 @@ pub(crate) struct V1OpenApi;
 /// rather than a runtime condition, so this panics instead of serving an
 /// empty spec (mirrors `crate::server::native_openapi_yaml`).
 pub fn v1_openapi_yaml() -> String {
-    V1OpenApi::openapi()
-        .to_yaml()
-        .expect("openapi yaml serialize")
+    crate::server::serialize_openapi_yaml(&V1OpenApi::openapi())
 }
