@@ -60,7 +60,7 @@ pub(crate) async fn replay(
         return v1_error(
             Reason::RealtimeDisabled,
             "realtime history is unavailable",
-            "start the node with an API listener",
+            "check notification storage errors in the boot log and restart",
         );
     };
     let limit = query.limit.unwrap_or(100);

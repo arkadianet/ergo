@@ -185,9 +185,10 @@ REST state even if the page contains useful records.
 - `available`: whether journal persistence is currently operating.
 
 Records above the confirmed boundary can be live-only. When notification
-cursors cannot be loaded or reserved safely, the boot log reports that API
-startup is disabled; the node and wallet continue running. There is no session
-fallback that could reuse durable cursors. Webhooks alone are disabled if their
+cursors cannot be loaded or reserved safely, the boot log reports that
+realtime and webhooks are disabled. The remaining API, node and wallet continue
+running; replay and WebSocket requests return `409 realtime_disabled`. There
+is no session fallback that could reuse durable cursors. Webhooks alone are disabled if their
 registry cannot be restored but the replay journal initializes successfully. Back up
 `webhooks.redb` with the other operator databases, preserving its private
 permissions because it also contains signing secrets.

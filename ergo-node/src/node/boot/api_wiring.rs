@@ -421,20 +421,8 @@ pub(super) async fn bind(
     {
         Ok(services) => services,
         Err(error) => {
-            tracing::error!(%error, "notification cursor initialization failed; node continuing without API");
-            // No safe fallback cursor exists when the durable reservation is
-            // unreadable or uncertain. Keep the wallet/node running, as for a
-            // listener bind failure, without activating realtime publishers.
-            return Ok(ApiBind {
-                api_addr: None,
-                api_handle: None,
-                api_shutdown_tx: None,
-                wallet_rescan,
-                wallet_cancel,
-                wallet_handle,
-                api_services: None,
-                live_wallet_hook: Some(hook),
-            });
+            tracing::error!(%error, "notification cursor initialization failed; realtime and webhooks disabled");
+            Arc::new(ergo_api::ApiServices::without_notifications())
         }
     };
     // Realtime WS bridge (A2): the same node-owned bus the
@@ -443,15 +431,16 @@ pub(super) async fn bind(
     // `tx_accepted`/`tx_dropped` on the `mempool` channel
     // directly from the admission hot path, bypassing the
     // coarse ring (which only carries block/reorg/peer events).
-    mempool.set_observer(Some(Arc::new(
-        crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
-            api_services.realtime.bus.clone(),
-        ),
-    )));
-    // Restore any durable webhook cursor before activating this observer.
-    // Disabled indexers and boot failures without a store have no observer.
-    if let Some(observer) = indexer_event_observer {
-        observer.activate(api_services.realtime.bus.clone());
+    if api_services.realtime.bus.is_enabled() {
+        mempool.set_observer(Some(Arc::new(
+            crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
+                api_services.realtime.bus.clone(),
+            ),
+        )));
+        // Restore durable cursors before activating the indexer source.
+        if let Some(observer) = indexer_event_observer {
+            observer.activate(api_services.realtime.bus.clone());
+        }
     }
     let mut admin = crate::api_bridge::ShutdownAdmin::new(
         shutdown_notify.clone(),
@@ -606,12 +595,39 @@ mod tests {
             write.commit().unwrap();
         }
         let handle = crate::node::run_inner(config).await.unwrap();
-        let api_addr = handle.api_addr;
+        let address = handle.api_addr.expect("other API routes remain available");
+        let bus = &handle.api_services.as_ref().unwrap().realtime.bus;
+        let published = bus.try_publish(ergo_api::v1::realtime::RealtimeEventBody::block_applied(
+            1,
+            "rejected".into(),
+            1,
+            1,
+            100,
+        ));
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .get(format!(
+                "http://{address}/api/v1/events/replay?channels=blocks"
+            ))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let value: serde_json::Value = response.json().await.unwrap();
+        client
+            .get(format!("http://{address}/api/v1/info"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
         handle.shutdown().await.unwrap();
-        assert!(
-            api_addr.is_none(),
-            "uncertain persisted cursors must disable API publication"
+        assert_eq!(
+            published, None,
+            "uncertain persisted cursors must disable notification publication"
         );
+        assert_eq!(status, reqwest::StatusCode::CONFLICT);
+        assert_eq!(value["error"]["reason"], "realtime_disabled");
     }
 
     // ----- happy path -----

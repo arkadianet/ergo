@@ -36,6 +36,14 @@ impl ApiServices {
         Self::with_realtime(engine, RealtimeHandle::blocks_and_mempool())
     }
 
+    /// Keep ordinary API services available when notification cursors cannot
+    /// be restored safely. The inert bus never hands out fallback cursors.
+    pub fn without_notifications() -> Self {
+        let mut realtime = RealtimeHandle::blocks_and_mempool();
+        realtime.bus = Arc::new(crate::v1::RealtimeBus::disabled());
+        Self::with_realtime(None, realtime)
+    }
+
     /// Restore bounded realtime replay independently of the webhook registry.
     /// Construction reserves cursors and must run on the boot blocking lane.
     pub fn with_durable_realtime(
@@ -145,18 +153,18 @@ impl ApiServices {
         if tasks.is_some() {
             return None;
         }
-        let handles = vec![
-            crate::v1::spawn_depth_sampler(
-                read.clone(),
-                self.mempool_depth.clone(),
-                crate::v1::DEFAULT_SAMPLE_INTERVAL,
-            ),
-            crate::v1::spawn_event_bridge(
+        let mut handles = vec![crate::v1::spawn_depth_sampler(
+            read.clone(),
+            self.mempool_depth.clone(),
+            crate::v1::DEFAULT_SAMPLE_INTERVAL,
+        )];
+        if self.realtime.bus.is_enabled() {
+            handles.push(crate::v1::spawn_event_bridge(
                 read,
                 self.realtime.bus.clone(),
                 crate::v1::realtime::DEFAULT_BRIDGE_INTERVAL,
-            ),
-        ];
+            ));
+        }
         let (webhook, webhook_shutdown) =
             if let (Some(webhooks), Some(sink)) = (&self.webhooks, &self.sink) {
                 let (shutdown, signal) = tokio::sync::oneshot::channel();

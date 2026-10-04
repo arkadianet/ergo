@@ -115,6 +115,7 @@ struct Inner {
 
 /// The fan-out hub. `Arc`-shared between the feed task(s) and every socket.
 pub struct RealtimeBus {
+    enabled: bool,
     inner: Mutex<Inner>,
     live_classes: RwLock<HashSet<ChannelClass>>,
     journal: Option<EventJournal>,
@@ -149,6 +150,7 @@ impl RealtimeBus {
     /// A bus that feeds the given channel classes live.
     pub fn new(live_classes: HashSet<ChannelClass>) -> Self {
         RealtimeBus {
+            enabled: true,
             inner: Mutex::new(Inner {
                 next_seq: 1,
                 next_sub_id: 1,
@@ -158,6 +160,19 @@ impl RealtimeBus {
             live_classes: RwLock::new(live_classes),
             journal: None,
         }
+    }
+
+    /// An unavailable source which cannot issue cursors, including when a
+    /// durable store failed to initialize. Other API services can remain live.
+    pub fn disabled() -> Self {
+        let mut bus = Self::new(HashSet::new());
+        bus.enabled = false;
+        bus
+    }
+
+    /// Whether this bus can issue observations and expose a live feed.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Restore bounded history and reserve fresh cursor space before exposing
@@ -246,6 +261,9 @@ impl RealtimeBus {
     /// Enable classes only after their real upstream observer is installed.
     /// Merely mounting an indexer query API does not provide an event source.
     pub fn enable_classes(&self, classes: impl IntoIterator<Item = ChannelClass>) {
+        if !self.enabled {
+            return;
+        }
         self.live_classes
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -304,6 +322,9 @@ impl RealtimeBus {
     /// Publish and return only a cursor assigned to this observation. Sources
     /// retaining inverse links must not remember a rejected observation.
     pub fn try_publish(&self, body: RealtimeEventBody) -> Option<u64> {
+        if !self.enabled {
+            return None;
+        }
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let seq = g.next_seq;
         if self
