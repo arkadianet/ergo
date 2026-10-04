@@ -173,14 +173,15 @@ export async function onSlow() {
   if (tipNow) tip = tipNow;
   if (infoNow) info = infoNow;
   if (rew?.rewardAddress) rewardAddr = rew.rewardAddress;
-  if (miningOn) candidate = cand;
+  // Work fetched while mining was enabled is retired once it is disabled.
+  candidate = miningOn ? cand : null;
   if (cand?.ok && cand.data) {
     const identity = `${cand.data.msg}:${cand.data.template_seq}`;
     if (candidateSeq !== identity) {
       candidateSeq = identity;
       candidateSeqAt = Date.now();
     }
-  } else if (miningOn) {
+  } else {
     candidateSeq = null;
     candidateSeqAt = null;
   }
