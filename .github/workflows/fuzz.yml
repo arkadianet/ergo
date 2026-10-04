@@ -181,10 +181,13 @@ jobs:
           nightly: 'true'
           components: rust-src
 
+      # The native build below uses target/native-fuzz (ignored, outside the
+      # difftest crate). rust-cache joins this target onto the workspace path,
+      # so it must be relative; an absolute $RUNNER_TEMP path is never saved.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: cargo-fuzz-${{ matrix.target }}
-          workspaces: ergo-difftest/fuzz
+          workspaces: ergo-difftest/fuzz -> ../../target/native-fuzz
 
       # Cache the installed cargo-fuzz binary itself (not just its build deps)
       # across nightly runs — it changes rarely.
@@ -206,7 +209,7 @@ jobs:
           python3 scripts/fuzz-evidence.py start --root "$GITHUB_WORKSPACE" \
             --out "$RUNNER_TEMP/fuzz-evidence" --target "${{ matrix.target }}" \
             --toolchain "${{ steps.rust.outputs.nightly }}" \
-            --build-directory "$RUNNER_TEMP/native-fuzz-target"
+            --build-directory "$GITHUB_WORKSPACE/target/native-fuzz"
 
       # cargo-fuzz has no --locked option. Preserve the locked precheck and
       # postcheck even when a build/run fails, plus exact command transcripts.
@@ -225,7 +228,7 @@ jobs:
           ../scripts/fuzz-step.sh "$RUNNER_TEMP/fuzz-evidence" build \
             cargo +${{ steps.rust.outputs.nightly }} fuzz build "${{ matrix.target }}" \
             --sanitizer address --target x86_64-unknown-linux-gnu \
-            --target-dir "$RUNNER_TEMP/native-fuzz-target"
+            --target-dir "$GITHUB_WORKSPACE/target/native-fuzz"
 
       - name: fuzz ${{ matrix.target }} (bounded run, 10 min)
         working-directory: ergo-difftest
@@ -237,7 +240,7 @@ jobs:
           ../scripts/fuzz-step.sh "$RUNNER_TEMP/fuzz-evidence" run \
             cargo +${{ steps.rust.outputs.nightly }} fuzz run "${{ matrix.target }}" \
             "fuzz/corpus/${{ matrix.target }}" --sanitizer address \
-            --target x86_64-unknown-linux-gnu --target-dir "$RUNNER_TEMP/native-fuzz-target" -- \
+            --target x86_64-unknown-linux-gnu --target-dir "$GITHUB_WORKSPACE/target/native-fuzz" -- \
             -max_total_time=600 -error_exitcode=1 -rss_limit_mb=2048 -print_final_stats=1
 
       - name: verify fuzz lockfile unchanged
