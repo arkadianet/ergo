@@ -126,8 +126,14 @@ conflicts, or a package that cannot fit with the final fee transaction refuse
 the request with HTTP 400; no partial package is offered. Operator exclusions
 win, and the error names the excluded transaction. Included request members
 satisfy matching operator requirements; remaining requirements retain their
-ordinary priority and never withhold work. Rent limits, token preservation,
-and reservations still apply to the remaining budget.
+ordinary priority and never withhold work. Requested members take budget before remaining policy requirements and the
+private reservation. Rent limits, token preservation, and reservations still
+apply to the remaining budget.
+
+The node skips its storage-rent sweep for another miner key. This keeps the
+operator's rent proceeds and recovered tokens out of lender rewards; requested
+transactions may still claim rent themselves under consensus rules. Jobs owned
+by the operator retain the normal sweep.
 
 A request for another miner key never selects the operator's private queue.
 Explicitly requesting a pending private member with another key is refused.

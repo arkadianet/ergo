@@ -496,7 +496,8 @@ fn build_and_publish_inner(
             // no longer holds; those are skipped and backfilled in the resolver,
             // never claimed blind. The resolver is injected by the node driver (it
             // owns the indexer handle); rent disabled ⇒ never called.
-            let eligible = if handle.claim_storage_rent() {
+            // Operator rent sweeps must never donate proceeds to a lender.
+            let eligible = if handle.claim_storage_rent() && intent.operator_owned {
                 let started = std::time::Instant::now();
                 let eligible = resolve_rent(&snapshot, snapshot.best_full_block_height() + 1);
                 rent_resolve_time = started.elapsed();

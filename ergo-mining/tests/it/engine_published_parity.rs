@@ -2512,3 +2512,60 @@ fn requested_candidate_cancelled_during_input_resolution_produces_no_proof() {
     .unwrap();
     assert_eq!(work.proof.unwrap().tx_proofs.len(), 2);
 }
+
+#[test]
+fn requested_lender_jobs_skip_the_operator_storage_rent_sweep() {
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+    for operator_owned in [false, true] {
+        let handle = handle(&regime).with_rent_config(true, 64);
+        handle.set_best_tip(BestTip {
+            parent_id: tip,
+            chain_seq: 1,
+            synced: true,
+        });
+        let mut intent = build_intent(tip, regime.parent_height);
+        intent.reason = BuildReason::Requested;
+        intent.operator_owned = operator_owned;
+        let called = std::cell::Cell::new(false);
+        let outcome = ergo_mining::engine::build_requested_and_publish_cached(
+            &store.reader_handle(),
+            &handle,
+            &intent,
+            &[],
+            &[],
+            &|| false,
+            None,
+            &mut ergo_mining::state_view::CandidateProofCache::default(),
+            || BUILT_AT_MS,
+            |_, _| {
+                called.set(true);
+                vec![]
+            },
+            &mut None,
+        )
+        .unwrap();
+        let BuildOutcome::Published { template_seq, .. } = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(
+            called.get(),
+            operator_owned,
+            "rent resolver follows frozen ownership"
+        );
+        let template = handle
+            .inspect_template(None, Some(template_seq))
+            .unwrap()
+            .template;
+        assert_eq!(
+            template.candidate.observation.operator_owned,
+            operator_owned
+        );
+        assert!(template
+            .candidate
+            .observation
+            .transactions
+            .iter()
+            .all(|tx| tx.category != "rent"));
+    }
+}
