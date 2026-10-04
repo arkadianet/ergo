@@ -64,8 +64,8 @@ impl WebhooksState {
         self.handle.as_ref().ok_or_else(|| {
             Box::new(v1_error(
                 Reason::WebhooksDisabled,
-                "the webhook store is not wired on this node",
-                "webhooks require the durable delivery subsystem to be enabled",
+                "the durable webhook subsystem is unavailable on this node",
+                "check notification storage errors in the boot log; stop the node, back up webhooks.redb, restore writable storage or a compatible database backup, then restart; see docs/events.md",
             ))
         })
     }
@@ -836,5 +836,11 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(v["error"]["reason"], "webhooks_disabled");
+        let detail = v["error"]["detail"].as_str().unwrap();
+        assert!(detail.contains("boot log"));
+        assert!(detail.contains("stop the node"));
+        assert!(detail.contains("back up webhooks.redb"));
+        assert!(detail.contains("compatible database backup"));
+        assert!(detail.contains("docs/events.md"));
     }
 }

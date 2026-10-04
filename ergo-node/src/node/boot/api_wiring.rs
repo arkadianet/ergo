@@ -401,7 +401,7 @@ pub(super) async fn bind(
         let store = match crate::webhook_store::RedbWebhookStore::open(&webhook_path) {
             Ok(store) => Arc::new(store),
             Err(error) => {
-                tracing::error!(%error, "notification store unavailable; webhooks and durable replay disabled");
+                tracing::error!(%error, "notification store unavailable; live realtime, durable replay and webhooks disabled");
                 return Err(error);
             }
         };

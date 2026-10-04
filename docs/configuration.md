@@ -181,7 +181,11 @@ Operator webhook registrations, HMAC secrets, bounded delivery history and pendi
 retry state are stored in `<data_dir>/webhooks.redb`. The file uses owner-only
 permissions on Unix. Back up this private database with the node data directory.
 A failed open, corrupt snapshot or failed commit disables webhook management and
-outbound deliveries until restart; other API routes remain available.
+outbound deliveries until restart; other API routes remain available. If the
+notification database cannot open or its cursor cannot initialize safely,
+live realtime and durable replay are disabled too. See
+[notification storage recovery](events.md#recovering-notification-storage)
+for backup, compatibility and corruption recovery steps.
 On a commit error, RAM changes are rolled back, but a failed disk flush may leave
 either atomic snapshot visible after restart. A failed API request can therefore
 have persisted; reconcile registrations and delivery history after reopening.

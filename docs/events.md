@@ -109,7 +109,9 @@ admission cursor until space returns. Expired or uncertain source history
 first admits the contiguous retained prefix, then pauses affected subscriptions
 with `auto_disabled_reason: source_gap`; hooks registered after the missing
 interval remain active. Reconcile
-from REST before explicitly re-enabling them. Confirmed-only hooks still
+from REST before explicitly re-enabling them. Re-enabling records the current
+bus boundary durably and skips observations from the pause; previously admitted
+deliveries remain retained. Confirmed-only hooks still
 receive `box_reverted`, `box_unspent`, and `token_reverted` invalidations,
 including `previous_seq` and `height` when available.
 
@@ -234,6 +236,38 @@ possible, keep the current binary and retain the paused subscriptions. Back up
 bypass this compatibility check. A pre-replay binary does not preserve the new
 journal cursor contract; discard replay cursors and reconcile REST state across
 a downgrade.
+
+## Recovering notification storage
+
+A `409 webhooks_disabled` or `realtime_disabled` response means notification
+services are unavailable; inspect the boot log for the specific open, version,
+permission, cursor reservation or commit error. If the database cannot open or
+its realtime cursor cannot initialize, live WebSocket delivery, durable replay
+and webhooks are all disabled. If only the webhook snapshot cannot load, replay
+and live realtime can still operate.
+
+1. Stop the node and wait for shutdown to finish before touching
+   `<data_dir>/webhooks.redb`. Preserve a copy of the failed file and its boot
+   log for diagnosis. Keep every copy private: it contains webhook signing
+   secrets (owner-only permissions on Unix).
+2. For permission, full-disk or read-only filesystem errors, restore writable
+   storage and ownership for the node account, then restart with the same
+   database. For an unsupported snapshot or realtime metadata version, use a
+   binary that supports the stored version; follow the downgrade guidance above.
+   Do not edit version fields to make a reader accept an incompatible format.
+3. For corruption, restore a known-good, compatible backup while the node is
+   stopped, retaining private permissions. Keep the failed original. If no
+   compatible backup is available, leave notifications disabled and recover
+   the database offline; the node and ordinary API can continue operating.
+   Do not delete or truncate the file to bypass initialization errors: that
+   loses registrations, secrets and admitted delivery obligations, and resets
+   the cursor namespace.
+4. After restoring a backup or changing versions, reconcile current state from
+   REST and inspect registrations and delivery history. A backup can roll back
+   both replay cursors and delivery IDs; discard old cursors and account for
+   possible duplicate deliveries or lost obligations at the receiver. Explicitly
+   re-enable reconciled `source_gap` subscriptions. Confirm replay and webhook
+   management respond successfully and the boot log reports no storage error.
 
 ## Transport limits
 
