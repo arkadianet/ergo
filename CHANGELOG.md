@@ -26,6 +26,12 @@ infrastructure.
 
 ### Changed
 
+- Mining pauses storage-rent self-claim scans while the indexer trails the
+  candidate parent by more than two blocks and resumes automatically within
+  that margin. One transition warning and resume message, plus the typed
+  `rent_self_claim` field on `/api/v1/mining/status`, distinguish index catch-up
+  from an empty eligible set.
+
 - Peer-store startup discards legacy ban rows as automatic bans in a single
   transaction. Earlier main releases did not implement manual blacklisting
   (`route_unavailable`); reapply intended operator bans through the new API.
