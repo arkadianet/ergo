@@ -13,12 +13,18 @@ export function eligibleFor(task, box) {
   if (task === 'rewards') return box.provenance?.type === 'minerReward' && ['confirmed', 'immature'].includes(box.status?.type);
   return box.provenance?.type === 'owned' && box.status?.type === 'confirmed';
 }
+// Immature rewards cannot be spent before maturity; a job waits until then
+// without spending attempts, so its start height may not be earlier.
+export function earliestStart(boxes) {
+  return Math.max(0, ...boxes.map(box => box.status?.type === 'immature' ? box.status.maturesAtHeight : 0));
+}
 export function makeMaintenanceRequest(task, boxes, destination, start, expiry, attempts, label) {
   if (!Object.hasOwn(kinds, task) || !boxes.length || boxes.length > 100 || boxes.some(box => !eligibleFor(task, box))) throw Error('Select 1–100 eligible boxes.');
   const boxIds = boxes.map(box => box.boxId);
   if (new Set(boxIds).size !== boxIds.length || boxIds.some(id => !/^[a-f0-9]{64}$/.test(id))) throw Error('Selected box identifiers are invalid.');
   for (const value of [start, expiry, attempts]) if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value))) throw Error('Enter whole block heights and attempts.');
   if (Number(start) > 4294967295 || Number(expiry) > 4294967295 || Number(expiry) <= Number(start) || Number(attempts) < 1 || Number(attempts) > 100) throw Error('Use a later expiry height and 1–100 attempts.');
+  if (Number(start) < earliestStart(boxes)) throw Error(`Selected rewards mature at height ${earliestStart(boxes)}; start at or after it.`);
   if (!label.trim() || new TextEncoder().encode(label).length > 160) throw Error('Enter a label of at most 160 bytes.');
   if (task !== 'renew' && !destination) throw Error('Choose a receiving address from this wallet.');
   return { label, task: { type: task, boxIds, ...(task === 'renew' ? {} : { destination }) }, notBeforeHeight: Number(start), expiresAtHeight: Number(expiry), maxAttempts: Number(attempts) };
@@ -68,7 +74,12 @@ export function createWalletMaintenance(root, { onJobs } = {}) {
     boxes.replaceChildren(); destination.closest('label').hidden = kind.value === 'renew';
     for (const box of currentBoxes.filter(box => eligibleFor(kind.value, box))) {
       const input = el('input'); input.type = 'checkbox'; input.checked = selected.has(box.boxId); input.disabled = busy;
-      input.addEventListener('change', () => { if (input.checked) selected.set(box.boxId, box); else selected.delete(box.boxId); invalidate(); });
+      input.addEventListener('change', () => {
+        if (input.checked) selected.set(box.boxId, box); else selected.delete(box.boxId);
+        const maturity = earliestStart([...selected.values()]);
+        if (Number(start.value) < maturity) { start.value = String(maturity); if (Number(expiry.value) <= maturity) expiry.value = String(maturity + 720); }
+        invalidate();
+      });
       const row = el('label', null, 'wb-check'); row.append(input, el('span', `${decimal(box.value)} ERG · ${(box.assets || []).length} tokens · ${box.boxId} · ${box.status.type === 'immature' ? 'matures at ' + box.status.maturesAtHeight : 'confirmed'}`)); boxes.append(row);
     }
     if (!boxes.children.length) boxes.append(el('p', 'No eligible boxes on this page.', 'wb-note'));

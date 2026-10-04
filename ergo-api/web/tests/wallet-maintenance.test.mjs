@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canCancelMaintenance, describeMaintenanceJob, eligibleFor, makeMaintenanceRequest, pendingMaintenance, recipientLines, summarizeBoxes } from '../js/wallet-maintenance.js';
+import { canCancelMaintenance, describeMaintenanceJob, earliestStart, eligibleFor, makeMaintenanceRequest, pendingMaintenance, recipientLines, summarizeBoxes } from '../js/wallet-maintenance.js';
 const owned = { boxId: 'aa'.repeat(32), value: '9007199254740993', assets: [{ tokenId: 'bb'.repeat(32), amount: '9007199254740993' }], status: { type: 'confirmed' }, provenance: { type: 'owned' } };
 const reward = { ...owned, boxId: 'cc'.repeat(32), status: { type: 'immature', maturesAtHeight: 720 }, provenance: { type: 'minerReward' } };
 test('maintenance pins the reviewed boxes and preserves amounts beyond JS safe integers', () => {
@@ -11,10 +11,14 @@ test('maintenance pins the reviewed boxes and preserves amounts beyond JS safe i
   assert.equal(totals.nanoErg, '18014398509481986'); assert.equal(totals.tokens[0].amount, '18014398509481986');
   assert.equal(req.delivery, undefined);
 });
-test('reward maturity is allowed to wait while other operations require confirmed owned inputs', () => {
+test('immature rewards schedule from maturity while other operations require confirmed owned inputs', () => {
   assert.ok(eligibleFor('rewards', reward)); assert.ok(!eligibleFor('renew', reward));
   assert.ok(!eligibleFor('rewards', owned)); assert.ok(!eligibleFor('consolidate', { ...owned, status: { type: 'spent' } }));
   assert.throws(() => makeMaintenanceRequest('consolidate', [reward], 'address', 0, 100, 1, 'label'));
+  const matured = { ...reward, boxId: 'dd'.repeat(32), status: { type: 'confirmed' } };
+  assert.equal(earliestStart([matured, reward]), 720); assert.equal(earliestStart([matured]), 0);
+  assert.throws(() => makeMaintenanceRequest('rewards', [reward, matured], 'address', 719, 1440, 1, 'label'), /mature at height 720/);
+  assert.equal(makeMaintenanceRequest('rewards', [reward, matured], 'address', 720, 1440, 1, 'label').notBeforeHeight, 720);
 });
 test('a conflicted maintenance transaction remains cancellable before a rollback can revive it', () => {
   for (const state of ['waiting', 'waitingForWallet', 'prepared', 'queued', 'inCandidate', 'conflicted']) assert.ok(canCancelMaintenance(state), state);

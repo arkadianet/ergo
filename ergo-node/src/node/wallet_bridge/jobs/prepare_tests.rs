@@ -662,3 +662,80 @@ async fn signed_bytes_the_journal_cannot_hold_are_never_submitted() {
     assert!(record.signed_hex.is_none());
     assert!(funded.queue.0.lock().is_empty());
 }
+
+#[tokio::test]
+async fn maturing_rewards_start_at_maturity_and_wait_without_spending_attempts() {
+    let mut funded = Funded::new();
+    let token = funded.rules.reemission_token_id;
+    let reward = funded.reward(10 * ERG, &[(token, 3 * ERG)]);
+    let box_ids = funded.fund(vec![reward]);
+    funded.set_status(
+        &box_ids[0],
+        BoxStatus::Immature {
+            matures_at: TIP + 1,
+        },
+    );
+    let mut request = funded.job(WalletJobTask::Rewards {
+        box_ids: box_ids.clone(),
+        destination: funded.address.clone(),
+    });
+    assert!(matches!(
+        create_owned(&funded.context(), request.clone()),
+        Err(WalletAdminError::BadRequest(_))
+    ));
+    request.not_before_height = TIP + 1;
+    create_owned(&funded.context(), request).unwrap();
+    // The chain reaches maturity before the wallet records the promotion.
+    funded.advance(None);
+    tick(&funded.context()).await.unwrap();
+    let job = list(&funded.db).unwrap().items.remove(0);
+    assert_eq!(job.state, WalletJobState::Waiting);
+    assert_eq!(job.attempts, 0);
+    assert_eq!(
+        job.detail,
+        Some(format!(
+            "waiting for the selected rewards to mature at height {}",
+            TIP + 1
+        ))
+    );
+    funded.set_status(&box_ids[0], BoxStatus::Confirmed);
+    tick(&funded.context()).await.unwrap();
+    let job = list(&funded.db).unwrap().items.remove(0);
+    assert_eq!(job.state, WalletJobState::Queued, "{:?}", job.detail);
+    assert_eq!(job.attempts, 1);
+}
+
+#[tokio::test]
+async fn invalidated_scan_waits_without_spending_attempts() {
+    let mut funded = Funded::new();
+    let source = funded.owned(ERG, &[], &[0]);
+    let box_ids = funded.fund(vec![source]);
+    create_owned(
+        &funded.context(),
+        funded.job(WalletJobTask::Renew { box_ids }),
+    )
+    .unwrap();
+    let invalidate = |invalidated: bool| {
+        let write = funded.db.begin_write().unwrap();
+        write
+            .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .insert((), invalidated)
+            .unwrap();
+        write.commit().unwrap();
+    };
+    invalidate(true);
+    tick(&funded.context()).await.unwrap();
+    let job = list(&funded.db).unwrap().items.remove(0);
+    assert_eq!(job.state, WalletJobState::Waiting);
+    assert_eq!(job.attempts, 0);
+    assert_eq!(
+        job.detail,
+        Some(WalletAdminError::ScanInvalidated.to_string())
+    );
+    invalidate(false);
+    tick(&funded.context()).await.unwrap();
+    let job = list(&funded.db).unwrap().items.remove(0);
+    assert_eq!(job.state, WalletJobState::Queued);
+    assert_eq!(job.attempts, 1);
+}

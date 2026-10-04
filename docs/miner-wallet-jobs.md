@@ -18,8 +18,11 @@ Approving a job requires an initialized, validly scanned and unlocked wallet,
 like an intent send: the node later signs the job with the wallet key. The
 expiry height may be at most 21,600 blocks (about 30 days) above the chain tip
 at approval. Approved inputs are reserved from other wallet builds and jobs.
-The wallet must also be unlocked when the job prepares its transaction; a locked
-wallet waits without spending the retry allowance. The scheduler shares the
+The wallet must also be unlocked when the job prepares its transaction. A job
+waits without spending its attempts while the wallet is locked or its scan is
+invalidated, while selected rewards are still maturing, and while the private
+queue is unavailable, catching up with the chain, or slow to answer. A reward
+retrieval may not start before its rewards mature. The scheduler shares the
 existing wallet writer: preparation, signing, lock, cancellation, and shutdown
 remain serialized.
 

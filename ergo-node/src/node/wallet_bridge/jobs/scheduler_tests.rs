@@ -19,6 +19,7 @@ struct Probe {
     entries: Mutex<Vec<ergo_api::mining::PrivateTransactionEntry>>,
     submissions: Mutex<Vec<Vec<u8>>>,
     submit_hangs: AtomicBool,
+    submit_refusal: Mutex<Option<&'static str>>,
     cancellations: AtomicUsize,
     cancel_hangs: AtomicBool,
 }
@@ -64,6 +65,12 @@ impl TxSubmitter for Probe {
         self.submissions.lock().push(bytes);
         if self.submit_hangs.load(Ordering::SeqCst) {
             return std::future::pending().await;
+        }
+        if let Some(reason) = *self.submit_refusal.lock() {
+            return Err(ergo_api::types::SubmitError {
+                reason: reason.into(),
+                detail: Some("private admission waits for chain synchronization".into()),
+            });
         }
         Ok("22".repeat(32))
     }
@@ -388,12 +395,13 @@ async fn uncertain_submission_retries_same_bytes_only_after_successful_absence()
     assert_eq!(start.elapsed(), BACKGROUND_RPC_TIMEOUT);
     let record = records(&harness.db).unwrap().remove(0).1;
     assert_eq!(record.job.state, WalletJobState::Prepared);
-    assert_eq!(record.job.attempts, 1);
+    // A queue that never answered has not judged the transaction.
+    assert_eq!(record.job.attempts, 0);
     harness.height.0.store(11, Ordering::SeqCst);
     harness.probe.snapshot_fails.store(true, Ordering::SeqCst);
     tick(&harness.context()).await.unwrap();
     assert_eq!(harness.probe.submissions.lock().len(), 1);
-    assert_eq!(records(&harness.db).unwrap().remove(0).1.job.attempts, 1);
+    assert_eq!(records(&harness.db).unwrap().remove(0).1.job.attempts, 0);
     harness.height.0.store(12, Ordering::SeqCst);
     harness.probe.snapshot_fails.store(false, Ordering::SeqCst);
     harness.probe.submit_hangs.store(false, Ordering::SeqCst);
@@ -401,8 +409,28 @@ async fn uncertain_submission_retries_same_bytes_only_after_successful_absence()
     assert_eq!(*harness.probe.submissions.lock(), vec![vec![0xab, 0xcd]; 2]);
     let record = records(&harness.db).unwrap().remove(0).1;
     assert_eq!(record.job.state, WalletJobState::Queued);
-    assert_eq!(record.job.attempts, 2);
+    assert_eq!(record.job.attempts, 1);
     assert_eq!(record.signed_hex.as_deref(), Some("abcd"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn queue_refusals_while_catching_up_spend_no_attempts() {
+    let harness = Harness::new();
+    harness.seed(WalletJobState::Prepared, true);
+    *harness.probe.submit_refusal.lock() = Some("private_mining_unavailable");
+    for height in 10..20 {
+        harness.height.0.store(height, Ordering::SeqCst);
+        tick(&harness.context()).await.unwrap();
+    }
+    let record = records(&harness.db).unwrap().remove(0).1;
+    assert_eq!(harness.probe.submissions.lock().len(), 10);
+    assert_eq!(record.job.state, WalletJobState::Prepared);
+    assert_eq!(record.job.attempts, 0);
+    // A verdict on the transaction itself counts.
+    *harness.probe.submit_refusal.lock() = Some("private_transaction_rejected");
+    harness.height.0.store(20, Ordering::SeqCst);
+    tick(&harness.context()).await.unwrap();
+    assert_eq!(records(&harness.db).unwrap().remove(0).1.job.attempts, 1);
 }
 
 #[tokio::test(start_paused = true)]

@@ -40,12 +40,15 @@ pub enum WalletJobTask {
 pub struct WalletJobRequest {
     pub label: String,
     pub task: WalletJobTask,
-    /// Earliest applied block height at which preparation may begin.
+    /// Earliest applied block height at which preparation may begin; for
+    /// immature rewards, at least their maturity height.
     pub not_before_height: u32,
     /// Stop trying after this height and retire any unpublished private work.
     /// At most 21,600 blocks (about 30 days) above the chain tip at approval.
     pub expires_at_height: u32,
-    /// Maximum preparation/submission attempts (1..=100).
+    /// Maximum preparation/submission attempts (1..=100). Waiting for an
+    /// unlock, a valid wallet scan, reward maturity or an available private
+    /// queue does not count as an attempt.
     pub max_attempts: u32,
 }
 

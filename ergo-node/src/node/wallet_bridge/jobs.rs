@@ -268,6 +268,7 @@ pub(super) fn create_owned(
     reserved.extend(reserved_inputs(ctx.db)?);
     let read = ctx.db.begin_read().map_err(internal)?;
     let reader = WalletReader::new(&read);
+    let mut matures_at = None;
     for value in task_box_ids(&request.task) {
         let bytes: [u8; 32] = hex::decode(value)
             .map_err(internal)?
@@ -282,8 +283,10 @@ pub(super) fn create_owned(
             .box_by_id(&bytes)
             .map_err(internal)?
             .ok_or(WalletAdminError::BoxNotFound)?;
-        if matches!(wallet_box.status, BoxStatus::Spent { .. }) {
-            return Err(WalletAdminError::BoxNotFound);
+        match wallet_box.status {
+            BoxStatus::Spent { .. } => return Err(WalletAdminError::BoxNotFound),
+            BoxStatus::Immature { matures_at: height } => matures_at = matures_at.max(Some(height)),
+            BoxStatus::Confirmed => {}
         }
         let expected = if matches!(request.task, WalletJobTask::Rewards { .. }) {
             BoxProvenance::MinerReward
@@ -297,6 +300,12 @@ pub(super) fn create_owned(
         }
     }
     drop(read);
+    // A job cannot sign before its rewards mature, so its schedule starts there.
+    if let Some(height) = matures_at.filter(|height| request.not_before_height < *height) {
+        return Err(WalletAdminError::BadRequest(format!(
+            "selected rewards mature at height {height}; start the job at or after it"
+        )));
+    }
     match &request.task {
         WalletJobTask::Consolidate { destination, .. }
         | WalletJobTask::Rewards { destination, .. } => tracked_destination(ctx, destination)?,
@@ -445,6 +454,35 @@ fn mined_in_wallet(ctx: &WriterContext<'_>, tx_id: &str) -> Result<Option<bool>,
         .transaction_by_id(&tx_id)
         .map_err(internal)?;
     Ok(Some(found.is_some()))
+}
+
+/// Why an unsigned job must wait without spending its retry allowance: an
+/// invalidated wallet scan, or reward inputs that are still maturing.
+fn waiting_reason(
+    ctx: &WriterContext<'_>,
+    task: &WalletJobTask,
+) -> Result<Option<String>, WalletAdminError> {
+    if let Err(error) = super::scan_guard::require_valid_scan(ctx.store.as_ref()) {
+        return Ok(Some(error.to_string()));
+    }
+    let read = ctx.db.begin_read().map_err(internal)?;
+    let reader = WalletReader::new(&read);
+    let mut matures_at = None;
+    for value in task_box_ids(task) {
+        let bytes: [u8; 32] = hex::decode(value)
+            .map_err(internal)?
+            .try_into()
+            .map_err(|_| internal("bad journal box id"))?;
+        if let Some(BoxStatus::Immature { matures_at: height }) = reader
+            .box_by_id(&bytes)
+            .map_err(internal)?
+            .map(|wallet_box| wallet_box.status)
+        {
+            matures_at = matures_at.max(Some(height));
+        }
+    }
+    Ok(matures_at
+        .map(|height| format!("waiting for the selected rewards to mature at height {height}")))
 }
 
 fn task_box_ids(task: &WalletJobTask) -> &[String] {
@@ -908,6 +946,18 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
             }
             continue;
         }
+        // So do an invalidated scan and rewards that are still maturing.
+        if record.signed_hex.is_none() {
+            if let Some(detail) = waiting_reason(ctx, &record.job.request.task)? {
+                if record.job.state != WalletJobState::Waiting
+                    || record.job.detail.as_ref() != Some(&detail)
+                {
+                    transition(&mut record, WalletJobState::Waiting, Some(detail));
+                    save(ctx.db, job_id, &record)?;
+                }
+                continue;
+            }
+        }
         record.job.attempts += 1;
         record.last_attempt_height = Some(height);
         if record.signed_hex.is_none() {
@@ -936,6 +986,16 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                     return Ok(());
                 }
                 Err(error) => {
+                    // The tip moving during preparation, or a lock or scan
+                    // change racing it, is no verdict on the approved operation.
+                    if matches!(
+                        error,
+                        WalletAdminError::StaleChainTip(_)
+                            | WalletAdminError::Locked
+                            | WalletAdminError::ScanInvalidated
+                    ) {
+                        record.job.attempts -= 1;
+                    }
                     transition(
                         &mut record,
                         WalletJobState::Waiting,
@@ -978,11 +1038,21 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
             Err(error) if error.reason == "duplicate" => {
                 transition(&mut record, WalletJobState::Queued, None)
             }
-            Err(error) => transition(
-                &mut record,
-                WalletJobState::Prepared,
-                error.detail.or(Some(error.reason)),
-            ),
+            Err(error) => {
+                // A queue that is unavailable, catching up with the chain or
+                // slow to answer has not judged the transaction.
+                if matches!(
+                    error.reason.as_str(),
+                    "private_mining_unavailable" | "timeout"
+                ) {
+                    record.job.attempts -= 1;
+                }
+                transition(
+                    &mut record,
+                    WalletJobState::Prepared,
+                    error.detail.or(Some(error.reason)),
+                )
+            }
         }
         save(ctx.db, job_id, &record)?;
         return Ok(());

@@ -4802,12 +4802,17 @@ components:
         maxAttempts:
           type: integer
           format: int32
-          description: Maximum preparation/submission attempts (1..=100).
+          description: |-
+            Maximum preparation/submission attempts (1..=100). Waiting for an
+            unlock, a valid wallet scan, reward maturity or an available private
+            queue does not count as an attempt.
           minimum: 0
         notBeforeHeight:
           type: integer
           format: int32
-          description: Earliest applied block height at which preparation may begin.
+          description: |-
+            Earliest applied block height at which preparation may begin; for
+            immature rewards, at least their maturity height.
           minimum: 0
         task:
           $ref: '#/components/schemas/WalletJobTask'
