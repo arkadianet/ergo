@@ -817,17 +817,20 @@ mod spill_topology_tests {
 
     // ----- error paths -----
     #[test]
-    fn small_parent_rows_report_missing_first_spill_for_every_list() {
+    fn huge_parent_spill_counts_report_missing_first_spill_for_every_list() {
         let dir = tempfile::tempdir().unwrap();
         let (store, _) = IndexerStore::open(&dir.path().join("indexer.redb")).unwrap();
         let id = Digest32::from_bytes([7; 32]);
+        // A corrupt counter claims the most spills a row can encode, behind an
+        // empty head. Reserving entries from it (about 8.8 TB) fails
+        // allocation and aborts; readers grow only after a decoded spill.
         let mut address = IndexedAddress::empty(id);
-        address.segment.box_segment_count = 3;
-        address.segment.tx_segment_count = 3;
+        address.segment.box_segment_count = i32::MAX;
+        address.segment.tx_segment_count = i32::MAX;
         let mut template = IndexedTemplate::empty(id);
-        template.segment.box_segment_count = 3;
+        template.segment.box_segment_count = i32::MAX;
         let mut token = IndexedToken::empty(id);
-        token.segment.box_segment_count = 3;
+        token.segment.box_segment_count = i32::MAX;
         let write = store.begin_write().unwrap();
         let mut writer = VlqWriter::new();
         write_indexed_address(&mut writer, &address);
@@ -852,8 +855,6 @@ mod spill_topology_tests {
             .insert(token_key.as_bytes().as_slice(), writer.as_slice())
             .unwrap();
         write.commit().unwrap();
-        // Keep the fixture count small. Production readers start with Vec::new
-        // and only grow after a decoded spill, independently of this count.
         for result in [
             store.read_address_box_entries(&id),
             store.read_address_tx_entries(&id),
