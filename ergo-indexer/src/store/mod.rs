@@ -5,6 +5,7 @@
 pub(crate) mod address;
 pub(crate) mod boxes;
 pub(crate) mod meta;
+mod migration;
 pub(crate) mod numeric;
 pub(crate) mod paging;
 pub(crate) mod segment;
@@ -47,6 +48,8 @@ pub enum OpenOutcome {
     /// File present and `schema_version` matched — resumed from
     /// persisted meta.
     Resumed,
+    /// Schema 2 projections migrated atomically, preserving the checkpoint.
+    Migrated { previous_version: u32 },
     /// File present but `schema_version` mismatched — file deleted and
     /// recreated, meta empty.
     WipedAndRecreated { previous_version: u32 },
@@ -126,7 +129,8 @@ impl IndexerStore {
     /// |---|---|
     /// | File absent | Create fresh, `schema_version = INDEXER_SCHEMA_VERSION`. |
     /// | File present, `schema_version` matches | Resume. |
-    /// | File present, `schema_version` mismatches | Delete, recreate fresh. |
+    /// | File present, schema 2 | Migrate atomically; rebuild on failure. |
+    /// | File present, other `schema_version` mismatches | Delete, recreate fresh. |
     /// | File present, `schema_version` key missing | Halt `SchemaCorruption`. |
     /// | File present, redb open / table / decode failure | Halt `DbCorruption`. |
     pub fn open(path: &Path) -> Result<(Self, OpenOutcome), IndexerError> {
@@ -137,6 +141,14 @@ impl IndexerStore {
     pub fn open_with_cache(
         path: &Path,
         cache_bytes: usize,
+    ) -> Result<(Self, OpenOutcome), IndexerError> {
+        Self::open_with_migration(path, cache_bytes, migration::migrate_schema_2_to_3)
+    }
+
+    fn open_with_migration(
+        path: &Path,
+        cache_bytes: usize,
+        migrate: fn(&Database) -> Result<(), IndexerError>,
     ) -> Result<(Self, OpenOutcome), IndexerError> {
         if !path.exists() {
             return Self::create_fresh(path, cache_bytes).map(|s| (s, OpenOutcome::CreatedFresh));
@@ -187,6 +199,27 @@ impl IndexerStore {
             }
             Some(previous_version) => {
                 drop(read_txn);
+                if previous_version == 2 {
+                    match migrate(&db) {
+                        Ok(()) => {
+                            return Ok((
+                                Self {
+                                    db: Arc::new(db),
+                                    repair_running: Arc::new(AtomicBool::new(false)),
+                                    path: path.to_path_buf(),
+                                    redb_cache_bytes: cache_bytes,
+                                    rollback_window: ROLLBACK_WINDOW,
+                                },
+                                OpenOutcome::Migrated { previous_version },
+                            ));
+                        }
+                        Err(error) => tracing::warn!(
+                            event = "indexer_schema_migration_failed",
+                            %error,
+                            "schema-2 migration aborted; rebuilding index from genesis",
+                        ),
+                    }
+                }
                 drop(db);
                 tracing::info!(
                     previous_version,

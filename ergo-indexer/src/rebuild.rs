@@ -443,7 +443,7 @@ fn rebuild_box_chunk(
 
 // ---- small read helpers over a write-txn-opened table ----
 
-fn read_box_id(
+pub(crate) fn read_box_id(
     num_box_table: &impl ReadableTable<&'static [u8], &'static [u8]>,
     gi: u64,
 ) -> Result<Option<Digest32>, IndexerError> {
@@ -454,7 +454,7 @@ fn read_box_id(
     Ok(Some(digest_from_key(g.value())?))
 }
 
-fn read_box(
+pub(crate) fn read_box(
     box_table: &impl ReadableTable<&'static [u8], &'static [u8]>,
     box_id: &Digest32,
     gi: u64,
