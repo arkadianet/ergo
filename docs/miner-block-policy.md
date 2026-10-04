@@ -49,26 +49,43 @@ additional protection; it does not exclude private transactions. Rent claims
 also avoid inputs reserved by private or required transactions.
 
 The final fee-collection transaction is measured and validated too. Assembly
-may trim optional transactions from the tail until the complete section fits.
-An included required transaction cannot be trimmed to make room for fees.
-Candidate details contain exact retained categories, sizes, costs and exclusion
-reasons from that template rather than estimates from the live mempool.
+may trim transactions from the tail until the complete section fits. Required
+transactions are selected first, so they are trimmed only after every
+optional transaction. Candidate details contain exact retained categories,
+sizes, costs and exclusion reasons from that template rather than estimates
+from the live mempool.
 
 ## Required and excluded transactions
 
-Required IDs and every ID listed in a mandatory bundle must appear together
-in a valid final candidate. Available parents are included before children;
-listed bundle order is used when no dependency requires a different order.
-Requirements can refer to public or private transactions. Missing IDs,
-excluded ancestors, conflicts, failed validation or a budget that cannot fit
-the whole requirement withhold a candidate. Initial emission-only templates
-are disabled while requirements are present.
+Required IDs, including every ID listed in a bundle, get priority inclusion
+and never withhold work. Each requirement and its available ancestors are
+selected before private and public transactions, and rent claims avoid their
+inputs. Available parents are included before children; listed bundle order
+is used when no dependency requires a different order. Requirements can refer
+to public or private transactions.
 
-Requirements remain operator policy until cleared. Clear completed or stale
-requirements to resume ordinary mining after those transactions confirm or
-are replaced. The UI explains this behavior before saving. Use the ordinary
-private queue for transactions that may wait across candidate rebuilds without
-requiring the whole miner to wait.
+A requirement that cannot be included is left out of that candidate, which is
+still published. Candidate details list it among the exclusions with a reason
+that starts with `required_`:
+
+- `required_unavailable`: the ID is in neither the mempool nor the private
+  queue, for example because it was mined, replaced or expired.
+- `required_excluded_ancestor`: it depends on an excluded transaction.
+- `required_` followed by an ordinary selection reason, such as
+  `required_input_unavailable`, `required_input_conflict`,
+  `required_consensus_validation_failed` or `required_cost_budget`: selection
+  could not include it or one of its ancestors.
+- `required_final_fee_or_section_budget`: it was trimmed, after every
+  optional transaction, so that the fee transaction and section fit.
+
+Bundles set an order; they are not atomic. Each member is included or
+reported on its own. Initial emission-only templates are published as usual,
+and requirements arrive with the enriched refresh.
+
+Requirements remain operator policy until cleared. A requirement that has
+confirmed keeps being reported, as `required_input_unavailable` while the
+mempool still holds it and then as `required_unavailable`, until you remove
+it from the policy.
 
 Excluded IDs are never selected. Requirements and exclusions are compared by
 decoded transaction ID, so hexadecimal case cannot bypass a contradiction.

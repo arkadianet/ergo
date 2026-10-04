@@ -7,6 +7,10 @@ including recently superseded templates while the node retains them.
 The report lists transactions in block order with their origin, fee, measured
 validation cost, serialized size, inputs, outputs, scripts, token amounts and
 canonical signed bytes. An export button saves the same frozen JSON report.
+Exclusions name the transactions the build considered and left out, with the
+reason. A reason starting with `required_` marks a block-policy requirement
+that this template does not satisfy; the panel lists those first and work is
+published without them (see [miner-block-policy.md](miner-block-policy.md)).
 Header votes and extension fields show the commitments actually present in that
 template. All ERG and token quantities in the inspection API are decimal strings;
 browser clients must keep them as strings or use `BigInt`.

@@ -30,13 +30,15 @@ pub struct BlockPolicy {
     pub rent_max_size_basis_points: u16,
     pub private_reserved_cost_basis_points: u16,
     pub private_reserved_size_basis_points: u16,
-    /// Every required transaction and its available ancestors must be present
-    /// in the final candidate. Missing, conflicting or oversized requirements
-    /// stop candidate publication until the operator changes the policy.
+    /// Required transactions and their available ancestors are selected
+    /// before private and public transactions. One that is missing, blocked
+    /// or does not fit is left out and reported as a `required_` exclusion;
+    /// it never withholds the candidate and stays here until cleared.
     pub required_tx_ids: Vec<String>,
     pub excluded_tx_ids: Vec<String>,
-    /// Each list is an ordered mandatory bundle. Transaction dependencies are
-    /// still ordered before children; every listed transaction is required.
+    /// Each list is an ordered bundle of required transactions. Dependencies
+    /// are still ordered before children. Bundles order requirements; they
+    /// are not atomic, so each member is included or reported on its own.
     pub required_bundles: Vec<Vec<String>>,
     pub rent_token_policy: RentTokenPolicy,
 }

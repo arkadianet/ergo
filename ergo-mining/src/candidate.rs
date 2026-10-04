@@ -311,9 +311,6 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     check_build_cancelled(should_cancel)?;
     policy.validate()?;
-    if mode == BuildMode::Minimal && policy.has_required_transactions() {
-        return Ok(None);
-    }
     let private_ids: HashSet<_> = private_transactions
         .iter()
         .map(|entry| entry.tx_id)
@@ -860,18 +857,16 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
                 final_section_size = Some(section_size as u64);
                 break checked_fee;
             }
+            // Selection ordered requirements first, so a required transaction
+            // is trimmed only after every optional one; it is then reported
+            // rather than withholding the candidate.
             if let Some((transaction, _)) = user_checked.last() {
                 let id = Digest32::from_bytes(*transaction.tx_id());
-                if required_ids.contains(&id) {
-                    return Err(MiningError::InvalidConfig(format!(
-                        "required transaction {} exceeds the final block budget",
-                        hex::encode(id.as_bytes())
-                    )));
-                }
-                observation.excluded.push(ExcludedTransaction {
-                    tx_id: id,
-                    reason: "final_fee_or_section_budget".into(),
-                });
+                observation.excluded.push(ExcludedTransaction::new(
+                    id,
+                    "final_fee_or_section_budget",
+                    required_ids.contains(&id),
+                ));
             }
             user_checked.pop();
         };

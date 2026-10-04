@@ -45,6 +45,23 @@ pub struct ExcludedTransaction {
     pub reason: String,
 }
 
+/// Prefix marking an operator requirement this template does not satisfy.
+/// The candidate is published without it; the requirement stays in policy.
+pub const REQUIRED_EXCLUSION_PREFIX: &str = "required_";
+
+impl ExcludedTransaction {
+    /// An exclusion for `reason`, prefixed with [`REQUIRED_EXCLUSION_PREFIX`]
+    /// when the transaction is required (a policy ID or one of its ancestors).
+    pub fn new(tx_id: Digest32, reason: &str, required: bool) -> Self {
+        let reason = if required {
+            format!("{REQUIRED_EXCLUSION_PREFIX}{reason}")
+        } else {
+            reason.to_owned()
+        };
+        Self { tx_id, reason }
+    }
+}
+
 /// One bounded lifecycle observation. This is local diagnostics, not a durable
 /// accounting ledger or evidence that a block remains on the canonical chain.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

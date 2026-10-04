@@ -16,6 +16,33 @@ export function matchesTemplate(details, candidate) {
   return !!details && !!candidate && details.msg === candidate.msg && details.template_seq === candidate.template_seq;
 }
 
+// Exclusion reasons recorded by candidate assembly. A `required_` prefix marks
+// a block-policy requirement the template leaves out; mining continues.
+const EXCLUSION_REASONS = {
+  excluded_by_policy: 'excluded by your block policy',
+  unavailable: 'not in the mempool or private queue (mined, replaced or expired)',
+  excluded_ancestor: 'depends on a transaction your policy excludes',
+  cost_budget: 'did not fit the remaining validation cost',
+  size_budget: 'did not fit the remaining block size',
+  input_conflict: 'an input is already spent in this block',
+  input_unavailable: 'an input is spent or not yet available',
+  data_input_unavailable: 'a data input is not available',
+  malformed_transaction: 'could not be decoded',
+  consensus_validation_failed: 'failed validation for this block',
+  final_fee_or_section_budget: 'trimmed so the fee transaction and block section fit',
+};
+const REQUIRED = 'required_';
+
+export const isUnmetRequirement = (entry) => String(entry?.reason ?? '').startsWith(REQUIRED);
+
+export function exclusionLabel(reason) {
+  const text = String(reason ?? '');
+  const required = text.startsWith(REQUIRED);
+  const base = required ? text.slice(REQUIRED.length) : text;
+  const detail = EXCLUSION_REASONS[base] || base.replaceAll('_', ' ') || 'unknown reason';
+  return required ? `Required, not included: ${detail}` : detail.charAt(0).toUpperCase() + detail.slice(1);
+}
+
 export function inspectorMessage(result) {
   if (!result) return 'Waiting for a candidate to inspect.';
   if (result.status === 401 || result.status === 403) return 'Authorize to inspect transaction contents and miner proceeds.';
@@ -108,6 +135,8 @@ function detailsView(details) {
   context.append(kv('Template', `${num(details.template_seq)} · ${details.status.replaceAll('_', ' ')}`), kv('Height', num(details.height)), kv('Published', new Date(details.published_at_ms).toLocaleString()), kv('Build', `${details.build_mode} · ${details.build_reason}`), kv('Parent block', idNode(details.parent_id)));
   root.append(context);
   if (details.build_mode === 'initial') root.append(el('p', 'muted', 'The first template after a new block contains emission only. The enriched refresh adds selected transactions and storage rent.'));
+  const unmet = details.exclusions.filter(isUnmetRequirement);
+  if (unmet.length) root.append(el('p', 'mining-inspector__burn', `${num(unmet.length)} required ${unmet.length === 1 ? 'transaction is' : 'transactions are'} not in this template; mining continues without ${unmet.length === 1 ? 'it' : 'them'}. Requirements stay in your block policy until you clear them. See the excluded transactions below.`));
   const rewards = el('div', 'mining-inspector__rewards');
   for (const [label, amount] of [['Emission', details.rewards.emission_nano_erg], ['Transaction fees', details.rewards.fees_nano_erg], ['Storage rent', details.rewards.rent_nano_erg], ['Total miner proceeds', details.rewards.total_nano_erg]]) rewards.append(kv(label, money(amount)));
   root.append(rewards);
@@ -141,8 +170,12 @@ function detailsView(details) {
     { key: 'collected_nano_erg', label: 'Rent collected', width: 140, render: (b) => money(b.collected_nano_erg), sort: (b) => BigInt(b.collected_nano_erg) },
   ], { rowKey: (b) => b.box_id, renderDetail: (b) => assetsView(b.input_assets), label: 'Storage rent inputs' });
   root.append(rent.root);
-  const exclusions = section(`Transactions excluded · ${num(details.exclusions.length)}`);
-  for (const entry of details.exclusions) exclusions.body.append(kv(entry.reason, idNode(entry.transaction_id)));
+  const exclusions = section(`Transactions excluded · ${num(details.exclusions.length)}`, unmet.length > 0);
+  for (const entry of [...unmet, ...details.exclusions.filter((e) => !isUnmetRequirement(e))]) {
+    const row = kv(exclusionLabel(entry.reason), idNode(entry.transaction_id));
+    row.title = entry.reason;
+    exclusions.body.append(row);
+  }
   if (!details.exclusions.length) exclusions.body.append(el('p', 'muted', 'No recorded exclusions.'));
   root.append(exclusions.root);
   const protocol = section('Votes and extension commitments');
