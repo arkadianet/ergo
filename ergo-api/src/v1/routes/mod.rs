@@ -362,6 +362,7 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             get(mempool::transaction_by_id),
         )
         .route("/api/v1/mempool/fee-histogram", get(mempool::fee_histogram))
+        .route("/api/v1/mempool/fee-estimate", get(mempool::fee_estimate))
         // ----- protocols/* registry discovery (static, indexer-free) -----
         .route("/api/v1/protocols", get(decode::list_protocols))
         .route(

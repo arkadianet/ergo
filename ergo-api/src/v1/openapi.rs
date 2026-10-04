@@ -142,6 +142,7 @@ Use BigInt with a lossless parser and send cursor query parameters as decimal te
         crate::v1::routes::mempool::by_box_id,
         crate::v1::routes::mempool::by_token_id,
         crate::v1::routes::mempool::fee_histogram,
+        crate::v1::routes::mempool::fee_estimate,
         crate::v1::routes::transactions::tx_by_id,
         crate::v1::routes::transactions::submit,
         crate::v1::routes::transactions::check,

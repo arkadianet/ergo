@@ -183,12 +183,11 @@ fn pooled_status(state: &V1State, row: crate::types::ApiMempoolTransaction) -> S
     };
 
     let interval_ms = state.read.info().target_block_interval_ms.max(1);
-    // No wait-time oracle (chain reader unwired) → an honest null, never a
-    // fabricated one-block estimate.
+    // Omit ETA when the reader or its observed wait estimate is unavailable.
     let eta_ms = state
         .chain
         .as_ref()
-        .map(|c| c.pool_expected_wait_time_ms(row.fee_nano_erg, row.size_bytes));
+        .and_then(|c| c.pool_wait_estimate_ms(row.fee_nano_erg, row.size_bytes));
     let eta_blocks =
         eta_ms.map(|ms| (ms.div_ceil(interval_ms)).max(1).min(u64::from(u32::MAX)) as u32);
 

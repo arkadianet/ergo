@@ -4425,7 +4425,7 @@ paths:
         - transactions
       responses:
         '200':
-          description: Recommended fee for the transaction (in nanoErgs)
+          description: Recommended fee from observed canonical block timing and byte/cost capacity (in nanoErgs); falls back to the configured relay fee floor when observations are insufficient
           content:
             application/json:
               schema:
@@ -4464,7 +4464,7 @@ paths:
         - transactions
       responses:
         '200':
-          description: Expected wait time in milliseconds
+          description: Expected wait time in milliseconds from observed canonical block timing and capacity; 0 denotes insufficient observations, matching Scala; use /api/v1/mempool/fee-estimate for nullable estimates and confidence
           content:
             application/json:
               schema:

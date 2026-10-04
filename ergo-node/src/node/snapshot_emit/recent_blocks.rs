@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use ergo_api::types::ApiRecentBlock;
+use ergo_api::types::{ApiBlockFeeObservation, ApiRecentBlock};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::address::{encode_p2pk_from_pubkey, NetworkPrefix};
 use ergo_ser::block_transactions::read_stored_block_transactions;
@@ -25,6 +25,8 @@ const RECENT_BLOCKS_CAP: usize = 32;
 /// is too heavy to redo on every `sync_tick`; the tail only changes when
 /// the full-block tip advances, so we recompute only when `tip_id` differs
 /// from the cached entry and otherwise hand back the cached allocation.
+/// On a changed tip, reuse observations for immutable ancestors by header ID;
+/// only newly encountered canonical blocks require section parsing and sizing.
 /// Takes the cache and store as separate borrows (disjoint `NodeState`
 /// fields) so the call site can hold a `&mut` to the cache without aliasing
 /// the rest of `state`.
@@ -60,7 +62,10 @@ pub(super) fn recent_blocks_for_tip(
             return c.blocks.clone();
         }
     }
-    let blocks = Arc::new(build_recent_blocks(store, tip_id, tip_height, network));
+    let previous = cache.as_ref().map_or(&[][..], |c| c.blocks.as_slice());
+    let blocks = Arc::new(build_recent_blocks_reusing(
+        store, tip_id, tip_height, network, previous,
+    ));
     // Contiguous-from-tip: `blocks[i]` must be height `tip_height - i`. This
     // implies the tip itself was emitted (i = 0) and that no ancestor inside
     // the window was skipped on a transient fault. An empty tail (tip block
@@ -163,11 +168,12 @@ fn decode_header_id(hex_id: &str) -> Option<[u8; 32]> {
 /// [`StateBackendKind::state_root_digest`]), so the backend gate lives HERE:
 /// a digest backend gets an empty recent-blocks tail rather than adopting the
 /// wrong size rule.
-fn build_recent_blocks(
+fn build_recent_blocks_reusing(
     store: &StateBackendKind,
     tip_id: [u8; 32],
     tip_height: u32,
     network: NetworkPrefix,
+    previous: &[ApiRecentBlock],
 ) -> Vec<ApiRecentBlock> {
     let mut out = Vec::new();
     if tip_height == 0 || store.as_utxo().is_none() {
@@ -200,7 +206,10 @@ fn build_recent_blocks(
             }
         };
         let parent = *header.parent_id.as_bytes();
-        if let Some(block) =
+        let id_hex = hex::encode(id);
+        if let Some(cached) = previous.iter().find(|block| block.header_id == id_hex) {
+            out.push(cached.clone());
+        } else if let Some(block) =
             try_recent_block(&sections, &id, height, &header, header_bytes.len(), network)
         {
             out.push(block);
@@ -215,6 +224,16 @@ fn build_recent_blocks(
         height -= 1;
     }
     out
+}
+
+#[cfg(test)]
+fn build_recent_blocks(
+    store: &StateBackendKind,
+    tip_id: [u8; 32],
+    tip_height: u32,
+    network: NetworkPrefix,
+) -> Vec<ApiRecentBlock> {
+    build_recent_blocks_reusing(store, tip_id, tip_height, network, &[])
 }
 
 /// Build one recent-blocks entry from a parsed header plus its on-disk
@@ -306,20 +325,81 @@ fn try_recent_block(
             return None;
         }
     };
+    recent_block_from_transactions(
+        &bt,
+        id,
+        height,
+        header,
+        (header_len + tx_bytes.len() + ext_len + adp_len) as u64,
+        tx_bytes.len() as u64,
+        network,
+    )
+}
+
+fn recent_block_from_transactions(
+    bt: &ergo_ser::block_transactions::BlockTransactions,
+    id: &[u8; 32],
+    height: u32,
+    header: &Header,
+    size_bytes: u64,
+    transactions_size_bytes: u64,
+    network: NetworkPrefix,
+) -> Option<ApiRecentBlock> {
     let (miner_pk, miner_address) = miner_fields(header.solution.pk().as_bytes(), network);
     Some(ApiRecentBlock {
         height,
         header_id: hex::encode(id),
         ts_unix_ms: header.timestamp,
         txs: bt.transactions.len() as u32,
-        size_bytes: (header_len + tx_bytes.len() + ext_len + adp_len) as u64,
-        // `delivered_by` is merged in at snapshot-assembly time from the
-        // first-deliverer ring (a transient P2P fact), NOT baked into the
-        // tip-keyed recent-blocks cache (committed-state only). See
-        // `merge_delivered_by` at the `publish_snapshot` call site.
+        size_bytes,
+        // A fee measurement fault must not erase an otherwise readable block.
+        fee_observation: block_fee_observation(&bt.transactions, transactions_size_bytes),
         delivered_by: None,
         miner_pk,
         miner_address,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static FEE_OBSERVATION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Extract samples from actual confirmed transactions, not mempool removals.
+fn block_fee_observation(
+    txs: &[ergo_ser::transaction::Transaction],
+    section_bytes: u64,
+) -> Option<ApiBlockFeeObservation> {
+    #[cfg(test)]
+    FEE_OBSERVATION_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let mut rates = Vec::new();
+    let mut fee_paying_size_bytes = 0u64;
+    for tx in txs {
+        let fee = tx
+            .output_candidates
+            .iter()
+            .filter(|output| {
+                output.ergo_tree_bytes() == ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES
+            })
+            .fold(0u64, |total, output| total.saturating_add(output.value));
+        if fee == 0 {
+            continue;
+        }
+        let mut writer = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::transaction::write_transaction(&mut writer, tx).ok()?;
+        let bytes = writer.result().len() as u64;
+        if bytes == 0 {
+            continue;
+        }
+        fee_paying_size_bytes = fee_paying_size_bytes.saturating_add(bytes);
+        rates.push(fee / bytes);
+    }
+    rates.sort_unstable();
+    Some(ApiBlockFeeObservation {
+        transactions_size_bytes: section_bytes,
+        fee_paying_transactions: rates.len() as u32,
+        fee_paying_size_bytes,
+        median_fee_per_byte_nano_erg: rates.get(rates.len() / 2).copied(),
     })
 }
 
@@ -346,6 +426,46 @@ mod tests {
     use ergo_ser::modifier_id::{TYPE_AD_PROOFS, TYPE_BLOCK_TRANSACTIONS, TYPE_EXTENSION};
     use ergo_state::store::StateStore;
     use std::time::Instant;
+
+    #[test]
+    fn fee_observations_count_only_fee_outputs_in_actual_block_transactions() {
+        use ergo_ser::ergo_box::ErgoBoxCandidate;
+        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+        use ergo_ser::register::AdditionalRegisters;
+        let ordinary = [0, 8, 0xd3];
+        let output = |value, bytes: &[u8]| {
+            ErgoBoxCandidate::new(
+                value,
+                ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(bytes)).unwrap(),
+                100,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()
+        };
+        let mut confirmed = ergo_ser::transaction::Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes([1; 32]),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![output(1_000_000, &ordinary)],
+        };
+        let without_fee = confirmed.clone();
+        confirmed.output_candidates.push(output(
+            2_000_000,
+            ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES,
+        ));
+        let samples = block_fee_observation(&[confirmed.clone(), without_fee], 10_000).unwrap();
+        assert_eq!(samples.fee_paying_transactions, 1);
+        let mut writer = VlqWriter::new();
+        ergo_ser::transaction::write_transaction(&mut writer, &confirmed).unwrap();
+        assert_eq!(samples.fee_paying_size_bytes, writer.result().len() as u64);
+        assert_eq!(
+            samples.median_fee_per_byte_nano_erg,
+            Some(2_000_000 / samples.fee_paying_size_bytes)
+        );
+    }
 
     // ----- helpers -----
 
@@ -625,6 +745,147 @@ mod tests {
         assert_eq!(third[0].height, 1);
     }
 
+    #[test]
+    fn advancing_tip_only_measures_new_canonical_blocks() {
+        let (_tmp, store) = open_store();
+        let (h1, id1, b1) = header(1, [0; 32], 10);
+        let (h2, id2, b2) = header(2, id1, 20);
+        let (h3, id3, b3) = header(3, id2, 30);
+        let ext = vec![0xee; 4];
+        for (h, id, bytes) in [(&h1, id1, &b1), (&h2, id2, &b2), (&h3, id3, &b3)] {
+            store_block(&store, h, id, bytes, true, Some(&ext), None);
+        }
+        let backend = StateBackendKind::Utxo(store);
+        let mut cache = None;
+        let previous = recent_blocks_for_tip(&mut cache, &backend, id2, 2, NetworkPrefix::Mainnet);
+        FEE_OBSERVATION_CALLS.with(|calls| calls.set(0));
+        let next = recent_blocks_for_tip(&mut cache, &backend, id3, 3, NetworkPrefix::Mainnet);
+        assert_eq!(next.len(), 3);
+        assert_eq!(
+            serde_json::to_value(&next[1].fee_observation).unwrap(),
+            serde_json::to_value(&previous[0].fee_observation).unwrap()
+        );
+        FEE_OBSERVATION_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+    }
+
+    #[test]
+    fn fee_measurement_failure_keeps_recent_block_metadata() {
+        let (header, id, _) = header(1, [0; 32], 10);
+        let mut bt = read_stored_block_transactions(&tx_section(id)).unwrap();
+        bt.transactions[0].output_candidates.push(
+            ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                2_000_000,
+                ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(
+                    ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES,
+                ))
+                .unwrap(),
+                1,
+                vec![],
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+        );
+        let input = bt.transactions[0].inputs[0].clone();
+        bt.transactions[0].inputs = vec![input; usize::from(u16::MAX) + 1];
+        assert!(block_fee_observation(&bt.transactions, 1000).is_none());
+        let block = recent_block_from_transactions(
+            &bt,
+            &id,
+            1,
+            &header,
+            2000,
+            1000,
+            NetworkPrefix::Mainnet,
+        )
+        .unwrap();
+        assert_eq!(block.height, 1);
+        assert_eq!(block.header_id, hex::encode(id));
+        assert_eq!(block.txs, 1);
+        assert_eq!(block.size_bytes, 2000);
+        assert!(block.fee_observation.is_none());
+    }
+
+    #[test]
+    fn recent_blocks_cache_replaces_fee_samples_on_same_height_reorg() {
+        let (_tmp, store) = open_store();
+        let (h1, id1, b1) = header(1, [0; 32], 10);
+        let (h2, id2, b2) = header(2, id1, 20);
+        let (fork, fork_id, fork_bytes) = header(2, id1, 21);
+        let ext = vec![0xEE; 4];
+        store_block(&store, &h1, id1, &b1, true, Some(&ext), None);
+        store_block(&store, &h2, id2, &b2, true, Some(&ext), None);
+        store_block(&store, &fork, fork_id, &fork_bytes, false, Some(&ext), None);
+        let mut fork_txs = read_stored_block_transactions(&tx_section(fork_id)).unwrap();
+        fork_txs.transactions[0].output_candidates.push(
+            ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                2_000_000,
+                ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(
+                    ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES,
+                ))
+                .unwrap(),
+                2,
+                vec![],
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+        );
+        let mut writer = VlqWriter::new();
+        ergo_ser::block_transactions::write_block_transactions_with_version(
+            &mut writer,
+            &fork_txs,
+            fork.version,
+        )
+        .unwrap();
+        let expected = ExpectedSections::from_header(
+            &fork_id,
+            fork.transactions_root.as_bytes(),
+            fork.extension_root.as_bytes(),
+            fork.ad_proofs_root.as_bytes(),
+        );
+        store
+            .store_block_section_typed(
+                &expected.transactions_id,
+                &writer.result(),
+                TYPE_BLOCK_TRANSACTIONS,
+            )
+            .unwrap();
+        let backend = StateBackendKind::Utxo(store);
+        let mut cache = None;
+        let previous = recent_blocks_for_tip(&mut cache, &backend, id2, 2, NetworkPrefix::Mainnet);
+        let replacement =
+            recent_blocks_for_tip(&mut cache, &backend, fork_id, 2, NetworkPrefix::Mainnet);
+        assert!(!Arc::ptr_eq(&previous, &replacement));
+        assert_eq!(replacement[0].header_id, hex::encode(fork_id));
+        assert!(replacement
+            .iter()
+            .all(|block| block.header_id != hex::encode(id2)));
+        assert_eq!(
+            replacement[0]
+                .fee_observation
+                .as_ref()
+                .unwrap()
+                .fee_paying_transactions,
+            previous[0]
+                .fee_observation
+                .as_ref()
+                .unwrap()
+                .fee_paying_transactions
+                + 1
+        );
+        assert_ne!(
+            replacement[0]
+                .fee_observation
+                .as_ref()
+                .unwrap()
+                .median_fee_per_byte_nano_erg,
+            previous[0]
+                .fee_observation
+                .as_ref()
+                .unwrap()
+                .median_fee_per_byte_nano_erg
+        );
+    }
+
     /// A transient fault on an *ancestor* section leaves a gap in the tail;
     /// the contiguity guard refuses to cache it, so the next tick (same tip)
     /// recomputes and self-heals once the section reads cleanly — no tip
@@ -774,6 +1035,7 @@ mod tests {
             ts_unix_ms: 0,
             txs: 0,
             size_bytes: 0,
+            fee_observation: None,
             delivered_by: None,
             miner_pk: None,
             miner_address: None,

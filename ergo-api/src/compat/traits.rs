@@ -430,6 +430,18 @@ pub trait NodeChainQuery: Send + Sync {
         Vec::new()
     }
 
+    /// Operator fee estimate with observation coverage and explicit unknowns.
+    /// Compatibility scalar endpoints may fall back to the relay floor when
+    /// recent canonical block observations are insufficient.
+    fn pool_fee_estimate(
+        &self,
+        _target_wait_ms: u64,
+        _tx_size_bytes: u32,
+        _tx_cost_units: u64,
+    ) -> Option<crate::types::ApiFeeEstimate> {
+        None
+    }
+
     /// `POST /transactions/unconfirmed/byBoxId` — pool txs that
     /// spend the supplied 32-byte box id (input side). The handler
     /// owns the hex+length validation; this method receives the
@@ -480,11 +492,9 @@ pub trait NodeChainQuery: Send + Sync {
     /// last entry covers `>= maxtime_ms`. OpenAPI defaults:
     /// `bins = 10`, `maxtime = 60000` ms (1 minute).
     ///
-    /// Per-tx wait-time estimate: bridge ranks pool txs by
-    /// fee-per-byte descending; tx at rank `r` has estimated
-    /// wait `(r / TX_PER_BLOCK) * BLOCK_TIME_MS`. Fee is the sum
-    /// of output values paying to the canonical fee proposition
-    /// (matches `ergo-mempool::validator`).
+    /// Bins measure time already spent in the pool, matching Scala's
+    /// HistogramStats. totalFee sums each transaction's fee per factor
+    /// (scaled by 1024), using the configured cost/size/min weighting.
     fn pool_fee_histogram(
         &self,
         _bins: u32,
@@ -502,10 +512,16 @@ pub trait NodeChainQuery: Send + Sync {
         0
     }
 
+    /// Observed wait for native transaction status; absent when statistics
+    /// cannot support a forecast. Scalar compatibility fallbacks are separate.
+    fn pool_wait_estimate_ms(&self, _fee: u64, _tx_size_bytes: u32) -> Option<u64> {
+        None
+    }
+
     /// `GET /transactions/waitTime?fee=<nanoErgs>&txSize=<bytes>` —
     /// expected wait in milliseconds for a tx with the given
-    /// `fee` and `tx_size_bytes`. Default impl returns 0 (immediate)
-    /// when the pool is empty.
+    /// `fee` and `tx_size_bytes`. Returns 0 without sufficient observed
+    /// statistics, matching Scala; native estimates remain optional.
     fn pool_expected_wait_time_ms(&self, _fee: u64, _tx_size_bytes: u32) -> u64 {
         0
     }
