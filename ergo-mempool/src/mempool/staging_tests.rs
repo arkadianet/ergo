@@ -950,68 +950,73 @@ fn package_child_stops_when_initial_unresolved_validation_spends_the_budget() {
 
 #[test]
 fn stale_held_parent_keeps_its_identity_when_its_source_budget_is_exhausted() {
-    let mut mp = Mempool::new(
-        MempoolConfig {
-            max_pool_size: 2,
-            ..base_cfg()
-        },
-        Box::new(ByCost),
-    );
-    let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
-    let before = TestTip::at_height(1000);
-    let after = TestTip::at_height(1001);
-    let validator = PoolAwareProbe::new()
-        .plan(10, 1_000_000, &[0x90], &[0x9A])
-        .plan(11, 3_000_000, &[0x91], &[0x9B])
-        .plan(1, 1_000_000, &[0x70], &[0x71])
-        .plan(2, 10_000_000, &[0x71], &[0x72]);
-    let peer = "127.0.0.1:9000".parse().unwrap();
-    let now = Instant::now();
-    for tx in [10, 11] {
+    let parent_peer = "127.0.0.1:9000".parse().unwrap();
+    let child_peer: std::net::SocketAddr = "127.0.0.1:9001".parse().unwrap();
+    // The child's own source decides its reported reason; the exhausted
+    // parent source never blames a submitter whose budget still has room.
+    for (child, expected) in [
+        (TxSource::Api, RejectReason::UnresolvedInput),
+        (
+            TxSource::Peer(child_peer),
+            RejectReason::PeerBudgetExhausted,
+        ),
+    ] {
+        let mut mp = Mempool::new(
+            MempoolConfig {
+                max_pool_size: 2,
+                ..base_cfg()
+            },
+            Box::new(ByCost),
+        );
+        let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+        let before = TestTip::at_height(1000);
+        let after = TestTip::at_height(1001);
+        let validator = PoolAwareProbe::new()
+            .plan(10, 1_000_000, &[0x90], &[0x9A])
+            .plan(11, 3_000_000, &[0x91], &[0x9B])
+            .plan(1, 1_000_000, &[0x70], &[0x71])
+            .plan(2, 10_000_000, &[0x71], &[0x72]);
+        let now = Instant::now();
+        for tx in [10, 11] {
+            mp.process(
+                &tx_bytes(tx),
+                TxSource::Api,
+                now,
+                &before.view(&utxo),
+                &validator,
+            );
+        }
         mp.process(
-            &tx_bytes(tx),
-            TxSource::Api,
+            &tx_bytes(1),
+            TxSource::Peer(parent_peer),
             now,
             &before.view(&utxo),
             &validator,
         );
+        mp.budgets = CostBudgets::new(100_000, 10_000, 0);
+        mp.budgets
+            .charge(crate::budget::BudgetSource::Peer(parent_peer), 10_000);
+        let (outcome, actions) =
+            mp.process(&tx_bytes(2), child, now, &after.view(&utxo), &validator);
+        assert_eq!(outcome, AdmissionOutcome::Rejected { reason: expected });
+        assert_eq!(
+            validator.calls.borrow()[&tx_bytes(1)],
+            1,
+            "no stale parent re-evaluation"
+        );
+        assert_eq!(validator.calls.borrow()[&tx_bytes(2)], 1);
+        assert_eq!(mp.budgets.global_consumed(), 20_000);
+        assert_eq!(
+            mp.staging_len(),
+            1,
+            "budget refusal does not evict a valid held parent"
+        );
+        assert!(
+            !mp.unresolved_contains(&tx_bytes(2)),
+            "a retry after the budget reset can reach the package"
+        );
+        assert!(broadcasts(&actions).is_empty());
     }
-    mp.process(
-        &tx_bytes(1),
-        TxSource::Peer(peer),
-        now,
-        &before.view(&utxo),
-        &validator,
-    );
-    mp.budgets = CostBudgets::new(100_000, 10_000, 0);
-    mp.budgets
-        .charge(crate::budget::BudgetSource::Peer(peer), 10_000);
-    let (outcome, actions) = mp.process(
-        &tx_bytes(2),
-        TxSource::Api,
-        now,
-        &after.view(&utxo),
-        &validator,
-    );
-    assert_eq!(
-        outcome,
-        AdmissionOutcome::Rejected {
-            reason: RejectReason::PeerBudgetExhausted
-        }
-    );
-    assert_eq!(
-        validator.calls.borrow()[&tx_bytes(1)],
-        1,
-        "no stale parent re-evaluation"
-    );
-    assert_eq!(validator.calls.borrow()[&tx_bytes(2)], 1);
-    assert_eq!(mp.budgets.global_consumed(), 20_000);
-    assert_eq!(
-        mp.staging_len(),
-        1,
-        "budget refusal does not evict a valid held parent"
-    );
-    assert!(broadcasts(&actions).is_empty());
 }
 
 #[test]

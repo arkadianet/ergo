@@ -784,9 +784,26 @@ impl Mempool {
                         }
                         // Stale/invalid at the new tip → evict it and abort: the
                         // child's ancestor chain is broken.
-                        Err(PackageValidationError::Budget(reason)) => {
+                        Err(PackageValidationError::Budget(_)) => {
                             // Budget exhaustion is temporary, not evidence
-                            // that the held ancestor became invalid.
+                            // that the held ancestor became invalid. Report
+                            // the submitter's own budget state: when only the
+                            // ancestor's source is exhausted, the child's input
+                            // stays unresolved for now, and a retry may reach
+                            // the package once that budget resets.
+                            let reason = match self
+                                .budgets
+                                .pre_admission_check(source.budget_source())
+                            {
+                                BudgetVerdict::PeerExhausted => RejectReason::PeerBudgetExhausted,
+                                BudgetVerdict::GlobalExhausted => {
+                                    RejectReason::GlobalBudgetExhausted
+                                }
+                                BudgetVerdict::Ok => {
+                                    self.unresolved.remove(c_bytes);
+                                    RejectReason::UnresolvedInput
+                                }
+                            };
                             return Some(rejected(reason));
                         }
                         Err(PackageValidationError::Validation(_)) => {

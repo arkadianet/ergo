@@ -61,7 +61,9 @@ staging, and reorg maintenance. Consensus validation is delegated to
   `canAccept` does. Validation work is charged before later conflict/capacity
   decisions.
   Each fresh package evaluation passes its original source budget first; temporary
-  budget refusal preserves held ancestors. Demoted-source exemption is explicit.
+  budget refusal preserves held ancestors and reports the submitter's own budget
+  state (an unresolved input when only an ancestor's source is exhausted).
+  Demoted-source exemption is explicit.
 - Replacement uses weight rather than only absolute fee. Package replacement
   additionally compares aggregate fee and weight against its measured conflict
   closure. Evicting admission changes are staged and adopted only on success.
