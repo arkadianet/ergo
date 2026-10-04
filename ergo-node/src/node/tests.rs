@@ -204,6 +204,7 @@ fn make_state_with_backend(
         wallet_hook: None,
         mining_enabled: false,
         mined_apply_failed_parent: None,
+        private_mining: Default::default(),
         api_publicly_bound: false,
         api_weight_function: ergo_api::types::ApiWeightFunction::Cost,
         recent_blocks_cache: None,

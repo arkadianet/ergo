@@ -26,7 +26,7 @@ use crate::v1::routes::chain::chain_read_failed;
 /// Map a [`MiningApiError`] onto the standard v1 error envelope. `unavailable`
 /// picks the endpoint-appropriate 503 reason (`candidate_unavailable` for the
 /// candidate path, `reward_unavailable` for the reward path).
-fn map_mining_error(e: MiningApiError, unavailable: Reason) -> Response {
+pub(super) fn map_mining_error(e: MiningApiError, unavailable: Reason) -> Response {
     match e {
         MiningApiError::InvalidPow => v1_error(
             Reason::InvalidPow,
@@ -145,9 +145,8 @@ pub(crate) async fn miner_stats(
 
 /// The `mining/status` aggregate. Always `200` — safe to poll from an
 /// unauthenticated dashboard even when mining is off (hence T0). The
-/// `last_template_*` / `template_seq` fields require the mining bridge to cache
-/// its last-published template metadata; that seam is not wired yet, so they are
-/// emitted as `null` (honest) rather than fabricated.
+/// Freshness comes from the served cache and contains no transaction content.
+/// `synced` means the mining-started latch when mining is enabled.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct MiningStatus {
     mining_enabled: bool,
@@ -165,19 +164,27 @@ pub(crate) struct MiningStatus {
 #[utoipa::path(
     get, path = "/api/v1/mining/status",
     operation_id = "v1_mining_status_get", tag = "mining",
-    responses((status = 200, description = "Mining capability + template freshness (nulls until the template-cache seam is wired)", body = MiningStatus)),
+    responses((status = 200, description = "Mining capability and current served-template freshness", body = MiningStatus)),
 )]
 pub(crate) async fn status(State(s): State<OperatorState>) -> Response {
     let mining_enabled = s.read.identity().mining;
-    let synced = s.read.status().sync_state == SyncStateLabel::AtTip;
+    let freshness = match &s.mining {
+        Some(m) => m.mining_freshness().await.unwrap_or_default(),
+        None => Default::default(),
+    };
+    let synced = if mining_enabled {
+        freshness.mining_started
+    } else {
+        s.read.status().sync_state == SyncStateLabel::AtTip
+    };
     Json(MiningStatus {
         mining_enabled,
         synced,
         longpoll_supported: true,
-        last_template_msg: None,
-        last_template_height: None,
-        last_template_age_ms: None,
-        template_seq: None,
+        last_template_msg: freshness.last_template_msg,
+        last_template_height: freshness.last_template_height,
+        last_template_age_ms: freshness.last_template_age_ms,
+        template_seq: freshness.template_seq,
     })
     .into_response()
 }
@@ -221,6 +228,113 @@ pub(crate) async fn candidate(
         ),
         Err(e) => map_mining_error(e, Reason::CandidateUnavailable),
     }
+}
+
+/// Select a retained template precisely; combining selectors is an AND.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub(crate) struct InspectionQuery {
+    msg: Option<String>,
+    template_seq: Option<u64>,
+}
+
+/// Operator-only transaction and rent inventory of one frozen template.
+#[utoipa::path(
+    get, path = "/api/v1/mining/candidate-details",
+    operation_id = "v1_mining_candidate_details_get", tag = "mining",
+    params(("msg" = Option<String>, Query, description = "32-byte hexadecimal work ID"), ("template_seq" = Option<u64>, Query, description = "Exact retained publish sequence")),
+    responses((status = 200, description = "Frozen template inventory and miner proceeds", body = serde_json::Value), (status = 404, description = "Template was evicted or selectors do not match", body = V1Error), (status = 503, description = "No current template", body = V1Error)),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn candidate_details(
+    State(s): State<OperatorState>,
+    Query(q): Query<InspectionQuery>,
+) -> Response {
+    let mining = match s.mining() {
+        Ok(m) => m,
+        Err(e) => return *e,
+    };
+    let historical = q.msg.is_some() || q.template_seq.is_some();
+    match mining.candidate_details(q.msg, q.template_seq).await {
+        Ok(Some(details)) => Json(details).into_response(),
+        Ok(None) if historical => v1_error(
+            Reason::TemplateNotFound,
+            "no retained template matches both selectors",
+            "re-fetch current work; templates are retained briefly and reset on restart",
+        ),
+        Ok(None) => v1_error(
+            Reason::CandidateUnavailable,
+            "no current template",
+            "retry once mining work is available",
+        ),
+        Err(e) => map_mining_error(e, Reason::CandidateUnavailable),
+    }
+}
+
+/// Bounded local template and solution history. Resets on restart.
+#[utoipa::path(
+    get, path = "/api/v1/mining/history",
+    operation_id = "v1_mining_history_get", tag = "mining",
+    responses((status = 200, description = "Bounded operator mining history", body = serde_json::Value), (status = 503, description = "Mining history unavailable", body = V1Error)),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn history(State(s): State<OperatorState>) -> Response {
+    let mining = match s.mining() {
+        Ok(m) => m,
+        Err(e) => return *e,
+    };
+    let mut history = match mining.mining_history().await {
+        Ok(history) => history,
+        Err(e) => return map_mining_error(e, Reason::CandidateUnavailable),
+    };
+    let Some(chain) = s.chain.clone() else {
+        return Json(history).into_response();
+    };
+    s.blocking
+        .run(ReadLane::Scan, move || {
+            let heights: Vec<u32> = history
+                .outcomes
+                .iter()
+                .filter_map(|e| e.accounting.as_ref().map(|a| a.height))
+                .collect();
+            let snapshot = match chain.applied_chain_at_heights(&heights) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => return Json(history).into_response(),
+                Err(e) => return chain_read_failed(e),
+            };
+            for event in &mut history.outcomes {
+                let Some(accounting) = &event.accounting else {
+                    continue;
+                };
+                let Some(block_id) = &event.block_id else {
+                    continue;
+                };
+                match snapshot
+                    .blocks
+                    .iter()
+                    .find(|(h, _)| *h == accounting.height)
+                    .and_then(|(_, id)| id.as_ref())
+                {
+                    Some(applied) => {
+                        let canonical = applied == block_id;
+                        event.canonical = Some(canonical);
+                        event.confirmations = canonical.then(|| {
+                            snapshot
+                                .tip
+                                .height
+                                .saturating_sub(accounting.height)
+                                .saturating_add(1)
+                        });
+                    }
+                    None => {
+                        event.canonical = None;
+                        event.confirmations = None;
+                    }
+                }
+            }
+            history.chain_tip = Some(snapshot.tip);
+            Json(history).into_response()
+        })
+        .await
 }
 
 /// `POST /api/v1/mining/solution` — T1. Reuses [`NodeMining::submit_solution`].

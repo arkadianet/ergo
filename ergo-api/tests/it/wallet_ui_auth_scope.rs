@@ -172,3 +172,38 @@ async fn wallet_status_stays_gated_403_without_api_key() {
     let resp = app().oneshot(get("/wallet/status")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn wallet_mining_jobs_require_operator_key_before_body_parsing() {
+    for (method, path) in [
+        ("GET", "/api/v1/wallet/mining-jobs"),
+        ("POST", "/api/v1/wallet/mining-jobs"),
+        ("POST", "/api/v1/wallet/mining-jobs/1/cancel"),
+    ] {
+        for key in [None, Some("wrong")] {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(key) = key {
+                request = request.header(API_KEY_HEADER, key);
+            }
+            let response = app()
+                .oneshot(request.body(Body::from("malformed")).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+    }
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/wallet/mining-jobs")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(API_KEY_HEADER, PLAINTEXT_KEY)
+        .body(Body::from("{\"unexpected\":true}"))
+        .unwrap();
+    assert_eq!(
+        app().oneshot(request).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+}

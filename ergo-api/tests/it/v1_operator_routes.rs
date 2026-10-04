@@ -437,11 +437,31 @@ fn fixed_work() -> WorkMessageJson {
 
 #[async_trait]
 impl NodeMining for StubMining {
+    async fn mining_freshness(
+        &self,
+    ) -> Result<ergo_rest_json::mining_inspection::MiningFreshnessJson, MiningApiError> {
+        Ok(ergo_rest_json::mining_inspection::MiningFreshnessJson {
+            mining_started: true,
+            last_template_msg: Some("ab".repeat(32)),
+            last_template_height: Some(100),
+            last_template_age_ms: Some(25),
+            template_seq: Some(7),
+        })
+    }
     async fn candidate(
         &self,
         _longpoll: Option<String>,
     ) -> Result<Option<WorkMessageJson>, MiningApiError> {
         Ok(Some(fixed_work()))
+    }
+    async fn candidate_details(
+        &self,
+        _msg: Option<String>,
+        _template_seq: Option<u64>,
+    ) -> Result<Option<ergo_rest_json::mining_inspection::CandidateDetailsJson>, MiningApiError>
+    {
+        // Nothing is retained.
+        Ok(None)
     }
     async fn submit_solution(&self, _: AutolykosSolutionJson) -> Result<(), MiningApiError> {
         Ok(())
@@ -664,7 +684,10 @@ async fn mining_status_t0_composed_always_200() {
     assert_eq!(v["mining_enabled"], true);
     assert_eq!(v["synced"], true);
     assert_eq!(v["longpoll_supported"], true);
-    assert!(v["last_template_msg"].is_null());
+    assert_eq!(v["last_template_msg"], "ab".repeat(32));
+    assert_eq!(v["last_template_height"], 100);
+    assert_eq!(v["last_template_age_ms"], 25);
+    assert_eq!(v["template_seq"], 7);
 }
 
 #[tokio::test]
@@ -794,6 +817,47 @@ async fn mining_candidate_t1_accepts_valid_key() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["msg"], "ab".repeat(32));
     assert_eq!(v["template_seq"], 7);
+}
+
+#[tokio::test]
+async fn mining_candidate_details_unretained_selector_is_v1_template_not_found() {
+    let uri = format!(
+        "/api/v1/mining/candidate-details?msg={}&template_seq=3",
+        "ab".repeat(32)
+    );
+    let (status, v) = send(
+        app_full(default_auth()),
+        req(
+            Method::GET,
+            &uri,
+            Some("operator-secret"),
+            Some(REMOTE),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(v["error"]["reason"], "template_not_found");
+    assert!(v["error"]["message"].is_string() && v["error"]["detail"].is_string());
+    assert!(
+        v.get("reason").is_none(),
+        "the v1 envelope nests the reason"
+    );
+
+    // Without selectors there is simply no current work.
+    let (status, v) = send(
+        app_full(default_auth()),
+        req(
+            Method::GET,
+            "/api/v1/mining/candidate-details",
+            Some("operator-secret"),
+            Some(REMOTE),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(v["error"]["reason"], "candidate_unavailable");
 }
 
 #[tokio::test]
