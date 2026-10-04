@@ -75,6 +75,14 @@ impl IndexerChainSource for Chain {
         Ok(h.checked_sub(1)
             .and_then(|index| self.headers.lock().unwrap().get(index as usize).copied()))
     }
+    // Tests drop applied rows only to model State unwinding for a competing
+    // branch, so the best-header chain names another block at those heights.
+    fn best_header_id_at(&self, h: u32) -> Result<Option<HeaderId>, crate::IndexerError> {
+        Ok(Some(
+            self.header_id_at(h)?
+                .unwrap_or(Digest32::from_bytes([0xF0; 32])),
+        ))
+    }
     fn full_block(&self, id: &HeaderId) -> Result<Option<IndexerFullBlock>, crate::IndexerError> {
         let Some(block) = self.blocks.lock().unwrap().get(id).cloned() else {
             return Ok(None);
@@ -619,6 +627,10 @@ impl IndexerChainSource for FailingChain {
         self.check("header")?;
         self.inner.header_id_at(height)
     }
+    fn best_header_id_at(&self, height: u32) -> Result<Option<HeaderId>, crate::IndexerError> {
+        self.check("best header")?;
+        self.inner.best_header_id_at(height)
+    }
     fn full_block(&self, id: &HeaderId) -> Result<Option<IndexerFullBlock>, crate::IndexerError> {
         self.check("block")?;
         self.inner.full_block(id)
@@ -725,4 +737,38 @@ fn rollback_source_failure_preserves_the_committed_checkpoint_and_undo() {
         handle.status(),
         IndexerStatus::Halted(IndexerHaltReason::DbCorruption)
     );
+}
+
+#[test]
+fn best_header_evidence_read_failure_halts_without_unwinding() {
+    let blocks: Vec<_> = corpus().into_iter().take(2).collect();
+    let (_tmp, handle, chain, mut task) = setup(&blocks);
+    assert!(matches!(
+        unlimited_time(&mut task, 2),
+        IndexerPoll::Applied(2)
+    ));
+    let store = handle.store().unwrap();
+    let before = store.read_meta().unwrap();
+    let undo = store.read_undo(2).unwrap();
+    // The applied chain lost height 2, so the gate must consult the
+    // best-header chain; that read failing is a halt, not absent evidence.
+    chain.tip.store(1, Ordering::Relaxed);
+    chain.headers.lock().unwrap().truncate(1);
+    let source = Arc::new(FailingChain {
+        inner: chain,
+        operation: "best header",
+        fail_at: 1,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut task = IndexerTask::new(handle.clone(), source);
+    assert!(matches!(
+        task.step(),
+        IndexerPoll::Halted(crate::IndexerError::ChainRead {
+            operation: "best header",
+            ..
+        })
+    ));
+    assert_eq!(store.read_meta().unwrap(), before);
+    assert_eq!(store.read_undo(2).unwrap(), undo);
+    assert_eq!(handle.indexed_height(), 2);
 }

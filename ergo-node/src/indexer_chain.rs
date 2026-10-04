@@ -68,6 +68,14 @@ impl IndexerChainSource for ChainReaderAdapter {
             .map_err(|e| source_error("canonical header ID", e))
     }
 
+    // HEADER_CHAIN_INDEX: header flushes commit it durably, ahead of State.
+    fn best_header_id_at(&self, height: u32) -> Result<Option<HeaderId>, IndexerError> {
+        self.reader
+            .get_header_id_at_height(height)
+            .map(|id| id.map(Digest32::from_bytes))
+            .map_err(|e| source_error("best header ID", e))
+    }
+
     fn full_block(&self, header_id: &HeaderId) -> Result<Option<IndexerFullBlock>, IndexerError> {
         let Some(header_bytes) = self
             .reader
@@ -117,12 +125,18 @@ mod tests {
 
     #[test]
     fn adapter_distinguishes_absence_from_native_table_read_failure() {
-        for table in ["chain_state_meta", "chain_index", "headers"] {
+        for table in [
+            "chain_state_meta",
+            "chain_index",
+            "header_chain_index",
+            "headers",
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let db = Arc::new(redb::Database::create(directory.path().join("chain.redb")).unwrap());
             let adapter = ChainReaderAdapter::new(ChainStoreReader::new_from_db(db.clone()));
             assert_eq!(adapter.committed_tip().unwrap().height, 0);
             assert!(adapter.header_id_at(1).unwrap().is_none());
+            assert!(adapter.best_header_id_at(1).unwrap().is_none());
             assert!(adapter.full_block(&Digest32::ZERO).unwrap().is_none());
             let write = db.begin_write().unwrap();
             write
@@ -132,6 +146,7 @@ mod tests {
             let error = match table {
                 "chain_state_meta" => adapter.committed_tip().unwrap_err(),
                 "chain_index" => adapter.header_id_at(1).unwrap_err(),
+                "header_chain_index" => adapter.best_header_id_at(1).unwrap_err(),
                 _ => adapter.full_block(&Digest32::ZERO).unwrap_err(),
             };
             assert!(matches!(error, IndexerError::ChainRead { .. }));

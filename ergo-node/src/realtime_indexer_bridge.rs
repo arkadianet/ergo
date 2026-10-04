@@ -406,6 +406,14 @@ mod tests {
                 .and_then(|index| self.blocks.get(index as usize))
                 .map(|b| b.header_id))
         }
+        // Lowering the tip models a reorg: the best-header chain has left
+        // every height the applied chain dropped.
+        fn best_header_id_at(
+            &self,
+            height: u32,
+        ) -> Result<Option<Digest32>, ergo_indexer::IndexerError> {
+            Ok(Some(self.header_id_at(height)?.unwrap_or(id(0xF0))))
+        }
         fn full_block(
             &self,
             id: &Digest32,

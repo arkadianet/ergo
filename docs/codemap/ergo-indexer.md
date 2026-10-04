@@ -35,8 +35,8 @@
 - `IndexerStore` (struct) — owns the `Arc<redb::Database>`; wipe/resume `open`; every read accessor.
 - `IndexerHandle` (struct) — read-side handle, implements `IndexerQuery`; `boot` returns `None` only when disabled, else `Some(syncing|halted)`.
 - `IndexerTask<C>` (struct) — poll driver over `IndexerChainSource` — `src/task.rs`.
-- `IndexerChainSource` (trait) — `committed_tip` / `header_id_at` / `full_block` read surface; production wires `ChainStoreReader` with fully applied `CHAIN_INDEX` IDs.
-- `IndexerPoll` (enum) — `Idle`/`Applied`/`RolledBack`/`SectionRetry`/`Race`/`Halted` step outcomes.
+- `IndexerChainSource` (trait) — `committed_tip` / `header_id_at` / `best_header_id_at` / `full_block` read surface; production wires `ChainStoreReader` with fully applied `CHAIN_INDEX` IDs. The best-header `HEADER_CHAIN_INDEX` ID is only reorg evidence: an indexed height missing from the applied chain (State restarted from its last durable IBD commit) unwinds only once the best-header chain selects another block there.
+- `IndexerPoll` (enum) — `Idle`/`Applied`/`RolledBack`/`SectionRetry`/`Race`/`AppliedGap`/`Halted` step outcomes.
 - `apply_block` / `apply_block_with_scratch` (fn) — forward apply; scratch variant reuses arenas — `src/apply.rs`.
 - `rollback_one_block` (fn) — inverse apply, undo-snapshot meta restore.
 - `IndexerBlock<'a>` (struct) — caller-provided apply/rollback input (`height`, `header_id`, `&[Transaction]`).
@@ -88,8 +88,10 @@ does not perform independent block authentication.
 The dedicated worker continues after committed apply/rollback progress.
 Persistent `Race` results wait 50 ms; `Idle` waits for the configured interval
 with a 50 ms minimum even when `poll_idle_ms` is zero. These waits observe
-cancellation. Missing sections retain the bounded five-attempt, one-second
-retry policy. Public single-step methods publish halt status but do not sleep.
+cancellation. Missing sections, and applied heights missing below a tip that
+stays anchored (`AppliedGap`), retain the bounded five-attempt, one-second
+retry policy before halting `section-missing`. Public single-step methods
+publish halt status but do not sleep.
 
 Token names, descriptions and persisted optional strings use JVM-compatible
 UTF-8 replacement. Decimal parsing follows Scala 2.12 signed `Int` behavior,

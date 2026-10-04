@@ -14,15 +14,19 @@
 //! either applies one block, rolls one block back, returns idle when caught
 //! up, or surfaces a halt/race condition. The blocking [`IndexerTask::run`]
 //! driver loop turns those outcomes into a long-running task — backing
-//! off on section-missing (5 × 1 s), continuing after committed progress,
-//! and waiting at least 50 ms after `Idle` or `Race`. Waits observe cancellation.
+//! off on missing sections or applied heights (5 × 1 s), continuing after
+//! committed progress, and waiting at least 50 ms after `Idle` or `Race`.
+//! Waits observe cancellation.
 //! Production uses [`IndexerTask::spawn`] to run this synchronous I/O and
 //! compute work on a dedicated thread, outside the node's async worker pool.
 //!
 //! Header lookups must follow the committed fully applied block chain.
 //! Header-only fork choice cannot establish validated bodies. Tip/height reads
 //! may straddle State commits, so both forward progress and rollback verify
-//! the captured applied tip's branch before mutating the index.
+//! the captured applied tip's branch before mutating the index. An indexed
+//! height merely absent from the applied chain, as after State restarts below
+//! the index from its last durable commit, is no reorg: rollback also needs
+//! the best-header chain to select another block there.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -80,6 +84,11 @@ pub trait IndexerChainSource: Send + Sync {
     /// is insufficient: section presence does not establish block validation.
     fn header_id_at(&self, height: u32) -> Result<Option<HeaderId>, IndexerError>;
 
+    /// Header ID on the best-header chain at `height`, or `None` if absent.
+    /// Never selects bodies to index: the task reads it only as reorg evidence
+    /// when the applied chain has no block at the indexed height.
+    fn best_header_id_at(&self, height: u32) -> Result<Option<HeaderId>, IndexerError>;
+
     /// Block (height + header_id + parsed transactions) by header_id.
     /// `None` when the chain has the header but section bytes haven't
     /// landed yet — driver retries with bounded backoff.
@@ -103,6 +112,10 @@ pub enum IndexerPoll {
     /// Mid-load fork flip or absent canonical height. Retry after a
     /// cancellation-aware delay so persistent races cannot spin.
     Race,
+    /// The applied chain has no block at `height` although the captured tip
+    /// above it stayed anchored: missing chain data, not a fork flip. Driver
+    /// retries with the section-missing backoff, then halts `SectionMissing`.
+    AppliedGap { height: u64 },
     /// Indexer halted with this error. Terminal — driver exits.
     Halted(IndexerError),
 }
@@ -296,8 +309,15 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                 }
             };
             let diverged = match chain_read!(self.chain.header_id_at(our_h)) {
-                None => true,
                 Some(id) => id != prev_id,
+                // IBD commits State without durability, so after a hard crash
+                // the applied chain can restart below blocks this index kept.
+                // Absence alone is not a reorg: unwind only once the
+                // best-header chain selects another block here, and otherwise
+                // wait for State to re-apply ours.
+                None => {
+                    chain_read!(self.chain.best_header_id_at(our_h)).is_some_and(|id| id != prev_id)
+                }
             };
             if diverged {
                 // Separate source calls can observe a rollback between the
@@ -361,6 +381,16 @@ impl<C: IndexerChainSource> IndexerTask<C> {
 
         let header_id = match chain_read!(self.chain.header_id_at(next_h32)) {
             Some(id) => id,
+            // A State rollback below this height also removes the captured
+            // tip. A tip that still anchors the applied chain leaves a
+            // permanent gap below it, such as `CHAIN_INDEX` coverage that
+            // starts at a UTXO-snapshot anchor: bound it like missing
+            // sections instead of racing forever.
+            None if chain_read!(self.chain.header_id_at(tip.height)) == Some(tip.header_id) => {
+                return IndexerPoll::AppliedGap {
+                    height: next_height,
+                };
+            }
             None => return IndexerPoll::Race,
         };
 
@@ -518,7 +548,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
     /// - `Applied` / `RolledBack`: tight loop (no sleep — backfill
     ///   throughput is bound by I/O, not wall clock).
     /// - `Race`: a cancellation-aware 50 ms delay.
-    /// - `SectionRetry`: 1 s backoff per attempt; halt
+    /// - `SectionRetry` / `AppliedGap`: 1 s backoff per attempt; halt
     ///   `SectionMissing` after [`MAX_SECTION_RETRIES`].
     /// - `Halted`: set status, exit.
     pub fn run(mut self, cancel: Arc<AtomicBool>, poll_idle: Duration) {
@@ -555,6 +585,25 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                             height,
                             attempts = MAX_SECTION_RETRIES,
                             "indexer halted: section bytes still missing",
+                        );
+                        self.handle
+                            .set_status(IndexerStatus::Halted(IndexerHaltReason::SectionMissing));
+                        return;
+                    }
+                    if !sleep_or_cancel(SECTION_RETRY_DELAY, &cancel) {
+                        return;
+                    }
+                }
+                // Same budget as missing sections: absent chain data below an
+                // anchored tip must end in a diagnosed halt, not spin.
+                IndexerPoll::AppliedGap { height } => {
+                    section_retry_count += 1;
+                    if section_retry_count >= MAX_SECTION_RETRIES {
+                        tracing::error!(
+                            height,
+                            attempts = MAX_SECTION_RETRIES,
+                            "indexer halted: applied chain has no block at this height \
+                             below its committed tip",
                         );
                         self.handle
                             .set_status(IndexerStatus::Halted(IndexerHaltReason::SectionMissing));
