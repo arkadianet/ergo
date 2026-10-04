@@ -515,50 +515,6 @@ fn query_space(path: &Path, options: &mut UpgradeOptions<'_>) -> Option<u64> {
     }
 }
 
-// Reserve copy headroom for the index AND the remaining legacy conversions.
-// Originals retained as backups still occupy space after each conversion.
-fn can_preserve_migratable_indexer(
-    indexer: &Path,
-    paths: &[PathBuf],
-    size: u64,
-    schema: u32,
-    options: &mut UpgradeOptions<'_>,
-) -> Result<bool> {
-    let mut needed = required_space(size);
-    for path in paths {
-        if !regular(path)? || classify(path)? != FileFormat::LegacyV2 {
-            continue;
-        }
-        #[cfg(unix)]
-        let same_filesystem = {
-            use std::os::unix::fs::MetadataExt;
-            fs::metadata(indexer)?.dev() == fs::metadata(path)?.dev()
-        };
-        #[cfg(not(unix))]
-        let same_filesystem = true; // Conservative reservation across volumes.
-        let other_needed = required_space(fs::metadata(path)?.len());
-        if same_filesystem {
-            needed = needed.saturating_add(other_needed);
-        } else if query_space(path, options).is_none_or(|free| free < other_needed) {
-            return Ok(false);
-        }
-    }
-    let available = match (options.free_space)(indexer) {
-        Ok(available) => Some(available),
-        Err(error) => {
-            (options.warning)(&format!("cannot determine available bytes for {}: {error}; deleting schema-{schema} indexer before state conversion", indexer.display()));
-            None
-        }
-    };
-    match available {
-        Some(available) if available >= needed => Ok(true),
-        available => {
-            (options.warning)(&format!("schema-{schema} legacy indexer cannot be preserved: indexer and remaining database conversions need {needed} bytes, available {}; deleting the indexer first so the state upgrade has priority", available.map_or_else(|| "unknown".to_owned(), |n| n.to_string())));
-            Ok(false)
-        }
-    }
-}
-
 fn check_space(path: &Path, size: u64, options: &mut UpgradeOptions<'_>) -> Result<()> {
     let needed = required_space(size);
     let Some(available) = query_space(path, options) else {
@@ -576,22 +532,6 @@ pub fn upgrade_data(
     directory: &Path,
     indexer_filename: &Path,
     options: &mut UpgradeOptions<'_>,
-) -> Result<UpgradeReport> {
-    upgrade_data_with_migration_path(
-        _lock,
-        directory,
-        indexer_filename,
-        options,
-        ergo_indexer::store::has_migration_path,
-    )
-}
-
-fn upgrade_data_with_migration_path(
-    _lock: &DataDirectoryLock,
-    directory: &Path,
-    indexer_filename: &Path,
-    options: &mut UpgradeOptions<'_>,
-    has_migration_path: impl Fn(u32) -> bool,
 ) -> Result<UpgradeReport> {
     _lock.check_directory(directory)?;
     let paths = database_paths(directory, indexer_filename)?;
@@ -626,16 +566,7 @@ fn upgrade_data_with_migration_path(
         let (stale, indexer_lock) = if position == 0 {
             let (schema, lock) = legacy_indexer_schema(path, options.warning)?;
             (
-                schema < ergo_indexer::store::INDEXER_SCHEMA_VERSION
-                    && !(has_migration_path(schema)
-                        && !options.keep_stale_indexer
-                        && can_preserve_migratable_indexer(
-                            path,
-                            &paths[1..],
-                            size,
-                            schema,
-                            options,
-                        )?),
+                schema < ergo_indexer::store::INDEXER_SCHEMA_VERSION,
                 Some(lock),
             )
         } else {
@@ -729,9 +660,6 @@ fn upgrade_data_with_migration_path(
                     Ok(())
                 })?;
                 report.migrated += 1;
-                if position == 0 {
-                    (options.warning)("legacy indexer file-format conversion verified; registered schema migrations run in place on the background indexer worker when needed");
-                }
             }
             eprintln!(
                 "upgrade-data: {} ({} bytes) {} in {:.1}s",
