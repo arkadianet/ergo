@@ -134,6 +134,17 @@ fn tip_id(state: &NodeState) -> String {
 /// Publish a template on the applied tip whose user transactions are `txs`,
 /// all built as private ones, identified by `msg`.
 fn serve(handle: &MiningHandle, state: &NodeState, txs: Vec<Transaction>, msg: [u8; 32]) {
+    serve_at(handle, state, txs, msg, 0x0101_0000);
+}
+
+/// [`serve`] at the difficulty encoded by `n_bits`.
+fn serve_at(
+    handle: &MiningHandle,
+    state: &NodeState,
+    txs: Vec<Transaction>,
+    msg: [u8; 32],
+    n_bits: u32,
+) {
     use ergo_primitives::digest::ADDigest;
     use ergo_validation::pre_header::{
         build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
@@ -141,7 +152,6 @@ fn serve(handle: &MiningHandle, state: &NodeState, txs: Vec<Transaction>, msg: [
     let tip = state.store.chain_state_meta();
     let parent = tip.best_full_block_id;
     let height = tip.best_full_block_height + 1;
-    let n_bits = 0x0101_0000;
     handle.set_best_tip(ergo_mining::engine::BestTip {
         parent_id: parent,
         chain_seq: 1,
@@ -469,7 +479,7 @@ fn expiry_lets_the_transaction_through_public_admission_again() {
         },
     );
     std::thread::sleep(std::time::Duration::from_millis(20));
-    assert!(expire(&mut state, &handle).unwrap());
+    expire(&mut state, &handle);
     assert_eq!(
         handle.private_queue().entry(&tx_id).unwrap().state,
         PrivateTransactionState::Expired
@@ -850,4 +860,100 @@ fn expiring_conflicted_work_retires_no_build_or_template() {
     );
     assert_eq!(handle.operator_generation(), generation);
     assert!(handle.cached_template_if_synced().is_some());
+}
+
+// ----- failing durable expiry -----
+
+#[test]
+fn a_failing_expiry_write_withdraws_once_and_keeps_mining() {
+    let (dir, mut state) = chain(4);
+    let path = dir.path().join("queue.json");
+    let handle = persisted_handle(&path);
+    let deadline = crate::snapshot::unix_now_ms() + 1_000;
+    let tx_id = queue_at_tip(
+        &state,
+        &handle,
+        1,
+        ergo_mining::private_queue::PrivateTransactionOptions {
+            expires_at_ms: Some(deadline),
+            ..Default::default()
+        },
+    );
+    run_lifecycle(&mut state, &handle);
+    // Hard enough that the nonce below is no solution for either template.
+    let n_bits =
+        ergo_ser::difficulty::encode_compact_bits(&(num_bigint::BigUint::from(1u8) << 200));
+    serve_at(&handle, &state, vec![tx(1)], [0x61; 32], n_bits);
+    serve_at(&handle, &state, vec![], [0x62; 32], n_bits);
+    // Every later write of the queue fails.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let remaining = deadline.saturating_sub(crate::snapshot::unix_now_ms());
+    std::thread::sleep(std::time::Duration::from_millis(remaining + 10));
+
+    let generation = handle.operator_generation();
+    for _ in 0..50 {
+        run_lifecycle(&mut state, &handle);
+    }
+    assert_eq!(
+        handle.operator_generation(),
+        generation + 1,
+        "elapsed work is withdrawn once, not on every pass"
+    );
+    assert_eq!(
+        handle
+            .inspect_template(Some([0x61; 32]), None)
+            .unwrap()
+            .status,
+        "withdrawn"
+    );
+    assert_eq!(
+        handle.cached_template_if_synced().expect("served").0.msg,
+        [0x62; 32]
+    );
+    assert_eq!(
+        handle.private_queue().entry(&tx_id).unwrap().state,
+        PrivateTransactionState::Queued,
+        "no input is released without a durable expiry"
+    );
+    assert_eq!(
+        handle.private_queue().reserved_inputs(),
+        std::collections::BTreeSet::from([[1; 32]])
+    );
+
+    // Solutions are still verified, not refused over the pending expiry.
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+    let _ = crate::node::mining_dispatch::handle_mining_request(
+        &mut state,
+        Some(&handle),
+        false,
+        crate::mining_bridge::MiningRequest::SubmitSolution {
+            solution: ergo_rest_json::mining::AutolykosSolutionJson {
+                pk: None,
+                w: None,
+                n: "0000000000000000".into(),
+                d: None,
+            },
+            reply,
+        },
+    );
+    assert!(
+        matches!(
+            response.try_recv().unwrap(),
+            Err(MiningApiError::InvalidPow)
+        ),
+        "the solution reached verification"
+    );
+    assert_eq!(handle.operator_generation(), generation + 1);
+
+    // Once the disk recovers, the next retry commits the expiry.
+    std::fs::remove_dir(&path).unwrap();
+    state.private_mining.expiry_retry_at = None;
+    run_lifecycle(&mut state, &handle);
+    assert_eq!(
+        handle.private_queue().entry(&tx_id).unwrap().state,
+        PrivateTransactionState::Expired
+    );
+    assert!(handle.private_queue().reserved_inputs().is_empty());
+    assert_eq!(handle.operator_generation(), generation + 1);
 }

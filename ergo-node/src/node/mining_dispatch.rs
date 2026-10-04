@@ -558,23 +558,11 @@ pub(super) fn handle_mining_request(
         }
     };
 
-    if let Err(error) = super::private_mining::expire(state, handle) {
-        tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
-        // A solution must not be accepted when its private queue deadlines
-        // cannot be established durably against the applied parent.
-        if matches!(
-            &req,
-            crate::mining_bridge::MiningRequest::SubmitSolution { .. }
-        ) {
-            handle.invalidate_operator_generation();
-            if let crate::mining_bridge::MiningRequest::SubmitSolution { reply, .. } = req {
-                let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(format!(
-                    "private mining deadline check failed: {error}"
-                ))));
-            }
-            return true;
-        }
-    }
+    // Apply private deadlines before serving or accepting work (constant time
+    // unless one is due). Templates that include elapsed work are withdrawn
+    // even when the durable expiry has to be retried, so a solution for any
+    // other template is still accepted.
+    super::private_mining::expire(state, handle);
     let req = match req {
         crate::mining_bridge::MiningRequest::ListPrivateTransactions { reply } => {
             let _ = reply.send(Ok(super::private_mining::list(handle)));

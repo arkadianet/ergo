@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ergo_api::mining::{MiningApiError, PrivateTransactionOptions};
 use ergo_mempool::admission::Validator;
@@ -28,9 +29,32 @@ pub(crate) struct PrivateLifecycle {
     /// The last pass stopped short of that tip: a bounded batch, or a
     /// committed tip still trailing the applied one.
     catching_up: bool,
+    /// Elapsed work whose templates are already withdrawn while its durable
+    /// expiry is still pending, so a failing write withdraws nothing twice.
+    /// Builds never select it: selection filters elapsed deadlines itself.
+    expiry_withdrawn: BTreeSet<String>,
+    /// No durable expiry is retried before this instant.
+    expiry_retry_at: Option<Instant>,
+    last_expiry_error: Option<Instant>,
+    last_history_warning: Option<Instant>,
     /// Reconciliation passes run, for tests of the event triggers.
     #[cfg(test)]
     reconcile_passes: usize,
+}
+
+/// Pause between attempts to make an elapsed deadline durable.
+const EXPIRY_RETRY: Duration = Duration::from_secs(10);
+/// A repeating lifecycle error or warning is logged at most this often.
+const LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Whether a repeating condition may log now; at most once per `LOG_INTERVAL`.
+fn log_allowed(last: &mut Option<Instant>) -> bool {
+    let now = Instant::now();
+    if last.is_some_and(|at| now.duration_since(at) < LOG_INTERVAL) {
+        return false;
+    }
+    *last = Some(now);
+    true
 }
 
 pub(super) fn api_entry(
@@ -294,13 +318,13 @@ pub(super) fn run_lifecycle(state: &mut NodeState, handle: &MiningHandle) {
             Err(error) => {
                 // Retried when the applied tip next changes.
                 state.private_mining.catching_up = false;
-                tracing::warn!(%error, "private mining queue waits for confirmation history");
+                if log_allowed(&mut state.private_mining.last_history_warning) {
+                    tracing::warn!(%error, "private mining queue waits for confirmation history");
+                }
             }
         }
     }
-    if let Err(error) = expire(state, handle) {
-        tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
-    }
+    expire(state, handle);
 }
 
 /// Called before every mining request as well as after loop arms; constant
@@ -309,25 +333,65 @@ pub(super) fn run_lifecycle(state: &mut NodeState, handle: &MiningHandle) {
 /// transaction that a not yet reconciled block confirmed. A time deadline
 /// racing such a block is corrected when reconciliation finds the
 /// confirmation.
-pub(super) fn expire(state: &mut NodeState, handle: &MiningHandle) -> Result<bool, String> {
+///
+/// A failing write never stops mining: elapsed work's templates are
+/// withdrawn once, its inputs stay reserved, every other template keeps
+/// serving and accepting solutions, and the durable expiry is retried every
+/// `EXPIRY_RETRY` with a rate-limited error.
+pub(super) fn expire(state: &mut NodeState, handle: &MiningHandle) {
     let now = crate::snapshot::unix_now_ms();
     let queue = handle.private_queue();
     let height = queue.observed_height();
+    let lifecycle = &mut state.private_mining;
     if !queue.deadline_due(now, height) {
-        return Ok(false);
+        lifecycle.expiry_withdrawn.clear();
+        return;
     }
     // Before a durable expiry can release inputs, withdraw the templates that
-    // include elapsed work, and retire in-flight builds only when it was
+    // include newly elapsed work, and retire in-flight builds only when it was
     // selectable; every other template keeps serving and accepting solutions.
     let due = queue.due(now, height);
-    withdraw(
-        handle,
-        due.iter().map(|(id, _)| id.as_str()),
-        due.iter().any(|(_, state)| state.is_active()),
-    );
-    let expired = queue.expire(now, height)?;
-    release_withdrawn(&mut state.mempool, &expired);
-    Ok(!expired.is_empty())
+    lifecycle
+        .expiry_withdrawn
+        .retain(|id| due.iter().any(|(due_id, _)| due_id == id));
+    let fresh: Vec<_> = due
+        .iter()
+        .filter(|(id, _)| !lifecycle.expiry_withdrawn.contains(id))
+        .collect();
+    if !fresh.is_empty() {
+        withdraw(
+            handle,
+            fresh.iter().map(|(id, _)| id.as_str()),
+            fresh.iter().any(|(_, state)| state.is_active()),
+        );
+        lifecycle
+            .expiry_withdrawn
+            .extend(fresh.iter().map(|(id, _)| id.clone()));
+    }
+    if lifecycle
+        .expiry_retry_at
+        .is_some_and(|at| Instant::now() < at)
+    {
+        return;
+    }
+    match queue.expire(now, height) {
+        Ok(expired) => {
+            lifecycle.expiry_withdrawn.clear();
+            lifecycle.expiry_retry_at = None;
+            release_withdrawn(&mut state.mempool, &expired);
+        }
+        Err(error) => {
+            lifecycle.expiry_retry_at = Some(Instant::now() + EXPIRY_RETRY);
+            if log_allowed(&mut lifecycle.last_expiry_error) {
+                tracing::error!(
+                    %error,
+                    pending = due.len(),
+                    "private mining expiry is not durable yet; elapsed work stays withdrawn and \
+                     its inputs reserved, retrying"
+                );
+            }
+        }
+    }
 }
 
 /// Withdraw pending work. The target is checked before any template is
