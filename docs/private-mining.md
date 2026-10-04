@@ -37,7 +37,9 @@ spends or reads is spent first, it must be rebuilt and signed again.
 ## Deadlines, input reservations, and rollback
 
 Pending private transactions reserve their spending inputs in the native wallet,
-including for ordinary public sends and other private jobs. Queue entries report
+including for ordinary public sends and other private jobs. Automatic input
+selection and "Retrieve rewards" skip reserved boxes; naming a reserved box as an
+explicit input is refused. Wallet balances still include reserved boxes. Queue entries report
 `queued`, `in_candidate`, `mined`, `conflicted`, `cancelled`, or `expired`.
 Candidate membership describes the currently served template; it does not imply
 a block will be found. Private ordering prefers larger integer priorities, then
