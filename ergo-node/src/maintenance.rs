@@ -15,6 +15,11 @@ thread_local! {
     static CANCELLED: std::cell::RefCell<Option<Arc<AtomicBool>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static BEFORE_PUBLISH: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+}
+
 fn check_interrupted() -> Result<()> {
     if CANCELLED.with(|flag| {
         flag.borrow()
@@ -435,6 +440,12 @@ fn destination_parent(source: &Path, destination: &Path) -> Result<PathBuf> {
 // Interruption can leave an empty reservation, never bootable partial data.
 fn publish(staging: &Path, destination: &Path) -> Result<()> {
     check_interrupted()?;
+    #[cfg(all(test, target_os = "linux"))]
+    BEFORE_PUBLISH.with(|hook| {
+        if let Some(check) = hook.get() {
+            check(staging);
+        }
+    });
     private_dir(destination)?;
     // Unix rename replaces the empty reservation. Windows refuses any existing
     // destination; release our reservation there before the same atomic rename.
@@ -491,6 +502,8 @@ pub fn backup(data_dir: &Path, destination: &Path) -> Result<BackupManifest> {
     serde_json::to_writer_pretty(&mut output, &manifest)?;
     output.write_all(b"\n")?;
     output.sync_all()?;
+    // Windows cannot rename the staging directory with its manifest still open.
+    drop(output);
     // Verify the copied databases, hashes and committed metadata before publish.
     verify_backup(staging.path())?;
     sync_directories(staging.path())?;
@@ -853,6 +866,40 @@ mod tests {
             vec![1]
         );
         verify_backup(&backup_dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publication_closes_all_staging_handles() {
+        thread_local! {
+            static PUBLICATIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        fn assert_closed(staging: &Path) {
+            for entry in fs::read_dir("/proc/self/fd").unwrap() {
+                // Another test's descriptor may close between enumeration and readlink.
+                if let Ok(path) = fs::read_link(entry.unwrap().path()) {
+                    assert!(!path.starts_with(staging), "open staging handle: {path:?}");
+                }
+            }
+            PUBLICATIONS.with(|count| count.set(count.get() + 1));
+        }
+        struct ResetHook;
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                BEFORE_PUBLISH.with(|hook| hook.set(None));
+            }
+        }
+
+        let data = seeded_directory();
+        seed_private_work(data.path());
+        let parent = tempfile::tempdir().unwrap();
+        let backup_dir = parent.path().join("backup");
+        let _reset = ResetHook;
+        BEFORE_PUBLISH.with(|hook| hook.set(Some(assert_closed)));
+        backup(data.path(), &backup_dir).unwrap();
+        restore(&backup_dir, &parent.path().join("quarantined")).unwrap();
+        restore_with_options(&backup_dir, &parent.path().join("kept"), true).unwrap();
+        PUBLICATIONS.with(|count| assert_eq!(count.get(), 3));
     }
 
     #[test]
