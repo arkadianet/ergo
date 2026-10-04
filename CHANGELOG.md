@@ -26,6 +26,12 @@ infrastructure.
 
 ### Changed
 
+- Startup, liveness and readiness GET/HEAD probes now bypass the API Host
+  allowlist so Kubernetes pod-IP and load-balancer checks work with the shipped
+  container configuration. Existing Host overrides remain valid. Other routes
+  still require an allowed Host; add forwarded API hostnames to
+  `[api] allowed_hosts`. See [`docs/deployment.md`](docs/deployment.md).
+
 - UTXO-snapshot bootstraps (Modes 2 and 4) by earlier releases stored the
   snapshot root at AVL node ID 0, the ID the store also reads as a null child.
   Such databases now fail to open with `LegacySnapshotNodeIds` rather than

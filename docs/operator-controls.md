@@ -9,7 +9,10 @@ The existing `/api/v1/node/health` and Scala-compatible routes retain their beha
 All three probes return a JSON report with `ready`, machine-readable `reasons`,
 heartbeat/snapshot/tip ages and heights only for required dependencies. Success is HTTP 200;
 a failed check is HTTP 503. They are public and exempt from the request governor, so shared proxy budgets
-cannot turn supervision probes into HTTP 429 responses.
+cannot turn supervision probes into HTTP 429 responses. GET/HEAD requests to
+these exact paths also bypass the Host allowlist, so pod-IP and load-balancer
+health checks work without a custom Host header. Other API routes still enforce
+the configured allowlist.
 
 | Endpoint | Meaning |
 | --- | --- |

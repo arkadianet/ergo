@@ -46,7 +46,11 @@ the intended deployment. No master key or named credential is embedded in the
 image. The default credential-free configuration closes privileged routes.
 
 The container health check uses **liveness**, allowing initial synchronization
-to proceed. Load balancers should call `/api/v1/node/readiness`. An overridden
+to proceed. Load balancers should call `/api/v1/node/readiness`. The startup, liveness and
+readiness GET/HEAD probes accept pod-IP and load-balancer Host headers without
+allowlist changes. Other API routes require a Host matching `[api] allowed_hosts`
+(the container defaults include `localhost`, `127.0.0.1` and `node`); add the
+public API hostname when deploying behind a proxy that forwards it. An overridden
 configuration which disables or moves HTTP must override the health check too.
 Compose requests a five-minute graceful stop and runs with dropped capabilities,
 a read-only root filesystem and a small writable temporary directory.
@@ -65,3 +69,27 @@ UID/GID 10001; named volumes initialize ownership from the image automatically.
 Keep application data outside the build context. The `.dockerignore` excludes
 common data/secret artifacts, but a custom secret configuration file should
 only be mounted at runtime.
+
+Kubernetes can use the pod IP directly; no `httpHeaders` Host override is needed:
+
+```yaml
+ports:
+  - name: http
+    containerPort: 9099
+startupProbe:
+  httpGet:
+    path: /api/v1/node/startup
+    port: http
+  periodSeconds: 10
+  failureThreshold: 60
+livenessProbe:
+  httpGet:
+    path: /api/v1/node/liveness
+    port: http
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /api/v1/node/readiness
+    port: http
+  periodSeconds: 10
+```
