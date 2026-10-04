@@ -416,3 +416,66 @@ fn atomic_requested_prefix_obeys_operator_exclusions() {
     assert!(error.contains(&excluded), "{error}");
     assert!(error.contains("excluded by operator policy"), "{error}");
 }
+
+#[test]
+fn atomic_requested_prefix_reparses_outputs_with_the_candidate_script_version() {
+    use ergo_mining::candidate_selection::select_requested_txs_cancellable;
+    use ergo_mining::policy::BlockPolicy;
+    let mut fixture = Fixture::load();
+    let true_tree = ergo_ser::ergo_tree::ErgoTree {
+        version: 0,
+        has_size: true,
+        constant_segregation: false,
+        reserved_header_bits: 0,
+        constants: vec![],
+        body: ergo_ser::opcode::Expr::Const {
+            tpe: ergo_ser::sigma_type::SigmaType::SSigmaProp,
+            val: ergo_ser::sigma_value::SigmaValue::SigmaProp(
+                ergo_ser::sigma_value::SigmaBoolean::TrivialProp(true),
+            ),
+        },
+    };
+    fixture.boxes[1].candidate = ergo_ser::ergo_box::ErgoBoxCandidate::new(
+        1_000_000_000,
+        true_tree,
+        15,
+        vec![],
+        ergo_ser::register::AdditionalRegisters::empty(),
+    )
+    .unwrap();
+    let mut tx = fixture.transactions[3].clone();
+    tx.inputs[0].box_id = fixture.boxes[1].box_id().unwrap();
+    tx.inputs[0].spending_proof =
+        ergo_ser::input::SpendingProof::new(vec![], ergo_ser::input::ContextExtension::empty())
+            .unwrap();
+    let mut tree = tx.output_candidates[0].ergo_tree().clone();
+    tree.version = 5;
+    tree.has_size = true;
+    tx.output_candidates[0] = ergo_ser::ergo_box::ErgoBoxCandidate::new(
+        tx.output_candidates[0].value,
+        tree,
+        15,
+        vec![],
+        ergo_ser::register::AdditionalRegisters::empty(),
+    )
+    .unwrap();
+    let mut ctx = fixture.context(false);
+    ctx.activated_script_version = 3;
+    ctx.pre_header_version = 4;
+    let error = select_requested_txs_cancellable(
+        &mut CandidateOverlay::new(&fixture),
+        &[tx],
+        &ctx,
+        &ProtocolParams::mainnet_default(),
+        &[],
+        u64::MAX,
+        u64::MAX,
+        None,
+        &BlockPolicy::default(),
+        true,
+        &|| false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("malformed_transaction"), "{error}");
+}

@@ -321,3 +321,45 @@ fn private_wallet_options_require_explicit_private_delivery() {
         }
     ));
 }
+
+#[tokio::test]
+async fn legacy_opt_in_keeps_native_mining_operator_routes_authenticated() {
+    for allow in [false, true] {
+        let mut requests: Vec<_> = [
+            "/api/v1/mining/candidate-details",
+            "/api/v1/mining/history",
+            "/api/v1/mining/policy",
+            "/api/v1/mining/private-transactions",
+        ]
+        .into_iter()
+        .map(get)
+        .collect();
+        requests.extend([
+            post_json("/api/v1/mining/candidate-with-txs", "[]"),
+            post_json("/api/v1/mining/private-transactions", r#"{"signed_transaction_hex":"00","options":{}}"#),
+            post("/api/v1/mining/private-transactions/0000000000000000000000000000000000000000000000000000000000000000/cancel"),
+            axum::http::Request::builder().method("PUT").uri("/api/v1/mining/policy")
+                .header("content-type", "application/json").body(axum::body::Body::from("{}")).unwrap(),
+        ]);
+        for request in requests {
+            let path = request.uri().to_string();
+            assert_eq!(
+                app_with_legacy(allow)
+                    .oneshot(request)
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED,
+                "{path}, legacy opt-in={allow}"
+            );
+        }
+        let response = app_with_legacy(allow)
+            .oneshot(with_key(post_json(
+                "/api/v1/mining/candidate-with-txs",
+                "[]",
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+}

@@ -293,6 +293,7 @@ pub fn build_and_publish(
         intent,
         mode,
         &[],
+        &[],
         None,
         base,
         None,
@@ -325,6 +326,7 @@ pub fn build_and_publish_cached(
         intent,
         mode,
         &[],
+        &[],
         None,
         base,
         Some(proof_cache),
@@ -341,7 +343,8 @@ pub fn build_requested_and_publish_cached(
     reader: &ChainStoreReader,
     handle: &MiningHandle,
     intent: &BuildIntent,
-    requested: &[Transaction],
+    requested: &[Vec<u8>],
+    forbidden_private_ids: &[Digest32],
     caller_cancelled: &dyn Fn() -> bool,
     base: Option<&mut Option<DryRunBase>>,
     proof_cache: &mut CandidateProofCache,
@@ -355,6 +358,7 @@ pub fn build_requested_and_publish_cached(
         intent,
         BuildMode::Full,
         requested,
+        forbidden_private_ids,
         Some(caller_cancelled),
         base,
         Some(proof_cache),
@@ -370,7 +374,8 @@ fn build_and_publish_inner(
     handle: &MiningHandle,
     intent: &BuildIntent,
     mode: BuildMode,
-    requested: &[Transaction],
+    requested: &[Vec<u8>],
+    forbidden_private_ids: &[Digest32],
     caller_cancelled: Option<&dyn Fn() -> bool>,
     base: Option<&mut Option<DryRunBase>>,
     proof_cache: Option<&mut CandidateProofCache>,
@@ -441,6 +446,16 @@ fn build_and_publish_inner(
     if should_cancel() {
         return Ok(BuildOutcome::DroppedStale);
     }
+    let (active, _) = snapshot
+        .tip_snapshot_params()
+        .map_err(|e| MiningError::StateRead {
+            op: "requested_parse_context",
+            reason: format!("{e:?}"),
+        })?;
+    let activated = ergo_validation::derive_activated_script_version(active.block_version);
+    let requested =
+        parse_requested_transactions(requested, activated, forbidden_private_ids, &should_cancel)?;
+    let requested = requested.as_slice();
     let mut rent_resolve_time = std::time::Duration::ZERO;
 
     // Minimal builds freeze nothing from the pool and never touch the
@@ -589,6 +604,40 @@ fn build_and_publish_inner(
         }
         None => Ok(BuildOutcome::DroppedStale),
     }
+}
+
+fn parse_requested_transactions(
+    requested: &[Vec<u8>],
+    activated_script_version: u8,
+    forbidden_private_ids: &[Digest32],
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Vec<Transaction>, MiningError> {
+    let forbidden: std::collections::HashSet<_> = forbidden_private_ids.iter().copied().collect();
+    requested
+        .iter()
+        .map(|bytes| {
+            crate::error::check_build_cancelled(should_cancel)?;
+            let mut reader = ergo_primitives::reader::VlqReader::new(bytes)
+                .with_activated_script_version(activated_script_version);
+            let transaction = ergo_ser::transaction::read_transaction(&mut reader)
+                .map_err(|error| MiningError::InvalidRequest(format!("transaction: {error:?}")))?;
+            if !reader.is_empty() {
+                return Err(MiningError::InvalidRequest(
+                    "trailing bytes after requested transaction".into(),
+                ));
+            }
+            let id = ergo_ser::transaction::transaction_id(&transaction).map_err(|error| {
+                MiningError::InvalidRequest(format!("transaction id: {error:?}"))
+            })?;
+            if forbidden.contains(&Digest32::from_bytes(*id.as_bytes())) {
+                return Err(MiningError::InvalidRequest(format!(
+                    "private transaction {} requires the operator miner key",
+                    hex::encode(id.as_bytes())
+                )));
+            }
+            Ok(transaction)
+        })
+        .collect()
 }
 
 /// Apply the optional proof wrapper to either state-view implementation while
@@ -851,4 +900,70 @@ mod tests {
     // block-transactions (emission) sections at a non-recalc height — the
     // chain harness landed with the action-loop wiring (Phase 2b-ii-b/3),
     // where the end-to-end loop→engine→cache→serve path is exercised.
+    #[test]
+    fn requested_wire_parse_scopes_script_version_and_rejects_trailing_bytes() {
+        use ergo_ser::{
+            ergo_box::ErgoBoxCandidate,
+            ergo_tree::ErgoTree,
+            input::{ContextExtension, Input, SpendingProof},
+            opcode::Expr,
+            register::AdditionalRegisters,
+            sigma_type::SigmaType,
+            sigma_value::{SigmaBoolean, SigmaValue},
+        };
+        let mut tx = Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes([1; 32]),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate::new(
+                1_000_000_000,
+                ErgoTree {
+                    version: 5,
+                    has_size: true,
+                    constant_segregation: false,
+                    reserved_header_bits: 0,
+                    constants: vec![],
+                    body: Expr::Const {
+                        tpe: SigmaType::SSigmaProp,
+                        val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+                    },
+                },
+                15,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        let bytes = |tx: &Transaction| {
+            let mut writer = ergo_primitives::writer::VlqWriter::new();
+            ergo_ser::transaction::write_transaction(&mut writer, tx).unwrap();
+            writer.result()
+        };
+        assert!(parse_requested_transactions(&[bytes(&tx)], 1, &[], &|| false).is_ok());
+        assert!(matches!(
+            parse_requested_transactions(&[bytes(&tx)], 3, &[], &|| false),
+            Err(MiningError::InvalidRequest(_))
+        ));
+        let mut tree = tx.output_candidates[0].ergo_tree().clone();
+        tree.version = 3;
+        tx.output_candidates[0] = ErgoBoxCandidate::new(
+            1_000_000_000,
+            tree,
+            15,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        let good = bytes(&tx);
+        assert!(
+            parse_requested_transactions(std::slice::from_ref(&good), 3, &[], &|| false).is_ok()
+        );
+        let mut trailing = good;
+        trailing.push(0);
+        assert!(
+            matches!(parse_requested_transactions(&[trailing], 3, &[], &|| false), Err(MiningError::InvalidRequest(ref reason)) if reason.contains("trailing bytes"))
+        );
+    }
 }

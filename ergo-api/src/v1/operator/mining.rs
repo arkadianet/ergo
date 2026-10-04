@@ -436,10 +436,10 @@ pub(crate) async fn reward_pubkey(State(s): State<OperatorState>) -> Response {
 /// Decodes directly from the body to preserve context extension ordering.
 #[utoipa::path(
     post, path = "/api/v1/mining/candidate-with-txs", tag = "mining",
-    request_body(content = serde_json::Value, description = "A transaction array, or {txs: [...], pk: compressed secp256k1 key hex}. At most 1024 transactions and 2 MiB. Request order and context-extension insertion order are preserved. Returns proofs only for supplied transactions admitted to the candidate."),
+    request_body(content = serde_json::Value, description = "A transaction array, or {txs: [...], pk: compressed secp256k1 key hex}. At most 1024 transactions and 2 MiB. Request order and context-extension insertion order are preserved. The complete ordered package must fit and validate under operator policy; exclusions win. Returns proofs for every supplied member."),
     responses(
         (status = 200, description = "WorkMessageJson with header preimage and transaction inclusion proofs", body = serde_json::Value),
-        (status = 400, description = "Malformed transactions, invalid miner key, or request limit exceeded", body = V1Error),
+        (status = 400, description = "Malformed or invalid transactions, operator exclusions, block budgets, invalid miner key, or request limit exceeded", body = V1Error),
         (status = 409, description = "Mining disabled on this node", body = V1Error),
         (status = 503, description = "Candidate unavailable", body = V1Error),
         (status = 504, description = "Candidate build timed out", body = V1Error),

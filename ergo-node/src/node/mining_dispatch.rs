@@ -689,34 +689,23 @@ pub(super) fn handle_mining_request(
                 .map(|store| handle.resolve_reward_key(store));
             let own_miner =
                 matches!(operator_key, Some(RewardKeyResolution::Ready(pk)) if pk == miner_pk);
-            if !own_miner {
-                for transaction in &transactions {
-                    let id = match ergo_ser::transaction::transaction_id(transaction) {
-                        Ok(id) => ergo_primitives::digest::Digest32::from_bytes(*id.as_bytes()),
-                        Err(error) => {
-                            let _ = reply.send(Err(ergo_api::MiningApiError::BadRequest(format!(
-                                "transaction id: {error:?}"
-                            ))));
-                            return false;
-                        }
-                    };
-                    if state.mempool.is_private_transaction(&id) {
-                        let _ = reply.send(Err(ergo_api::MiningApiError::BadRequest(format!(
-                            "private transaction {} requires the operator miner key",
-                            hex::encode(id.as_bytes())
-                        ))));
-                        return false;
-                    }
-                }
-            }
             let tip = MiningTipSnapshot::capture(state);
             let (operator_generation, private_transactions) = handle.operator_snapshot(|queue| {
-                if own_miner {
-                    queue.selection_entries_at(crate::snapshot::unix_now_ms(), tip.best_full_height)
-                } else {
-                    Vec::new()
-                }
+                queue.selection_entries_at(crate::snapshot::unix_now_ms(), tip.best_full_height)
             });
+            let forbidden_private_ids = if own_miner {
+                Vec::new()
+            } else {
+                private_transactions
+                    .iter()
+                    .map(|entry| entry.tx_id)
+                    .collect()
+            };
+            let private_transactions = if own_miner {
+                private_transactions
+            } else {
+                Vec::new()
+            };
             let intent = BuildIntent {
                 expected_parent: tip.best_full_id,
                 expected_height: tip.best_full_height,
@@ -728,8 +717,13 @@ pub(super) fn handle_mining_request(
             };
             // The API-owned permit caps queued requests. Sending is nonblocking;
             // validation and AVL proof generation run on the existing worker.
-            let request =
-                super::mining_engine::BuildRequest::requested(intent, transactions, reply, permit);
+            let request = super::mining_engine::BuildRequest::requested(
+                intent,
+                transactions,
+                forbidden_private_ids,
+                reply,
+                permit,
+            );
             if worker_tx.send(request).is_err() {
                 // Dropping the failed request closes its reply and releases its
                 // admission permit; the bridge maps closure to unavailable.

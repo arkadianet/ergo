@@ -300,7 +300,8 @@ pub(super) struct BuildRequest {
     intent: BuildIntent,
     mode: BuildMode,
     /// Client-supplied transactions, empty for ordinary background builds.
-    requested: Vec<ergo_ser::transaction::Transaction>,
+    requested: Vec<Vec<u8>>,
+    forbidden_private_ids: Vec<ergo_primitives::digest::Digest32>,
     /// Background replies carry an outcome and the dry-run base-cache
     /// disposition; client replies carry the published work or an API error.
     ///
@@ -330,7 +331,8 @@ enum BuildReply {
 impl BuildRequest {
     pub(super) fn requested(
         intent: BuildIntent,
-        requested: Vec<ergo_ser::transaction::Transaction>,
+        requested: Vec<Vec<u8>>,
+        forbidden_private_ids: Vec<ergo_primitives::digest::Digest32>,
         reply: oneshot::Sender<
             Result<ergo_rest_json::mining::WorkMessageJson, ergo_api::MiningApiError>,
         >,
@@ -340,6 +342,7 @@ impl BuildRequest {
             intent,
             mode: BuildMode::Full,
             requested,
+            forbidden_private_ids,
             reply: BuildReply::Requested {
                 reply,
                 _permit: permit,
@@ -393,6 +396,7 @@ pub(super) fn run_build_worker(
         intent,
         mode,
         requested,
+        forbidden_private_ids,
         reply,
     }) = req_rx.recv()
     {
@@ -446,6 +450,7 @@ pub(super) fn run_build_worker(
                     &handle,
                     &intent,
                     &requested,
+                    &forbidden_private_ids,
                     &caller_cancelled,
                     use_base_cache.then_some(&mut base),
                     &mut proof_cache,
@@ -648,6 +653,7 @@ pub(super) async fn run_mining_engine(
                     intent: intent.clone(),
                     mode,
                     requested: Vec::new(),
+                    forbidden_private_ids: Vec::new(),
                     reply: BuildReply::Background(reply_tx),
                 })
                 .is_err()

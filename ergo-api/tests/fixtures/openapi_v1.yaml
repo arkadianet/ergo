@@ -2571,7 +2571,7 @@ paths:
         Decodes directly from the body to preserve context extension ordering.
       operationId: candidate_with_txs
       requestBody:
-        description: 'A transaction array, or {txs: [...], pk: compressed secp256k1 key hex}. At most 1024 transactions and 2 MiB. Request order and context-extension insertion order are preserved. Returns proofs only for supplied transactions admitted to the candidate.'
+        description: 'A transaction array, or {txs: [...], pk: compressed secp256k1 key hex}. At most 1024 transactions and 2 MiB. Request order and context-extension insertion order are preserved. The complete ordered package must fit and validate under operator policy; exclusions win. Returns proofs for every supplied member.'
         content:
           application/json:
             schema: {}
@@ -2583,7 +2583,7 @@ paths:
             application/json:
               schema: {}
         '400':
-          description: Malformed transactions, invalid miner key, or request limit exceeded
+          description: Malformed or invalid transactions, operator exclusions, block budgets, invalid miner key, or request limit exceeded
           content:
             application/json:
               schema:

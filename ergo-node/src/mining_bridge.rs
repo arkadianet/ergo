@@ -22,7 +22,6 @@ use ergo_api::mining::{MiningApiError, NodeMining};
 use ergo_rest_json::mining::{AutolykosSolutionJson, CandidateMetricsJson, WorkMessageJson};
 use ergo_rest_json::mining::{CandidateProofJson, TransactionMembershipProofJson};
 use ergo_rest_json::ScalaTransactionInput;
-use ergo_ser::transaction::Transaction;
 use tokio::sync::{mpsc, oneshot};
 
 /// Project a typed mining `WorkMessage` to its JSON wire shape, stamping the
@@ -91,7 +90,7 @@ pub enum MiningRequest {
     /// Request-specific build; the permit bounds queued and executing packages
     /// together and stays owned by the worker even if the HTTP caller leaves.
     GetCandidateWithTxs {
-        transactions: Vec<Transaction>,
+        transactions: Vec<Vec<u8>>,
         miner_pk: Option<[u8; 33]>,
         reply: oneshot::Sender<Result<WorkMessageJson, MiningApiError>>,
         permit: tokio::sync::OwnedSemaphorePermit,
@@ -383,10 +382,7 @@ impl NodeMining for MiningBridge {
                     "requested transactions exceed 2 MiB".into(),
                 ));
             }
-            let mut reader = ergo_primitives::reader::VlqReader::new(&bytes);
-            let transaction = ergo_ser::transaction::read_transaction(&mut reader)
-                .map_err(|e| MiningApiError::BadRequest(format!("transaction: {e:?}")))?;
-            transactions.push(transaction);
+            transactions.push(bytes);
         }
         let (reply, response) = oneshot::channel();
         self.tx

@@ -1155,6 +1155,8 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         None => block_transactions_section_size(&raw_txs, pre_header.version)? as u64,
     };
 
+    validate_block_transactions_roundtrip(&raw_txs, pre_header.version)?;
+
     // 10. Dry-run AVL+ to obtain new_state_root + raw_proof_bytes.
     check_build_cancelled(should_cancel)?;
     let phase_start = std::time::Instant::now();
@@ -1316,6 +1318,31 @@ fn block_transactions_section_size(
         }
     })?;
     Ok(w.result().len())
+}
+
+fn validate_block_transactions_roundtrip(
+    txs: &[Transaction],
+    block_version: u8,
+) -> Result<(), MiningError> {
+    let section = BlockTransactions {
+        header_id: Digest32::from_bytes([0; 32]).into(),
+        transactions: txs.to_vec(),
+    };
+    let mut writer = VlqWriter::new();
+    write_block_transactions_with_version(&mut writer, &section, block_version).map_err(
+        |error| MiningError::InvalidRequest(format!("block transactions serialize: {error:?}")),
+    )?;
+    let bytes = writer.result();
+    let mut reader = VlqReader::new(&bytes);
+    ergo_ser::block_transactions::read_block_transactions(&mut reader).map_err(|error| {
+        MiningError::InvalidRequest(format!("block transactions parse: {error:?}"))
+    })?;
+    if !reader.is_empty() {
+        return Err(MiningError::InvalidRequest(
+            "trailing bytes after block transactions".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn state_err(e: ergo_state::store::StateError) -> MiningError {
@@ -1975,7 +2002,9 @@ mod tests {
             ),
             StateError,
         > {
-            self.stub.tip_snapshot_params()
+            let (mut params, settings) = self.stub.tip_snapshot_params()?;
+            params.block_version = self.stub.header.version;
+            Ok((params, settings))
         }
         fn candidate_dry_run(
             &self,
@@ -2175,6 +2204,7 @@ mod tests {
     fn requested_prefix_precedes_rent_and_satisfies_operator_requirements() {
         let mut header = crate::genesis::parent_header();
         header.height = 1_100_005;
+        header.version = 4;
         header.n_bits = 16_842_752;
         let spendable = genesis_era_box(u16::MAX);
         let view = RentView {
@@ -2255,8 +2285,99 @@ mod tests {
         );
         assert_eq!(candidate.observation.policy_revision, 7);
         assert_eq!(candidate.observation.operator_generation, 9);
+        let mut writer = VlqWriter::new();
+        write_block_transactions_with_version(
+            &mut writer,
+            &BlockTransactions {
+                header_id: ModifierId::from_bytes([0; 32]),
+                transactions: candidate.transactions.clone(),
+            },
+            candidate.header.version,
+        )
+        .unwrap();
+        let bytes = writer.result();
+        let mut reader = VlqReader::new(&bytes);
+        let parsed = ergo_ser::block_transactions::read_block_transactions(&mut reader).unwrap();
+        assert!(reader.is_empty());
+        assert_eq!(candidate.header.version, 4);
+        assert_eq!(parsed.transactions, candidate.transactions);
         assert_eq!(work.proof.unwrap().tx_proofs.len(), 2);
         assert_eq!(work.metrics.selected_transaction_count, 0);
+    }
+
+    #[test]
+    fn assembled_section_roundtrip_rejects_too_new_output_tree() {
+        let box_ = genesis_era_box(0);
+        let mut tree = box_.candidate.ergo_tree().clone();
+        tree.version = 5;
+        let tx = Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                1_000_000_000,
+                tree,
+                15,
+                vec![],
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        assert!(validate_block_transactions_roundtrip(std::slice::from_ref(&tx), 3).is_ok());
+        assert!(matches!(
+            validate_block_transactions_roundtrip(&[tx], 4),
+            Err(MiningError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn candidate_backstop_refuses_a_rent_output_newer_than_the_v4_chain() {
+        let mut header = crate::genesis::parent_header();
+        header.height = 1_100_005;
+        header.version = 4;
+        header.n_bits = 16_842_752;
+        let mut historical = genesis_era_box(0);
+        let mut tree = historical.candidate.ergo_tree().clone();
+        tree.version = 5;
+        historical.candidate = ergo_ser::ergo_box::ErgoBoxCandidate::new(
+            1_000_000_000,
+            tree,
+            0,
+            vec![],
+            ergo_ser::register::AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        let view = RentView {
+            stub: ExhaustedView { header },
+            utxo: std::collections::HashMap::from([(
+                historical.box_id().unwrap(),
+                historical.clone(),
+            )]),
+        };
+        let result = generate_candidate_with_policy_cancellable(
+            &view,
+            ergo_chain_spec::Network::Mainnet,
+            BuildMode::Full,
+            &MempoolReadSnapshot::empty(),
+            &RENT_MINER_PK,
+            &MonetarySettings::mainnet(),
+            None,
+            None,
+            &DifficultyParams::mainnet(),
+            &[historical],
+            &BTreeMap::new(),
+            &VotingSettings::mainnet(),
+            &[],
+            &mut vec![],
+            &[],
+            &BlockPolicy::default(),
+            0,
+            0,
+            &|| false,
+        );
+        assert!(
+            matches!(result, Err(MiningError::InvalidRequest(ref reason)) if reason.contains("block transactions parse")),
+            "{result:?}"
+        );
     }
 
     // ----- round-trips -----

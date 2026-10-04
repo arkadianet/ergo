@@ -283,7 +283,17 @@ fn seed_synced_chain(db: &std::path::Path) -> [u8; 32] {
 }
 
 fn seed_synced_chain_with_boxes(db: &std::path::Path, extra_boxes: &[ErgoBox]) -> [u8; 32] {
-    let mut store = StateStore::open_with_launch_params(db, v2_launch_params()).unwrap();
+    seed_synced_chain_with_version(db, extra_boxes, 2)
+}
+
+fn seed_synced_chain_with_version(
+    db: &std::path::Path,
+    extra_boxes: &[ErgoBox],
+    block_version: u8,
+) -> [u8; 32] {
+    let mut params = v2_launch_params();
+    params.block_version = block_version;
+    let mut store = StateStore::open_with_launch_params(db, params).unwrap();
 
     let em_tx = parent_emission_tx();
     let em_box = emission_box_from(&em_tx);
@@ -413,12 +423,24 @@ async fn boot_synced_mining_node_with_packages(
     boxes: &[ErgoBox],
     legacy_mining: bool,
 ) -> (tempfile::TempDir, RunHandle, [u8; 32]) {
+    boot_synced_mining_node_with_package_version(candidate_base_cache, boxes, legacy_mining, 2)
+        .await
+}
+
+async fn boot_synced_mining_node_with_package_version(
+    candidate_base_cache: bool,
+    boxes: &[ErgoBox],
+    legacy_mining: bool,
+    block_version: u8,
+) -> (tempfile::TempDir, RunHandle, [u8; 32]) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("state.redb");
-    let parent_tip = if boxes.is_empty() {
+    let parent_tip = if block_version == 2 && boxes.is_empty() {
         seed_synced_chain(&db)
-    } else {
+    } else if block_version == 2 {
         seed_synced_chain_with_boxes(&db, boxes)
+    } else {
+        seed_synced_chain_with_version(&db, boxes, block_version)
     };
 
     let mut config = make_test_config(dir.path().to_path_buf());
@@ -1531,4 +1553,178 @@ async fn requested_private_work_isolated_from_lenders_and_withdrawn_on_cancel() 
         "unrelated lender work survives cancellation"
     );
     handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn requested_output_tree_versions_are_checked_against_the_v4_chain() {
+    use ergo_ser::{
+        ergo_tree::ErgoTree,
+        opcode::Expr,
+        sigma_type::SigmaType,
+        sigma_value::{SigmaBoolean, SigmaValue},
+    };
+    for cache in [false, true] {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
+        ))
+        .unwrap();
+        let bytes = hex::decode(fixture["independent_input_box"].as_str().unwrap()).unwrap();
+        let mut input = ergo_ser::ergo_box::read_ergo_box(&mut VlqReader::new(&bytes)).unwrap();
+        let true_tree = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: false,
+            reserved_header_bits: 0,
+            constants: vec![],
+            body: Expr::Const {
+                tpe: SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+            },
+        };
+        input.candidate = ErgoBoxCandidate::new(
+            1_000_000_000,
+            true_tree,
+            15,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        let (_dir, handle, _) = boot_synced_mining_node_with_package_version(
+            cache,
+            std::slice::from_ref(&input),
+            false,
+            4,
+        )
+        .await;
+        let addr = handle.api_addr.unwrap();
+        poll_candidate(addr).await;
+        // A v0 output can contain an SBox constant with a future-version tree.
+        // DTO decoding and the ambient version-one reader both accept it.
+        let mut nested_tree = input.candidate.ergo_tree().clone();
+        nested_tree.version = 5;
+        nested_tree.has_size = true;
+        let nested_box = ErgoBox {
+            candidate: ErgoBoxCandidate::new(
+                1_000_000_000,
+                nested_tree,
+                15,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+            transaction_id: ModifierId::from_bytes([0; 32]),
+            index: 0,
+        };
+        let tree = ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: true,
+            reserved_header_bits: 0,
+            constants: vec![(
+                SigmaType::SBox,
+                SigmaValue::OpaqueBoxBytes(write_box_bytes(&nested_box)),
+            )],
+            body: Expr::Const {
+                tpe: SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+            },
+        };
+        let tx = Transaction {
+            inputs: vec![Input {
+                box_id: input.box_id().unwrap(),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate::new(
+                1_000_000_000,
+                tree,
+                15,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        let mut json: serde_json::Value =
+            serde_json::from_str(fixture["transactions_json"][3].as_str().unwrap()).unwrap();
+        json["inputs"][0]["boxId"] =
+            serde_json::json!(hex::encode(input.box_id().unwrap().as_bytes()));
+        json["inputs"][0]["spendingProof"]["proofBytes"] = serde_json::json!("");
+        let mut good_json = json.clone();
+        good_json["outputs"][0]["ergoTree"] =
+            serde_json::json!(hex::encode(input.candidate.ergo_tree_bytes()));
+        json["outputs"][0]["ergoTree"] =
+            serde_json::json!(hex::encode(tx.output_candidates[0].ergo_tree_bytes()));
+        let request: ergo_rest_json::ScalaTransactionInput =
+            serde_json::from_value(json.clone()).unwrap();
+        let wire = ergo_rest_json::decode_scala_transaction(&request).unwrap();
+        assert!(ergo_ser::transaction::read_transaction(&mut VlqReader::new(&wire)).is_ok());
+        let rejected = http_request(
+            addr,
+            "POST",
+            "/mining/candidateWithTxs",
+            Some(&serde_json::to_string(&vec![json]).unwrap()),
+        )
+        .await;
+        assert_eq!(rejected.status, 400, "{}", rejected.body);
+        // A subsequent valid request still builds and applies a v4 block.
+        let work = http_request(
+            addr,
+            "POST",
+            "/mining/candidateWithTxs",
+            Some(&serde_json::to_string(&vec![good_json]).unwrap()),
+        )
+        .await;
+        assert_eq!(work.status, 200, "{}", work.body);
+        let work: ergo_rest_json::mining::WorkMessageJson =
+            serde_json::from_str(&work.body).unwrap();
+        let details = http_request(
+            addr,
+            "GET",
+            &format!(
+                "/api/v1/mining/candidate-details?template_seq={}",
+                work.template_seq
+            ),
+            None,
+        )
+        .await;
+        let details: ergo_rest_json::mining_inspection::CandidateDetailsJson =
+            serde_json::from_str(&details.body).unwrap();
+        let transactions: Vec<_> = details
+            .transactions
+            .iter()
+            .map(|tx| {
+                let bytes = hex::decode(&tx.bytes).unwrap();
+                ergo_ser::transaction::read_transaction(
+                    &mut VlqReader::new(&bytes).with_activated_script_version(3),
+                )
+                .unwrap()
+            })
+            .collect();
+        let mut writer = VlqWriter::new();
+        write_block_transactions_with_version(
+            &mut writer,
+            &BlockTransactions {
+                header_id: ModifierId::from_bytes([0; 32]),
+                transactions,
+            },
+            4,
+        )
+        .unwrap();
+        let bytes = writer.result();
+        let mut reader = VlqReader::new(&bytes);
+        let parsed = ergo_ser::block_transactions::read_block_transactions(&mut reader).unwrap();
+        assert!(reader.is_empty());
+        assert_eq!(parsed.transactions.len(), 2);
+        let nonce = solve(&msg_bytes(&work), CANDIDATE_HEIGHT, &work.b);
+        let submitted = http_request(
+            addr,
+            "POST",
+            "/mining/solution",
+            Some(&format!(r#"{{"n":"{}"}}"#, hex::encode(nonce))),
+        )
+        .await;
+        assert_eq!(submitted.status, 200, "{}", submitted.body);
+        assert!(poll_best_full_height(&handle, CANDIDATE_HEIGHT).await);
+        handle.shutdown().await.unwrap();
+    }
 }

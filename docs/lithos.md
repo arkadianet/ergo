@@ -136,3 +136,10 @@ job may show `superseded` because it is separate from the current solo template;
 that status still permits solving offered work. History includes both classes,
 with up to 16 templates per class (32 total), and journals requested outcomes
 with the reward accounting for that job's miner key.
+
+Requested bytes are parsed on the serial mining worker using the committed
+tip's activated script version, as mempool admission does, and trailing bytes
+are rejected. Selection also parses under the frozen candidate context. Before
+AVL proof generation or publication, every assembled transaction section is
+round-tripped through the node's incoming block parser with the candidate's
+block version, including ordinary candidates.

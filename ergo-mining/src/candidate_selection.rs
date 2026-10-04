@@ -471,7 +471,7 @@ fn select_ordered_entries_cancellable(
             continue;
         }
 
-        let tx = match parse_tx(&entry.bytes) {
+        let tx = match parse_tx(&entry.bytes, ctx.activated_script_version) {
             Ok(t) => t,
             Err(_) => {
                 sel.exclude(entry.tx_id, "malformed_transaction");
@@ -734,7 +734,10 @@ impl<'a> PoolGraph<'a> {
                 .iter()
                 .filter_map(|box_id| self.output_owners.get(box_id).copied())
                 .collect();
-            if let Ok(tx) = parse_tx(&entry.bytes) {
+            if let Ok(tx) = parse_tx(
+                &entry.bytes,
+                ergo_ser::ergo_tree::DEFAULT_ACTIVATED_SCRIPT_VERSION,
+            ) {
                 parents.extend(
                     tx.data_inputs
                         .iter()
@@ -754,8 +757,8 @@ impl<'a> PoolGraph<'a> {
     }
 }
 
-fn parse_tx(bytes: &[u8]) -> Result<Transaction, MiningError> {
-    let mut r = VlqReader::new(bytes);
+fn parse_tx(bytes: &[u8], activated_script_version: u8) -> Result<Transaction, MiningError> {
+    let mut r = VlqReader::new(bytes).with_activated_script_version(activated_script_version);
     let tx = read_transaction(&mut r).map_err(|e| MiningError::Decode {
         op: "mempool_tx_parse",
         reason: format!("{e:?}"),
