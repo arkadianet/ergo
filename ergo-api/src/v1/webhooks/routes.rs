@@ -409,8 +409,9 @@ pub(crate) async fn patch_active(
         Ok(h) => h,
         Err(e) => return *e,
     };
+    let resume_bus = handle.bus.clone();
     run_operation(handle, move |engine| {
-        match engine.set_active(&id, body.active) {
+        match engine.set_active_after(&id, body.active, resume_bus.latest_seq()) {
             Some(sub) => Json(sub.to_dto()).into_response(),
             None if !engine.is_available() => v1_error(
                 Reason::WebhooksDisabled,
@@ -583,6 +584,55 @@ mod tests {
         let (status, v) = json_of(resp).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(v["error"]["reason"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn patch_resume_records_current_bus_boundary() {
+        let state = state_enabled();
+        let handle = state.handle.as_ref().unwrap();
+        let id = handle
+            .executor
+            .run_worker(|engine| {
+                let sub = engine
+                    .register(
+                        "https://x.example/h".into(),
+                        vec!["blocks".into()],
+                        None,
+                        1,
+                        0,
+                    )
+                    .unwrap();
+                engine.set_active(&sub.webhook_id, false).unwrap();
+                sub.webhook_id
+            })
+            .await
+            .unwrap();
+        handle
+            .bus
+            .publish(crate::v1::realtime::RealtimeEventBody::block_applied(
+                1,
+                "header".into(),
+                1,
+                1,
+                100,
+            ));
+        let executor = handle.executor.clone();
+        let resp = app(state)
+            .oneshot(req(
+                "PATCH",
+                &format!("/api/v1/webhooks/{id}"),
+                Some("operator-secret"),
+                Some(json!({"active": true})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let start = executor
+            .run_worker(move |engine| engine.get(&id).unwrap().start_seq)
+            .await
+            .unwrap();
+        assert_eq!(start, 1);
+        executor.shutdown().await;
     }
 
     // ----- register happy path + secret echoed once -----

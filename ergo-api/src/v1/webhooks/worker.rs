@@ -625,6 +625,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconciled_resume_skips_expired_pause_history_and_retains_obligations() {
+        for source_gap in [false, true] {
+            let store = Arc::new(CountingStore::default());
+            let engine =
+                Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+            register_blocks(&engine);
+            let id = engine.list(0, 1).remove(0).webhook_id;
+            let bus = Arc::new(RealtimeBus::blocks_only());
+            let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+            engine.attach_filter(filter.clone());
+            let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+            bus.publish(block(1));
+            catch_up(&bus, &filter, &executor).await.unwrap();
+            if source_gap {
+                engine.record_source_gap(2);
+            } else {
+                engine.set_active(&id, false).unwrap();
+            }
+            for height in 2..=10_000 {
+                bus.publish(block(height));
+            }
+            catch_up(&bus, &filter, &executor).await.unwrap();
+            let resume_id = id.clone();
+            let resume_bus = bus.clone();
+            executor
+                .run_worker(move |engine| {
+                    engine
+                        .set_active_after(&resume_id, true, resume_bus.latest_seq())
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+            catch_up(&bus, &filter, &executor).await.unwrap();
+            assert!(engine.get(&id).unwrap().active);
+            assert_eq!(engine.deliveries_for(&id, 0, 10).len(), 1);
+            bus.publish(block(10_001));
+            catch_up(&bus, &filter, &executor).await.unwrap();
+            assert_eq!(engine.deliveries_for(&id, 0, 10).len(), 2);
+            executor.shutdown().await;
+            drop(engine);
+            let recovered = WebhookEngine::durable(Default::default(), store).unwrap();
+            assert_eq!(recovered.get(&id).unwrap().start_seq, 10_000);
+            assert!(recovered.get(&id).unwrap().active);
+        }
+    }
+
+    #[tokio::test]
     async fn catch_up_batches_snapshots_and_bounds_skip_checkpoints() {
         use std::sync::atomic::Ordering::SeqCst;
         let store = Arc::new(CountingStore::default());

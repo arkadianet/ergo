@@ -499,11 +499,23 @@ impl WebhookEngine {
     /// counter + health so a re-enabled hook starts clean. Returns the
     /// updated subscription, or `None` if unknown.
     pub fn set_active(&self, webhook_id: &str, active: bool) -> Option<Subscription> {
+        self.set_active_after(webhook_id, active, 0)
+    }
+
+    /// Resume after the operator's reconciled bus boundary, preserving already
+    /// admitted obligations while excluding observations from the pause.
+    pub fn set_active_after(
+        &self,
+        webhook_id: &str,
+        active: bool,
+        start_seq: u64,
+    ) -> Option<Subscription> {
         self.mutate(|g| {
             let updated = {
                 let sub = g.subs.get_mut(webhook_id)?;
                 sub.active = active;
                 if active {
+                    sub.start_seq = sub.start_seq.max(start_seq);
                     sub.consecutive_failures = 0;
                     sub.health = WebhookHealth::Delivered;
                     sub.auto_disabled_reason = None;
