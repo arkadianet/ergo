@@ -1194,6 +1194,16 @@ async fn lithos_requested_package_proves_and_applies_with_lender_key() {
         let work: ergo_rest_json::mining::WorkMessageJson =
             serde_json::from_str(&response.body).unwrap();
         assert_eq!(work.pk, fixture["miner_pk"].as_str().unwrap());
+        for _ in 0..20 {
+            let repeat =
+                http_request(addr, "POST", "/mining/candidateWithTxsAndPk", Some(&body)).await;
+            assert_eq!(repeat.status, 200, "{}", repeat.body);
+            let repeat: ergo_rest_json::mining::WorkMessageJson =
+                serde_json::from_str(&repeat.body).unwrap();
+            assert_eq!(repeat.template_seq, work.template_seq);
+            assert_eq!(repeat.msg, work.msg);
+        }
+
         assert_eq!(work.h, Some(CANDIDATE_HEIGHT));
         let details = http_request(
             addr,
@@ -1297,7 +1307,7 @@ async fn lithos_requested_package_proves_and_applies_with_lender_key() {
         assert_eq!(history.status, 200, "{}", history.body);
         let history: ergo_rest_json::mining_inspection::MiningHistoryJson =
             serde_json::from_str(&history.body).unwrap();
-        assert_eq!(history.retention, 32);
+        assert_eq!(history.retention, 1040);
         let accepted = history
             .outcomes
             .iter()

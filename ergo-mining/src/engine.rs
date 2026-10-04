@@ -458,6 +458,24 @@ fn build_and_publish_inner(
     let requested =
         parse_requested_transactions(requested, activated, forbidden_private_ids, &should_cancel)?;
     let requested = requested.as_slice();
+    if intent.reason == BuildReason::Requested {
+        let ids = requested
+            .iter()
+            .map(|tx| {
+                ergo_ser::transaction::transaction_id(tx)
+                    .map(|id| Digest32::from_bytes(*id.as_bytes()))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| MiningError::InvalidRequest(format!("requested ID: {e:?}")))?;
+        if let Some((_, identity)) =
+            handle.cached_requested_package(Some(intent.miner_pk), &ids, now_ms())
+        {
+            return Ok(BuildOutcome::Published {
+                timings: crate::candidate::PhaseTimings::default(),
+                template_seq: identity.template_seq,
+            });
+        }
+    }
     let mut rent_resolve_time = std::time::Duration::ZERO;
 
     // Minimal builds freeze nothing from the pool and never touch the

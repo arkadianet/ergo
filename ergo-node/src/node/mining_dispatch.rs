@@ -652,10 +652,23 @@ pub(super) fn handle_mining_request(
     match req {
         crate::mining_bridge::MiningRequest::GetCandidateWithTxs {
             transactions,
+            requested_ids,
             miner_pk,
             reply,
             permit,
         } => {
+            if let Some((work, identity)) = handle.cached_requested_package(
+                miner_pk,
+                &requested_ids,
+                crate::snapshot::unix_now_ms(),
+            ) {
+                let _ = reply.send(Ok(crate::mining_bridge::work_message_to_json(
+                    work,
+                    identity.template_seq,
+                    identity.clean_jobs,
+                )));
+                return false;
+            }
             let Some(worker_tx) = worker_tx else {
                 let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
                     "mining worker unavailable".into(),

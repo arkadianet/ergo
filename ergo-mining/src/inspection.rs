@@ -28,6 +28,8 @@ pub struct CandidateObservation {
     pub policy_requires_transactions: bool,
     /// The reward key belonged to the operator when this job was built.
     pub operator_owned: bool,
+    /// Ordered IDs of the caller-supplied package, before ordinary selection.
+    pub requested_ids: Vec<Digest32>,
 }
 
 /// The exact validated cost and origin of one retained transaction.

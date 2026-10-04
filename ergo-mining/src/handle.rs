@@ -107,25 +107,13 @@ use crate::reemission::ReemissionSettings;
 use crate::solution::{verify_solution, SolutionOutcome, SubmittedBlock};
 use crate::work_message::{MinerSolution, WorkMessage};
 
-/// Upper bound on templates retained in the `MiningCache` ring — the number
-/// of recently-published templates whose in-flight solutions can still be
-/// verified. Deliberately small: it bounds both memory (a handful of full
-/// candidates) and the per-`verify_solution` scan cost (each submit recomputes
-/// the Autolykos hit for at most twice this many candidates, so it can't be turned
-/// into a large per-submit work amplifier). It covers the last few refresh
-/// cycles — enough for the brief window between a template being served and its
-/// solution arriving, given that longpoll keeps miners on a fresh template
-/// rather than grinding a stale one. A solution for a template evicted beyond
-/// this window cannot be matched against its original template; verification
-/// falls through to `InvalidPow` if none of the retained templates match, so
-/// the miner must re-poll. For retained
-/// solutions, the submit-time executor recheck remains authoritative. Ordinary
-/// and requested templates each have an independent allowance, so mempool
-/// refreshes cannot evict client-supplied jobs. Sized for two ordinary publishes
-/// per tip (minimal + enriched two-phase publish): 16 slots retain ≈8
-/// tip-changes of in-flight solution history, matching the pre-two-phase
-/// horizon.
+/// Ordinary template history, independent of requested work.
 pub const MAX_RETAINED_TEMPLATES: usize = 16;
+/// Requested work shares a bounded budget, with stale/withdrawn jobs evicted first.
+/// Charge at least 64 KiB per job to bound scans even for tiny candidates.
+pub const MAX_REQUESTED_TEMPLATE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_REQUESTED_TEMPLATES: usize = MAX_REQUESTED_TEMPLATE_BYTES / (64 * 1024);
+pub const REQUESTED_GENERATION_INTERVAL_MS: u64 = 60_000;
 /// Bounded lifecycle event retention; events reset on node restart.
 pub const MAX_MINING_OUTCOMES: usize = 128;
 
@@ -144,18 +132,18 @@ pub enum RewardKeySource {
 /// Mutable cache state — wrapped in an `RwLock` inside `MiningHandle`.
 ///
 /// Bounded-ring design: `templates` holds the last
-/// [`MAX_RETAINED_TEMPLATES`] published templates, newest at the back. Serving
+/// ordinary templates plus per-key requested histories, newest at the back. Serving
 /// returns the newest offered template whose parent matches the tip; solution
 /// verification scans the whole ring (newest-first) so a solution against any
 /// recently superseded template still resolves. Eviction is by age — once the
-/// ring is full, publishing a new template pops the oldest from the front. A
+/// ordinary ring is full, its oldest member is evicted; requested work has a
+/// separate per-key limit and byte budget. A
 /// mined block's failed apply withdraws every template on its parent
 /// ([`MiningHandle::withdraw_templates_for_parent`]): a withdrawn template is
 /// no longer offered, and ages out of the ring like any other.
 #[derive(Debug, Default)]
 struct MiningCache {
-    /// The last `MAX_RETAINED_TEMPLATES` published templates, newest at the
-    /// back. `cached_work_if_synced` serves from the offered ones;
+    /// Retained ordinary and requested histories, newest at the back. `cached_work_if_synced` serves from the offered ones;
     /// `verify_solution` scans them all newest-first.
     templates: std::collections::VecDeque<RetainedTemplate>,
     /// Monotonic publish counter, stamped onto each template's
@@ -179,6 +167,7 @@ struct RetainedTemplate {
     /// parent's template, and a solution to it is answered stale rather than
     /// accepted.
     withdrawn: bool,
+    requested_weight: usize,
 }
 
 fn template_status(
@@ -936,6 +925,43 @@ impl MiningHandle {
             built_at_ms,
             reason,
         };
+        let requested_weight = if reason == BuildReason::Requested {
+            let inputs_size: usize = candidate
+                .observation
+                .transactions
+                .iter()
+                .flat_map(|tx| &tx.resolved_inputs)
+                .map(|box_| {
+                    let mut writer = ergo_primitives::writer::VlqWriter::new();
+                    if ergo_ser::ergo_box::write_ergo_box(&mut writer, box_).is_err() {
+                        return MAX_REQUESTED_TEMPLATE_BYTES;
+                    }
+                    writer.as_slice().len()
+                })
+                .sum();
+            let proofs_size = work.proof.as_ref().map_or(0, |proof| {
+                proof.msg_preimage.len()
+                    + proof
+                        .tx_proofs
+                        .iter()
+                        .map(|p| 32 + p.levels.iter().map(Vec::len).sum::<usize>())
+                        .sum::<usize>()
+            });
+            let encoded_size = (work.metrics.transactions_size_bytes as usize)
+                .saturating_add(inputs_size)
+                .saturating_add(candidate.ad_proof_bytes.len())
+                .saturating_add(
+                    candidate
+                        .extension_fields
+                        .iter()
+                        .map(|(k, v)| k.len() + v.len())
+                        .sum::<usize>(),
+                )
+                .saturating_add(proofs_size);
+            encoded_size.saturating_mul(4).max(64 * 1024)
+        } else {
+            0
+        };
         cache.templates.push_back(RetainedTemplate {
             template: Arc::new(Template {
                 candidate,
@@ -943,24 +969,67 @@ impl MiningHandle {
                 identity: identity.clone(),
             }),
             withdrawn: false,
+            requested_weight,
         });
-        // Age-based eviction: keep the ring bounded by dropping the oldest.
-        // Independent bounded histories: ordinary mempool refreshes must never
-        // evict a client's collateral job while its miners are still hashing it.
-        // Both histories remain available to solution verification.
-        let requested = reason == BuildReason::Requested;
-        while cache
-            .templates
-            .iter()
-            .filter(|t| (t.template.identity.reason == BuildReason::Requested) == requested)
-            .count()
-            > MAX_RETAINED_TEMPLATES
-        {
-            if let Some(index) = cache
+        if reason == BuildReason::Requested {
+            let pk = cache
+                .templates
+                .back()
+                .expect("just published")
+                .template
+                .work
+                .pk;
+            while cache
                 .templates
                 .iter()
-                .position(|t| (t.template.identity.reason == BuildReason::Requested) == requested)
+                .filter(|t| t.requested_weight != 0 && t.template.work.pk == pk)
+                .count()
+                > MAX_RETAINED_TEMPLATES
             {
+                let index = cache
+                    .templates
+                    .iter()
+                    .position(|t| t.requested_weight != 0 && t.template.work.pk == pk)
+                    .expect("per-key retention exceeded");
+                cache.templates.remove(index);
+            }
+            while cache
+                .templates
+                .iter()
+                .map(|t| t.requested_weight)
+                .sum::<usize>()
+                > MAX_REQUESTED_TEMPLATE_BYTES
+            {
+                let requested = |t: &&RetainedTemplate| t.requested_weight != 0;
+                let index = cache
+                    .templates
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| requested(t))
+                    .min_by_key(|(_, t)| {
+                        (
+                            !t.withdrawn
+                                && t.template.candidate.parent_id == cache.best_tip.parent_id,
+                            t.template.identity.template_seq,
+                        )
+                    })
+                    .map(|(index, _)| index)
+                    .expect("requested budget exceeded");
+                cache.templates.remove(index);
+            }
+        } else {
+            while cache
+                .templates
+                .iter()
+                .filter(|t| t.requested_weight == 0)
+                .count()
+                > MAX_RETAINED_TEMPLATES
+            {
+                let index = cache
+                    .templates
+                    .iter()
+                    .position(|t| t.requested_weight == 0)
+                    .expect("ordinary retention exceeded");
                 cache.templates.remove(index);
             }
         }
@@ -995,6 +1064,37 @@ impl MiningHandle {
         // template wins, and an older parent's templates are skipped once the
         // tip advances — the wrong-parent-never-served guarantee.
         cache.newest_offered_on(&parent).map(|t| t.work.clone())
+    }
+
+    /// Reuse offered live-parent work for exactly the same ordered package.
+    /// Ownership is frozen, so the default-key lookup needs no wallet read.
+    pub fn cached_requested_package(
+        &self,
+        pk: Option<[u8; 33]>,
+        ids: &[Digest32],
+        now_ms: u64,
+    ) -> Option<(WorkMessage, TemplateIdentity)> {
+        let cache = self.cache.read().expect("cache poisoned");
+        if !cache.best_tip.synced {
+            return None;
+        }
+        let found = cache
+            .offered()
+            .find(|t| {
+                t.identity.reason == BuildReason::Requested
+                    && t.candidate.parent_id == cache.best_tip.parent_id
+                    && pk.map_or(t.candidate.observation.operator_owned, |pk| t.work.pk == pk)
+                    && t.candidate.observation.requested_ids == ids
+                    && now_ms.saturating_sub(t.identity.built_at_ms)
+                        < REQUESTED_GENERATION_INTERVAL_MS
+            })
+            .map(|t| (t.work.clone(), t.identity.clone()));
+        drop(cache);
+        found.filter(|(work, _)| {
+            !self
+                .private_queue
+                .deadline_due(now_ms, work.height.saturating_sub(1))
+        })
     }
 
     /// The client-requested job published as `template_seq`, read atomically
@@ -3280,5 +3380,143 @@ mod tests {
                 "{outcome:?}"
             );
         }
+    }
+    #[test]
+    fn requested_package_cache_matches_key_order_parent_and_interval() {
+        let handle = MiningHandle::mainnet([2; 33]);
+        let parent = [0; 32];
+        handle.set_best_tip(synced_tip(parent));
+        let ids = vec![Digest32::from_bytes([1; 32]), Digest32::from_bytes([2; 32])];
+        let (mut candidate, work) =
+            candidate_pair_for_key(parent, [0xB1; 32], requested_test_key(), 10);
+        candidate.observation.requested_ids = ids.clone();
+        let seq = handle
+            .publish_if_current(
+                candidate,
+                work,
+                &parent,
+                || BUILT_AT_MS,
+                BuildReason::Requested,
+            )
+            .unwrap()
+            .template_seq;
+        assert_eq!(
+            handle
+                .cached_requested_package(Some(requested_test_key()), &ids, BUILT_AT_MS + 59_999)
+                .unwrap()
+                .1
+                .template_seq,
+            seq
+        );
+        assert!(handle
+            .cached_requested_package(None, &ids, BUILT_AT_MS)
+            .is_none());
+        assert!(handle
+            .cached_requested_package(Some([2; 33]), &ids, BUILT_AT_MS)
+            .is_none());
+        assert!(handle
+            .cached_requested_package(Some(requested_test_key()), &[ids[1], ids[0]], BUILT_AT_MS)
+            .is_none());
+        assert!(handle
+            .cached_requested_package(Some(requested_test_key()), &[], BUILT_AT_MS)
+            .is_none());
+        assert!(handle
+            .cached_requested_package(Some(requested_test_key()), &ids, BUILT_AT_MS + 60_000)
+            .is_none());
+        handle.set_best_tip(synced_tip([1; 32]));
+        assert!(handle
+            .cached_requested_package(Some(requested_test_key()), &ids, BUILT_AT_MS)
+            .is_none());
+    }
+
+    #[test]
+    fn requested_churn_for_one_key_preserves_another_keys_live_job() {
+        let handle = MiningHandle::mainnet([2; 33]);
+        let parent = [0; 32];
+        handle.set_best_tip(synced_tip(parent));
+        let key = requested_test_key();
+        let (candidate, work) = candidate_pair_for_key(parent, [0xB2; 32], key, 10);
+        let seq = handle
+            .publish_if_current(
+                candidate,
+                work,
+                &parent,
+                || BUILT_AT_MS,
+                BuildReason::Requested,
+            )
+            .unwrap()
+            .template_seq;
+        for i in 0..20 {
+            let (candidate, work) = candidate_pair_for_key(parent, [i; 32], [2; 33], 20 + i as u64);
+            handle
+                .publish_if_current(
+                    candidate,
+                    work,
+                    &parent,
+                    || BUILT_AT_MS,
+                    BuildReason::Requested,
+                )
+                .unwrap();
+        }
+        assert!(handle.cached_requested_template_if_synced(seq).is_some());
+        assert_eq!(handle.inspect_history().len(), 17);
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        let outcome = handle
+            .verify_solution(
+                &MinerSolution {
+                    nonce: [0; 8],
+                    pk: Some(key),
+                },
+                &state,
+            )
+            .unwrap();
+        assert!(matches!(outcome, SolutionOutcome::Accepted(_)));
+    }
+
+    #[test]
+    fn requested_byte_budget_evicts_stale_jobs_before_live_jobs() {
+        let handle = MiningHandle::mainnet([2; 33]);
+        let a = [0; 32];
+        let b = [1; 32];
+        let mut seqs = vec![];
+        for (parent, pk, msg) in [
+            (a, requested_test_key(), [0xB3; 32]),
+            (b, [2; 33], [0xB4; 32]),
+        ] {
+            handle.set_best_tip(synced_tip(parent));
+            let (candidate, mut work) = candidate_pair_for_key(parent, msg, pk, 10);
+            work.metrics.transactions_size_bytes = 8 * 1024 * 1024;
+            seqs.push(
+                handle
+                    .publish_if_current(
+                        candidate,
+                        work,
+                        &parent,
+                        || BUILT_AT_MS,
+                        BuildReason::Requested,
+                    )
+                    .unwrap()
+                    .template_seq,
+            );
+        }
+        handle.set_best_tip(synced_tip(a));
+        let (candidate, work) = candidate_pair_for_key(a, [0xB5; 32], [3; 33], 10);
+        handle
+            .publish_if_current(candidate, work, &a, || BUILT_AT_MS, BuildReason::Requested)
+            .unwrap();
+        assert!(handle
+            .cached_requested_template_if_synced(seqs[0])
+            .is_some());
+        assert!(handle.inspect_template(None, Some(seqs[1])).is_none());
+        let cache = handle.cache.read().unwrap();
+        assert!(
+            cache
+                .templates
+                .iter()
+                .map(|t| t.requested_weight)
+                .sum::<usize>()
+                <= MAX_REQUESTED_TEMPLATE_BYTES
+        );
     }
 }

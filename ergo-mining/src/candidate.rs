@@ -789,6 +789,11 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
             should_cancel,
         )?;
         prioritized_count = priority.checked.len();
+        observation.requested_ids = priority
+            .checked
+            .iter()
+            .map(|(tx, _)| Digest32::from_bytes(*tx.tx_id()))
+            .collect();
         // Already included request members satisfy operator requirements and
         // must not reserve rent budget or be selected a second time.
         let remaining = (!priority.checked.is_empty()).then(|| {

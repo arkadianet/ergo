@@ -88,7 +88,13 @@ transactions. Each proof has `leaf` (transaction ID) and `levels` (hexadecimal
 side-byte followed by sibling digest). The proofs use the final block's
 transaction/witness tree, so they bind the package to the work being mined.
 
-Requested and ordinary jobs have independent bounded retention. Refreshing
+Identical ordered packages on the live parent reuse their offered work for
+60 seconds, including the message and template sequence. Cache hits do not
+consume build permits. Requested jobs retain up to 16 templates per miner key
+and share a 64 MiB accounted-byte budget (four times encoded transactions,
+resolved system inputs, AVL proofs, extensions and membership proofs, at least
+64 KiB per job). Budget pressure evicts stale or withdrawn jobs first. Ordinary
+jobs retain their own 16-slot history. Refreshing
 ordinary mempool contents cannot evict a retained Lithos job; solo candidate
 reads use the operator's key even after a lender request. Submit `pk` from the
 work response with the nonce for an explicit-key job. Nonce-only submission
@@ -140,7 +146,7 @@ It records `build_reason: "Requested"`, categories for requested and private
 members, and their frozen policy revision and operator generation. A requested
 job may show `superseded` because it is separate from the current solo template;
 that status still permits solving offered work. History includes both classes,
-with up to 16 templates per class (32 total), and journals requested outcomes
+with up to 16 ordinary and 1024 requested templates, and journals requested outcomes
 with their frozen miner identity. Lender jobs have no operator earnings
 accounting and never become the public current-work freshness view.
 

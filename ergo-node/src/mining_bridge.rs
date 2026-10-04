@@ -91,6 +91,7 @@ pub enum MiningRequest {
     /// together and stays owned by the worker even if the HTTP caller leaves.
     GetCandidateWithTxs {
         transactions: Vec<Vec<u8>>,
+        requested_ids: Vec<ergo_primitives::digest::Digest32>,
         miner_pk: Option<[u8; 33]>,
         reply: oneshot::Sender<Result<WorkMessageJson, MiningApiError>>,
         permit: tokio::sync::OwnedSemaphorePermit,
@@ -340,15 +341,6 @@ impl NodeMining for MiningBridge {
         txs: Vec<ScalaTransactionInput>,
         miner_pk: Option<String>,
     ) -> Result<Option<WorkMessageJson>, MiningApiError> {
-        let permit = self
-            .requested_slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| {
-                MiningApiError::Unavailable(
-                    "candidate request queue full; retry with backoff".into(),
-                )
-            })?;
         if txs.len() > 1024 {
             return Err(MiningApiError::BadRequest(
                 "at most 1024 requested transactions".into(),
@@ -372,8 +364,9 @@ impl NodeMining for MiningBridge {
         // Decode directly from typed DTOs: routing the signed JSON through a
         // generic Value would sort context-extension keys and change its ID.
         let mut transactions = Vec::with_capacity(txs.len());
+        let mut requested_ids = Vec::with_capacity(txs.len());
         let mut bytes_total = 0usize;
-        for input in txs {
+        for mut input in txs {
             let bytes = ergo_rest_json::decode_scala_transaction(&input)
                 .map_err(|(_, e)| MiningApiError::BadRequest(e))?;
             bytes_total = bytes_total.saturating_add(bytes.len());
@@ -382,12 +375,43 @@ impl NodeMining for MiningBridge {
                     "requested transactions exceed 2 MiB".into(),
                 ));
             }
+            // bytes_to_sign uses the signed wire format with empty proofs;
+            // preserve extensions and JSON decoding's original tree bytes.
+            for tx_input in &mut input.inputs {
+                tx_input.spending_proof.proof_bytes.clear();
+            }
+            let sign_bytes = ergo_rest_json::decode_scala_transaction(&input)
+                .map_err(|(_, e)| MiningApiError::BadRequest(e))?;
+            requested_ids.push(ergo_primitives::digest::blake2b256(&sign_bytes));
             transactions.push(bytes);
         }
+        if let Some(handle) = &self.handle {
+            if let Some((work, identity)) = handle.cached_requested_package(
+                miner_pk,
+                &requested_ids,
+                crate::snapshot::unix_now_ms(),
+            ) {
+                return Ok(Some(work_message_to_json(
+                    work,
+                    identity.template_seq,
+                    identity.clean_jobs,
+                )));
+            }
+        }
+        let permit = self
+            .requested_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                MiningApiError::Unavailable(
+                    "candidate request queue full; retry with backoff".into(),
+                )
+            })?;
         let (reply, response) = oneshot::channel();
         self.tx
             .try_send(MiningRequest::GetCandidateWithTxs {
                 transactions,
+                requested_ids,
                 miner_pk,
                 reply,
                 permit,
@@ -426,7 +450,8 @@ impl NodeMining for MiningBridge {
         };
         let handle = self.inspection_handle()?;
         Ok(MiningHistoryJson {
-            retention: 2 * ergo_mining::handle::MAX_RETAINED_TEMPLATES,
+            retention: ergo_mining::handle::MAX_RETAINED_TEMPLATES
+                + ergo_mining::handle::MAX_REQUESTED_TEMPLATES,
             retained_templates: handle
                 .inspect_history()
                 .into_iter()
@@ -1020,5 +1045,136 @@ mod tests {
             matches!(rejected, Err(MiningApiError::BadRequest(_))),
             "{rejected:?}"
         );
+    }
+    #[tokio::test]
+    async fn requested_cache_hit_bypasses_full_build_admission() {
+        use ergo_mining::{
+            candidate::Candidate,
+            engine::{BestTip, BuildReason},
+            inspection::CandidateObservation,
+            work_message::{CandidateMetrics, WorkMessage},
+        };
+        use ergo_primitives::{digest::Digest32, reader::VlqReader};
+        use ergo_validation::pre_header::{
+            build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
+        };
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
+        ))
+        .unwrap();
+        let header_bytes = hex::decode(fixture["header"].as_str().unwrap()).unwrap();
+        let header = ergo_ser::header::read_header(&mut VlqReader::new(&header_bytes)).unwrap();
+        let pk: [u8; 33] = hex::decode(fixture["miner_pk"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let parent = *header.parent_id.as_bytes();
+        let transactions: Vec<_> = fixture["transactions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(2)
+            .map(|tx| {
+                ergo_ser::transaction::read_transaction(&mut VlqReader::new(
+                    &hex::decode(tx.as_str().unwrap()).unwrap(),
+                ))
+                .unwrap()
+            })
+            .collect();
+        let ids = transactions
+            .iter()
+            .map(|tx| {
+                Digest32::from_bytes(
+                    *ergo_ser::transaction::transaction_id(tx)
+                        .unwrap()
+                        .as_bytes(),
+                )
+            })
+            .collect();
+        let candidate = Candidate {
+            validation_ctx: CandidateValidationContext {
+                pre_header: CandidatePreHeader {
+                    version: header.version,
+                    parent_id: parent,
+                    height: header.height,
+                    timestamp: header.timestamp,
+                    n_bits: header.n_bits,
+                    votes: header.votes,
+                    miner_pubkey: pk,
+                },
+                activated_script_version: 2,
+                last_headers: vec![],
+                last_block_utxo_root: build_last_block_utxo_root(header.state_root),
+            },
+            header: header.clone(),
+            transactions,
+            ad_proof_bytes: vec![],
+            extension_fields: vec![],
+            msg: [7; 32],
+            target: num_bigint::BigUint::from(1u8),
+            parent_id: parent,
+            observation: CandidateObservation {
+                requested_ids: ids,
+                ..Default::default()
+            },
+        };
+        let handle = ergo_mining::handle::MiningHandle::mainnet([2; 33]);
+        handle.set_best_tip(BestTip {
+            parent_id: parent,
+            chain_seq: 1,
+            synced: true,
+        });
+        let work = WorkMessage {
+            msg: candidate.msg,
+            pk,
+            target: candidate.target.clone(),
+            height: header.height,
+            proof: None,
+            metrics: CandidateMetrics::default(),
+        };
+        let identity = handle
+            .publish_if_current(
+                candidate,
+                work,
+                &parent,
+                crate::snapshot::unix_now_ms,
+                BuildReason::Requested,
+            )
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        let bridge = MiningBridge::new(
+            tx,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            handle.subscribe_serve_changes(),
+        )
+        .with_handle(handle);
+        let _first = bridge.requested_slots.clone().try_acquire_owned().unwrap();
+        let _second = bridge.requested_slots.clone().try_acquire_owned().unwrap();
+        let package: Vec<ScalaTransactionInput> = fixture["transactions_json"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(2)
+            .map(|tx| serde_json::from_str(tx.as_str().unwrap()).unwrap())
+            .collect();
+        let response = bridge
+            .candidate_with_txs(package.clone(), Some(hex::encode(pk)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.template_seq, identity.template_seq);
+        assert_eq!(response.msg, hex::encode(identity.template_id));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        let mut reversed = package;
+        reversed.reverse();
+        assert!(matches!(
+            bridge
+                .candidate_with_txs(reversed, Some(hex::encode(pk)))
+                .await,
+            Err(MiningApiError::Unavailable(_))
+        ));
     }
 }
