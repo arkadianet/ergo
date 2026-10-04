@@ -2091,24 +2091,39 @@ mod tests {
 
     #[test]
     fn remove_separator_returns_deleted_value_and_preserves_predecessor() {
-        for first in [0x10, 0x20] {
+        let all_entries = [
+            ([0x10; 32], vec![1]),
+            ([0x20; 32], vec![2]),
+            ([0x30; 32], vec![3]),
+        ];
+        for (count, first) in [(2, 0x10), (3, 0x10), (3, 0x20)] {
+            let entries = &all_entries[..count];
             let mut tree = AvlTree::new();
-            let entries = [
-                ([0x10; 32], vec![1]),
-                ([0x20; 32], vec![2]),
-                ([0x30; 32], vec![3]),
-            ];
             let mut oracle = oracle_tree();
-            for (key, value) in &entries {
+            for (key, value) in entries {
                 tree.insert(*key, value.clone());
                 oracle_insert(&mut oracle, key, value);
+            }
+            if count == 2 {
+                // The separator's left child is the NEG_INF sentinel leaf and
+                // its right child is internal: removal must return the right
+                // minimum's value, not the surviving predecessor's.
+                let AvlNode::Internal {
+                    key, left, right, ..
+                } = tree.node_clone(tree.root_id())
+                else {
+                    panic!("two-key root must be internal");
+                };
+                assert_eq!(key, [first; 32]);
+                assert!(matches!(tree.node_clone(left), AvlNode::Leaf { .. }));
+                assert!(matches!(tree.node_clone(right), AvlNode::Internal { .. }));
             }
             let key = [first; 32];
             assert_eq!(tree.remove(&key), Some(vec![first / 0x10]));
             oracle_remove(&mut oracle, &key);
             assert_eq!(our_digest(&mut tree), oracle_digest(&oracle));
             assert_eq!(tree.lookup(&key), None);
-            for (other, value) in &entries {
+            for (other, value) in entries {
                 if *other != key {
                     assert_eq!(tree.lookup(other), Some(value.clone()));
                 }
