@@ -38,6 +38,19 @@ use serde::{Deserialize, Serialize};
 mod private;
 pub use private::{PrivateTransactionEntry, PrivateTransactionOptions, PrivateTransactionRequest};
 
+/// Availability of the operator's optional storage-rent self-claims.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RentSelfClaimState {
+    #[default]
+    Disabled,
+    Active,
+    PausedIndexerBehind {
+        indexed_height: u64,
+        chain_height: u32,
+    },
+}
+
 /// Trait the node implements to surface its mining subsystem to the
 /// API server. Each call crosses into the node's main loop and awaits
 /// a oneshot reply, matching the existing [`crate::traits::NodeSubmit`]
@@ -95,6 +108,12 @@ pub trait NodeMining: Send + Sync {
     /// Public freshness has no transaction or wallet content.
     async fn mining_freshness(&self) -> Result<MiningFreshnessJson, MiningApiError> {
         Ok(MiningFreshnessJson::default())
+    }
+
+    /// Last availability observed by the serial mining worker; contains no
+    /// transaction or wallet contents.
+    async fn rent_self_claim_state(&self) -> RentSelfClaimState {
+        RentSelfClaimState::Disabled
     }
 
     /// Validated runtime block selection policy. A JSON seam preserves the

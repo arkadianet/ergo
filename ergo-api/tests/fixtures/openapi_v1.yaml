@@ -9731,6 +9731,7 @@ components:
         `synced` means the mining-started latch when mining is enabled.
       required:
       - mining_enabled
+      - rent_self_claim
       - synced
       - longpoll_supported
       properties:
@@ -9754,6 +9755,8 @@ components:
           type: boolean
         mining_enabled:
           type: boolean
+        rent_self_claim:
+          $ref: '#/components/schemas/RentSelfClaimState'
         synced:
           type: boolean
         template_seq:
@@ -10647,6 +10650,43 @@ components:
           - 'null'
         url:
           type: string
+    RentSelfClaimState:
+      oneOf:
+      - type: object
+        required:
+        - state
+        properties:
+          state:
+            type: string
+            enum:
+            - disabled
+      - type: object
+        required:
+        - state
+        properties:
+          state:
+            type: string
+            enum:
+            - active
+      - type: object
+        required:
+        - indexed_height
+        - chain_height
+        - state
+        properties:
+          chain_height:
+            type: integer
+            format: int32
+            minimum: 0
+          indexed_height:
+            type: integer
+            format: int64
+            minimum: 0
+          state:
+            type: string
+            enum:
+            - paused_indexer_behind
+      description: Availability of the operator's optional storage-rent self-claims.
     ReplayEvent:
       type: object
       description: Owned, versioned storage/wire representation; no process-local references.

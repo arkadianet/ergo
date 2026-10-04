@@ -29,6 +29,7 @@ mod outcome_journal;
 pub mod policy;
 pub mod private_queue;
 pub mod reemission;
+pub mod rent_state;
 pub mod reward_script;
 pub mod solution;
 pub mod state_view;
