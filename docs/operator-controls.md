@@ -166,8 +166,16 @@ Expiry is checked during admission/dial selection, independently of cleanup.
 Configured seeds can reappear after removing saved metadata and restarting;
 use a ban if the node must not reconnect to an IP.
 
-Automatic peer bans are process-local and cannot evict or extend manual bans.
+Automatic peer bans are process-local and cannot evict or extend active manual bans.
 The live table reserves 1,024 of its 10,000 entries for operators; manual bans
 may also replace automatic entries. Persisted rows include their operator origin.
 Legacy rows without an origin marker are discarded at boot because their origin
 cannot be established.
+
+On upgrade, legacy persisted ban rows have no operator-origin marker and are
+interpreted as automatic bans. Startup discards them in one batched transaction;
+new operator bans retain their TTL across restarts. The earlier main branch's
+manual-blacklisting endpoint was a `route_unavailable` stub, so legacy rows
+cannot represent acknowledged operator bans. The optional origin byte retains
+peer schema version 1: old decoders ignore it, and new decoders tolerate its
+absence. Operators should reapply any intended manual bans through the new API.

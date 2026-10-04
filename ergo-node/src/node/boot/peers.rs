@@ -46,12 +46,6 @@ pub(super) fn setup(config: &NodeConfig) -> Result<(i64, PeerManager), NodeError
                         });
                     }
                     for b in &state.bans {
-                        if !b.operator {
-                            if let Err(error) = book.unban(b.ip) {
-                                tracing::warn!(%error, "failed to discard legacy automatic ban");
-                            }
-                            continue;
-                        }
                         peer_manager.restore_ban(
                             b.ip,
                             ban_expiry_to_instant(b.until, mono_now, wall_now),
@@ -65,6 +59,7 @@ pub(super) fn setup(config: &NodeConfig) -> Result<(i64, PeerManager), NodeError
                         corrupt_skipped = state.corrupt_skipped,
                         nonroutable_purged = state.nonroutable_purged,
                         expired_bans_purged = state.expired_bans_purged,
+                        automatic_bans_purged = state.automatic_bans_purged,
                         "address_book restored",
                     );
                 }

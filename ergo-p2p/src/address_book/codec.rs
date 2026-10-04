@@ -11,8 +11,11 @@
 //! is the only intended consumer.
 //!
 //! Schema is versioned via [`super::SCHEMA_VERSION`] in the META
-//! table. Bumping any tag, flag, or field width is a schema change
-//! and the version must move with it.
+//! table. Incompatible tag, flag, or field-width changes require a version bump.
+//! The optional operator byte appended to ban rows is compatible with schema 1:
+//! the old decoder ignores trailing bytes, and this decoder defaults missing
+//! origin bytes to automatic. Old rows therefore remain readable for batched
+//! discard at load; no destructive schema upgrade is needed.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

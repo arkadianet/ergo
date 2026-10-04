@@ -26,6 +26,12 @@ infrastructure.
 
 ### Changed
 
+- Peer-store startup discards legacy ban rows as automatic bans in a single
+  transaction. Earlier main releases did not implement manual blacklisting
+  (`route_unavailable`); reapply intended operator bans through the new API.
+  New operator rows survive restart. The optional origin byte is compatible
+  with peer schema version 1; no peer database migration is required.
+
 - Startup, liveness and readiness GET/HEAD probes now bypass the API Host
   allowlist so Kubernetes pod-IP and load-balancer checks work with the shipped
   container configuration. Existing Host overrides remain valid. Other routes
