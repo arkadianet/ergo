@@ -1,6 +1,6 @@
 //! Membership evidence for caller-supplied transactions in an unproven block.
 
-use ergo_crypto::merkle::merkle_proof_by_index;
+use ergo_crypto::merkle::merkle_proofs_by_indices;
 use ergo_primitives::digest::blake2b256;
 use ergo_ser::header::{serialize_header_without_pow, Header};
 use ergo_ser::transaction::{transaction_id, Transaction};
@@ -45,17 +45,24 @@ pub fn upcoming_transactions_proof(
     };
     let mut leaves: Vec<&[u8]> = ids.iter().map(|id| id.as_bytes().as_slice()).collect();
     leaves.extend(witnesses.iter().map(Vec::as_slice));
-    let mut tx_proofs = Vec::new();
-    for tx in requested {
-        let Ok(id) = transaction_id(tx) else { continue };
-        let Some(index) = ids.iter().position(|included| *included == id) else {
-            continue;
-        };
-        let Some(proof) = merkle_proof_by_index(&leaves, index) else {
-            continue;
-        };
+    let positions: std::collections::HashMap<_, _> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id.as_bytes(), index))
+        .collect();
+    let indices: Vec<_> = requested
+        .iter()
+        .filter_map(|tx| {
+            let id = transaction_id(tx).ok()?;
+            positions.get(id.as_bytes()).copied()
+        })
+        .collect();
+    let proofs = merkle_proofs_by_indices(&leaves, &indices);
+    let mut tx_proofs = Vec::with_capacity(indices.len());
+    for (index, proof) in indices.into_iter().zip(proofs) {
+        let Some(proof) = proof else { continue };
         tx_proofs.push(TransactionMembershipProof {
-            leaf: *id.as_bytes(),
+            leaf: *ids[index].as_bytes(),
             levels: proof
                 .levels
                 .into_iter()
