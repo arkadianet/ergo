@@ -354,7 +354,7 @@ impl SyncExecutor {
             match store.get_header_meta(&cs.best_header_id) {
                 Ok(Some(meta)) => coordinator
                     .sync_state_mut()
-                    .check_headers_synced(meta.timestamp, meta.height),
+                    .check_headers_synced(meta.timestamp),
                 Ok(None) => {}
                 Err(e) => super::report_sync_storage_failure(
                     store,
@@ -397,10 +397,11 @@ impl SyncExecutor {
         // same floor `SyncState::blocks_to_download` uses:
         // `max(best_full_block_height, prune_sentinel - 1)`.
         //
-        // A freshly activated Mode 3 node holds no full blocks
-        // (`best_full_block_height == 0`) while the headers-synced flip
-        // has already seeded the sentinel far up the chain. The download
-        // side drops every pending entry below the sentinel, so a walk
+        // A store can hold no full blocks (`best_full_block_height == 0`)
+        // while its floor sits far up the chain: a NiPoPoW proof's
+        // `dense_from_height`, or an older release's header-derived floor
+        // until boot repairs it and walks again. The download side drops
+        // every pending entry below the sentinel, so a walk
         // anchored at `best_full_block_height` would register exactly the
         // range the download window then filters away — section requests
         // stop going out and full-block sync stalls. Anchoring both on the

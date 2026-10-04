@@ -560,8 +560,7 @@ impl SyncCoordinator {
         self.first_deliverers.push((header_id, peer));
 
         self.sync_state.set_best_known_header(height);
-        self.sync_state
-            .check_headers_synced(header_timestamp_ms, height);
+        self.sync_state.check_headers_synced(header_timestamp_ms);
 
         // Don't track pending blocks or request sections until headers are synced.
         // Scala: toDownload() returns Nil when !isHeadersChainSynced.

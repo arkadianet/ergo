@@ -33,7 +33,6 @@ mod persistent_blocks_1_10;
 mod popow_apply;
 mod popow_header_persisted_accessor;
 mod popow_prove_mainnet;
-mod prune_activation_scala_oracle;
 mod prune_eviction_pipeline_oracle;
 mod prune_eviction_sync_oracle;
 mod prune_formula_scala_oracle;

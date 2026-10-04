@@ -39,6 +39,15 @@ infrastructure.
   and keep the existing best-effort peer fallback; automatic quarantine is
   limited to an explicit corruption error.
 
+### Removed
+
+- The unused Mode 3 header-flip seed:
+  `ergo_state::store::activation_minimal_full_block_height`,
+  `SyncState::flip_seed_height` and the height argument of
+  `SyncState::check_headers_synced`. Fresh pruned UTXO stores replay full
+  blocks from genesis and prune after apply, so nothing seeds the prune
+  floor when the header chain is declared synced.
+
 ## [0.11.0] - 2026-09-30
 
 Scala consensus and compiler parity fixes, more reliable full-chain selection,

@@ -1087,9 +1087,10 @@ fn recover_coordinator_leaves_done_unset_during_bootstrap() {
 
 #[test]
 fn recover_coordinator_anchors_the_walk_on_the_prune_sentinel_floor() {
-    // Mode 3 tick order: the activation seed lands in `SyncState` before
-    // recovery runs. A walk anchored at `best_full_block_height` (0 on a
-    // node that has applied nothing) would register the bottom of the
+    // A floor above the applied tip (a NiPoPoW proof floor, or a legacy
+    // header-derived floor before repair) is mirrored into `SyncState`
+    // before recovery runs. A walk anchored at `best_full_block_height` (0
+    // on a node that has applied nothing) would register the bottom of the
     // chain — a range `blocks_to_download` discards wholesale, because it
     // anchors at `max(best_full_block_height, prune_sentinel - 1)` and
     // drops everything below the sentinel. Recovery must use the same
