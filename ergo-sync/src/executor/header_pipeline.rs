@@ -972,12 +972,15 @@ impl SyncExecutor {
         if !processed.is_new_best {
             return;
         }
-        let had_cached_tip = !self.last_headers.is_empty();
+        // An empty cache starts at this header. Headers written behind the
+        // executor (a NiPoPoW proof's sparse prefix, a seeded tip) need not
+        // have stored ancestry; startup hydration rebuilds the window.
+        let starts_cache = self.last_headers.is_empty();
         let extends_cached_tip = self
             .last_headers
             .front()
             .is_some_and(|(header, _)| *header.header_id() == processed.parent_id);
-        if extends_cached_tip {
+        if starts_cache || extends_cached_tip {
             self.last_headers
                 .push_front((processed.checked.clone(), header_bytes.to_vec()));
             self.last_headers.truncate(LAST_HEADERS_WINDOW);
@@ -990,17 +993,6 @@ impl SyncExecutor {
         }
         if let Some(after_tip) = processed.height.checked_add(1) {
             self.header_index.split_off(&after_tip);
-        }
-        if !had_cached_tip {
-            // A public executor may first attach to an existing header tip.
-            // Initialize the available recent window; startup's full index
-            // loader owns the older range, and no previous cached branch
-            // needs invalidation here.
-            for (header, _) in &self.last_headers {
-                self.header_index
-                    .insert(header.height(), *header.header_id());
-            }
-            return;
         }
         // The selected header fork can diverge below the applied full tip.
         // This cache follows best-header ancestry, so only an indexed matching

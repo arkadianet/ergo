@@ -1919,3 +1919,210 @@ fn winning_header_fork_repairs_index_below_applied_full_tip() {
         .collect::<Vec<_>>();
     assert_eq!(cached_ids, expected_ids);
 }
+
+fn mainnet_headers_1_10() -> Vec<(Vec<u8>, Header)> {
+    let rows: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/headers_1_10.json"
+    ))
+    .unwrap();
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let bytes = hex::decode(row["bytes"].as_str().unwrap()).unwrap();
+            let header =
+                ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
+                    .unwrap();
+            (bytes, header)
+        })
+        .collect()
+}
+
+/// Commit a NiPoPoW proof over mainnet headers whose stored chain is not
+/// contiguous: `prefix` heights below a contiguous `suffix` of `k` headers.
+/// Interlinks are left empty; `apply_popow_proof` trusts its caller.
+fn sparse_popow_store(
+    headers: &[(Vec<u8>, Header)],
+    prefix: &[u32],
+    suffix: std::ops::RangeInclusive<u32>,
+) -> ergo_state::StateBackendKind {
+    let popow = |height: u32| ergo_ser::popow_header::PoPowHeader {
+        header: headers[height as usize - 1].1.clone(),
+        interlinks: vec![],
+        interlinks_proof: vec![],
+    };
+    let mut store = open_initialized_store();
+    store
+        .apply_popow_proof(&ergo_ser::popow_proof::NipopowProof {
+            m: 1,
+            k: suffix.end() - suffix.start() + 1,
+            prefix: prefix.iter().map(|height| popow(*height)).collect(),
+            suffix_head: popow(*suffix.start()),
+            suffix_tail: (*suffix.start() + 1..=*suffix.end())
+                .map(|height| headers[height as usize - 1].1.clone())
+                .collect(),
+            continuous: true,
+        })
+        .unwrap();
+    ergo_state::StateBackendKind::Utxo(store)
+}
+
+fn validate_header_action(headers: &[(Vec<u8>, Header)], height: u32) -> Action {
+    let bytes = headers[height as usize - 1].0.clone();
+    Action::ValidateHeader {
+        peer: peer(9030),
+        modifier_id: *blake2b256(&bytes).as_bytes(),
+        header_bytes: bytes,
+    }
+}
+
+fn cached_heights(executor: &SyncExecutor) -> Vec<u32> {
+    executor
+        .last_headers
+        .iter()
+        .map(|(header, _)| header.height())
+        .collect()
+}
+
+#[test]
+fn sparse_popow_store_accepts_next_header_and_restarts() {
+    // Real proof apply and real-PoW mainnet headers. The proof stores 1 and
+    // 5 below its 6..=7 suffix, so 2..=4 are absent by construction.
+    let headers = mainnet_headers_1_10();
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    // Boot hydration ran on the fresh store, before the proof arrived.
+    executor
+        .hydrate_from_store(&ergo_state::StateBackendKind::Utxo(open_initialized_store()))
+        .unwrap();
+    let mut store = sparse_popow_store(&headers, &[1, 5], 6..=7);
+    assert!(matches!(
+        store.chain_state_meta().header_availability,
+        ergo_state::chain::HeaderAvailability::PoPowSparse {
+            dense_from_height: 5,
+            proof_suffix_height: 6,
+        }
+    ));
+    let mut coordinator = SyncCoordinator::new(0);
+    let actions = executor.execute(
+        validate_header_action(&headers, 8),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, Action::Penalize { .. })),
+        "{actions:?}"
+    );
+    assert_eq!(store.chain_state_meta().best_header_height, 8);
+    assert_eq!(cached_heights(&executor), vec![8]);
+
+    // Restart: boot hydration ends at the proof's absent prefix ancestor.
+    let mut restarted = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    restarted.hydrate_from_store(&store).unwrap();
+    restarted.load_header_index(&store).unwrap();
+    assert_eq!(cached_heights(&restarted), vec![8, 7, 6, 5]);
+    assert_eq!(restarted.header_index_len(), 4);
+    let mut coordinator = SyncCoordinator::new(0);
+    restarted.execute(
+        validate_header_action(&headers, 9),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert_eq!(store.chain_state_meta().best_header_height, 9);
+    assert_eq!(cached_heights(&restarted), vec![9, 8, 7, 6, 5]);
+    assert_eq!(
+        restarted.header_index_get(9),
+        Some(*blake2b256(&headers[8].0).as_bytes())
+    );
+}
+
+#[test]
+fn sparse_popow_store_accepts_next_header_batch() {
+    let headers = mainnet_headers_1_10();
+    let mut store = sparse_popow_store(&headers, &[1, 5], 6..=7);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut coordinator = SyncCoordinator::new(0);
+    let actions = executor.execute_all(
+        vec![
+            validate_header_action(&headers, 9),
+            validate_header_action(&headers, 8),
+        ],
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, Action::Penalize { .. })),
+        "{actions:?}"
+    );
+    assert_eq!(store.chain_state_meta().best_header_height, 9);
+    assert_eq!(cached_heights(&executor), vec![9, 8]);
+}
+
+#[test]
+fn hydration_ends_below_the_proof_suffix_head_but_not_in_dense_ancestry() {
+    // A Scala proof need not carry its suffix head's parent, which can sit at
+    // or above `dense_from_height` (suffix head - k + 1, saturating).
+    let headers = mainnet_headers_1_10();
+    let store = sparse_popow_store(&headers, &[1], 4..=8);
+    assert!(matches!(
+        store.chain_state_meta().header_availability,
+        ergo_state::chain::HeaderAvailability::PoPowSparse {
+            dense_from_height: 0,
+            proof_suffix_height: 4,
+        }
+    ));
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    executor.hydrate_from_store(&store).unwrap();
+    assert_eq!(cached_heights(&executor), vec![8, 7, 6, 5, 4]);
+
+    // The same hole in Dense ancestry remains a hydration failure.
+    let mut dense = open_initialized_store();
+    let (bytes, header) = &headers[3];
+    let id = *blake2b256(bytes).as_bytes();
+    dense.store_header(&id, bytes).unwrap();
+    dense
+        .store_header_meta(
+            &id,
+            &ergo_state::chain::HeaderMeta {
+                parent_id: *header.parent_id.as_bytes(),
+                height: header.height,
+                cumulative_score: vec![4],
+                pow_validity: 1,
+                timestamp: header.timestamp,
+            },
+        )
+        .unwrap();
+    dense
+        .test_force_set_best_header_unsafe(id, header.height, vec![4])
+        .unwrap();
+    let dense = ergo_state::StateBackendKind::Utxo(dense);
+    match executor.hydrate_from_store(&dense) {
+        Err(HydrationError::MissingPersistedRow {
+            phase: "hydrate_from_store",
+            kind: "header",
+            id,
+        }) => assert_eq!(id, hex::encode(blake2b256(&headers[2].0).as_bytes())),
+        other => panic!("expected the Dense ancestor gap to fail, got {other:?}"),
+    }
+}

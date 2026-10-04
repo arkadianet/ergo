@@ -6,6 +6,7 @@
 //! coordinator's pending-block queue.
 
 use ergo_ser::modifier_id::ExpectedSections;
+use ergo_state::chain::HeaderAvailability;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_validation::header::CheckedHeader;
 use thiserror::Error;
@@ -14,6 +15,21 @@ use tracing::{debug, info, warn};
 use crate::coordinator::SyncCoordinator;
 
 use super::{SyncExecutor, LAST_HEADERS_WINDOW};
+
+/// Whether an ancestor absent at `height` is where a NiPoPoW-bootstrapped
+/// store's stored chain ends rather than a hole. `apply_popow_proof` keeps
+/// only sparse prefix headers below the proof's contiguous suffix, and a
+/// Scala proof need not carry the suffix head's parent (which can sit above
+/// `dense_from_height`). Dense stores keep every ancestor.
+pub(super) fn is_sparse_prefix_gap(store: &ergo_state::StateBackendKind, height: u32) -> bool {
+    match store.chain_state_meta().header_availability {
+        HeaderAvailability::Dense => false,
+        HeaderAvailability::PoPowSparse {
+            dense_from_height,
+            proof_suffix_height,
+        } => height < dense_from_height.max(proof_suffix_height),
+    }
+}
 
 /// Errors returned during startup while hydrating executor state from the
 /// persisted store. A variant here means the node must abort startup — the
@@ -71,7 +87,9 @@ pub enum HydrationError {
     /// A non-genesis ancestor id resolved through chain-state walking is
     /// expected to be present in the header table — chain_state pointing
     /// at a row that doesn't exist (or whose meta row is missing) is a
-    /// mid-chain hole, not a legitimate chain-end termination.
+    /// mid-chain hole, not a legitimate chain-end termination. The one
+    /// exception is a NiPoPoW proof's sparse prefix, where recent-header
+    /// hydration ends instead.
     #[error(
         "hydration {phase}: persisted-{kind} row missing for id={id} (chain-state inconsistency)"
     )]
@@ -94,8 +112,10 @@ impl SyncExecutor {
     ///
     /// Reaching the end of the chain (`current_id == [0; 32]`, store
     /// reaches the zero parent) is a successful termination — the cache may
-    /// be shorter than `LAST_HEADERS_WINDOW` early in the chain. Any
-    /// other error (store I/O, header reconstruction integrity) is
+    /// be shorter than `LAST_HEADERS_WINDOW` early in the chain. So is an
+    /// ancestor absent below a NiPoPoW proof's contiguous suffix on a
+    /// `PoPowSparse` store. Any other error (store I/O, header
+    /// reconstruction integrity, a missing Dense ancestor) is
     /// fatal: the persistent header table is the source of truth for
     /// `CheckedHeader.header_id` after restart, and silent truncation
     /// would mask DB corruption that downstream validation also can't
@@ -110,13 +130,19 @@ impl SyncExecutor {
             if current_id == [0u8; 32] {
                 break;
             }
-            let header_bytes = store.get_header(&current_id)?.ok_or_else(|| {
-                HydrationError::MissingPersistedRow {
+            let Some(header_bytes) = store.get_header(&current_id)? else {
+                let sparse_end = self.last_headers.back().is_some_and(|(child, _)| {
+                    is_sparse_prefix_gap(store, child.height().saturating_sub(1))
+                });
+                if sparse_end {
+                    break;
+                }
+                return Err(HydrationError::MissingPersistedRow {
                     phase: "hydrate_from_store",
                     kind: "header",
                     id: hex::encode(current_id),
-                }
-            })?;
+                });
+            };
             let meta = store.get_header_meta(&current_id)?.ok_or_else(|| {
                 HydrationError::MissingPersistedRow {
                     phase: "hydrate_from_store",
