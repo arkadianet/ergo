@@ -108,3 +108,15 @@ and [`scripts/jvm_keystore_oracle`](../scripts/jvm_keystore_oracle/README.md).
 This establishes node API, block construction and keystore interoperability.
 A full Lithos pool lifecycle with mining hardware is not exercised by these
 repository tests.
+
+## Operator policy and private work
+
+Requested packages form an atomic prefix after emission and before storage rent.
+The node validates members in the supplied dependency order using the same
+selection path and consensus budgets as ordinary candidates. Invalid members,
+conflicts, or a package that cannot fit with the final fee transaction refuse
+the request with HTTP 400; no partial package is offered. Operator exclusions
+win, and the error names the excluded transaction. Included request members
+satisfy matching operator requirements; remaining requirements retain their
+ordinary priority and never withhold work. Rent limits, token preservation,
+and reservations still apply to the remaining budget.

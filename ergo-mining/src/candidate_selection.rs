@@ -192,10 +192,7 @@ impl Selected {
     }
 }
 
-/// Validate caller-supplied transactions in their original dependency order.
-/// This is a block-building path, so no relay fee or mempool admission policy
-/// applies. Invalid, conflicting and oversized transactions are skipped;
-/// descendants can only resolve when their parent was actually included.
+/// Validate supplied transactions in request order using the ordinary selector.
 #[allow(clippy::too_many_arguments)]
 pub fn select_prioritized_txs_cancellable(
     overlay: &mut CandidateOverlay,
@@ -208,77 +205,95 @@ pub fn select_prioritized_txs_cancellable(
     reemission_rules: Option<&ReemissionRuleInputs>,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<Selected, MiningError> {
-    let block_cap = JitCost::from_block_cost(params.max_block_cost).map_err(|e| {
-        MiningError::IdComputation {
-            op: "priority_block_cap",
-            reason: format!("{e:?}"),
-        }
-    })?;
-    let mut selected = Selected::default();
-    let minimum_tx_cost = INTERPRETER_INIT_COST
-        .saturating_add(params.input_cost)
-        .saturating_add(params.output_cost);
+    select_requested_txs_cancellable(
+        overlay,
+        transactions,
+        ctx,
+        params,
+        last_headers,
+        cost_budget,
+        size_budget,
+        reemission_rules,
+        &BlockPolicy::default(),
+        false,
+        should_cancel,
+    )
+}
+
+/// A requested prefix either fits in full or refuses the candidate. Operator
+/// exclusions win; requirements and private/public work follow the prefix.
+#[allow(clippy::too_many_arguments)]
+pub fn select_requested_txs_cancellable(
+    overlay: &mut CandidateOverlay,
+    transactions: &[Transaction],
+    ctx: &TransactionContext,
+    params: &ProtocolParams,
+    last_headers: &[Header],
+    cost_budget: u64,
+    size_budget: u64,
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    policy: &BlockPolicy,
+    atomic: bool,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Selected, MiningError> {
+    policy.validate()?;
+    let excluded: HashSet<_> = policy.excluded_ids()?.into_iter().collect();
+    let mut entries = Vec::with_capacity(transactions.len());
     for tx in transactions {
         check_build_cancelled(should_cancel)?;
-        let remaining_cost = cost_budget.saturating_sub(selected.total_cost);
-        if remaining_cost < minimum_tx_cost {
-            break;
-        }
-        let structural_cost = INTERPRETER_INIT_COST
-            .saturating_add((tx.inputs.len() as u64).saturating_mul(params.input_cost))
-            .saturating_add((tx.data_inputs.len() as u64).saturating_mul(params.data_input_cost))
-            .saturating_add((tx.output_candidates.len() as u64).saturating_mul(params.output_cost));
-        if structural_cost > remaining_cost {
-            continue;
-        }
-        if tx
-            .inputs
-            .iter()
-            .any(|input| overlay.is_spent(&input.box_id))
-        {
-            continue;
+        let id = transaction_id(tx)
+            .map_err(|e| MiningError::InvalidRequest(format!("transaction id: {e:?}")))?;
+        let id = Digest32::from_bytes(*id.as_bytes());
+        if excluded.contains(&id) {
+            return Err(MiningError::InvalidRequest(format!(
+                "requested transaction {} excluded by operator policy",
+                hex::encode(id.as_bytes())
+            )));
         }
         let mut writer = VlqWriter::new();
-        if write_transaction(&mut writer, tx).is_err() {
-            continue;
-        }
+        write_transaction(&mut writer, tx)
+            .map_err(|e| MiningError::InvalidRequest(format!("transaction: {e:?}")))?;
         let bytes = writer.result();
-        if selected.total_size.saturating_add(bytes.len() as u64) > size_budget {
-            continue;
-        }
-        let Some((inputs, data_inputs)) = overlay.resolve_tx(tx) else {
-            continue;
-        };
-        check_build_cancelled(should_cancel)?;
-        let mut cost = CostAccumulator::new(block_cap);
-        let mut validation = TxValidationCtx {
-            ctx,
-            params,
-            cost: &mut cost,
-            last_headers,
-            rules: TxValidationRules {
-                reemission: reemission_rules,
-            },
-        };
-        let Ok(checked) = validate_transaction_parsed(
-            tx.clone(),
-            &bytes,
-            inputs,
-            data_inputs,
-            false,
-            &mut validation,
-        ) else {
-            continue;
-        };
-        check_build_cancelled(should_cancel)?;
-        let tx_cost = cost.total_block_cost();
-        if selected.total_cost.saturating_add(tx_cost) > cost_budget {
-            continue;
-        }
-        overlay.apply_checked(&checked);
-        selected.total_cost = selected.total_cost.saturating_add(tx_cost);
-        selected.total_size = selected.total_size.saturating_add(bytes.len() as u64);
-        selected.checked.push((checked, tx_cost));
+        let size = bytes.len() as u32;
+        entries.push(Entry::new(
+            id,
+            bytes.into(),
+            tx.inputs.iter().map(|i| i.box_id).collect(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            0,
+            size,
+            0,
+            ergo_mempool::types::TxSource::Api,
+        ));
+    }
+    let selected = select_ordered_entries_cancellable(
+        overlay,
+        SelectionPlan {
+            ordered: entries.iter().collect(),
+            required: HashSet::new(),
+            excluded: HashSet::new(),
+            unmet: Vec::new(),
+        },
+        ctx,
+        params,
+        last_headers,
+        cost_budget,
+        size_budget,
+        reemission_rules,
+        should_cancel,
+    )?;
+    if atomic && selected.checked.len() != transactions.len() {
+        let failure = selected
+            .excluded
+            .first()
+            .expect("every selection skip has a reason");
+        return Err(MiningError::InvalidRequest(format!(
+            "requested transaction {}: {}",
+            hex::encode(failure.tx_id.as_bytes()),
+            failure.reason
+        )));
     }
     Ok(selected)
 }
@@ -369,17 +384,46 @@ pub fn select_user_txs_with_policy_cancellable(
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<Selected, MiningError> {
     policy.validate()?;
-    let plan = selection_plan(snapshot, private_transactions, policy)?;
+    let mut plan = selection_plan(snapshot, private_transactions, policy)?;
+    for entry in snapshot.iter().chain(private_transactions) {
+        if plan.excluded.contains(&entry.tx_id) {
+            plan.unmet.push(ExcludedTransaction::new(
+                entry.tx_id,
+                "excluded_by_policy",
+                plan.required.contains(&entry.tx_id),
+            ));
+        }
+    }
+    select_ordered_entries_cancellable(
+        overlay,
+        plan,
+        ctx,
+        params,
+        last_headers,
+        cost_budget,
+        size_budget,
+        reemission_rules,
+        should_cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_ordered_entries_cancellable(
+    overlay: &mut CandidateOverlay,
+    plan: SelectionPlan<'_>,
+    ctx: &TransactionContext,
+    params: &ProtocolParams,
+    last_headers: &[Header],
+    cost_budget: u64,
+    size_budget: u64,
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Selected, MiningError> {
     let mut sel = Selected {
         required: plan.required,
         excluded: plan.unmet,
         ..Default::default()
     };
-    for entry in snapshot.iter().chain(private_transactions) {
-        if plan.excluded.contains(&entry.tx_id) {
-            sel.exclude(entry.tx_id, "excluded_by_policy");
-        }
-    }
     check_build_cancelled(should_cancel)?;
     if cost_budget == 0 || size_budget == 0 {
         let reason = if cost_budget == 0 {
@@ -388,9 +432,7 @@ pub fn select_user_txs_with_policy_cancellable(
             "size_budget"
         };
         for entry in plan.ordered {
-            if sel.required.contains(&entry.tx_id) {
-                sel.exclude(entry.tx_id, reason);
-            }
+            sel.exclude(entry.tx_id, reason);
         }
         return Ok(sel);
     }

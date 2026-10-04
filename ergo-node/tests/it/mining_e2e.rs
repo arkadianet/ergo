@@ -1229,11 +1229,8 @@ async fn lithos_requested_package_proves_and_applies_with_lender_key() {
         );
         let response =
             http_request(addr, "POST", "/mining/candidateWithTxsAndPk", Some(&wrong)).await;
-        assert_eq!(response.status, 200, "{}", response.body);
-        let other: ergo_rest_json::mining::WorkMessageJson =
-            serde_json::from_str(&response.body).unwrap();
-        assert_eq!(other.pk, fixture["wrong_miner_pk"].as_str().unwrap());
-        assert!(other.proof.unwrap().tx_proofs.is_empty());
+        assert_eq!(response.status, 400, "{}", response.body);
+        assert!(response.body.contains("consensus_validation_failed"));
         let fallback = http_request_with_key(addr, "GET", "/mining/candidate", None, false).await;
         assert_eq!(fallback.status, 200);
         let fallback: ergo_rest_json::mining::WorkMessageJson =

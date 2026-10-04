@@ -526,6 +526,9 @@ pub(super) fn run_build_worker(
                     Ok(outcome) => Err(MiningApiError::Unavailable(format!(
                         "candidate not published: {outcome:?}"
                     ))),
+                    Err(MiningError::InvalidRequest(detail)) => {
+                        Err(MiningApiError::BadRequest(detail))
+                    }
                     Err(error) => Err(MiningApiError::Internal(format!(
                         "candidate build: {error}"
                     ))),

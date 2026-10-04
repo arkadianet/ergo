@@ -328,3 +328,91 @@ fn upcoming_proof_mainnet_v1_single_leaf_padding_matches_scala_capture() {
         .collect();
     assert_eq!(proof.tx_proofs[0].levels, encoded);
 }
+
+// ----- atomic request policy -----
+
+#[test]
+fn atomic_requested_prefix_rejects_partial_packages_and_names_the_failure() {
+    use ergo_mining::candidate_selection::select_requested_txs_cancellable;
+    use ergo_mining::policy::BlockPolicy;
+    let fixture = Fixture::load();
+    let parent_cost = fixture.raw["parent_matching_key"]["cost"].as_u64().unwrap();
+    let select = |txs: &[Transaction], cost, size, policy: &BlockPolicy| {
+        select_requested_txs_cancellable(
+            &mut CandidateOverlay::new(&fixture),
+            txs,
+            &fixture.context(false),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            cost,
+            size,
+            None,
+            policy,
+            true,
+            &|| false,
+        )
+    };
+    let txs = &fixture.transactions[..2];
+    assert_eq!(
+        select(txs, u64::MAX, u64::MAX, &BlockPolicy::default())
+            .unwrap()
+            .checked
+            .len(),
+        2
+    );
+    for (package, cost, size, reason) in [
+        (txs.to_vec(), parent_cost, u64::MAX, "cost_budget"),
+        (
+            txs.to_vec(),
+            u64::MAX,
+            serialized_size(&txs[0]),
+            "size_budget",
+        ),
+        (
+            vec![txs[1].clone(), txs[0].clone()],
+            u64::MAX,
+            u64::MAX,
+            "input_unavailable",
+        ),
+        (
+            fixture.transactions[..3].to_vec(),
+            u64::MAX,
+            u64::MAX,
+            "input_conflict",
+        ),
+    ] {
+        let error = select(&package, cost, size, &BlockPolicy::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(reason), "{error}");
+        assert!(error.contains("requested transaction"), "{error}");
+    }
+}
+
+#[test]
+fn atomic_requested_prefix_obeys_operator_exclusions() {
+    use ergo_mining::candidate_selection::select_requested_txs_cancellable;
+    use ergo_mining::policy::BlockPolicy;
+    let fixture = Fixture::load();
+    let excluded = hex::encode(transaction_id(&fixture.transactions[0]).unwrap().as_bytes());
+    let error = select_requested_txs_cancellable(
+        &mut CandidateOverlay::new(&fixture),
+        &fixture.transactions[..2],
+        &fixture.context(false),
+        &ProtocolParams::mainnet_default(),
+        &[],
+        u64::MAX,
+        u64::MAX,
+        None,
+        &BlockPolicy {
+            excluded_tx_ids: vec![excluded.to_uppercase()],
+            ..Default::default()
+        },
+        true,
+        &|| false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains(&excluded), "{error}");
+    assert!(error.contains("excluded by operator policy"), "{error}");
+}

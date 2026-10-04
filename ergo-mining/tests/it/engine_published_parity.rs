@@ -659,7 +659,7 @@ fn candidate_metrics_describe_retained_transactions_and_collected_fees() {
 #[test]
 fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() {
     use ergo_mempool::{pool::Entry, types::TxSource};
-    use ergo_mining::candidate::generate_candidate_with_policy_cancellable;
+    use ergo_mining::candidate::generate_candidate_with_transactions_cancellable;
     use ergo_ser::{
         ergo_tree::ErgoTree,
         opcode::Expr,
@@ -705,7 +705,7 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
     ))
     .unwrap();
     // Spend the first `n` boxes, paying FEE to the fee proposition.
-    let spend = |n: usize| {
+    let spend = |n: usize, requested: bool| {
         let tx = Transaction {
             inputs: inputs[..n]
                 .iter()
@@ -755,11 +755,16 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
             required_tx_ids: vec![hex::encode(id.as_bytes())],
             ..Default::default()
         };
-        generate_candidate_with_policy_cancellable(
+        generate_candidate_with_transactions_cancellable(
             &store,
             ergo_chain_spec::Network::Mainnet,
             BuildMode::Full,
             &MempoolReadSnapshot::from_entries(vec![entry]),
+            if requested {
+                std::slice::from_ref(&tx)
+            } else {
+                &[]
+            },
             &MINER_PK,
             &MonetarySettings::mainnet(),
             None,
@@ -780,7 +785,7 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
     };
     // Measure the emission, per-input and fee-transaction costs.
     let costs = |n: usize| {
-        let candidate = spend(n).unwrap().0.unwrap();
+        let candidate = spend(n, false).unwrap().0.unwrap();
         let cost = |category: &str| {
             candidate
                 .observation
@@ -800,7 +805,7 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
     let n = 1 + ((budget - one) / per_input) as usize;
     assert!(per_input < fees && n < inputs.len());
 
-    let (candidate, id) = spend(n).expect("an unmet requirement never fails the build");
+    let (candidate, id) = spend(n, false).expect("an unmet requirement never fails the build");
     let candidate = candidate.expect("the emission-only candidate is published");
     assert_eq!(candidate.transactions.len(), 1, "only the emission remains");
     let reasons: Vec<_> = candidate
@@ -811,6 +816,12 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
         .map(|e| e.reason.as_str())
         .collect();
     assert_eq!(reasons, ["required_final_fee_or_section_budget"]);
+    let error = spend(n, true).unwrap_err();
+    assert!(
+        matches!(error, MiningError::InvalidRequest(ref reason)
+        if reason.contains("final fee transaction exceed the block budget")),
+        "{error}"
+    );
 }
 
 // ----- happy path -----
