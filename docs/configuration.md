@@ -17,8 +17,9 @@ Values are resolved from three sources, highest precedence first:
 
 The config file path is `--config <path>`; when that flag is absent the
 node looks for `ergo-node.toml` inside the data directory
-(`<data_dir>/ergo-node.toml`). A missing config file is not an error —
-the node falls back to built-in defaults. All validation runs at load
+(`<data_dir>/ergo-node.toml`). If `--config` is omitted and that file does
+not exist, built-in defaults apply; a path given with `--config` must exist
+and be readable, or the node refuses to start. All validation runs at load
 time: any failure returns an error and the node refuses to start rather
 than booting into a misconfigured state.
 
