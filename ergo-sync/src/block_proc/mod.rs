@@ -21,6 +21,23 @@ mod utxo;
 use digest::process_block_digest;
 use utxo::process_block_utxo;
 
+/// Parameters pricing and gating the target block's transactions. Scala
+/// appends the block, validating an epoch-start extension, before executing
+/// its transactions, so an epoch-start block uses its voted row and any other
+/// block the active row. Rule statuses are the store's cumulative settings
+/// (Scala `ErgoStateContext.validationSettings`); one row's
+/// `activated_update` is only that epoch's delta.
+fn target_block_params(
+    store: &impl ergo_state::ChainStateRead,
+    voted_params_row: Option<&ergo_validation::ActiveProtocolParameters>,
+) -> ProtocolParams {
+    ProtocolParams::for_block(
+        store.active_params(),
+        voted_params_row,
+        store.validation_settings(),
+    )
+}
+
 /// Tally the applied block's ancestors. The best-header height index can
 /// belong to a different branch while that branch's bodies are unavailable.
 fn branch_epoch_votes(
@@ -253,3 +270,5 @@ pub fn process_block(
 
 #[cfg(test)]
 mod failed_tx_tests;
+#[cfg(test)]
+mod params_tests;

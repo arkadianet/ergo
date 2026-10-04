@@ -60,10 +60,11 @@ pub const fn neutral_votes() -> [u8; 3] {
 /// the script version (that is handled separately via rule
 /// replacements in `ErgoValidationSettings`).
 ///
-/// `saturating_sub` matches the existing block-validation call sites
-/// (`ergo-validation/src/block.rs:523,756`) — `block_version = 0` is
-/// a synthetic value that never appears on mainnet, but saturating
-/// avoids underflow if some pre-genesis test path constructs it.
+/// Block validation and mempool tip contexts pass the active parameters'
+/// `block_version` (Scala `stateContext.blockVersion`), never a header's own
+/// version byte. `block_version = 0` is a synthetic value that never appears
+/// on mainnet, but saturating avoids underflow if some pre-genesis test path
+/// constructs it.
 pub const fn derive_activated_script_version(block_version: u8) -> u8 {
     block_version.saturating_sub(1)
 }
@@ -81,9 +82,8 @@ mod mining_helper_tests {
 
     #[test]
     fn derive_activated_script_version_matches_existing_pattern() {
-        // Mirror the existing call sites at
-        // ergo-validation/src/block.rs:523,756 which spell out
-        // `header.version.saturating_sub(1)`.
+        // Scala `Header.scriptFromBlockVersion`: `(blockVersion - 1).toByte`,
+        // saturating at the synthetic version 0.
         for v in 0..=255u8 {
             assert_eq!(
                 derive_activated_script_version(v),

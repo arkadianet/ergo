@@ -148,6 +148,9 @@ pub enum EvictionReason {
     ByteBudget,
     Confirmed,
     InputConflict,
+    /// Deferred descendant removal after its pooled ancestor was evicted.
+    /// This is a dependency decision, without a verdict on the child's scripts.
+    DependencyRemoved,
     /// Evicted by the proactive tip-revalidation pass: the tx (or a cascade
     /// descendant of one) is no longer valid at the new tip.
     TipInvalid,

@@ -78,6 +78,28 @@ async fn range_400_on_negative_offset() {
     assert_eq!(body["reason"], "bad-request");
 }
 
+#[tokio::test]
+async fn range_rejects_offsets_outside_scala_int_domain() {
+    for offset in [2147483648_i64, 4294967296, i64::MAX] {
+        let app = build_app(Arc::new(StubIndexer::caught_up(Vec::new())));
+        let (status, body) = json_get(
+            app,
+            &format!("/blockchain/transaction/range?offset={offset}&limit=1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["reason"], "bad-request");
+    }
+    let app = build_app(Arc::new(StubIndexer::caught_up(Vec::new())));
+    let (status, body) = json_get(
+        app,
+        "/blockchain/transaction/range?offset=2147483647&limit=0",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!([]));
+}
+
 // ---- 200 dispatch + projection --------------------------------------------
 
 #[tokio::test]
@@ -92,9 +114,9 @@ async fn range_200_returns_bare_id_array() {
     assert_eq!(status, StatusCode::OK);
     let arr = body.as_array().expect("bare array response");
     assert_eq!(arr.len(), 3);
-    assert_eq!(arr[0], "aa".repeat(32));
+    assert_eq!(arr[0], "cc".repeat(32));
     assert_eq!(arr[1], "bb".repeat(32));
-    assert_eq!(arr[2], "cc".repeat(32));
+    assert_eq!(arr[2], "aa".repeat(32));
 }
 
 #[tokio::test]
@@ -239,6 +261,17 @@ impl IndexerQuery for StubIndexer {
                 self.txs[lo..hi].to_vec()
             }
         })
+    }
+
+    fn txs_latest_paged(&self, page: Page) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(self
+            .txs
+            .iter()
+            .rev()
+            .skip(page.offset as usize)
+            .take(page.limit as usize)
+            .cloned()
+            .collect())
     }
 
     fn address_balance(&self, _: &TreeHash) -> Result<Option<BalanceDto>, IndexerReadError> {

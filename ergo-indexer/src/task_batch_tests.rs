@@ -64,26 +64,33 @@ impl Chain {
     }
 }
 impl IndexerChainSource for Chain {
-    fn committed_tip(&self) -> ChainTip {
+    fn committed_tip(&self) -> Result<ChainTip, crate::IndexerError> {
         let height = self.tip.load(Ordering::Relaxed);
-        ChainTip {
+        Ok(ChainTip {
             height,
             header_id: self.headers.lock().unwrap()[height as usize - 1],
-        }
+        })
     }
-    fn header_id_at(&self, h: u32) -> Option<HeaderId> {
-        self.headers
-            .lock()
-            .unwrap()
-            .get(h.checked_sub(1)? as usize)
-            .copied()
+    fn header_id_at(&self, h: u32) -> Result<Option<HeaderId>, crate::IndexerError> {
+        Ok(h.checked_sub(1)
+            .and_then(|index| self.headers.lock().unwrap().get(index as usize).copied()))
     }
-    fn full_block(&self, id: &HeaderId) -> Option<IndexerFullBlock> {
-        let block = self.blocks.lock().unwrap().get(id).cloned()?;
+    // Tests drop applied rows only to model State unwinding for a competing
+    // branch, so the best-header chain names another block at those heights.
+    fn best_header_id_at(&self, h: u32) -> Result<Option<HeaderId>, crate::IndexerError> {
+        Ok(Some(
+            self.header_id_at(h)?
+                .unwrap_or(Digest32::from_bytes([0xF0; 32])),
+        ))
+    }
+    fn full_block(&self, id: &HeaderId) -> Result<Option<IndexerFullBlock>, crate::IndexerError> {
+        let Some(block) = self.blocks.lock().unwrap().get(id).cloned() else {
+            return Ok(None);
+        };
         if let Some(hook) = &*self.hook.lock().unwrap() {
             hook(block.height as u32);
         }
-        Some(block)
+        Ok(Some(block))
     }
 }
 
@@ -588,4 +595,180 @@ fn benchmark_mainnet_index_batches() {
             samples[2]
         );
     }
+}
+
+struct FailingChain {
+    inner: Arc<Chain>,
+    operation: &'static str,
+    fail_at: usize,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl FailingChain {
+    fn check(&self, operation: &'static str) -> Result<(), crate::IndexerError> {
+        if operation == self.operation
+            && self.calls.fetch_add(1, Ordering::Relaxed) + 1 == self.fail_at
+        {
+            return Err(crate::IndexerError::ChainRead {
+                operation,
+                source: Box::new(std::io::Error::other("controlled source read failure")),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl IndexerChainSource for FailingChain {
+    fn committed_tip(&self) -> Result<ChainTip, crate::IndexerError> {
+        self.check("tip")?;
+        self.inner.committed_tip()
+    }
+    fn header_id_at(&self, height: u32) -> Result<Option<HeaderId>, crate::IndexerError> {
+        self.check("header")?;
+        self.inner.header_id_at(height)
+    }
+    fn best_header_id_at(&self, height: u32) -> Result<Option<HeaderId>, crate::IndexerError> {
+        self.check("best header")?;
+        self.inner.best_header_id_at(height)
+    }
+    fn full_block(&self, id: &HeaderId) -> Result<Option<IndexerFullBlock>, crate::IndexerError> {
+        self.check("block")?;
+        self.inner.full_block(id)
+    }
+}
+
+#[test]
+fn every_batch_source_error_aborts_all_uncommitted_rows() {
+    let blocks: Vec<_> = corpus().into_iter().take(2).collect();
+    for (operation, fail_at) in [
+        ("tip", 1),
+        ("header", 1),
+        ("block", 1),
+        ("header", 2),
+        ("header", 3),
+        ("block", 2),
+        ("header", 4),
+        ("header", 5),
+        ("header", 6),
+        ("header", 7),
+        ("header", 8),
+    ] {
+        let (_tmp, handle, chain, _) = setup(&blocks);
+        let source = Arc::new(FailingChain {
+            inner: chain,
+            operation,
+            fail_at,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut task = IndexerTask::new(handle.clone(), source);
+        let outcome = task.step_with_budget(2, Duration::from_secs(60), u64::MAX);
+        assert!(
+            matches!(
+                outcome,
+                IndexerPoll::Halted(crate::IndexerError::ChainRead { .. })
+            ),
+            "{operation}#{fail_at}: {outcome:?}"
+        );
+        let store = handle.store().unwrap();
+        assert_eq!(store.read_meta().unwrap(), IndexerMeta::empty());
+        assert!(store.read_numeric_box(0).unwrap().is_none());
+        assert!(store.read_numeric_tx(0).unwrap().is_none());
+        assert!(store.read_undo(1).unwrap().is_none());
+        assert_eq!(handle.indexed_height(), 0);
+        // An explicit retry after the controlled failure uses a clean scratch
+        // and checkpoint, rather than leaked in-memory batch progress.
+        assert!(matches!(
+            task.step_with_budget(2, Duration::from_secs(60), u64::MAX),
+            IndexerPoll::Applied(2)
+        ));
+    }
+}
+
+#[test]
+fn public_step_reports_chain_failure_as_halted_not_caught_up() {
+    let blocks: Vec<_> = corpus().into_iter().take(1).collect();
+    let (_tmp, handle, chain, _) = setup(&blocks);
+    handle.set_status(IndexerStatus::CaughtUp);
+    let source = Arc::new(FailingChain {
+        inner: chain,
+        operation: "tip",
+        fail_at: 1,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut task = IndexerTask::new(handle.clone(), source);
+    assert!(matches!(
+        task.step(),
+        IndexerPoll::Halted(crate::IndexerError::ChainRead { .. })
+    ));
+    assert_eq!(
+        handle.status(),
+        IndexerStatus::Halted(IndexerHaltReason::DbCorruption)
+    );
+}
+
+#[test]
+fn rollback_source_failure_preserves_the_committed_checkpoint_and_undo() {
+    let blocks: Vec<_> = corpus().into_iter().take(2).collect();
+    let (_tmp, handle, chain, mut task) = setup(&blocks);
+    assert!(matches!(task.step(), IndexerPoll::Applied(1)));
+    let store = handle.store().unwrap();
+    let before = store.read_meta().unwrap();
+    let undo = store.read_undo(1).unwrap();
+    let first_box = store.read_numeric_box(0).unwrap();
+    // The committed tip still agrees with its canonical height, while the
+    // indexed height belongs to the old fork and needs one rollback.
+    chain.headers.lock().unwrap()[0] = Digest32::from_bytes([0x42; 32]);
+    let source = Arc::new(FailingChain {
+        inner: chain,
+        operation: "block",
+        fail_at: 1,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut task = IndexerTask::new(handle.clone(), source);
+    assert!(matches!(
+        task.step(),
+        IndexerPoll::Halted(crate::IndexerError::ChainRead { .. })
+    ));
+    assert_eq!(store.read_meta().unwrap(), before);
+    assert_eq!(store.read_undo(1).unwrap(), undo);
+    assert_eq!(store.read_numeric_box(0).unwrap(), first_box);
+    assert_eq!(handle.indexed_height(), 1);
+    assert_eq!(
+        handle.status(),
+        IndexerStatus::Halted(IndexerHaltReason::DbCorruption)
+    );
+}
+
+#[test]
+fn best_header_evidence_read_failure_halts_without_unwinding() {
+    let blocks: Vec<_> = corpus().into_iter().take(2).collect();
+    let (_tmp, handle, chain, mut task) = setup(&blocks);
+    assert!(matches!(
+        unlimited_time(&mut task, 2),
+        IndexerPoll::Applied(2)
+    ));
+    let store = handle.store().unwrap();
+    let before = store.read_meta().unwrap();
+    let undo = store.read_undo(2).unwrap();
+    // The applied chain lost height 2, so the gate must consult the
+    // best-header chain; that read failing is a halt, not absent evidence.
+    chain.tip.store(1, Ordering::Relaxed);
+    chain.headers.lock().unwrap().truncate(1);
+    let source = Arc::new(FailingChain {
+        inner: chain,
+        operation: "best header",
+        fail_at: 1,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut task = IndexerTask::new(handle.clone(), source);
+    assert!(matches!(
+        task.step(),
+        IndexerPoll::Halted(crate::IndexerError::ChainRead {
+            operation: "best header",
+            ..
+        })
+    ));
+    assert_eq!(store.read_meta().unwrap(), before);
+    assert_eq!(store.read_undo(2).unwrap(), undo);
+    assert_eq!(handle.indexed_height(), 2);
 }

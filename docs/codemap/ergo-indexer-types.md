@@ -25,7 +25,7 @@
 - `IndexerQuery::health` (defaulted) — returns `Result<IndexerHealthDto, IndexerReadError>`; its operator HTTP route is never status-gated but returns 500 on read failure. Production `IndexerHandle` reads the real snapshot and preserves observed failures; stubs inherit `Ok(IndexerHealthDto::default())` — `src/query.rs:66`, `ergo-indexer/src/handle.rs:280-308`, `ergo-api/src/blockchain.rs:187-219`
 - Storage-rent trait methods (`storage_rent_eligible_paged`, `storage_rent_eligible_total`, `storage_rent_in_creation_range`, `storage_rent_total_in_creation_range`) — default to `Ok(Vec::new())`/`Ok(0)` for fixtures/stubs; production `IndexerHandle` overrides with fallible store reads — `src/query.rs:177,192,208,223`
 - `Page` (struct) / `SortDir` (enum) — `(offset, limit)` paging + sort direction; `MaxItems` is enforced at the API layer, not validated here — `src/query.rs:9,17`
-- `IndexedErgoBox` (struct) + `is_spent()` — one redb row per `BoxId`; `global_index` always non-negative on the box record (spent-flag is segment-side sign); spend triple set/unset together — `src/types.rs:33,49`
+- `IndexedErgoBox` (struct) + `is_spent()` — one redb row per `BoxId`; valid persisted records use non-negative `global_index` (spent-flag is segment-side sign) and a complete spend triple; public fields do not enforce these rules — `src/types.rs:33,49`
 - `IndexedErgoTransaction` (struct) — one redb row per `TxId`; `input_nums`/`output_nums` are global indices for `byIndex`; `numConfirmations` deliberately omitted (rebuilt on read) — `src/types.rs:66`
 - `IndexerHealthDto` (struct) — live health snapshot returned inside `Ok` by `health()`; fields expose the durable `INDEXER_META` repair markers (`repair_pending`, `repair_next_gi`, `repair_skipped`), process-lifetime `drift_skips` and running totals (`global_boxes`, `global_txs`); `Default` holds empty repair markers and zero counters — `src/query.rs:246-268`
 - `BalanceDto` (struct) — ERG nanos + order-preserving `tokens` vec; mirrors Scala `BalanceInfo` first-touch insertion order — `src/query.rs:225`
@@ -39,9 +39,9 @@
 
 ## Invariants & contracts
 - `IndexerQuery` database methods return `Result` even when `status() == CaughtUp`. The gated `/blockchain/*` routes reject `Syncing`/`Halted` with 503 before querying, but caught-up status does not establish storage health (`src/query.rs:43-55`, `ergo-api/src/blockchain.rs:261-277`). Cached height/status remain infallible; the operator health route is ungated and can return 500.
-- `IndexedErgoBox.global_index` is always non-negative on the box record (assigned at output time, never sign-flipped). The spent-flag is carried by the segment-side sign, not the box record (`src/types.rs:39-43`).
+- Valid persisted `IndexedErgoBox.global_index` values are non-negative on the box record (assigned at output time, never sign-flipped). The spent-flag is carried by the segment-side sign, not the box record (`src/types.rs:39-43`).
 - `[inherited]` segment-filter quirk: segment-based unspent queries filter `_ > 0`, so the genesis output (`global_index = 0`) is invisible to those routes on both Scala and Rust — must not be "fixed" to include 0 (`src/types.rs:21-26`).
-- Box spend triple (`spending_tx_id`, `spending_height`, `spending_proof`) is always set or unset together, mirroring Scala `IndexedErgoBox.asSpent` (`src/types.rs:28-31,35-37`).
+- Valid persisted box spend triples (`spending_tx_id`, `spending_height`, `spending_proof`) are set or unset together, mirroring Scala `IndexedErgoBox.asSpent` (`src/types.rs:28-31,35-37`).
 - Mempool-overlay discriminator is `inclusion_height == 0` (block heights start at 1), NOT `global_index == 0` (`src/types.rs:14-19`).
 - `numConfirmations` is transient (rebuilt on read as `bestFullBlockHeight - height`) and deliberately not modeled — the API formatter computes it from the indexer's `indexed_height()` (`src/types.rs:61-64`).
 - `IndexerStatus` is never persisted: persisting `CaughtUp` could let a stale positive open routes before the indexer confirms the canonical tip (`src/status.rs:3-5`).
@@ -55,3 +55,15 @@ point reads use `Ok(None)`, missing owners use empty pages or zero totals,
 and unavailable/corrupt storage uses `Err(IndexerReadError)`. The `try_*`
 aliases forward the same result contract.
 Cached `status()` and `indexed_height()` remain available without storage.
+
+Public record fields are unconstrained in-memory values, not checked constructors.
+Persistence codecs and apply helpers enforce the valid-record contracts described
+above; raw construction alone does not establish them.
+
+`boxes_by_global_range` and `txs_by_global_range` use ascending half-open
+`[lo, hi)` global-index ranges. `boxes_latest_paged` and `txs_latest_paged`
+translate an offset into the latest indexed window using the counter and rows
+from one read snapshot. Their default implementations return
+`Err(IndexerReadError)` for an unsupported reader; an empty successful page
+therefore means a supported query found no rows. The HTTP boundary rejects
+values outside its signed paging domain before narrowing them.

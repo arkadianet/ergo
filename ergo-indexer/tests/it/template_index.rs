@@ -3,8 +3,9 @@
 //! Confirms:
 //!   - apply records every output whose tree parses cleanly under its
 //!     template_hash (no per-tx dedupe);
-//!   - apply skips outputs whose tree is wrapped as `UnparsedErgoTree`
-//!     (the soft-fork path — see `template_hash_for_box_bytes`);
+//!   - apply records outputs whose tree is wrapped as `UnparsedErgoTree`
+//!     (the soft-fork path) under Scala's cached template, and spend and
+//!     rollback find that same entry;
 //!   - apply flips the sign of an existing template entry on input
 //!     spend;
 //!   - rollback inverts both the append and the flip, leaving the
@@ -14,6 +15,7 @@
 //!     `box_segment_id(template_hash, 0)`).
 
 use ergo_primitives::digest::Digest32;
+use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
 use ergo_ser::ergo_tree::{template_hash_from_bytes, write_ergo_tree, ErgoTree};
@@ -60,10 +62,10 @@ fn parseable_tree_false() -> ErgoTree {
     }
 }
 
-/// Unparseable: `has_size: true` + non-SigmaProp `Const` root → wrapped
-/// as `UnparsedErgoTree` on read, so `template_hash_for_box_bytes`
-/// returns `None` and the indexer must skip the template entry.
-fn unparseable_tree() -> ErgoTree {
+/// `has_size: true` + non-SigmaProp `Const` root → wrapped as
+/// `UnparsedErgoTree` on read. Scala still records it under the hash of its
+/// cached template: the bytes after the header and size.
+fn wrapped_tree() -> ErgoTree {
     ErgoTree {
         version: 0,
         has_size: true,
@@ -157,47 +159,70 @@ fn apply_records_one_template_entry_per_parseable_output() {
 }
 
 #[test]
-fn apply_skips_template_entry_for_unparseable_tree() {
-    // A `has_size + Const(SBoolean)` tree is wrapped as
-    // `UnparsedErgoTree` on read → `template_hash_for_box_bytes`
-    // returns `None` → indexer must skip the template recording. The
-    // address still indexes (the address-side `tree_hash_from_bytes`
-    // is unconditional blake2b of the canonical bytes), but the
-    // template row must not exist.
+fn wrapped_tree_template_entry_follows_apply_spend_and_rollback() {
+    // A `has_size + Const(SBoolean)` tree is wrapped as `UnparsedErgoTree`
+    // on read. Scala's `hashTreeTemplate` still yields its cached template,
+    // the bytes after the header and size, so the output is recorded there;
+    // the spend and both rollbacks must find the same entry.
     let (store, _tmp) = open_store();
-    let unparseable = unparseable_tree();
-    let unparseable_bytes = tree_bytes(&unparseable);
-    let unparseable_hash = ergo_primitives::digest::blake2b256(&unparseable_bytes);
+    let wrapped = wrapped_tree();
+    let wrapped_bytes = tree_bytes(&wrapped);
+    assert_eq!(hex::encode(&wrapped_bytes), "08020101");
+    let template = Digest32::from_bytes(*ergo_primitives::digest::blake2b256(&[1, 1]).as_bytes());
+    assert_eq!(template_hash_of(&wrapped), template);
 
-    let tx = Transaction {
+    let tx_a = Transaction {
         inputs: vec![fake_input(0xAA)],
         data_inputs: vec![],
-        output_candidates: vec![candidate_with_tree(1_000_000, unparseable, 1)],
+        output_candidates: vec![candidate_with_tree(1_000_000, wrapped, 1)],
     };
-    let block = IndexerBlock {
+    let block1 = IndexerBlock {
         height: 1,
         header_id: Digest32::from_bytes([0x12; 32]),
-        transactions: std::slice::from_ref(&tx),
+        transactions: std::slice::from_ref(&tx_a),
     };
-    apply_block(&store, &IndexerMeta::empty(), &block).unwrap();
+    let meta1 = apply_block(&store, &IndexerMeta::empty(), &block1).unwrap();
+    let tree_hash = ergo_primitives::digest::blake2b256(&wrapped_bytes);
+    assert!(store.read_address(&tree_hash).unwrap().is_some());
+    assert_eq!(
+        store.read_template_box_entries(&template).unwrap().unwrap(),
+        vec![0]
+    );
 
-    // The address row IS written (tree_hash is just blake2b of bytes).
-    assert!(
-        store.read_address(&unparseable_hash).unwrap().is_some(),
-        "address row must still exist for unparseable trees — only the template index skips"
+    let tx_b = Transaction {
+        inputs: vec![Input {
+            box_id: sealed_box_id(&tx_a, 0),
+            spending_proof: SpendingProof::new(vec![0xCA, 0xFE], ContextExtension::empty())
+                .unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![candidate_with_tree(900_000, parseable_tree_false(), 2)],
+    };
+    let block2 = IndexerBlock {
+        height: 2,
+        header_id: Digest32::from_bytes([0x22; 32]),
+        transactions: std::slice::from_ref(&tx_b),
+    };
+    let meta2 = apply_block(&store, &meta1, &block2).unwrap();
+    assert_eq!(
+        store.read_template_box_entries(&template).unwrap().unwrap(),
+        vec![-0i64]
     );
-    // No template row may exist under the wrap-placeholder hash.
-    let placeholder = template_hash_from_bytes(&unparseable_bytes);
     assert!(
-        placeholder.is_err(),
-        "unparseable tree's template_hash_from_bytes must return Err so indexer skips"
+        !store.secondary_repair_pending().unwrap(),
+        "the spend flip must find the entry"
     );
-    // Defensive: nothing under the address-side hash either, since
-    // template keys are template_hash, never tree_hash.
-    assert!(
-        store.read_template(&unparseable_hash).unwrap().is_none(),
-        "no template row may exist when every output's tree is wrapped"
+
+    let after_rb2 = rollback_one_block(&store, &meta2, &block2).unwrap();
+    assert_eq!(
+        store.read_template_box_entries(&template).unwrap().unwrap(),
+        vec![0i64]
     );
+    let after_rb1 = rollback_one_block(&store, &after_rb2, &block1).unwrap();
+    assert_eq!(after_rb1.indexed_height, 0);
+    let post = store.read_template_box_entries(&template).unwrap();
+    assert!(post.as_ref().is_none_or(Vec::is_empty), "{post:?}");
+    assert!(!store.secondary_repair_pending().unwrap());
 }
 
 #[test]
@@ -377,9 +402,8 @@ fn fixture_trees_are_template_parseable() {
     let _ = template_hash_of(&parseable_tree_true());
     let _ = template_hash_of(&parseable_tree_false());
 
-    let bytes = tree_bytes(&unparseable_tree());
-    assert!(
-        template_hash_from_bytes(&bytes).is_err(),
-        "unparseable_tree fixture must surface as Err for the indexer skip path"
-    );
+    // The wrapped fixture must really take the soft-fork wrap path.
+    let bytes = tree_bytes(&wrapped_tree());
+    let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+    assert!(matches!(tree.body, Expr::Unparsed(_)));
 }

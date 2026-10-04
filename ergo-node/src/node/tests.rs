@@ -153,6 +153,7 @@ fn make_state_with_backend(
             utxo_bootstrap: false,
             nipopow_bootstrap: false,
             mining_enabled: false,
+            mempool_enabled: true,
             extra_index_enabled: false,
             declared_addr: None,
             bind_addr: None,

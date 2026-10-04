@@ -1,7 +1,8 @@
 # Scala-anchored batch Merkle multiproof fixtures
 
-`fixtures.json` pins the wire bytes the scorex-utils
-`BatchMerkleProofSerializer` produces against five Rust paths:
+`fixtures.json` pins the wire bytes the scrypto
+`BatchMerkleProofSerializer` produces against Rust construction, codec and
+verification paths:
 the construction algorithm in `ergo-crypto::merkle::merkle_proof_by_indices`,
 the codec in `ergo-ser::batch_merkle_proof::{serialize,deserialize}_batch_merkle_proof`,
 and the verifier in `ergo-validation::popow::merkle::verify_batch_merkle_proof`.
@@ -10,10 +11,9 @@ The proof carries the NiPoPoW interlinks proof embedded in each
 `PoPowHeader`. Drift in any of those three Rust paths breaks
 `check_popow_header_interlinks_proof` — the consumer that
 validates each PoPow-prefix header during logarithmic-time
-bootstrap. The PoPow path is marked optional/deferred in the
-node checklist ("one mode first"), so drift here does not by
-itself fork the main chain; it does invalidate NiPoPoW sync once
-that mode is wired.
+bootstrap. The node's Mode4 bootstrap consumes this path. These finite
+proof fixtures cover construction and verification, not complete node bootstrap
+or authenticated chain selection.
 
 ## Fixture contract
 
@@ -63,35 +63,41 @@ encoding and is the documented ambiguity at
 |------|--------|-------|
 | `fixtures.json` | `test-vectors/scripts/scala/ExtractBatchMerkleProofs.scala` | scrypto 2.3.0 on Scala 2.13 |
 
-### Pinning
+### Version authority
 
-scrypto is pinned to **2.3.0** to match
-`reference/ergo/avldb/build.sbt`:
-```
-"org.scorexfoundation" %% "scrypto" % "2.3.0"
-```
-Do not bump the dep without confirming the wire format hasn't
-changed across major versions. The Scala node currently used as
-the parity oracle runs scrypto 2.3.0; a `BatchMerkleProof`
-encoded by scrypto 3.x is a different wire artifact even if the
-algorithm is identical.
+`fixtures.json` is the historical scrypto2.3.0/Scala2.13 capture; its bytes
+remain unchanged. The pinned Ergo v6.0.5 `avldb/build.sbt` uses **scrypto3.1.1**.
+The additive `scrypto-3.1.1/` directory contains the official-library wrapper,
+ten captured cases and source/tool/jar hashes in `provenance.json`. Its seven
+historical cases produce identical roots and proof bytes; three additional
+cases cover repeated leaf values at distinct positions. This establishes parity
+for those finite shapes, not every algorithm or wire artifact across versions.
 
-## How to regenerate
+### Reproduction
+
+For the historical capture, use its historical generator:
 
 ```bash
-scala-cli run test-vectors/scripts/scala/ExtractBatchMerkleProofs.scala \
-  > test-vectors/ergo-crypto/batch-merkle/fixtures.json
+scala-cli run test-vectors/scripts/scala/ExtractBatchMerkleProofs.scala
 ```
 
-`scala-cli` will print an upgrade hint suggesting scrypto 3.1.0;
-ignore it — see Pinning above. Validate with `python -c "import
-json; json.load(open('test-vectors/ergo-crypto/batch-merkle/fixtures.json'))"`.
+For the current pinned dependency capture:
+
+```bash
+scala-cli run test-vectors/ergo-crypto/batch-merkle/scrypto-3.1.1/ReferenceBatchMerkle.scala
+```
+
+Review output against the committed capture rather than replacing expected
+bytes automatically. `provenance.json` records the actual manual JVM compiler
+and classpath jars used for this capture. Scala2.12.21 was used; the pinned
+Ergo v6.0.5 avldb build requests Scala2.12.20. This is a library oracle, not a
+complete execution of that node binary.
 
 ## Oracle test
 
 `ergo-validation/tests/it/batch_merkle_oracle.rs` consumes these
-fixtures. The test runs in default `cargo test`, no network, no
-feature flag.
+fixtures and all ten current-dependency captures. The test runs in default
+`cargo test`, no network, no feature flag.
 
 Test matrix (one `#[test]` per fixture plus cross-shape checks):
 * per-fixture roundtrip: `deserialize` succeeds → shape matches
@@ -178,7 +184,7 @@ captured fails loudly.
   serialized mainnet `PoPowHeader` — requires the Scala node's
   `/nipopow/popowHeader/byHeight/{h}` endpoint (returns
   `bad.request` on probe; needs upstream wiring). The harness
-  here matches what `proofForInterlinkVector` produces byte-for-
-  byte, so the gap is presentation, not parity.
+  here exercises the historical harness construction. Live wire extraction
+  and complete pinned-node proof acceptance remain separate evidence gaps.
 * **Even larger trees.** Mainnet interlinks max around 20-40
   entries; the existing fixtures cover up to 32 unique kv-pairs.

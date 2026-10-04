@@ -35,7 +35,9 @@ use ergo_sync::executor::SyncExecutor;
 use ergo_validation::context::ProtocolParams;
 
 /// Seeded chain tip: the fed headers descend from it, so it is the only
-/// ancestor the pipeline has to resolve.
+/// ancestor the pipeline has to resolve. Its own parent is deliberately
+/// absent: an executor attaching to this tip must not need more stored
+/// ancestry than difficulty does.
 const SEED_HEIGHT: u32 = 1_795_073;
 /// First fed header.
 const FEED_LO: u32 = 1_795_074;
@@ -272,7 +274,7 @@ fn mode5_validation_verdict_durably_invalidates_the_branch() {
     // header-by-header after every restart — the node would never converge.
     //
     // The verdict classes the executor routes to `invalidate_validation_branch`
-    // (`Validation`, `HeaderMeta`, `EpochExtension`, `AdProofsHashMismatch`)
+    // (`Validation`, `EpochExtension`, `AdProofsHashMismatch`)
     // are mode-independent, so this path IS reachable in Mode 5; only the
     // stale-root-ambiguous digest apply failure takes the session-mark path.
     let tmp = tempfile::tempdir().expect("tempdir");

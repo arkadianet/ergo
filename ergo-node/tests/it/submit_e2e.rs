@@ -555,12 +555,14 @@ async fn fee_recommendation_uses_configured_relay_floor() {
 #[tokio::test]
 async fn native_script_toml_policy_gates_all_routes_at_boot() {
     use clap::Parser;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use reqwest::StatusCode;
+
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("node.toml");
     std::fs::write(
         &path,
         r#"
+network = "devnet"
 [api]
 bind = "127.0.0.1:0"
 [api.security]
@@ -570,6 +572,7 @@ require_api_key = true
 max_cost = 12345
 [peers]
 known = ["127.0.0.1:1"]
+bind_addr = "127.0.0.1:0"
 "#,
     )
     .unwrap();
@@ -582,30 +585,99 @@ known = ["127.0.0.1:1"]
     ]);
     let config = ergo_node::config::NodeConfig::load(cli).unwrap();
     assert!(config.api_script.require_api_key);
+    assert_eq!(config.api_script.max_cost, 12345);
+    // Public networks append bootstrap seeds during TOML load. Devnet keeps
+    // this policy test on loopback, with no fixed inbound port or public dials.
+    assert_eq!(config.network, ergo_node::config::Network::Devnet);
+    assert_eq!(config.known_peers, vec!["127.0.0.1:1".parse().unwrap()]);
+    assert_eq!(config.bind_addr, Some("127.0.0.1:0".parse().unwrap()));
     let handle = spawn_node(config).await;
     let addr = handle.api_addr.unwrap();
-    for route in [
-        "compile", "inspect", "execute", "cost", "simulate", "explain", "diff",
+    // Read the framed HTTP response, rather than waiting for TCP EOF. The
+    // client's total deadline also bounds reading the body on a slow CI host.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    for (route, expected_status, expected_reason, expected_detail) in [
+        (
+            "compile",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "Failed to deserialize the JSON body into the target type",
+        ),
+        (
+            "inspect",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "one input is required",
+        ),
+        (
+            "execute",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "one script input is required",
+        ),
+        (
+            "cost",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "one script input is required",
+        ),
+        (
+            "simulate",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "Failed to deserialize the JSON body into the target type",
+        ),
+        (
+            "explain",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "Failed to deserialize the JSON body into the target type",
+        ),
+        (
+            "diff",
+            StatusCode::NOT_IMPLEMENTED,
+            "oracle_unavailable",
+            "configure a Scala node or bundled reducer to enable script/diff",
+        ),
     ] {
         for key in [None, Some("hello")] {
-            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-            let auth = key
-                .map(|key| format!("api_key: {key}\r\n"))
-                .unwrap_or_default();
-            let request = format!("POST /api/v1/script/{route} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n{auth}Connection: close\r\n\r\n{{}}");
-            stream.write_all(request.as_bytes()).await.unwrap();
-            let mut bytes = Vec::new();
-            tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut bytes))
+            let mut request = client
+                .post(format!("http://{addr}/api/v1/script/{route}"))
+                .json(&serde_json::json!({}));
+            if let Some(key) = key {
+                request = request.header("api_key", key);
+            }
+            let context = format!("{route}, api_key present={}", key.is_some());
+            let response = request
+                .send()
                 .await
-                .unwrap()
-                .unwrap();
-            let response = String::from_utf8(bytes).unwrap();
+                .unwrap_or_else(|e| panic!("{context}: HTTP request failed: {e}"));
+            let status = response.status();
+            let body = response
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|e| panic!("{context}: response body is not JSON: {e}"));
             if key.is_none() {
-                assert!(response.starts_with("HTTP/1.1 401"), "{route}: {response}");
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{context}: {body}");
+                assert_eq!(body["error"]["reason"], "unauthorized", "{context}: {body}");
             } else {
+                // Prove the key reaches this route's body validation (or its
+                // explicit unconfigured oracle), rather than accepting a 404,
+                // server error, or any response that merely omits unauthorized.
+                assert_eq!(status, expected_status, "{context}: {body}");
+                assert_eq!(
+                    body["error"]["reason"], expected_reason,
+                    "{context}: {body}"
+                );
                 assert!(
-                    !response.contains("\"reason\":\"unauthorized\""),
-                    "{route}: {response}"
+                    body["error"]["detail"]
+                        .as_str()
+                        .is_some_and(|detail| detail.contains(expected_detail)),
+                    "{context}: {body}"
                 );
             }
         }

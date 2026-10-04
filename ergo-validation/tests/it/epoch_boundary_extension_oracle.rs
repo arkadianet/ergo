@@ -85,7 +85,7 @@ fn active_params_serializer_reproduces_real_mainnet_param_fields() {
         let parsed = parse_active_params(&ext_from_fields(&real), height)
             .unwrap_or_else(|e| panic!("parse real params at h={height}: {e:?}"));
 
-        let mine = active_params_to_extension_fields(&parsed);
+        let mine = active_params_to_extension_fields(&parsed).unwrap();
 
         // The 0x00 set my serializer produces must match the real 0x00 set
         // byte-for-byte, key-for-key (order-independent).
@@ -151,7 +151,7 @@ fn full_extension_fields_round_trip_through_the_parsers() {
         let params = parse_active_params(&ext, height).unwrap();
         let cumulative = parse_validation_settings_update(&ext).unwrap();
 
-        let mut my_fields = active_params_to_extension_fields(&params);
+        let mut my_fields = active_params_to_extension_fields(&params).unwrap();
         my_fields.extend(validation_settings_update_to_extension_fields(&cumulative));
         let my_ext = ext_from_fields(&my_fields);
 

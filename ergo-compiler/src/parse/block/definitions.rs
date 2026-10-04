@@ -99,6 +99,10 @@ pub(crate) fn bind_pattern(c: &mut Cursor) -> Result<BindPat, ParseError> {
 /// `Pattern` grammar (`pattern`: `TypeOrBindPattern` alternatives), not merely a
 /// `SimplePattern` and not a balanced-paren scan.
 pub(crate) fn tuple_ex(c: &mut Cursor) -> Result<(), ParseError> {
+    with_depth_guard(c, tuple_ex_inner)
+}
+
+fn tuple_ex_inner(c: &mut Cursor) -> Result<(), ParseError> {
     c.expect(&TokenKind::LParen, "(")?; // "(" ~/ — committed
     if starts_pattern(c.peek()) {
         loop {
@@ -365,6 +369,10 @@ pub(crate) fn type_arg(c: &mut Cursor) -> Result<(), ParseError> {
 /// (Types.scala:163-165); `TypeArgVariant = Annot.rep ~ (`+` | `-`).? ~ TypeArg`
 /// (:161). Parsed and DISCARDED — the variance markers `+`/`-` are `OpId` tokens.
 pub(crate) fn type_arg_list(c: &mut Cursor) -> Result<(), ParseError> {
+    with_depth_guard(c, type_arg_list_inner)
+}
+
+fn type_arg_list_inner(c: &mut Cursor) -> Result<(), ParseError> {
     c.expect(&TokenKind::LBracket, "[")?; // "[" ~/ — committed
     loop {
         type_arg_variant(c)?;

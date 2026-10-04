@@ -1,15 +1,9 @@
-//! End-to-end TCP-pair tests for the `Connection` / framing /
-//! handshake layer.
+//! TCP-pair tests for framed Connection reads/writes and payload codecs.
 //!
-//! These run a real `TcpListener` on `127.0.0.1:0` plus a connecting
-//! `TcpStream`, exercise the same `Connection::send` /
-//! `Connection::read_message` path that production uses, and assert
-//! both sides observe the same wire bytes / `MessageFrame` /
-//! `Handshake` values.
-//!
-//! Unit tests in `ergo-p2p/src/{framing,connection,handshake}.rs`
-//! pin the codec individually; this file pins the integration
-//! between them — what production actually runs.
+//! Loopback sockets exercise the production framed Connection path. The code-75
+//! handshake payload test is a synthetic framed codec exchange; production
+//! admission sends raw unframed handshake bytes. Raw prefix/large-leftover
+//! parsing is covered separately in `src/handshake.rs` unit tests.
 
 use std::time::Duration;
 
@@ -44,7 +38,7 @@ async fn frame_roundtrip_over_tcp_with_mixed_payload_sizes() {
     //   - non-empty Inv carrying two ids (passes serialize_inv's
     //     "no empty" check; tests the with-checksum branch)
     //   - small ad-hoc code with a single byte payload
-    //   - a few KB payload to cross the read-buffer's 64K page once
+    //   - a representative 4 KiB payload, smaller than the 64 KiB read chunk
     let inv = InvData {
         type_id: 101,
         ids: vec![[0xAA; 32], [0xBB; 32]],
@@ -125,7 +119,7 @@ async fn read_message_rejects_wrong_magic_from_peer() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn handshake_roundtrip_over_tcp_pair() {
+async fn framed_handshake_payload_roundtrip_over_tcp_pair() {
     // Both sides exchange a single Handshake frame (code 75) and
     // verify the parsed `PeerSpec` matches what the peer sent.
     let (server, client) = tcp_pair().await;
@@ -156,7 +150,7 @@ async fn handshake_roundtrip_over_tcp_pair() {
     let server_payload = serialize_handshake(&server_hs);
     let client_payload = serialize_handshake(&client_hs);
 
-    // Exchange handshakes concurrently — production is symmetric.
+    // Exchange synthetic framed handshake payloads concurrently.
     let server_payload_to_send = server_payload.clone();
     let client_payload_to_send = client_payload.clone();
     let server_task = tokio::spawn(async move {

@@ -27,7 +27,8 @@
 //! - **§2b Equals/NotEquals** (`DefRewriting.scala:100-129`): `x==y→true` /
 //!   `x!=y→false` fire on Scala **graph-ref equality** (hash-consing), which we
 //!   mirror with structural `Expr` equality **restricted to `Const` operands**
-//!   (the non-`Const` `a==a` case is CSE substrate, handled by `crate::cse`);
+//!   (CSE shares/materializes non-`Const` expressions; it does not rewrite
+//!   nonconstant `a==a` to true);
 //!   the boolean-`Const` arms (`x==true→x`, `x==false→!x`, and NotEquals'
 //!   mirror) are ported. A **non-equal, non-boolean** `Const==Const` (e.g.
 //!   `1==2`) does NOT fold — Scala's `Equals` case is terminal (never falls to

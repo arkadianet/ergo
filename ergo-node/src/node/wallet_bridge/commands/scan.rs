@@ -221,7 +221,7 @@ fn register_request(db: &redb::Database, request: ScanRequest) -> Result<u16, Wa
 
     // Persist the new scan and the advanced counter atomically (Scala
     // `addScan` writes both the scan key and `lastUsedScanId` in one batch).
-    let write = db.begin_write().map_err(internal)?;
+    let write = ergo_state::begin_write_qr(db).map_err(internal)?;
     {
         let value = serde_json::to_vec(&scan).map_err(internal)?;
         let mut scans = write.open_table(WALLET_SCANS).map_err(internal)?;
@@ -313,7 +313,7 @@ fn deregister_impl(db: &redb::Database, scan_id: u16) -> Result<(), WalletAdminE
     // lost/under-set, `load_registry` lifts it to the highest scan id; writing
     // it here makes that recovery durable, so deregistering the highest scan
     // can't drop the counter and let the next register reuse the removed id.
-    let write = db.begin_write().map_err(internal)?;
+    let write = ergo_state::begin_write_qr(db).map_err(internal)?;
     {
         let mut scans = write.open_table(WALLET_SCANS).map_err(internal)?;
         scans.remove(scan_id).map_err(internal)?;
@@ -452,7 +452,7 @@ fn stop_tracking_impl(
     // The single-writer wallet task serializes this read-then-write; the
     // read happens inside the write txn, so block-apply writes (same redb,
     // global write lock) can't interleave.
-    let write = db.begin_write().map_err(internal)?;
+    let write = ergo_state::begin_write_qr(db).map_err(internal)?;
     {
         let mut idx = write.open_table(WALLET_SCAN_BOX_INDEX).map_err(internal)?;
         let ids: Vec<u16> = match idx.get(box_id).map_err(internal)? {
@@ -559,7 +559,7 @@ fn add_box_impl(
     let box_bytes = ergo_ser::ergo_box::serialize_ergo_box(&ergo_box)
         .map_err(|e| bad_request(format!("box serialize: {e}")))?;
 
-    let write = db.begin_write().map_err(internal)?;
+    let write = ergo_state::begin_write_qr(db).map_err(internal)?;
     {
         let mut idx = write.open_table(WALLET_SCAN_BOX_INDEX).map_err(internal)?;
         let old_ids: Vec<u16> = match idx.get(box_id).map_err(internal)? {

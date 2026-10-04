@@ -15,6 +15,7 @@ use redb::{Database, ReadableTableMetadata, WriteTransaction};
 /// cannot suppress each other's live wallet writes.
 #[derive(Debug, Default)]
 pub struct RescanControl {
+    lifecycle: parking_lot::Mutex<()>,
     generation: AtomicU64,
     active: AtomicU64,
     pub from_height: std::sync::atomic::AtomicU32,
@@ -27,7 +28,21 @@ impl RescanControl {
     pub fn in_progress(&self) -> bool {
         self.active.load(Ordering::SeqCst) != 0
     }
+    #[cfg(test)]
     pub(crate) fn admit(self: &std::sync::Arc<Self>) -> Option<RescanIdentity> {
+        self.admit_inner(None)
+    }
+    pub(crate) fn admit_rescan(
+        self: &std::sync::Arc<Self>,
+        from_height: u32,
+    ) -> Option<RescanIdentity> {
+        self.admit_inner(Some(from_height))
+    }
+    fn admit_inner(
+        self: &std::sync::Arc<Self>,
+        from_height: Option<u32>,
+    ) -> Option<RescanIdentity> {
+        let _lifecycle = self.lifecycle.lock();
         if self.stopping.load(Ordering::SeqCst) {
             return None;
         }
@@ -40,16 +55,24 @@ impl RescanControl {
             .compare_exchange(0, id, Ordering::SeqCst, Ordering::SeqCst)
             .ok()?;
         if self.stopping.load(Ordering::SeqCst) {
-            self.cancel();
+            self.active.store(0, Ordering::SeqCst);
             return None;
         }
+        self.from_height
+            .store(from_height.unwrap_or(0), Ordering::SeqCst);
+        self.rebuilding
+            .store(from_height == Some(0), Ordering::SeqCst);
         Some(RescanIdentity {
             id,
             control: self.clone(),
         })
     }
     pub(crate) fn cancel(&self) -> bool {
-        self.active.swap(0, Ordering::SeqCst) != 0
+        let _lifecycle = self.lifecycle.lock();
+        let cancelled = self.active.swap(0, Ordering::SeqCst) != 0;
+        self.from_height.store(0, Ordering::SeqCst);
+        self.rebuilding.store(false, Ordering::SeqCst);
+        cancelled
     }
     pub(crate) fn stop(&self) {
         self.stopping.store(true, Ordering::SeqCst);
@@ -107,10 +130,17 @@ impl RescanIdentity {
         self.control.active.load(Ordering::SeqCst) == self.id
     }
     pub(crate) fn release(&self) -> bool {
-        self.control
+        let _lifecycle = self.control.lifecycle.lock();
+        let released = self
+            .control
             .active
             .compare_exchange(self.id, 0, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+            .is_ok();
+        if released {
+            self.control.from_height.store(0, Ordering::SeqCst);
+            self.control.rebuilding.store(false, Ordering::SeqCst);
+        }
+        released
     }
 }
 
@@ -125,6 +155,48 @@ pub static FAULT_INJECT: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 
 pub struct WalletBootService;
 
+/// Replace the persisted `WALLET_VISIBLE_ADDRESSES` list with `pubkeys`, in
+/// order. The table is small, so writers rebuild it whole.
+pub(crate) fn replace_visible_pubkeys(
+    visible: &mut redb::Table<'_, u32, [u8; 33]>,
+    pubkeys: &[[u8; 33]],
+) -> Result<(), String> {
+    use redb::ReadableTable;
+    let existing: Vec<u32> = visible
+        .iter()
+        .map_err(|e| e.to_string())?
+        .map(|entry| entry.map(|(key, _)| key.value()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    for key in existing {
+        visible.remove(key).map_err(|e| e.to_string())?;
+    }
+    for (index, pubkey) in pubkeys.iter().enumerate() {
+        let index =
+            u32::try_from(index).map_err(|_| "visible wallet index exceeds u32".to_string())?;
+        visible.insert(index, pubkey).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// A decrypted master remains owned by the unlock operation until every
+/// synchronization step succeeds. Errors and unwinding erase secret state.
+struct UnlockSyncAttempt<'a> {
+    storage: &'a mut SecretStorage,
+    state: &'a mut WalletState,
+    complete: bool,
+}
+
+impl Drop for UnlockSyncAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.storage.lock();
+            self.state.set_prover(None);
+            self.state.set_unlocked(false);
+        }
+    }
+}
+
 impl WalletBootService {
     /// Single production unlock+hydrate+persist path. The 6-step lifecycle:
     ///
@@ -132,7 +204,10 @@ impl WalletBootService {
     /// 2. Update `state.use_pre_1627` to match.
     /// 3. `storage.unlock(password)` loads the master key into memory.
     /// 4. Open a redb read txn to check if `WALLET_TRACKED_PUBKEYS` has entries.
-    ///    - Non-empty: hydrate state from `WalletReader` (redb is source of truth).
+    ///    - Non-empty: bind the master to the persisted keys
+    ///      (`SecretStorage::bind_tracked_keys`, refusing keys the secret does
+    ///      not derive), then hydrate state from `WalletReader` (redb is source
+    ///      of truth).
     ///    - Empty: auto-derive master + EIP-3 first child, persist both tables in ONE write txn.
     /// 5. Validate the change address: if `WALLET_CHANGE_ADDRESS` points at an
     ///    untracked pubkey, return `ChangeAddressUntracked` and roll back the unlock.
@@ -160,10 +235,13 @@ impl WalletBootService {
 
         // Step 3: Unlock (decrypts master key into memory).
         storage.unlock(password)?;
-        // Reflect the successful unlock in WalletState immediately so
-        // is_unlocked() returns true even if the subsequent steps fail
-        // and we roll back — the rollback paths below reset this to false.
-        state.set_unlocked(true);
+        let mut attempt = UnlockSyncAttempt {
+            storage,
+            state,
+            complete: false,
+        };
+        let storage = &mut *attempt.storage;
+        let state = &mut *attempt.state;
 
         // Step 4: Check if tables have entries.
         let already_persisted = {
@@ -183,6 +261,59 @@ impl WalletBootService {
 
         if already_persisted {
             // Step 5a: hydrate from redb (the persisted state is the source of truth).
+            let (rows, visible) = {
+                let read_txn = db
+                    .begin_read()
+                    .map_err(|e| WalletError::SecretFile(format!("redb begin_read: {e}")))?;
+                let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+                let rows = reader
+                    .tracked_pubkeys_with_paths()
+                    .map_err(|e| WalletError::SecretFile(format!("wallet tracked keys: {e}")))?;
+                let visible =
+                    ergo_state::wallet::hydration::HydrationSource::visible_pubkeys(&reader)
+                        .map_err(|e| {
+                            WalletError::SecretFile(format!("wallet visible keys: {e}"))
+                        })?;
+                (rows, visible)
+            };
+            // Every persisted key must come from the unlocked secret before
+            // anything pairs it with a derived scalar.
+            let tracked: Vec<([u8; 33], Vec<u32>)> = rows
+                .iter()
+                .map(|(_, pubkey, path)| (*pubkey, path.clone()))
+                .collect();
+            if storage.bind_tracked_keys(&tracked)?
+                == ergo_wallet::storage::MasterDerivation::LegacyRustTrimmed
+            {
+                tracing::warn!(
+                    "wallet keys were derived by the earlier Rust legacy master encoding; \
+                     signing and new addresses continue that derivation, whose addresses \
+                     differ from Scala's for this secret file"
+                );
+            }
+            // Scala rebuilds its address list from storage order at every
+            // unlock; rewrite a list persisted in another order (earlier
+            // releases kept insertion order).
+            let ordered = ergo_wallet::state::visible_pubkeys_with_paths(&rows);
+            if !visible.iter().map(|(_, pubkey)| pubkey).eq(ordered.iter()) {
+                let write_txn = ergo_state::begin_write_qr(db)
+                    .map_err(|e| WalletError::SecretFile(format!("redb begin_write: {e}")))?;
+                {
+                    let mut table =
+                        write_txn
+                            .open_table(WALLET_VISIBLE_ADDRESSES)
+                            .map_err(|e| {
+                                WalletError::SecretFile(format!(
+                                    "open WALLET_VISIBLE_ADDRESSES: {e}"
+                                ))
+                            })?;
+                    replace_visible_pubkeys(&mut table, &ordered)
+                        .map_err(|e| WalletError::SecretFile(format!("visible keys: {e}")))?;
+                }
+                write_txn
+                    .commit()
+                    .map_err(|e| WalletError::SecretFile(format!("redb commit: {e}")))?;
+            }
             let read_txn = db
                 .begin_read()
                 .map_err(|e| WalletError::SecretFile(format!("redb begin_read: {e}")))?;
@@ -217,23 +348,18 @@ impl WalletBootService {
                         .values()
                         .any(|tracked| *tracked == pk)
                     {
-                        // Rollback: drop master key, clear unlock flag.
-                        storage.lock();
-                        state.set_prover(None);
-                        state.set_unlocked(false);
                         return Err(WalletError::ChangeAddressUntracked);
                     }
                 }
                 Err(_) => {
                     // Persisted address doesn't decode — corruption signal.
-                    storage.lock();
-                    state.set_prover(None);
-                    state.set_unlocked(false);
                     return Err(WalletError::ChangeAddressUntracked);
                 }
             }
         }
 
+        state.set_unlocked(true);
+        attempt.complete = true;
         Ok(())
     }
 
@@ -253,8 +379,7 @@ impl WalletBootService {
         let child_pk = unlocked.master.derive_pubkey_at_path(&eip3_path)?;
 
         // Persist BOTH WALLET_TRACKED_PUBKEYS entries + WALLET_VISIBLE_ADDRESSES entry in ONE write txn.
-        let write_txn = db
-            .begin_write()
+        let write_txn = ergo_state::begin_write_qr(db)
             .map_err(|e| WalletError::SecretFile(format!("redb begin_write: {e}")))?;
         {
             let mut tracked = write_txn.open_table(WALLET_TRACKED_PUBKEYS).map_err(|e| {
@@ -316,12 +441,12 @@ impl WalletBootService {
             .commit()
             .map_err(|e| WalletError::SecretFile(format!("redb commit: {e}")))?;
 
-        // Mirror persistence into in-memory state.
-        state.insert_tracked_pubkey(0, master_pk, network)?;
-        state.insert_tracked_pubkey(1, child_pk, network)?;
-        state.set_change_address(ergo_wallet::address::pubkey_to_p2pk_address(
-            &child_pk, network,
-        )?);
+        // Use the committed visibility and change-address snapshot, as on reopen.
+        let read = db
+            .begin_read()
+            .map_err(|e| WalletError::SecretFile(e.to_string()))?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read);
+        state.hydrate_from_reader(&reader, network)?;
         Ok(())
     }
 
@@ -350,8 +475,7 @@ impl WalletBootService {
         };
 
         // Persist the pubkey, then mirror the rendered address into state.
-        let write_txn = db
-            .begin_write()
+        let write_txn = ergo_state::begin_write_qr(db)
             .map_err(|e| WalletError::SecretFile(format!("redb begin_write: {e}")))?;
         {
             let mut change = write_txn
@@ -539,6 +663,11 @@ mod tests {
             )
         }));
         assert!(result.is_err(), "fault injection must trigger panic");
+        assert!(
+            storage.unlocked().is_none(),
+            "unwinding must relock decrypted storage"
+        );
+        assert!(!state.is_unlocked());
 
         // Disarm so subsequent tests aren't affected.
         FAULT_INJECT.store(false, Ordering::SeqCst);
@@ -634,6 +763,108 @@ mod tests {
             "backfilled change address must be committed to WALLET_CHANGE_ADDRESS"
         );
     }
+
+    #[test]
+    fn post_decryption_table_and_hydration_errors_relock_the_wallet() {
+        for malformed_table in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = redb::Database::create(dir.path().join("state.redb")).unwrap();
+            let mut storage = SecretStorage::open(dir.path().join("wallet"));
+            storage.restore("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about", "", "pw", false).unwrap();
+            let write = db.begin_write().unwrap();
+            if malformed_table {
+                write
+                    .open_table(redb::TableDefinition::<u32, u32>::new(
+                        "wallet_tracked_pubkeys",
+                    ))
+                    .unwrap();
+            } else {
+                let pk: [u8; 33] = hex::decode(
+                    "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2",
+                )
+                .unwrap()
+                .try_into()
+                .unwrap();
+                write
+                    .open_table(WALLET_TRACKED_PUBKEYS)
+                    .unwrap()
+                    .insert(tracked_pubkey_key(0, &pk), vec![])
+                    .unwrap();
+                write
+                    .open_table(WALLET_VISIBLE_ADDRESSES)
+                    .unwrap()
+                    .insert(0, [0u8; 33])
+                    .unwrap();
+            }
+            write.commit().unwrap();
+            let mut state = WalletState::empty(false);
+            let result = WalletBootService::unlock_and_sync(
+                &mut storage,
+                &mut state,
+                &db,
+                ergo_ser::address::NetworkPrefix::Mainnet,
+                "pw",
+            );
+            assert!(
+                result.is_err(),
+                "a post-decryption synchronization step must fail"
+            );
+            assert!(storage.unlocked().is_none());
+            assert_eq!(storage.lock_state(), LockState::Locked);
+            assert!(!state.is_unlocked());
+        }
+    }
+
+    #[test]
+    fn unlock_refuses_persisted_keys_the_secret_does_not_derive() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("state.redb")).unwrap();
+        let mut storage = SecretStorage::open(dir.path().join("wallet"));
+        storage.restore("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about", "", "pw", false).unwrap();
+        // Another seed's EIP-3 key (BIP32 vector 1 master) at the EIP-3 path.
+        let foreign: [u8; 33] =
+            hex::decode("0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let meta = TrackedPubkeyMeta {
+            derivation_path: ergo_wallet::DerivationPath::eip3_first_address()
+                .components()
+                .to_vec(),
+            derivation_path_label: String::new(),
+            added_at_height: 0,
+        };
+        let write = db.begin_write().unwrap();
+        write
+            .open_table(WALLET_TRACKED_PUBKEYS)
+            .unwrap()
+            .insert(
+                tracked_pubkey_key(1, &foreign),
+                bincode::serialize(&meta).unwrap(),
+            )
+            .unwrap();
+        write
+            .open_table(WALLET_CHANGE_ADDRESS)
+            .unwrap()
+            .insert((), foreign)
+            .unwrap();
+        write.commit().unwrap();
+        let mut state = WalletState::empty(false);
+        let result = WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut state,
+            &db,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            "pw",
+        );
+        assert!(
+            matches!(&result, Err(WalletError::TrackedKeyMismatch(path)) if path == "m/44'/429'/0'/0/0"),
+            "{result:?}"
+        );
+        assert_eq!(storage.lock_state(), LockState::Locked);
+        assert!(!state.is_unlocked());
+    }
+
     // ----- error paths -----
 
     #[test]

@@ -6,15 +6,6 @@ fn addr(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(a, b, c, d)), port)
 }
 
-/// Trusted IPs are no-op for `penalize`. Even a permanent penalty must
-/// not transition a trusted peer to `Banned` or remove it from the
-/// peer table. Logged at info level; behavior matches Scala's
-/// always-reconnect treatment of operator-supplied `knownPeers`.
-/// `peers_for_sharing` must rotate the returned subset across calls so
-/// every recipient of a `Peers` reply doesn't see the same prefix.
-/// Mirrors Scala `PeerManager.scala`'s `Random.shuffle` intent —
-/// without it, the gossip share is deterministic per-process and one
-/// well-connected peer gets propagated more than others.
 /// Inbound peers connect from an ephemeral client port; their listening
 /// port is carried in the declared address. Verify that handshake
 /// completion records the declared (listening) socket in

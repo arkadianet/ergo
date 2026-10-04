@@ -544,12 +544,10 @@ fn rollback_removes_box_bytes_row() {
 // ----- atomic-commit guarantee -----
 
 #[test]
-fn mid_apply_failure_leaves_no_partial_write() {
-    // Synthetic failure: we begin a write txn, do half the work,
-    // then DROP the txn without committing. The redb contract is
-    // that dropped-without-commit = full abort. Verify: an
-    // apply that wrote one box but was dropped before scan_height
-    // advance must leave the table empty after a fresh read.
+fn dropping_completed_uncommitted_wallet_apply_aborts_all_rows() {
+    // Complete the wallet apply within a write transaction, then drop it
+    // without commit. This checks transaction abort on an ordinary path;
+    // it does not interrupt apply or simulate process exit/power loss.
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.redb");
     {
@@ -576,8 +574,7 @@ fn mid_apply_failure_leaves_no_partial_write() {
             let (trees, pks) = wallet_data(&wallet);
             apply_block_to_wallet(&txn, &trees, &pks, 100, &[0xBB; 32], &txs).unwrap();
         }
-        // Deliberately drop without committing — simulates a panic
-        // between apply and commit.
+        // Deliberately drop without committing after the complete apply.
         drop(txn);
     }
 

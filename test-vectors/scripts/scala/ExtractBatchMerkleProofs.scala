@@ -21,8 +21,11 @@
 //   scala-cli run test-vectors/scripts/scala/ExtractBatchMerkleProofs.scala \
 //     > test-vectors/ergo-crypto/batch-merkle/fixtures.json
 //
-// Pinning: scrypto 2.3.0 matches ergo's avldb/build.sbt; do not bump
-// without confirming the wire format hasn't changed.
+// Historical capture: keep scrypto2.3.0 and the existing output unchanged.
+// Ergo v6.0.5 avldb uses3.1.1; the additive current-dependency wrapper,
+// captures and provenance live at ergo-crypto/batch-merkle/scrypto-3.1.1.
+// Seven finite historical cases match3.1.1 exactly; this is not a claim
+// that every artifact or algorithm is unchanged across versions.
 
 import scorex.crypto.authds.LeafData
 import scorex.crypto.authds.merkle.{BatchMerkleProof, MerkleTree}

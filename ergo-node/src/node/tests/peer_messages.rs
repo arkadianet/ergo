@@ -343,11 +343,14 @@ fn unknown_modifier_type_is_rejected_before_delivery_mutation() {
             .request(peer, 100, &[id], now),
         vec![id]
     );
-    let payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
-        type_id: 100,
+    // The serializer rejects unknown types; build an invalid incoming wire
+    // payload from the valid framing instead.
+    let mut payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
+        type_id: 101,
         modifiers: vec![(id, vec![1, 2, 3])],
     })
     .unwrap();
+    payload[0] = 100;
 
     let actions = handle_message(&mut state, peer, message::CODE_MODIFIER, &payload, now);
 

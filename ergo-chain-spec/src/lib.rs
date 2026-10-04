@@ -285,13 +285,12 @@ impl VotingParams {
 
     /// Testnet defaults. Source: `testnet.conf` at v6.0.3 —
     /// `votingLength = 128`, `softForkEpochs = 32`,
-    /// `activationEpochs = 32`. The shorter epoch length matches
-    /// testnet's 45 s block interval so the wall-clock voting window
-    /// is comparable to mainnet's. No `version2ActivationHeight`
-    /// because `TestnetLaunchParameters.scala` sets
-    /// `BlockVersion = Interpreter60Version` (= 4) at genesis — there
-    /// is no v1 → v2 transition for the voting state machine to
-    /// trigger.
+    /// `activationEpochs = 32`. At the configured 45 s interval the voting
+    /// window is 51.2 hours (mainnet: 45.5 days). No scheduled
+    /// `version2ActivationHeight`: the launch parameter row is version 4,
+    /// while the captured height-1 genesis header retains version 1.
+    /// See `test-vectors/testnet/initial-context/` for pinned launch source
+    /// and the observed first epoch at height 128.
     pub const fn testnet() -> Self {
         Self {
             voting_length: 128,
@@ -305,7 +304,13 @@ impl VotingParams {
     /// * 9 / 10`. Mainnet threshold: `> 29_491`
     /// (`reference/ergo/.../settings/VotingSettings.scala:9`).
     pub fn soft_fork_approved(&self, votes: i32) -> bool {
-        let threshold = (self.voting_length * self.soft_fork_epochs * 9 / 10) as i32;
+        // Scala evaluates this expression as signed Int, wrapping each
+        // multiplication before division. In particular devnet overflows;
+        // widening before dividing would change its approval threshold.
+        let threshold = (self.voting_length as i32)
+            .wrapping_mul(self.soft_fork_epochs as i32)
+            .wrapping_mul(9)
+            / 10;
         votes > threshold
     }
 
@@ -695,7 +700,8 @@ impl ChainSpec {
             && self
                 .reemission
                 .as_ref()
-                .is_some_and(|r| r.reemission_nft_id == canonical_reemission.reemission_nft_id)
+                .is_some_and(|r| *r == canonical_reemission)
+            && self.monetary == MonetaryParams::mainnet()
             && self.genesis.state_digest == GenesisParams::mainnet().state_digest;
         if !genuine {
             return None;
@@ -1088,6 +1094,64 @@ mod tests {
         let mut spec = ChainSpec::mainnet();
         spec.network_params = NetworkParams::TESTNET;
         assert!(spec.emission_script_trees().is_none());
+    }
+
+    #[test]
+    fn emission_script_trees_require_every_contract_setting() {
+        let monetary_changes: [fn(&mut MonetaryParams); 6] = [
+            |p| p.fixed_rate += 1,
+            |p| p.fixed_rate_period += 1,
+            |p| p.epoch_length += 1,
+            |p| p.one_epoch_reduction += 1,
+            |p| p.founders_initial_reward += 1,
+            |p| p.miner_reward_delay += 1,
+        ];
+        for change in monetary_changes {
+            let mut spec = ChainSpec::mainnet();
+            change(&mut spec.monetary);
+            assert!(spec.emission_script_trees().is_none());
+        }
+        let reemission_changes: [fn(&mut ReemissionParams); 5] = [
+            |p| p.activation_height += 1,
+            |p| p.reemission_start_height += 1,
+            |p| p.emission_nft_id = Digest32::from_bytes([0; 32]),
+            |p| p.reemission_nft_id = Digest32::from_bytes([0; 32]),
+            |p| p.reemission_token_id = Digest32::from_bytes([0; 32]),
+        ];
+        for change in reemission_changes {
+            let mut spec = ChainSpec::mainnet();
+            change(spec.reemission.as_mut().unwrap());
+            assert!(spec.emission_script_trees().is_none());
+        }
+    }
+
+    #[test]
+    fn soft_fork_thresholds_match_pinned_scala_jvm() {
+        let fixture =
+            include_str!("../../test-vectors/ergo-chain-spec/voting-thresholds/thresholds.tsv");
+        let rows: Vec<_> = fixture.lines().skip(1).collect();
+        assert_eq!(rows.len(), 4);
+        for row in rows {
+            let fields: Vec<_> = row.split('\t').collect();
+            assert_eq!(fields.len(), 8, "{row}");
+            let settings = VotingParams {
+                voting_length: fields[1].parse().unwrap(),
+                soft_fork_epochs: fields[2].parse().unwrap(),
+                ..VotingParams::mainnet()
+            };
+            let threshold: i32 = fields[3].parse().unwrap();
+            for (votes, expected) in [0, threshold - 1, threshold, threshold + 1]
+                .into_iter()
+                .zip(&fields[4..])
+            {
+                assert_eq!(
+                    settings.soft_fork_approved(votes),
+                    expected.parse::<bool>().unwrap(),
+                    "network={} votes={votes}",
+                    fields[0]
+                );
+            }
+        }
     }
 
     #[test]

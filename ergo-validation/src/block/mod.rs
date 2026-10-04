@@ -183,12 +183,14 @@ pub struct BlockValidationContext<'a> {
     pub reemission: Option<&'a ReemissionRuleInputs>,
 }
 
-/// A block whose header is PoW/difficulty-validated and whose
-/// transactions, section linkage, merkle roots, and intra-block UTXO
-/// overlay all pass validation.
+/// A block accepted by a full-block validation entry point using the
+/// supplied checked header and chain context.
 ///
-/// Construction is limited to [`validate_full_block`] — private fields
-/// mean no other code can mint a `CheckedBlock`. Downstream consumers
+/// The production path is [`validate_full_block_parallel`]; the sequential
+/// reference is [`validate_full_block`]. Neither repeats header validation.
+/// A configured script checkpoint skips transaction scripts and their
+/// charges, while section linkage, roots, and remaining transaction checks
+/// still run. Private fields preserve the accepted parts. Downstream consumers
 /// (`StateStore::apply_block`) derive every consensus-significant
 /// field (height, header_id, expected state root) from the embedded
 /// header, not from caller arguments.
@@ -218,7 +220,7 @@ impl CheckedBlock {
     /// inverse of [`Self::into_parts`]. This bypasses validation, so it
     /// is a test-only escape hatch (gated behind `test-helpers`) for
     /// driving state-apply seams with hand-built fixtures; production
-    /// `CheckedBlock`s come only from `validate_full_block`.
+    /// `CheckedBlock`s come from the full-block validation entry points.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn from_parts(
         checked_header: CheckedHeader,

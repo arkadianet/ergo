@@ -365,9 +365,8 @@ mod tests {
 
     #[test]
     fn autolykos_solution_rejects_negative_d() {
-        // `d` is the unsigned magnitude Scala writes with
-        // `BigIntegers.asUnsignedByteArray`; a negative value is not a
-        // solution any node could have produced.
+        // This DTO uses a nonnegative magnitude policy for distance.
+        // Header serialization separately chooses its wire encoding.
         let s = r#"{"n":"0000000900cb491a","d":-1}"#;
         let err = serde_json::from_str::<AutolykosSolutionJson>(s).expect_err("must reject");
         assert!(

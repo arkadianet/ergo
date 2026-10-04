@@ -270,6 +270,38 @@ fn remove_with_descendants_frontier_empty_when_within_cap() {
 }
 
 #[test]
+fn staged_eviction_frontier_commits_with_the_pool_and_stays_bounded() {
+    let mut live = OrderedPool::with_capacity(4);
+    live.insert(mk_entry(1, 10, &[10], &[100], &[])).unwrap();
+    live.insert(mk_entry(2, 20, &[100], &[200], &[1])).unwrap();
+    live.insert(mk_entry(3, 30, &[200], &[210], &[2])).unwrap();
+    let mut staged = live.clone_for_staging();
+    let removed = staged.remove_with_descendants_debiting(&digest(1), 0, wide_bounds());
+    assert_eq!(
+        removed.len(),
+        1,
+        "zero bound still removes the root and makes progress"
+    );
+    assert_eq!(staged.orphan_eviction_pending(), 1);
+    assert_eq!(
+        live.orphan_eviction_pending(),
+        0,
+        "discarding a clone leaves live work untouched"
+    );
+    live = staged;
+    assert_eq!(live.next_orphan_eviction(), Some(digest(2)));
+    live.remove_with_descendants_debiting(&digest(2), 1, wide_bounds());
+    assert_eq!(live.orphan_eviction_pending(), 1);
+    live.remove(&digest(3)).unwrap();
+    assert_eq!(
+        live.orphan_eviction_pending(),
+        0,
+        "ordinary removal clears queued identity"
+    );
+    live.check_invariants();
+}
+
+#[test]
 fn remove_with_descendants_on_missing_tx() {
     let mut p = OrderedPool::with_capacity(4);
     assert!(p.remove_with_descendants(&digest(99), 10).is_empty());

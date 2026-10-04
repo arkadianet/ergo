@@ -1,0 +1,41 @@
+{
+  "oracle" : "sigma-state:6.0.6 / jitcost_probe",
+  "cases" : [
+    {
+      "operation" : "add",
+      "a" : 2147483646,
+      "b" : 1,
+      "result" : {
+        "value" : 2147483647,
+        "exception" : null
+      }
+    },
+    {
+      "operation" : "add",
+      "a" : 2147483647,
+      "b" : 1,
+      "result" : {
+        "value" : null,
+        "exception" : "java.lang.ArithmeticException"
+      }
+    },
+    {
+      "operation" : "from_block_cost",
+      "a" : 214748364,
+      "b" : 0,
+      "result" : {
+        "value" : 2147483640,
+        "exception" : null
+      }
+    },
+    {
+      "operation" : "from_block_cost",
+      "a" : 214748365,
+      "b" : 0,
+      "result" : {
+        "value" : null,
+        "exception" : "java.lang.ArithmeticException"
+      }
+    }
+  ]
+}

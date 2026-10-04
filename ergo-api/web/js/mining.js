@@ -5,6 +5,7 @@
 // follow the local full-block tip independently while syncing.
 import { subscribe, CONFIGURE_API_KEY } from './auth.js';
 import { api } from './api-client.js';
+import { ENABLE_MINING } from './capabilities.js';
 import { makeTable } from './table.js';
 import { erg, num, bytes, dur, truncMiddle, blockTime } from './format.js';
 import { minerNode, poolLabel, fetchOwnPk, ownPkHex } from './miners.js';
@@ -161,7 +162,7 @@ async function refetchStats() {
 }
 
 export async function onSlow() {
-  if (!identity) identity = await api.identity();
+  identity = await api.identity();
   const miningOn = !!identity?.mining;
   const [tipNow, infoNow, cand, rew] = await Promise.all([
     api.tip(),
@@ -214,15 +215,15 @@ function renderYourNode() {
   if (els.you.contains(document.activeElement) && candidate?.ok) return;
   const workDetailsOpen = els.you.querySelector('.mining-work__details')?.open || false;
   els.you.replaceChildren();
-  if (!identity) {
-    els.you.append(el('div', 'micro-label', 'loading…'));
+  if (!identity || typeof identity.mining !== 'boolean') {
+    els.you.append(el('div', 'micro-label', 'Mining configuration unavailable. Retrying…'));
   } else if (!identity.mining) {
     els.you.append(kvNode('mining', 'disabled', 'var(--tx3)'));
     els.you.append(
       el(
         'div',
         'micro-label',
-        'This node does not serve mining work. Enable mining in the node config (mining = true) to hand out candidates to external miners.',
+        ENABLE_MINING,
       ),
     );
   } else {

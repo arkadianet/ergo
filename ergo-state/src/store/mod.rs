@@ -89,7 +89,8 @@ pub(crate) const NODE_FORMAT_V2: &[u8] = b"v2";
 /// codec) into a runtime [`AvlNode`] suitable for AVL_NODES
 /// storage. Preserves separator keys (Internal) and v2-format
 /// cached labels (left/right). Outer `label` is None — recomputed
-/// lazily on first traversal.
+/// lazily on first traversal. Snapshot indices start at zero; runtime node
+/// IDs start at one because zero is the null-node sentinel.
 fn reconstructed_to_avl(rec: &crate::avl::snapshot_codec::ReconstructedNode) -> AvlNode {
     use crate::avl::snapshot_codec::ReconstructedNode;
     match rec {
@@ -112,8 +113,8 @@ fn reconstructed_to_avl(rec: &crate::avl::snapshot_codec::ReconstructedNode) -> 
             right_label,
         } => AvlNode::Internal {
             key: *key,
-            left: *left as crate::avl::node::NodeId,
-            right: *right as crate::avl::node::NodeId,
+            left: *left as crate::avl::node::NodeId + 1,
+            right: *right as crate::avl::node::NodeId + 1,
             balance: *balance,
             left_label: Some(*left_label),
             right_label: Some(*right_label),
@@ -478,7 +479,7 @@ pub(crate) fn verify_or_init_state_type_inner(
 
 mod apply;
 pub mod emission;
-pub use apply::{activation_minimal_full_block_height, compute_minimal_full_block_height};
+pub use apply::compute_minimal_full_block_height;
 mod backfill;
 mod dry_run;
 #[cfg(test)]
@@ -997,7 +998,9 @@ impl StateStore {
             .map(crate::persist::PersistPipeline::progress)
     }
 
-    /// Current committed height (0 = genesis, no blocks applied).
+    /// Foreground applied height (0 = genesis, no blocks applied).
+    /// Background persistence can lag; use `committed_snapshot` for a
+    /// transaction pinned to committed state.
     pub fn height(&self) -> u32 {
         self.height
     }
@@ -1186,7 +1189,7 @@ impl StateStore {
     /// Mode 2 consume-side terminal step: takes the
     /// `ReconstructedTree` produced by [`crate::avl::snapshot_codec::reconstruct_tree`]
     /// and bulk-writes it into `AVL_NODES`, sets `STATE_META`
-    /// (`root_node_id=0`, `tree_height`, `root_digest=manifest_id`),
+    /// (`root_node_id=1`, `tree_height`, `root_digest=manifest_id`),
     /// and advances `chain_state.best_full_block_*` to
     /// (`snapshot_height`, `canonical_header_id`). Then rebuilds
     /// the in-memory `tree` so subsequent reads hit the new state.
@@ -1333,6 +1336,30 @@ impl StateStore {
             });
         }
 
+        // Reserve runtime node zero for NULL_NODE. Validate the index space
+        // before replacing either the committed tree or its arena.
+        let next_id = u64::try_from(reconstructed.nodes.len())
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .filter(|next| *next > 1)
+            .ok_or(StateError::InvalidPrecondition {
+                what: "snapshot must contain a root and fit runtime node IDs",
+            })?;
+        for node in &reconstructed.nodes {
+            if let crate::avl::snapshot_codec::ReconstructedNode::Internal { left, right, .. } =
+                node
+            {
+                if *left >= reconstructed.nodes.len() || *right >= reconstructed.nodes.len() {
+                    return Err(StateError::InvalidPrecondition {
+                        what: "snapshot child index is outside its node arena",
+                    });
+                }
+            }
+        }
+        // The imported image and any prior jobs must not overlap. Retain the
+        // worker's monotonic job sequence when attaching the replacement arena.
+        self.flush_persist_pipeline()?;
+
         // 3. Atomic write. Stage the new ChainStateMeta into a
         // local; do NOT mutate `self.chain_state` until after the
         // write_txn commits. If any fallible step inside the txn
@@ -1345,9 +1372,10 @@ impl StateStore {
         new_cs.best_full_block_height = snapshot_height;
         {
             let mut avl_table = write_txn.open_table(AVL_NODES)?;
+            avl_table.retain(|_, _| false)?;
             for (idx, rec_node) in reconstructed.nodes.iter().enumerate() {
                 let avl_node = reconstructed_to_avl(rec_node);
-                avl_table.insert(idx as u64, node_to_bytes(&avl_node).as_slice())?;
+                avl_table.insert(idx as u64 + 1, node_to_bytes(&avl_node).as_slice())?;
             }
 
             // StateMeta.root_digest is the 33-byte ADDigest:
@@ -1360,10 +1388,11 @@ impl StateStore {
                 height: snapshot_height,
                 tree_height: reconstructed.tree_height,
                 root_digest,
-                root_node_id: 0,
+                root_node_id: 1,
             };
             let mut meta_table = write_txn.open_table(STATE_META)?;
             meta_table.insert("root", meta.serialize().as_slice())?;
+            meta_table.insert("allocator", AllocMeta { next_id }.serialize().as_slice())?;
             meta_table.insert(NODE_FORMAT_VERSION_KEY, NODE_FORMAT_V2)?;
             // Persistent UTXO-bootstrap provenance marker. One
             // byte, never cleared. Distinguishes a true Mode 2
@@ -1418,6 +1447,8 @@ impl StateStore {
         // the staged in-memory state. A failure above leaves the
         // store observably unchanged.
         self.chain_state = ChainState::from_persisted(&new_cs);
+        self.height = snapshot_height;
+        self.genesis_committed = true;
         self.mode2_trust_first_epoch = true;
 
         // 4. Rebuild the in-memory tree so subsequent reads find
@@ -1430,12 +1461,15 @@ impl StateStore {
         ));
         let new_tree = AvlTree::new_with_arena(
             arena,
-            0,
+            1,
             reconstructed.tree_height,
-            reconstructed.nodes.len() as u64,
+            next_id,
             reconstructed.root_label,
         );
         self.tree = new_tree;
+        if let Some(pipeline) = &self.persist_pipeline {
+            pipeline.rebind_arena_progress(self.tree.arena_durable_seq_handle());
+        }
 
         Ok(())
     }
@@ -2236,6 +2270,90 @@ impl StateStore {
         Ok(())
     }
 
+    /// Repair the legacy header-only pruning floor before any UTXO block has
+    /// been applied. A fresh UTXO tree must replay from height 1; headers alone
+    /// do not supply the missing parent state. This exception cannot lower a
+    /// floor belonging to applied, snapshot-installed or NiPoPoW-bootstrapped
+    /// state.
+    ///
+    /// Requires both live and committed full tips/AVL metadata at height 0,
+    /// dense committed header availability (`apply_popow_proof` writes its
+    /// `dense_from_height` floor while the full tip stays at 0) and no
+    /// permanent snapshot-install or first-epoch trust marker. Checks and
+    /// the floor reset share one quick-repair transaction. Returns `false`
+    /// for an absent/already-1 floor. The ordinary setter remains monotonic.
+    pub fn repair_unapplied_pruning_floor(&mut self) -> Result<bool, StateError> {
+        const REFUSAL: &str =
+            "pruning floor repair requires committed unapplied dense UTXO genesis without bootstrap";
+        if self.height != 0 || self.chain_state.best_full_block_height != 0 {
+            return Err(StateError::InvalidPrecondition { what: REFUSAL });
+        }
+        self.flush_persist_pipeline()?;
+        let txn = crate::begin_write_qr(&self.db)?;
+        {
+            let chain = txn.open_table(CHAIN_STATE_META)?;
+            if chain.get(MODE2_TRUST_FIRST_EPOCH_KEY)?.is_some() {
+                return Err(StateError::InvalidPrecondition { what: REFUSAL });
+            }
+            let durable = chain
+                .get("chain_state")?
+                .ok_or(StateError::InvalidPrecondition { what: REFUSAL })?;
+            let durable = ChainStateMeta::deserialize(durable.value()).map_err(|error| {
+                StateError::DbCorruption {
+                    table: "chain_state_meta",
+                    key: hex::encode("chain_state"),
+                    reason: error.to_string(),
+                }
+            })?;
+            if durable.best_full_block_height != 0
+                || durable.best_full_block_id != self.chain_state.best_full_block_id
+                || durable.header_availability != HeaderAvailability::Dense
+            {
+                return Err(StateError::InvalidPrecondition { what: REFUSAL });
+            }
+        }
+        {
+            let mut meta = txn.open_table(STATE_META)?;
+            if meta.get(UTXO_BOOTSTRAP_INSTALLED_V1_KEY)?.is_some() {
+                return Err(StateError::InvalidPrecondition { what: REFUSAL });
+            }
+            let root = meta
+                .get("root")?
+                .ok_or(StateError::InvalidPrecondition { what: REFUSAL })?;
+            if StateMeta::deserialize(root.value())?.height != 0 {
+                return Err(StateError::InvalidPrecondition { what: REFUSAL });
+            }
+            drop(root);
+            let floor = meta
+                .get(MINIMAL_FULL_BLOCK_HEIGHT_KEY)?
+                .map(|row| row.value().to_vec());
+            let Some(floor) = floor else { return Ok(false) };
+            let floor: [u8; 4] =
+                floor
+                    .try_into()
+                    .map_err(|bytes: Vec<u8>| StateError::DbCorruption {
+                        table: "state_meta",
+                        key: hex::encode(MINIMAL_FULL_BLOCK_HEIGHT_KEY.as_bytes()),
+                        reason: format!(
+                            "minimal_full_block_height payload has unexpected length: {}",
+                            bytes.len()
+                        ),
+                    })?;
+            let floor = u32::from_le_bytes(floor);
+            if floor == 1 {
+                return Ok(false);
+            }
+            if floor == 0 {
+                return Err(StateError::InvalidPrecondition {
+                    what: "pruning floor must be positive",
+                });
+            }
+            meta.insert(MINIMAL_FULL_BLOCK_HEIGHT_KEY, 1u32.to_le_bytes().as_slice())?;
+        }
+        txn.commit()?;
+        Ok(true)
+    }
+
     /// Side-effect-free section eligibility read for network serving/relay.
     /// Section tables commit independently of the AVL persist pipeline. Never
     /// drain its results here: the next apply must still observe PersistFailed.
@@ -2492,6 +2610,16 @@ impl StateStore {
     /// Look up the header_id on the best-header chain at a given height.
     pub fn get_header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
         self.headers.get_header_id_at_height(height)
+    }
+
+    /// Header ID on the fully applied chain at `height`, as committed in
+    /// `CHAIN_INDEX`. Queued persistence is not visible until commit. Use a
+    /// `CommittedSnapshot` when several reads must share one frozen view.
+    pub fn get_applied_header_id_at_height(
+        &self,
+        height: u32,
+    ) -> Result<Option<[u8; 32]>, StateError> {
+        crate::reader::applied_header_id_in_txn(&self.db.begin_read()?, height)
     }
 
     /// Scan `HEADER_CHAIN_INDEX` for the canonical height of a given
@@ -4144,6 +4272,15 @@ impl StateStore {
         Ok(crate::avl::arena::CommitDurability::Durable)
     }
 
+    /// Whether `AVL_NODES` holds a row at the null node ID. One point lookup.
+    fn has_null_node_row(read_txn: &redb::ReadTransaction) -> Result<bool, StateError> {
+        match read_txn.open_table(AVL_NODES) {
+            Ok(table) => Ok(table.get(crate::avl::node::NULL_NODE)?.is_some()),
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Derive next_id by scanning the AVL_NODES table for the max key.
     /// One-time migration cost when AllocMeta is absent (pre-upgrade DB).
     fn derive_next_id_from_scan(read_txn: &redb::ReadTransaction) -> Result<u64, StateError> {
@@ -4169,6 +4306,107 @@ pub use crate::avl::serialization::{node_from_bytes, node_to_bytes};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prover_rejects_invalid_parameters_before_archive_reads() {
+        let (store, _directory) = fresh_store();
+        for (m, k, expected) in [
+            (0, 1, "prove_with_db: m must be >= 1"),
+            (1, 0, "prove_with_db: k must be >= 1"),
+            (u32::MAX, 1, "prove_with_db: k + m overflows u32"),
+        ] {
+            assert!(matches!(store.prove_with_db(m, k, None),
+                Err(StateError::InvalidPrecondition { what }) if what == expected));
+        }
+    }
+
+    #[test]
+    fn legacy_zero_based_snapshot_is_refused_before_allocator_migration() {
+        let (mut store, _directory) = fresh_store();
+        let path = store.db_path.clone();
+        store.initialize_genesis(&[]).unwrap();
+        let txn = crate::begin_write_qr(&store.db).unwrap();
+        {
+            let mut table = txn.open_table(STATE_META).unwrap();
+            let mut meta = {
+                let row = table.get("root").unwrap().unwrap();
+                StateMeta::deserialize(row.value()).unwrap()
+            };
+            meta.root_node_id = 0;
+            table.insert("root", meta.serialize().as_slice()).unwrap();
+            table
+                .insert(UTXO_BOOTSTRAP_INSTALLED_V1_KEY, &[1u8][..])
+                .unwrap();
+            table.remove("allocator").unwrap();
+        }
+        txn.commit().unwrap();
+        drop(store);
+        assert!(matches!(
+            StateStore::open(&path),
+            Err(StateError::LegacySnapshotNodeIds)
+        ));
+        let db = Database::create(&path).unwrap();
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(STATE_META).unwrap();
+        assert!(table.get("allocator").unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_node_zero_rotated_into_an_internal_child_is_refused() {
+        // Older installs stored the snapshot root at node zero. Applied
+        // blocks keep node IDs, so a root rotation leaves node zero as an
+        // internal child under a nonzero root. Reproduce that layout from a
+        // real install by storing the root's internal left child at node zero.
+        let (mut store, _directory) = fresh_store();
+        let path = store.db_path.clone();
+        store.initialize_genesis(&[]).unwrap();
+        let (height, header_id) =
+            crate::test_helpers::seed_dense_mainnet_headers(&mut store, 1).unwrap()[0];
+        let (reconstructed, root) = crate::test_helpers::reconstructed_snapshot_fixture(24, height);
+        store
+            .install_snapshot_state(reconstructed, height, header_id, &root)
+            .unwrap();
+        drop(store);
+
+        let db = Arc::new(Database::create(&path).unwrap());
+        let txn = crate::begin_write_qr(&db).unwrap();
+        {
+            let meta = txn.open_table(STATE_META).unwrap();
+            let root_id = StateMeta::deserialize(meta.get("root").unwrap().unwrap().value())
+                .unwrap()
+                .root_node_id;
+            assert_ne!(root_id, 0);
+            let mut nodes = txn.open_table(AVL_NODES).unwrap();
+            assert!(nodes.get(0).unwrap().is_none());
+            let mut root_node =
+                node_from_bytes(nodes.get(root_id).unwrap().unwrap().value()).unwrap();
+            let AvlNode::Internal { left, .. } = &mut root_node else {
+                panic!("fixture root must be internal");
+            };
+            let child = std::mem::replace(left, 0);
+            let child_bytes = nodes.remove(child).unwrap().unwrap().value().to_vec();
+            assert!(matches!(
+                node_from_bytes(&child_bytes).unwrap(),
+                AvlNode::Internal { .. }
+            ));
+            nodes.insert(0, child_bytes.as_slice()).unwrap();
+            nodes
+                .insert(root_id, node_to_bytes(&root_node).as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+        // Committed reads below node zero treat it as a null child.
+        assert!(matches!(
+            crate::reader::ChainStoreReader::new_from_db(Arc::clone(&db)).lookup_box(&[0x10; 32]),
+            Err(StateError::DbCorruption { .. })
+        ));
+        drop(db);
+
+        assert!(matches!(
+            StateStore::open(&path),
+            Err(StateError::LegacySnapshotNodeIds)
+        ));
+    }
 
     #[test]
     fn ibd_periodic_barrier_runs_on_nth_job_and_exit_drains_remaining_jobs() {
@@ -4234,6 +4472,136 @@ mod tests {
         ));
         assert!(store.ibd_mode());
         assert_eq!(store.ibd_flush_interval, 50);
+    }
+
+    #[test]
+    fn pruning_floor_repair_preserves_monotonic_setter_and_clean_reopen() {
+        let (mut store, directory) = fresh_store();
+        store.initialize_genesis(&[]).unwrap();
+        assert!(!store.repair_unapplied_pruning_floor().unwrap());
+        store.write_minimal_full_block_height(951).unwrap();
+        assert!(matches!(
+            store.write_minimal_full_block_height(1),
+            Err(StateError::PruneSentinelMonotonicity {
+                current: 951,
+                attempted: 1
+            })
+        ));
+        assert!(store.repair_unapplied_pruning_floor().unwrap());
+        assert_eq!(
+            store.try_read_minimal_full_block_height_raw().unwrap(),
+            Some(1)
+        );
+        assert!(!store.repair_unapplied_pruning_floor().unwrap());
+        drop(store);
+        let reopened = StateStore::open(&directory.path().join("state.redb")).unwrap();
+        assert_eq!(
+            reopened.try_read_minimal_full_block_height_raw().unwrap(),
+            Some(1)
+        );
+        assert_eq!(reopened.chain_state().best_full_block_height, 0);
+    }
+
+    #[test]
+    fn pruning_floor_repair_refuses_live_or_committed_applied_state() {
+        for live in [false, true] {
+            let (mut store, _directory) = fresh_store();
+            store.initialize_genesis(&[]).unwrap();
+            store.write_minimal_full_block_height(951).unwrap();
+            if live {
+                store.height = 1;
+            } else {
+                let txn = crate::begin_write_qr(&store.db).unwrap();
+                {
+                    let mut table = txn.open_table(CHAIN_STATE_META).unwrap();
+                    let mut committed = store.chain_state.to_persisted();
+                    committed.best_full_block_height = 1;
+                    table
+                        .insert("chain_state", committed.serialize().as_slice())
+                        .unwrap();
+                }
+                txn.commit().unwrap();
+            }
+            assert!(matches!(
+                store.repair_unapplied_pruning_floor(),
+                Err(StateError::InvalidPrecondition { .. })
+            ));
+            assert_eq!(
+                store.try_read_minimal_full_block_height_raw().unwrap(),
+                Some(951)
+            );
+        }
+    }
+
+    #[test]
+    fn pruning_floor_repair_refuses_snapshot_markers_and_committed_avl_height() {
+        for guard in 0..3 {
+            let (mut store, _directory) = fresh_store();
+            store.initialize_genesis(&[]).unwrap();
+            store.write_minimal_full_block_height(951).unwrap();
+            let txn = crate::begin_write_qr(&store.db).unwrap();
+            match guard {
+                0 => {
+                    let mut table = txn.open_table(STATE_META).unwrap();
+                    table
+                        .insert(UTXO_BOOTSTRAP_INSTALLED_V1_KEY, &[1u8][..])
+                        .unwrap();
+                }
+                1 => open::write_mode2_trust_sentinel(&txn).unwrap(),
+                _ => {
+                    let mut table = txn.open_table(STATE_META).unwrap();
+                    let mut meta = {
+                        let root = table.get("root").unwrap().unwrap();
+                        StateMeta::deserialize(root.value()).unwrap()
+                    };
+                    meta.height = 1;
+                    table.insert("root", meta.serialize().as_slice()).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+            assert!(matches!(
+                store.repair_unapplied_pruning_floor(),
+                Err(StateError::InvalidPrecondition { .. })
+            ));
+            assert_eq!(
+                store.try_read_minimal_full_block_height_raw().unwrap(),
+                Some(951)
+            );
+        }
+    }
+
+    #[test]
+    fn pruning_floor_repair_refuses_nipopow_proof_floor() {
+        // `apply_popow_proof` writes its `dense_from_height` floor while the
+        // full tip stays at 0 and writes no snapshot marker. That floor is
+        // bootstrap state, not a legacy header-only floor.
+        let (mut store, directory) = fresh_store();
+        store.initialize_genesis(&[]).unwrap();
+        store
+            .apply_popow_proof(&crate::test_helpers::nipopow_proof_dense_from_2())
+            .unwrap();
+        assert_eq!(store.chain_state().best_full_block_height, 0);
+        assert!(matches!(
+            store.chain_state().header_availability,
+            HeaderAvailability::PoPowSparse {
+                dense_from_height: 2,
+                ..
+            }
+        ));
+        assert_eq!(
+            store.try_read_minimal_full_block_height_raw().unwrap(),
+            Some(2)
+        );
+        assert!(matches!(
+            store.repair_unapplied_pruning_floor(),
+            Err(StateError::InvalidPrecondition { .. })
+        ));
+        drop(store);
+        let reopened = StateStore::open(&directory.path().join("state.redb")).unwrap();
+        assert_eq!(
+            reopened.try_read_minimal_full_block_height_raw().unwrap(),
+            Some(2)
+        );
     }
 
     #[test]

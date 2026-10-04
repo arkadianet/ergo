@@ -158,10 +158,9 @@ fn render_unspent_by_template_hash(
 /// `IndexedErgoBox(0, None, None, None, _, 0)` sentinel as
 /// `pool_unspent_for_tree`.
 ///
-/// Soft-fork-wrapped trees (`TemplateHashError::Unparseable`) are
-/// skipped — Scala's `IndexedContractTemplate` only records template
-/// hashes for parseable trees, so a wrapped pool output can never match
-/// any queried template anyway.
+/// Soft-fork-wrapped trees match under the same Scala-cached template the
+/// indexer records for them (`IndexedContractTemplate.filterMempool` also
+/// applies `hashTreeTemplate`); only bytes that fail to parse are skipped.
 pub(crate) fn pool_unspent_for_template(
     mempool: &dyn MempoolView,
     template_hash: &TemplateHash,

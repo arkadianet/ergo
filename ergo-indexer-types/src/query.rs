@@ -46,10 +46,9 @@ impl std::error::Error for IndexerReadError {}
 /// successfully queried missing data, never a read failure. Cached status
 /// and height remain available independently of database reads.
 ///
-/// The full 25-route surface is declared up-front; per-phase
-/// implementations on `IndexerStore` fill in the methods
-/// progressively. Methods declared but unimplemented at a given stage
-/// have no callers because their corresponding routes are unmounted.
+/// Production `IndexerHandle` implements the mounted reader surfaces.
+/// Optional methods explicitly document their default behavior so other
+/// implementations cannot silently claim support for a missing query.
 pub trait IndexerQuery: Send + Sync + 'static {
     fn indexed_height(&self) -> u64;
     fn status(&self) -> IndexerStatus;
@@ -89,9 +88,24 @@ pub trait IndexerQuery: Send + Sync + 'static {
         hi: u64,
     ) -> Result<Vec<IndexedBoxDto>, IndexerReadError>;
 
+    /// Latest-first global box page. Offset counts backwards from the durable
+    /// global counter. Counter and records must come from one read snapshot.
+    /// Pages past the beginning are empty; a partial final page is truncated.
+    fn boxes_latest_paged(&self, _p: Page) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Err(IndexerReadError::new("latest box paging is unsupported"))
+    }
+
     fn tx_by_id(&self, tx_id: &TxId) -> Result<Option<IndexedTxDto>, IndexerReadError>;
     fn tx_by_global_index(&self, n: u64) -> Result<Option<IndexedTxDto>, IndexerReadError>;
     fn txs_by_global_range(&self, lo: u64, hi: u64) -> Result<Vec<IndexedTxDto>, IndexerReadError>;
+
+    /// Latest-first global transaction page, with the same snapshot and
+    /// out-of-range contract as [`Self::boxes_latest_paged`].
+    fn txs_latest_paged(&self, _p: Page) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Err(IndexerReadError::new(
+            "latest transaction paging is unsupported",
+        ))
+    }
 
     fn address_balance(&self, tree_hash: &TreeHash)
         -> Result<Option<BalanceDto>, IndexerReadError>;

@@ -93,11 +93,10 @@ pub struct NodeSnapshot {
     /// priority order (matches Scala's `MempoolReader.getAll`).
     /// Each entry is `(tx_id, serialized_tx_bytes)` — bytes are
     /// the canonical wire form preserved by mempool admission.
-    /// `Arc`-shared so paged + by-id + batch handlers pay no copy
-    /// per request. Drives the three mempool read endpoints
-    /// (`/transactions/unconfirmed?offset=&limit=`,
-    /// `/transactions/unconfirmed/byTransactionId/{id}`, and
-    /// `POST /transactions/unconfirmed/byTransactionIds`).
+    /// `Arc`-shared so paged and by-id handlers pay no copy per request.
+    /// Drives the full-transaction mempool reads, such as
+    /// `/transactions/unconfirmed?offset=&limit=` and
+    /// `/transactions/unconfirmed/byTransactionId/{id}`.
     pub pool_full_txs: Arc<Vec<(Digest32, Arc<[u8]>)>>,
     /// Per-peer last-observed sync-info classification — Scala's
     /// `syncTracker.fullInfo` analogue. Snapshotted from

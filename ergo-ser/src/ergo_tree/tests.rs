@@ -1215,33 +1215,40 @@ fn template_hash_self_consistent_for_emission_contract() {
     assert_eq!(from_parsed, from_bytes);
 }
 
-/// Block 1,702,686 size-flagged non-SigmaProp tree must surface as
-/// `Unparseable` from the bytes path so the indexer can skip
-/// recording an entry rather than emitting a hash that would
-/// collide across every soft-fork-wrapped tree on the chain.
+/// Block 1,702,686 size-flagged non-SigmaProp tree is wrapped, yet Scala's
+/// cached `template` is defined: the bytes after its header (0x09) and size
+/// (0x2f), as it has no segregated constants. The bytes path hashes that
+/// slice, the key a Scala indexer records (see the sigma-state 6.0.6 table in
+/// `hash.rs`). The structured path has no template for the wrapped body.
 #[test]
-fn template_hash_from_bytes_unparseable_for_block_1702686() {
+fn template_hash_from_bytes_uses_scala_template_for_block_1702686() {
     let hex = "092f0204a00b08cd021dde34603426402615658f1d970cfa7c7bd92ac81a8b16ee20427901040404040004020504040402";
     let bytes = hex::decode(hex).unwrap();
-    match template_hash_from_bytes(&bytes) {
-        Err(TemplateHashError::Unparseable) => {}
-        other => panic!("expected Unparseable, got {other:?}"),
-    }
+    assert_eq!(
+        template_hash_from_bytes(&bytes).unwrap(),
+        *blake2b256(&bytes[2..]).as_bytes()
+    );
+    let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+    assert!(matches!(
+        template_hash(&tree),
+        Err(TemplateHashError::Unparseable)
+    ));
 }
 
-/// A v4 tree (version > MAX_SUPPORTED_TREE_VERSION = 3) is wrapped
-/// by the version-soft-fork branch and must also surface as
-/// `Unparseable`.
+/// A v4 tree (version > MAX_SUPPORTED_TREE_VERSION = 3) is wrapped by the
+/// version-soft-fork branch. Scala rejects such a tree at deserialization at
+/// every activated version, so it never indexes one; the bytes path applies
+/// the same header/size strip as to any other wrapped tree.
 #[test]
-fn template_hash_from_bytes_unparseable_for_v4_softfork() {
+fn template_hash_from_bytes_strips_v4_softfork_header_and_size() {
     // Header: 0x0C = v=4, has_size=true, no cseg. Size VLQ(1)=0x01.
     // Body: one arbitrary byte (0x00) — never parsed because version
     // exceeds MAX_SUPPORTED_TREE_VERSION, so the wrap branch fires.
     let bytes = hex::decode("0C0100").unwrap();
-    match template_hash_from_bytes(&bytes) {
-        Err(TemplateHashError::Unparseable) => {}
-        other => panic!("expected Unparseable for v4 tree, got {other:?}"),
-    }
+    assert_eq!(
+        template_hash_from_bytes(&bytes).unwrap(),
+        *blake2b256(&[0x00]).as_bytes()
+    );
 }
 
 /// Every mainnet vector that the existing roundtrip test exercises
@@ -1610,39 +1617,19 @@ fn pre_v3_unsigned_bigint_embeddable_type_wraps_unparsed() {
     assert_eq!(w.result(), bytes);
 }
 
-/// F1: a SIZELESS header-v0 tree whose body carries a V6-embeddable TYPE code
-/// (`SUnsignedBigInt` = code 9, here `SELF.R4[UnsignedBigInt].isDefined` →
-/// `1000d1e6c6a70409`) is REJECTED by the default header-version-gated
-/// [`read_ergo_tree`] but ACCEPTED by
-/// [`read_ergo_tree_with_activated_version`] at activated version 3 — mirroring
-/// Scala `getEmbeddableType` gating on the ACTIVATED version, not the header.
-/// The compile self-check uses the activated-version reader so a
-/// `tree_version >= 3` compile's header-v0 output round-trips (oracle:
-/// `cc sigmaProp(SELF.R4[UnsignedBigInt].isDefined)`, ORACLE_TREE_VERSION=3 →
-/// `OK 1000d1e6c6a70409`; sigma-state 6.0.2).
+/// The independently captured6.0.6 compiler emits this header0 type9 tree,
+/// but its reader refuses it at every tested activation. Activation cannot
+/// replace the header's embeddable table; the full seven-case fixture is also
+/// checked in the activated reader tests.
 #[test]
-fn sizeless_v0_v6_embeddable_type_accepts_only_under_activated_v6() {
+fn sizeless_v0_v6_type_is_not_certified_by_an_activated_table_override() {
     let bytes = hex::decode("1000d1e6c6a70409").unwrap();
-    // Default reader: header-version (0) gate rejects code 9.
-    let err = read_ergo_tree(&mut VlqReader::new(&bytes))
-        .expect_err("header-v0 reader must reject the v6 embeddable code");
-    assert!(
-        matches!(&err, ReadError::SigmaValidation { rule_id: 1007, args, .. } if args == &[9]),
-        "{err:?}"
-    );
-    // Activated-version reader at v3: accepts, round-trips byte-identically.
-    let mut r = VlqReader::new(&bytes);
-    let tree = read_ergo_tree_with_activated_version(&mut r, 3)
-        .expect("activated-v6 reader must accept the v6 embeddable code");
-    assert!(r.is_empty(), "no trailing bytes");
-    let mut w = VlqWriter::new();
-    write_ergo_tree(&mut w, &tree).unwrap();
-    assert_eq!(w.result(), bytes, "re-serialize is byte-identical");
-    // Below-v3 activated override stays strict (an activated < V6 network).
-    assert!(
-        read_ergo_tree_with_activated_version(&mut VlqReader::new(&bytes), 2).is_err(),
-        "activated v2 must still reject code 9"
-    );
+    assert!(read_ergo_tree(&mut VlqReader::new(&bytes)).is_err());
+    for activation in 1..=3 {
+        assert!(
+            read_ergo_tree_with_activated_version(&mut VlqReader::new(&bytes), activation).is_err()
+        );
+    }
 }
 
 /// `check_tree_version_supported` is Scala's `VersionContext` require

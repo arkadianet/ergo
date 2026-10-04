@@ -12,7 +12,6 @@ use ergo_primitives::digest::Digest32;
 use ergo_primitives::reader::VlqReader;
 
 use crate::error::{IndexerError, SpillParentKind};
-use crate::segment::SEGMENT_THRESHOLD;
 use crate::segment_id::box_segment_id;
 use crate::store::segment::read_spill_in;
 use crate::store::tables::INDEXED_TEMPLATE;
@@ -54,8 +53,9 @@ pub(crate) fn read_template_box_entries_in(
     let Some(t) = read_template_in(read_txn, template_hash)? else {
         return Ok(None);
     };
-    let count = t.segment.box_segment_count.max(0) as usize;
-    let mut entries = Vec::with_capacity(count * SEGMENT_THRESHOLD + t.segment.boxes.len());
+    // A declared spill count does not prove any spill rows exist. Grow only
+    // after each referenced row has been read and decoded.
+    let mut entries = Vec::new();
     for seg_num in 0..t.segment.box_segment_count {
         let seg_id = box_segment_id(template_hash, seg_num);
         let spill = read_spill_in(read_txn, &seg_id)?.ok_or_else(|| {

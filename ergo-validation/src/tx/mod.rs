@@ -70,12 +70,14 @@ pub struct TxValidationCtx<'a> {
     pub rules: TxValidationRules<'a>,
 }
 
-/// A transaction that has passed all validation checks.
+/// A transaction accepted by a transaction-validation entry point.
 ///
-/// Fields are private — construction only through `validate_transaction()`
-/// or `validate_transaction_parsed()`. This makes it unforgeable from
-/// outside ergo-validation, so downstream crates can trust it as a
-/// validated artifact.
+/// Private fields preserve the checked transaction and resolved boxes.
+/// Parsed entry points may skip script evaluation and its cost accounting
+/// under a caller-authorized checkpoint. Their caller also owns the parse
+/// context and, for the sideband variant, the exact group-element list.
+/// A checked value therefore records the checks performed on that path;
+/// it does not certify that scripts ran when `skip_scripts` was true.
 ///
 /// `tx_id` is computed internally during validation (blake2b256 of
 /// bytes_to_sign). It is NOT accepted as a parameter from callers.
@@ -153,6 +155,8 @@ pub fn validate_transaction(
     // Stage 4: resolve inputs
     let resolved_inputs = resolve_inputs(&tx, utxo)?;
     let resolved_data_inputs = resolve_data_inputs(&tx, utxo)?;
+    verify_resolved_inputs_match(&tx, &resolved_inputs)?;
+    verify_resolved_data_inputs_match(&tx, &resolved_data_inputs)?;
 
     // Stage 4.5: per-output height constraints (Scala rules 112 + 124).
     // Runs after structural so we know we have outputs to walk, and
@@ -174,7 +178,7 @@ pub fn validate_transaction(
     // (output token amounts only), so it runs here, ahead of the height loop.
     monetary::check_positive_assets(&tx)?;
     heights::validate_output_heights(&tx, cx.ctx)?;
-    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.pre_header_version)?;
+    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
 
     // Stage 5: monetary
     monetary::validate_monetary(&tx, &resolved_inputs)?;
@@ -220,9 +224,10 @@ pub fn validate_transaction(
 /// Composable validation for callers that already have parsed Transaction
 /// and resolved inputs (e.g. block validation with batch UTXO resolution).
 ///
-/// Defensively verifies that `resolved_inputs` match the transaction's
-/// input box IDs and lengths. This prevents constructing a CheckedTransaction
-/// from mismatched state.
+/// Verifies the lengths and IDs of both resolved box lists and checks the
+/// transaction's canonical bytes against `original_bytes`. The caller owns
+/// the original parse's version context and authorizes `skip_scripts`;
+/// skipping scripts also skips their init-cost and evaluator charges.
 pub fn validate_transaction_parsed(
     tx: Transaction,
     original_bytes: &[u8],
@@ -295,7 +300,7 @@ pub fn validate_transaction_parsed_with_group_elements(
     monetary::check_positive_assets(&tx)?;
     // Per-output height constraints (Scala rules 112 + 124)
     heights::validate_output_heights(&tx, cx.ctx)?;
-    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.pre_header_version)?;
+    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
 
     // Monetary
     monetary::validate_monetary(&tx, &resolved_inputs)?;

@@ -314,7 +314,7 @@ fn derive(a: DeriveArgs) -> Result<(), WalletError> {
     let phrase = a.source.read()?;
     let m = Mnemonic::import(&phrase)?;
     let seed = m.to_seed(&a.passphrase);
-    let master = ExtendedSecretKey::derive_master_key(seed.as_ref(), false)?;
+    let master = ExtendedSecretKey::derive_master_key(seed.as_ref())?;
     let path: DerivationPath = a.path.parse()?;
     let leaf = master.derive_at_path(&path)?;
     let pk_hex = hex::encode(leaf.public_key().compressed_bytes());

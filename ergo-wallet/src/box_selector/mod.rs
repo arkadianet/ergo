@@ -16,8 +16,9 @@ pub struct SelectionTarget {
     /// Token id → required amount.
     pub tokens: BTreeMap<[u8; 32], u64>,
     /// Minimum change box ERG if any (typically the network's minBoxValue).
-    /// When the natural change would be less than this, the selector must
-    /// accumulate additional boxes until change >= min_change_value (or == 0).
+    /// Prefer additional boxes when change is below this amount. If every
+    /// candidate still leaves dust, return the funded selection and let the
+    /// transaction builder decide whether that change can become a box or fee.
     pub min_change_value: u64,
 }
 
@@ -51,7 +52,8 @@ pub trait BoxSelector {
     /// `candidates` is a SUMMARY view: `(box_id, value, tokens)` tuples from
     /// WALLET_BOXES (the wallet's tracked-set). Returns selected box ids and
     /// change amounts on success, or `WalletError::BoxSelection` if no valid
-    /// selection exists (insufficient funds, missing token, etc.).
+    /// selection exists (insufficient funds, missing token, duplicate candidate
+    /// ids, or an unrepresentable selected ERG/token total).
     fn select(
         &self,
         candidates: &[BoxSummary],

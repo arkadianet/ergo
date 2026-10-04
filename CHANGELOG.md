@@ -26,6 +26,22 @@ infrastructure.
 
 ### Changed
 
+- UTXO-snapshot bootstraps (Modes 2 and 4) by earlier releases stored the
+  snapshot root at AVL node ID 0, the ID the store also reads as a null child.
+  Such databases now fail to open with `LegacySnapshotNodeIds` rather than
+  serving misread lookups. Keep the old database and bootstrap from a
+  verified snapshot into a fresh data directory; stores synced from genesis
+  and snapshots installed by this release are unaffected.
+- Wallet unlock checks every persisted tracked key against the unlocked
+  secret before deriving, signing or exporting keys. Pre-1627 wallets that an
+  earlier release restored from a master beginning with a zero byte keep the
+  earlier Rust derivation for signing, `/wallet/getPrivateKey` and new keys
+  (their addresses differ from Scala's for the same secret file) and log a
+  warning; any other mismatch refuses the unlock with `TrackedKeyMismatch`.
+- `/wallet/addresses` follows Scala's key storage order; an unlock rewrites a
+  list stored in the earlier insertion order.
+- `POST /transactions/unconfirmed/byTransactionIds` returns Scala's shape: the
+  requested IDs that are pooled, in pool order, instead of full transactions.
 - Upgrade normal storage to redb 4.3. Legacy redb 2.6 file-format v2 databases
   require the copy-only `ergo-node migrate-redb SOURCE DESTINATION` command
   before startup. Originals remain intact; the offline converter locks the
@@ -38,6 +54,22 @@ infrastructure.
   fail node startup. Live-file locks and I/O failures preserve the database
   and keep the existing best-effort peer fallback; automatic quarantine is
   limited to an explicit corruption error.
+- Indexer schema 3: on first start an existing indexer database is deleted
+  and rebuilt from genesis, and `/blockchain/*` answers `503 indexer-syncing`
+  until it catches up. The rebuild applies two Scala-parity corrections to
+  already-indexed history: EIP-4 token names, descriptions and decimals use
+  the JVM text and digit projections, and outputs with soft-fork-wrapped
+  scripts are listed under the template hash Scala records for them (for
+  example the mainnet block 1,702,686 output).
+
+### Removed
+
+- The unused Mode 3 header-flip seed:
+  `ergo_state::store::activation_minimal_full_block_height`,
+  `SyncState::flip_seed_height` and the height argument of
+  `SyncState::check_headers_synced`. Fresh pruned UTXO stores replay full
+  blocks from genesis and prune after apply, so nothing seeds the prune
+  floor when the header chain is declared synced.
 
 ## [0.11.0] - 2026-09-30
 

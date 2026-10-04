@@ -75,9 +75,10 @@ pub enum ModifierStatus {
     Requested,
     /// We've received this modifier (at least once).
     Received,
-    /// We don't know about this modifier (never requested).
+    /// No current request or retained receipt, including a released retry.
     Unknown,
-    /// Delivery failed after MAX_RETRIES attempts. Will not be re-requested.
+    /// Reserved explicit failure status. Timeout/cancel exhaustion instead
+    /// resets to Unknown so a later download round can try again.
     Failed,
 }
 
@@ -97,7 +98,8 @@ pub enum DeliveryAction {
 pub struct CancelResult {
     /// Modifier IDs that can be retried from a different peer.
     pub retryable: Vec<[u8; 32]>,
-    /// Modifier IDs that have exceeded MAX_RETRIES and are permanently failed.
+    /// Modifier IDs that exhausted this retry cycle, now Unknown. A later
+    /// download round can request them again.
     pub exhausted: Vec<[u8; 32]>,
 }
 
@@ -158,7 +160,7 @@ pub struct DeliveryTracker {
     peer_inflight_count: HashMap<PeerId, usize>,
     /// Retry count per modifier ID. Incremented on each timeout/cancel.
     retry_count: HashMap<[u8; 32], u8>,
-    /// Modifiers that have exhausted retries. Will not be re-requested.
+    /// Explicit failures (not populated by ordinary timeout/cancel exhaustion).
     failed: HashSet<[u8; 32]>,
     /// Peers whose late delivery is still acceptable for a modifier.
     ///
@@ -373,8 +375,7 @@ impl DeliveryTracker {
     /// "no reason to penalize" goal of forgetting. `mark_received` clears
     /// the allowance when the tx actually arrives. (Leaving it matches
     /// how block sections already behave; the entry is otherwise dropped
-    /// on arrival or, for a never-arriving tx, persists like any other
-    /// un-received modifier's allowance.)
+    /// on arrival or after `LATE_ACCEPTABLE_TTL` when no answer arrives.)
     ///
     /// Scala parity: `checkDelivery` forgets a timed-out mempool
     /// transaction via `clearStatusForModifier(id, txTypeId, Requested)`
@@ -388,7 +389,7 @@ impl DeliveryTracker {
 
     /// Check for timed-out requests. Returns a `TimeoutResult` with:
     /// - `retryable`: (peer, ids) that can be re-requested from a different peer
-    /// - `exhausted`: ids that have exceeded MAX_RETRIES (marked as Failed)
+    /// - `exhausted`: ids that reached MAX_RETRIES and returned to Unknown
     /// - `penalize`: ids whose timeout should attract NonDelivery
     ///
     /// `last_modifier_got_time` gates retry-count increments and the
@@ -501,6 +502,12 @@ impl DeliveryTracker {
         // the coordinator is about to re-request is never touched.
         self.recently_released
             .retain(|_, (_, released_at)| now.duration_since(*released_at) < RELEASED_SHADOW_TTL);
+        // Retry counts belong to the live request or its short retry window.
+        // Reclaim abandoned first/second attempts together with their type
+        // shadows; retaining only the hidden count would leak per-id history.
+        self.retry_count.retain(|id, _| {
+            self.inflight.contains_key(id) || self.recently_released.contains_key(id)
+        });
         // Issue #245 / audit M-7: sweep stale late-delivery allowances —
         // abandoned IDs previously kept their entries for the node's
         // lifetime.
@@ -516,8 +523,15 @@ impl DeliveryTracker {
 
     /// Cancel all inflight requests for a peer (e.g., on disconnect).
     /// Increments retry count for each cancelled modifier. Returns two
-    /// lists: retryable IDs (can be reassigned) and exhausted IDs (failed).
+    /// lists: retryable IDs (can be reassigned) and exhausted IDs (Unknown).
     pub fn cancel_peer(&mut self, peer: &PeerId, now: Instant) -> CancelResult {
+        // Peer teardown revokes only that peer's eligibility, including
+        // allowances where it was merely a hedge. Other asked peers may still
+        // answer while a primary request is being rerouted.
+        self.late_acceptable.retain(|_, allowance| {
+            allowance.peers.remove(peer);
+            !allowance.peers.is_empty()
+        });
         // Capture (id, type) BEFORE removing inflight entries — the
         // retry-bucket classifier consults `recently_released` after
         // this loop, so the type must be stashed BEFORE the inflight
@@ -530,7 +544,6 @@ impl DeliveryTracker {
             .collect();
         for (id, modifier_type) in &cancelled {
             self.inflight.remove(id);
-            self.late_acceptable.remove(id);
             self.recently_released.insert(*id, (*modifier_type, now));
         }
         self.peer_inflight_count.remove(peer);

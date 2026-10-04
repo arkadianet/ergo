@@ -158,6 +158,7 @@ fn scala_section_storage_fixture_pins_received_wire_policy_and_rest_sizes() {
                     name: "test".into(),
                     app_version: "test".into(),
                     network: "mainnet".into(),
+                    state_type: crate::config::StateType::Utxo,
                     voting_length: 1024,
                     launch_time_unix_ms: 0,
                     rest_api_url: None,

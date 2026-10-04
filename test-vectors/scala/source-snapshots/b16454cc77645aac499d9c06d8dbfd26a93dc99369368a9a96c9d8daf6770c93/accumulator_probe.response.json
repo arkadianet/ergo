@@ -1,0 +1,53 @@
+{
+  "oracle" : "sigma-state:6.0.6 / accumulator_probe",
+  "cases" : [
+    {
+      "initial" : 9,
+      "limit" : 10,
+      "delta" : 0,
+      "before" : 9,
+      "after" : 9,
+      "exception" : null
+    },
+    {
+      "initial" : 9,
+      "limit" : 10,
+      "delta" : 1,
+      "before" : 9,
+      "after" : 10,
+      "exception" : null
+    },
+    {
+      "initial" : 10,
+      "limit" : 10,
+      "delta" : 0,
+      "before" : 10,
+      "after" : 10,
+      "exception" : null
+    },
+    {
+      "initial" : 10,
+      "limit" : 10,
+      "delta" : 1,
+      "before" : 10,
+      "after" : 11,
+      "exception" : "sigma.exceptions.CostLimitException"
+    },
+    {
+      "initial" : 11,
+      "limit" : 10,
+      "delta" : 0,
+      "before" : 11,
+      "after" : 11,
+      "exception" : "sigma.exceptions.CostLimitException"
+    },
+    {
+      "initial" : 11,
+      "limit" : 10,
+      "delta" : 1,
+      "before" : 11,
+      "after" : 12,
+      "exception" : "sigma.exceptions.CostLimitException"
+    }
+  ]
+}
