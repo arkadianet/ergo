@@ -17,6 +17,37 @@ pub(super) fn assert_response(path: &str, method: &str, body: &Value) {
     check_shape(&doc, schema, body);
 }
 
+/// A route whose served shape differs from its Scala schema: the document
+/// keeps the Scala `required` fields and lists the route among its divergences.
+pub(super) fn assert_documented_divergence(path: &str, method: &str, scala_required: &[&str]) {
+    let doc = document();
+    let description = doc["info"]["description"].as_str().unwrap();
+    let section = description
+        .split("## Different response shapes")
+        .nth(1)
+        .expect("divergence section")
+        .split("\n## ")
+        .next()
+        .unwrap();
+    let route = format!("`{} {path}`", method.to_uppercase());
+    assert!(section.contains(&route), "{route} is not listed");
+    let mut schema =
+        &doc["paths"][path][method]["responses"]["200"]["content"]["application/json"]["schema"];
+    if let Some(reference) = schema["$ref"].as_str() {
+        schema = doc.pointer(reference.strip_prefix('#').unwrap()).unwrap();
+    }
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .expect("documented required fields")
+        .iter()
+        .map(|field| field.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        required, scala_required,
+        "{method} {path} keeps the Scala schema"
+    );
+}
+
 fn check_shape(doc: &Value, schema: &Value, value: &Value) {
     if let Some(reference) = schema["$ref"].as_str() {
         check_shape(

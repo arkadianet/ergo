@@ -62,6 +62,16 @@ info:
     - `GET /emission/scripts` is served on mainnet; testnet/dev
       return 404 pending an oracle capture.
 
+    ## Different response shapes
+
+    These routes are mounted but answer with a shape other than the
+    Scala schema documented for them:
+
+    - `GET /peers/trackInfo` — aggregate delivery counters
+      `{numRequested, numReceived, numFailed}` (as
+      `/api/v1/network/track-info`), not Scala's per-modifier
+      `{invalidModifierApproxSize, requested, received}` object.
+
     ## Wallet (integrated)
 
     Unlike the Scala node, this build ships an **integrated wallet** —
@@ -2635,18 +2645,27 @@ components:
 
     TrackInfo:
       type: object
-      description: Aggregate delivery counters served by this node.
-      required: [numRequested, numReceived, numFailed]
+      description: >-
+        Scala delivery-tracker state. This build serves aggregate counters
+        instead; see `GET /peers/trackInfo`.
+      required:
+        - invalidModifierApproxSize
+        - requested
+        - received
       properties:
-        numRequested:
+        invalidModifierApproxSize:
           type: integer
-          minimum: 0
-        numReceived:
-          type: integer
-          minimum: 0
-        numFailed:
-          type: integer
-          minimum: 0
+          example: 65780
+        requested:
+          type: object
+          description: Currently requested modifiers
+          additionalProperties:
+            $ref: '#/components/schemas/RequestedInfoByModifierId'
+        received:
+          type: object
+          description: Received modifiers
+          additionalProperties:
+            $ref: '#/components/schemas/ConnectedPeerByModifierId'
 
     BlacklistedPeers:
       type: object
@@ -4097,13 +4116,13 @@ paths:
                 type: string
       responses:
         '200':
-          description: List of matching unconfirmed transactions
+          description: List of unconfirmed transaction ids
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/ErgoTransaction'
+                  type: string
         default:
           description: Error
           content:
@@ -4598,6 +4617,11 @@ paths:
   /peers/trackInfo:
     get:
       summary: Get track info reported by peers, including count of invalid modifiers and details of requested and received modifiers
+      description: >-
+        Divergence: this build serves aggregate delivery counters
+        `{numRequested, numReceived, numFailed}` (non-negative integers, the
+        same counters as `/api/v1/network/track-info`), not the Scala
+        per-modifier object documented here.
       operationId: getPeersTrackInfo
       tags:
         - peers

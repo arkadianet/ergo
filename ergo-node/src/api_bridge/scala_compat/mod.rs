@@ -644,29 +644,6 @@ impl NodeChainQuery for ScalaCompatBridge {
             .and_then(|(_, bytes)| pool_bytes_to_scala_tx(bytes, &costs))
     }
 
-    fn pool_txs_by_ids(
-        &self,
-        tx_ids_hex: &[String],
-    ) -> Vec<ergo_api::compat::types::ScalaUnconfirmedTransaction> {
-        // Single snapshot load for the whole batch so all ids
-        // resolve against the same point-in-time pool view. A
-        // composed-via-self.pool_tx_by_id variant would reload the
-        // snapshot per id — fine for correctness but could mix
-        // snapshot versions across entries in one response.
-        let snap = self.handle.load();
-        let costs = pool_costs(&snap);
-        tx_ids_hex
-            .iter()
-            .filter_map(|id_hex| {
-                let target_bytes: [u8; 32] = hex::decode(id_hex).ok()?.try_into().ok()?;
-                snap.pool_full_txs
-                    .iter()
-                    .find(|(id, _)| id.as_bytes() == &target_bytes)
-                    .and_then(|(_, bytes)| pool_bytes_to_scala_tx(bytes, &costs))
-            })
-            .collect()
-    }
-
     fn pool_txs_by_ergo_tree(
         &self,
         tree_bytes: &[u8],
@@ -675,8 +652,7 @@ impl NodeChainQuery for ScalaCompatBridge {
         // same point-in-time view. Match is byte-equality between
         // the request's canonical ergoTree wire form and each
         // output's `ergo_tree_bytes()`. Parse-failures are silently
-        // skipped (same flatMap(getById) lossy-skip semantics
-        // `pool_txs_by_ids` uses for malformed pool entries).
+        // skipped, as `pool_txs_paged` skips malformed pool entries.
         let snap = self.handle.load();
         let costs = pool_costs(&snap);
         snap.pool_full_txs

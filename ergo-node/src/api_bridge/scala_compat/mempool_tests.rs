@@ -104,9 +104,6 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
     let responses = [
         bridge.pool_txs_paged(0, 10).remove(0),
         bridge.pool_tx_by_id(&id_hex).unwrap(),
-        bridge
-            .pool_txs_by_ids(std::slice::from_ref(&id_hex))
-            .remove(0),
         bridge.pool_txs_by_ergo_tree(&tree_bytes).remove(0),
         bridge.pool_txs_by_box_id(&[1; 32]).remove(0),
         bridge.pool_txs_by_token_id(&[2; 32]).remove(0),

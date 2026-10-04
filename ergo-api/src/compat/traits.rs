@@ -364,7 +364,8 @@ pub trait NodeChainQuery: Send + Sync {
 
     /// `/transactions/unconfirmed/transactionIds` — array of pooled tx
     /// id hex strings. Order is implementation-defined; Scala iterates
-    /// the pool in priority order.
+    /// the pool in priority order. `POST byTransactionIds` filters this
+    /// list by the requested ids.
     fn pool_tx_ids(&self) -> Vec<String> {
         Vec::new()
     }
@@ -391,15 +392,6 @@ pub trait NodeChainQuery: Send + Sync {
     /// 404 with the standard `ApiError` envelope.
     fn pool_tx_by_id(&self, _tx_id_hex: &str) -> Option<ScalaUnconfirmedTransaction> {
         None
-    }
-
-    /// `POST /transactions/unconfirmed/byTransactionIds` — batch
-    /// lookup; returns only the txs that resolved (Scala
-    /// `flatMap(getById)` semantics). Always 200 with a (possibly
-    /// empty) JSON array; ids that don't resolve or fail hex parse
-    /// are silently skipped.
-    fn pool_txs_by_ids(&self, _tx_ids_hex: &[String]) -> Vec<ScalaUnconfirmedTransaction> {
-        Vec::new()
     }
 
     /// `GET /transactions/unconfirmed/size` — current pool size as a

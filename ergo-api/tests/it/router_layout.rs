@@ -333,15 +333,6 @@ impl NodeChainQuery for StubCompat {
         }
     }
 
-    fn pool_txs_by_ids(&self, tx_ids_hex: &[String]) -> Vec<ScalaUnconfirmedTransaction> {
-        // Resolve only ids that match `pool_tx_by_id`. Unresolved
-        // ids silently skipped — Scala `flatMap(getById)` parity.
-        tx_ids_hex
-            .iter()
-            .filter_map(|id| self.pool_tx_by_id(id))
-            .collect()
-    }
-
     fn pool_size(&self) -> u32 {
         3
     }
@@ -1388,8 +1379,16 @@ async fn pool_unconfirmed_by_tx_id_404_when_absent() {
 
 #[tokio::test]
 async fn pool_unconfirmed_by_tx_ids_batch_filters_unresolved() {
-    // Body: 3 ids, only the first resolves in the stub.
-    let body = serde_json::json!(["00".repeat(32), "ee".repeat(32), "ff".repeat(32)]);
+    // Scala answers the pooled ids among the requested ones, in pool order,
+    // each once; it compares id strings exactly. The stub pools aa.., bb...
+    let pooled = ["aa".repeat(32), "bb".repeat(32)];
+    let body = serde_json::json!([
+        pooled[1],
+        "ee".repeat(32),
+        pooled[0],
+        pooled[0],
+        "AA".repeat(32)
+    ]);
     let resp = build_compat_app()
         .oneshot(
             Request::builder()
@@ -1409,8 +1408,7 @@ async fn pool_unconfirmed_by_tx_ids_batch_filters_unresolved() {
         "post",
         &parsed,
     );
-    let arr = parsed.as_array().unwrap();
-    assert_eq!(arr.len(), 1, "only the resolvable id is returned");
+    assert_eq!(parsed, serde_json::json!(pooled));
 }
 
 #[tokio::test]
@@ -1801,8 +1799,13 @@ async fn peers_sync_info_returns_observed_peers_only() {
 async fn peers_track_info_returns_counter_envelope() {
     let (s, v) = json_get(build_compat_app(), "/peers/trackInfo").await;
     assert_eq!(s, StatusCode::OK);
-    super::published_schema::assert_response("/peers/trackInfo", "get", &v);
-    // Pin the Scala serde rename direction.
+    // Aggregate counters are a documented divergence from Scala's FullInfo,
+    // whose schema the compatibility document keeps.
+    super::published_schema::assert_documented_divergence(
+        "/peers/trackInfo",
+        "get",
+        &["invalidModifierApproxSize", "requested", "received"],
+    );
     assert_eq!(v.get("numRequested").and_then(|x| x.as_u64()), Some(12));
     assert_eq!(v.get("numReceived").and_then(|x| x.as_u64()), Some(100));
     assert_eq!(v.get("numFailed").and_then(|x| x.as_u64()), Some(3));

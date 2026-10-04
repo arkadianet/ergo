@@ -479,14 +479,21 @@ pub async fn pool_tx_by_id_handler(
     }
 }
 
-/// `POST /transactions/unconfirmed/byTransactionIds` — batch lookup.
-/// Always 200 with a (possibly empty) JSON array; unresolved ids
-/// silently skipped per Scala's `flatMap` semantics.
+/// `POST /transactions/unconfirmed/byTransactionIds` — which requested ids
+/// are pooled. Scala answers `pool.getAll.filter(tx => ids.contains(tx.id))
+/// .map(_.id)`: a (possibly empty) array of matching ids in pool order, each
+/// once, compared as exact strings.
 pub async fn pool_txs_by_ids_handler(
     State(q): State<Arc<dyn NodeChainQuery>>,
     Json(ids): Json<Vec<String>>,
 ) -> Response {
-    Json(q.pool_txs_by_ids(&ids)).into_response()
+    let requested: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let pooled: Vec<String> = q
+        .pool_tx_ids()
+        .into_iter()
+        .filter(|id| requested.contains(id.as_str()))
+        .collect();
+    Json(pooled).into_response()
 }
 
 /// `GET /transactions/unconfirmed/size` — bare JSON integer.
