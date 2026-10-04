@@ -104,7 +104,7 @@ fn solved_block(
         header.ad_proofs_root.as_bytes(),
     );
     let candidate = Candidate {
-            required_transaction_ids: Vec::new(),
+        required_transaction_ids: Vec::new(),
         header: candidate_header,
         validation_ctx: CandidateValidationContext {
             pre_header: CandidatePreHeader {
