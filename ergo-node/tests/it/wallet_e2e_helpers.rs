@@ -118,7 +118,7 @@ impl TestWallet {
     /// on-disk state after the call.
     pub fn reopen_and_unlock(dir: tempfile::TempDir, password: &str) -> Self {
         let mut t = Self::reopen(dir);
-        ergo_node::wallet_boot::WalletBootService::unlock_and_sync(
+        ergo_wallet_service::engine::WalletBootService::unlock_and_sync(
             &mut t.storage,
             &mut t.state,
             &t.db,
@@ -141,7 +141,7 @@ impl TestWallet {
         state: &mut WalletState,
         password: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        ergo_node::wallet_boot::WalletBootService::unlock_and_sync(
+        ergo_wallet_service::engine::WalletBootService::unlock_and_sync(
             storage,
             state,
             db,

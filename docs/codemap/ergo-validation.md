@@ -34,6 +34,7 @@
 - `src/popow/verifier.rs` — `NipopowVerifier`: stateful best-proof-keeping `process` reducer over incoming `NipopowProof`s.
 - `src/popow/proof.rs` — `NipopowProofExt` trait (proof-level helpers) + popow-header interlink-proof check.
 - `src/popow/merkle.rs` — `verify_batch_merkle_proof` against an expected root.
+- `src/fee.rs` — `MAINNET_FEE_PROPOSITION_BYTES`, the canonical mainnet miner-fee ErgoTree shared by the mempool (re-exported as `ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES`), candidate assembly, and the wallet transaction builder.
 - `src/storage_rent.rs` — `compute_storage_fee`: the consensus-critical i32 wrapping multiply (`storage_fee_factor * box_bytes_len`) shared by the validator and the API storage-rent endpoint.
 - `src/pre_header.rs` — `CandidatePreHeader` / `CandidateValidationContext`: the frozen script-visible context used during mining-candidate assembly.
 

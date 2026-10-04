@@ -21,7 +21,7 @@ use ergo_ser::batch_merkle_proof::{
     serialize_batch_merkle_proof, BatchMerkleProof, ProofEntry, Side,
 };
 use ergo_ser::block_transactions::{write_block_transactions_with_version, BlockTransactions};
-use ergo_ser::ergo_box::ErgoBoxCandidate;
+use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
 use ergo_ser::ergo_tree::{read_ergo_tree, ErgoTree};
 use ergo_ser::extension::{write_extension, Extension, ExtensionField};
 use ergo_ser::input::{read_context_extension, ContextExtension, DataInput, Input, SpendingProof};
@@ -31,9 +31,9 @@ use ergo_ser::token::{Token, TokenId};
 use ergo_ser::transaction::{write_transaction, Transaction};
 
 use crate::types::{
-    ScalaAdProofs, ScalaBatchMerkleProof, ScalaBlockTransactions, ScalaDataInput, ScalaExtension,
-    ScalaFullBlock, ScalaHeader, ScalaInput, ScalaNipopowProof, ScalaOutputInput, ScalaPopowHeader,
-    ScalaTransactionInput,
+    ScalaAdProofs, ScalaBatchMerkleProof, ScalaBlockTransactions, ScalaDataInput,
+    ScalaErgoBoxInput, ScalaExtension, ScalaFullBlock, ScalaHeader, ScalaInput, ScalaNipopowProof,
+    ScalaOutputInput, ScalaPopowHeader, ScalaTransactionInput,
 };
 
 pub const NON_CANONICAL: &str = "non_canonical";
@@ -219,6 +219,31 @@ pub fn decode_output_with_mode(
         registers,
         canonical_register_bytes,
     ))
+}
+
+/// Decode a Scala SDK `ErgoBox` JSON value ([`ScalaErgoBoxInput`]) for a box
+/// that already exists on chain (the `box` member of `/scan/addBox`).
+///
+/// Decodes in [`DecodeMode::Preserve`]: attaching a box that is already on
+/// chain means soft-fork trees must be accepted and tree/register wire bytes
+/// kept verbatim — Submit-mode re-serialization could shift the computed box
+/// id off its on-chain identity, and then block-apply spend-marking (keyed by
+/// the real id) would never find it. Errors are client-facing detail strings
+/// (the caller surfaces them as HTTP 400).
+pub fn decode_on_chain_ergo_box_json(value: &serde_json::Value) -> Result<ErgoBox, String> {
+    let parsed: ScalaErgoBoxInput =
+        serde_json::from_value(value.clone()).map_err(|e| format!("box: {e}"))?;
+    let candidate =
+        decode_output_with_mode(&parsed.output, DecodeMode::Preserve).map_err(|(_, d)| d)?;
+    let tx_id: [u8; 32] = hex::decode(&parsed.transaction_id)
+        .map_err(|e| format!("transactionId hex: {e}"))?
+        .try_into()
+        .map_err(|v: Vec<u8>| format!("transactionId must be 32 bytes, got {}", v.len()))?;
+    Ok(ErgoBox {
+        candidate,
+        transaction_id: ModifierId::from_bytes(tx_id),
+        index: parsed.index,
+    })
 }
 
 pub fn decode_digest32(s: &str, field: &str) -> Result<Digest32, DecodeError> {

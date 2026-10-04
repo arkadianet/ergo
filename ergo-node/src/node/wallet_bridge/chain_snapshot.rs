@@ -5,40 +5,18 @@ use ergo_state::store::{CommittedSnapshot, StateError};
 use ergo_validation::pre_header::CandidatePreHeader;
 use ergo_validation::{ActiveProtocolParameters, ProtocolParams, ReemissionRuleInputs};
 use ergo_wallet::tx_context::{BlockchainParameters, BlockchainStateContext};
-use thiserror::Error;
+use ergo_wallet_service::chain::CommittedTip;
+use ergo_wallet_service::engine::{ChainAccessError, SigningView};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChainTip {
-    pub height: u32,
-    pub header_id: [u8; 32],
-}
-
-#[derive(Debug, Error)]
-pub enum ChainStateError {
-    #[error("chain state read failed: {0}")]
-    State(#[source] StateError),
-    #[error("no committed chain state")]
-    NoCommittedState,
-    #[error("chain snapshot is unsupported by this accessor")]
-    Unsupported,
-    #[error("committed chain tip moved from ({expected_height}, {expected_id}) to ({actual_height}, {actual_id})")]
-    StaleTip {
-        expected_height: u32,
-        expected_id: String,
-        actual_height: u32,
-        actual_id: String,
-    },
-}
-
-impl From<StateError> for ChainStateError {
-    fn from(error: StateError) -> Self {
-        Self::State(error)
-    }
+/// A committed-state read failure, rendered exactly as the node has always
+/// reported it (`chain state read failed: ...`).
+pub(super) fn chain_state_read_failed(error: StateError) -> ChainAccessError {
+    ChainAccessError::State(format!("chain state read failed: {error}"))
 }
 
 pub struct ChainSnapshot {
     committed: CommittedSnapshot,
-    tip: ChainTip,
+    tip: CommittedTip,
     headers: Vec<Header>,
     header_ids: Vec<[u8; 32]>,
     state_context: BlockchainStateContext,
@@ -84,10 +62,10 @@ impl ChainSnapshot {
         committed: CommittedSnapshot,
         reemission: Option<&ReemissionRuleInputs>,
     ) -> Result<Self, StateError> {
-        let tip = ChainTip {
-            height: committed.best_full_block_height(),
-            header_id: committed.best_full_block_id(),
-        };
+        let tip = CommittedTip::new(
+            committed.best_full_block_height(),
+            committed.best_full_block_id(),
+        );
         let header_window = committed.last_ancestor_header_window_with_ids()?;
         let headers: Vec<Header> = header_window
             .iter()
@@ -137,38 +115,6 @@ impl ChainSnapshot {
         })
     }
 
-    pub fn tip(&self) -> ChainTip {
-        self.tip
-    }
-
-    pub fn headers(&self) -> &[Header] {
-        &self.headers
-    }
-
-    pub fn header_ids(&self) -> &[[u8; 32]] {
-        &self.header_ids
-    }
-
-    pub fn state_context(&self) -> &BlockchainStateContext {
-        &self.state_context
-    }
-
-    pub fn active_params(&self) -> &ActiveProtocolParameters {
-        &self.active_params
-    }
-
-    pub fn signing_params(&self) -> &BlockchainParameters {
-        &self.signing_params
-    }
-
-    pub fn protocol_params(&self) -> &ProtocolParams {
-        &self.protocol_params
-    }
-
-    pub fn reemission_rules(&self) -> Option<&ReemissionRuleInputs> {
-        self.reemission.as_ref()
-    }
-
     pub fn lookup_utxo(&self, box_id: &[u8; 32]) -> Result<Option<ErgoBox>, StateError> {
         let Some(bytes) = self.committed.lookup_box(box_id)? else {
             return Ok(None);
@@ -177,14 +123,53 @@ impl ChainSnapshot {
     }
 }
 
+impl SigningView for ChainSnapshot {
+    fn tip(&self) -> CommittedTip {
+        self.tip.clone()
+    }
+
+    fn headers(&self) -> &[Header] {
+        &self.headers
+    }
+
+    fn header_ids(&self) -> &[[u8; 32]] {
+        &self.header_ids
+    }
+
+    fn state_context(&self) -> &BlockchainStateContext {
+        &self.state_context
+    }
+
+    fn active_params(&self) -> &ActiveProtocolParameters {
+        &self.active_params
+    }
+
+    fn signing_params(&self) -> &BlockchainParameters {
+        &self.signing_params
+    }
+
+    fn protocol_params(&self) -> &ProtocolParams {
+        &self.protocol_params
+    }
+
+    fn reemission_rules(&self) -> Option<&ReemissionRuleInputs> {
+        self.reemission.as_ref()
+    }
+
+    fn lookup_utxo(&self, box_id: &[u8; 32]) -> Result<Option<ErgoBox>, ChainAccessError> {
+        ChainSnapshot::lookup_utxo(self, box_id)
+            .map_err(|error| ChainAccessError::State(error.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::wallet_bridge::ChainStateAccessor;
     use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
     use ergo_ser::autolykos::AutolykosSolution;
     use ergo_ser::header::serialize_header;
     use ergo_state::store::StateStore;
+    use ergo_wallet_service::engine::WalletChainAccess;
 
     fn header(height: u32, parent: ModifierId) -> Header {
         Header {
@@ -335,8 +320,8 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            accessor.ensure_snapshot_current(&snapshot),
-            Err(ChainStateError::StaleTip { .. })
+            accessor.ensure_view_current(&snapshot),
+            Err(ChainAccessError::StaleTip { .. })
         ));
     }
 }

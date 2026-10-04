@@ -30,6 +30,7 @@
 - `decode_ergo_tree_canonicalize_with_mode` (fn) — ergoTree hex → `(ErgoTree, bytes)`; ALWAYS returns the input bytes (writer is lossy for some opcodes); `Submit` rejects soft-fork versions + non-roundtripping placeholder patterns — `src/decode.rs:472`
 - `decode_scala_header` (fn) — `ScalaHeader` → `(wire bytes, ModifierId)`; maps stateRoot(33B), votes(3B), nBits(u64→u32 with overflow reject), and v1/v2 PoW solution — `src/decode.rs:565`
 - `decode_scala_full_block` (fn) → `DecodedFullBlock` — drives `POST /blocks`; cross-checks each section's `headerId` against the computed header id before decoding — `src/decode.rs:833`
+- `decode_on_chain_ergo_box_json` (fn) — Scala SDK `ErgoBox` JSON (`ScalaErgoBoxInput`: output fields + `transactionId` + `index`) → `ErgoBox`, in `Preserve` mode so the box id keeps its on-chain identity; the `/scan/addBox` decoder, with client-facing error strings
 - `DecodedFullBlock` (struct) — header bytes + id + per-section canonical bytes (`ad_proofs_bytes` optional for digest-mode blocks) — `src/decode.rs:807`
 - `decode_block_transactions_with_mode` / `decode_extension` / `decode_ad_proofs` (fns) — per-section decoders to canonical wire — `src/decode.rs:724,773,899`
 - `ScalaFullBlock`, `ScalaHeader`, `ScalaPowSolutions`, `ScalaBlockTransactions`, `ScalaTransaction`, `ScalaInput`, `ScalaSpendingProof`, `ScalaOutput`, `ScalaExtension`, `ScalaAdProofs`, `ScalaBlockSection` (read-side DTOs) — `src/types.rs:23,42,79,89,103,113,121,150,218,227,243`

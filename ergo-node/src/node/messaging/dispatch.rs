@@ -163,15 +163,10 @@ pub(in crate::node) fn handle_message(
                     state
                         .coordinator
                         .on_sync_info(peer, sv, &sync_info, &state.store, now);
-                let rescan_guard = crate::wallet_boot::ProdRescanGuard;
-                let wallet_wiring =
-                    state
-                        .wallet_hook
-                        .as_deref()
-                        .map(|h| ergo_state::wallet::WalletWiring {
-                            hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-                            rescan_guard: &rescan_guard,
-                        });
+                let wallet_wiring = state
+                    .wallet_hook
+                    .as_deref()
+                    .map(crate::node::wallet_bridge::WalletStateHook::wiring);
                 state.executor.execute_all(
                     actions,
                     &mut state.store,
@@ -687,15 +682,10 @@ fn handle_inv(state: &mut NodeState, peer: PeerId, inv: InvData, now: Instant) -
         // harmless losers in a race for fastest
         // delivery.
         let actions = hedge_request_modifiers(state, actions, peer);
-        let rescan_guard = crate::wallet_boot::ProdRescanGuard;
-        let wallet_wiring =
-            state
-                .wallet_hook
-                .as_deref()
-                .map(|h| ergo_state::wallet::WalletWiring {
-                    hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-                    rescan_guard: &rescan_guard,
-                });
+        let wallet_wiring = state
+            .wallet_hook
+            .as_deref()
+            .map(crate::node::wallet_bridge::WalletStateHook::wiring);
         state.executor.execute_all(
             actions,
             &mut state.store,
@@ -830,14 +820,10 @@ fn handle_modifier_batch(
     let bh_before = cs_before.best_header_height;
     let fb_before = cs_before.best_full_block_height;
 
-    let rescan_guard = crate::wallet_boot::ProdRescanGuard;
     let wallet_wiring = state
         .wallet_hook
         .as_deref()
-        .map(|h| ergo_state::wallet::WalletWiring {
-            hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-            rescan_guard: &rescan_guard,
-        });
+        .map(crate::node::wallet_bridge::WalletStateHook::wiring);
     let mut all_actions = state.executor.execute_all(
         batch_actions,
         &mut state.store,

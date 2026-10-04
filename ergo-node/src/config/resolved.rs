@@ -255,8 +255,8 @@ pub struct NodeConfig {
     /// `[wallet] expose_private_keys`: when `true`, the
     /// `POST /wallet/getPrivateKey` route returns the derived secret
     /// scalar for an address. Default `false` — the route otherwise
-    /// returns `403 Forbidden`. Threaded into the wallet writer task's
-    /// `WriterConfig` at boot.
+    /// returns `403 Forbidden`. Threaded into the wallet engine's
+    /// `WalletEngineConfig` at boot.
     pub wallet_expose_private_keys: bool,
     pub wallet_mode: WalletMode,
     pub wallet_daemon_address: String,

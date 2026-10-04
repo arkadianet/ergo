@@ -36,7 +36,7 @@ pub struct PaymentRequest {
 /// - `data_inputs`: read-only box references included in the unsigned tx.
 ///
 /// The builder is pure: it does not access chain state. Full ErgoBox lookup
-/// for signing happens at the writer-task boundary via `ChainStateAccessor::lookup_utxo`.
+/// for signing happens at the engine boundary via `WalletChainAccess::lookup_utxo`.
 pub struct UnsignedTxBuilder<'a> {
     pub available_summaries: &'a [BoxSummary],
     pub selector: &'a dyn BoxSelector,

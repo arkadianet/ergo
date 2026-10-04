@@ -250,6 +250,19 @@ pub struct ScalaOutputInput {
     pub additional_registers: BTreeMap<String, String>,
 }
 
+/// Scala SDK `ErgoBox` JSON input: the standard `ErgoTransactionOutput`
+/// shape ([`ScalaOutputInput`]) plus `transactionId` + `index`, which
+/// Scala's SDK `ErgoBox` decoder requires (they fix the box id). The `box`
+/// member of a `/scan/addBox` body.
+#[derive(Debug, Deserialize)]
+pub struct ScalaErgoBoxInput {
+    #[serde(flatten)]
+    pub output: ScalaOutputInput,
+    #[serde(rename = "transactionId")]
+    pub transaction_id: String,
+    pub index: u16,
+}
+
 /// `Extension.jsonEncoder` shape: `headerId`, `digest`, and `fields`
 /// as a JSON array of two-element string arrays `[key_hex, value_hex]`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
