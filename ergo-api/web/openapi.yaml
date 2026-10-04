@@ -4464,7 +4464,7 @@ paths:
         - transactions
       responses:
         '200':
-          description: Expected wait time in milliseconds from observed canonical block timing and capacity; 18446744073709551615 denotes insufficient observations; use /api/v1/mempool/fee-estimate for nullable estimates and confidence
+          description: Expected wait time in milliseconds from observed canonical block timing and capacity; 0 denotes insufficient observations, matching Scala; use /api/v1/mempool/fee-estimate for nullable estimates and confidence
           content:
             application/json:
               schema:
