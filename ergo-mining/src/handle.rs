@@ -425,6 +425,18 @@ impl MiningHandle {
             .operator_generation
     }
 
+    /// Freeze a build's operator inputs: the generation, then the queue
+    /// contents `read` returns. Reading in this order means a queue change
+    /// after the generation read leaves the build on the older generation, so
+    /// its snapshot can never publish under the newer one.
+    pub fn operator_snapshot<T>(
+        &self,
+        read: impl FnOnce(&crate::private_queue::PrivateTransactionQueue) -> T,
+    ) -> (u64, T) {
+        let generation = self.operator_generation();
+        (generation, read(&self.private_queue))
+    }
+
     /// Cancel/expire operator work and reject older in-flight builds.
     pub fn invalidate_operator_generation(&self) -> u64 {
         let mut cache = self.cache.write().expect("cache poisoned");
@@ -2478,6 +2490,30 @@ mod tests {
         assert!(handle
             .publish_if_current(candidate, work, &parent, || 300, BuildReason::Tip)
             .is_some());
+    }
+
+    #[test]
+    fn operator_snapshot_freezes_the_generation_before_reading_the_queue() {
+        let handle = base_handle();
+        let parent = [1; 32];
+        handle.set_best_tip(BestTip {
+            parent_id: parent,
+            chain_seq: 1,
+            synced: true,
+        });
+        // The queue changes (and invalidates) between the two reads.
+        let (generation, entries) = handle.operator_snapshot(|queue| {
+            handle.invalidate_operator_generation();
+            queue.selection_entries()
+        });
+        assert_eq!(generation, 0, "the generation is read before the queue");
+        assert!(entries.is_empty());
+        // So a build carrying that snapshot cannot publish.
+        let (mut candidate, work) = candidate_pair(parent);
+        candidate.observation.operator_generation = generation;
+        assert!(handle
+            .publish_if_current(candidate, work, &parent, || 100, BuildReason::Tip)
+            .is_none());
     }
 
     #[test]
