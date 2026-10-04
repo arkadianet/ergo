@@ -351,6 +351,98 @@ fn flatmap_result_type_errors_still_precede_the_output_cost() {
     }
 }
 
+// The Scala-captured mixed-carrier fixture asserts only `size == 2` for its box
+// cases, which a nested `[SELF, Coll(SELF)]` also satisfies. Evaluate each
+// captured tree's own flatMap instead. Scala's `CollOverArray.flatMap` is
+// `builder.fromArray(toArray.flatMap(x => f(x).toArray))`: every element of
+// every result, in receiver order. Rust carries Coll[Box] as `CollBox`, and a
+// `(Coll[Byte], Long)` collection with a non-32-byte id as `CollGeneric`
+// tagged with that pair type.
+#[test]
+fn flatmap_mixed_carrier_fixture_results_are_flat() {
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::ergo_tree::read_ergo_tree;
+    fn find_flat_map(expr: &Expr) -> Option<&Expr> {
+        let Expr::Op(node) = expr else { return None };
+        match &node.payload {
+            Payload::MethodCall {
+                type_id: 12,
+                method_id: 15,
+                ..
+            } => Some(expr),
+            Payload::One(a) => find_flat_map(a),
+            Payload::Two(a, b) => find_flat_map(a).or_else(|| find_flat_map(b)),
+            Payload::BlockValue { items, result } => items
+                .iter()
+                .find_map(find_flat_map)
+                .or_else(|| find_flat_map(result)),
+            Payload::ValDef { rhs, .. } => find_flat_map(rhs),
+            _ => None,
+        }
+    }
+    let pair = |id: Vec<u8>, amount| Value::Tuple(vec![Value::CollBytes(id), Value::Long(amount)]);
+    let pairs = |items| {
+        Value::CollGeneric(
+            items,
+            Box::new(SigmaType::STuple(vec![
+                SigmaType::SColl(Box::new(SigmaType::SByte)),
+                SigmaType::SLong,
+            ])),
+        )
+    };
+    // HEIGHT is 0: x == HEIGHT yields the 32-byte id, x == 1 a one-byte id.
+    let (wide, narrow) = (pair(vec![1; 32], 0), pair(vec![1], 1));
+    let input = Value::BoxRef {
+        source: BoxSource::Inputs,
+        index: 0,
+    };
+    let expected = [
+        (
+            "flatmap-mixed-width-token-first",
+            pairs(vec![wide.clone(), narrow.clone()]),
+        ),
+        ("flatmap-mixed-width-generic-first", pairs(vec![narrow, wide])),
+        (
+            "flatmap-mixed-box-generic-first",
+            Value::CollBox(vec![Value::SelfBox, Value::SelfBox]),
+        ),
+        (
+            "flatmap-mixed-box-specialized-first",
+            Value::CollBox(vec![Value::SelfBox, Value::SelfBox]),
+        ),
+        (
+            "flatmap-box-input-lazy-first",
+            Value::CollBox(vec![input.clone(), Value::SelfBox]),
+        ),
+        (
+            "flatmap-box-input-materialized-first",
+            Value::CollBox(vec![Value::SelfBox, input]),
+        ),
+    ];
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../test-vectors/ergo-sigma/mixed-collection-types/cases.json"
+    ))
+    .unwrap();
+    let cases = fixture["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), expected.len(), "complete fixture denominator");
+    for (case, (id, expected)) in cases.iter().zip(expected) {
+        assert_eq!(case["id"], id);
+        let bytes = hex::decode(case["tree_hex"].as_str().unwrap()).unwrap();
+        let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+        // The same SELF/input context as the fixture's own test.
+        let mut self_box = EvalBox::simple(0, bytes);
+        self_box.value = 1_000_000;
+        let inputs = [self_box.clone()];
+        let mut ctx = ReductionContext::minimal(0, 0);
+        ctx.self_box = Some(&self_box);
+        ctx.inputs = &inputs;
+        let flat_map = find_flat_map(&tree.body).unwrap();
+        let value = eval_to_value(flat_map, &ctx, &tree.constants).unwrap();
+        // Debug equality also pins the carrier and its element-type tag.
+        assert_eq!(format!("{value:?}"), format!("{expected:?}"), "{id}");
+    }
+}
+
 // ── AvlTree.updateDigest (100,15) / updateOperations (100,8) + variable digest ──
 
 #[test]
@@ -507,3 +599,4 @@ fn avltree_update_digest_operations_fixed_cost_invariant() {
         "updateOperations FixedCost(45) - updateDigest FixedCost(40) = 5",
     );
 }
+
