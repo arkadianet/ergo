@@ -79,9 +79,9 @@ export function miningPolicy() {
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:16px 0">
           <label>Required transaction IDs<textarea name="required" rows="3" spellcheck="false" placeholder="One transaction ID per line"></textarea></label>
           <label>Excluded transaction IDs<textarea name="excluded" rows="3" spellcheck="false" placeholder="One transaction ID per line"></textarea></label>
-          <label>Mandatory bundles<textarea name="bundles" rows="3" spellcheck="false" placeholder="One bundle per line; separate its IDs with spaces"></textarea></label>
+          <label>Required bundles, tried in order<textarea name="bundles" rows="3" spellcheck="false" placeholder="One bundle per line; separate its IDs with spaces"></textarea></label>
         </div>
-        <p class="muted">Required transactions and their available ancestors are selected first, and rent never claims their inputs. Mining never waits for them: a requirement that is unavailable or cannot be included is left out and reported under Candidate contents. Requirements stay in the policy until you clear them, including after they confirm.</p>
+        <p class="muted">Required transactions and their available ancestors are selected first, and rent never claims their inputs. Mining never waits for them: a requirement that is unavailable or cannot be included is left out and reported under Candidate contents. A bundle sets the order and is not all-or-nothing. Requirements stay in the policy until you clear them, including after they confirm.</p>
         <button class="btn" type="submit">Save block policy</button>
         <button class="btn" type="button" data-policy-reload>Reload saved policy</button>
       </form>
