@@ -78,8 +78,9 @@ password. An existing wallet does not need a new mnemonic or new addresses.
 Transactions retain their signed context extensions and request order. Valid
 zero-fee and dependent transactions can enter this private block package without
 public mempool admission. Normal consensus, cost and size limits still apply;
-invalid, conflicting, unresolved or nonfitting members are omitted. Check the
-returned proofs rather than assuming the whole request was included.
+invalid, conflicting, unresolved or nonfitting members refuse the entire request
+with HTTP 400. Accepted packages include every requested member, and their
+returned proofs bind that inclusion to the offered work.
 
 The work response retains `msg`, `b`, `h` and `pk`, adding `proof.msgPreimage`
 (the serialized header without PoW) and `proof.txProofs` for included requested
