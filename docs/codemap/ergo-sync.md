@@ -76,10 +76,11 @@ consumes those actions — validating + persisting headers and blocks against
 - **Mode gating (headers-only / mid-bootstrap):** `should_skip_block_sections()` (Mode 6 permanent + Mode 2 transient) suppresses section Inv handling, section persistence, pending-block registration, and block apply at every layer — perimeter (`on_inv`), receive (`on_modifier_received`), schedule (`on_header_validated`), dispatch (`execute` rechecks queued `PersistSection`/`AssembleBlock` actions), and apply (`try_apply_next_blocks`) — defense-in-depth (`src/coordinator/mod.rs`, `src/executor/mod.rs`).
 - **Prune-sentinel request gate (Mode 3):** when `prune_sentinel() > 0`, sub-sentinel sections are fail-CLOSED — never requested (would be evicted on apply / refused on serve); inert for archive / Mode 6 / pre-eviction stores (`src/coordinator/mod.rs`).
 - **Snapshot manifest trust:** a peer-advertised `manifest_id` is accepted only if it equals the first 32 bytes of the canonical header's committed `state_root` at the snapshot height; quorum = highest height where `>= MIN_MANIFEST_VOTES (3)` peers agree (`src/snapshot_bootstrap/mod.rs`).
-- **Startup integrity is fail-fast:** hydration treats a missing/corrupt persisted header row or a `HEADER_CHAIN_INDEX` coverage gap as fatal (`HydrationError` / `StartupError::IndexGap`) rather than silently truncating caches — the persisted header table is the source of truth after restart (`src/executor/mod.rs`).
+- **Startup integrity is fail-fast:** hydration treats a missing/corrupt persisted header row or a `HEADER_CHAIN_INDEX` coverage gap as fatal (`HydrationError` / `StartupError::IndexGap`) rather than silently truncating caches — the persisted header table is the source of truth after restart (`src/executor/mod.rs`). The one exception is a `PoPowSparse` store, where the recent-header window ends at the first ancestor absent below the NiPoPoW proof's contiguous suffix (`src/executor/startup.rs`).
 
 The Mode5 ordinary replay requires exactly 55 data-input blocks in its 183-block
 range and compares every resulting root with captured mainnet headers. Its
-header-sync companion seeds the complete 50-header cache window independently
-of the one-parent difficulty context. These are fixed-corpus checks; ignored
-startup benchmarks and historical script/oracle prerequisites remain explicit.
+header-sync companion seeds only the one-parent difficulty context, so the
+executor must start its cache at a tip without stored ancestry. These are
+fixed-corpus checks; ignored startup benchmarks and historical script/oracle
+prerequisites remain explicit.
