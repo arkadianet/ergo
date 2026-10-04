@@ -6,6 +6,7 @@ pub(crate) mod address;
 pub(crate) mod boxes;
 pub(crate) mod meta;
 mod migration;
+mod migration_registry;
 pub(crate) mod numeric;
 pub(crate) mod paging;
 pub(crate) mod segment;
@@ -17,6 +18,7 @@ pub(crate) mod txs;
 pub(crate) mod undo;
 
 pub use meta::{IndexerMeta, INDEXER_SCHEMA_VERSION};
+pub use migration_registry::has_migration_path;
 pub use undo::{UndoEntry, ROLLBACK_WINDOW};
 
 use ergo_indexer_types::{IndexedErgoBox, IndexedErgoTransaction};
@@ -50,9 +52,9 @@ pub enum OpenOutcome {
     /// File present and `schema_version` matched — resumed from
     /// persisted meta.
     Resumed,
-    /// Schema 2 awaits conversion on the dedicated indexer worker.
+    /// Registered schema steps await conversion on the dedicated indexer worker.
     MigrationPending,
-    /// Schema 2 projections migrated atomically, preserving the checkpoint.
+    /// Registered schema steps committed, preserving the checkpoint.
     Migrated { previous_version: u32 },
     /// File present but `schema_version` mismatched — file deleted and
     /// recreated, meta empty.
@@ -133,7 +135,7 @@ impl IndexerStore {
     /// |---|---|
     /// | File absent | Create fresh, `schema_version = INDEXER_SCHEMA_VERSION`. |
     /// | File present, `schema_version` matches | Resume. |
-    /// | File present, schema 2 | Migrate atomically; rebuild on failure. |
+    /// | File present, registered migration path | Migrate each step atomically; rebuild on failure. |
     /// | File present, other `schema_version` mismatches | Delete, recreate fresh. |
     /// | File present, `schema_version` key missing | Halt `SchemaCorruption`. |
     /// | File present, redb open / table / decode failure | Halt `DbCorruption`. |
@@ -146,9 +148,10 @@ impl IndexerStore {
         path: &Path,
         cache_bytes: usize,
     ) -> Result<(Self, OpenOutcome), IndexerError> {
-        Self::open_with_migration(path, cache_bytes, migration::migrate_schema_2_to_3)
+        Self::open_inner(path, cache_bytes, Some(migration_registry::run_uncancelled))
     }
 
+    #[cfg(test)]
     fn open_with_migration(
         path: &Path,
         cache_bytes: usize,
@@ -168,6 +171,15 @@ impl IndexerStore {
         path: &Path,
         cache_bytes: usize,
         migrate: Option<SchemaMigration>,
+    ) -> Result<(Self, OpenOutcome), IndexerError> {
+        Self::open_with_registry(path, cache_bytes, migrate, migration_registry::MIGRATIONS)
+    }
+
+    fn open_with_registry(
+        path: &Path,
+        cache_bytes: usize,
+        migrate: Option<SchemaMigration>,
+        registry: &[migration_registry::MigrationStep],
     ) -> Result<(Self, OpenOutcome), IndexerError> {
         if !path.exists() {
             return Self::create_fresh(path, cache_bytes).map(|s| (s, OpenOutcome::CreatedFresh));
@@ -218,7 +230,7 @@ impl IndexerStore {
             }
             Some(previous_version) => {
                 drop(read_txn);
-                if previous_version == 2 {
+                if migration_registry::path_from(registry, previous_version).is_some() {
                     let Some(migrate) = migrate else {
                         return Ok((
                             Self {
@@ -247,7 +259,7 @@ impl IndexerStore {
                         Err(error) => tracing::warn!(
                             event = "indexer_schema_migration_failed",
                             %error,
-                            "schema-2 migration aborted; rebuilding index from genesis",
+                            "schema migration aborted; rebuilding index from genesis",
                         ),
                     }
                 }
@@ -268,7 +280,9 @@ impl IndexerStore {
     }
 
     pub(crate) fn finish_migration(self, cancel: &AtomicBool) -> Result<Self, IndexerError> {
-        self.finish_migration_with(cancel, |db| migration::migrate_cancellable(db, cancel))
+        self.finish_migration_with(cancel, |db| {
+            migration_registry::run(db, cancel, migration_registry::MIGRATIONS)
+        })
     }
 
     pub(crate) fn finish_migration_with(
@@ -281,7 +295,7 @@ impl IndexerStore {
             Err(error) if cancel.load(Ordering::Acquire) => Err(error),
             Err(error) => {
                 tracing::warn!(event = "indexer_schema_migration_failed", %error,
-                    "schema-2 migration aborted; rebuilding index from genesis");
+                    "schema migration aborted; rebuilding index from genesis");
                 let path = self.path.clone();
                 let cache_bytes = self.redb_cache_bytes;
                 let rollback_window = self.rollback_window;

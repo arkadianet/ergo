@@ -10,7 +10,7 @@ use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use super::tables::{
     INDEXED_BOX, INDEXED_TEMPLATE, INDEXED_TOKEN, INDEXER_UNDO, NUMERIC_BOX, SEGMENTS,
 };
-use super::{meta, segment::read_spill_in, template::read_template_in, INDEXER_SCHEMA_VERSION};
+use super::{meta, segment::read_spill_in, template::read_template_in};
 use crate::error::IndexerError;
 use crate::rebuild::{read_box, read_box_id};
 use crate::segment_buffer::{append_box_entry, flip_box_segment_entry, flush_staged_spills};
@@ -52,6 +52,7 @@ fn migrate_cancellable_observed(
     )
 }
 
+#[cfg(test)]
 pub(super) fn migrate_schema_2_to_3(db: &redb::Database) -> Result<(), IndexerError> {
     migrate_controlled(db, &|| Ok(()), &mut || Ok(()))
 }
@@ -285,7 +286,8 @@ fn migrate_controlled(
         undo_entries,
         "retained undo entries validated"
     );
-    meta::write_schema_version(&write, INDEXER_SCHEMA_VERSION)?;
+    // Pin the destination: a later schema bump must not skip its own step.
+    meta::write_schema_version(&write, 3)?;
     check()?;
     let commit_start = Instant::now();
     write.commit()?;
