@@ -5,7 +5,7 @@ globalThis.location = { search: '' };
 const storage = new Map();
 globalThis.sessionStorage = { getItem: (key) => storage.get(key) || null, removeItem: (key) => storage.delete(key) };
 const { api } = await import('../js/api-client.js');
-const { matchesTemplate, inspectorMessage, exclusionLabel, isUnmetRequirement } = await import('../js/mining-inspector.js');
+const { matchesTemplate, inspectorMessage, exclusionLabel, isUnmetRequirement, emissionRows } = await import('../js/mining-inspector.js');
 const response = (status, data) => ({ status, ok: status >= 200 && status < 300, text: async () => JSON.stringify(data), json: async () => data });
 
 test('candidate inspection requires exact work ID and publish sequence', () => {
@@ -31,6 +31,16 @@ test('unmet requirements read as required transactions left out of work', () => 
   assert.match(exclusionLabel('required_final_fee_or_section_budget'), /^Required, not included: trimmed/);
   assert.equal(exclusionLabel('input_conflict'), 'An input is already spent in this block');
   assert.equal(exclusionLabel('required_future_reason'), 'Required, not included: future reason');
+});
+
+test('an EIP-27 reward box shows its value, the re-emission owed and the emission kept', () => {
+  assert.deepEqual(emissionRows({ emission_nano_erg: '3000000000', emission_gross_nano_erg: '12000000000', reemission_obligation_nano_erg: '9000000000' }), [
+    ['Emission reward box', '12.0 ERG'],
+    ['Owed to re-emission when spent (EIP-27)', '−9.0 ERG'],
+    ['Emission kept', '3.0 ERG'],
+  ]);
+  assert.deepEqual(emissionRows({ emission_nano_erg: '67500000000', emission_gross_nano_erg: '67500000000', reemission_obligation_nano_erg: '0' }), [['Emission', '67.5 ERG']]);
+  assert.deepEqual(emissionRows({ emission_nano_erg: '12000000000' }), [['Emission', '12.0 ERG']]);
 });
 
 test('candidate selector and operator key reach the authenticated details API', async () => {

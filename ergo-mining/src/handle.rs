@@ -511,9 +511,9 @@ impl MiningHandle {
         let template_seq = template.as_ref().map(|s| s.template.identity.template_seq);
         let accounting = (outcome == "accepted")
             .then(|| {
-                template
-                    .as_ref()
-                    .map(|s| crate::inspection::outcome_accounting(&s.template))
+                template.as_ref().map(|s| {
+                    crate::inspection::outcome_accounting(&s.template, self.reemission_ref())
+                })
             })
             .flatten();
         let detail = detail.map(|text| text.chars().take(4096).collect());
@@ -534,9 +534,16 @@ impl MiningHandle {
     /// Hydrate durable local submission history at boot; corrupt files fail
     /// closed so the operator does not unknowingly lose accounting history.
     pub fn with_outcome_journal(self, path: &std::path::Path) -> Result<Self, MiningError> {
-        *self.outcomes.lock().expect("outcomes poisoned") =
-            crate::outcome_journal::OutcomeJournal::open(path)
-                .map_err(MiningError::InvalidConfig)?;
+        let mut journal = crate::outcome_journal::OutcomeJournal::open(path)
+            .map_err(MiningError::InvalidConfig)?;
+        for accounting in journal
+            .events
+            .iter_mut()
+            .filter_map(|e| e.accounting.as_mut())
+        {
+            accounting.split_legacy_emission(self.reemission_ref());
+        }
+        *self.outcomes.lock().expect("outcomes poisoned") = journal;
         Ok(self)
     }
 

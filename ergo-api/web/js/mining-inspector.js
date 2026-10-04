@@ -43,6 +43,18 @@ export function exclusionLabel(reason) {
   return required ? `Required, not included: ${detail}` : detail.charAt(0).toUpperCase() + detail.slice(1);
 }
 
+// EIP-27 reward boxes hold re-emission tokens that cost 1 nanoERG each to
+// spend, so only the kept emission (`emission_nano_erg`) is miner income.
+export function emissionRows(amounts) {
+  const owed = amounts?.reemission_obligation_nano_erg;
+  if (typeof owed !== 'string' || !/^\d+$/.test(owed) || BigInt(owed) === 0n) return [['Emission', money(amounts?.emission_nano_erg)]];
+  return [
+    ['Emission reward box', money(amounts.emission_gross_nano_erg)],
+    ['Owed to re-emission when spent (EIP-27)', `−${money(owed)}`],
+    ['Emission kept', money(amounts.emission_nano_erg)],
+  ];
+}
+
 export function inspectorMessage(result) {
   if (!result) return 'Waiting for a candidate to inspect.';
   if (result.status === 401 || result.status === 403) return 'Authorize to inspect transaction contents and miner proceeds.';
@@ -138,7 +150,7 @@ function detailsView(details) {
   const unmet = details.exclusions.filter(isUnmetRequirement);
   if (unmet.length) root.append(el('p', 'mining-inspector__burn', `${num(unmet.length)} required ${unmet.length === 1 ? 'transaction is' : 'transactions are'} not in this template; mining continues without ${unmet.length === 1 ? 'it' : 'them'}. Requirements stay in your block policy until you clear them. See the excluded transactions below.`));
   const rewards = el('div', 'mining-inspector__rewards');
-  for (const [label, amount] of [['Emission', details.rewards.emission_nano_erg], ['Transaction fees', details.rewards.fees_nano_erg], ['Storage rent', details.rewards.rent_nano_erg], ['Total miner proceeds', details.rewards.total_nano_erg]]) rewards.append(kv(label, money(amount)));
+  for (const [label, amount] of [...emissionRows(details.rewards), ['Transaction fees', money(details.rewards.fees_nano_erg)], ['Storage rent', money(details.rewards.rent_nano_erg)], ['Total miner proceeds', money(details.rewards.total_nano_erg)]]) rewards.append(kv(label, amount));
   root.append(rewards);
   const payouts = section('Payout boxes and spendability');
   for (const payout of details.rewards.outputs || []) {
@@ -239,7 +251,7 @@ export function createMiningInspector(host) {
       if (event.block_id) row.append(kv('Current applied chain', event.canonical === true ? `${num(event.confirmations)} confirmations` : event.canonical === false ? 'Orphaned by a reorg' : 'Not verified'));
       if (event.accounting?.recovered_tokens?.length) row.append(assetsView(event.accounting.recovered_tokens));
       if (event.detail) row.append(el('p', 'muted', event.detail));
-      if (event.accounting) for (const [label, amount] of [['Emission', event.accounting.emission_nano_erg], ['Fees', event.accounting.fees_nano_erg], ['Rent', event.accounting.rent_nano_erg]]) row.append(kv(label, money(amount)));
+      if (event.accounting) for (const [label, amount] of [...emissionRows(event.accounting), ['Fees', money(event.accounting.fees_nano_erg)], ['Rent', money(event.accounting.rent_nano_erg)]]) row.append(kv(label, amount));
       outcomes.body.append(row);
     }
     if (!history?.outcomes?.length) outcomes.body.append(el('p', 'muted', 'No local solution submissions recorded.'));

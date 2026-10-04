@@ -283,11 +283,12 @@ impl NodeMining for MiningBridge {
     ) -> Result<Option<ergo_rest_json::mining_inspection::CandidateDetailsJson>, MiningApiError>
     {
         let msg = inspection::parse_msg(msg)?;
-        let snapshot = self
-            .inspection_handle()?
-            .inspect_template(msg, template_seq);
-        snapshot
-            .map(|s| inspection::candidate_details(s, self.network, now_ms()))
+        let handle = self.inspection_handle()?;
+        handle
+            .inspect_template(msg, template_seq)
+            .map(|s| {
+                inspection::candidate_details(s, self.network, handle.reemission_ref(), now_ms())
+            })
             .transpose()
     }
 
@@ -320,6 +321,8 @@ impl NodeMining for MiningBridge {
                     accounting: e.accounting.map(|a| MiningAccountingJson {
                         height: a.height,
                         emission_nano_erg: a.emission_nano_erg,
+                        emission_gross_nano_erg: a.emission_gross_nano_erg,
+                        reemission_obligation_nano_erg: a.reemission_obligation_nano_erg,
                         fees_nano_erg: a.fees_nano_erg,
                         rent_nano_erg: a.rent_nano_erg,
                         recovered_tokens: a

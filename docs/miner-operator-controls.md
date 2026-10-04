@@ -16,7 +16,12 @@ template. All ERG and token quantities in the inspection API are decimal strings
 browser clients must keep them as strings or use `BigInt`.
 
 Miner proceeds distinguish emission, collected transaction fees and storage rent,
-with the actual payout boxes and their spendable heights. Rent collection can
+with the actual payout boxes and their spendable heights. Since EIP-27 an emission
+reward box also holds re-emission tokens, and the spend that unlocks it must pay
+1 nanoERG per token to the re-emission contract. The report shows the reward box
+value, that obligation and the emission kept; only the kept emission counts in the
+totals and the submission history, and re-emission tokens are never reported as
+received. Rent collection can
 produce several payout boxes; the report includes every miner payout and excludes
 recreated owner outputs, even when their owner is also the miner. Tokens held in
 recreated boxes are not miner income. Recovered and burned token amounts come from
