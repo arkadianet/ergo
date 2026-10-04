@@ -50,7 +50,7 @@ use crate::evaluator::cost::{add_method_cost, collection_len, eq_with_cost};
 use crate::evaluator::dispatch::eval_expr;
 use crate::evaluator::eval_ctx::EvalCtx;
 use crate::evaluator::helpers::{
-    coll_elem_type, collection_to_values, infer_expr_type, sigma_type_compatible,
+    coll_elem_type, collection_to_values, infer_expr_type, not_a_collection, sigma_type_compatible,
     sigma_type_to_coll_kind, value_to_sigma_type, values_equal, values_to_collection, CollKind,
 };
 use crate::evaluator::opcodes::binding::check_closure_param_types;
@@ -394,7 +394,7 @@ pub(super) fn flat_map(
                 _ => Value::CollBytes(vec![]),
             });
             inner_colls.retain(|v| !matches!(v, Value::CollGeneric(t, _) | Value::CollLegacyPair(t, _, _) if t.is_empty()));
-            let result = if inner_colls.is_empty() {
+            if inner_colls.is_empty() {
                 // Empty receiver: no inner collection exists to read the shape
                 // from, so recover the output element type B from the mapper
                 // body's static `Coll[B]` type (Scala threads `RType[B]`),
@@ -409,53 +409,146 @@ pub(super) fn flat_map(
                         .iter()
                         .filter_map(|(id, tpe)| tpe.clone().map(|tpe| (*id, tpe))),
                 );
-                first_shape
+                let result = first_shape
                     .or_else(|| {
                         flatmap_output_elem_type(&body, &bindings, cx.constants)
                             .map(|b| empty_coll_for_elem(&b))
                     })
-                    .unwrap_or_else(|| Value::CollBytes(Vec::new()))
+                    .unwrap_or_else(|| Value::CollBytes(Vec::new()));
+                // An empty output still pays compute(0) = 70 (chunks
+                // truncate to 1); see `flatten_flat_map_results`.
+                cx.cost.add(COST_FLAT_MAP.compute(0)?)?;
+                return Ok(result);
+            }
+            // Static element types can have several runtime carriers:
+            // token-width pairs use Tokens or CollGeneric, reverse uses
+            // boxed carriers, and INPUTS/OUTPUTS can remain lazy. Flatten
+            // their elements losslessly instead of filtering or nesting
+            // carriers that differ from the first.
+            let elem_type =
+                coll_elem_type(&inner_colls[0]).ok_or_else(|| EvalError::TypeError {
+                    expected: "collection result from flatMap body",
+                    got: format!("{:?}", inner_colls[0]),
+                })?;
+            let token_elem_type = SigmaType::STuple(vec![
+                SigmaType::SColl(Box::new(SigmaType::SByte)),
+                SigmaType::SLong,
+            ]);
+            let kind = if elem_type == token_elem_type {
+                CollKind::Token
             } else {
-                // Static element types can have several runtime carriers:
-                // token-width pairs use Tokens or CollGeneric, reverse uses
-                // boxed carriers, and INPUTS/OUTPUTS can remain lazy. Flatten
-                // their elements through one lossless conversion instead of
-                // filtering or nesting carriers that differ from the first.
-                let elem_type =
-                    coll_elem_type(&inner_colls[0]).ok_or_else(|| EvalError::TypeError {
-                        expected: "collection result from flatMap body",
-                        got: format!("{:?}", inner_colls[0]),
-                    })?;
-                let token_elem_type = SigmaType::STuple(vec![
-                    SigmaType::SColl(Box::new(SigmaType::SByte)),
-                    SigmaType::SLong,
-                ]);
-                let kind = if elem_type == token_elem_type {
-                    CollKind::Token
-                } else {
-                    sigma_type_to_coll_kind(&elem_type).unwrap_or(CollKind::Tuple)
-                };
-                let mut out = Vec::new();
-                for inner in inner_colls {
-                    let (_, items) = collection_to_values(inner, cx.ctx)?;
-                    out.extend(items);
-                }
-                values_to_collection(kind, out, elem_type)?
+                sigma_type_to_coll_kind(&elem_type).unwrap_or(CollKind::Tuple)
             };
-            // FlatMapMethod_CostKind = PerItemCost(60, 10, 8) charged
-            // over the OUTPUT (flattened) length — Scala flatMap_eval
-            // (methods.scala) does `addSeqCost(costKind){ res.length }`.
-            // compute(0) = 70 (chunks truncate to 1), matching the
-            // empty-result case.
-            let out_len = collection_len(&result, cx.ctx) as u32;
-            cx.cost.add(COST_FLAT_MAP.compute(out_len)?)?;
-            Ok(result)
+            flatten_flat_map_results(kind, elem_type, inner_colls, cx)
         }
         _ => Err(EvalError::TypeError {
             expected: "Func for flatMap",
             got: format!("{func_val:?}"),
         }),
     }
+}
+
+/// Concatenate flatMap's per-element results into the carrier `kind` selects.
+/// Results already in that carrier are copied, never boxed into one `Value`
+/// per element.
+///
+/// FlatMapMethod_CostKind = PerItemCost(60, 10, 8) is charged over the OUTPUT
+/// (flattened) length: Scala flatMap_eval (methods.scala) does
+/// `addSeqCost(costKind){ res.length }`; compute(0) = 70 because chunks
+/// truncate to 1. That length is the sum of the result lengths, so it is
+/// charged before the output is built, and a flatMap over the cost limit fails
+/// without building it. Errors keep their order: a result that is not a
+/// collection, then the first element that does not fit `kind` (Scala's cast
+/// also fails before its charge), then the cost. A length beyond `u32`
+/// saturates and overflows the cost instead of wrapping to a cheap charge.
+fn flatten_flat_map_results(
+    kind: CollKind,
+    elem_type: SigmaType,
+    results: Vec<Value>,
+    cx: &mut EvalCtx<'_>,
+) -> Result<Value, EvalError> {
+    let ctx = cx.ctx;
+    let mut out_len = 0usize;
+    for result in &results {
+        if coll_elem_type(result).is_none() {
+            return Err(not_a_collection(result));
+        }
+        out_len = out_len.saturating_add(collection_len(result, ctx));
+    }
+    // Box and boxed-element (`Tuple`) outputs hold one `Value` per element and
+    // accept any element. Every other kind has its own carrier: convert each
+    // result that uses another carrier now, one result at a time, so an
+    // element that does not fit is still reported before the charge.
+    let boxed = matches!(kind, CollKind::Box | CollKind::Tuple);
+    let results = if boxed {
+        results
+    } else {
+        results
+            .into_iter()
+            .map(|result| {
+                if in_output_carrier(kind, &result) {
+                    return Ok(result);
+                }
+                let (_, items) = collection_to_values(result, ctx)?;
+                values_to_collection(kind, items, elem_type.clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    cx.cost
+        .add(COST_FLAT_MAP.compute(u32::try_from(out_len).unwrap_or(u32::MAX))?)?;
+    macro_rules! concat_carrier {
+        ($carrier:ident) => {{
+            let mut out = Vec::with_capacity(out_len);
+            for result in results {
+                match result {
+                    Value::$carrier(items) => out.extend(items),
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "flatMap result in the output carrier",
+                            got: format!("{other:?}"),
+                        })
+                    }
+                }
+            }
+            Value::$carrier(out)
+        }};
+    }
+    Ok(match kind {
+        CollKind::Byte => concat_carrier!(CollBytes),
+        CollKind::Short => concat_carrier!(CollShort),
+        CollKind::Int => concat_carrier!(CollInt),
+        CollKind::Long => concat_carrier!(CollLong),
+        CollKind::Bool => concat_carrier!(CollBool),
+        CollKind::SigmaProp => concat_carrier!(CollSigmaProp),
+        CollKind::Header => concat_carrier!(CollHeader),
+        // A pair whose id is not 32 bytes stays boxed (`values_to_collection`),
+        // and then so does the whole output.
+        CollKind::Token if results.iter().all(|r| matches!(r, Value::Tokens(_))) => {
+            concat_carrier!(Tokens)
+        }
+        _ => {
+            let mut items = Vec::with_capacity(out_len);
+            for result in results {
+                items.extend(collection_to_values(result, ctx)?.1);
+            }
+            values_to_collection(kind, items, elem_type)?
+        }
+    })
+}
+
+/// Whether `coll` already uses the carrier of a flatMap output of `kind`.
+fn in_output_carrier(kind: CollKind, coll: &Value) -> bool {
+    matches!(
+        (kind, coll),
+        (CollKind::Byte, Value::CollBytes(_))
+            | (CollKind::Short, Value::CollShort(_))
+            | (CollKind::Int, Value::CollInt(_))
+            | (CollKind::Long, Value::CollLong(_))
+            | (CollKind::Bool, Value::CollBool(_))
+            | (CollKind::SigmaProp, Value::CollSigmaProp(_))
+            | (CollKind::Header, Value::CollHeader(_))
+            | (CollKind::Token, Value::Tokens(_))
+    )
 }
 
 // SColl(12).patch(19) -> Coll[T]

@@ -166,6 +166,191 @@ fn flatmap_empty_receiver_recovers_output_type_from_concrete_collection_body() {
     assert_eq!(run_eval(&expr), Value::CollInt(vec![]));
 }
 
+// ── flatMap output: result carriers are copied, and charged before building ──
+// Scala's CollOverArray.flatMap fills one primitive array. A result already in
+// the output carrier is copied, never boxed into one 136-byte `Value` per
+// element, and the output length is charged before the output exists.
+// `UNPACKED_ELEMENTS` counts the elements this thread boxed; the receiver's own
+// elements are the only expected ones.
+
+fn flat_map_of(receiver: Expr, param: SigmaType, body: Expr) -> Expr {
+    let func = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(param))],
+            body: Box::new(body),
+        },
+    );
+    op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 12,
+            method_id: 15,
+            obj: Box::new(receiver),
+            args: vec![func],
+            type_args: vec![],
+        },
+    )
+}
+
+fn unpacked_while<T>(run: impl FnOnce() -> T) -> (T, usize) {
+    let before = UNPACKED_ELEMENTS.with(|count| count.get());
+    let result = run();
+    (result, UNPACKED_ELEMENTS.with(|count| count.get()) - before)
+}
+
+fn eval_flat_map(
+    expr: &Expr,
+    ctx: &ReductionContext<'_>,
+    limit: Option<u64>,
+) -> (Result<Value, EvalError>, u64) {
+    let mut cost = limit.map_or_else(CostAccumulator::recording_only, |limit| {
+        CostAccumulator::new(ergo_primitives::cost::JitCost::from_jit(limit))
+    });
+    let result = eval_expr(
+        expr,
+        ctx,
+        &[],
+        &mut Env::new(),
+        &mut 0,
+        &mut cost,
+        &mut None,
+    );
+    (result, cost.total().value())
+}
+
+#[test]
+fn flatmap_copies_typed_results_without_boxing_their_elements() {
+    use ergo_ser::sigma_value::CollValue;
+    let coll = |tpe: SigmaType, values: Vec<SigmaValue>| Expr::Const {
+        tpe: SigmaType::SColl(Box::new(tpe)),
+        val: SigmaValue::Coll(CollValue::Values(values)),
+    };
+    let property = |type_id: u8, method_id: u8, opcode: u8| {
+        op(
+            0xDB,
+            Payload::MethodCall {
+                type_id,
+                method_id,
+                obj: Box::new(op(opcode, Payload::Zero)),
+                args: vec![],
+                type_args: vec![],
+            },
+        )
+    };
+    let self_box = make_test_box();
+    let headers = vec![test_eval_header_v2(); 3];
+    let mut ctx = ctx_with_self_box(&self_box);
+    ctx.last_headers = &headers;
+    let n = 256;
+    let proved = SigmaBoolean::TrivialProp(true);
+    let cases = [
+        ("Coll[Byte]", const_bytes(vec![7; n]), Value::CollBytes(vec![7; 2 * n])),
+        (
+            "Coll[Short]",
+            coll(SigmaType::SShort, vec![SigmaValue::Short(9); n]),
+            Value::CollShort(vec![9; 2 * n]),
+        ),
+        ("Coll[Int]", const_coll_int(vec![5; n]), Value::CollInt(vec![5; 2 * n])),
+        (
+            "Coll[Long]",
+            coll(SigmaType::SLong, vec![SigmaValue::Long(3); n]),
+            Value::CollLong(vec![3; 2 * n]),
+        ),
+        ("Coll[Boolean]", const_coll_bool(vec![true; n]), Value::CollBool(vec![true; 2 * n])),
+        (
+            "Coll[SigmaProp]",
+            coll(SigmaType::SSigmaProp, vec![SigmaValue::SigmaProp(proved.clone()); n]),
+            Value::CollSigmaProp(vec![proved; 2 * n]),
+        ),
+        (
+            "SELF.tokens",
+            property(99, 8, 0xA7),
+            Value::Tokens(self_box.tokens.repeat(2)),
+        ),
+        (
+            "CONTEXT.headers",
+            property(101, 2, 0xFE),
+            Value::CollHeader([&headers[..], &headers[..]].concat()),
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let expr = flat_map_of(const_coll_int(vec![1, 2]), SigmaType::SInt, body);
+        let (value, unpacked) = unpacked_while(|| run_eval_ctx(&expr, &ctx));
+        assert!(value == expected, "{name}: flattened to {value:?}");
+        assert_eq!(unpacked, 2, "{name}: only the two receiver elements are boxed");
+    }
+}
+
+#[test]
+fn flatmap_output_cost_is_charged_before_the_output_is_built() {
+    // 64 receiver elements x 100 lazy OUTPUTS = 6,400 output boxes.
+    let outputs = vec![make_test_box(); 100];
+    let mut ctx = ReductionContext::minimal(500_000, 0);
+    ctx.outputs = &outputs;
+    let expr = flat_map_of(
+        const_bytes(vec![0; 64]),
+        SigmaType::SByte,
+        op(0xA5, Payload::Zero),
+    );
+    let ((built, total), unpacked) = unpacked_while(|| eval_flat_map(&expr, &ctx, None));
+    assert_eq!(collection_len(&built.unwrap(), &ctx), 6_400);
+    assert_eq!(
+        unpacked,
+        64 + 6_400,
+        "building a box output unpacks every lazy result"
+    );
+    // The flatMap charge comes last, so one unit less fails on that charge.
+    let ((rejected, _), unpacked) =
+        unpacked_while(|| eval_flat_map(&expr, &ctx, Some(total - 1)));
+    assert!(
+        matches!(rejected, Err(EvalError::CostExceeded(_))),
+        "{rejected:?}"
+    );
+    assert_eq!(unpacked, 64, "an over-limit flatMap must not build its output");
+}
+
+#[test]
+fn flatmap_result_type_errors_still_precede_the_output_cost() {
+    // `x => if (x == 1) Coll(1) else other`: with another collection type or a
+    // non-collection as `other`, the second result does not fit the Coll[Int]
+    // output. Scala's cast fails while building the array, before flatMap_eval
+    // charges for it.
+    let ctx = ReductionContext::minimal(500_000, 0);
+    let flat_map = |other: Expr| {
+        let first = op(
+            0x93,
+            Payload::Two(
+                Box::new(op(0x72, Payload::ValUse { id: 1 })),
+                Box::new(const_int(1)),
+            ),
+        );
+        let body = op(
+            0x95,
+            Payload::Three(
+                Box::new(first),
+                Box::new(const_coll_int(vec![1])),
+                Box::new(other),
+            ),
+        );
+        flat_map_of(const_coll_int(vec![1, 2]), SigmaType::SInt, body)
+    };
+    let (built, total) = eval_flat_map(&flat_map(const_coll_int(vec![1])), &ctx, None);
+    assert_eq!(built.unwrap(), Value::CollInt(vec![1, 1]));
+    for (other, error) in [
+        (const_bytes(vec![1]), "Int in collection"),
+        (const_int(5), "collection for lambda operation"),
+    ] {
+        // The flatMap charge is the well-typed twin's last one, so only that
+        // charge exceeds this limit. The type error is still reported.
+        let (limited, _) = eval_flat_map(&flat_map(other), &ctx, Some(total - 1));
+        assert!(
+            matches!(&limited, Err(EvalError::TypeError { expected, .. }) if *expected == error),
+            "{limited:?}"
+        );
+    }
+}
+
 // ── AvlTree.updateDigest (100,15) / updateOperations (100,8) + variable digest ──
 
 #[test]

@@ -10,6 +10,7 @@ use ergo_ser::sigma_value::SigmaValue;
 use super::*;
 use crate::evaluator::types::*;
 
+#[derive(Clone, Copy)]
 pub(crate) enum CollKind {
     Byte,
     Short,
@@ -23,12 +24,29 @@ pub(crate) enum CollKind {
     Token,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Elements this thread has unpacked into one boxed `Value` each through
+    /// [`collection_to_values`]. Tests use it to show that a path copies a
+    /// typed carrier instead of boxing every element.
+    pub(crate) static UNPACKED_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The error [`collection_to_values`] reports for a value that is not a
+/// collection.
+pub(crate) fn not_a_collection(value: &Value) -> EvalError {
+    EvalError::TypeError {
+        expected: "collection for lambda operation",
+        got: format!("{value:?}"),
+    }
+}
+
 /// Decompose a collection Value into (element_kind, items).
 pub(crate) fn collection_to_values(
     coll: Value,
     ctx: &ReductionContext,
 ) -> Result<(CollKind, Vec<Value>), EvalError> {
-    match coll {
+    let unpacked = match coll {
         // Coll[Byte] stays as Vec<u8> in storage; elements surface
         // as Value::Byte at the element boundary (typed carrier).
         Value::CollBytes(bytes) => Ok((
@@ -92,11 +110,13 @@ pub(crate) fn collection_to_values(
                     .collect(),
             ))
         }
-        _ => Err(EvalError::TypeError {
-            expected: "collection for lambda operation",
-            got: format!("{coll:?}"),
-        }),
+        _ => Err(not_a_collection(&coll)),
+    };
+    #[cfg(test)]
+    if let Ok((_, items)) = &unpacked {
+        UNPACKED_ELEMENTS.with(|count| count.set(count.get() + items.len()));
     }
+    unpacked
 }
 
 /// Recover the static element `SigmaType` of a collection-shaped
