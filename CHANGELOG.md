@@ -66,7 +66,9 @@ infrastructure.
   more free space than remains after upgrading. Backups are plain files the
   node never opens and can be deleted while it runs once satisfied, or removed
   with the offline command after stopping. `[store] auto_upgrade_legacy`
-  defaults to true. See
+  defaults to true. Free-space checks query the path's own filesystem and
+  warn and proceed if unavailable, so container overlay mounts do not block
+  startup. See
   [space, recovery and rollback instructions](docs/operating.md#migrating-legacy-redb-databases).
 - Indexer apply and repair commits now use synchronous `Immediate` durability
   instead of `Eventual`, preserving durable guarantees across platforms with

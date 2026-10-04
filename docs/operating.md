@@ -391,7 +391,11 @@ when legacy files or an unfinished upgrade exist.
 
 **Space and backups.** Before each copied database, the upgrader requires free
 bytes on that filesystem equal to its file size plus the larger of **10% or
-256 MiB**. Conversion may still fail if other processes consume that space;
+256 MiB**. The query uses the path's filesystem (`statvfs` on Unix,
+`GetDiskFreeSpaceExW` on Windows), including container overlay mounts. If free
+space cannot be determined, the node warns and proceeds: this check is a
+preflight, and an out-of-space copy still fails safely. Conversion may still
+fail if other processes consume that space;
 originals remain recoverable. Each original becomes `<filename>.redb2-backup`
 after its replacement passes both readers' integrity and typed row verification.
 The verified file and the rename directories are synced. State, peer and

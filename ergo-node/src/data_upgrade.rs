@@ -187,19 +187,7 @@ fn sync_directory(path: &Path) -> Result<()> {
 /// Refreshed before each copy; tests inject a provider into UpgradeOptions.
 pub fn available_space(path: &Path) -> Result<u64> {
     let canonical = fs::canonicalize(path)?;
-    #[cfg(windows)]
-    let canonical = PathBuf::from(canonical.to_string_lossy().trim_start_matches(r"\\?\"));
-    sysinfo::Disks::new_with_refreshed_list()
-        .iter()
-        .filter(|disk| canonical.starts_with(disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().as_os_str().len())
-        .map(|disk| disk.available_space())
-        .ok_or_else(|| {
-            fail(format!(
-                "cannot determine available bytes for {}",
-                path.display()
-            ))
-        })
+    Ok(fs4::available_space(canonical)?)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -513,9 +501,21 @@ fn warn_retained_backups(
     Ok(())
 }
 
+fn query_space(path: &Path, options: &mut UpgradeOptions<'_>) -> Option<u64> {
+    match (options.free_space)(path) {
+        Ok(available) => Some(available),
+        Err(error) => {
+            (options.warning)(&format!("cannot determine available bytes for {}: {error}; proceeding without the space preflight; a failed copy leaves the original recoverable", path.display()));
+            None
+        }
+    }
+}
+
 fn check_space(path: &Path, size: u64, options: &mut UpgradeOptions<'_>) -> Result<()> {
     let needed = required_space(size);
-    let available = (options.free_space)(path)?;
+    let Some(available) = query_space(path, options) else {
+        return Ok(());
+    };
     if available < needed {
         return Err(fail(format!("insufficient space for {}: need {needed} bytes, available {available} bytes; free space, use --discard-backups, or use ergo-node migrate-redb to another disk", path.display())));
     }
@@ -692,8 +692,9 @@ pub fn upgrade_data(
             let parent = path
                 .parent()
                 .ok_or_else(|| fail("indexer needs a parent"))?;
-            let available = (options.free_space)(parent)?;
-            if available < size {
+            if let Some(available) =
+                query_space(parent, options).filter(|available| *available < size)
+            {
                 (options.warning)(&format!("indexer rebuild at {} needs about {size} bytes (the deleted indexer's size), but only {available} bytes are free; remove retained state backups once satisfied with the upgrade, or free space before rebuilding", path.display()));
             }
         }

@@ -54,6 +54,7 @@ async-trait        = { workspace = true }
 # rustls-only dependency policy as the ergo-api webhook sink.
 reqwest            = { workspace = true, features = ["rustls-tls", "json"] }
 thiserror          = { workspace = true }
+fs4                = { workspace = true }
 sysinfo            = { workspace = true }
 maxminddb          = { workspace = true }
 dns-lookup         = { workspace = true }

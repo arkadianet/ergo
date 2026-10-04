@@ -982,3 +982,73 @@ fn default_stale_indexer_deletion_recovers_and_remembers_rebuild_size() {
         );
     }
 }
+
+#[test]
+fn unknown_free_space_warns_and_proceeds_including_the_index_rebuild_check() {
+    for indexer_enabled in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+        let idx = dir.path().join("custom-index.redb");
+        indexer(&idx, 2);
+        let state = dir.path().join("state.redb");
+        let bytes = legacy(&state);
+        let mut warnings = Vec::new();
+        let report = upgrade_data(
+            &lock,
+            dir.path(),
+            Path::new("custom-index.redb"),
+            &mut UpgradeOptions {
+                discard_backups: false,
+                keep_stale_indexer: false,
+                indexer_enabled,
+                free_space: &|_| Err(fail("injected filesystem query failure")),
+                warning: &mut |message| warnings.push(message.to_owned()),
+                cancelled: &|| false,
+                progress: &mut |_, _, _, _| {},
+                step: &mut |_| Ok(()),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.migrated, 1);
+        assert_eq!(report.stale_indexers, 1);
+        assert!(!idx.exists());
+        assert_current(&state);
+        assert_eq!(fs::read(sibling(&state, ".redb2-backup")).unwrap(), bytes);
+        let space_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|message| message.contains("cannot determine available bytes"))
+            .collect();
+        assert_eq!(space_warnings.len(), if indexer_enabled { 2 } else { 1 });
+        assert!(space_warnings.iter().all(|message| message
+            .contains("injected filesystem query failure")
+            && message.contains("proceeding without")));
+    }
+}
+
+#[test]
+fn filesystem_space_provider_accepts_files_and_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("database.redb");
+    fs::write(&file, b"fixture").unwrap();
+    for path in [dir.path(), file.as_path()] {
+        assert!(available_space(path).unwrap() > 0);
+    }
+    assert!(available_space(&dir.path().join("missing")).is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let path = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b'd', 0xff]));
+        fs::write(&path, b"fixture").unwrap();
+        assert!(available_space(&path).unwrap() > 0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn filesystem_space_provider_queries_a_filtered_filesystem_itself() {
+    // procfs has no allocatable disk blocks and is omitted from sysinfo's
+    // disk list. Matching it to the root mount returns the wrong filesystem.
+    assert_eq!(available_space(Path::new("/proc/self/status")).unwrap(), 0);
+}
