@@ -104,6 +104,7 @@ pub trait RealtimeStore: Send + Sync + 'static {
 struct Health {
     committed_seq: AtomicU64,
     complete_through_seq: AtomicU64,
+    complete_from_seq: AtomicU64,
     reserved_next: AtomicU64,
     published_seq: AtomicU64,
     dropped: AtomicU64,
@@ -116,9 +117,12 @@ pub struct JournalStatus {
     /// Largest event cursor confirmed committed, not an acknowledgement of
     /// every lower cursor: inspect gap / dropped_events as well.
     pub committed_seq: u64,
-    /// Every observed event through this boundary was committed; later records
-    /// may also be committed, but drops/crash uncertainty prevent that claim.
+    /// Every cursor in (complete_from_seq, complete_through_seq] was committed.
+    /// Earlier missing intervals still require reconciliation via replay gap.
     pub complete_through_seq: u64,
+    /// Exclusive start of the latest contiguous committed segment. Equal to
+    /// complete_through_seq when no event in the current segment is committed.
+    pub complete_from_seq: u64,
     pub dropped_events: u64,
     pub available: bool,
 }
@@ -180,12 +184,22 @@ impl EventJournal {
             .first()
             .map(|event| event.seq - 1)
             .unwrap_or(0);
+        let mut complete_from = complete;
         for event in &recovery.events {
             if event.seq != complete.saturating_add(1) {
-                break;
+                complete_from = event.seq - 1;
             }
             complete = event.seq;
         }
+        // A fresh journal seeded above legacy webhook state, or a reserved
+        // crash tail, starts a new segment without claiming the missing range.
+        if recovery.next_seq > complete.saturating_add(1) {
+            complete = recovery.next_seq - 1;
+            complete_from = complete;
+        }
+        health
+            .complete_from_seq
+            .store(complete_from, Ordering::Release);
         health
             .complete_through_seq
             .store(complete, Ordering::Release);
@@ -218,13 +232,15 @@ impl EventJournal {
                     batch.clear();
                     continue;
                 }
-                shared.committed_seq.store(last, Ordering::Release);
                 let mut complete = shared.complete_through_seq.load(Ordering::Acquire);
                 for event in &batch {
-                    if event.seq != complete.saturating_add(1) { break; }
+                    if event.seq != complete.saturating_add(1) {
+                        shared.complete_from_seq.store(event.seq - 1, Ordering::Release);
+                    }
                     complete = event.seq;
                 }
                 shared.complete_through_seq.store(complete, Ordering::Release);
+                shared.committed_seq.store(last, Ordering::Release);
                 batch.clear();
             }
             // All publishers are gone and the queue is drained. Releasing the
@@ -292,9 +308,16 @@ impl EventJournal {
     }
 
     pub fn status(&self) -> JournalStatus {
+        let complete_through_seq = self.health.complete_through_seq.load(Ordering::Acquire);
+        let complete_from_seq = self
+            .health
+            .complete_from_seq
+            .load(Ordering::Acquire)
+            .min(complete_through_seq);
         JournalStatus {
             committed_seq: self.health.committed_seq.load(Ordering::Acquire),
-            complete_through_seq: self.health.complete_through_seq.load(Ordering::Acquire),
+            complete_through_seq,
+            complete_from_seq,
             dropped_events: self.health.dropped.load(Ordering::Acquire),
             available: !self.health.failed.load(Ordering::Acquire)
                 && !self.health.closed.load(Ordering::Acquire),
@@ -471,6 +494,37 @@ mod tests {
         let restarted = RealtimeBus::durable(classes(), store, 1).unwrap();
         assert!(restarted.publish(body(100_002)) > 100_001);
         assert!(restarted.backfill(&filter(), 100_001, 10).gap);
+    }
+
+    #[test]
+    fn complete_watermark_advances_after_legacy_upgrade_and_crash_gap() {
+        for recovered in [false, true] {
+            let store = Arc::new(MemoryStore::default());
+            if recovered {
+                let mut saved = store.saved.lock().unwrap();
+                saved.next_seq = 100;
+                let source = RealtimeBus::blocks_only();
+                for height in 1..=3 {
+                    source.publish(body(height));
+                }
+                saved.events = source
+                    .backfill(&filter(), 0, 3)
+                    .events
+                    .iter()
+                    .map(|event| ReplayEvent::from(event.as_ref()))
+                    .collect();
+            }
+            let bus = RealtimeBus::durable(classes(), store, 50).unwrap();
+            let seq = bus.publish(body(50));
+            wait_until(|| bus.journal_status().unwrap().committed_seq == seq);
+            let status = bus.journal_status().unwrap();
+            assert_eq!(status.complete_through_seq, seq);
+            assert_eq!(serde_json::to_value(&status).unwrap()["complete_from_seq"], seq - 1);
+            assert!(
+                bus.backfill(&filter(), 0, 100).gap,
+                "old missing interval is still a gap"
+            );
+        }
     }
 
     #[test]

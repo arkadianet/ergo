@@ -175,8 +175,12 @@ REST state even if the page contains useful records.
 
 - `committed_seq`: largest record cursor confirmed committed. Earlier missing
   observations are still possible; this is not a contiguous acknowledgement.
-- `complete_through_seq`: contiguous confirmed history through this boundary;
-  inspect `gap` too, because older records can expire from retention.
+- `complete_from_seq`: exclusive start of the latest contiguous committed
+  segment. A crash interval or legacy webhook cursor starts a new segment.
+- `complete_through_seq`: every cursor after `complete_from_seq` through this
+  boundary is committed. Equal boundaries describe an empty segment. This
+  watermark continues advancing after a gap; inspect `gap` for older missing
+  intervals and expired retention.
 - `dropped_events`: observations lost by journal admission or failed writes this session.
 - `available`: whether journal persistence is currently operating.
 

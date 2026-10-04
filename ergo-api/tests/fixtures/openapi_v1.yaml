@@ -9085,6 +9085,7 @@ components:
       required:
       - committed_seq
       - complete_through_seq
+      - complete_from_seq
       - dropped_events
       - available
       properties:
@@ -9097,12 +9098,19 @@ components:
             Largest event cursor confirmed committed, not an acknowledgement of
             every lower cursor: inspect gap / dropped_events as well.
           minimum: 0
+        complete_from_seq:
+          type: integer
+          format: int64
+          description: |-
+            Exclusive start of the latest contiguous committed segment. Equal to
+            complete_through_seq when no event in the current segment is committed.
+          minimum: 0
         complete_through_seq:
           type: integer
           format: int64
           description: |-
-            Every observed event through this boundary was committed; later records
-            may also be committed, but drops/crash uncertainty prevent that claim.
+            Every cursor in (complete_from_seq, complete_through_seq] was committed.
+            Earlier missing intervals still require reconciliation via replay gap.
           minimum: 0
         dropped_events:
           type: integer
