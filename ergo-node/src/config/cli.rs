@@ -21,7 +21,7 @@ pub enum Command {
     /// Upgrade all legacy databases in a stopped node's data directory in place.
     UpgradeData {
         data_dir: PathBuf,
-        /// Exactly [indexer] db_filename, including any configured path.
+        /// Exactly `[indexer] db_filename`, including any configured path.
         #[arg(long, default_value = "indexer.redb")]
         indexer_db: PathBuf,
         /// Remove legacy rollback copies after verification; requires an external backup to roll back.

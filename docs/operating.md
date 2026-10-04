@@ -429,8 +429,10 @@ the short journaled rename sequence, that sequence finishes before interruption
 is reported. Any failure exits non-zero with its reason. A kill or crash can
 leave `<filename>.redb-upgrade/`; rerun `upgrade-data` or start with automatic
 conversion enabled. The journal discards an unverified copy while retaining
-its original, or finishes installing a durably verified copy while retaining
-its backup. Existing rollback backups are never replaced. Do not manually
+its original, or finishes installing a durably verified copy before handling
+its backup. Recovery honors a discard decision already recorded in the journal,
+even when the retry uses default startup settings. Existing rollback backups
+are never replaced. Do not manually
 delete upgrade journals or copies between the two renames. An unclean legacy
 indexer requiring repair cannot be schema-probed without writing; cleanly shut
 down 0.11 first, or use `migrate-redb` to repair and verify a private copy on

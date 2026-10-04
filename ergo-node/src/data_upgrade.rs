@@ -1,7 +1,7 @@
 //! In-place file-format upgrades, shared by startup and the offline command.
 //!
 //! Inventory: state.redb (UTXO/digest and embedded wallet tables), peers.redb,
-//! webhooks.redb, and [indexer] db_filename. The wallet secret, mining queue,
+//! webhooks.redb, and `[indexer] db_filename`. The wallet secret, mining queue,
 //! policy/history, credentials and maintenance journals are JSON/files, not redb.
 
 use std::fs::{self, File, OpenOptions};
