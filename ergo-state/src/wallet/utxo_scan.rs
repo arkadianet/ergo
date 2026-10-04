@@ -323,9 +323,14 @@ pub(crate) fn invalidate_below_anchor(
 ) -> Result<(), redb::Error> {
     let table = txn.open_table(WALLET_UTXO_DISCOVERY)?;
     if let Some(row) = table.get(())? {
-        let meta: DiscoveryCoverage = serde_json::from_slice(&row.value())
-            .map_err(|e| redb::Error::Io(std::io::Error::other(e.to_string())))?;
-        if removed_height <= meta.anchor_height {
+        let invalidate = match serde_json::from_slice::<DiscoveryCoverage>(&row.value()) {
+            Ok(meta) => removed_height <= meta.anchor_height,
+            Err(error) => {
+                tracing::warn!(%error, "unreadable wallet discovery coverage; invalidating wallet during rollback");
+                true
+            }
+        };
+        if invalidate {
             txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
         }
     }

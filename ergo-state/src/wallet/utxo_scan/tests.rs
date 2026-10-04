@@ -410,3 +410,21 @@ fn wallet_rollback_below_discovery_anchor_invalidates_atomically() {
     txn.commit().unwrap();
     assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
 }
+
+#[test]
+fn corrupt_discovery_metadata_invalidates_wallet_without_aborting_rollback() {
+    use super::super::store::WalletStore;
+    let (_dir, db, _) = fixture(4);
+    discover(&db, false).unwrap();
+    let txn = crate::begin_write_qr(&db).unwrap();
+    txn.open_table(WALLET_UTXO_DISCOVERY)
+        .unwrap()
+        .insert((), b"broken JSON".to_vec())
+        .unwrap();
+    txn.commit().unwrap();
+    let store = super::super::store::RedbWalletStore::new(db.clone());
+    let mut txn = store.begin_write().unwrap();
+    txn.rollback_block(1001, &[], false).unwrap();
+    txn.commit().unwrap();
+    assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
+}
