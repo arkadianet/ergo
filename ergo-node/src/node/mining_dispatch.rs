@@ -486,7 +486,11 @@ pub(super) fn signal_mining_engine(
         RewardKeyResolution::Pending | RewardKeyResolution::Corrupt => return now,
     };
     let mempool = ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool);
+    let (operator_generation, private_transactions) =
+        handle.operator_snapshot(|queue| queue.selection_entries());
     let intent = BuildIntent {
+        private_transactions: Arc::new(private_transactions),
+        operator_generation,
         expected_parent: now.best_full_id,
         expected_height: now.best_full_height,
         mempool: Arc::new(mempool),

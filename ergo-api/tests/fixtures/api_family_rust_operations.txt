@@ -69,9 +69,13 @@ get /api/v1/mempool/summary
 get /api/v1/mempool/transactions
 get /api/v1/mempool/transactions/{tx_id}
 get /api/v1/mining/candidate
+get /api/v1/mining/candidate-details
 post /api/v1/mining/candidate-with-txs
+get /api/v1/mining/history
 get /api/v1/mining/miner-stats
 get /api/v1/mining/minerStats
+get /api/v1/mining/policy
+put /api/v1/mining/policy
 get /api/v1/mining/reward-address
 get /api/v1/mining/reward-pubkey
 post /api/v1/mining/solution

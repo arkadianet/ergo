@@ -2,11 +2,12 @@
 //! and API bridge, gated on `[mining] enabled`) and the off-loop candidate
 //! engine spawn (build-worker thread + coordinator task).
 
+use std::path::Path;
 use std::time::Duration;
 
 use ergo_state::HeaderSectionStore;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::NodeConfig;
 
@@ -54,6 +55,7 @@ pub(super) fn build_subsystem(
         }
         None => ergo_mining::handle::RewardKeySource::Wallet,
     };
+    let policy_path = config.data_dir.join("mining-policy.json");
     let handle = ergo_mining::handle::MiningHandle::with_reward_key(
         reward_key,
         config.chain_spec.monetary,
@@ -62,6 +64,11 @@ pub(super) fn build_subsystem(
         config.chain_spec.voting,
     )
     .with_network(config.network)
+    .with_outcome_journal(&config.data_dir.join("mining-history.json"))
+    .with_policy(config.mining_config.block_policy.clone())
+    .map_err(|e| -> NodeError { format!("[mining] {e}").into() })?
+    .with_policy_store(&policy_path)
+    .map_err(|e| -> NodeError { format!("[mining] {e}").into() })?
     .with_rent_config(
         config.mining_config.claim_storage_rent,
         config.mining_config.max_storage_rent_claims,
@@ -81,6 +88,11 @@ pub(super) fn build_subsystem(
             .map_err(|e| -> NodeError { format!("[mining] {e}").into() })?,
     )
     .map_err(|e| -> NodeError { format!("[mining] {e}").into() })?;
+    warn_if_saved_policy_overrides(
+        &handle.policy(),
+        &config.mining_config.block_policy,
+        &policy_path,
+    );
     let network_prefix = config.chain_spec.network_params.address_prefix;
     // Subscribe to the handle's serve-state-change notifications so the
     // bridge's longpoll wait wakes the instant the served candidate changes
@@ -88,6 +100,7 @@ pub(super) fn build_subsystem(
     let serve_rx = handle.subscribe_serve_changes();
     let bridge =
         crate::mining_bridge::MiningBridge::new(mining_submit_tx.clone(), network_prefix, serve_rx)
+            .with_handle(handle.clone())
             .into_dyn();
     match reward_key {
         ergo_mining::handle::RewardKeySource::Pinned(pk) => {
@@ -101,6 +114,23 @@ pub(super) fn build_subsystem(
         handle: Some(handle),
         bridge: Some(bridge),
     })
+}
+
+/// A policy saved through `PUT /api/v1/mining/policy` outranks the boot
+/// default in `[mining.block_policy]`. Say so once at startup when they
+/// differ, so an edited config file is not silently ignored.
+fn warn_if_saved_policy_overrides(
+    active: &ergo_mining::policy::BlockPolicy,
+    configured: &ergo_mining::policy::BlockPolicy,
+    saved: &Path,
+) {
+    if active != configured {
+        warn!(
+            path = %saved.display(),
+            "mining: the block policy saved through the API overrides [mining.block_policy] \
+             in the config file; remove the saved file to mine with the config file's policy",
+        );
+    }
 }
 
 /// What [`spawn_engine`] produces: the wiring the action loop needs plus
@@ -206,5 +236,123 @@ pub(super) fn spawn_engine(
         }),
         engine_handle: Some(task),
         worker_handle: Some(worker),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    // ----- helpers -----
+
+    /// A mainnet node with mining enabled whose data directory is `data_dir`.
+    fn mining_config(data_dir: &Path) -> NodeConfig {
+        let file = data_dir.join("ergo-node.toml");
+        // The api_key_hash of "hello", as Scala's sample config ships it.
+        std::fs::write(
+            &file,
+            "[mining]\nenabled = true\n\n[api.security]\napi_key_hash = \
+             \"324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf\"\n",
+        )
+        .unwrap();
+        NodeConfig::load(crate::config::Cli {
+            command: None,
+            config: Some(file),
+            network: Some("mainnet".into()),
+            peers: vec![],
+            data_dir: Some(data_dir.to_path_buf()),
+            ibd_flush_interval: 500,
+            cache_bytes: None,
+            checkpoint_height: None,
+            checkpoint_block_id: None,
+            mempool_disabled: false,
+            mempool_sort: None,
+            mining_enabled: true,
+            mining_public_key: None,
+        })
+        .unwrap()
+    }
+
+    #[derive(Clone, Default)]
+    struct Logs(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Logs {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+        type Writer = Logs;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Build the mining subsystem as boot does, returning it and the
+    /// warnings logged meanwhile.
+    fn boot_mining(config: &NodeConfig) -> (MiningSubsystem, String) {
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let subsystem = tracing::subscriber::with_default(subscriber, || {
+            build_subsystem(config, &Default::default(), &tx)
+        })
+        .unwrap_or_else(|e| panic!("mining boot refused: {e}"));
+        let logged = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        (subsystem, logged)
+    }
+
+    // ----- startup -----
+
+    #[test]
+    fn a_saved_policy_overriding_the_config_is_logged_at_boot() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = mining_config(directory.path());
+        let (_, logged) = boot_mining(&config);
+        assert!(!logged.contains("overrides"), "{logged}");
+
+        let saved = ergo_mining::policy::BlockPolicy {
+            rent_max_cost_basis_points: 0,
+            ..Default::default()
+        };
+        std::fs::write(
+            directory.path().join("mining-policy.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+        let (subsystem, logged) = boot_mining(&config);
+        assert_eq!(subsystem.handle.unwrap().policy(), saved);
+        assert!(
+            logged.contains("overrides [mining.block_policy]")
+                && logged.contains("mining-policy.json"),
+            "{logged}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_mining_history_does_not_refuse_boot() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = mining_config(directory.path());
+        std::fs::write(directory.path().join("mining-history.json"), b"{broken").unwrap();
+        let (subsystem, _) = boot_mining(&config);
+        let (persistent, error) = subsystem.handle.unwrap().outcome_journal_status();
+        assert!(persistent);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("mining-history.json.corrupt-")),
+            "{error:?}"
+        );
     }
 }

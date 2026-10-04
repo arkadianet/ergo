@@ -155,6 +155,8 @@ export const api = {
   // Mining surface — routes mount only when mining is wired (404 = off).
   // candidate is cheap on repeat calls (same-tip template cache node-side).
   miningCandidate: getMiningCandidate,
+  miningCandidateDetails: (msg, sequence) => walletReq(`/api/v1/mining/candidate-details?msg=${encodeURIComponent(msg)}&template_seq=${encodeURIComponent(sequence)}`),
+  miningHistory: () => walletReq('/api/v1/mining/history'),
   miningRewardAddress: () => getJson('/mining/rewardAddress'),
   miningRewardPublicKey: () => getJson('/mining/rewardPublicKey'),
   // Network mining landscape: last-`window` headers folded by miner pk,

@@ -2520,6 +2520,47 @@ paths:
                 $ref: '#/components/schemas/V1Error'
       security:
       - ApiKeyAuth: []
+  /api/v1/mining/candidate-details:
+    get:
+      tags:
+      - mining
+      summary: Operator-only transaction and rent inventory of one frozen template.
+      operationId: v1_mining_candidate_details_get
+      parameters:
+      - name: msg
+        in: query
+        description: 32-byte hexadecimal work ID
+        required: false
+        schema:
+          type: string
+      - name: template_seq
+        in: query
+        description: Exact retained publish sequence
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      responses:
+        '200':
+          description: Frozen template inventory and miner proceeds
+          content:
+            application/json:
+              schema: {}
+        '404':
+          description: Template was evicted or selectors do not match
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: No current template
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/mining/candidate-with-txs:
     post:
       tags:
@@ -2533,6 +2574,26 @@ paths:
       responses:
         '503':
           description: Forced-transaction candidate building not wired on this node
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/mining/history:
+    get:
+      tags:
+      - mining
+      summary: Bounded local template and solution history. Resets on restart.
+      operationId: v1_mining_history_get
+      responses:
+        '200':
+          description: Bounded operator mining history
+          content:
+            application/json:
+              schema: {}
+        '503':
+          description: Mining history unavailable
           content:
             application/json:
               schema:
@@ -2583,6 +2644,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/mining/policy:
+    get:
+      tags:
+      - mining
+      operationId: v1_mining_policy_get
+      responses:
+        '200':
+          description: Active durable block assembly policy
+          content:
+            application/json:
+              schema: {}
+      security:
+      - ApiKeyAuth: []
+    put:
+      tags:
+      - mining
+      operationId: v1_mining_policy_put
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        required: true
+      responses:
+        '200':
+          description: Saved policy; previously offered templates retired
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Malformed or contradictory policy
+        '500':
+          description: The policy could not be saved; the active policy is unchanged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/mining/reward-address:
     get:
       tags:
@@ -2691,7 +2790,7 @@ paths:
       operationId: v1_mining_status_get
       responses:
         '200':
-          description: Mining capability + template freshness (nulls until the template-cache seam is wired)
+          description: Mining capability and current served-template freshness
           content:
             application/json:
               schema:
@@ -9107,9 +9206,8 @@ components:
       description: |-
         The `mining/status` aggregate. Always `200` — safe to poll from an
         unauthenticated dashboard even when mining is off (hence T0). The
-        `last_template_*` / `template_seq` fields require the mining bridge to cache
-        its last-published template metadata; that seam is not wired yet, so they are
-        emitted as `null` (honest) rather than fabricated.
+        Freshness comes from the served cache and contains no transaction content.
+        `synced` means the mining-started latch when mining is enabled.
       required:
       - mining_enabled
       - synced
@@ -9725,6 +9823,7 @@ components:
       - tx_not_in_block
       - not_blacklisted
       - not_a_singleton_protocol
+      - template_not_found
       - bad_request
       - invalid_address
       - invalid_ergo_tree
