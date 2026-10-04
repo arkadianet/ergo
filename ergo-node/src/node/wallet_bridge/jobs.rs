@@ -236,7 +236,7 @@ pub(crate) fn reserved_inputs(db: &redb::Database) -> Result<BTreeSet<[u8; 32]>,
     Ok(reserved)
 }
 
-pub(super) fn create_owned(
+pub(super) async fn create_owned(
     ctx: &WriterContext<'_>,
     request: WalletJobRequest,
 ) -> Result<WalletJob, WalletAdminError> {
@@ -270,6 +270,7 @@ pub(super) fn create_owned(
     let read = ctx.db.begin_read().map_err(internal)?;
     let reader = WalletReader::new(&read);
     let mut matures_at = None;
+    let mut boxes = Vec::new();
     for value in task_box_ids(&request.task) {
         let bytes: [u8; 32] = hex::decode(value)
             .map_err(internal)?
@@ -299,6 +300,7 @@ pub(super) fn create_owned(
                 "job input provenance does not match its task".into(),
             ));
         }
+        boxes.push(wallet_box);
     }
     drop(read);
     // A job cannot sign before its rewards mature, so its schedule starts there.
@@ -312,6 +314,7 @@ pub(super) fn create_owned(
         | WalletJobTask::Rewards { destination, .. } => tracked_destination(ctx, destination)?,
         _ => {}
     }
+    dry_run(ctx, &request.task, &boxes).await?;
     create(ctx.db, request)
 }
 
@@ -685,42 +688,154 @@ fn renewal_outputs(
     Ok(outputs)
 }
 
+/// The zero-fee intent a job's transaction is built from.
+fn job_intent(
+    ctx: &WriterContext<'_>,
+    task: &WalletJobTask,
+    boxes: &[WalletBox],
+) -> Result<TxIntent, WalletAdminError> {
+    let outputs = match task {
+        WalletJobTask::Send { intent } => {
+            let mut intent = intent.clone();
+            intent.fee = Some("0".into());
+            return Ok(intent);
+        }
+        WalletJobTask::Consolidate { destination, .. } => {
+            vec![aggregated_output(ctx, boxes, destination, false)?]
+        }
+        WalletJobTask::Rewards { destination, .. } => {
+            vec![aggregated_output(ctx, boxes, destination, true)?]
+        }
+        WalletJobTask::Renew { .. } => renewal_outputs(ctx, boxes)?,
+    };
+    Ok(TxIntent {
+        outputs,
+        fee: Some("0".into()),
+        inputs: InputSource::BoxIds {
+            box_ids: task_box_ids(task).to_vec(),
+        },
+        data_inputs: DataInputSource::default(),
+        change_address: None,
+        allow_reemission_spend: matches!(task, WalletJobTask::Rewards { .. }),
+        allow_token_burn: false,
+    })
+}
+
+/// Build, without signing, the transaction a job will sign, so approval
+/// refuses an operation that could never be signed or admitted.
+async fn dry_run(
+    ctx: &WriterContext<'_>,
+    task: &WalletJobTask,
+    boxes: &[WalletBox],
+) -> Result<(), WalletAdminError> {
+    let intent = job_intent(ctx, task, boxes)?;
+    let unsigned = match (task, intent.outputs.as_slice()) {
+        // Wallet selection does not offer rewards that are still maturing, so
+        // build from the exact input IDs with the explicit-input builder that
+        // preparation's native builder wraps. The reward output carries no
+        // registers, so the transaction is the same.
+        (
+            WalletJobTask::Rewards { box_ids, .. },
+            [OutputIntent::Payment {
+                address,
+                value,
+                assets,
+                registers: None,
+            }],
+        ) => {
+            let request = ergo_api::wallet::sending::PaymentRequestDto {
+                address: address.clone(),
+                value: tx_build::parse_u64_dec(value, "output value")?,
+                assets: tx_build::parse_native_assets(assets)?
+                    .into_iter()
+                    .map(|(id, amount)| ergo_api::wallet::sending::AssetDto {
+                        token_id: hex::encode(id),
+                        amount,
+                    })
+                    .collect(),
+            };
+            tx_build::build_unsigned_tx(
+                &[request],
+                Some(box_ids),
+                None,
+                Some(0),
+                None,
+                ctx.state,
+                ctx.db,
+                ctx.chain.as_ref(),
+                ctx.cfg.network,
+            )
+            .await?
+            .bytes
+        }
+        (WalletJobTask::Rewards { .. }, _) => {
+            return Err(internal("reward retrieval builds one payment output"))
+        }
+        _ => {
+            let (built, _) = tx_build::build_transaction_impl_with_snapshot(
+                &intent,
+                ctx.state,
+                ctx.db,
+                ctx.chain.as_ref(),
+                ctx.cfg.network,
+                ctx.mempool.as_ref(),
+            )
+            .await?;
+            hex::decode(built.unsigned_transaction.bytes_hex()).map_err(internal)?
+        }
+    };
+    check_unsigned(ctx, &unsigned)
+}
+
+/// Consensus structure and admission size of an unsigned job transaction.
+/// Each job input is spent by one 56-byte Schnorr proof, so 64-byte
+/// placeholder proofs make the serialized size an upper bound.
+fn check_unsigned(ctx: &WriterContext<'_>, unsigned: &[u8]) -> Result<(), WalletAdminError> {
+    const PROOF_BOUND: usize = 64;
+    let unsigned = ergo_ser::transaction::read_unsigned_transaction(
+        &mut ergo_primitives::reader::VlqReader::new(unsigned),
+    )
+    .map_err(|error| internal(format!("unsigned transaction decode: {error}")))?;
+    let inputs = unsigned
+        .inputs
+        .iter()
+        .map(|input| {
+            ergo_ser::input::SpendingProof::new(vec![0; PROOF_BOUND], input.extension.clone())
+                .map(|spending_proof| ergo_ser::input::Input {
+                    box_id: input.box_id,
+                    spending_proof,
+                })
+                .map_err(|error| internal(format!("placeholder proof: {error:?}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let transaction = ergo_ser::transaction::Transaction {
+        inputs,
+        data_inputs: unsigned.data_inputs,
+        output_candidates: unsigned.output_candidates,
+    };
+    let size = sign_submit::serialize_signed_tx(&transaction)?.len();
+    if size > ctx.cfg.max_tx_size_bytes {
+        return Err(WalletAdminError::BadRequest(format!(
+            "job transaction (about {size} bytes) exceeds the configured {}-byte limit; \
+             approve fewer boxes per job",
+            ctx.cfg.max_tx_size_bytes
+        )));
+    }
+    let params = ctx
+        .chain
+        .build_protocol_params()
+        .map_err(super::map_chain_error)?;
+    ergo_validation::tx::structural::validate_structural(&transaction, &params)
+        .map_err(|error| WalletAdminError::BadRequest(format!("job transaction rejected: {error}")))
+}
+
 async fn prepare(ctx: &WriterContext<'_>, record: &Record) -> Result<Vec<u8>, WalletAdminError> {
     super::scan_guard::require_valid_scan(ctx.store.as_ref())?;
     if ctx.storage.read().unlocked().is_none() {
         return Err(WalletAdminError::Locked);
     }
     let boxes = loaded_boxes(ctx, &record.job.request.task)?;
-    let intent = match &record.job.request.task {
-        WalletJobTask::Send { intent } => {
-            let mut intent = intent.clone();
-            intent.fee = Some("0".into());
-            intent
-        }
-        task => {
-            let outputs = match task {
-                WalletJobTask::Consolidate { destination, .. } => {
-                    vec![aggregated_output(ctx, &boxes, destination, false)?]
-                }
-                WalletJobTask::Rewards { destination, .. } => {
-                    vec![aggregated_output(ctx, &boxes, destination, true)?]
-                }
-                WalletJobTask::Renew { .. } => renewal_outputs(ctx, &boxes)?,
-                WalletJobTask::Send { .. } => unreachable!(),
-            };
-            TxIntent {
-                outputs,
-                fee: Some("0".into()),
-                inputs: InputSource::BoxIds {
-                    box_ids: task_box_ids(task).to_vec(),
-                },
-                data_inputs: DataInputSource::default(),
-                change_address: None,
-                allow_reemission_spend: matches!(task, WalletJobTask::Rewards { .. }),
-                allow_token_burn: false,
-            }
-        }
-    };
+    let intent = job_intent(ctx, &record.job.request.task, &boxes)?;
     let (built, pool) = tx_build::build_transaction_impl_with_snapshot(
         &intent,
         ctx.state,

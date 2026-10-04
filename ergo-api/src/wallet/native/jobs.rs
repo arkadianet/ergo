@@ -23,8 +23,10 @@ pub(crate) async fn list(
     request_body = dto::WalletJobRequest,
     responses(
         (status = 200, description = "One approved, finite private maintenance job", body = dto::WalletJob),
-        (status = 400, description = "Invalid schedule, operation or pinned inputs", body = error::NativeWalletError),
-        (status = 409, description = "The wallet is locked", body = error::NativeWalletError),
+        (status = 400, description = "Invalid schedule, operation or pinned inputs, or a transaction consensus or the size limit would reject", body = error::NativeWalletError),
+        (status = 404, description = "A pinned input is not an unspent wallet box", body = error::NativeWalletError),
+        (status = 409, description = "The wallet is locked or its scan is invalidated", body = error::NativeWalletError),
+        (status = 422, description = "The pinned inputs cannot fund or sign the operation", body = error::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]

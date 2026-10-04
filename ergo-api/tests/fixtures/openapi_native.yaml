@@ -726,13 +726,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/WalletJob'
         '400':
-          description: Invalid schedule, operation or pinned inputs
+          description: Invalid schedule, operation or pinned inputs, or a transaction consensus or the size limit would reject
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '404':
+          description: A pinned input is not an unspent wallet box
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NativeWalletError'
         '409':
-          description: The wallet is locked
+          description: The wallet is locked or its scan is invalidated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '422':
+          description: The pinned inputs cannot fund or sign the operation
           content:
             application/json:
               schema:

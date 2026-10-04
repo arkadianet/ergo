@@ -346,7 +346,7 @@ impl Funded {
 
     /// Approve one job and run the scheduler wake that prepares and submits it.
     async fn prepare(&self, task: WalletJobTask) -> (WalletJob, Transaction) {
-        create_owned(&self.context(), self.job(task)).unwrap();
+        create_owned(&self.context(), self.job(task)).await.unwrap();
         tick(&self.context()).await.unwrap();
         let job = list(&self.db).unwrap().items.remove(0);
         assert_eq!(job.state, WalletJobState::Queued, "{:?}", job.detail);
@@ -398,14 +398,40 @@ impl Funded {
 /// Renewal of 70 boxes near the 4096-byte box limit: a ~283 KB signed
 /// transaction, whose hex record would not fit the 512 KiB journal bound.
 fn heavy_renewal(funded: &mut Funded) -> WalletJobRequest {
+    let boxes = heavy_boxes(funded);
+    let box_ids = funded.fund(boxes);
+    funded.job(WalletJobTask::Renew { box_ids })
+}
+
+fn heavy_boxes(funded: &Funded) -> Vec<(ErgoBoxCandidate, BoxProvenance)> {
     // R4 = Coll[Byte] of 3,900 bytes (VLQ length 0xbc 0x1e).
     let mut registers = vec![1, 0x0e, 0xbc, 0x1e];
     registers.resize(registers.len() + 3_900, 0x5a);
-    let boxes = (0..70)
+    (0..70)
         .map(|_| funded.owned(ERG / 100, &[], &registers))
-        .collect();
-    let box_ids = funded.fund(boxes);
-    funded.job(WalletJobTask::Renew { box_ids })
+        .collect()
+}
+
+/// A zero-fee payment of `value` (and `assets`) to a key this wallet does not
+/// track, from exactly `box_ids`.
+fn external_payment(box_ids: &[String], value: u64, assets: serde_json::Value) -> WalletJobTask {
+    let recipient = ergo_ser::address::encode_p2pk_from_pubkey(
+        ergo_ser::address::NetworkPrefix::Mainnet,
+        &hex::decode(EXTERNAL_KEY).unwrap(),
+    )
+    .unwrap();
+    let intent = serde_json::from_value(serde_json::json!({
+        "outputs": [{
+            "type": "payment",
+            "address": recipient,
+            "value": value.to_string(),
+            "assets": assets,
+        }],
+        "fee": "0",
+        "inputs": {"type": "boxIds", "boxIds": box_ids},
+    }))
+    .unwrap();
+    WalletJobTask::Send { intent }
 }
 
 fn tracked_tree(funded: &Funded) -> Vec<u8> {
@@ -508,23 +534,10 @@ async fn payment_returns_change_to_the_wallet_without_a_miner_fee() {
     let source = funded.owned(5 * ERG, &[(TOKEN_A, 10)], &[0]);
     let box_ids = funded.fund(vec![source]);
     let external = hex::decode(EXTERNAL_KEY).unwrap();
-    let recipient = ergo_ser::address::encode_p2pk_from_pubkey(
-        ergo_ser::address::NetworkPrefix::Mainnet,
-        &external,
-    )
-    .unwrap();
-    let intent: TxIntent = serde_json::from_value(serde_json::json!({
-        "outputs": [{
-            "type": "payment",
-            "address": recipient,
-            "value": ERG.to_string(),
-            "assets": [{"tokenId": hex::encode(TOKEN_A), "amount": "4"}],
-        }],
-        "fee": "0",
-        "inputs": {"type": "boxIds", "boxIds": box_ids},
-    }))
-    .unwrap();
-    let (_, transaction) = funded.prepare(WalletJobTask::Send { intent }).await;
+    let assets = serde_json::json!([{"tokenId": hex::encode(TOKEN_A), "amount": "4"}]);
+    let (_, transaction) = funded
+        .prepare(external_payment(&box_ids, ERG, assets))
+        .await;
     assert_eq!(transaction.output_candidates.len(), 2);
     let (payment, change) = (
         &transaction.output_candidates[0],
@@ -551,16 +564,20 @@ async fn approval_reserves_pinned_inputs_until_cancelled() {
     let source = funded.owned(ERG, &[(TOKEN_A, 42)], &[0]);
     let box_ids = funded.fund(vec![source]);
     let request = funded.job(WalletJobTask::Renew { box_ids });
-    let job = create_owned(&funded.context(), request.clone()).unwrap();
+    let job = create_owned(&funded.context(), request.clone())
+        .await
+        .unwrap();
     assert_eq!(job.state, WalletJobState::Waiting);
     assert_eq!(job.attempts, 0);
-    assert!(create_owned(&funded.context(), request.clone()).is_err());
+    assert!(create_owned(&funded.context(), request.clone())
+        .await
+        .is_err());
     assert_eq!(list(&funded.db).unwrap().items[0].request, request);
     for _ in 0..2 {
         let cancelled = cancel(&funded.context(), &job.id).await.unwrap();
         assert_eq!(cancelled.state, WalletJobState::Cancelled);
     }
-    create_owned(&funded.context(), request).unwrap();
+    create_owned(&funded.context(), request).await.unwrap();
 }
 
 // ----- error paths -----
@@ -572,18 +589,18 @@ async fn approval_requires_an_unlocked_wallet_and_a_bounded_deadline() {
     let mut request = funded.job(WalletJobTask::Renew { box_ids });
     funded.storage.write().lock();
     assert!(matches!(
-        create_owned(&funded.context(), request.clone()),
+        create_owned(&funded.context(), request.clone()).await,
         Err(WalletAdminError::Locked)
     ));
     assert!(list(&funded.db).unwrap().items.is_empty());
     funded.storage.write().unlock("test").unwrap();
     request.expires_at_height = TIP + MAX_SCHEDULE_BLOCKS + 1;
     assert!(matches!(
-        create_owned(&funded.context(), request.clone()),
+        create_owned(&funded.context(), request.clone()).await,
         Err(WalletAdminError::BadRequest(_))
     ));
     request.expires_at_height -= 1;
-    create_owned(&funded.context(), request).unwrap();
+    create_owned(&funded.context(), request).await.unwrap();
 }
 
 #[tokio::test]
@@ -597,6 +614,7 @@ async fn prepare_time_conflict_fails_the_approval_for_good() {
             box_ids: box_ids.clone(),
         }),
     )
+    .await
     .unwrap();
     let spent = BoxStatus::Spent {
         spent_in_tx: [0x77; 32],
@@ -680,11 +698,11 @@ async fn maturing_rewards_start_at_maturity_and_wait_without_spending_attempts()
         destination: funded.address.clone(),
     });
     assert!(matches!(
-        create_owned(&funded.context(), request.clone()),
+        create_owned(&funded.context(), request.clone()).await,
         Err(WalletAdminError::BadRequest(_))
     ));
     request.not_before_height = TIP + 1;
-    create_owned(&funded.context(), request).unwrap();
+    create_owned(&funded.context(), request).await.unwrap();
     // The chain reaches maturity before the wallet records the promotion.
     funded.advance(None);
     tick(&funded.context()).await.unwrap();
@@ -714,6 +732,7 @@ async fn invalidated_scan_waits_without_spending_attempts() {
         &funded.context(),
         funded.job(WalletJobTask::Renew { box_ids }),
     )
+    .await
     .unwrap();
     let invalidate = |invalidated: bool| {
         let write = funded.db.begin_write().unwrap();
@@ -738,4 +757,56 @@ async fn invalidated_scan_waits_without_spending_attempts() {
     let job = list(&funded.db).unwrap().items.remove(0);
     assert_eq!(job.state, WalletJobState::Queued);
     assert_eq!(job.attempts, 1);
+}
+
+#[tokio::test]
+async fn approval_refuses_operations_that_could_never_sign() {
+    let mut funded = Funded::new();
+    // Each box fits the 4096-byte limit; one output holding both does not.
+    let tokens = |seed: u8| -> Vec<([u8; 32], u64)> {
+        (0..55)
+            .map(|index| {
+                let mut id = [seed; 32];
+                id[0] = index;
+                (id, 1 << 62)
+            })
+            .collect()
+    };
+    let mut boxes = vec![
+        funded.owned(ERG, &tokens(0xC1), &[0]),
+        funded.owned(ERG, &tokens(0xC2), &[0]),
+        funded.owned(ERG, &[], &[0]),
+    ];
+    boxes.extend(heavy_boxes(&funded));
+    let box_ids = funded.fund(boxes);
+    let (token_boxes, source, heavy) = (&box_ids[..2], &box_ids[2..3], &box_ids[3..]);
+    let refusal = |result: Result<WalletJob, WalletAdminError>| match result {
+        Err(error) => error.to_string(),
+        Ok(job) => panic!("approved a job that cannot sign: {job:?}"),
+    };
+    let consolidation = funded.job(WalletJobTask::Consolidate {
+        box_ids: token_boxes.to_vec(),
+        destination: funded.address.clone(),
+    });
+    assert!(
+        refusal(create_owned(&funded.context(), consolidation).await)
+            .contains("job transaction rejected")
+    );
+    let dust_change = funded.job(external_payment(source, ERG - 1_000, serde_json::json!([])));
+    assert!(refusal(create_owned(&funded.context(), dust_change).await)
+        .contains("change above the minimum box value"));
+    let overdraft = funded.job(external_payment(source, 2 * ERG, serde_json::json!([])));
+    assert!(matches!(
+        create_owned(&funded.context(), overdraft).await,
+        Err(WalletAdminError::InsufficientFunds(_))
+    ));
+    let renewal = funded.job(WalletJobTask::Renew {
+        box_ids: heavy.to_vec(),
+    });
+    assert!(refusal(create_owned(&funded.context(), renewal).await)
+        .contains("configured 98304-byte limit"));
+    assert!(list(&funded.db).unwrap().items.is_empty());
+    // Refusals reserve nothing; an operation that fits is approved.
+    let payment = funded.job(external_payment(source, ERG / 2, serde_json::json!([])));
+    create_owned(&funded.context(), payment).await.unwrap();
 }

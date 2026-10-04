@@ -14,6 +14,13 @@ creation height. Consolidation preserves all token units and refuses a selection
 that cannot fit a single output. Reward retrieval still pays required EIP-27
 re-emission obligations; a zero miner fee does not waive those obligations.
 
+Approval builds the job's unsigned transaction and checks it against consensus
+structure and the configured transaction size limit, so an operation that could
+never sign is refused at once: insufficient funds, zero-fee change below the
+minimum box value, an output above the 4,096-byte box limit or below its
+minimum value, a transaction above `[mempool] max_tx_size_bytes`, or a renewal
+input that is not a tracked P2PK box.
+
 Approving a job requires an initialized, validly scanned and unlocked wallet,
 like an intent send: the node later signs the job with the wallet key. The
 expiry height may be at most 21,600 blocks (about 30 days) above the chain tip

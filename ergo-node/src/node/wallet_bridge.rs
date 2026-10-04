@@ -1496,7 +1496,7 @@ pub async fn run_wallet_writer_supervised(
                 let _ = reply.send(jobs::list(&db));
             }
             WalletCommand::CreateMiningJob { request, reply } => {
-                let _ = reply.send(jobs::create_owned(&ctx, request));
+                let _ = reply.send(jobs::create_owned(&ctx, request).await);
             }
             WalletCommand::CancelMiningJob { job_id, reply } => {
                 let _ = reply.send(jobs::cancel(&ctx, &job_id).await);
