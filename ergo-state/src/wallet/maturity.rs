@@ -113,7 +113,9 @@ pub fn unpromote_matured_boxes(
         if !matches!(wb.status, BoxStatus::Confirmed) {
             continue;
         }
-        let matures_at = wb.creation_height.saturating_add(REWARD_MATURITY_MAINNET);
+        let matures_at =
+            crate::wallet::utxo_scan::reward_creation_height(txn, wb.box_id, wb.creation_height)?
+                .saturating_add(REWARD_MATURITY_MAINNET);
         if matures_at > new_tip_height {
             to_unpromote.push(k.value());
         }
@@ -128,7 +130,12 @@ pub fn unpromote_matured_boxes(
                     format!("WalletBox deserialize: {e}"),
                 ))
             })?;
-            let matures_at = wb.creation_height.saturating_add(REWARD_MATURITY_MAINNET);
+            let matures_at = crate::wallet::utxo_scan::reward_creation_height(
+                txn,
+                wb.box_id,
+                wb.creation_height,
+            )?
+            .saturating_add(REWARD_MATURITY_MAINNET);
             wb.status = BoxStatus::Immature { matures_at };
             let bytes = bincode::serialize(&wb).map_err(|e| {
                 redb::Error::Io(std::io::Error::other(format!("WalletBox serialize: {e}")))

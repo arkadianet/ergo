@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 /// Offline operator commands. These never start the node or load its config.
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum Command {
     /// Copy and upgrade a stopped legacy redb database; never replace either path.
     MigrateRedb {
@@ -17,6 +17,32 @@ pub enum Command {
         source: PathBuf,
         /// New database path in an existing directory; must not exist.
         destination: PathBuf,
+    },
+    /// Verify and copy a stopped node's complete data directory.
+    Backup {
+        data_dir: PathBuf,
+        destination: PathBuf,
+    },
+    /// Verify checksums, committed metadata and UTXO root in a backup.
+    VerifyBackup { directory: PathBuf },
+    /// Restore a verified backup into a new data directory.
+    Restore {
+        directory: PathBuf,
+        destination: PathBuf,
+        /// Confirm that private transactions and wallet jobs from this backup may run again.
+        #[arg(long)]
+        keep_pending_work: bool,
+    },
+    /// Inspect a stopped node without repairing or changing its databases.
+    Doctor { data_dir: PathBuf },
+    /// Verify and report logical current-UTXO storage usage.
+    UtxoStats { data_dir: PathBuf },
+    /// Discover tracked wallet holdings from current UTXOs; no historical blocks required.
+    WalletScanUtxo {
+        data_dir: PathBuf,
+        /// Discard a previous checkpoint and start at the current committed tip.
+        #[arg(long)]
+        restart: bool,
     },
 }
 

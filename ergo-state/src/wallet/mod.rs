@@ -15,11 +15,13 @@ pub mod apply;
 pub mod hydration;
 pub mod maturity;
 pub mod miner_reward;
+pub mod mining_jobs;
 pub mod reader;
 pub mod scan;
 pub mod store;
 pub mod tables;
 pub mod types;
+pub mod utxo_scan;
 
 use redb::ReadableDatabase;
 use std::sync::Arc;
@@ -125,6 +127,9 @@ fn read_chain_index_header(db: &Database, height: u32) -> Result<[u8; 32], State
     let table = match txn.open_table(CHAIN_INDEX) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => {
+            if let Some(id) = utxo_scan::committed_discovery_anchor(&txn, height)? {
+                return Ok(id);
+            }
             return Err(StateError::DbCorruption {
                 table: "chain_index",
                 key: hex::encode((height as u64).to_be_bytes()),
@@ -133,13 +138,19 @@ fn read_chain_index_header(db: &Database, height: u32) -> Result<[u8; 32], State
         }
         Err(error) => return Err(error.into()),
     };
-    let bytes = table
-        .get(height as u64)?
-        .ok_or_else(|| StateError::DbCorruption {
-            table: "chain_index",
-            key: hex::encode((height as u64).to_be_bytes()),
-            reason: "wallet cursor points to a height without chain_index".to_string(),
-        })?;
+    let bytes = match table.get(height as u64)? {
+        Some(bytes) => bytes,
+        None => {
+            if let Some(id) = utxo_scan::committed_discovery_anchor(&txn, height)? {
+                return Ok(id);
+            }
+            return Err(StateError::DbCorruption {
+                table: "chain_index",
+                key: hex::encode((height as u64).to_be_bytes()),
+                reason: "wallet cursor points to a height without chain_index".to_string(),
+            });
+        }
+    };
     let bytes = bytes.value();
     if bytes.len() != 32 {
         return Err(StateError::DbCorruption {

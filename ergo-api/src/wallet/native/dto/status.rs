@@ -16,7 +16,7 @@ pub enum NetworkDto {
     Testnet,
 }
 
-/// Wallet rescan lifecycle phase. `required` means a full rescan is needed;
+/// Wallet rescan lifecycle phase. `required` means discovery or a full rescan is needed;
 /// `unavailable` means the backend cannot replay blocks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -63,8 +63,23 @@ pub struct WalletStatusDto {
     pub eip27_active: bool,
     /// Rescan lifecycle phase.
     pub rescan: RescanStateDto,
-    /// The wallet scan was invalidated; a full rescan (fromHeight=0) is required.
+    /// The wallet scan was invalidated; offline discovery or a full rescan is required.
     pub scan_invalidated: bool,
+    /// Present after current-UTXO discovery; historical transactions before
+    /// the anchor have not been reconstructed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryCoverageDto>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryCoverageDto {
+    pub anchor_height: u32,
+    pub anchor_header_id: String,
+    pub history_complete: bool,
+    pub covered_pubkeys: Vec<String>,
+    /// Keys added since discovery; nonempty means discovery is required again.
+    pub uncovered_pubkeys: Vec<String>,
 }
 
 /// Key-derivation mode for `restore` (tagged). Required — no default (the
@@ -191,6 +206,7 @@ mod tests {
             eip27_active: true,
             rescan: RescanStateDto::Idle,
             scan_invalidated: false,
+            discovery: None,
         };
         let back: WalletStatusDto =
             serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();

@@ -863,7 +863,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/NativeWalletError'
         '409':
-          description: Wallet exists / restore unsupported on a pruned node
+          description: Wallet already exists
           content:
             application/json:
               schema:
@@ -3766,6 +3766,32 @@ components:
           format: int32
           description: Address index — the last path component.
           minimum: 0
+    DiscoveryCoverageDto:
+      type: object
+      required:
+      - anchorHeight
+      - anchorHeaderId
+      - historyComplete
+      - coveredPubkeys
+      - uncoveredPubkeys
+      properties:
+        anchorHeaderId:
+          type: string
+        anchorHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        coveredPubkeys:
+          type: array
+          items:
+            type: string
+        historyComplete:
+          type: boolean
+        uncoveredPubkeys:
+          type: array
+          items:
+            type: string
+          description: Keys added since discovery; nonempty means discovery is required again.
     ExternalSecret:
       oneOf:
       - type: object
@@ -4238,7 +4264,7 @@ components:
             enum:
             - unavailable
       description: |-
-        Wallet rescan lifecycle phase. `required` means a full rescan is needed;
+        Wallet rescan lifecycle phase. `required` means discovery or a full rescan is needed;
         `unavailable` means the backend cannot replay blocks.
     RestoreRequest:
       type: object
@@ -4785,6 +4811,11 @@ components:
             Creation height the unspent box itself declares, from which storage rent
             is counted; it can precede `creationHeight`. `null` once spent.
           minimum: 0
+        inclusionHeightKnown:
+          type: boolean
+          description: |-
+            False after UTXO discovery: creationHeight is first observed height,
+            so confirmation filters remain conservative.
         provenance:
           $ref: '#/components/schemas/BoxProvenanceDto'
         status:
@@ -4991,6 +5022,13 @@ components:
             Current change address, or `null` when unset (never `""`). Surfaced even
             while locked — it is read from the persisted change-address state, not the
             in-memory key.
+        discovery:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/DiscoveryCoverageDto'
+            description: |-
+              Present after current-UTXO discovery; historical transactions before
+              the anchor have not been reconstructed.
         eip27Active:
           type: boolean
           description: |-
@@ -5015,7 +5053,7 @@ components:
           minimum: 0
         scanInvalidated:
           type: boolean
-          description: The wallet scan was invalidated; a full rescan (fromHeight=0) is required.
+          description: The wallet scan was invalidated; offline discovery or a full rescan is required.
         tipHeight:
           type: integer
           format: int32

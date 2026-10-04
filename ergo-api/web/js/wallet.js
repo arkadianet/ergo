@@ -19,7 +19,7 @@ import { fetchTokenMeta, tokenName, getTokenMeta } from './token-meta.js';
 import { createWalletBuilder } from './wallet-builder.js';
 import { createPrivateMiningQueue } from './wallet-private.js';
 import { createWalletMaintenance, describeMaintenanceJob, pendingMaintenance, recipientLines } from './wallet-maintenance.js';
-import { decimal } from './wallet-transaction.js';
+import { decimal, walletRecoveryMessage } from './wallet-transaction.js';
 
 let root = null;
 let authUnsub = null;
@@ -357,14 +357,9 @@ async function lockWallet() {
 // ── scan-invalidated banner ──────────────────────────────────────────────────
 function renderScanBanner(s) {
   const b = q('[data-scan-banner]');
-  if (s.error === 'scan_invalidated') {
-    b.textContent =
-      'Wallet scan invalidated — balances and addresses may be stale until a rescan. ' +
-      'Trigger one from the CLI/API (POST /wallet/rescan).';
-    b.hidden = false;
-  } else {
-    b.hidden = true;
-  }
+  const message = walletRecoveryMessage(s.error);
+  b.textContent = message || '';
+  b.hidden = !message;
 }
 
 // ── reads: balances + addresses ──────────────────────────────────────────────
