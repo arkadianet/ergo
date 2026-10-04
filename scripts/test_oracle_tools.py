@@ -2,12 +2,14 @@
 
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "test-vectors/scripts"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "test-vectors/scripts"))
 import rejection_corpus as corpus
 import verify_bytes_to_sign as messages
 
@@ -73,6 +75,13 @@ class CorpusTests(unittest.TestCase):
             completed = subprocess.CompletedProcess([], 0, stdout="\n".join(map(json.dumps, rows)))
             with patch.object(corpus.subprocess, "run", return_value=completed), self.assertRaises(ValueError):
                 corpus.mutations(self.context, ["fixture-helper"])
+
+    def test_categories_match_the_pinned_corpus_and_the_scala_helper(self):
+        pinned = json.loads((ROOT / "test-vectors/mainnet/scala_rejection_corpus.json").read_text())
+        self.assertEqual({row["label"]: row["expectedCategory"] for row in pinned}, corpus.CATEGORIES)
+        helper = (ROOT / "test-vectors/scripts/scala/BuildMutations.scala").read_text()
+        emitted = dict(re.findall(r'emit\("(\w+)", "(\w+)"', helper))
+        self.assertEqual(emitted, corpus.CATEGORIES)
 
 
 if __name__ == "__main__":

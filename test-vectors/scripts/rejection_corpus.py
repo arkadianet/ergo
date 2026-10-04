@@ -15,7 +15,13 @@ from verify_bytes_to_sign import write_report
 HERE = Path(__file__).resolve().parent
 CATEGORIES = {
     "erg_inflation": "MONETARY", "duplicate_inputs": "STRUCTURAL",
-    "invalid_proof": "PROOF", "empty_proof_nontrivial": "SCRIPT",
+    # Both proof mutations spend the source box into one output worth 0.001 ERG
+    # less, so they are ERG-unbalanced. Scala's fail-fast validateStateful
+    # checks txErgPreservation (ErgoTransaction.scala:430) before verifyInput
+    # (:437), and Rust runs validate_monetary before validate_scripts, so both
+    # nodes reject them as MONETARY without reaching a proof. The pinned
+    # corpus records them so.
+    "invalid_proof": "MONETARY", "empty_proof_nontrivial": "MONETARY",
     "no_inputs": "STRUCTURAL", "missing_input_box": "STRUCTURAL",
     "output_value_too_low": "MONETARY",
 }

@@ -72,13 +72,19 @@ object BuildMutations extends JsonCodecs {
       emit("duplicate_inputs", "STRUCTURAL", tx, height, sourceBox, contextSourceBox)
     }
 
+    // Mutations 3 and 4 pay boxValue - 1000000 from boxValue, so they are
+    // ERG-unbalanced. validateStateful is fail-fast and checks
+    // txErgPreservation (ErgoTransaction.scala:430) before verifyInput (:437),
+    // so the reference rejects both as MONETARY before checking any proof, as
+    // the Rust validator does (validate_monetary precedes validate_scripts).
+
     // --- Mutation 3: Invalid proof (wrong bytes) ---
     {
       val normalOut = new ErgoBoxCandidate(boxValue - 1000000L, simpleTree, height)
       val badProof = Array.fill(32)(0xAB.toByte)
       val input = makeInput(boxIdBytes, badProof)
       val tx = new ErgoLikeTransaction(IndexedSeq(input), IndexedSeq.empty, IndexedSeq(normalOut))
-      emit("invalid_proof", "PROOF", tx, height, sourceBox, contextSourceBox)
+      emit("invalid_proof", "MONETARY", tx, height, sourceBox, contextSourceBox)
     }
 
     // --- Mutation 4: Empty proof on non-trivial script ---
@@ -86,7 +92,7 @@ object BuildMutations extends JsonCodecs {
       val normalOut = new ErgoBoxCandidate(boxValue - 1000000L, simpleTree, height)
       val input = makeInput(boxIdBytes)
       val tx = new ErgoLikeTransaction(IndexedSeq(input), IndexedSeq.empty, IndexedSeq(normalOut))
-      emit("empty_proof_nontrivial", "SCRIPT", tx, height, sourceBox, contextSourceBox)
+      emit("empty_proof_nontrivial", "MONETARY", tx, height, sourceBox, contextSourceBox)
     }
 
     // --- Mutation 5: No inputs ---
