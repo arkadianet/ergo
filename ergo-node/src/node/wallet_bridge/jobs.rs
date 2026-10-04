@@ -413,29 +413,38 @@ pub(super) async fn cancel(
         return Ok(record.job);
     }
     if let Some(tx_id) = &record.job.tx_id {
-        if !ctx.submit_handle.private_mining_configured() {
-            // Nothing is queued on a node without private mining, so absence is
-            // definitive; only a confirmation the wallet's history already
-            // shows refuses the cancellation.
-            if mined_in_wallet(ctx, tx_id, 0)? == Some(true) {
-                transition(
-                    &mut record,
-                    WalletJobState::Mined,
-                    Some(MINED_IN_WALLET.into()),
-                );
-                save(ctx.db, job_id, &record)?;
-                return Err(WalletAdminError::BadRequest(
-                    "the job transaction is already confirmed and cannot be cancelled".into(),
-                ));
-            }
-        } else if bounded_rpc(ctx.submit_handle.private_transaction_status(tx_id.clone()))
-            .await
-            .map_err(sign_submit::map_submit_error)?
-            .is_some()
-        {
+        // A queue stored on disk keeps admitted work while mining is disabled,
+        // and enabling mining would mine it, so it is withdrawn there too.
+        // Only a node without any private queue has nothing queued.
+        let queued =
+            match bounded_rpc(ctx.submit_handle.private_transaction_status(tx_id.clone())).await {
+                Ok(entry) => entry.is_some(),
+                Err(error)
+                    if !ctx.submit_handle.private_mining_configured()
+                        && error.reason == "private_mining_unavailable" =>
+                {
+                    false
+                }
+                Err(error) => return Err(sign_submit::map_submit_error(error)),
+            };
+        if queued {
             bounded_rpc(ctx.submit_handle.cancel_private_transaction(tx_id.clone()))
                 .await
                 .map_err(sign_submit::map_submit_error)?;
+        } else if !ctx.submit_handle.private_mining_configured()
+            // Without queue knowledge, only a confirmation the wallet's
+            // history already shows refuses the cancellation.
+            && mined_in_wallet(ctx, tx_id, 0)? == Some(true)
+        {
+            transition(
+                &mut record,
+                WalletJobState::Mined,
+                Some(MINED_IN_WALLET.into()),
+            );
+            save(ctx.db, job_id, &record)?;
+            return Err(WalletAdminError::BadRequest(
+                "the job transaction is already confirmed and cannot be cancelled".into(),
+            ));
         }
     }
     transition(&mut record, WalletJobState::Cancelled, None);

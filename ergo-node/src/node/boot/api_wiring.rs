@@ -229,7 +229,7 @@ pub(super) async fn bind(
             // burn-aware builder + self-verify gate share consensus.
             super::build_reemission_rules(&config.chain_spec),
         )
-        .with_private_queue(private_queue),
+        .with_private_queue(private_queue.clone()),
     );
     let wallet_storage = {
         let secret_dir = config.data_dir.join("wallet");
@@ -284,7 +284,8 @@ pub(super) async fn bind(
     };
     let submit_handle: Arc<dyn super::super::wallet_bridge::TxSubmitter> = Arc::new(
         super::super::wallet_bridge::NodeSubmitAdapter::new(submit_bridge.clone())
-            .with_private_mining(mining_bridge.clone()),
+            .with_private_mining(mining_bridge.clone())
+            .with_stored_private_queue(private_queue),
     );
     let wallet_rescan = Arc::new(crate::wallet_boot::RescanControl::default());
     let (wallet_cancel, wallet_shutdown) = tokio::sync::watch::channel(false);

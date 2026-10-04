@@ -13,6 +13,9 @@ use crate::node::wallet_bridge::{ChainStateAccessor, TxSubmitter, WriterConfig};
 struct Probe {
     /// Behaves like a node without `[mining]`: every private call fails.
     mining_disabled: AtomicBool,
+    /// With mining disabled, a queue file loaded at boot still answers
+    /// listing and cancellation.
+    stored_queue: AtomicBool,
     snapshots: AtomicUsize,
     snapshot_hangs: AtomicBool,
     snapshot_fails: AtomicBool,
@@ -41,8 +44,7 @@ impl TxSubmitter for Probe {
         if self.snapshot_hangs.load(Ordering::SeqCst) {
             return std::future::pending().await;
         }
-        if self.snapshot_fails.load(Ordering::SeqCst) || self.mining_disabled.load(Ordering::SeqCst)
-        {
+        if self.snapshot_fails.load(Ordering::SeqCst) || self.queue_absent() {
             return Err(ergo_api::types::SubmitError {
                 reason: "private_mining_unavailable".into(),
                 detail: None,
@@ -80,7 +82,7 @@ impl TxSubmitter for Probe {
         _: String,
     ) -> Result<(), ergo_api::types::SubmitError> {
         self.cancellations.fetch_add(1, Ordering::SeqCst);
-        if self.mining_disabled.load(Ordering::SeqCst) {
+        if self.queue_absent() {
             return Err(ergo_api::types::SubmitError {
                 reason: "private_mining_unavailable".into(),
                 detail: None,
@@ -90,6 +92,12 @@ impl TxSubmitter for Probe {
             return std::future::pending().await;
         }
         Ok(())
+    }
+}
+
+impl Probe {
+    fn queue_absent(&self) -> bool {
+        self.mining_disabled.load(Ordering::SeqCst) && !self.stored_queue.load(Ordering::SeqCst)
     }
 }
 
@@ -344,7 +352,7 @@ async fn disabled_private_mining_waits_then_retires_jobs_locally() {
             Some("private mining is not enabled on this node")
         );
     }
-    // Nothing can be queued on such a node, so cancellation needs no RPC.
+    // Nothing can be queued on such a node, so nothing is withdrawn.
     let cancelled = cancel(&harness.context(), &queued.to_string())
         .await
         .unwrap();
@@ -362,6 +370,23 @@ async fn disabled_private_mining_waits_then_retires_jobs_locally() {
     assert_eq!(states[&unsigned], WalletJobState::Expired);
     assert!(reserved_inputs(&harness.db).unwrap().is_empty());
     assert!(harness.probe.submissions.lock().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_with_mining_disabled_withdraws_the_stored_queue_entry() {
+    let harness = Harness::new();
+    harness.probe.mining_disabled.store(true, Ordering::SeqCst);
+    // The queue file loaded at boot still holds the admitted transaction.
+    harness.probe.stored_queue.store(true, Ordering::SeqCst);
+    let key = harness.seed(WalletJobState::Queued, true);
+    harness.queue_entry(key, "queued");
+    let cancelled = cancel(&harness.context(), &key.to_string()).await.unwrap();
+    assert_eq!(cancelled.state, WalletJobState::Cancelled);
+    assert_eq!(
+        harness.probe.cancellations.load(Ordering::SeqCst),
+        1,
+        "enabling mining again must not mine a cancelled job's transaction"
+    );
 }
 
 #[tokio::test(start_paused = true)]

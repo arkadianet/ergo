@@ -69,8 +69,12 @@ through the deadline block, tells a mined job from an expired one.
 
 Jobs need private mining, so a node without `[mining] enabled = true` refuses
 approvals. If mining is disabled after approval, pending jobs wait without
-signing or spending attempts; their deadline and cancellation then take effect
-locally, since nothing is queued on such a node.
+signing or spending attempts. The node still loads a private queue file it
+finds, so cancelling such a job also withdraws its transaction from that stored
+queue, and enabling mining again cannot mine it. A deadline retires the job
+locally: the stored transaction can no longer be selected, because the queue
+applies the same deadline, but its inputs stay reserved until mining is enabled
+again and the queue expires it.
 
 The journal holds at most 256 jobs, pruning the oldest terminal record when
 necessary. Each record is bounded to 512 KiB. A signed transaction above the
@@ -83,9 +87,9 @@ cancellation, expiry and failure delete them, and cancellation and deadlines
 withdraw the transaction from private mining. Neither revokes the signature: a
 signed transaction stays valid until one of its inputs is spent, so a mined
 transaction cannot be undone and any retained copy could still be published. A
-queue stored while mining is disabled keeps work admitted earlier, which can be
-mined until its deadline once mining is enabled again. Historical terminal jobs
-remain visible while retained.
+queue stored while mining is disabled keeps work admitted earlier and not
+cancelled, which can be mined until its deadline once mining is enabled again.
+Historical terminal jobs remain visible while retained.
 
 ## Authenticated native API
 
