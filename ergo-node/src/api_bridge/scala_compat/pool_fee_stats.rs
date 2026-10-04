@@ -2,8 +2,8 @@
 // Fee-stats helpers
 // =====================================================================
 //
-// `poolHistogram` / `getFee` / `waitTime` all depend on a per-tx
-// fee-per-byte ranking of the current pool. The helpers below build
+// `getFee` / `waitTime` depend on a per-tx fee-per-byte ranking
+// of the current pool. The helpers below build
 // that ranking from a snapshot's `pool_full_txs` in a single pass.
 // `bins` and `maxtime` are caller-supplied (OpenAPI defaults
 // `10` / `60000`), so they aren't constants here.
@@ -12,10 +12,6 @@ use super::parse_pool_tx;
 
 /// Long-range estimates lose accuracy; cap forecasts at one day.
 pub(super) const MAX_ESTIMATE_WAIT_MS: u64 = 86_400_000;
-/// Scalar compatibility endpoints have no nullable result; this sentinel
-/// denotes unknown wait. The operator fee-estimate endpoint reports null.
-pub(super) const UNKNOWN_WAIT_MS: u64 = u64::MAX;
-
 /// Server-side cap on the `bins` query parameter for
 /// `/transactions/poolHistogram`. Larger requests are silently
 /// clamped (caller still gets a valid histogram, just shorter
@@ -27,7 +23,6 @@ pub(super) const MAX_HISTOGRAM_BINS: usize = 4096;
 
 #[derive(Clone, Copy)]
 pub(super) struct PoolFeeEntry {
-    pub(super) fee: u64,
     pub(super) fee_per_byte: u64,
     pub(super) size_bytes: u64,
     pub(super) cost_units: u64,
@@ -76,7 +71,6 @@ pub(super) fn rank_pool_by_fee_per_byte(
                 return None;
             }
             Some(PoolFeeEntry {
-                fee,
                 fee_per_byte: fee / size,
                 size_bytes: size,
                 cost_units: costs
@@ -340,7 +334,6 @@ mod observed_capacity_tests {
         assert_eq!(model.wait_ms(1001, 0).0, 60_000);
         assert_eq!(model.wait_ms(1, model.cost_per_block + 1).0, 60_000);
         let ranked = vec![PoolFeeEntry {
-            fee: 20_000,
             fee_per_byte: 20,
             size_bytes: 950,
             cost_units: 1,

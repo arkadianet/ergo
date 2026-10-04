@@ -238,3 +238,118 @@ fn fee_model_uses_committed_tip_during_apply_lag_and_rejects_replaced_samples() 
     snap.produced_at -= std::time::Duration::from_secs(61);
     assert!(fee_model(&snap, Some((100, [0xab; 32]))).is_none());
 }
+
+#[test]
+fn compat_histogram_uses_pool_residence_age_and_fee_factor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = ergo_state::store::StateStore::open(&tmp.path().join("state.redb")).unwrap();
+    for weight in [
+        ApiWeightFunction::Cost,
+        ApiWeightFunction::Size,
+        ApiWeightFunction::Min,
+    ] {
+        let mut snap = crate::snapshot::NodeSnapshot::empty(
+            ApiInfo {
+                agent_name: "test".into(),
+                node_name: "test".into(),
+                network: "mainnet".into(),
+                version: "test".into(),
+                started_at_unix_ms: 0,
+                uptime_seconds: 0,
+                target_block_interval_ms: 120_000,
+            },
+            weight,
+        );
+        snap.mempool_transactions.transactions = [0, 12_000, 60_000]
+            .into_iter()
+            .enumerate()
+            .map(|(index, age)| ApiMempoolTransaction {
+                tx_id: format!("{index:064x}"),
+                fee_nano_erg: 1_000_000,
+                fee_per_byte_nano_erg: 5000,
+                size_bytes: 200,
+                validation_cost_units: 100,
+                priority_weight: 9999,
+                source: ApiTxSource::Api,
+                input_count: 1,
+                output_count: 2,
+                parents_in_pool: 0,
+                first_seen_unix_ms: 0,
+                first_seen_age_ms: age,
+                last_checked_age_ms: 0,
+            })
+            .collect();
+        let mut full_txs = Vec::new();
+        for (index, row) in snap
+            .mempool_transactions
+            .transactions
+            .iter_mut()
+            .enumerate()
+        {
+            let tx = Transaction {
+                inputs: vec![Input {
+                    box_id: Digest32::from_bytes([index as u8; 32]),
+                    spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty())
+                        .unwrap(),
+                }],
+                data_inputs: vec![],
+                output_candidates: vec![ErgoBoxCandidate::new(
+                    row.fee_nano_erg,
+                    ergo_ser::ergo_tree::read_ergo_tree(
+                        &mut ergo_primitives::reader::VlqReader::new(
+                            ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES,
+                        ),
+                    )
+                    .unwrap(),
+                    0,
+                    vec![],
+                    AdditionalRegisters::empty(),
+                )
+                .unwrap()],
+            };
+            let id = transaction_id(&tx).unwrap();
+            let mut writer = VlqWriter::new();
+            write_transaction(&mut writer, &tx).unwrap();
+            let bytes = writer.result();
+            row.tx_id = hex::encode(id.as_bytes());
+            row.size_bytes = bytes.len() as u32;
+            row.fee_per_byte_nano_erg = row.fee_nano_erg / u64::from(row.size_bytes);
+            row.output_count = 1;
+            full_txs.push((Digest32::from_bytes(*id.as_bytes()), Arc::from(bytes)));
+        }
+        snap.pool_full_txs = Arc::new(full_txs);
+        let size = u64::from(snap.mempool_transactions.transactions[0].size_bytes);
+        let factor = match weight {
+            ApiWeightFunction::Cost => 100,
+            ApiWeightFunction::Size => size,
+            ApiWeightFunction::Min => 100.max(size),
+        };
+        let bridge = ScalaCompatBridge::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(snap)),
+            ScalaCompatStatic {
+                name: "test".into(),
+                app_version: "test".into(),
+                network: "mainnet".into(),
+                state_type: crate::config::StateType::Utxo,
+                voting_length: 1024,
+                launch_time_unix_ms: 0,
+                rest_api_url: None,
+                min_relay_fee_nano_erg: 1_000_000,
+            },
+            store.reader_handle(),
+            ergo_chain_spec::DifficultyParams::mainnet(),
+        );
+        let bins = bridge.pool_fee_histogram(10, 60_000);
+        assert_eq!(bins.len(), 11);
+        for index in [0, 2, 10] {
+            assert_eq!(bins[index].n_txns, 1);
+            assert_eq!(bins[index].total_fee, 1_000_000 * 1024 / factor);
+        }
+        assert_eq!(bins.iter().map(|bin| bin.n_txns).sum::<u32>(), 3);
+        assert_eq!(bridge.pool_fee_histogram(10, 0)[10].n_txns, 3);
+        assert_eq!(
+            bridge.pool_fee_histogram(u32::MAX, 60_000).len(),
+            pool_fee_stats::MAX_HISTOGRAM_BINS + 1
+        );
+    }
+}

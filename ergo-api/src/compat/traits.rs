@@ -492,11 +492,9 @@ pub trait NodeChainQuery: Send + Sync {
     /// last entry covers `>= maxtime_ms`. OpenAPI defaults:
     /// `bins = 10`, `maxtime = 60000` ms (1 minute).
     ///
-    /// Per-tx wait-time estimate: bridge ranks pool txs by
-    /// fee-per-byte descending and projects their cumulative bytes/cost
-    /// against observed block intervals and current byte/cost capacity. Fee is the sum
-    /// of output values paying to the canonical fee proposition
-    /// (matches `ergo-mempool::validator`).
+    /// Bins measure time already spent in the pool, matching Scala's
+    /// HistogramStats. totalFee sums each transaction's fee per factor
+    /// (scaled by 1024), using the configured cost/size/min weighting.
     fn pool_fee_histogram(
         &self,
         _bins: u32,

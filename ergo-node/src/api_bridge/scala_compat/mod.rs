@@ -790,8 +790,6 @@ impl NodeChainQuery for ScalaCompatBridge {
         maxtime_ms: u64,
     ) -> Vec<ergo_api::compat::types::ScalaFeeHistogramBin> {
         let snap = self.handle.load();
-        let ranked = self.ranked_pool(&snap);
-        let model = self.observed_fee_model(&snap);
         let bin_count = (bins.max(1) as usize).min(pool_fee_stats::MAX_HISTOGRAM_BINS);
         let mut out = vec![
             ergo_api::compat::types::ScalaFeeHistogramBin {
@@ -800,18 +798,29 @@ impl NodeChainQuery for ScalaCompatBridge {
             };
             bin_count + 1
         ];
-        let mut bytes = 0u64;
-        let mut cost = 0u64;
-        for entry in ranked.iter() {
-            bytes = bytes.saturating_add(entry.size_bytes);
-            cost = cost.saturating_add(entry.cost_units);
-            let wait_ms = model
-                .as_ref()
-                .map(|model| model.wait_ms(bytes, cost).0)
-                .unwrap_or(pool_fee_stats::UNKNOWN_WAIT_MS);
-            let index = pool_fee_stats::bin_for_wait_ms(wait_ms, bin_count, maxtime_ms);
+        let snapshot_age_ms = snap
+            .produced_at
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        for tx in &snap.mempool_transactions.transactions {
+            let age_ms = tx.first_seen_age_ms.saturating_add(snapshot_age_ms);
+            let index = pool_fee_stats::bin_for_wait_ms(age_ms, bin_count, maxtime_ms);
+            let factor = match snap.mempool_transactions.weight_function {
+                ergo_api::types::ApiWeightFunction::Cost => tx.validation_cost_units,
+                ergo_api::types::ApiWeightFunction::Size => u64::from(tx.size_bytes),
+                ergo_api::types::ApiWeightFunction::Min => {
+                    tx.validation_cost_units.max(u64::from(tx.size_bytes))
+                }
+            }
+            .max(1);
+            let fee_per_factor = (u128::from(tx.fee_nano_erg) * 1024 / u128::from(factor))
+                .min(i64::MAX as u128) as u64;
             out[index].n_txns = out[index].n_txns.saturating_add(1);
-            out[index].total_fee = out[index].total_fee.saturating_add(entry.fee);
+            out[index].total_fee = out[index]
+                .total_fee
+                .saturating_add(fee_per_factor)
+                .min(i64::MAX as u64);
         }
         out
     }
