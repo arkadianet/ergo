@@ -136,6 +136,8 @@ macro_rules! chain_read {
 /// across every block apply so per-block / per-tx
 /// allocations amortize over the run.
 pub struct IndexerTask<C: IndexerChainSource> {
+    #[cfg(test)]
+    profile: CatchupProfile,
     observer: Option<Arc<dyn IndexerObserver>>,
     handle: IndexerHandle,
     chain: Arc<C>,
@@ -151,6 +153,13 @@ pub struct IndexerTask<C: IndexerChainSource> {
     /// unlatched warn would fire once per second for the (potentially
     /// unbounded) life of a deep-fork wedge.
     hold_logged: bool,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct CatchupProfile {
+    apply: Duration,
+    commit: Duration,
 }
 
 /// Owned dedicated indexer thread. Dropping requests cancellation; use
@@ -180,6 +189,8 @@ impl Drop for IndexerWorker {
 impl<C: IndexerChainSource> IndexerTask<C> {
     pub fn new(handle: IndexerHandle, chain: Arc<C>) -> Self {
         Self {
+            #[cfg(test)]
+            profile: CatchupProfile::default(),
             observer: None,
             handle,
             chain,
@@ -434,6 +445,8 @@ impl<C: IndexerChainSource> IndexerTask<C> {
         let mut bytes = 0_u64;
         let mut observations = Vec::new();
         for applied_count in 1..=max_blocks {
+            #[cfg(test)]
+            let apply_started = Instant::now();
             let indexed = IndexerBlock {
                 height: block.height,
                 header_id: block.header_id,
@@ -449,6 +462,10 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                 Ok(applied) => applied,
                 Err(error) => return IndexerPoll::Halted(error), // abort all uncommitted rows
             };
+            #[cfg(test)]
+            {
+                self.profile.apply += apply_started.elapsed();
+            }
             next = applied.meta;
             if self.observer.is_some() {
                 observations.push(BlockChanges {
@@ -494,8 +511,14 @@ impl<C: IndexerChainSource> IndexerTask<C> {
         {
             return IndexerPoll::Race;
         }
+        #[cfg(test)]
+        let commit_started = Instant::now();
         if let Err(error) = write.commit() {
             return IndexerPoll::Halted(error.into());
+        }
+        #[cfg(test)]
+        {
+            self.profile.commit += commit_started.elapsed();
         }
         self.handle.set_indexed_height(next.indexed_height);
         if let Some(observer) = &self.observer {
