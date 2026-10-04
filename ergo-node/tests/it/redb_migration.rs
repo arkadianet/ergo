@@ -522,10 +522,27 @@ fn assert_upgraded_directory(
         b"webhook registrations"
     );
     if !stale {
-        let (_, outcome) =
-            IndexerStore::open_with_cache(&directory.join("archive-index.redb"), 1024 * 1024)
+        let path = directory.join("archive-index.redb");
+        let schema_before = {
+            let db = redb::ReadOnlyDatabase::open(&path).unwrap();
+            let read = db.begin_read().unwrap();
+            let table = read
+                .open_table(TableDefinition::<&str, &[u8]>::new("indexer_meta"))
                 .unwrap();
-        assert_eq!(outcome, OpenOutcome::Resumed);
+            let value = table.get("schema_version").unwrap().unwrap();
+            u32::from_be_bytes(value.value().try_into().unwrap())
+        };
+        let (_, outcome) = IndexerStore::open_with_cache(&path, 1024 * 1024).unwrap();
+        assert_eq!(
+            outcome,
+            if schema_before == 2 {
+                OpenOutcome::Migrated {
+                    previous_version: 2,
+                }
+            } else {
+                OpenOutcome::Resumed
+            }
+        );
     }
 }
 
@@ -535,6 +552,7 @@ fn packaged_upgrade_data_command_upgrades_entire_directory_and_is_idempotent() {
         (2, false),
         (ergo_indexer::store::INDEXER_SCHEMA_VERSION, false),
         (2, true),
+        (1, false),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let originals = directory_upgrade_fixture(dir.path(), schema);
@@ -565,7 +583,7 @@ fn packaged_upgrade_data_command_upgrades_entire_directory_and_is_idempotent() {
         if discard {
             assert!(stderr.contains("external backup"));
         }
-        assert_upgraded_directory(dir.path(), &originals, schema == 2, discard);
+        assert_upgraded_directory(dir.path(), &originals, schema < 2, discard);
         let output = command().output().unwrap();
         assert!(
             output.status.success(),
@@ -600,12 +618,12 @@ async fn startup_hook_upgrades_without_networking_and_disabled_switch_gives_guid
         .await
         .unwrap();
     assert!(ergo_node::data_upgrade::DataDirectoryLock::acquire(dir.path()).is_err());
-    assert_upgraded_directory(dir.path(), &originals, true, false);
+    assert_upgraded_directory(dir.path(), &originals, false, false);
     drop(lock);
     let lock = ergo_node::data_upgrade::prepare_startup(&config)
         .await
         .unwrap();
-    assert_upgraded_directory(dir.path(), &originals, true, false);
+    assert_upgraded_directory(dir.path(), &originals, false, false);
     drop(lock);
 }
 
@@ -632,7 +650,7 @@ async fn boot_hook_precedes_sentinel_peek_and_refuses_a_second_directory_owner()
         }
     };
     assert!(error.contains("initialized for state backend"), "{error}");
-    assert_upgraded_directory(dir.path(), &original, true, false);
+    assert_upgraded_directory(dir.path(), &original, false, false);
     let lock = ergo_node::data_upgrade::DataDirectoryLock::acquire(dir.path()).unwrap();
     let config = super::common::make_test_config(dir.path().to_path_buf());
     let error = match ergo_node::run_inner(config).await {
@@ -668,5 +686,5 @@ async fn upgraded_directory_retained_backups_support_doctor_backup_verify_and_re
     ergo_node::maintenance::verify_backup(&backup).unwrap();
     let restored = destinations.path().join("restored");
     ergo_node::maintenance::restore(&backup, &restored).unwrap();
-    assert_upgraded_directory(&restored, &originals, true, false);
+    assert_upgraded_directory(&restored, &originals, false, false);
 }
