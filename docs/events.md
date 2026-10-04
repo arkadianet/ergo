@@ -6,6 +6,8 @@ The node publishes coarse operator events and fine-grained changes:
   (seq-keyed, `?since=` filtering strictly greater).
 - **`GET /api/v1/ws`** — the realtime WebSocket bus: subscribe / resume /
   backfill with per-channel filtering.
+- **`GET /api/v1/events/replay`** — paginated history of that same realtime
+  bus, including recovered records, with persistence watermarks and gap flags.
 
 Block/reorg/peer events share the snapshot-diff producer across the REST ring
 and WebSocket bus. Mempool and committed extra-index changes feed that bus
@@ -85,7 +87,7 @@ and burn amounts can therefore appear without an opposite pair.
 
 These feeds follow successful indexer commits and may trail the consensus tip
 or replay an indexer catch-up interval. The payload height names the indexed
-change. They are current-session observations, not an audit log: boot catch-up
+change. They are bounded observations, not a chain audit log: boot catch-up
 before API activation and changes outside retained undo history are not
 fabricated. Reorg events include `previous_seq` only when this observer
 published the original and retains it in its bounded recent-event ledger.
@@ -95,21 +97,38 @@ retention between lookup and inverse publication, so the link does not
 guarantee the original is still backfillable. Match retractions by
 box/token/transaction/header identity when rebuilding
 from REST. Slow consumers use the same bounded drop/close policy as other
-classes; they never hold an indexer commit open. The shared bus is a bounded
-best-effort source; durable webhook delivery begins at successful enqueue,
-not at every source change.
+classes; they never hold an indexer commit open. The shared bus is a bounded source; durable webhook delivery begins at
+successful admission. Its worker catches up from retained observations after
+subscriber queue overflow or restart. A full pending-delivery ring stops the
+admission cursor until space returns. Expired or uncertain source history
+pauses active subscriptions with `auto_disabled_reason: source_gap`; reconcile
+from REST before explicitly re-enabling them. Confirmed-only hooks still
+receive `box_reverted`, `box_unspent`, and `token_reverted` invalidations,
+including `previous_seq` and `height` when available.
 
 Protocol genesis boxes are not extra-index rows, so their first spends do not
 produce these box/token observations.
 
 ## Sequence + resume semantics
 
-- Every bus event has a global, monotonically increasing `seq`
-  within one node session. On restart, the bus starts above event cursors
-  retained in durable webhook deliveries when that store is available; the
-  event backfill itself is not persisted. A cursor can therefore reset or
-  skip historical events. Reconcile from REST after a restart or resume gap,
-  and discard an old cursor when `welcome.latest_seq` is lower.
+- Every bus event has a global, monotonically increasing `seq`. Production
+  restores retained realtime records from `webhooks.redb` before activating
+  publishers. Orderly shutdown drains the journal and releases unused cursor
+  reservations. A crash preserves the reserved upper cursor boundary, so
+  unconfirmed cursors are never reused; the uncertain interval becomes a gap.
+  The journal is asynchronous: a live event or its publish cursor alone does
+  **not** acknowledge durable persistence. Reconcile after a gap and discard
+  an old cursor if it is ahead of this data directory's latest cursor.
+- The journal queue holds **512** observations, committing batches of up to
+  **128** on a dedicated thread. Publishing and indexer commits never wait for
+  disk. Queue overflow or a storage error leaves live delivery available while
+  reserved cursor space remains, but can lose restart history. Errors stop
+  persistence until restart; reservation exhaustion stops new observations.
+- Durable history retains at most **8192** events and **64 MiB** of encoded
+  records, evicting oldest first. A single encoded record over **1 MiB** stops
+  journal persistence rather than growing the store without a bound. The live
+  resume ring retains at most **8192** events; recovered history may be smaller
+  because of the byte limit.
 - `{"op":"resume","since":<seq>,"channels":[…]}` replays retained events
   with `seq > since` that match your channels, oldest-first, capped at
   **1024** per resume. More retained than the cap ⇒ the server answers
@@ -119,6 +138,48 @@ produce these box/token observations.
   `resync` with `gap:true`.
 - Delivery is exactly-once per socket across the replay/live seam
   (server-side seq watermark).
+
+## Polling realtime history
+
+```bash
+curl 'http://127.0.0.1:9099/api/v1/events/replay?channels=blocks,mempool&since=0&limit=100'
+```
+
+`channels` uses the same selector grammar as WebSocket subscriptions, with
+1–64 comma-separated keys. Historical indexed records are readable even when
+the current indexer writer is disabled. `limit` is 1–1024, default 100;
+`since` is an exclusive bus cursor, default 0. Invalid or future cursors return
+400. This public read carries the shared heavy-read governor.
+
+The response contains oldest-first `events`, `oldest_seq`, `latest_seq`,
+`next_seq`, `has_more`, `gap`, and `persistence`. Each event preserves its
+`routes`, `seq`, `event`, `confirmed`, `height`, `data`, `previous_seq`, and
+source timestamp. Continue with `since=next_seq`, including after an empty
+page; filtered-out observations still advance the cursor. `has_more` allows
+REST clients to page past the WebSocket resume limit without pretending a
+partial page is complete. A true `gap` requires reconciliation from current
+REST state even if the page contains useful records.
+
+`persistence` is null when no durable store is installed. Otherwise it reports:
+
+- `committed_seq`: largest record cursor confirmed committed. Earlier missing
+  observations are still possible; this is not a contiguous acknowledgement.
+- `complete_through_seq`: contiguous confirmed history through this boundary;
+  inspect `gap` too, because older records can expire from retention.
+- `dropped_events`: observations rejected by the journal queue this session.
+- `available`: whether journal persistence is currently operating.
+
+Records above the confirmed boundary can be live-only. When a notification
+store cannot be opened, the boot log explicitly reports session-only replay;
+webhooks are disabled if their durable registry cannot be restored. Back up
+`webhooks.redb` with the other operator databases, preserving its private
+permissions because it also contains signing secrets.
+
+New webhook registrations record the bus boundary inside their serialized
+management operation, so replay does not send them observations from before
+registration. Previously admitted deliveries retain their IDs, bodies and
+retry deadlines across restart; receivers must deduplicate the delivery ID
+because an unknown HTTP acknowledgement can still be retried.
 
 ## Transport limits
 

@@ -393,19 +393,27 @@ pub(super) async fn bind(
     // than acknowledging registrations that would disappear at restart.
     let webhook_path = config.data_dir.join("webhooks.redb");
     let api_services = tokio::task::spawn_blocking(move || {
-        let webhook_engine = crate::webhook_store::RedbWebhookStore::open(&webhook_path)
-            .and_then(|store| {
-                ergo_api::v1::WebhookEngine::durable(Default::default(), Arc::new(store))
-            })
-            .map(Arc::new);
-        let webhook_engine = match webhook_engine {
-            Ok(engine) => Some(engine),
+        let store = match crate::webhook_store::RedbWebhookStore::open(&webhook_path) {
+            Ok(store) => Arc::new(store),
+            Err(error) => {
+                tracing::error!(%error, "notification store unavailable; webhooks and durable replay disabled");
+                return Arc::new(ergo_api::ApiServices::with_webhooks(None));
+            }
+        };
+        let webhook_engine = match ergo_api::v1::WebhookEngine::durable(Default::default(), store.clone()) {
+            Ok(engine) => Some(Arc::new(engine)),
             Err(error) => {
                 tracing::error!(%error, "durable webhook store unavailable; webhooks disabled");
                 None
             }
         };
-        Arc::new(ergo_api::ApiServices::with_webhooks(webhook_engine))
+        match ergo_api::ApiServices::with_durable_realtime(webhook_engine.clone(), store) {
+            Ok(services) => Arc::new(services),
+            Err(error) => {
+                tracing::error!(%error, "durable replay unavailable; serving session-only realtime history");
+                Arc::new(ergo_api::ApiServices::with_webhooks(webhook_engine))
+            }
+        }
     })
     .await
     .unwrap_or_else(|error| {

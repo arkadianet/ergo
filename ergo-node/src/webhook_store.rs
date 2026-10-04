@@ -1,7 +1,7 @@
 //! Private durable webhook snapshot store. Signing secrets are stored in the
 //! operator data directory; restrict this database to the operator account.
 use ergo_api::v1::webhooks::engine::WebhookStore;
-use redb::ReadableDatabase;
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 
@@ -11,6 +11,28 @@ const CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 const SNAPSHOT: redb::TableDefinition<&str, &[u8]> =
     redb::TableDefinition::new("webhook_snapshot_v1");
+
+const REALTIME_EVENTS: redb::TableDefinition<u64, &[u8]> =
+    redb::TableDefinition::new("realtime_events_v1");
+const REALTIME_META: redb::TableDefinition<&str, &[u8]> =
+    redb::TableDefinition::new("realtime_metadata_v1");
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RealtimeMetadata {
+    version: u32,
+    next_seq: u64,
+    retained_bytes: u64,
+}
+
+impl Default for RealtimeMetadata {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            next_seq: 1,
+            retained_bytes: 0,
+        }
+    }
+}
 
 // One-shot faults stay local to each test thread and do not exist in production.
 #[cfg(test)]
@@ -147,6 +169,177 @@ impl WebhookStore for RedbWebhookStore {
     }
 }
 
+impl ergo_api::v1::realtime::journal::RealtimeStore for RedbWebhookStore {
+    fn load_events(&self) -> Result<ergo_api::v1::realtime::journal::JournalRecovery, String> {
+        use ergo_api::v1::realtime::journal::{JournalRecovery, JOURNAL_BYTES_CAP};
+        let read = self.db.begin_read().map_err(|e| e.to_string())?;
+        let metadata = match read.open_table(REALTIME_META) {
+            Ok(table) => table
+                .get("state")
+                .map_err(|e| e.to_string())?
+                .map(|value| serde_json::from_slice::<RealtimeMetadata>(value.value()))
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .unwrap_or_default(),
+            Err(redb::TableError::TableDoesNotExist(_)) => RealtimeMetadata::default(),
+            Err(error) => return Err(error.to_string()),
+        };
+        if metadata.version != 1
+            || metadata.next_seq == 0
+            || metadata.retained_bytes > JOURNAL_BYTES_CAP as u64
+        {
+            return Err("invalid realtime metadata".into());
+        }
+        let mut recovery = JournalRecovery {
+            next_seq: metadata.next_seq,
+            events: Vec::new(),
+        };
+        let table = match read.open_table(REALTIME_EVENTS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) if metadata.retained_bytes == 0 => {
+                return Ok(recovery)
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        if table.len().map_err(|e| e.to_string())?
+            > ergo_api::v1::realtime::bus::RESUME_WINDOW as u64
+        {
+            return Err("realtime event retention exceeds limit".into());
+        }
+        let mut bytes = 0u64;
+        for entry in table.iter().map_err(|e| e.to_string())? {
+            let (key, value) = entry.map_err(|e| e.to_string())?;
+            bytes = bytes
+                .checked_add(value.value().len() as u64)
+                .ok_or("realtime byte count overflow")?;
+            if bytes > JOURNAL_BYTES_CAP as u64 {
+                return Err("realtime event retention exceeds byte limit".into());
+            }
+            let event: ergo_api::v1::realtime::journal::ReplayEvent =
+                serde_json::from_slice(value.value()).map_err(|e| e.to_string())?;
+            if event.seq != key.value() || event.seq >= metadata.next_seq {
+                return Err("realtime cursor/key mismatch".into());
+            }
+            recovery.events.push(event);
+        }
+        if bytes != metadata.retained_bytes {
+            return Err("realtime retained byte count mismatch".into());
+        }
+        Ok(recovery)
+    }
+
+    fn reserve_cursor(&self, next_seq: u64) -> Result<(), String> {
+        if next_seq == 0 || next_seq >= u64::MAX - 1 {
+            return Err("realtime cursor exhausted".into());
+        }
+        let mut write = ergo_state::begin_write_qr(&self.db).map_err(|e| e.to_string())?;
+        write
+            .set_durability(redb::Durability::Immediate)
+            .map_err(|e| e.to_string())?;
+        {
+            let events = write
+                .open_table(REALTIME_EVENTS)
+                .map_err(|e| e.to_string())?;
+            if events
+                .last()
+                .map_err(|e| e.to_string())?
+                .is_some_and(|(key, _)| key.value() >= next_seq)
+            {
+                return Err("realtime reservation precedes persisted events".into());
+            }
+            let mut table = write.open_table(REALTIME_META).map_err(|e| e.to_string())?;
+            let mut metadata = table
+                .get("state")
+                .map_err(|e| e.to_string())?
+                .map(|value| serde_json::from_slice::<RealtimeMetadata>(value.value()))
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .unwrap_or_default();
+            if metadata.version != 1 {
+                return Err("unsupported realtime metadata".into());
+            }
+            metadata.next_seq = next_seq;
+            let bytes = serde_json::to_vec(&metadata).map_err(|e| e.to_string())?;
+            table
+                .insert("state", bytes.as_slice())
+                .map_err(|e| e.to_string())?;
+        }
+        write.commit().map_err(|e| e.to_string())
+    }
+
+    fn append_events(
+        &self,
+        events: &[ergo_api::v1::realtime::journal::ReplayEvent],
+    ) -> Result<(), String> {
+        use ergo_api::v1::realtime::journal::{JOURNAL_BYTES_CAP, JOURNAL_EVENT_BYTES_CAP};
+        let encoded = events
+            .iter()
+            .map(|event| {
+                let bytes = serde_json::to_vec(event).map_err(|e| e.to_string())?;
+                if bytes.len() > JOURNAL_EVENT_BYTES_CAP {
+                    return Err("realtime event exceeds byte limit".into());
+                }
+                Ok((event.seq, bytes))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut write = ergo_state::begin_write_qr(&self.db).map_err(|e| e.to_string())?;
+        write
+            .set_durability(redb::Durability::Immediate)
+            .map_err(|e| e.to_string())?;
+        {
+            let mut metadata_table = write.open_table(REALTIME_META).map_err(|e| e.to_string())?;
+            let mut metadata = metadata_table
+                .get("state")
+                .map_err(|e| e.to_string())?
+                .map(|value| serde_json::from_slice::<RealtimeMetadata>(value.value()))
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .ok_or("realtime cursor was not reserved")?;
+            let mut table = write
+                .open_table(REALTIME_EVENTS)
+                .map_err(|e| e.to_string())?;
+            let mut last = table
+                .last()
+                .map_err(|e| e.to_string())?
+                .map(|(key, _)| key.value())
+                .unwrap_or(0);
+            for (seq, bytes) in encoded {
+                if seq <= last || seq >= metadata.next_seq {
+                    return Err("realtime event outside reserved cursor range".into());
+                }
+                table
+                    .insert(seq, bytes.as_slice())
+                    .map_err(|e| e.to_string())?;
+                metadata.retained_bytes = metadata
+                    .retained_bytes
+                    .checked_add(bytes.len() as u64)
+                    .ok_or("realtime byte count overflow")?;
+                last = seq;
+            }
+            while table.len().map_err(|e| e.to_string())?
+                > ergo_api::v1::realtime::bus::RESUME_WINDOW as u64
+                || metadata.retained_bytes > JOURNAL_BYTES_CAP as u64
+            {
+                let (key, size) = table
+                    .first()
+                    .map_err(|e| e.to_string())?
+                    .map(|(key, value)| (key.value(), value.value().len() as u64))
+                    .ok_or("realtime retention accounting mismatch")?;
+                table.remove(key).map_err(|e| e.to_string())?;
+                metadata.retained_bytes = metadata
+                    .retained_bytes
+                    .checked_sub(size)
+                    .ok_or("realtime byte count underflow")?;
+            }
+            let bytes = serde_json::to_vec(&metadata).map_err(|e| e.to_string())?;
+            metadata_table
+                .insert("state", bytes.as_slice())
+                .map_err(|e| e.to_string())?;
+        }
+        write.commit().map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +364,151 @@ mod tests {
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn realtime_database_reopen_preserves_history_cursor_and_retention() {
+        use ergo_api::v1::realtime::bus::RESUME_WINDOW;
+        use ergo_api::v1::realtime::journal::{RealtimeStore, ReplayEvent};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("webhooks.redb");
+        let store = RedbWebhookStore::open(&path).unwrap();
+        store.reserve_cursor(20_000).unwrap();
+        let events = (1..=(RESUME_WINDOW as u64 + 3))
+            .map(|seq| ReplayEvent::from(&event(seq)))
+            .collect::<Vec<_>>();
+        store.append_events(&events).unwrap();
+        drop(store);
+        let store = RedbWebhookStore::open(&path).unwrap();
+        let saved = store.load_events().unwrap();
+        assert_eq!(saved.next_seq, 20_000);
+        assert_eq!(saved.events.len(), RESUME_WINDOW);
+        assert_eq!(saved.events[0].seq, 4);
+        assert_eq!(saved.events.last().unwrap().seq, RESUME_WINDOW as u64 + 3);
+        assert!(store.reserve_cursor(10).is_err());
+        assert!(store
+            .append_events(&[ReplayEvent::from(&event(20_000))])
+            .is_err());
+        assert_eq!(store.load_events().unwrap().events.len(), RESUME_WINDOW);
+    }
+
+    #[test]
+    fn oversized_realtime_append_rolls_back_entire_batch() {
+        use ergo_api::v1::realtime::journal::{
+            RealtimeStore, ReplayEvent, JOURNAL_EVENT_BYTES_CAP,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let store = RedbWebhookStore::open(&directory.path().join("webhooks.redb")).unwrap();
+        store.reserve_cursor(100).unwrap();
+        let mut oversized = ReplayEvent::from(&event(2));
+        oversized.data = serde_json::json!({"large": "x".repeat(JOURNAL_EVENT_BYTES_CAP)});
+        assert!(store
+            .append_events(&[ReplayEvent::from(&event(1)), oversized])
+            .is_err());
+        assert!(store.load_events().unwrap().events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restart_admits_unqueued_durable_events_and_persists_delivery_ack() {
+        use ergo_api::v1::realtime::{ChannelClass, RealtimeBus, RealtimeEventBody};
+        use ergo_api::v1::webhooks::worker::{spawn_webhook_worker_with_shutdown, WebhookSink};
+        use ergo_api::v1::webhooks::PreparedRequest;
+        use std::time::Duration;
+        struct Sink {
+            seen: std::sync::Mutex<Vec<PreparedRequest>>,
+            notify: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl WebhookSink for Sink {
+            async fn post(&self, request: &PreparedRequest) -> DeliveryOutcome {
+                self.seen.lock().unwrap().push(request.clone());
+                self.notify.notify_one();
+                DeliveryOutcome::Success(204)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("webhooks.redb");
+        let store = Arc::new(RedbWebhookStore::open(&path).unwrap());
+        let engine = WebhookEngine::durable(Default::default(), store.clone()).unwrap();
+        let subscription = engine
+            .register_after(
+                "https://receiver.example/hook".into(),
+                vec!["blocks".into()],
+                Some("key".into()),
+                1,
+                0,
+                0,
+            )
+            .unwrap();
+        let bus = RealtimeBus::durable(
+            [ChannelClass::Blocks].into_iter().collect(),
+            store.clone(),
+            1,
+        )
+        .unwrap();
+        bus.publish(RealtimeEventBody::block_applied(
+            1,
+            "header".into(),
+            1,
+            1,
+            100,
+        ));
+        drop(bus); // persist source observation before any worker admission
+        drop(engine);
+        drop(store);
+
+        let store = Arc::new(RedbWebhookStore::open(&path).unwrap());
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+        assert_eq!(engine.replay_seq(), 0);
+        let bus = Arc::new(
+            RealtimeBus::durable(
+                [ChannelClass::Blocks].into_iter().collect(),
+                store.clone(),
+                1,
+            )
+            .unwrap(),
+        );
+        let sink = Arc::new(Sink {
+            seen: Default::default(),
+            notify: Default::default(),
+        });
+        let (stop, signal) = tokio::sync::oneshot::channel();
+        let worker = spawn_webhook_worker_with_shutdown(
+            bus.clone(),
+            engine.clone(),
+            sink.clone(),
+            Duration::from_millis(1),
+            signal,
+        );
+        tokio::time::timeout(Duration::from_secs(3), sink.notify.notified())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while engine.deliveries_for(&subscription.webhook_id, 0, 1)[0].status
+                != ergo_api::v1::webhooks::model::DeliveryStatus::Delivered
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send(()).unwrap();
+        worker.await.unwrap();
+        assert_eq!(sink.seen.lock().unwrap().len(), 1);
+        assert_eq!(engine.replay_seq(), 1);
+        drop(bus);
+        drop(engine);
+        drop(store);
+        let engine = WebhookEngine::durable(
+            Default::default(),
+            Arc::new(RedbWebhookStore::open(&path).unwrap()),
+        )
+        .unwrap();
+        assert!(engine.take_due(u64::MAX).is_empty());
+        assert_eq!(
+            engine.deliveries_for(&subscription.webhook_id, 0, 10).len(),
+            1
+        );
+    }
 
     #[test]
     fn webhook_database_reopen_retains_retry_signature_and_acknowledgement() {

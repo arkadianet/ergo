@@ -247,13 +247,16 @@ pub(crate) async fn register(
     };
     let min_conf = req.confirmations.unwrap_or(1);
 
+    let registration_bus = handle.bus.clone();
     run_operation(handle, move |engine| {
-        match engine.register(
+        let start_seq = registration_bus.latest_seq();
+        match engine.register_after(
             req.url,
             keys,
             secret,
             min_conf,
             crate::v1::webhooks::worker::now_unix_ms(),
+            start_seq,
         ) {
             Ok(sub) => (
                 axum::http::StatusCode::CREATED,

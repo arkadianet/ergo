@@ -1920,6 +1920,52 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TipHealth'
+  /api/v1/events/replay:
+    get:
+      tags:
+      - realtime
+      operationId: v1_events_replay
+      parameters:
+      - name: channels
+        in: query
+        description: Comma-separated WebSocket channel keys; at most 64
+        required: true
+        schema:
+          type: string
+      - name: since
+        in: query
+        description: Exclusive shared realtime cursor; default 0
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      - name: limit
+        in: query
+        description: Page size, 1..1024; default 100
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '200':
+          description: Bounded realtime history with explicit retention/crash gap and confirmed persistence watermark
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayPage'
+        '400':
+          description: Invalid channel, limit or future cursor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Realtime disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
   /api/v1/light/bootstrap-proof:
     get:
       tags:
@@ -8884,6 +8930,34 @@ components:
         size:
           type: integer
           minimum: 0
+    JournalStatus:
+      type: object
+      required:
+      - committed_seq
+      - complete_through_seq
+      - dropped_events
+      - available
+      properties:
+        available:
+          type: boolean
+        committed_seq:
+          type: integer
+          format: int64
+          description: |-
+            Largest event cursor confirmed committed, not an acknowledgement of
+            every lower cursor: inspect gap / dropped_events as well.
+          minimum: 0
+        complete_through_seq:
+          type: integer
+          format: int64
+          description: |-
+            Every observed event through this boundary was committed; later records
+            may also be committed, but drops/crash uncertainty prevent that claim.
+          minimum: 0
+        dropped_events:
+          type: integer
+          format: int64
+          minimum: 0
     LightBatchElement:
       type: object
       description: |-
@@ -9848,6 +9922,88 @@ components:
           - 'null'
         url:
           type: string
+    ReplayEvent:
+      type: object
+      description: Owned, versioned storage/wire representation; no process-local references.
+      required:
+      - seq
+      - emitted_at_unix_ms
+      - routes
+      - event
+      - confirmed
+      - data
+      properties:
+        confirmed:
+          type: boolean
+        data: {}
+        emitted_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        event:
+          type: string
+        height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        previous_seq:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        routes:
+          type: array
+          items:
+            type: string
+        seq:
+          type: integer
+          format: int64
+          minimum: 0
+    ReplayPage:
+      type: object
+      required:
+      - events
+      - latest_seq
+      - next_seq
+      - has_more
+      - gap
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReplayEvent'
+        gap:
+          type: boolean
+          description: |-
+            Missing source observations, retention expiry or an uncertain crash
+            interval. A page can contain useful records and still require REST reconciliation.
+        has_more:
+          type: boolean
+        latest_seq:
+          type: integer
+          format: int64
+          minimum: 0
+        next_seq:
+          type: integer
+          format: int64
+          description: Pass this cursor as `since` on the next page, including empty pages.
+          minimum: 0
+        oldest_seq:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        persistence:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/JournalStatus'
+            description: |-
+              None means this node has no durable replay store. Live records above
+              complete_through_seq are not covered by a contiguous durable acknowledgement.
     RewardAddress:
       type: object
       description: |-

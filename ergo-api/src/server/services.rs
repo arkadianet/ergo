@@ -33,11 +33,49 @@ impl ApiServices {
     /// The fresh bus is seeded above recovered obligations before any publisher
     /// or worker starts, so delivery dedupe keys cannot alias after restart.
     pub fn with_webhooks(engine: Option<Arc<WebhookEngine>>) -> Self {
-        let realtime = RealtimeHandle::blocks_and_mempool();
+        Self::with_realtime(engine, RealtimeHandle::blocks_and_mempool())
+    }
+
+    /// Restore bounded realtime replay independently of the webhook registry.
+    /// Construction reserves cursors and must run on the boot blocking lane.
+    pub fn with_durable_realtime(
+        engine: Option<Arc<WebhookEngine>>,
+        store: Arc<dyn crate::v1::realtime::journal::RealtimeStore>,
+    ) -> Result<Self, String> {
+        let minimum_next = engine
+            .as_ref()
+            .map(|engine| {
+                engine
+                    .highest_event_seq()
+                    .max(engine.replay_seq())
+                    .saturating_add(1)
+            })
+            .unwrap_or(1);
+        let mut realtime = RealtimeHandle::blocks_and_mempool();
+        let classes = [
+            crate::v1::realtime::ChannelClass::Blocks,
+            crate::v1::realtime::ChannelClass::Mempool,
+            crate::v1::realtime::ChannelClass::Peers,
+            crate::v1::realtime::ChannelClass::Tx,
+        ]
+        .into_iter()
+        .collect();
+        realtime.bus = Arc::new(crate::v1::RealtimeBus::durable(
+            classes,
+            store,
+            minimum_next,
+        )?);
+        Ok(Self::with_realtime(engine, realtime))
+    }
+
+    fn with_realtime(engine: Option<Arc<WebhookEngine>>, realtime: RealtimeHandle) -> Self {
         if let Some(engine) = &engine {
-            realtime
-                .bus
-                .advance_cursor_to(engine.highest_event_seq().saturating_add(1));
+            realtime.bus.advance_cursor_to(
+                engine
+                    .highest_event_seq()
+                    .max(engine.replay_seq())
+                    .saturating_add(1),
+            );
         }
         let (webhooks, sink) = match engine.map(|engine| (engine, ReqwestSink::new())) {
             Some((engine, Ok(sink))) => (
@@ -99,6 +137,7 @@ impl ApiServices {
             // shared lane owned until all accepted persistence jobs complete.
             webhooks.executor.shutdown().await;
         }
+        self.realtime.bus.shutdown_journal().await;
     }
 
     pub(super) fn start(&self, read: Arc<dyn NodeReadState>) -> Option<BackgroundTasks> {

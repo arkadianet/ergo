@@ -95,6 +95,7 @@ Every error from these routes follows the nested error envelope \
         crate::v1::operator::voting::operator_votes_get,
         crate::v1::operator::voting::operator_votes_set,
         crate::v1::realtime::ws::ws_handler,
+        crate::v1::realtime::history::replay,
         crate::v1::routes::chain::list_blocks,
         crate::v1::routes::chain::block_by_id,
         crate::v1::routes::chain::block_transactions,
