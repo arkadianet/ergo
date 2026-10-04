@@ -19,6 +19,7 @@ use ergo_ser::transaction::{read_transaction, Transaction};
 use ergo_state::chain::{ChainStateMeta, HeaderMeta};
 use ergo_state::store::StateStore;
 use ergo_state::wallet::{RescanGuard, WalletApplyHook, WalletReader};
+use redb::ReadableDatabase;
 use redb::WriteTransaction;
 
 /// Re-install the `hci_version=1` sentinel on the underlying redb after a
@@ -570,19 +571,48 @@ fn wallet_rollback_to_nonzero_and_genesis_restores_cursor_identity() {
 }
 
 #[test]
-fn wallet_hook_without_rescan_guard_allows_rewind() {
+fn wallet_rollback_without_guard_preserves_chain_rows_and_cursor() {
+    use ergo_state::wallet::tables::WALLET_BOXES;
     let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("state.redb");
     let data = load_test_data();
     let hook = TestWalletHook {
         tree: vec![0x01, 0x02, 0x03],
     };
-    let mut store = StateStore::open(&db_path).unwrap();
+    let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
     init_genesis(&mut store);
     apply_blocks_with_wallet(&mut store, &data, &hook, 1, 5);
+    let cursor = read_wallet_cursor(&store);
+    let root = store.root_digest();
+    let db = store.db_arc();
+    let write = db.begin_write().unwrap();
+    write
+        .open_table(WALLET_BOXES)
+        .unwrap()
+        .insert([0xab; 32], vec![1, 2, 3])
+        .unwrap();
+    write.commit().unwrap();
 
-    store.rollback_to(3, Some(&hook), None).unwrap();
-    assert_eq!(store.height(), 3);
+    assert!(matches!(store.rollback_to(3, Some(&hook), None),
+        Err(ergo_state::store::StateError::InvalidPrecondition { what })
+            if what == "wallet rollback requires a rescan guard"));
+    assert_eq!(store.height(), 5);
+    assert_eq!(
+        store.chain_state().best_full_block_id,
+        get_header_id(&data, 5)
+    );
+    assert_eq!(store.root_digest(), root);
+    assert_eq!(read_wallet_cursor(&store), cursor);
+    assert!(!wallet_invalidated(&store));
+    let read = db.begin_read().unwrap();
+    assert_eq!(
+        read.open_table(WALLET_BOXES)
+            .unwrap()
+            .get([0xab; 32])
+            .unwrap()
+            .unwrap()
+            .value(),
+        vec![1, 2, 3]
+    );
 }
 
 #[test]

@@ -40,6 +40,10 @@ use crate::store::StateError;
 /// backend projects its in-memory `ChainState` via `to_persisted()`,
 /// the digest backend clones its persisted `ChainStateMeta`.
 pub trait ChainStateRead {
+    /// Local history horizon for Scala's fatal `hdrTooOld` rule (209).
+    fn keep_versions(&self) -> u32 {
+        crate::store::ROLLBACK_WINDOW
+    }
     /// Best fully-applied block height.
     fn height(&self) -> u32;
     /// Owned snapshot of the committed chain pointers.
@@ -62,6 +66,13 @@ pub trait ChainStateRead {
 /// concrete backend (session invalidity is session-scoped in-memory
 /// state; the reader handle and lifecycle are backend concerns).
 pub trait HeaderSectionStore {
+    /// Selection prefilter: O(number of marks) metadata lookups on real stores.
+    /// Unknown mark IDs do not block a height.
+    /// Stores without an enumerable mark set conservatively permit the check.
+    fn has_session_mark_at_height(&self, _height: u32) -> Result<bool, StateError> {
+        Ok(true)
+    }
+
     fn get_header(&self, header_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError>;
     fn get_header_meta(&self, header_id: &[u8; 32]) -> Result<Option<HeaderMeta>, StateError>;
     fn get_header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError>;
@@ -82,6 +93,13 @@ pub trait HeaderSectionStore {
         modifier_id: &[u8; 32],
         section_bytes: &[u8],
         section_type: u8,
+    ) -> Result<(), StateError>;
+    /// Store `(modifier id, bytes, modifier type)` sections in one durable
+    /// transaction: all of them or none. For the sections of a block this
+    /// node mined or was handed whole, which no peer holds yet.
+    fn store_block_sections_durable(
+        &self,
+        sections: &[(&[u8; 32], &[u8], u8)],
     ) -> Result<(), StateError>;
     fn begin_header_batch(&mut self);
     fn flush_header_batch(&mut self) -> Result<(), StateError>;
@@ -161,6 +179,9 @@ impl<T: ChainStateRead + HeaderSectionStore + BlockApply> StateBackend for T {}
 use crate::store::StateStore;
 
 impl ChainStateRead for StateStore {
+    fn keep_versions(&self) -> u32 {
+        self.rollback_window()
+    }
     fn height(&self) -> u32 {
         StateStore::height(self)
     }
@@ -181,6 +202,18 @@ impl ChainStateRead for StateStore {
 }
 
 impl HeaderSectionStore for StateStore {
+    fn has_session_mark_at_height(&self, height: u32) -> Result<bool, StateError> {
+        for id in &self.chain_state().session_invalids {
+            if self
+                .get_header_meta(id)?
+                .is_some_and(|meta| meta.height == height)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn get_header(&self, header_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         StateStore::get_header(self, header_id)
     }
@@ -222,6 +255,12 @@ impl HeaderSectionStore for StateStore {
         section_type: u8,
     ) -> Result<(), StateError> {
         StateStore::store_block_section_typed(self, modifier_id, section_bytes, section_type)
+    }
+    fn store_block_sections_durable(
+        &self,
+        sections: &[(&[u8; 32], &[u8], u8)],
+    ) -> Result<(), StateError> {
+        StateStore::store_block_sections_durable(self, sections)
     }
     fn begin_header_batch(&mut self) {
         StateStore::begin_header_batch(self)
@@ -314,6 +353,24 @@ impl StateBackendKind {
         }
     }
 
+    /// Read independently committed section tables without consuming apply's
+    /// persist-result channel. Availability is not a durability claim.
+    pub fn read_section_for_serving(
+        &self,
+        id: &[u8; 32],
+        sentinel: u32,
+    ) -> Result<Option<Vec<u8>>, StateError> {
+        match self {
+            Self::Utxo(s) => s.read_section_for_serving(id, sentinel),
+            Self::Digest(d) => {
+                if sentinel > 1 && d.get_section_height(id)?.is_none_or(|h| h < sentinel) {
+                    return Ok(None);
+                }
+                d.get_block_section(id)
+            }
+        }
+    }
+
     /// The deepest reorg this backend can roll back, or `None` if unbounded.
     ///
     /// The UTXO store prunes `UNDO_LOG` below `tip - ROLLBACK_WINDOW` on every
@@ -361,6 +418,12 @@ impl StateBackendKind {
 }
 
 impl ChainStateRead for StateBackendKind {
+    fn keep_versions(&self) -> u32 {
+        match self {
+            Self::Utxo(s) => s.keep_versions(),
+            Self::Digest(d) => d.keep_versions(),
+        }
+    }
     fn height(&self) -> u32 {
         match self {
             StateBackendKind::Utxo(s) => s.height(),
@@ -394,6 +457,13 @@ impl ChainStateRead for StateBackendKind {
 }
 
 impl HeaderSectionStore for StateBackendKind {
+    fn has_session_mark_at_height(&self, height: u32) -> Result<bool, StateError> {
+        match self {
+            Self::Utxo(store) => store.has_session_mark_at_height(height),
+            Self::Digest(store) => store.has_session_mark_at_height(height),
+        }
+    }
+
     fn get_header(&self, header_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         match self {
             StateBackendKind::Utxo(s) => s.get_header(header_id),
@@ -469,6 +539,15 @@ impl HeaderSectionStore for StateBackendKind {
             StateBackendKind::Digest(d) => {
                 d.store_block_section_typed(modifier_id, section_bytes, section_type)
             }
+        }
+    }
+    fn store_block_sections_durable(
+        &self,
+        sections: &[(&[u8; 32], &[u8], u8)],
+    ) -> Result<(), StateError> {
+        match self {
+            StateBackendKind::Utxo(s) => s.store_block_sections_durable(sections),
+            StateBackendKind::Digest(d) => d.store_block_sections_durable(sections),
         }
     }
     fn begin_header_batch(&mut self) {
@@ -582,6 +661,31 @@ mod tests {
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn session_marks_both_backends_dispatch_height_filter() {
+        for (mut backend, _dir) in [utxo_backend(), digest_backend()] {
+            assert!(!backend.has_session_mark_at_height(1).unwrap());
+            backend.mark_session_invalid([1; 32]);
+            assert!(!backend.has_session_mark_at_height(1).unwrap());
+            backend
+                .store_validated_header(
+                    &[1; 32],
+                    &[1; 8],
+                    &HeaderMeta {
+                        parent_id: [0; 32],
+                        height: 1,
+                        cumulative_score: vec![1],
+                        pow_validity: 1,
+                        timestamp: 1,
+                    },
+                    None,
+                )
+                .unwrap();
+            assert!(backend.has_session_mark_at_height(1).unwrap());
+            assert!(!backend.has_session_mark_at_height(2).unwrap());
+        }
+    }
 
     #[test]
     fn both_variants_dispatch_chain_state_read_through_enum() {

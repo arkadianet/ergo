@@ -1,15 +1,12 @@
-//! JSON `ScalaTransactionInput` → canonical wire bytes.
+//! Scala-compatible JSON conversion through the production wire readers/writers.
 //!
-//! Parse incoming hex via existing `ergo-ser` readers, then re-serialize
-//! via existing writers to canonical bytes; reject soft-fork ergoTree
-//! submissions in v1 with `non_canonical`.
+//! Both modes retain received ErgoTree bytes after parsing. Submit gates unsupported
+//! or unparsed trees and canonicalizes register values; Preserve keeps consumed
+//! register node-form bytes. Spending-proof context extensions are canonicalized
+//! in both modes. Modes select serialization policy, not trusted chain provenance.
 //!
-//! The first element of the error tuple is the envelope reason string
-//! (`"deserialize"` for malformed wire / hex, `"non_canonical"` for
-//! the soft-fork reject path); the second is operator-readable detail.
-//!
-//! Anchored by the b4_* byte-parity oracle in
-//! `ergo-node/src/api_bridge.rs::tests`.
+//! Errors carry an envelope reason (`"deserialize"` or `"non_canonical"`) and a
+//! readable field detail. Existing node `b4_*` fixtures anchor byte parity.
 
 use std::collections::BTreeMap;
 
@@ -39,7 +36,7 @@ use crate::types::{
 pub const NON_CANONICAL: &str = "non_canonical";
 pub const DESERIALIZE: &str = "deserialize";
 
-/// Maximum supported ErgoTree version for canonical re-serialization.
+/// Maximum supported ErgoTree version for the Submit conversion policy.
 /// Matches `ergo_ser::ergo_tree::MAX_SUPPORTED_TREE_VERSION` (private
 /// there). Mirrors Scala's `VersionContext.MaxSupportedScriptVersion`.
 const MAX_SUPPORTED_TREE_VERSION: u8 = 3;
@@ -118,29 +115,11 @@ pub fn decode_input(si: &ScalaInput) -> Result<Input, DecodeError> {
 
 /// Mode-aware variant of [`decode_input`].
 ///
-/// Both modes canonicalize `spendingProof.extension`: unlike registers,
-/// context-extension entries carry no genuine Scala-side node-form
-/// ambiguity, and the reference's own `tx_id` always commits to the
-/// CANONICAL re-serialization (`ContextExtension.serializer.serialize`
-/// inside `ErgoLikeTransaction.bytesToSign`) regardless of the wire form it
-/// read — see the `SpendingProof` doc comment in `ergo-ser`. So there is no
-/// mode-specific "preserve the caller's bytes" path here: doing so for
-/// `DecodeMode::Preserve` would have hashed non-canonical-but-re-parseable
-/// bytes (`01017f`) into a tx id that DIFFERS from the reference's
-/// (`01010101`) for the same logical extension, on the unverified
-/// assumption that every caller only ever supplies Scala-emitted canonical
-/// hex.
-///
-/// **`DecodeMode::Submit`** (wallet → node): parsed and re-serialized via
-/// [`SpendingProof::new`] (mirrors register canonicalization — see
-/// `b4_q5_extension_canonicalization*` in `ergo-node/src/api_bridge.rs`).
-///
-/// **`DecodeMode::Preserve`**: parsed and re-serialized via
-/// [`SpendingProof::try_from_raw_parts`], which validates the parse and
-/// canonicalizes the stored bytes rather than trusting the caller's wire
-/// form — closing the same `ConstantSerializer`-vs-AST-form drift class the
-/// register-side fix addresses, without the byte-fidelity assumption the
-/// unchecked `from_trusted_raw_parts` would require.
+/// Both modes canonicalize the spending-proof context extension, matching the
+/// reference transaction's signing serialization. Submit uses [`SpendingProof::new`];
+/// Preserve uses [`SpendingProof::try_from_raw_parts`], which checks the raw
+/// aggregate against its parsed value and caches canonical writer bytes. The
+/// standalone context helper's Preserve bytes remain available for diagnostics.
 pub fn decode_input_with_mode(si: &ScalaInput, mode: DecodeMode) -> Result<Input, DecodeError> {
     let box_id = decode_digest32(&si.box_id, "boxId")?;
     let proof = hex::decode(&si.spending_proof.proof_bytes)
@@ -182,17 +161,25 @@ pub fn decode_output_with_mode(
     mode: DecodeMode,
 ) -> Result<ErgoBoxCandidate, DecodeError> {
     let value = so.value;
+    i64::try_from(value)
+        .map_err(|_| (DESERIALIZE, "value exceeds Scala Long.MAX_VALUE".to_owned()))?;
     let creation_height = so.creation_height;
 
-    // ergoTree: parse → canonicalize. Submit rejects soft-fork;
-    // Preserve accepts it (already on chain).
-    let (parsed_tree, canonical_tree_bytes) =
+    // Both modes parse and retain the original tree bytes. Submit additionally
+    // refuses unsupported/unparsed trees; Preserve leaves acceptance to callers.
+    let (parsed_tree, received_tree_bytes) =
         decode_ergo_tree_canonicalize_with_mode(&so.ergo_tree, mode)
             .map_err(|(r, d)| (r, format!("ergoTree: {d}")))?;
 
     // assets → Vec<Token>
     let mut tokens = Vec::with_capacity(so.assets.len());
     for (i, a) in so.assets.iter().enumerate() {
+        i64::try_from(a.amount).map_err(|_| {
+            (
+                DESERIALIZE,
+                format!("assets[{i}].amount exceeds Scala Long.MAX_VALUE"),
+            )
+        })?;
         let token_id_bytes = decode_digest32(&a.token_id, "tokenId")
             .map_err(|(r, d)| (r, format!("assets[{i}]: {d}")))?;
         tokens.push(Token {
@@ -205,7 +192,7 @@ pub fn decode_output_with_mode(
     // In Preserve mode the wire bytes are returned verbatim so
     // bytes_to_sign(tx) reproduces Scala's emission byte-for-byte
     // (Constant[STuple] vs CreateTuple form is value-node-driven on
-    // the Scala side; we cannot canonicalize without losing parity).
+    // the Scala side and retained by the structured writer).
     let (registers, canonical_register_bytes) =
         decode_registers_with_mode(&so.additional_registers, mode)
             .map_err(|(r, d)| (r, d.to_string()))?;
@@ -213,7 +200,7 @@ pub fn decode_output_with_mode(
     Ok(ErgoBoxCandidate::from_trusted_raw_parts(
         value,
         parsed_tree,
-        canonical_tree_bytes,
+        received_tree_bytes,
         creation_height,
         tokens,
         registers,
@@ -281,7 +268,7 @@ pub fn decode_context_extension(
 /// in `ergo-node/src/api_bridge.rs`.
 ///
 /// **`DecodeMode::Preserve`**: the returned `Vec<u8>` is the input
-/// hex concatenated verbatim (`count(u8) || repeated (key(u8),
+/// consumed value prefixes concatenated (`count(u8) || repeated (key(u8),
 /// value_bytes)`) — the raw material [`decode_input_with_mode`] parses.
 /// Unlike the register raw-passthrough at [`decode_registers_with_mode`],
 /// these verbatim bytes are NOT what ends up hashed: `decode_input_with_mode`
@@ -290,15 +277,19 @@ pub fn decode_context_extension(
 /// reference's own `tx_id` always commits to the canonical
 /// re-serialization of the extension regardless of the wire form it read.
 /// Returned here verbatim only so callers inspecting raw wire bytes
-/// directly (tests, diagnostics) see exactly what was submitted.
+/// directly (tests, diagnostics) see the retained field prefixes. Each field is
+/// parsed independently; unused suffixes are tolerated like the SDK and omitted.
 pub fn decode_context_extension_with_mode(
     map: &indexmap::IndexMap<String, String>,
     mode: DecodeMode,
 ) -> Result<(ContextExtension, Vec<u8>), DecodeError> {
-    if map.len() > u8::MAX as usize {
+    if map.len() > i8::MAX as usize {
         return Err((
             DESERIALIZE,
-            format!("extension entry count {} exceeds u8 max", map.len()),
+            format!(
+                "extension entry count {} exceeds Scala signed-byte max",
+                map.len()
+            ),
         ));
     }
     // Build wire-shape: count(u8) + repeated (key(u8), constant_bytes).
@@ -311,7 +302,8 @@ pub fn decode_context_extension_with_mode(
             .map_err(|_| (DESERIALIZE, format!("extension key {k:?} not a u8")))?;
         let bytes =
             hex::decode(v).map_err(|e| (DESERIALIZE, format!("extension[{k}] value hex: {e}")))?;
-        entries.push((key, bytes));
+        let field = format!("extension[{k}]");
+        entries.push((key, isolate_json_value(bytes, &field, Some(key))?));
     }
     // Duplicate-key check via HashSet so we don't mutate the order
     // the wallet sent (`IndexMap<String, String>` from serde would
@@ -389,23 +381,14 @@ pub fn decode_registers(
 /// `b4_q5_register_canonicalization*` tests in
 /// `ergo-node/src/api_bridge.rs`.
 ///
-/// **`DecodeMode::Preserve`**:
-/// the returned wire bytes are the **original** input hex
-/// concatenated, byte-for-byte. Scala already validated these on
-/// chain; the consensus-bearing `tx_id =
-/// blake2b256(bytes_to_sign)` requires byte-identical re-emission
-/// of every section we ingested. Re-serializing via
-/// `write_registers` would normalize legitimate `Constant[STuple]`
-/// forms (e.g. `3c 0e 0e …` at h=836113 R9) into the writer's
-/// `CreateTuple` form (`86 02 …`), which Scala accepts as also
-/// valid but breaks byte-fidelity for the upstream wire. Pinned by
-/// `ergo-validation/tests/diagnose_block_836113.rs`. Scala's choice
-/// between `Constant[STuple]` and `Tuple(...)` is AST-driven, not
-/// type-driven, so a type-conditional canonicalizer cannot reproduce
-/// both forms — preserve mode keeps the original bytes verbatim.
+/// **`DecodeMode::Preserve`**: return each independently consumed register prefix
+/// in R4..R9 order, retaining ConstantTuple/CreateTuple/ConcreteCollection node
+/// forms and scalar spellings. Submit's writer also retains those node forms;
+/// scalar encodings such as nonzero Boolean data can normalize.
 ///
-/// In both modes the parse-validation step still runs — gap /
-/// trailing-byte / unknown-register checks fire identically.
+/// Each field uses its own reader, like the SDK evaluated-value decoder. Unused
+/// suffixes are tolerated and omitted, so they cannot become another value.
+/// Both modes still enforce dense names, type/value parsing and aggregate EOF.
 pub fn decode_registers_with_mode(
     map: &BTreeMap<String, String>,
     mode: DecodeMode,
@@ -424,7 +407,8 @@ pub fn decode_registers_with_mode(
             Some(hex_str) => {
                 let bytes = hex::decode(hex_str)
                     .map_err(|e| (DESERIALIZE, format!("additionalRegisters[{name}] hex: {e}")))?;
-                ordered.push(bytes);
+                let field = format!("additionalRegisters[{name}]");
+                ordered.push(isolate_json_value(bytes, &field, None)?);
             }
             None => {
                 if (idx + 1..6).any(|j| map.contains_key(REGISTER_NAMES[j])) {
@@ -475,21 +459,42 @@ pub fn decode_registers_with_mode(
     }
 }
 
-/// Decode mode: SUBMIT (wallet→node) is strict; PRESERVE
-/// (on-chain bytes from Scala) is lenient on soft-fork ergoTree
-/// versions.
+/// Decode each JSON value before joining fields. The pinned SDK uses a separate
+/// ValueSerializer reader per field and tolerates a suffix. Keep only consumed
+/// bytes here, preserving node form; the aggregate reader cannot borrow a
+/// neighbor's bytes or interpret a tolerated suffix as another field.
+fn isolate_json_value(
+    bytes: Vec<u8>,
+    field: &str,
+    context_key: Option<u8>,
+) -> Result<Vec<u8>, DecodeError> {
+    let prefix_len = 1 + usize::from(context_key.is_some());
+    let mut framed = Vec::with_capacity(prefix_len + bytes.len());
+    framed.push(1);
+    if let Some(key) = context_key {
+        framed.push(key);
+    }
+    framed.extend_from_slice(&bytes);
+    let mut reader = VlqReader::new(&framed);
+    if context_key.is_some() {
+        read_context_extension(&mut reader).map(|_| ())
+    } else {
+        read_registers(&mut reader).map(|_| ())
+    }
+    .map_err(|e| (DESERIALIZE, format!("{field} value parse: {e}")))?;
+    // Successful one-entry readers have consumed their complete count/key
+    // prefix plus the value. EOF is deliberately checked only on the aggregate.
+    Ok(bytes[..reader.position() - prefix_len].to_vec())
+}
+
+/// Serialization policy for JSON conversion. Every mode parses its inputs;
+/// callers independently establish transaction validity and source trust.
 ///
-/// SUBMIT path defenses: reject `version > MAX_SUPPORTED_TREE_VERSION`
-/// AND placeholder-fallback re-emit divergence — a wallet cannot
-/// sneak in an unsupported tree.
-///
-/// PRESERVE path (live mainnet bytes from Scala): accept any
-/// version that `read_ergo_tree` can handle (including the
-/// soft-fork placeholder fallback for `version > 3` AND
-/// has_size). Scala already validated these on chain, our
-/// executor will re-validate; the JSON→wire conversion just
-/// needs to produce byte-identical canonical bytes for hashing
-/// and persistence.
+/// Submit refuses unsupported or unparsed trees and canonicalizes registers.
+/// Preserve retains consumed register prefixes and permits structurally readable
+/// soft-fork trees. Both retain tree bytes and canonicalize spending-proof context
+/// extensions. Parsed whole-box cached IDs and newly sealed candidate IDs are
+/// separate serializer contracts; selecting Preserve does not authenticate a box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeMode {
     /// Wallet/operator submission. Reject soft-fork versions and
@@ -506,19 +511,19 @@ pub enum DecodeMode {
     Preserve,
 }
 
-/// Decode an `ergoTree` hex string into `(parsed, canonical_bytes)`.
+/// Decode an `ergoTree` hex string into `(parsed, received_bytes)`.
 ///
-/// Always returns the INPUT bytes as the canonical Vec<u8>. We
+/// Always returns the received bytes as the `Vec<u8>`. We
 /// do NOT use `write_ergo_tree`'s re-emitted form because the
 /// serializer is lossy for some opcode encodings (live h=303967
 /// case: `1000d1ed8501` re-emitted as `1000d1ed01010100`,
 /// caused tx_id divergence).
 ///
-/// Live mainnet history caught:
-/// - Block 303967 / tx[1] / output[0]: ergoTree `1000d1ed8501`
+/// Existing captured regression cases:
+/// - Block 303967 / `tx[1]` / `output[0]`: ergoTree `1000d1ed8501`
 ///   re-emitted lossily as `1000d1ed01010100` → tx_id divergence
 ///   → Merkle root mismatch → IBD wedge. Fix: use input bytes.
-/// - Block 545684 / tx[1] / output[0]: ergoTree `cd07021a8e6f59fd4a`
+/// - Block 545684 / `tx[1]` / `output[0]`: ergoTree `cd07021a8e6f59fd4a`
 ///   (version=5 soft-fork, has_size=true). The pre-check
 ///   rejection blocked the on-chain decode path; `read_ergo_tree`
 ///   itself handles this fine via `unparsed_soft_fork_tree`. Fix:
@@ -634,14 +639,14 @@ pub fn decode_header_json(json: &str) -> Result<ergo_ser::header::Header, Decode
 /// Field mapping (Scala JSON → internal `Header`):
 /// - `parentId` / `adProofsRoot` / `transactionsRoot` / `extensionHash`
 ///   → corresponding `Digest32` / `ModifierId` fields
-/// - `stateRoot` (33 hex chars = 33 bytes) → `ADDigest`
+/// - `stateRoot` (66 hex characters = 33 bytes) → `ADDigest`
 /// - `votes` (6 hex chars = 3 bytes) → `[u8; 3]`
 /// - `unparsedBytes` (hex) → `Vec<u8>`
 /// - `nBits` (u64 in JSON, capped at `u32::MAX` per protocol) → `u32`
 /// - `powSolutions` → `AutolykosSolution::V1` if `version == 1`,
 ///   `V2` otherwise. `pk` / `w` are 33-byte SEC1 compressed group
 ///   elements; `nonce` is 8 bytes; `d` is a BigInt for v1 (Scala
-///   emits decimal string) and ignored for v2.
+///   emits a bare JSON number; numeric strings are also accepted) and ignored for v2.
 ///
 /// Scala-emitted `extensionId`, `transactionsId`, `adProofsId`,
 /// `size`, `id`, `difficulty` are derived fields the indexer

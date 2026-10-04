@@ -20,7 +20,7 @@ pub mod tx_context;
 
 pub use derivation::DerivationPath;
 pub use error::WalletError;
-pub use extended_key::{ExtendedPublicKey, ExtendedSecretKey};
+pub use extended_key::{ExtendedPublicKey, ExtendedSecretKey, ExtendedSecretKeyLegacy};
 pub use mnemonic::Mnemonic;
 pub use secret::SecretKey;
 pub use storage::{
@@ -35,10 +35,10 @@ pub use storage::{
 ///
 /// Always uses post-1627 (modern) derivation; the legacy
 /// pre-Sigma-5.0 path is exposed via
-/// `ExtendedSecretKey::derive_master_key(seed, true)` for callers
-/// importing pre-1627 wallets.
+/// [`ExtendedSecretKeyLegacy::derive_master_key`] for callers importing
+/// pre-1627 wallets. The key type retains the selected child derivation mode.
 pub fn miner_pubkey_for_seed(seed: &[u8]) -> Result<[u8; 33], error::WalletError> {
-    let master = extended_key::ExtendedSecretKey::derive_master_key(seed, false)?;
+    let master = extended_key::ExtendedSecretKey::derive_master_key(seed)?;
     let leaf = master.derive_at_path(&derivation::DerivationPath::eip3_first_address())?;
     Ok(leaf.public_key().compressed_bytes())
 }
@@ -58,7 +58,7 @@ mod lib_tests {
         )
         .unwrap();
         let seed = m.to_seed("");
-        let pk = miner_pubkey_for_seed(&seed).unwrap();
+        let pk = miner_pubkey_for_seed(&seed[..]).unwrap();
         let hex = hex::encode(pk);
         assert_eq!(hex.len(), 66, "33 bytes hex = 66 chars");
         assert!(

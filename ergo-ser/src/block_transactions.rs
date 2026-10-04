@@ -7,7 +7,7 @@ use crate::error::WriteError;
 use crate::transaction::{read_transaction, write_transaction, Transaction};
 
 /// A block's transactions section: the header it belongs to plus the
-/// ordered list of transactions. Authenticated by the header's
+/// non-empty ordered list of transactions. Authenticated by the header's
 /// `transactions_root` (Merkle over `transaction_id`s in order).
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockTransactions {
@@ -126,7 +126,7 @@ pub fn read_block_transactions(r: &mut VlqReader) -> Result<BlockTransactions, R
 /// node has already validated, applied and stored can only make its own history
 /// unreadable.
 ///
-/// This is not hypothetical: mainnet block 545,684 (tx[1], output[0]) holds the
+/// This is not hypothetical: mainnet block 545,684 (`tx[1]`, `output[0]`) holds the
 /// size-delimited ErgoTree `cd07021a8e6f59fd4a`, whose header byte claims tree
 /// version 5. Scala accepted it because at that height the activated script
 /// version was below `VersionContext.JitActivationVersion`, where
@@ -187,6 +187,14 @@ pub fn read_block_transactions_with_group_elements(
         (1, ver_or_count as usize)
     };
 
+    // Scala constructs BlockTransactions during parse (BlockTransactions.scala:204),
+    // whose invariant at line 42 rejects an empty section, including stored data.
+    if count == 0 {
+        return Err(ReadError::InvalidData(
+            "BlockTransactions must contain at least one transaction".to_owned(),
+        ));
+    }
+
     // Scala `BlockTransactionsSerializer.parse` (`BlockTransactions.scala:184-202`)
     // scopes the transaction parse in `VersionContext.withVersions(blockVersion - 1,
     // blockVersion - 1)` ONLY for `blockVersion >= Header.Interpreter60Version (4)`;
@@ -228,6 +236,8 @@ pub fn read_block_transactions_with_group_elements(
         for tx_idx in 0..count {
             let tx = read_transaction(r)
                 .map_err(|e| ReadError::InvalidData(format!("tx[{tx_idx}]: {e}")))?;
+            // Missing inputs/outputs are validation failures (ErgoTransaction.scala:93-94),
+            // not parse failures: committed bytes must reach header invalidation.
             transactions.push(tx);
             per_tx_group_elements.push(r.take_group_elements());
         }
@@ -248,6 +258,33 @@ pub fn read_block_transactions_with_group_elements(
 
 #[cfg(test)]
 mod tests {
+
+    /// SANTA `BlockTransactions.reader_scope` (blessed by ergo-core 6.0.6):
+    /// `ErgoTransactionSerializer.parse` wraps each transaction in a new
+    /// `SigmaByteReader`, so every transaction starts with an empty binding
+    /// store. #2's second transaction uses a variable only the first one
+    /// binds and must be rejected; the others round-trip byte-identically.
+    #[test]
+    fn block_transactions_start_each_transaction_with_an_empty_binding_store() {
+        for (name, hex, accept) in [
+            ("block-depth-left-then-plain-accept#0", "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade20402012273c73313bd759c7a0e122d48a6b452a378a24fc783280e8d3789f08f5567b20000000001c0843d0b6dd1efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefeffd01000001e21828951e367099a66b8cac0f867c2297848003ab45f38d8c3b864598d728590000000001c0843d0008d3010000", true),
+            ("block-plain-then-depth-left-accept#1", "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade2040201e21828951e367099a66b8cac0f867c2297848003ab45f38d8c3b864598d728590000000001c0843d0008d3010000012273c73313bd759c7a0e122d48a6b452a378a24fc783280e8d3789f08f5567b20000000001c0843d0b6dd1efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefeffd010000", true),
+            ("block-valdef-then-valuse-reject#2", "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade2040201456971d1f52b5bafce6e5c94848a0892d936cfe52a65d6a75d48d1fcc586f9f60000000001c0843d00d801d60108d3720101000001b2c4c3246f9b3015b4fea907cb8b0748e5c6c434c665d8cf2b2668427caf97620000000001c0843d007201010000", false),
+            ("block-valdef-then-own-valdef-accept#3", "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade2040201456971d1f52b5bafce6e5c94848a0892d936cfe52a65d6a75d48d1fcc586f9f60000000001c0843d00d801d60108d37201010000015dea0e5b89dbbc08eb741989221dda7428575bb695d2a75bb15e434e379af43b0000000001c0843d00d801d60108d37201010000", true),
+        ] {
+            let bytes = hex::decode(hex).unwrap();
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
+            let result = read_block_transactions(&mut r);
+            assert_eq!(result.is_ok(), accept, "{name}: {result:?}");
+            if let Ok(bt) = result {
+                let mut marker = VlqReader::new(&bytes[32..]);
+                let version = (marker.get_u32_exact().unwrap() - MAX_TRANSACTIONS_IN_BLOCK) as u8;
+                let mut w = VlqWriter::new();
+                write_block_transactions_with_version(&mut w, &bt, version).unwrap();
+                assert_eq!(w.result(), bytes, "{name}: round trip");
+            }
+        }
+    }
     use super::*;
     use crate::ergo_box::ErgoBoxCandidate;
     use crate::ergo_tree::{read_ergo_tree, ErgoTree};
@@ -265,6 +302,7 @@ mod tests {
             version: 0,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             // Root must be SSigmaProp: under `has_size`, a non-SigmaProp root
             // (e.g. `Const(SBoolean, true)`) fails Scala's
@@ -308,21 +346,6 @@ mod tests {
     // ----- round-trips -----
 
     #[test]
-    fn block_transactions_roundtrip_empty() {
-        let bt = BlockTransactions {
-            header_id: ModifierId::from_bytes([0x11; 32]),
-            transactions: vec![],
-        };
-        let mut w = VlqWriter::new();
-        write_block_transactions(&mut w, &bt).unwrap();
-        let data = w.result();
-        let mut r = VlqReader::new(&data);
-        let decoded = read_block_transactions(&mut r).unwrap();
-        assert!(r.is_empty(), "leftover bytes");
-        assert_eq!(decoded, bt);
-    }
-
-    #[test]
     fn block_transactions_roundtrip_one_tx() {
         let bt = BlockTransactions {
             header_id: ModifierId::from_bytes([0x22; 32]),
@@ -335,6 +358,34 @@ mod tests {
         let decoded = read_block_transactions(&mut r).unwrap();
         assert!(r.is_empty(), "leftover bytes");
         assert_eq!(decoded, bt);
+    }
+
+    #[test]
+    fn block_transactions_missing_inputs_or_outputs_roundtrip() {
+        let mut no_output = make_tx(0xBB);
+        no_output.output_candidates.clear();
+        let no_input = Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![make_candidate(1_000_000)],
+        };
+        let empty = Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        };
+        let bt = BlockTransactions {
+            header_id: ModifierId::from_bytes([0x57; 32]),
+            transactions: vec![empty, no_input, no_output],
+        };
+        let mut w = VlqWriter::new();
+        write_block_transactions(&mut w, &bt).unwrap();
+        let bytes = w.result();
+        let mut reader = VlqReader::new(&bytes);
+        let decoded = read_block_transactions(&mut reader).unwrap();
+        assert!(reader.is_empty());
+        assert_eq!(decoded, bt);
+        assert_eq!(read_stored_block_transactions(&bytes).unwrap(), bt);
     }
 
     /// Pin Scala-canonical v2 wire format for the new
@@ -406,6 +457,26 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn block_transactions_zero_count_rejected() {
+        for version in [1, 2, 4] {
+            let bt = BlockTransactions {
+                header_id: ModifierId::from_bytes([0x11; 32]),
+                transactions: vec![],
+            };
+            let mut writer = VlqWriter::new();
+            write_block_transactions_with_version(&mut writer, &bt, version).unwrap();
+            let bytes = writer.result();
+            for result in [
+                read_block_transactions(&mut VlqReader::new(&bytes)),
+                read_stored_block_transactions(&bytes),
+            ] {
+                assert!(matches!(result, Err(ReadError::InvalidData(ref message))
+                    if message.contains("must contain at least one transaction")));
+            }
+        }
+    }
 
     /// Build a v2+ marker preamble (header_id + marker only, no count or
     /// txs) so callers can append a hostile or boundary count and assert
@@ -652,5 +723,54 @@ mod tests {
             ser(2).len() > v1.len(),
             "a real v2 block carries the marker (longer than v1)",
         );
+    }
+
+    // ----- oracle parity -----
+
+    /// Scala parses each transaction of a section on a fresh
+    /// `SigmaByteReader`, so neither the levels a degraded tree leaves open
+    /// nor the val bindings of one transaction reach the next. SANTA
+    /// `BlockTransactions.reader_scope` (https://github.com/mwaddip/santa,
+    /// MIT); JVM (`SantaWireOracle.scala`, sigma-state 6.0.6): #0, #1 and #3
+    /// ACCEPT with their own bytes, #2 REJECT NoSuchElementException. In #0
+    /// the first transaction's tree degrades 109 levels deep, which on a
+    /// shared reader would reject the second transaction's `sigmaProp(true)`.
+    #[test]
+    fn block_transactions_each_transaction_starts_a_fresh_reader() {
+        for (name, section, accept) in [
+            (
+                "block-depth-left-then-plain-accept#0",
+                "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade20402012273c73313bd759c7a0e122d48a6b452a378a24fc783280e8d3789f08f5567b20000000001c0843d0b6dd1efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefeffd01000001e21828951e367099a66b8cac0f867c2297848003ab45f38d8c3b864598d728590000000001c0843d0008d3010000",
+                true,
+            ),
+            (
+                "block-plain-then-depth-left-accept#1",
+                "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade2040201e21828951e367099a66b8cac0f867c2297848003ab45f38d8c3b864598d728590000000001c0843d0008d3010000012273c73313bd759c7a0e122d48a6b452a378a24fc783280e8d3789f08f5567b20000000001c0843d0b6dd1efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefeffd010000",
+                true,
+            ),
+            (
+                "block-valdef-then-valuse-reject#2",
+                "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade2040201456971d1f52b5bafce6e5c94848a0892d936cfe52a65d6a75d48d1fcc586f9f60000000001c0843d00d801d60108d3720101000001b2c4c3246f9b3015b4fea907cb8b0748e5c6c434c665d8cf2b2668427caf97620000000001c0843d007201010000",
+                false,
+            ),
+            (
+                "block-valdef-then-own-valdef-accept#3",
+                "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade2040201456971d1f52b5bafce6e5c94848a0892d936cfe52a65d6a75d48d1fcc586f9f60000000001c0843d00d801d60108d37201010000015dea0e5b89dbbc08eb741989221dda7428575bb695d2a75bb15e434e379af43b0000000001c0843d00d801d60108d37201010000",
+                true,
+            ),
+        ] {
+            let bytes = hex::decode(section).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let result = read_block_transactions(&mut r);
+            if accept {
+                let bt = result.unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert!(r.is_empty(), "{name}");
+                let mut w = VlqWriter::new();
+                write_block_transactions_with_version(&mut w, &bt, 4).unwrap();
+                assert_eq!(w.result(), bytes, "{name}: round trip");
+            } else {
+                assert!(result.is_err(), "{name}");
+            }
+        }
     }
 }

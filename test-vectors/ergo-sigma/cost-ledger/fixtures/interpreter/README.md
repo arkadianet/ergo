@@ -2,7 +2,7 @@
 
 The generators hand-serialize every expression and SigmaBoolean; they do not
 invoke the ErgoScript compiler. `scripts/gen-cost-fixture.sh` supplies all
-expectations through the pinned JVM 6.0.2 full-verification oracle. Each JSON
+expectations through the pinned JVM 6.0.6 full-verification oracle. Each JSON
 includes its reproducibility manifest. `cost_ledger_fixtures_jvm_verify_fields_match`
 compares every exposed cost, verdict, and failure class.
 

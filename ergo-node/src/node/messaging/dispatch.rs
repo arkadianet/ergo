@@ -34,6 +34,7 @@
 //! small — the honest-peer cost of a false eviction is much higher than
 //! the cost of a slightly cheaper trickle.
 
+use crate::node::section_serving::{servable_section, serving_sentinel};
 use std::time::Instant;
 
 use ergo_p2p::handshake::PeerSpec;
@@ -48,7 +49,7 @@ use ergo_sync::coordinator::Action;
 use tracing::{debug, info, warn};
 
 use super::super::{
-    admit_transaction, hedge_request_modifiers, send_to_peer, try_send_anchor_sync_info, NodeState,
+    admit_transaction, hedge_request_modifiers, send_post_header_sync_info, send_to_peer, NodeState,
 };
 use super::{manifest, popow, utxo_chunk};
 
@@ -60,19 +61,33 @@ fn note_progress(state: &mut NodeState, peer: &PeerId, now: Instant) {
     state.peer_manager.note_progress(peer, now);
 }
 
-#[tracing::instrument(
-    name = "msg",
-    level = "debug",
-    skip_all,
-    fields(peer = %peer, code = code, bytes = payload.len()),
-)]
-pub(in crate::node) fn handle_message(
+fn validate_modifier_type_prefix(payload: &[u8]) -> Result<(), message::MessageError> {
+    let Some(type_id) = payload.first().copied() else {
+        return Ok(());
+    };
+    if ModifierTypeId::from_byte(type_id).is_none() {
+        return Err(message::MessageError::UnknownModifierType(type_id));
+    }
+    Ok(())
+}
+
+pub(in crate::node) fn admit_frame(
     state: &mut NodeState,
     peer: PeerId,
     code: u8,
     payload: &[u8],
     now: Instant,
-) -> Vec<Action> {
+) -> Result<(), Vec<Action>> {
+    if matches!(code, message::CODE_INV | message::CODE_MODIFIER) {
+        if let Err(e) = validate_modifier_type_prefix(payload) {
+            warn!(peer = %peer, code = code, error = %e, "unknown modifier type");
+            return Err(vec![Action::Penalize {
+                peer,
+                penalty: Penalty::Misbehavior,
+            }]);
+        }
+    }
+
     // Per-peer throughput cap. Payload size + header bytes (9)
     // approximate the on-wire cost; precise framing size isn't
     // necessary for rate bounding. Over-limit frames drop and the
@@ -121,11 +136,30 @@ pub(in crate::node) fn handle_message(
         }
         LimiterVerdict::MessageRateExceeded | LimiterVerdict::ByteRateExceeded => {
             warn!(peer = %peer, code = code, "throttle exceeded; dropping frame");
-            return vec![Action::Penalize {
+            return Err(vec![Action::Penalize {
                 peer,
                 penalty: Penalty::Misbehavior,
-            }];
+            }]);
         }
+    }
+    Ok(())
+}
+
+#[tracing::instrument(
+    name = "msg",
+    level = "debug",
+    skip_all,
+    fields(peer = %peer, code = code, bytes = payload.len()),
+)]
+pub(in crate::node) fn handle_message(
+    state: &mut NodeState,
+    peer: PeerId,
+    code: u8,
+    payload: &[u8],
+    now: Instant,
+) -> Vec<Action> {
+    if let Err(actions) = admit_frame(state, peer, code, payload, now) {
+        return actions;
     }
     match code {
         message::CODE_SYNC_INFO => match message::deserialize_sync_info(payload) {
@@ -225,58 +259,14 @@ pub(in crate::node) fn handle_message(
                         | ModifierTypeId::ADProofs
                         | ModifierTypeId::Extension,
                     ) => {
-                        // Mode 3 serve gating. Silently
-                        // skip sections whose parent header is
-                        // below our prune sentinel. The peer is
-                        // not penalized — they may legitimately
-                        // not know our pruned suffix-window
-                        // setting, and serving stale section bytes
-                        // for a pruned height would advertise
-                        // availability we can't sustainably honor.
-                        // Matches Scala's
-                        // `ErgoNodeViewSynchronizer.processModifierRequest`
-                        // silent-skip.
-                        //
-                        // Fail-CLOSED on missing or unreadable
-                        // SECTION_HEIGHT_INDEX rows (see the
-                        // get_section_height docstring at
-                        // ergo-state/src/store/mod.rs): a pruned
-                        // node only serves sections it can prove
-                        // are above its sentinel. Unindexed
-                        // sections (legacy / never seen) are
-                        // denied even if BLOCK_SECTIONS would
-                        // return bytes — otherwise an attacker
-                        // could resurrect pruned content via
-                        // orphan-id requests.
-                        // Sentinel unreadable → serve nothing
-                        // (fail-closed).
-                        let sentinel: u32 = match state.store.read_minimal_full_block_height() {
-                            Ok(s) => s,
-                            Err(_) => return Vec::new(),
+                        let Some(sentinel) = serving_sentinel(&state.store) else {
+                            return Vec::new();
                         };
-                        // Gate fires on `sentinel > 1`: covers
-                        // Mode 2 / NiPoPoW bootstrapped nodes, not just
-                        // pruned mode. Fresh archive-from-genesis reads
-                        // sentinel = 1 (default) → no gating, full serve.
-                        let gate_active = sentinel > 1;
                         inv.ids
                             .iter()
                             .filter_map(|id| {
-                                if gate_active {
-                                    match state.store.get_section_height(id) {
-                                        Ok(Some(h)) if h >= sentinel => {}
-                                        // sub-sentinel: deny
-                                        Ok(Some(_)) => return None,
-                                        // unindexed / unreadable: fail-closed
-                                        Ok(None) | Err(_) => return None,
-                                    }
-                                }
-                                state
-                                    .store
-                                    .get_block_section(id)
-                                    .ok()
-                                    .flatten()
-                                    .map(|b| (*id, b))
+                                servable_section(&state.store, id, sentinel)
+                                    .map(|bytes| (*id, bytes))
                             })
                             .collect()
                     }
@@ -337,13 +327,10 @@ pub(in crate::node) fn handle_message(
             // hold its slot. Serving it still costs us nothing beyond the
             // reply, and an honest peer that asks for peers is also
             // syncing with us.
-            // Seed for rotation: wall-clock nanos give a different
+            // Seed rotation from OS randomness to vary the
             // starting offset on each `Peers` reply so the same prefix
             // of our peer list isn't sent to every requester.
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
+            let seed = rand::RngCore::next_u64(&mut rand::rngs::OsRng);
             // Scala parses inbound Peers with `require(length <= 64)`
             // (BasicMessagesRepo.scala:56-58); a longer list is a parse
             // failure and earns us a permanent IP ban, so share at most
@@ -455,8 +442,7 @@ pub(in crate::node) fn handle_message(
         message::CODE_MANIFEST => match message::deserialize_manifest(payload) {
             Ok(manifest_bytes) => {
                 note_progress(state, &peer, now);
-                manifest::handle_inbound_manifest(state, peer, manifest_bytes);
-                Vec::new()
+                manifest::handle_inbound_manifest(state, peer, manifest_bytes)
             }
             Err(e) => {
                 warn!(peer = %peer, error = %e, "bad Manifest");
@@ -469,8 +455,7 @@ pub(in crate::node) fn handle_message(
         message::CODE_UTXO_CHUNK => match message::deserialize_utxo_chunk(payload) {
             Ok(chunk_bytes) => {
                 note_progress(state, &peer, now);
-                utxo_chunk::handle_inbound_utxo_chunk(state, peer, chunk_bytes);
-                Vec::new()
+                utxo_chunk::handle_inbound_utxo_chunk(state, peer, chunk_bytes)
             }
             Err(e) => {
                 warn!(peer = %peer, error = %e, "bad UtxoSnapshotChunk");
@@ -816,8 +801,20 @@ fn handle_modifier_batch(
                 .on_modifier_received(peer, type_id, mod_id, data, now),
         );
     }
+    // ValidateHeader is emitted only for a delivery accepted from its requested
+    // peer, after the coordinator's type and claimed-ID checks.
+    let requested_headers: Vec<_> = batch_actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::ValidateHeader {
+                peer: p,
+                modifier_id,
+                ..
+            } if *p == peer => Some(*modifier_id),
+            _ => None,
+        })
+        .collect();
     let cs_before = state.store.chain_state_meta();
-    let bh_before = cs_before.best_header_height;
     let fb_before = cs_before.best_full_block_height;
 
     let wallet_wiring = state
@@ -863,44 +860,16 @@ fn handle_modifier_batch(
     // Without this, the next SyncInfo waits for the sync_tick timer,
     // throttling header throughput to batch_size/sync_tick.
     //
-    // Step C+D: when the scheduler is enabled, route this
-    // through the same anchor path as the periodic dispatch.
-    // Sending tip-tail here causes massive Inv duplication —
-    // peer A's tip-tail response overlaps with peer B's
-    // anchored response, the on_inv filter rejects 87-99% of
-    // incoming IDs as "already received", and effective
-    // throughput collapses (instrumentation 2026-05-05). The
-    // anchored path keeps each peer on a disjoint chain
-    // slice. mark_sync_sent fires either way so Lever 1's
-    // throttle accounts for the dispatch.
-    if bh > bh_before && state.registry.peers.contains_key(&peer) {
-        if !try_send_anchor_sync_info(state, &peer, now) {
-            if let Some(rt) = state.registry.peers.get(&peer) {
-                let payload_res = match rt.sync_version {
-                    SyncVersion::V2 => {
-                        let headers = state.executor.cached_header_bytes(50);
-                        message::serialize_sync_info(&message::SyncInfo::V2 { headers })
-                    }
-                    SyncVersion::V1 => ergo_sync::coordinator::build_sync_info_payload(
-                        rt.sync_version,
-                        &state.store,
-                    ),
-                };
-                match payload_res {
-                    Ok(payload) => all_actions.push(Action::SendToPeer {
-                        peer,
-                        code: message::CODE_SYNC_INFO,
-                        payload,
-                    }),
-                    Err(e) => warn!(
-                        peer = %peer,
-                        error = %e,
-                        "failed to serialize SyncInfo; skipping send"
-                    ),
-                }
-            }
-        }
-        state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
+    // Step C+D: when the scheduler is enabled, this goes through the same
+    // anchor path as the periodic dispatch (see
+    // `send_post_header_sync_info` for why tip-tail is not sent here).
+    // Scala sends only for valid requested headers. The executor forgets
+    // rejected deliveries, but retains AlreadyKnown and buffered headers.
+    let delivered_requested_header = requested_headers.iter().any(|id| {
+        state.coordinator.delivery().status(id) == ergo_p2p::delivery::ModifierStatus::Received
+    });
+    if delivered_requested_header {
+        send_post_header_sync_info(state, peer, now, &mut all_actions);
     }
 
     // Log progress periodically

@@ -2,7 +2,7 @@
 # difftest-guard.sh — the standing consensus guard.
 #
 # Runs the structure-aware generators against the live JVM oracle on the
-# consensus-complete surfaces, minimizes + classifies every unique divergence,
+# supported codec and reduction surfaces, minimizes + classifies every unique divergence,
 # and prints a per-surface table.
 #
 # Verdict:
@@ -33,7 +33,7 @@
 # process cannot overwrite another's evidence.
 #
 # Requires `scala-cli` on PATH and the oracle's dependencies resolvable
-# (sigma-state 6.0.2 from Maven, ergo-core 6.0.2 from a local `sbt
+# (sigma-state 6.0.6 from Maven, ergo-core 6.0.6 from a local `sbt
 # ergoCore/publishLocal` — see ergo-difftest/README.md "Oracle setup").
 
 set -euo pipefail
@@ -48,12 +48,15 @@ SEED=991
 ITERS=2000
 SURFACES="reduce reduce_ctx transaction ergo_box_candidate validate"
 ORACLE_SCRIPT="$REPO_ROOT/scripts/jvm_serde_oracle/ErgoSerdeOracle.scala"
-DEFAULT_REGRESSIONS_DIR="$REPO_ROOT/ergo-difftest/regressions"
-REGRESSIONS_DIR="$DEFAULT_REGRESSIONS_DIR"
+REGRESSIONS_DIR=""
 BASELINE="$REPO_ROOT/ergo-difftest/known_bugs/baseline.toml"
 KEEP_REGRESSIONS=false
 
 while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --seed|--iters|--surfaces|--oracle-script|--regressions-dir|--baseline)
+            [[ $# -ge 2 && -n "$2" ]] || { echo >&2 "missing value for $1"; exit "$EXIT_USAGE"; } ;;
+    esac
     case "$1" in
         --seed)            SEED="$2"; shift 2 ;;
         --iters)           ITERS="$2"; shift 2 ;;
@@ -67,73 +70,38 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-case "$SEED$ITERS" in
-    *[!0-9]*) echo >&2 "difftest-guard: --seed and --iters must be integers"; exit "$EXIT_USAGE" ;;
-esac
-
+if ! python3 - "$SEED" "$ITERS" <<'CHECK_ARGUMENTS'
+import sys
+for value in sys.argv[1:]:
+    if not value.isascii() or not value.isdigit() or not 0 < int(value) <= 2**64 - 1:
+        sys.exit(1)
+if int(sys.argv[2]) > 1_000_000_000_000:
+    sys.exit(1)
+CHECK_ARGUMENTS
+then
+    echo >&2 "difftest-guard: positive u64 seed and iteration count in 1..1000000000000 required"
+    exit "$EXIT_USAGE"
+fi
+# Normalize leading zeros before comparing the printed completed-check count.
+SEED="$(python3 -c 'import sys; print(int(sys.argv[1]))' "$SEED")"
+ITERS="$(python3 -c 'import sys; print(int(sys.argv[1]))' "$ITERS")"
+read -r -a SURFACE_LIST <<< "$SURFACES"
+[[ ${#SURFACE_LIST[@]} -gt 0 ]] || { echo >&2 "difftest-guard: empty surface set"; exit "$EXIT_USAGE"; }
+declare -A SEEN_SURFACE=()
+for surface in "${SURFACE_LIST[@]}"; do
+    case "$surface" in
+        ergo_tree|ergo_box_candidate|transaction|header|reduce|reduce_ctx|validate) ;;
+        *) echo >&2 "difftest-guard: unsupported structured oracle surface: $surface"; exit "$EXIT_USAGE" ;;
+    esac
+    [[ -z "${SEEN_SURFACE[$surface]:-}" ]] || { echo >&2 "duplicate surface: $surface"; exit "$EXIT_USAGE"; }
+    SEEN_SURFACE[$surface]=1
+done
 if ! command -v scala-cli >/dev/null 2>&1; then
     echo >&2 "difftest-guard: scala-cli not on PATH — the guard needs the JVM oracle."
     exit "$EXIT_USAGE"
 fi
-
-# ---------------------------------------------------------------------------
-# Baseline: `key = "<surface>/<hash16>"` + a REQUIRED `ref` naming a PR/issue.
-# Parsed with the same pure-bash approach as reinject_gate.sh (no TOML library
-# in the toolchain).
-# ---------------------------------------------------------------------------
-
-declare -A BASELINE_REF=()
-declare -A BASELINE_HIT=()
-
-# Strip a trailing TOML comment WITHOUT cutting a '#' inside a quoted value —
-# `ref = "PR #301"` is exactly that case, and a naive `${line%%#*}` truncates it
-# to `PR `, so the required-reference rule would reject its own valid input.
-strip_comment() {
-    local line="$1" out="" in_quote=0 i ch
-    for (( i = 0; i < ${#line}; i++ )); do
-        ch="${line:i:1}"
-        [[ "$ch" == '"' ]] && in_quote=$(( 1 - in_quote ))
-        [[ "$ch" == "#" && $in_quote -eq 0 ]] && break
-        out+="$ch"
-    done
-    printf '%s' "$out"
-}
-
-load_baseline() {
-    [[ -f "$BASELINE" ]] || {
-        echo >&2 "difftest-guard: baseline file not found: $BASELINE"
-        exit "$EXIT_USAGE"
-    }
-    local line key="" ref="" bad=0
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="$(strip_comment "$line")"
-        line="${line#"${line%%[![:space:]]*}"}"
-        case "$line" in
-            "[[baseline]]"*)
-                if [[ -n "$key" ]]; then BASELINE_REF["$key"]="$ref"; fi
-                key=""; ref="" ;;
-            key*=*)  key="$(printf '%s' "${line#*=}" | tr -d ' "')" ;;
-            ref*=*)  ref="$(printf '%s' "${line#*=}" | sed 's/^ *"//; s/" *$//')" ;;
-        esac
-    done < "$BASELINE"
-    if [[ -n "$key" ]]; then BASELINE_REF["$key"]="$ref"; fi
-
-    for key in "${!BASELINE_REF[@]}"; do
-        # A baseline entry without a tracking reference is a muted divergence,
-        # not an accepted one. Refuse the whole run rather than silently honour it.
-        if ! [[ "${BASELINE_REF[$key]}" =~ ^(PR|issue)\ \#[0-9]+$ ]]; then
-            echo >&2 "difftest-guard: baseline entry $key has ref '${BASELINE_REF[$key]}' — must match '(PR|issue) #<number>'"
-            bad=1
-        fi
-        if ! [[ "$key" =~ ^[a-z_]+/[0-9a-f]{16}$ ]]; then
-            echo >&2 "difftest-guard: baseline key '$key' is not '<surface>/<16 hex chars>'"
-            bad=1
-        fi
-    done
-    (( bad == 0 )) || exit "$EXIT_USAGE"
-}
-
-load_baseline
+RECORD_VALIDATOR="$REPO_ROOT/scripts/difftest-records.py"
+python3 "$RECORD_VALIDATOR" --baseline "$BASELINE" --check-baseline || exit "$EXIT_USAGE"
 
 # ---------------------------------------------------------------------------
 # Binary.
@@ -142,49 +110,46 @@ load_baseline
 DIFFTEST_BIN="${DIFFTEST_BIN:-}"
 if [[ -z "$DIFFTEST_BIN" ]]; then
     echo "difftest-guard: building ergo-difftest (release)…"
-    cargo build --release --quiet -p ergo-difftest
-    DIFFTEST_BIN="$(cargo metadata --format-version 1 --no-deps \
-        | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/difftest"
+    cargo build --locked --release -p ergo-difftest
+    DIFFTEST_BIN="$(cargo metadata --locked --format-version 1 --no-deps \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/release/difftest"
 fi
 if [[ ! -x "$DIFFTEST_BIN" ]]; then
     echo >&2 "difftest-guard: difftest binary not found at $DIFFTEST_BIN"
     exit "$EXIT_USAGE"
 fi
 
-# `rm -rf` on a caller-supplied path: only ever the default, or something under
-# the repository. A typo in --regressions-dir must not cost somebody their home
-# directory.
-if ! $KEEP_REGRESSIONS; then
-    abs_regressions="$(cd "$(dirname "$REGRESSIONS_DIR")" 2>/dev/null && pwd)/$(basename "$REGRESSIONS_DIR")" || abs_regressions=""
-    if [[ "$abs_regressions" != "$DEFAULT_REGRESSIONS_DIR" && "$abs_regressions" != "$REPO_ROOT"/* ]]; then
-        echo >&2 "difftest-guard: refusing to clear '$REGRESSIONS_DIR' — it is outside the repository."
-        echo >&2 "                 pass --keep-regressions, or point --regressions-dir under $REPO_ROOT."
+# Default to a fresh owned output directory. Explicit existing output is kept
+# only with --keep-regressions; the guard never clears caller-owned evidence.
+if [[ -z "$REGRESSIONS_DIR" ]]; then
+    REGRESSIONS_DIR="$(mktemp -d "$REPO_ROOT/ergo-difftest/regressions-run.XXXXXX")"
+elif [[ -e "$REGRESSIONS_DIR" || -L "$REGRESSIONS_DIR" ]]; then
+    if ! $KEEP_REGRESSIONS || [[ ! -d "$REGRESSIONS_DIR" || -L "$REGRESSIONS_DIR" ]]; then
+        echo >&2 "difftest-guard: output exists; preserve it and select a fresh directory, or explicitly use --keep-regressions"
         exit "$EXIT_USAGE"
     fi
-    rm -rf "$abs_regressions"
+else
+    mkdir -p "$REGRESSIONS_DIR"
 fi
-
-# One log per surface so a failure keeps its full evidence.
-LOG_DIR="$(mktemp -d)"
-trap 'rm -rf "$LOG_DIR"' EXIT
+REGRESSIONS_DIR="$(cd "$REGRESSIONS_DIR" && pwd -P)"
+mkdir -p "$REGRESSIONS_DIR/logs"
+LOG_DIR="$(mktemp -d "$REGRESSIONS_DIR/logs/run.XXXXXX")"
 
 echo "difftest-guard: seed=$SEED iters=$ITERS oracle=$ORACLE_SCRIPT"
 echo "difftest-guard: surfaces: $SURFACES"
-echo "difftest-guard: baseline: $BASELINE (${#BASELINE_REF[@]} accepted entries)"
+echo "difftest-guard: baseline: $BASELINE"
+echo "difftest-guard: preserved logs: $LOG_DIR"
 echo
 
 declare -A CHECKS DIVERGENCES CLASSES PENDING ARTIFACTS RC
 harness_failed=0
 
-for surface in $SURFACES; do
+for surface in "${SURFACE_LIST[@]}"; do
     echo "── $surface ──────────────────────────────────────────────"
     log="$LOG_DIR/$surface.log"
     # Per-surface transcript: the guard spawns one oracle process per surface,
     # and they must not share one file.
-    surface_env=()
-    if [[ -n "${DIFFTEST_ORACLE_LOG:-}" ]]; then
-        surface_env=(env "DIFFTEST_ORACLE_LOG=${DIFFTEST_ORACLE_LOG}.${surface}")
-    fi
+    surface_env=(env "DIFFTEST_ORACLE_LOG=${DIFFTEST_ORACLE_LOG:-$LOG_DIR/oracle-transcript.log}.${surface}")
     # `--structured` feeds each surface its own targeted generator; `--minimize`
     # shrinks + classifies + files every unique divergence under the regressions
     # directory.
@@ -236,34 +201,50 @@ for surface in $SURFACES; do
         echo "difftest-guard: HARNESS ERROR — $surface ran ${CHECKS[$surface]} checks, expected $ITERS"
         harness_failed=1
     fi
+
+    # A completed input loop does not establish that detected evidence was
+    # processed/filed. Every observed class must have a pending record.
+    if (( ${CLASSES[$surface]} > 0 )); then
+        minimized_unique= filed_pending= filed_artifacts=
+        read -r minimized_unique filed_pending filed_artifacts < <(
+            sed -n 's/^minimize summary: checks=[0-9]* unique_divergences=\([0-9]*\) minimized=[0-9]* pending_queued=\([0-9]*\) known_artifacts=\([0-9]*\)$/\1 \2 \3/p' "$log" | tail -n 1
+        ) || true
+        if [[ "${minimized_unique:-}" != "${CLASSES[$surface]}" ||
+              "${filed_pending:-}" != "${CLASSES[$surface]}" ||
+              "${filed_artifacts:-}" != "0" ]]; then
+            echo "difftest-guard: HARNESS ERROR — $surface detected ${CLASSES[$surface]} class(es), but pending filing was incomplete"
+            harness_failed=1
+        fi
+    elif [[ $rc -eq "$EXIT_FINDING" ]]; then
+        echo "difftest-guard: HARNESS ERROR — $surface exited finding with zero reported classes"
+        harness_failed=1
+    fi
     echo
 done
 
-# ---------------------------------------------------------------------------
-# Split the filed PENDING records into baselined and new.
-# ---------------------------------------------------------------------------
-
-new_keys=()
-baselined_keys=()
-for surface in $SURFACES; do
-    dir="$REGRESSIONS_DIR/$surface"
-    [[ -d "$dir" ]] || continue
-    for record in "$dir"/*.json; do
-        [[ -e "$record" ]] || continue
-        key="$surface/$(basename "$record" .json)"
-        if [[ -n "${BASELINE_REF[$key]:-}" ]]; then
-            baselined_keys+=("$key")
-            BASELINE_HIT[$key]=1
-        else
-            new_keys+=("$key")
-        fi
-    done
+# Validate full JSON identities and source-bound authority before any baseline
+# hit. Filenames alone, including historical short keys, cannot mute findings.
+set +e
+python3 "$RECORD_VALIDATOR" --root "$REGRESSIONS_DIR" --baseline "$BASELINE" \
+    --surfaces "${SURFACE_LIST[@]}" > "$LOG_DIR/record-validation.log" 2>&1
+record_rc=$?
+set -e
+cat "$LOG_DIR/record-validation.log"
+if [[ $record_rc -ne 0 && $record_rc -ne "$EXIT_FINDING" ]]; then
+    harness_failed=1
+fi
+for surface in "${SURFACE_LIST[@]}"; do
+    validated="$(sed -n "s/^VALIDATED $surface \\([0-9]*\\)$/\\1/p" "$LOG_DIR/record-validation.log")"
+    if [[ -z "$validated" ]] || (( validated < ${CLASSES[$surface]} )); then
+        echo "difftest-guard: HARNESS ERROR — $surface has fewer validated records than detected classes"
+        harness_failed=1
+    fi
 done
 
 echo "=============================================================="
 printf '%-20s %8s %12s %8s %8s %10s %4s\n' surface checks divergences classes pending artifacts rc
 printf '%-20s %8s %12s %8s %8s %10s %4s\n' -------------------- -------- ------------ -------- -------- ---------- ----
-for surface in $SURFACES; do
+for surface in "${SURFACE_LIST[@]}"; do
     printf '%-20s %8s %12s %8s %8s %10s %4s\n' \
         "$surface" "${CHECKS[$surface]}" "${DIVERGENCES[$surface]}" \
         "${CLASSES[$surface]}" "${PENDING[$surface]}" "${ARTIFACTS[$surface]}" "${RC[$surface]}"
@@ -272,41 +253,14 @@ echo "=============================================================="
 echo "regressions filed under: $REGRESSIONS_DIR"
 echo
 
-if (( ${#baselined_keys[@]} > 0 )); then
-    echo "accepted baseline (known, tracked — not a failure):"
-    printf '%-40s %s\n' record tracked-as
-    for key in "${baselined_keys[@]}"; do
-        printf '%-40s %s\n' "$key" "${BASELINE_REF[$key]}"
-    done
-    echo
-fi
-
-# A baseline entry the run did NOT reproduce is worth saying out loud: either the
-# fix landed (delete the entry) or the campaign stopped reaching the class.
-stale=()
-for key in "${!BASELINE_REF[@]}"; do
-    [[ -n "${BASELINE_HIT[$key]:-}" ]] || stale+=("$key")
-done
-if (( ${#stale[@]} > 0 )); then
-    echo "baseline entries NOT reproduced by this run (fix landed, or coverage lost):"
-    for key in "${stale[@]}"; do
-        printf '  %-38s %s\n' "$key" "${BASELINE_REF[$key]}"
-    done
-    echo "  (not a failure at this seed/iteration budget — but if a fix merged, delete the entry)"
-    echo
-fi
-
 if (( harness_failed )); then
     echo "difftest-guard: HARNESS FAILURE — the run did not check what it planned to."
     echo "A partial run says nothing about consensus parity. Fix the oracle and re-run."
     exit "$EXIT_HARNESS"
 fi
 
-if (( ${#new_keys[@]} > 0 )); then
-    echo "difftest-guard: FAIL — ${#new_keys[@]} UNBASELINED pending divergence(s):"
-    for key in "${new_keys[@]}"; do
-        echo "  $key  →  $REGRESSIONS_DIR/$key.json"
-    done
+if [[ $record_rc -eq "$EXIT_FINDING" ]]; then
+    echo "difftest-guard: FAIL — unbaselined authority-bound pending divergence(s); see $LOG_DIR/record-validation.log"
     echo
     echo "Triage each one. If it is a genuine, tracked divergence, file an issue and"
     echo "add it to $BASELINE with its ref. Never baseline to make the run green."

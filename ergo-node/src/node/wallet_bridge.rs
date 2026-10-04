@@ -115,6 +115,17 @@ impl MempoolOverlay for MempoolViewOverlay {
     fn pool_outputs(&self) -> Arc<HashMap<Digest32, ErgoBox>> {
         self.inner.pool_outputs()
     }
+
+    fn box_snapshot(
+        &self,
+        committed_ids: &[Digest32],
+    ) -> ergo_wallet_service::engine::mempool::MempoolBoxSnapshot {
+        let snapshot = self.inner.box_snapshot(committed_ids);
+        ergo_wallet_service::engine::mempool::MempoolBoxSnapshot {
+            outputs: snapshot.outputs,
+            spent_box_ids: snapshot.spent_box_ids,
+        }
+    }
 }
 
 /// Command sent from the API task to the wallet writer task.
@@ -380,10 +391,11 @@ pub enum WalletCommand {
     },
 }
 
-fn reject_wallet_reply<T>(reply: oneshot::Sender<Result<T, WalletAdminError>>) {
-    let _ = reply.send(Err(WalletAdminError::RescanUnavailable(
-        "wallet recovery required: run rescan before using wallet operations".to_string(),
-    )));
+fn reject_wallet_reply<T>(
+    reply: oneshot::Sender<Result<T, WalletAdminError>>,
+    error: WalletAdminError,
+) {
+    let _ = reply.send(Err(error));
 }
 
 impl WalletCommand {
@@ -398,10 +410,14 @@ impl WalletCommand {
     }
 
     fn reject_during_rescan(self) {
+        self.reject(WalletAdminError::ScanInvalidated);
+    }
+
+    fn reject(self, error: WalletAdminError) {
         macro_rules! reject {
             ($($variant:ident),+ $(,)?) => {
                 match self {
-                    $(Self::$variant { reply, .. } => reject_wallet_reply(reply),)+
+                    $(Self::$variant { reply, .. } => reject_wallet_reply(reply, error),)+
                 }
             };
         }
@@ -508,18 +524,26 @@ impl NodeWalletAdmin {
     where
         F: FnOnce(oneshot::Sender<Result<R, WalletAdminError>>) -> WalletCommand,
     {
+        if self.rescan.shutdown_requested() {
+            return Err(WalletAdminError::ShuttingDown);
+        }
         if !allow_during_rescan && self.rescan.operations_fenced() {
-            return Err(WalletAdminError::RescanUnavailable(
-                "wallet recovery required: run rescan before using wallet operations".to_string(),
-            ));
+            return Err(WalletAdminError::ScanInvalidated);
         }
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(build(reply_tx))
-            .await
-            .map_err(|_| WalletAdminError::Internal("wallet writer task is gone".to_string()))?;
+        self.tx.send(build(reply_tx)).await.map_err(|_| {
+            if self.rescan.shutdown_requested() {
+                WalletAdminError::ShuttingDown
+            } else {
+                WalletAdminError::Internal("wallet writer task is gone".to_string())
+            }
+        })?;
         reply_rx.await.map_err(|_| {
-            WalletAdminError::Internal("wallet writer task dropped reply".to_string())
+            if self.rescan.shutdown_requested() {
+                WalletAdminError::ShuttingDown
+            } else {
+                WalletAdminError::Internal("wallet writer task dropped reply".to_string())
+            }
         })?
     }
 }
@@ -1191,18 +1215,53 @@ impl WalletWriter {
     /// otherwise dispatch it to the engine; each reply goes back via the
     /// command's oneshot.
     pub async fn run(self) {
+        let (_cancel, cancellation) = tokio::sync::watch::channel(false);
+        if let Err(error) = self.run_supervised(cancellation).await {
+            tracing::error!(%error, "wallet writer failed");
+        }
+    }
+
+    /// Stop admission, drain accepted commands and join every blocking rescan.
+    pub async fn run_supervised(
+        self,
+        mut cancellation: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), WalletAdminError> {
         let Self {
             mut rx,
             mut engine,
             session_id,
         } = self;
-        while let Some(cmd) = rx.recv().await {
-            if !cmd.is_rescan_control() && engine.rescan_coordinator().operations_fenced() {
+        let coordinator = engine.rescan_coordinator().clone();
+        loop {
+            let cmd = tokio::select! {
+                biased;
+                _ = cancellation.changed(), if !coordinator.shutdown_requested() => {
+                    coordinator.request_shutdown();
+                    rx.close();
+                    continue;
+                }
+                cmd = rx.recv() => cmd,
+            };
+            let Some(cmd) = cmd else {
+                break;
+            };
+            if coordinator.shutdown_requested() {
+                rx.close();
+                cmd.reject(WalletAdminError::ShuttingDown);
+                continue;
+            }
+            if !cmd.is_rescan_control() && coordinator.operations_fenced() {
                 cmd.reject_during_rescan();
                 continue;
             }
             dispatch(&mut engine, session_id, cmd).await;
         }
+        coordinator.request_shutdown();
+        crate::wallet_boot::await_wallet_tasks(session_id)
+            .await
+            .map_err(|error| {
+                WalletAdminError::Internal(format!("wallet rescan worker failed: {error}"))
+            })
     }
 }
 
@@ -1458,10 +1517,7 @@ mod command_fencing_tests {
         let admin = NodeWalletAdmin::new(tx, coordinator.clone());
         let normal = admin.balances().await;
         let queued = rx.try_recv();
-        assert!(matches!(
-            normal,
-            Err(WalletAdminError::RescanUnavailable(_))
-        ));
+        assert!(matches!(normal, Err(WalletAdminError::ScanInvalidated)));
         assert!(queued.is_err());
 
         let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -1469,10 +1525,7 @@ mod command_fencing_tests {
         let rescan = tokio::spawn(async move { admin.rescan(0).await });
         drop(rx);
         let rescan = rescan.await.unwrap();
-        assert!(!matches!(
-            rescan,
-            Err(WalletAdminError::RescanUnavailable(_))
-        ));
+        assert!(!matches!(rescan, Err(WalletAdminError::ScanInvalidated)));
     }
 
     #[tokio::test]
@@ -1495,10 +1548,7 @@ mod command_fencing_tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let admin = NodeWalletAdmin::new(tx, coordinator.clone());
         let result = admin.balances().await;
-        assert!(matches!(
-            result,
-            Err(WalletAdminError::RescanUnavailable(_))
-        ));
+        assert!(matches!(result, Err(WalletAdminError::ScanInvalidated)));
         assert!(rx.try_recv().is_err());
     }
 
@@ -1559,7 +1609,74 @@ mod command_fencing_tests {
         WalletCommand::Balances { reply: reply_tx }.reject_during_rescan();
         assert!(matches!(
             reply_rx.await.unwrap(),
-            Err(WalletAdminError::RescanUnavailable(_))
+            Err(WalletAdminError::ScanInvalidated)
         ));
+    }
+    #[test]
+    fn rescan_preflight_no_committed_chain_returns_genesis_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let chain = ChainStateAccessorImpl::new(
+            ergo_state::reader::ChainStoreReader::new_from_db(db.clone()),
+            Arc::new(ergo_wallet_service::wallet::RedbWalletStore::new(db)),
+            false,
+            None,
+        );
+        assert_eq!(chain.tip_height().unwrap(), 0);
+    }
+
+    #[test]
+    fn chain_tip_no_committed_chain_returns_zero() {
+        use tracing_subscriber::prelude::*;
+
+        struct WarnCounter(Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCounter {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let chain = ChainStateAccessorImpl::chain_only(
+            ergo_state::reader::ChainStoreReader::new_from_db(db),
+            false,
+            None,
+        );
+        let warnings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(WarnCounter(warnings.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(chain.tip_height().unwrap(), 0);
+        });
+        assert_eq!(warnings.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn production_chain_access_propagates_database_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let state_meta: redb::TableDefinition<u64, u64> =
+            redb::TableDefinition::new("chain_state_meta");
+        let chain_index: redb::TableDefinition<u64, u64> =
+            redb::TableDefinition::new("chain_index");
+        {
+            let write = db.begin_write().unwrap();
+            write.open_table(state_meta).unwrap().insert(1, 1).unwrap();
+            write.open_table(chain_index).unwrap().insert(1, 1).unwrap();
+            write.commit().unwrap();
+        }
+        let chain = ChainStateAccessorImpl::chain_only(
+            ergo_state::reader::ChainStoreReader::new_from_db(db),
+            false,
+            None,
+        );
+        assert!(chain.tip_height().is_err());
+        assert!(chain.read_block_at(1).is_err());
     }
 }

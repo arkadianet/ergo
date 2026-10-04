@@ -21,6 +21,7 @@ Contents:
 - [First run vs resume](#first-run-vs-resume)
 - [Data directory layout and backup](#data-directory-layout-and-backup)
 - [Upgrading the node](#upgrading-the-node)
+- [Migrating legacy redb databases](#migrating-legacy-redb-databases)
 - [Monitoring](#monitoring)
 - [API security posture](#api-security-posture)
 - [Graceful shutdown](#graceful-shutdown)
@@ -28,13 +29,13 @@ Contents:
 
 ## Quick start
 
-Build the node binary (the workspace pins Rust 1.95.0 via
+Build the node binary (the workspace pins Rust 1.99.0 via
 [`../rust-toolchain.toml`](../rust-toolchain.toml); `rustup` installs it on
-first build). See the README [Building](../README.md#building) section for
+first build). See the overview [Building](overview.md#building) section for
 the full set of build commands.
 
 ```bash
-cargo build --release -p ergo-node
+cargo build --locked --release -p ergo-node
 ```
 
 Start from the operator config template
@@ -55,7 +56,7 @@ With the bundled defaults the node connects on mainnet (P2P port 9030),
 persists state under `./ergo-data/`, and serves the REST API on
 `127.0.0.1:9099`. The first run performs an Initial Block Download (IBD)
 from genesis; later runs resume from the persisted tip. See
-[Running](../README.md#running) in the README for the cargo one-shot form
+[Running](overview.md#running) in the overview for the cargo one-shot form
 and CLI help.
 
 For the authoritative description of every config key, read the source
@@ -76,9 +77,13 @@ to start on an unsupported combination.
 | **Mode 1 — UTXO full archive** | `state_type = "utxo"`, `verify_transactions = true`, `blocks_to_keep = -1` | Supported (default) | You want the full UTXO set on disk, can answer box/UTXO queries, and want to run the extra-index (Mode 1 only) or the external miner (any `state_type = "utxo"` mode — see below). |
 | **Mode 2 — UTXO snapshot bootstrap** | Mode 1 plus `[node.utxo] utxo_bootstrap = true` | Supported | Clean-DB boot and you want to skip multi-hour genesis replay by installing a UTXO snapshot, then resume normal sync. See the trust caveat below. |
 | **Mode 6 — headers-only** | `state_type = "digest"`, `verify_transactions = false`, `blocks_to_keep = 0`, `utxo_bootstrap = false` | Supported | You only need the validated header chain (PoW + difficulty) and never need block bodies, transaction validation, the mempool, or UTXO queries. |
-| **Mode 5 — digest verifier** | `state_type = "digest"`, `verify_transactions = true` | Partial | Boots, passes handshake/sync-info/API seams, and syncs headers from live peers; the AD-proof block-replay path is oracle-pinned to the mainnet window. External ADProof-corpus parity, epoch continuity, bounded history retention, and reorg-abort coverage remain open. |
-| **Mode 3 — pruned** | `state_type = "utxo"`, `blocks_to_keep = N > 0` | Partial | A standard pruned config boots — `blocks_to_keep` at or above the rollback-window floor (`keep_versions + SAFETY_MARGIN`, 250 at the defaults) — with `block_sections` eviction and headers-synced activation landed; end-to-end activation-parity tests are the remaining done gate. |
-| **Mode 4 — pruned + bootstrap** | Mode 3 plus `utxo_bootstrap = true` | Partial | The composed Mode 3 + Mode 2 lifecycle is landed and tested (real UTXO-snapshot install through boot, NiPoPoW+UTXO composition in both orders (proof-first composes; snapshot-first rejects the later proof) — `ergo-node/tests/it/mode4_acceptance.rs`); end-to-end deferred snapshot installation through real header catch-up inside `run_inner` and a live multi-peer soak remain outstanding. |
+| **Mode 5 — digest verifier** | `state_type = "digest"`, `verify_transactions = true`, `blocks_to_keep = -1`, `utxo_bootstrap = false`, `nipopow_bootstrap = false` | Partial | External replay covers a mainnet voting boundary and additional mainnet/testnet windows, with rollback/replay and corrupted-proof rejection. Bounded process-death reorg recovery is tested for digest and UTXO backends. Broader historical coverage, complete external-window cold-open recovery campaigns and a history-retention policy remain open. |
+| **Mode 3 — pruned** | `state_type = "utxo"`, `blocks_to_keep = N > 0` | Partial | A standard pruned config boots — `blocks_to_keep` at or above the rollback-window floor (`keep_versions + SAFETY_MARGIN`, 250 at the defaults) — with `block_sections` eviction. Fresh UTXO stores replay from genesis before pruning; complete activation and retention campaigns remain open. |
+| **Mode 4 — pruned + bootstrap** | Mode 3 plus `utxo_bootstrap = true` | Partial | Install/reopen and both NiPoPoW/UTXO orderings are tested. A three-peer test exercises deferred snapshot installation through real header catch-up, full validation of the next mainnet block and restart. Long-running live multi-peer soak remains outstanding. |
+
+The [operating-mode evidence inventory](operating-mode-evidence.md) links the
+fixtures, bounded recovery tests, historical campaign receipts and remaining
+closure criteria behind these statuses.
 
 Defaults: `state_type = "utxo"`, `verify_transactions = true`,
 `blocks_to_keep = -1` — i.e. omitting all three knobs gives you Mode 1.
@@ -271,6 +276,7 @@ or the top-level `data_dir` key. The node creates the following under it:
 | `peers.redb` | Peer address book (known peers + bans); independent of the consensus DB | Always |
 | `wallet/` | Encrypted (AES-GCM) wallet secret storage | When the wallet is initialized |
 | `indexer.redb` | Extra-index (address / token / template) DB | Only when `[indexer] enabled = true` |
+| `webhooks.redb` | Private webhook registrations, signing secrets, delivery history and pending retries | When the API listener is enabled |
 | `logs/` (or the configured `[logging.file].dir`) | Rotated log files | Only when `[logging.file]` is configured |
 | `ergo-node.toml` | Config file, when you keep it in the data dir | Operator-placed |
 
@@ -294,6 +300,9 @@ cp -rp ./ergo-data /backup/ergo-data.$(date +%Y%m%d)
 # restart the node
 ```
 
+Keep backups private: `webhooks.redb` contains unencrypted HMAC signing secrets,
+and `wallet/` contains encrypted wallet secrets. Preserve their permissions.
+
 **Restore.** Stop the node, drop the backed-up directory back into place,
 and start. Note that the recorded `state_type` is pinned in the data
 directory — restore a UTXO backup only into a UTXO-configured node, and a
@@ -306,12 +315,16 @@ digest backup only into a digest-configured node.
 2. Stop the node gracefully (see [Graceful shutdown](#graceful-shutdown)) so
    the final state commit and a clean redb close complete.
 3. Back up `data_dir` (see above) before any cross-minor upgrade.
-4. Swap in the new binary and restart against the same config and
+4. For a redb 2.6 → 4 upgrade, complete the [offline database migration](#migrating-legacy-redb-databases)
+   below before starting the new binary. Other upgrades follow their release notes.
+5. Swap in the new binary and restart against the verified config and
    `data_dir`.
 
 Notes:
 
-- Every tagged release through 1.0 is marked **pre-release** on GitHub;
+- Tags with a prerelease suffix (for example `v0.11.0-rc.1`) are marked
+  **pre-release** on GitHub. A plain version tag is not marked pre-release;
+  pre-1.0 compatibility and readiness limits still apply;
   treat any pre-1.0 deployment as experimental.
 - Configuration is unstable until 1.0 — a minor-version upgrade may rename
   or reshape config keys. The node validates the whole config at load and
@@ -328,6 +341,83 @@ Notes:
   [Status](../README.md#status) and [`../CHANGELOG.md`](../CHANGELOG.md)
   in view. If in doubt around an activation, cross-check the node's tip and
   verdicts against a Scala reference node.
+
+## Migrating legacy redb databases
+
+The redb 4 storage upgrade cannot open the file-format v2 databases normally
+created by redb 2.6. Normal startup fails closed with `UpgradeRequired(2)`;
+the peer address book also preserves unsupported files rather than quarantining
+them as corruption. The offline command below upgrades **a new copy**, preserves
+the original, and verifies table schemas and every key/value row with both the
+legacy and current readers. It applies to UTXO and digest `state.redb`, the
+embedded wallet tables, the peer book, and optional indexer and webhook databases.
+It does not change application schemas, consensus bytes, or encrypted seeds.
+
+1. Stop the old node gracefully and disable its automatic restart. Keep its
+   binary and config for rollback. Back up the **whole stopped data directory**,
+   including `wallet/`, with permissions intact; a set of databases copied at
+   different running-node heights is not a consistent backup.
+2. Create a separate destination directory. Copy config and `wallet/` into it
+   with their permissions intact, but do not copy database files into the
+   destination paths: publication refuses existing files, directories and even
+   dangling symlinks. Ensure disk space for the complete backup, migrated files,
+   and one temporary database copy with upgrade/repair overhead. Run as the
+   same account that owns the data and wallet files.
+3. Using the **new** binary, migrate each database from the same stopped source
+   directory. The destination parent must already exist. Adjust the indexer
+   filename if `[indexer] db_filename` overrides the default; omit that command
+   when no indexer database exists. Migrate `webhooks.redb` too if it was created
+   by a legacy binary; omit that command when the file does not exist.
+
+   ```bash
+   mkdir ./ergo-data-redb4
+   # Copy your config and, when present, wallet/ into ergo-data-redb4 first.
+   ./ergo-node migrate-redb ./ergo-data/state.redb ./ergo-data-redb4/state.redb
+   ./ergo-node migrate-redb ./ergo-data/peers.redb ./ergo-data-redb4/peers.redb
+   ./ergo-node migrate-redb ./ergo-data/indexer.redb ./ergo-data-redb4/indexer.redb
+   ./ergo-node migrate-redb ./ergo-data/webhooks.redb ./ergo-data-redb4/webhooks.redb
+   ```
+
+   This command never loads node configuration or starts networking. It takes
+   a nonblocking exclusive lock compatible with the old writer on the source;
+   a live/open database fails immediately. It opens only a private copy for
+   recovery, upgrade and integrity checks. Unknown table types, multimaps,
+   persistent savepoints and unsupported file versions fail closed. A database
+   already readable by redb 4 reports that no legacy migration is needed and
+   creates no destination. For a mixed stopped v2/v3 set, copy already-current
+   files with permissions intact into the new directory instead.
+4. Start only after **all** required database copies succeed. Update the config's
+   data directory to use the new directory, or supply
+   `--data-dir ./ergo-data-redb4`. The wallet path is always `wallet/` inside that
+   directory; ensure it was copied there. Check any independently configured
+   absolute paths. Validate the resumed
+   state mode, chain tip/root, wallet scan/balances, indexer progress and webhook
+   registrations before restoring automatic restart. Keep the original directory
+   and backup.
+
+**Failure and recovery.** Failure before publication removes the temporary
+copy and leaves source bytes unchanged, including on malformed input or repair
+failure. Fix the reported cause and retry to a new destination. An interrupted
+process can leave `.ergo-redb-migrate-*` files in the destination directory;
+normal startup never uses them. Remove those temporary files only while all
+migration processes are stopped. A parent-directory sync failure on Unix or a
+permission-restoration failure on Windows can report an error **after** the
+verified destination was published. Keep it for inspection; retrying will
+refuse to replace it. The source is still preserved. The file is synced before
+publication and Unix also syncs its parent directory; Windows has no portable
+parent-directory sync and restores the source's readonly attribute after publish.
+
+**Rollback.** Stop the new node completely, then restore the old binary and its
+config against the original stopped directory or the full pre-upgrade backup.
+Do not point redb 2.6 at a directory subsequently written by redb 4. Do not mix
+old and new state, wallet or indexer files. Blocks received only by the new node
+must be downloaded again by the old node; confirm the resumed tip and wallet.
+
+The indexer now uses `Durability::Immediate` for every apply and repair commit.
+This replaces redb 2.6's `Eventual`: commits have a synchronous durability
+boundary on every supported OS, which can increase indexer flush latency.
+The state store retains its existing IBD policy (`None` between periodic
+`Immediate` boundaries); this upgrade does not weaken durable commits.
 
 ## Monitoring
 
@@ -568,7 +658,12 @@ Work the list in order; stop at the first decisive answer.
    probably rejecting something valid (reject-valid). Capture the block id
    + rejection reason — that pair is the bug report. Check
    `sync_wedged` too: a wedge is a different failure (see Troubleshooting)
-   that also presents as a stall.
+   that also presents as a stall. The last rejection and session counter are
+   retained after processing resumes. Once `best_full_block_height` exceeds
+   the rejected block's nonzero height, the dashboard labels it historical
+   and `/health` returns to its sync-derived status. Header progress or elapsed
+   time alone never clears the rejection alarm. This indicates local chain
+   progress, not independent confirmation that the rejected block was invalid.
 3. **`header_mismatch`: ask a third node.** The event names `height`,
    `ours`, `theirs`. Query any independent node (public explorer, a second
    Scala node) for the header id at that height:
@@ -609,54 +704,72 @@ companion gauge explaining it.
 | Tip frozen forever, headers far ahead | `/api/v1/node/status .sync_wedged` | Deep-fork wedge: below the rollback window only a resync recovers (see Troubleshooting). |
 | Mempool looks dead | `ergo_node_mempool_size`, admit/reject counters | Rejections climbing = admission policy at work, not a hang. |
 
+## Optional peer location and network details
+
+The Peers dashboard shows native connection, traffic, sync and handshake details
+without external enrichment. Both `[api.peer_details] auto_download` and
+`reverse_dns` default to `false`, including in the shipped configs.
+
+For automatic country/city and ASN data, set `auto_download = true` and restart.
+The node fetches free DB-IP Lite datasets over HTTPS and checks daily for the next
+monthly release. The provider sees the node's outbound IP; peer IPs stay local.
+The cached databases under `data_dir/geoip/` remain usable after disabling downloads
+and restarting. To remain fully offline for enrichment, install compatible MMDB
+files and configure `geoip_db` / `asn_db` instead.
+
+Reverse DNS is a separate choice: `reverse_dns = true` sends public peer IPs to
+the OS DNS resolver. It is unnecessary for country/city/ASN details. Neither option
+changes peer selection, scoring, or sync behavior. Enrichment is visible through
+the existing public peer read API, so it shares that API's exposure.
+
+The drawer identifies database type and build date. A failed automatic update
+keeps the last working copy and retries after 24 hours; missing initial data shows
+as unavailable. Check the node log for download, validation or filesystem errors.
+Manual overrides take precedence and require a restart after replacement. See the
+[configuration reference](configuration.md#apipeer_details) for privacy, cache,
+limits and attribution details.
+
 ## API security posture
 
-The default posture is **safe by default for a single-host operator**:
+The default API bind is loopback (`127.0.0.1:9099`). A non-loopback bind
+requires `[api] public_bind = true`; enabling it does not authenticate public
+reads or transaction submission. API credentials are optional. Without
+`[api.security] api_key_hash`, privileged routes fail closed while the dashboard
+and public reads remain available. Supplied hashes must be exactly 64 lowercase
+hex characters and are validated even when the API is disabled.
 
-- The API binds to loopback (`127.0.0.1:9099`) by default. A non-loopback
-  bind is **rejected at config-load** unless you also set
-  `[api] public_bind = true` — the node will not start otherwise.
-- `[api.security] api_key_hash` is **mandatory** whenever the API server is
-  enabled. It is the lowercase Base16 of `Blake2b256(secret)` and must be
-  exactly 64 lowercase hex characters; the node refuses to start with a
-  malformed or missing hash. The only way to omit it is `[api] disabled =
-  true`. Requests authenticate by sending the secret in the `api_key`
-  request header (lowercase, underscore — not `Authorization`, not
-  `X-Api-Key`); the node Blake2b-256-hashes it and compares against the
-  configured hash in constant time. A missing or wrong key returns `403`.
+Requests authenticate with the secret in the `api_key` header. The node compares
+its Blake2b-256 hash to the configured hash in constant time. Wallet/scan/native
+wallet routes, shutdown, peer connect, vote changes, direct block submission,
+mining and native operator/admin routes require their configured tier. See the
+[route inventory](configuration.md#security-notes-for-the-api) for the complete
+list. Read routes and transaction submission remain public. Native script routes
+can additionally require a credential with `[api.script] require_api_key = true`;
+this setting does not alter Scala-compatible script compilation authentication.
 
-What the `api_key` actually gates is **narrow, by design** (Scala parity):
-only the `/wallet/*` JSON subtree and `POST /node/shutdown` (and its
-`/api/v1/node/shutdown` alias) require the key. The gate covers those
-whole path prefixes — an unknown subpath under `/wallet/` or `/node/`
-still rejects on the key first, mirroring Scala's
-`pathPrefix(...) & withAuth`; every other unmatched path is a plain,
-ungated `404`. **Everything else is public**
-regardless of `public_bind` — including transaction submission
-(`POST /transactions*`, `POST /api/v1/mempool/{submit,check}`),
-`POST /blocks`, `/mining/solution`, all reads, `/blockchain/*`,
-`/emission/*`, `/peers/*`, `/utils/*`, the dashboard, and `/metrics`.
+Before exposing the API, put public endpoints behind a firewall or reverse proxy
+with per-client rate limits and expose only the endpoints you intend. For a
+proxy terminating on loopback, set `[api] local_reverse_proxy = true` so proxy
+traffic loses the trusted-loopback exemption. Forwarded client-IP headers are
+not trusted; clients share the proxy peer IP's limits. The dashboard is public,
+and its wallet calls still require the operator's credential.
 
-**Before exposing the node beyond localhost:**
-
-- Setting `public_bind = true` removes the only guard against a non-loopback
-  bind, and it does so silently — there is no runtime warning. Do not treat
-  it as "now the node is secured for the public internet."
-- Because submission and read routes stay unauthenticated, put the node
-  behind a reverse proxy (or firewall) that adds authentication and rate
-  limiting on the public surface. Expose only what you intend to, and keep
-  `/metrics` and the submission routes off the open internet unless you have
-  fronted them.
-- The dashboard at `/` is intentionally public (it carries no secrets; the
-  Wallet section authenticates each `/wallet/*` call with the key you enter in
-  the browser), but the `/wallet/*` API it drives remains `api_key`-gated.
+Compilation and reduction have bounded running/waiting pools and response
+deadlines; accepted blocking jobs retain their slots until completion even if
+the client disconnects. Queue pressure returns HTTP 503 and `Retry-After: 1`.
+Resource defaults and native script cost policy are documented under
+[`[api.script]`](configuration.md#apiscript). Indexer query and health failures
+surface as errors rather than zero balances, empty pages or a healthy caught-up
+status. A detected indexer read fault remains latched until reopening the handle;
+inspect the underlying error and repair/rebuild the database before restarting.
 
 ## Graceful shutdown
 
-The node drains cleanly on SIGINT / SIGTERM / SIGHUP (Unix) or Ctrl+C
-(Windows), and on the API shutdown route. A graceful shutdown is what
-guarantees the final state commit lands and redb is closed cleanly, so the
-next start does not need a recovery pass.
+SIGINT / SIGTERM / SIGHUP (Unix), Ctrl+C (Windows), and the API shutdown
+route request a graceful drain. Successful completion joins state-owning work,
+performs the final durable flush and closes redb. Watch the process exit status
+and logs; a failed drain or flush is an error, and an accepted shutdown request
+alone does not establish durable completion.
 
 To trigger shutdown over the API:
 
@@ -670,11 +783,14 @@ returns `202` with the body `shutdown_requested` **immediately**; the actual
 drain proceeds asynchronously. Confirm completion by polling
 `GET /api/v1/health` until the connection refuses.
 
-The drain fires the action-loop shutdown signal (in-flight write handlers
-see a "shutting down" result rather than hanging), cancels the indexer and
-anchor-builder tasks with bounded waits, lets in-flight HTTP requests drain
-(also bounded), drops the persist pipeline (draining queued writes), and
-forces a final durable flush so redb sees a clean close.
+The drain fires the action-loop shutdown signal, stops indexer and anchor work,
+drains accepted API compute and tracked service tasks, drains the persistence
+pipeline and performs the final durable flush. Realtime, sampler and webhook
+services belong to the running node and are joined or aborted on shutdown;
+restarting a node creates fresh workers and restores durable webhook
+registrations and admitted retries. A failed persistence batch is terminal for
+that worker, and later dependent writes are
+refused until recovery against committed state.
 
 Under a process supervisor (systemd, Docker), prefer sending SIGTERM and
 allowing a generous stop timeout so the bounded drains and the final flush
@@ -687,8 +803,8 @@ find the real problem.
 
 **Node refuses to start with a config error.** The whole config is validated
 at load. Common causes: a non-loopback `[api] bind` without
-`public_bind = true`; a missing or malformed `[api.security] api_key_hash`
-(must be 64 lowercase hex chars) while the API is enabled; an unsupported
+`public_bind = true`; a malformed `[api.security] api_key_hash`
+(must be 64 lowercase hex chars when provided); an unsupported
 mode combination (e.g. `verify_transactions = false` without
 `state_type = "digest"`, or `[indexer] enabled = true` alongside
 `utxo_bootstrap = true` or `blocks_to_keep >= 0`); an empty resolved peer
@@ -733,9 +849,15 @@ until sync catches up.
 **Disk usage growing faster than expected.** Enabling the extra-index
 (`[indexer] enabled = true`) adds an `indexer.redb` file and roughly doubles
 the on-disk footprint. Disable it if you are not querying the
-address/token/template indices. Pruning (positive `[node] blocks_to_keep`)
-is not a supported posture today; the supported way to run without keeping
-full blocks is Mode 6 (headers-only).
+address/token/template indices. Pruned Mode 3 is partial, as described above.
+A fresh pruned UTXO node downloads and validates the chain from genesis
+before discarding old block sections; pruning does not skip initial UTXO
+reconstruction or remove the current UTXO set. Its retained window must
+cover `[node] keep_versions` plus the safety margin, with the extra index
+disabled. Mode 6 (headers-only) avoids full blocks and does not provide UTXO
+or transaction validation. See the
+[mode table](#state-modes-and-how-to-choose) for boot combinations and
+remaining external-validation limits.
 
 **Reorgs.** The node handles reorgs automatically with delta-based rollback
 through the undo log. You will see a brief dip in `best_full_block_height`
@@ -743,10 +865,16 @@ followed by a climb on the new chain. A reorg approaching the ~200-block
 rollback window is unusual — investigate peer quality before assuming a
 node-side fault.
 
-**Memory.** Each redb database falls back to its own ~1 GiB page cache by
-default, and that is separate from the AVL arena budget logged at startup.
+**Memory.** State, indexer and peer redb databases each use a 1 GiB page-cache
+budget by default, separate from the AVL arena budget logged at startup.
 When budgeting memory, account for `state.redb` plus, when enabled,
 `indexer.redb` and `peers.redb`. `[store] cache_bytes` (or `--cache-bytes`)
-tunes the AVL arena cache. For IBD memory profiling, setting
+tunes the AVL arena cache. Set `[store] state_redb_cache_bytes`,
+`indexer_redb_cache_bytes` and `peers_redb_cache_bytes` independently to tune
+redb page caches; defaults preserve 1 GiB each. The private webhook snapshot
+database uses a fixed 16 MiB clean-page cache. These limits exclude dirty and
+pinned nodes, queues and mining graphs, so their sum does not bound process RSS.
+Startup logs and CSV samples expose budgets, and per-database eviction counters
+are enabled. For IBD memory profiling, setting
 `ERGO_MEM_CSV=<path>` makes the node append a per-tick memory sample to a
 CSV.

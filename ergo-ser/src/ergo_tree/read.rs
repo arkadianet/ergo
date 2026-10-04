@@ -3,7 +3,7 @@
 //! version scoping, and the shared depth/position budgets.
 //! Oracle: test-vectors/scala/const_placeholder_bounds.json
 
-use ergo_primitives::reader::{ReadError, VlqReader};
+use ergo_primitives::reader::{ReadError, UnresolvedMethodCheckpoint, VlqReader};
 
 use crate::opcode;
 use crate::sigma_value::read_constant;
@@ -11,56 +11,41 @@ use crate::sigma_value::read_constant;
 use super::root_type::determinable_root_type;
 use super::{
     ErgoTree, CONSTANTS_VEC_SOFT_CAP, CONSTANT_SEGREGATION_FLAG, MAX_PROPOSITION_BYTES,
-    MAX_SUPPORTED_TREE_VERSION, SIZE_FLAG, VERSION_MASK,
+    MAX_SUPPORTED_TREE_VERSION, RESERVED_HEADER_MASK, SIZE_FLAG, VERSION_MASK,
 };
 
 /// Deserialize an ErgoTree from bytes.
 ///
-/// For size-delimited trees, exactly `size` bytes are consumed after the size
-/// field. For non-size-delimited trees, all remaining bytes in the reader are
-/// consumed (the caller must provide exact bounds).
+/// A successfully parsed tree consumes its constants and one opcode expression,
+/// leaving following fields available. Size-delimited soft-fork trees retain the
+/// declared byte region as an opaque tree; their boundary follows Scala's wrap
+/// semantics. Parsing and box/script acceptance are separate gates.
 pub fn read_ergo_tree(r: &mut VlqReader) -> Result<ErgoTree, ReadError> {
     let (tree, _was_wrapped) = read_ergo_tree_tracking_wrap(r)?;
     Ok(tree)
 }
 
-/// Like [`read_ergo_tree`] but gates V6-EMBEDDABLE TYPE CODES (`SUnsignedBigInt`
-/// = code 9, …) under `activated_version` rather than the tree's header version.
+/// Read an ErgoTree under an explicit activated script version.
 ///
-/// This mirrors Scala `TypeSerializer.getEmbeddableType`, which selects
-/// `embeddableV5`/`embeddableV6` by `VersionContext.current.isV6Activated` — the
-/// ACTIVATED version (`VersionContext.scala:33`), NOT the tree header. The
-/// default [`read_ergo_tree`] gates embeddable codes on the header version
-/// (`embeddable_gate_version`), which is correct for the consensus path but wrong
-/// for the ergo-compiler post-write self-check: the compile route emits a
-/// header-v0 tree (`ErgoTree.defaultHeaderWithVersion(0)`), yet a
-/// `tree_version >= 3` (V6-activated) compile legitimately produces a body
-/// carrying code 9 that Scala re-parses fine on a V6-activated network
-/// (`ErgoTreeSerializer.scala:148-154`, deser runs body/type parse under
-/// `withVersions(activatedVersion, treeVersion)`).
-///
-/// ONLY the compiler self-check uses this — passing its requested `tree_version`
-/// as the activated-version floor. Every consensus caller keeps
-/// [`read_ergo_tree`] (header-version gating); this function does not exist on
-/// their path and is byte-inert for them. The override is restored to its prior
-/// value on return so a shared reader is unaffected.
+/// Activation and the emitted header remain separate: Scala selects validation
+/// rules using activation, but `TypeSerializer.embeddableIdToType` selects its
+/// table using the tree's version. This helper preserves header-based membership
+/// and temporarily clears the low-level type-table override. It restores both
+/// reader settings on success or failure. Parsing remains the lenient tree
+/// reader; box/script acceptance gates are separate.
 pub fn read_ergo_tree_with_activated_version(
     r: &mut VlqReader,
     activated_version: u8,
 ) -> Result<ErgoTree, ReadError> {
-    let saved = r.embeddable_activated_version();
-    r.set_embeddable_activated_version(Some(activated_version));
+    let saved_activation = r.set_activated_script_version(Some(activated_version));
+    let saved_table = r.embeddable_activated_version();
+    r.set_embeddable_activated_version(None);
     let result = read_ergo_tree_tracking_wrap(r);
-    r.set_embeddable_activated_version(saved);
+    r.set_embeddable_activated_version(saved_table);
+    r.set_activated_script_version(saved_activation);
     result.map(|(tree, _was_wrapped)| tree)
 }
 
-/// Like [`read_ergo_tree`] but also reports whether the returned tree
-/// was rebuilt by `unparsed_soft_fork_tree` instead of fully parsed
-/// (Scala's `Left(UnparsedErgoTree)` branch). Used by the template-hash
-/// path — Scala's `tree.template` throws on the unparsed branch, so we
-/// skip recording a template entry rather than emit one bogus hash for
-/// every unparsed tree.
 /// Advance `r` from the body start to the DECLARED-size end and return the
 /// verbatim bytes. Mirrors Scala's wrap path EXACTLY: it computes
 /// `numBytes = bodyPos - startPos + declaredSize`, rewinds (`r.position =
@@ -91,10 +76,27 @@ fn take_unparsed_size_region(
     Ok(r.data_slice(tree_start, end).to_vec())
 }
 
+/// Also reports local soft-fork wrapping. Wrapped trees establish no parsed
+/// expression boundary; see [`wrapped_tree_template`] for their template.
 pub(crate) fn read_ergo_tree_tracking_wrap(
     r: &mut VlqReader,
 ) -> Result<(ErgoTree, bool), ReadError> {
+    read_ergo_tree_tracking_template(r).map(|(tree, wrapped, _)| (tree, wrapped))
+}
+
+/// Record the original expression slice while parsing. Scala's cached
+/// `ErgoTree.template` strips the received header and constants, rather than
+/// serializing the normalized expression again. Wrapped trees have no parsed
+/// template range; [`wrapped_tree_template`] re-reads their retained bytes.
+pub(super) fn read_ergo_tree_tracking_template(
+    r: &mut VlqReader,
+) -> Result<(ErgoTree, bool, Option<std::ops::Range<usize>>), ReadError> {
     let tree_start = r.position();
+    // A tree that starts a fresh top-level reader starts Scala's reader too, so
+    // its `valDefTypeStore` is empty and unbound uses are decidable.
+    if tree_start == 0 && r.nesting_depth_base() == 0 {
+        r.track_val_bindings();
+    }
     let header = r.get_u8()?;
     let version = header & VERSION_MASK;
     let has_size = header & SIZE_FLAG != 0;
@@ -126,6 +128,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             return Ok((
                 unparsed_soft_fork_tree(version, has_size, constant_segregation, full, None),
                 true,
+                None,
             ));
         }
 
@@ -145,9 +148,22 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // boundary byte-for-byte. The limit, relative to the inner view that
         // starts at `body_start`, is `MaxPropositionSize - (header + size length)`.
         let body_budget = MAX_PROPOSITION_BYTES.saturating_sub(body_start - tree_start);
-        let (parsed, unresolved_checkpoint, body_consumed, inner_ges) = {
+        // The body's reader level starts where `r`'s is; the frames it leaves
+        // open at a throw that degrades the tree are counted below.
+        let entry_level = r.scala_level();
+        let (
+            parsed,
+            unresolved_checkpoint,
+            body_consumed,
+            inner_ges,
+            header_spans,
+            (level_after, leaked_after),
+        ) = {
             let body_view = r.data_slice(body_start, body_start + r.remaining());
             let mut inner = VlqReader::new(body_view);
+            if r.collects_header_spans() {
+                inner.enable_header_spans();
+            }
             inner.set_position_limit(Some(body_budget));
             // Propagate trust into the body sub-reader so a high-version tree
             // nested in this size-delimited tree's body / segregated constants
@@ -164,27 +180,44 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             // this tree's header version, like Scala's version-scoped
             // `getEmbeddableType`. Covers segregated constants + the body.
             inner.set_ergo_tree_version(Some(version));
-            // Also propagate the activated-version override (set by the
-            // ergo-compiler self-check) into the size-delimited body reader, so a
-            // header-v0 tree gates SUnsignedBigInt (v6-only) by the activated
-            // version rather than version 0. Byte-inert on every consensus caller
-            // (the override is `None`, falling back to the header version).
+            // Preserve a caller's low-level type-table override. The public
+            // whole-tree activated helper clears it before entering this path;
+            // ordinary tree parsing selects membership from the header.
             inner.set_embeddable_activated_version(r.embeddable_activated_version());
-            let parsed = parse_body(&mut inner, version, has_size, constant_segregation);
+            // Scala parses this body on the SAME reader, so its nesting level
+            // (`CoreByteReader.lvl`) keeps climbing across the boundary. This
+            // view is a separate reader, so carry the level base over by hand:
+            // otherwise a size-delimited tree nested inside an `SBox` constant
+            // restarts the MaxTreeDepth budget at 0 and the
+            // box -> tree -> constant -> box cycle recurses until the native
+            // stack overflows. Inert for a top-level tree, where the base is 0.
+            inner.set_nesting_depth_base(r.nesting_depth_base());
+            inner.set_scala_level(entry_level);
+            inner.set_leaked_levels(r.leaked_levels());
+            // The body shares Scala's reader, and with it the binding store,
+            // including bindings made before a failure that is then wrapped.
+            inner.set_val_bindings(r.val_bindings().cloned());
+            let parsed = parse_body(&mut inner, header, has_size, constant_segregation);
+            r.set_val_bindings(inner.val_bindings().cloned());
             (
                 parsed,
                 inner.unresolved_method_checkpoint(),
                 inner.position(),
                 inner.take_group_elements(),
+                inner.header_spans().to_vec(),
+                (inner.scala_level(), inner.leaked_levels()),
             )
         };
+        for (start, end) in header_spans {
+            r.record_header_span(body_start + start, body_start + end);
+        }
         // A size-delimited tree carrying a method the tree's registry cannot resolve
         // is wrapped by Scala as `UnparsedErgoTree`: `MethodCallSerializer.parse`
         // throws a method-resolution `ValidationException`, caught under has_size.
         // The parser keyed that on the tree-header version (v6-only method in a
         // pre-v3 tree, or a genuinely unknown id at any version) and recorded the
-        // group-element sideband length at the exact throw point (after the method's
-        // receiver + value args).
+        // group-element sideband length and the reader level at the exact throw
+        // point (after the method's receiver + value args).
         let unresolved_method_wrap = unresolved_checkpoint.is_some();
 
         // Forward the group elements the inner parse collected onto `r` — EVEN when
@@ -193,7 +226,10 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // ONLY the prefix Scala reached before it threw at the method; points after
         // it are never deserialized, hence never curve-checked.
         let forward_upto = if unresolved_method_wrap {
-            unresolved_checkpoint.unwrap().0.min(inner_ges.len())
+            unresolved_checkpoint
+                .unwrap()
+                .group_elements
+                .min(inner_ges.len())
         } else {
             inner_ges.len()
         };
@@ -209,7 +245,13 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // outcome is a wrap REGARDLESS of whether the trailing bytes then parsed cleanly
         // OR hit a hard error (depth / overflow / nested HardReject) Scala never reaches.
         // Checked BEFORE the `parsed` match so such a later hard error cannot override it.
-        if unresolved_method_wrap {
+        if let Some(checkpoint) = unresolved_checkpoint {
+            leave_levels_open(
+                r,
+                entry_level,
+                checkpoint.scala_level,
+                checkpoint.leaked_levels,
+            );
             let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
             return Ok((
                 unparsed_soft_fork_tree(
@@ -218,17 +260,23 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                     constant_segregation,
                     full,
                     Some(method_validation_rule(
-                        unresolved_checkpoint.unwrap(),
+                        checkpoint,
                         version,
                         r.activated_script_version().unwrap_or(1),
                     )),
                 ),
                 true,
+                None,
             ));
         }
 
         match parsed {
-            Ok(tree) => {
+            Ok((tree, template_start)) => {
+                // Every frame the body entered returned: only degrades nested
+                // in it (a size-delimited box script) left levels open.
+                debug_assert_eq!(level_after, entry_level, "unbalanced reader level");
+                r.set_scala_level(level_after);
+                r.set_leaked_levels(leaked_after);
                 // Scala wraps any non-SigmaProp root
                 // (`CheckDeserializedScriptIsSigmaProp`) as `UnparsedErgoTree`.
                 // `determinable_root_type` is the rule-1001 typer — it covers inline
@@ -249,54 +297,41 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                             Some((1001, vec![])),
                         ),
                         true,
+                        None,
                     ));
                 }
                 // Parsed as SigmaProp: advance `r` by the ACTUAL body length so the
                 // next box field is read from the structural body end, exactly where
                 // Scala leaves the reader on success (the declared size is ignored).
                 let _ = r.get_bytes(body_consumed)?;
-                Ok((tree, false))
+                Ok((tree, false, Some(body_start + template_start..r.position())))
             }
-            // Reached only when NO unresolved method preceded the error (that case
-            // wrapped above) — so this hard error is the FIRST thing Scala hits too.
-            // A tree-depth overflow is Scala's `DeserializeCallDepthExceeded`,
-            // a `SerializerException` that `deserializeErgoTree` does NOT catch
-            // (it only wraps ReaderPositionLimitExceeded / IllegalArgumentException
-            // / ValidationException). So it must HARD-REJECT even under has_size,
-            // not become an UnparsedErgoTree — otherwise a size-delimited tree
-            // nested past MaxTreeDepth would be accept-invalid vs Scala.
-            //
-            // `HardReject` carries the same semantics for a NESTED box script
-            // (an `SBox` constant whose sizeless pre-v3 inner tree carries a v6
-            // method, or violates rule 1012): Scala re-raises those as
-            // `SerializerException` too, so they must escape this size-delimited
-            // wrap rather than be swallowed into an `UnparsedErgoTree`.
-            //
-            // `ValueTooLarge` is a VLQ value that overflowed its declared integer
-            // width during the body parse. After routing the NON-exact
-            // `getUInt().toInt` sites (segregated constants count, `ValUse` id,
-            // `FuncValue` arg ids) through `get_uint_to_i32`, every `ValueTooLarge`
-            // reachable HERE is from a width Scala hard-rejects: a `getUIntExact`
-            // site (ConstantPlaceholder index, ValDef/FunDef id, BlockValue /
-            // FuncValue / SigmaAnd-SigmaOr counts, SString length →
-            // `ArithmeticException`) or a `getUShort` range overflow — neither a
-            // `ValidationException`, so it must escape the wrap.
-            Err(
-                e @ (ReadError::DepthLimitExceeded { .. }
-                | ReadError::HardReject(_)
-                | ReadError::ValueTooLarge { .. }),
-            ) => Err(e),
+            // Reached only when NO unresolved method preceded the error (that
+            // case wrapped above), so this error is the FIRST thing Scala hits
+            // too. Only a `ValidationException` degrades a size-delimited tree:
+            // `ErgoTreeSerializer.deserializeErgoTree` (`ErgoTreeSerializer.scala:
+            // 141-215`) wraps on `case ve: ValidationException` alone, turns a
+            // `ReaderPositionLimitExceeded` into one (rule 1014) and rethrows an
+            // `IllegalArgumentException` as a `SerializerException`. Every other
+            // throw inside the body is a hard reject: running out of input
+            // (`BufferUnderflowException`, or the reader's `require`), a failed
+            // `require`, a `ClassCastException` / `MatchError` /
+            // `NegativeArraySizeException` / `ArrayIndexOutOfBoundsException`
+            // from building a node, `safeNewArray` past 100,000 items, a
+            // `DeserializeCallDepthExceeded` or any other `SerializerException`,
+            // including one a nested box script re-raises. The body parser
+            // reports exactly the `ValidationException` sites as
+            // `SigmaValidation` (a validation rule id), so that is the only
+            // error the wrap takes.
             Err(error) => {
-                let validation_error = match error {
-                    ReadError::SigmaValidation { rule_id, args, .. } => Some((
-                        validation_rule_version(rule_id, r.activated_script_version().unwrap_or(1)),
-                        args,
-                    )),
-                    _ => None,
+                let ReadError::SigmaValidation { rule_id, args, .. } = error else {
+                    return Err(error);
                 };
-                // Other parse failures (unknown opcode, invalid type tag, body
-                // truncated at the MaxPropositionSize view) map to Scala's
-                // ValidationException, wrapped as UnparsedErgoTree under has_size.
+                let validation_error = Some((
+                    validation_rule_version(rule_id, r.activated_script_version().unwrap_or(1)),
+                    args,
+                ));
+                leave_levels_open(r, entry_level, level_after, leaked_after);
                 let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
                 Ok((
                     unparsed_soft_fork_tree(
@@ -307,6 +342,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                         validation_error,
                     ),
                     true,
+                    None,
                 ))
             }
         }
@@ -316,12 +352,67 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // unaffected. A v6-only embeddable type in a sizeless v<3 tree errors
         // (`InvalidData`); the box-script readers propagate it as a reject, matching
         // Scala re-raising the uncaught `ValidationException` as a hard reject.
+        //
+        // `deserializeErgoTree` bounds the whole tree, sized or not, to a
+        // window of `MaxPropositionSize` from its start
+        // (ErgoTreeSerializer.scala:143-144), replacing any enclosing window
+        // (a box's) and restoring it afterwards. A sizeless tree cannot
+        // degrade, so a read that begins past it rejects the tree.
         let saved_v = r.ergo_tree_version();
+        let saved_limit = r.position_limit();
         r.set_ergo_tree_version(Some(version));
-        let parsed = parse_body(r, version, has_size, constant_segregation);
+        r.set_position_limit(Some(tree_start + MAX_PROPOSITION_BYTES));
+        let parsed = parse_body(r, header, has_size, constant_segregation);
+        r.set_position_limit(saved_limit);
         r.set_ergo_tree_version(saved_v);
-        parsed.map(|tree| (tree, false))
+        parsed.map(|(tree, template_start)| (tree, false, Some(template_start..r.position())))
     }
+}
+
+/// Scala's `ErgoTree.template` of a soft-fork-wrapped tree, as a range of its
+/// retained bytes. `deserializeHeaderWithTreeBytes` re-reads the header, size
+/// and segregated constants, then keeps everything after them; it never looks
+/// at the root, so a wrapped root does not throw. `hashTreeTemplate` runs it
+/// under `VersionContext.withVersions(3, 3)`, so constants decode with the v3
+/// type table whatever the header version. `None` where that re-read throws
+/// (e.g. a declared size that cuts the constants short), where Scala hashes
+/// the whole tree bytes instead. Constant group elements are not curve-checked
+/// here (this crate is crypto-free), unlike Scala's re-read.
+pub(super) fn wrapped_tree_template(bytes: &[u8]) -> Option<std::ops::Range<usize>> {
+    let mut r = VlqReader::new(bytes);
+    r.set_activated_script_version(Some(MAX_SUPPORTED_TREE_VERSION));
+    r.set_ergo_tree_version(Some(MAX_SUPPORTED_TREE_VERSION));
+    let header = r.get_u8().ok()?;
+    // A wrapped tree always carries the size bit, so `CheckHeaderSizeBit` holds.
+    if header & SIZE_FLAG != 0 {
+        r.get_uint_to_i32().ok()?;
+    }
+    if header & CONSTANT_SEGREGATION_FLAG != 0 {
+        // Same `getUInt().toInt` count and `safeNewArray` bound as `parse_body`.
+        let count = r.get_uint_to_i32().ok()?.max(0) as usize;
+        crate::opcode::check_array_length(count, "segregated constants").ok()?;
+        for _ in 0..count {
+            read_constant(&mut r).ok()?;
+        }
+    }
+    Some(r.position()..bytes.len())
+}
+
+/// A size-delimited tree degraded: Scala's `deserializeErgoTree` catches the
+/// `ValidationException` and restores only the position limit
+/// (ErgoTreeSerializer.scala:209-211), so every frame the throw unwound keeps
+/// its reader level for the rest of the reader. Count those frames, the
+/// levels between the tree's entry and the throw, as leaked, together with
+/// the levels already leaked when it threw.
+fn leave_levels_open(
+    r: &mut VlqReader,
+    entry_level: usize,
+    level_at_throw: usize,
+    leaked_at_throw: usize,
+) {
+    let open = level_at_throw.saturating_sub(entry_level);
+    r.set_leaked_levels(leaked_at_throw.saturating_add(open));
+    r.set_scala_level(entry_level);
 }
 
 /// Construct a soft-fork-accepted ErgoTree (Scala's
@@ -346,6 +437,9 @@ fn unparsed_soft_fork_tree(
         version,
         has_size,
         constant_segregation,
+        reserved_header_bits: full_tree_bytes
+            .first()
+            .map_or(0, |h| h & RESERVED_HEADER_MASK),
         constants: vec![],
         body: crate::opcode::Expr::Unparsed(crate::opcode::UnparsedErgoTree {
             bytes: full_tree_bytes,
@@ -367,7 +461,9 @@ fn validation_rule_version(rule_id: u16, activated_version: u8) -> u16 {
 // MethodsContainer.methodsV5/V6 and CheckAndGetMethodTemplate distinguish
 // unknown containers from unknown methods after reading the receiver and args.
 fn method_validation_rule(
-    (_, type_id, method_id): (usize, u8, u8),
+    UnresolvedMethodCheckpoint {
+        type_id, method_id, ..
+    }: UnresolvedMethodCheckpoint,
     version: u8,
     activated_version: u8,
 ) -> (u16, Vec<u8>) {
@@ -383,10 +479,11 @@ fn method_validation_rule(
 
 fn parse_body(
     r: &mut VlqReader,
-    version: u8,
+    header: u8,
     has_size: bool,
     constant_segregation: bool,
-) -> Result<ErgoTree, ReadError> {
+) -> Result<(ErgoTree, usize), ReadError> {
+    let version = header & VERSION_MASK;
     let constants = if constant_segregation {
         // Scala `deserializeConstants` reads the count via `getUInt().toInt`
         // (ErgoTreeSerializer.scala:248) — NOT `getUIntExact`. A value past
@@ -395,35 +492,14 @@ fn parse_body(
         // non-exact and treat a negative count as 0 (an overflowed count is a
         // valid empty-constants tree in Scala, not a hard rejection).
         let count = r.get_uint_to_i32()?.max(0) as usize;
+        // `safeNewArray[Constant](nConsts)` (ErgoTreeSerializer.scala:254).
+        crate::opcode::check_array_length(count, "segregated constants")?;
         let mut consts = Vec::with_capacity(count.min(CONSTANTS_VEC_SOFT_CAP));
         for _ in 0..count {
             let (tpe, val) = read_constant(r)?;
-            // SHeader value deserialization is gated on isV3OrLaterErgoTreeVersion
-            // (Scala DataSerializer.deserialize(SHeader)), per materialized
-            // header: a segregated constant carrying a header in a pre-v3 tree
-            // is rejected; an empty Coll[Header] is accepted. Scala's SHeader
-            // arm throws a SerializerException (NOT a ValidationException), so
-            // it escapes the deserializeErgoTree catch — HARD reject, never
-            // wrap (SANTA wire/v6 `Box.softfork_header_constant_reject`: the
-            // JVM rejects the whole box; we accepted while this funneled into
-            // the generic body-error wrap).
-            if version < 3 && val.contains_header() {
-                return Err(ReadError::HardReject(format!(
-                    "SHeader value requires ErgoTree version >= 3 (got {version})"
-                )));
-            }
-            // SOption data is gated on isV3OrLaterErgoTreeVersion too
-            // (CheckSerializableTypeCode rejects SOption pre-v3, Some AND None);
-            // a segregated Option constant in a pre-v3 tree is rejected.
-            if version < 3 && val.contains_option() {
-                return Err(ReadError::SigmaValidation {
-                    rule_id: 1009,
-                    args: vec![36],
-                    message: format!(
-                        "SOption value requires ErgoTree version >= 3 (got {version})"
-                    ),
-                });
-            }
+            // The pre-v3 `SHeader` / `SOption` data gates fire inside
+            // `read_constant`, at the point Scala throws: the reader carries
+            // this tree's version.
             consts.push((tpe, val));
         }
         consts
@@ -431,19 +507,24 @@ fn parse_body(
         vec![]
     };
 
+    let template_start = r.position();
     let saved_pool_len = r.constant_pool_len();
     r.set_constant_pool_len(Some(constants.len()));
     let body = opcode::parse_body_with_constants(r, version, &constants);
     r.set_constant_pool_len(saved_pool_len);
     let body = body?;
 
-    Ok(ErgoTree {
-        version,
-        has_size,
-        constant_segregation,
-        constants,
-        body,
-    })
+    Ok((
+        ErgoTree {
+            version,
+            has_size,
+            constant_segregation,
+            reserved_header_bits: header & RESERVED_HEADER_MASK,
+            constants,
+            body,
+        },
+        template_start,
+    ))
 }
 
 #[cfg(test)]
@@ -451,6 +532,38 @@ mod tests {
     use super::*;
 
     // ----- oracle parity -----
+
+    #[test]
+    fn activated_tree_reader_preserves_pinned_header_type_table_and_reader_scope() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/ergoscript/compiled-reader/cases.json"
+        ))
+        .unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 7);
+        for case in cases {
+            let bytes = hex::decode(case["tree_hex"].as_str().unwrap()).unwrap();
+            for reference in case["reader_results"].as_array().unwrap() {
+                assert_eq!(reference["outcome"], "READ_ERROR");
+                let activation = reference["activated_version"].as_u64().unwrap() as u8;
+                let mut reader = VlqReader::new(&bytes).with_activated_script_version(2);
+                reader.set_embeddable_activated_version(Some(3));
+                let result = read_ergo_tree_with_activated_version(&mut reader, activation);
+                assert!(result.is_err(), "{} activation {activation}", case["id"]);
+                assert_eq!(reader.activated_script_version(), Some(2));
+                assert_eq!(reader.embeddable_activated_version(), Some(3));
+            }
+            let control = hex::decode(case["header3_control_hex"].as_str().unwrap()).unwrap();
+            assert_eq!(case["header3_control_result"]["outcome"], "READ_RIGHT");
+            let mut reader = VlqReader::new(&control);
+            let tree = read_ergo_tree_with_activated_version(&mut reader, 3).unwrap();
+            assert_eq!(tree.version, 3);
+            assert!(!matches!(tree.body, opcode::Expr::Unparsed(_)));
+            assert!(reader.is_empty());
+            assert_eq!(reader.activated_script_version(), None);
+            assert_eq!(reader.embeddable_activated_version(), None);
+        }
+    }
 
     // ledger: ORDER-constplaceholder
     #[test]

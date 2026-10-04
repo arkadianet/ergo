@@ -205,7 +205,7 @@ impl WalletAdmin for CapturingAdmin {
 async fn payment_send_handler_round_trip() {
     let fake_tx_id = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
     let admin = Arc::new(CapturingAdmin::new(fake_tx_id));
-    let app = ergo_api::wallet::router_with_security(admin.clone(), None);
+    let app = ergo_api::wallet::router_with_security(admin.clone(), Some(super::auth::security()));
 
     let body_json = serde_json::json!([
         {
@@ -218,6 +218,7 @@ async fn payment_send_handler_round_trip() {
     let resp = app
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::POST)
                 .uri("/wallet/payment/send")
                 .header("content-type", "application/json")
@@ -262,7 +263,7 @@ async fn payment_send_handler_round_trip() {
 async fn payment_send_handler_multi_request() {
     let fake_tx_id = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     let admin = Arc::new(CapturingAdmin::new(fake_tx_id));
-    let app = ergo_api::wallet::router_with_security(admin.clone(), None);
+    let app = ergo_api::wallet::router_with_security(admin.clone(), Some(super::auth::security()));
 
     let body_json = serde_json::json!([
         {
@@ -282,6 +283,7 @@ async fn payment_send_handler_multi_request() {
     let resp = app
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::POST)
                 .uri("/wallet/payment/send")
                 .header("content-type", "application/json")
@@ -446,11 +448,12 @@ async fn payment_send_locked_wallet_returns_400() {
     }
 
     let admin: Arc<dyn WalletAdmin> = Arc::new(LockedAdmin);
-    let app = ergo_api::wallet::router_with_security(admin, None);
+    let app = ergo_api::wallet::router_with_security(admin, Some(super::auth::security()));
 
     let resp = app
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::POST)
                 .uri("/wallet/payment/send")
                 .header("content-type", "application/json")

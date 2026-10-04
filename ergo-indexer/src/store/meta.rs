@@ -14,15 +14,21 @@ use crate::error::IndexerError;
 use crate::store::tables::INDEXER_META;
 use crate::HeaderId;
 
-/// Bumped any time the on-disk format changes incompatibly. A bump
-/// triggers the wipe/resume table's `schema_version mismatch` row:
+/// Bumped any time the on-disk format changes incompatibly, or a value
+/// derived once at apply time changes. A bump triggers the wipe/resume
+/// table's `schema_version mismatch` row:
 /// the file is deleted and recreated, forcing a full resync. New
 /// tables introduced at the current version are lazy-created on first
 /// apply (`WriteTransaction::open_table` is create-or-open in redb
-/// 2.x), so the wipe-and-resync path is the only mechanism that
+/// 4.x), so the wipe-and-resync path is the only mechanism that
 /// backfills them — older DBs are deleted on first boot, never
 /// migrated in place.
-pub const INDEXER_SCHEMA_VERSION: u32 = 2;
+///
+/// Version 3 re-derives JVM token name/description/decimals projections
+/// and template entries for soft-fork-wrapped trees. Mint-time token
+/// metadata is never recomputed, and rolling back a pre-change wrapped
+/// output would pop a template entry that was never recorded.
+pub const INDEXER_SCHEMA_VERSION: u32 = 3;
 
 pub(crate) const KEY_SCHEMA_VERSION: &str = "schema_version";
 pub(crate) const KEY_INDEXED_HEIGHT: &str = "indexed_height";
@@ -214,40 +220,80 @@ pub(crate) fn write_schema_version(
 }
 
 pub(crate) fn read_meta(read_txn: &redb::ReadTransaction) -> Result<IndexerMeta, IndexerError> {
-    let table = read_txn.open_table(INDEXER_META)?;
+    read_meta_table(&read_txn.open_table(INDEXER_META)?)
+}
 
-    let indexed_height = read_u64(&table, KEY_INDEXED_HEIGHT)?.unwrap_or(0);
-    let global_tx_index = read_u64(&table, KEY_GLOBAL_TX_INDEX)?.unwrap_or(0);
-    let global_box_index = read_u64(&table, KEY_GLOBAL_BOX_INDEX)?.unwrap_or(0);
-    let indexed_header_id = match table.get(KEY_INDEXED_HEADER_ID)? {
-        None => None,
-        Some(g) => {
-            let bytes = g.value();
-            if bytes.is_empty() {
-                None
-            } else if bytes.len() == 32 {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(bytes);
-                Some(Digest32::from_bytes(arr))
-            } else {
-                // Stored value is allowed to be 0 bytes (None) or 32
-                // bytes (Some). Reaching here means the row is neither
-                // — classify against the non-empty expected width.
-                return Err(IndexerError::DbRowLength {
-                    context: "indexed_header_id",
-                    expected: 32,
-                    got: bytes.len(),
-                });
-            }
+fn read_meta_table<T>(table: &T) -> Result<IndexerMeta, IndexerError>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    let required = |key| read_u64(table, key)?.ok_or(IndexerError::MetadataMissing { key });
+    let indexed_height = required(KEY_INDEXED_HEIGHT)?;
+    let global_tx_index = required(KEY_GLOBAL_TX_INDEX)?;
+    let global_box_index = required(KEY_GLOBAL_BOX_INDEX)?;
+    let guard = table
+        .get(KEY_INDEXED_HEADER_ID)?
+        .ok_or(IndexerError::MetadataMissing {
+            key: KEY_INDEXED_HEADER_ID,
+        })?;
+    let indexed_header_id = match guard.value() {
+        [] => None,
+        bytes if bytes.len() == 32 => Some(Digest32::from_bytes(
+            bytes.try_into().expect("checked width"),
+        )),
+        bytes => {
+            return Err(IndexerError::DbRowLength {
+                context: KEY_INDEXED_HEADER_ID,
+                expected: 32,
+                got: bytes.len(),
+            })
         }
     };
-
-    Ok(IndexerMeta {
+    let meta = IndexerMeta {
         indexed_height,
         indexed_header_id,
         global_tx_index,
         global_box_index,
-    })
+    };
+    if (meta.indexed_height == 0) != meta.indexed_header_id.is_none()
+        || (meta.indexed_height == 0 && (meta.global_tx_index != 0 || meta.global_box_index != 0))
+        || meta.global_tx_index > i64::MAX as u64 + 1
+        || meta.global_box_index > i64::MAX as u64 + 1
+    {
+        return Err(IndexerError::MetadataInvalid);
+    }
+    Ok(meta)
+}
+
+/// Compare the complete caller checkpoint under the same writer that will
+/// mutate rows. In a batch, the preceding block has already written its meta.
+/// Pending repair also excludes apply/rollback across multi-transaction wipes.
+pub(crate) fn check_mutation_checkpoint(
+    write_txn: &WriteTransaction,
+    expected: &IndexerMeta,
+) -> Result<(), IndexerError> {
+    let table = write_txn.open_table(INDEXER_META)?;
+    if read_meta_table(&table)? != *expected {
+        return Err(IndexerError::StaleCheckpoint);
+    }
+    check_repair_in_table(&table)
+}
+
+pub(crate) fn check_no_repair(write_txn: &WriteTransaction) -> Result<(), IndexerError> {
+    check_repair_in_table(&write_txn.open_table(INDEXER_META)?)
+}
+
+fn check_repair_in_table<T>(table: &T) -> Result<(), IndexerError>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    if table
+        .get(KEY_SECONDARY_REPAIR_PENDING)?
+        .is_some_and(|g| g.value().first().copied().unwrap_or(0) != 0)
+    {
+        return Err(IndexerError::RepairInProgress);
+    }
+    Ok(())
 }
 
 pub(crate) fn write_meta(
@@ -298,6 +344,7 @@ where
 mod repair_marker_tests {
     use super::*;
     use crate::store::tables::INDEXER_META;
+    use redb::ReadableDatabase;
 
     fn temp_db() -> (redb::Database, tempfile::TempDir) {
         let tmp = tempfile::TempDir::new().unwrap();

@@ -7,6 +7,7 @@
 //! rather than buried under either.
 
 use ergo_primitives::digest::Digest32;
+use redb::ReadableDatabase;
 
 use crate::avl::serialization::AllocMeta;
 use crate::chain::{ChainState, ChainStateMeta};
@@ -21,7 +22,8 @@ impl StateStore {
     /// guarantees that on failure, the caller drops uncommitted
     /// changes and reads the truth from redb.
     ///
-    /// Restores: AVL tree pointers, height, AND chain_state.
+    /// Restores AVL tree pointers, height, and committed chain_state while
+    /// retaining all in-memory session invalidity marks.
     ///
     /// With CachedDiskArena this is O(1): abort discards dirty +
     /// clean cache, then we reset tree pointers from StateMeta.
@@ -69,7 +71,7 @@ impl StateStore {
         }
 
         // Restore chain_state from chain_state_meta, or derive from UTXO state.
-        let chain_state = match read_txn.open_table(CHAIN_STATE_META) {
+        let mut chain_state = match read_txn.open_table(CHAIN_STATE_META) {
             Ok(table) => match table.get("chain_state")? {
                 Some(guard) => {
                     let meta = ChainStateMeta::deserialize(guard.value()).map_err(|e| {
@@ -88,6 +90,9 @@ impl StateStore {
             }
             Err(e) => return Err(e.into()),
         };
+        // Rebuilding dirty UTXO state is not a new process session. Earlier
+        // ambiguous failures must remain excluded after another apply fails.
+        chain_state.session_invalids = std::mem::take(&mut self.chain_state.session_invalids);
         self.chain_state = chain_state;
         // Voted params: refresh the in-memory cache from the now-restored
         // chain state, using the post-commit (fail-stop) variant on purpose.

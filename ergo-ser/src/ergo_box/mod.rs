@@ -24,37 +24,43 @@ mod candidate;
 mod candidate_indexed;
 mod whole;
 
-pub use candidate::{read_ergo_box_candidate, write_ergo_box_candidate};
+pub use candidate::{
+    read_accepted_ergo_box_candidate, read_ergo_box_candidate, write_ergo_box_candidate,
+};
 pub use candidate_indexed::{read_ergo_box_candidate_indexed, write_ergo_box_candidate_indexed};
 pub use whole::{
-    box_id_with, parse_ergo_box_bytes, read_ergo_box, serialize_ergo_box, write_ergo_box,
+    box_id_with, parse_ergo_box_bytes, read_accepted_ergo_box, read_ergo_box, serialize_ergo_box,
+    write_ergo_box,
 };
 
 /// Parsed box candidate with a structured ErgoTree.
 ///
-/// The ErgoTree is stored in parsed form AND as raw bytes. The raw bytes
-/// are used for wire-compatible serialization (the tree is written directly
-/// into the box byte stream, matching Scala/sigma-rust behavior).
+/// The ErgoTree is stored in parsed form AND as the bytes it was read from
+/// ([`ErgoBoxCandidate::ergo_tree_bytes`], Scala's `propositionBytes`). The box
+/// is written with the canonical re-serialization of the parsed tree
+/// ([`ErgoBoxCandidate::serialized_ergo_tree_bytes`]), which is the same bytes
+/// for every canonically encoded tree.
 ///
-/// # Standalone parsing limitation
+/// # Parsing and retained bytes
 ///
-/// `read_ergo_box` / `read_ergo_box_candidate` can only locate the tree/body
-/// boundary when the ErgoTree header has the size flag set. Non-size-delimited
-/// trees (legal on mainnet, common in early blocks) require the caller to
-/// supply the tree bytes externally — see `parse_ergo_box_bytes`. Transaction-
-/// mode parsing (`read_ergo_box_candidate_indexed`) does not have this
-/// limitation because the token table and field ordering provide the boundary.
+/// Standalone and transaction readers locate non-size-delimited tree boundaries
+/// by parsing the opcode expression. Size-delimited trees also support Scala's
+/// opaque soft-fork representation. [`parse_ergo_box_bytes`] additionally checks
+/// that supplied proposition bytes agree with the bytes in the complete box.
 ///
-/// Removing this limitation requires opcode-level expression parsing to
-/// discover where the tree body ends. Until then, standalone raw-bytes box
-/// parsing (UTXO snapshots, API responses) must use `parse_ergo_box_bytes`
-/// for boxes with non-size-delimited trees.
+/// Received proposition bytes and canonical serialization can differ; use the
+/// documented accessors for the required identity rather than treating them as
+/// interchangeable. Registers retain the evaluated-value forms needed for
+/// canonical box serialization.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ErgoBoxCandidate {
     /// Box value in nanoErg.
     pub value: u64,
     ergo_tree: ErgoTree,
     ergo_tree_bytes: Vec<u8>,
+    /// The canonical re-serialization of `ergo_tree`, kept only when it differs
+    /// from `ergo_tree_bytes`. See [`ErgoBoxCandidate::serialized_ergo_tree_bytes`].
+    canonical_tree_bytes: Option<Vec<u8>>,
     /// Block height at which this candidate is created (consensus
     /// rejects boxes whose `creation_height` is greater than the
     /// containing block's height).
@@ -62,8 +68,22 @@ pub struct ErgoBoxCandidate {
     /// Tokens carried by the box, in their on-wire order.
     pub tokens: Vec<Token>,
     /// Non-mandatory registers R4-R9 (densely packed from R4 upward).
-    pub additional_registers: AdditionalRegisters,
+    additional_registers: AdditionalRegisters,
     register_bytes: Vec<u8>,
+    // Present only for a parsed whole box whose received identity differs from
+    // canonical serialization. Include it in equality: identity-distinct
+    // received candidates must not alias in equality-keyed caller caches.
+    received_box_identity: Option<Box<ReceivedBoxIdentity>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ReceivedBoxIdentity {
+    id: Digest32,
+    value: u64,
+    creation_height: u32,
+    tokens: Vec<Token>,
+    transaction_id: ModifierId,
+    index: u16,
 }
 
 impl ErgoBoxCandidate {
@@ -85,17 +105,20 @@ impl ErgoBoxCandidate {
             value,
             ergo_tree,
             ergo_tree_bytes,
+            canonical_tree_bytes: None,
             creation_height,
             tokens,
             additional_registers,
             register_bytes,
+            received_box_identity: None,
         })
     }
 
-    /// Build from already-trusted parts, preserving verbatim ErgoTree and
-    /// register bytes. Use this when reconstructing a box from external
-    /// data the on-chain Scala node already accepted (REST mainnet replay,
-    /// captured fixtures) and `box_id` byte-identity must hold.
+    /// Build from already-trusted canonical parts without reserialization.
+    /// Reference acceptance alone does not establish canonicality: accepted
+    /// bytes can normalize when written. Use the checked constructor when that
+    /// distinction has not already been established. Parsed whole-box received
+    /// identity belongs to the whole-box reader, not this candidate constructor.
     ///
     /// # Safety contract
     ///
@@ -123,10 +146,12 @@ impl ErgoBoxCandidate {
             value,
             ergo_tree,
             ergo_tree_bytes,
+            canonical_tree_bytes: None,
             creation_height,
             tokens,
             additional_registers,
             register_bytes,
+            received_box_identity: None,
         }
     }
 
@@ -137,16 +162,16 @@ impl ErgoBoxCandidate {
     /// Returns `WriteError::InvalidData` on any mismatch — including
     /// re-parse failure, trailing bytes after parse, or a parse
     /// success that does not equal the supplied parsed value. On
-    /// success the candidate carries the supplied raw bytes verbatim
-    /// (so non-canonical Scala-emitted forms are preserved for
-    /// `box_id` byte-identity).
+    /// success the candidate retains the received tree bytes for
+    /// `propositionBytes`, while writers use canonical tree and register
+    /// serialization. Sealing this candidate creates a new canonical box;
+    /// use a whole-box reader to retain a received whole box's cached ID.
     ///
-    /// Cost: one re-parse of the tree and registers per call. Use
-    /// this on construction paths where the caller cannot prove the
-    /// invariant by construction; prefer the unchecked
-    /// [`ErgoBoxCandidate::from_trusted_raw_parts`] in hot paths
-    /// where the bytes/parsed pair is guaranteed (e.g. `read_ergo_box*`
-    /// itself, which produces both atomically from the same reader).
+    /// Cost: one re-parse and canonical serialization of the tree and registers
+    /// per call. Prefer this constructor when the invariant is not guaranteed;
+    /// the unchecked [`ErgoBoxCandidate::from_trusted_raw_parts`] requires
+    /// canonical bytes. Internal readers produce the parsed and cached fields
+    /// atomically from the same reader.
     pub fn try_from_raw_parts(
         value: u64,
         ergo_tree: ErgoTree,
@@ -206,14 +231,20 @@ impl ErgoBoxCandidate {
             ));
         }
 
+        let canonical_tree_bytes = canonical_tree_bytes(&ergo_tree, &ergo_tree_bytes);
+        let mut writer = VlqWriter::new();
+        write_registers(&mut writer, &additional_registers)?;
+        let register_bytes = writer.result();
         Ok(Self {
             value,
             ergo_tree,
             ergo_tree_bytes,
+            canonical_tree_bytes,
             creation_height,
             tokens,
             additional_registers,
             register_bytes,
+            received_box_identity: None,
         })
     }
 
@@ -222,20 +253,83 @@ impl ErgoBoxCandidate {
         &self.ergo_tree
     }
 
-    /// Verbatim canonical bytes of the `ErgoTree`. Preserved across
-    /// parse so callers needing byte-exact roundtrip — including
-    /// `box_id` computation — don't have to re-serialize through the
-    /// writer.
+    /// The `ErgoTree` bytes as received: Scala's `ErgoTree.bytes`, which is
+    /// what a script reads as `propositionBytes` and what the proposition-size
+    /// and storage-rent checks compare. For a tree parsed off the wire these
+    /// are the exact input bytes, even where they are not canonical.
     pub fn ergo_tree_bytes(&self) -> &[u8] {
         &self.ergo_tree_bytes
     }
 
-    /// Verbatim bytes the parser preserved for `additional_registers`.
+    /// The `ErgoTree` bytes emitted by the candidate writers. Newly sealed
+    /// boxes and transaction serialization commit to these bytes. An unchanged
+    /// parsed whole box can retain a different received ID; see [`ErgoBox::box_id`].
     ///
-    /// Returned slice is the raw `count(u8) || concat(register_bytes)` wire
-    /// form — feed it to `split_register_bytes` to recover per-register
-    /// hex without round-tripping through the structured representation.
-    /// Byte-equal to what came in off the wire.
+    /// Scala writes a box's tree back from the parsed structure
+    /// (`ErgoBoxCandidate.serializeBodyWithIndexedDigests` calls
+    /// `DefaultSerializer.serializeErgoTree`, `ErgoBoxCandidate.scala:142`),
+    /// never from the bytes it read. So a tree the reference accepts in a
+    /// non-canonical form (a declared size that is not the body's length, a
+    /// constants count that wraps negative, a `TrueLeaf` opcode, an over-long
+    /// VLQ) is written back canonically, while `propositionBytes` keeps the
+    /// input. A soft-fork-wrapped tree is written back as it was read.
+    pub fn serialized_ergo_tree_bytes(&self) -> &[u8] {
+        self.canonical_tree_bytes
+            .as_deref()
+            .unwrap_or(&self.ergo_tree_bytes)
+    }
+
+    /// Validate structured scripts before falling back to uncached wire bytes.
+    /// Scala propagates script serialization failures when writing a box.
+    pub(super) fn checked_serialized_ergo_tree_bytes(&self) -> Result<&[u8], WriteError> {
+        // Box writers preserve opaque soft-fork scripts verbatim, even when
+        // the standalone tree writer cannot prove they are self-delimiting.
+        if self.canonical_tree_bytes.is_none()
+            && !matches!(self.ergo_tree.body, crate::opcode::Expr::Unparsed(_))
+        {
+            let mut writer = VlqWriter::new();
+            crate::ergo_tree::write_ergo_tree(&mut writer, &self.ergo_tree)?;
+        }
+        Ok(self.serialized_ergo_tree_bytes())
+    }
+
+    /// Non-mandatory registers R4-R9, kept consistent with [`Self::register_bytes`].
+    /// Use [`Self::replace_additional_registers`] to change the register block.
+    pub fn additional_registers(&self) -> &AdditionalRegisters {
+        &self.additional_registers
+    }
+
+    /// Replace the register block and its cached serialization atomically.
+    ///
+    /// The new values must serialize and parse as valid box registers. If
+    /// validation fails, both the parsed values and wire bytes stay unchanged.
+    pub fn replace_additional_registers(
+        &mut self,
+        registers: AdditionalRegisters,
+    ) -> Result<(), WriteError> {
+        let mut writer = VlqWriter::new();
+        write_registers(&mut writer, &registers)?;
+        let bytes = writer.result();
+        let mut reader = VlqReader::new(&bytes);
+        let parsed = read_registers(&mut reader).map_err(|error| {
+            WriteError::InvalidData(format!("invalid replacement registers: {error}"))
+        })?;
+        if !reader.is_empty() || parsed != registers {
+            return Err(WriteError::InvalidData(
+                "replacement registers do not round-trip through the box register codec".into(),
+            ));
+        }
+        self.additional_registers = registers;
+        self.register_bytes = bytes;
+        self.received_box_identity = None;
+        Ok(())
+    }
+
+    /// The serialized `additional_registers`: the `count(u8) ||
+    /// concat(register_bytes)` wire form, feed it to `split_register_bytes` to
+    /// recover per-register hex. A parsed box keeps the CANONICAL
+    /// re-serialization of its registers, as Scala writes a box back from its
+    /// parsed register values.
     pub fn register_bytes(&self) -> &[u8] {
         &self.register_bytes
     }
@@ -256,15 +350,73 @@ pub struct ErgoBox {
 }
 
 impl ErgoBox {
-    /// Compute the canonical `box_id` — `Blake2b256` of the box's
-    /// serialized wire form (candidate body, then the 32-byte
-    /// `transaction_id`, then the VLQ-`u16` `index`). See
-    /// [`box_id_with`] for an allocation-free scratch variant.
+    /// Seal a candidate as a new box, using its canonical serialization for ID.
+    /// This clears received whole-box identity even when resealing a clone with
+    /// the same transaction ID and index, matching Scala's new-box constructor.
+    pub fn new(mut candidate: ErgoBoxCandidate, transaction_id: ModifierId, index: u16) -> Self {
+        candidate.received_box_identity = None;
+        Self {
+            candidate,
+            transaction_id,
+            index,
+        }
+    }
+
+    /// The box's ID. An unchanged parsed whole box hashes its received bytes,
+    /// matching Scala's cached `ErgoBox.bytes`; a newly sealed or changed box
+    /// hashes canonical serialization. These identities can differ for accepted
+    /// non-canonical encodings. Use [`Self::new`] when sealing a candidate.
     pub fn box_id(&self) -> Result<Digest32, WriteError> {
+        if let Some(id) = self.received_box_id() {
+            return Ok(id);
+        }
         let bytes = serialize_ergo_box(self)?;
         Ok(blake2b256(&bytes))
     }
+
+    fn received_box_id(&self) -> Option<Digest32> {
+        let original = self.candidate.received_box_identity.as_ref()?;
+        (self.candidate.value == original.value
+            && self.candidate.creation_height == original.creation_height
+            && self.candidate.tokens == original.tokens
+            && self.transaction_id == original.transaction_id
+            && self.index == original.index)
+            .then_some(original.id)
+    }
+
+    fn remember_received_bytes(&mut self, bytes: &[u8]) {
+        // Canonical boxes need no metadata; their existing structural equality
+        // and cheap candidate representation remain unchanged. Equal bytes have
+        // equal IDs, so only a differing encoding is hashed.
+        if serialize_ergo_box(self).is_ok_and(|canonical| canonical == bytes) {
+            return;
+        }
+        self.candidate.received_box_identity = Some(Box::new(ReceivedBoxIdentity {
+            id: blake2b256(bytes),
+            value: self.candidate.value,
+            creation_height: self.candidate.creation_height,
+            tokens: self.candidate.tokens.clone(),
+            transaction_id: self.transaction_id,
+            index: self.index,
+        }));
+    }
 }
+
+/// The canonical re-serialization of a parsed tree, when it differs from the
+/// bytes it was read from; see [`ErgoBoxCandidate::serialized_ergo_tree_bytes`].
+/// A tree the writer cannot re-serialize keeps its input bytes.
+pub(crate) fn canonical_tree_bytes(tree: &ErgoTree, input: &[u8]) -> Option<Vec<u8>> {
+    let mut w = VlqWriter::new();
+    write_ergo_tree(&mut w, tree).ok()?;
+    let canonical = w.result();
+    (canonical != input).then_some(canonical)
+}
+
+/// `SigmaConstants.MaxBoxSize`: `ErgoBoxCandidate.parseBodyWithIndexedDigests`
+/// bounds a candidate's body (value .. registers) to a window of this many
+/// bytes from its start (ErgoBoxCandidate.scala:190-191). A read that begins
+/// past it is rule 1014, which no box read catches: the box is rejected.
+pub(crate) const MAX_BOX_SIZE: usize = 4096;
 
 /// Scala writes the per-box token count as a single unsigned byte;
 /// >255 tokens would silently wrap on `as u8` and corrupt the wire form.
@@ -291,6 +443,7 @@ mod tests {
             version: 0,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             // Root must be SSigmaProp: under `has_size`, a non-SigmaProp root
             // (e.g. `Const(SBoolean, true)`) fails Scala's
@@ -301,6 +454,120 @@ mod tests {
                 tpe: SigmaType::SSigmaProp,
                 val: SigmaValue::SigmaProp(crate::sigma_value::SigmaBoolean::TrivialProp(true)),
             },
+        }
+    }
+
+    // ----- atomic register replacement -----
+
+    #[test]
+    fn replace_additional_registers_matches_external_scala_bytes_and_box_ids() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/scala/evaluated_value_forms.json"
+        ))
+        .unwrap();
+        let prefix = oracle["box_prefix"]["candidate_prefix_hex"]
+            .as_str()
+            .unwrap();
+        for form in oracle["forms"].as_array().unwrap() {
+            let Some(expected_id) = form["box_id"].as_str().filter(|id| id.len() == 64) else {
+                continue;
+            };
+            let canonical = form["register_reserialized_hex"]
+                .as_str()
+                .or_else(|| form["scala_reserialized_value_hex"].as_str())
+                .unwrap();
+            let bytes = hex::decode(format!(
+                "{prefix}{}",
+                form["register_hex"].as_str().unwrap()
+            ))
+            .unwrap();
+            let parsed = read_ergo_box_candidate(&mut VlqReader::new(&bytes)).unwrap();
+            let mut candidate = ErgoBoxCandidate::new(
+                parsed.value,
+                parsed.ergo_tree().clone(),
+                parsed.creation_height,
+                parsed.tokens.clone(),
+                AdditionalRegisters::empty(),
+            )
+            .unwrap();
+            candidate
+                .replace_additional_registers(parsed.additional_registers().clone())
+                .unwrap();
+            assert_eq!(
+                candidate.additional_registers(),
+                parsed.additional_registers()
+            );
+            assert_eq!(
+                hex::encode(candidate.register_bytes()),
+                format!("01{canonical}")
+            );
+            let ergo_box = ErgoBox {
+                candidate,
+                transaction_id: ModifierId::from_bytes([7; 32]),
+                index: 3,
+            };
+            assert_eq!(
+                hex::encode(ergo_box.box_id().unwrap().as_bytes()),
+                expected_id,
+                "{}",
+                form["name"]
+            );
+            let serialized = serialize_ergo_box(&ergo_box).unwrap();
+            let reparsed = read_ergo_box(&mut VlqReader::new(&serialized)).unwrap();
+            assert_eq!(reparsed, ergo_box);
+        }
+    }
+
+    #[test]
+    fn replace_additional_registers_invalid_value_leaves_candidate_unchanged() {
+        use crate::register::RegisterValue;
+        let original = ErgoBoxCandidate::new(
+            1_000_000,
+            size_delimited_tree(),
+            100,
+            vec![],
+            AdditionalRegisters {
+                registers: vec![RegisterValue {
+                    tpe: SigmaType::SInt,
+                    value: SigmaValue::Int(7),
+                }],
+            },
+        )
+        .unwrap();
+        let invalid = [
+            AdditionalRegisters {
+                registers: vec![
+                    RegisterValue {
+                        tpe: SigmaType::SInt,
+                        value: SigmaValue::Int(1),
+                    };
+                    7
+                ],
+            },
+            AdditionalRegisters {
+                registers: vec![RegisterValue {
+                    tpe: SigmaType::SInt,
+                    value: SigmaValue::Boolean(true),
+                }],
+            },
+            // The writer accepts an Option constant, but Scala's box-register
+            // reader forbids v6-only types. Validation must also be atomic.
+            AdditionalRegisters {
+                registers: vec![RegisterValue {
+                    tpe: SigmaType::SOption(Box::new(SigmaType::SInt)),
+                    value: SigmaValue::Opt(None),
+                }],
+            },
+        ];
+        for registers in invalid {
+            let mut candidate = original.clone();
+            assert!(candidate.replace_additional_registers(registers).is_err());
+            assert_eq!(candidate, original);
+            let mut before = VlqWriter::new();
+            let mut after = VlqWriter::new();
+            write_ergo_box_candidate(&mut before, &original).unwrap();
+            write_ergo_box_candidate(&mut after, &candidate).unwrap();
+            assert_eq!(after.result(), before.result());
         }
     }
 
@@ -367,6 +634,7 @@ mod tests {
             version: 0,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             body: Expr::Const {
                 tpe: SigmaType::SBoolean,

@@ -62,7 +62,7 @@
 //! PATH (+ network on first run):
 //!
 //! ```text
-//! cargo test -p ergo-compiler --test compile_semantic_parity -- --ignored --nocapture
+//! cargo test -p ergo-compiler --test it compile_semantic_parity:: -- --ignored --nocapture
 //! ```
 
 use std::collections::BTreeMap;
@@ -543,7 +543,7 @@ fn str_field(v: &serde_json::Value, key: &str) -> Option<String> {
 fn load_vectors() -> (serde_json::Value, Vec<Vector>) {
     let raw = std::fs::read_to_string(seed_json_path()).expect(
         "read compile_seed.json — regenerate it with \
-         `cargo test -p ergo-compiler --test compile_semantic_parity -- --ignored`",
+         `cargo test -p ergo-compiler --test it compile_semantic_parity:: -- --ignored`",
     );
     let json: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
     let vectors = json["vectors"]

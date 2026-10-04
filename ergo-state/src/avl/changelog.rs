@@ -11,10 +11,10 @@ use super::node::{AvlNode, NodeId};
 #[derive(Debug, Clone)]
 pub enum NodeChange {
     /// An existing node was overwritten. Stores (node_id, old_value).
-    /// On rollback: restore nodes[id] = old_value.
+    /// On rollback: restore `nodes[id]` = old_value.
     Modified(NodeId, AvlNode),
     /// A new node was allocated. Stores the node_id.
-    /// On rollback: delete nodes[id].
+    /// On rollback: delete `nodes[id]`.
     Created(NodeId),
 }
 

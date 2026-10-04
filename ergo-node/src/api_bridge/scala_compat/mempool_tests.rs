@@ -92,7 +92,9 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
             name: "test".into(),
             app_version: "test".into(),
             network: "mainnet".into(),
+            state_type: crate::config::StateType::Utxo,
             launch_time_unix_ms: 0,
+            voting_length: ergo_chain_spec::ChainSpec::mainnet().voting.voting_length,
             rest_api_url: None,
             min_relay_fee_nano_erg: 2_500_000,
         },
@@ -102,9 +104,6 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
     let responses = [
         bridge.pool_txs_paged(0, 10).remove(0),
         bridge.pool_tx_by_id(&id_hex).unwrap(),
-        bridge
-            .pool_txs_by_ids(std::slice::from_ref(&id_hex))
-            .remove(0),
         bridge.pool_txs_by_ergo_tree(&tree_bytes).remove(0),
         bridge.pool_txs_by_box_id(&[1; 32]).remove(0),
         bridge.pool_txs_by_token_id(&[2; 32]).remove(0),

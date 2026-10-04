@@ -15,6 +15,7 @@
 //! best-header pointers; this component only persists the rows and the
 //! derived indexes.
 
+use redb::ReadableDatabase;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -27,6 +28,29 @@ use crate::store::{
     HEADERS_BY_HEIGHT, HEADER_CHAIN_INDEX, HEADER_META, MINIMAL_FULL_BLOCK_HEIGHT_KEY,
     MODIFIER_TYPE_INDEX, SECTION_HEIGHT_INDEX, STATE_META,
 };
+
+/// Header writers own only the header fields. The foreground full-block
+/// pointer may already include queued AVL deltas, so always retain the
+/// transaction's committed full-block pointer when publishing a header tip.
+fn persist_header_chain_state(
+    table: &mut redb::Table<'_, &str, &[u8]>,
+    proposed: &ChainStateMeta,
+) -> Result<(), StateError> {
+    let committed = table
+        .get("chain_state")?
+        .map(|row| ChainStateMeta::deserialize(row.value()))
+        .transpose()
+        .map_err(|error| StateError::DbCorruption {
+            table: "chain_state_meta",
+            key: "chain_state".into(),
+            reason: error.to_string(),
+        })?;
+    let mut merged = proposed.clone();
+    merged.best_full_block_id = committed.as_ref().map_or([0; 32], |c| c.best_full_block_id);
+    merged.best_full_block_height = committed.as_ref().map_or(0, |c| c.best_full_block_height);
+    table.insert("chain_state", merged.serialize().as_slice())?;
+    Ok(())
+}
 
 /// Header + block-section tables with the buffered-write overlay.
 ///
@@ -185,7 +209,7 @@ impl HeaderSectionTables {
         section_bytes: &[u8],
     ) -> Result<(), StateError> {
         let mut write_txn = crate::begin_write_qr(&self.db)?;
-        write_txn.set_durability(redb::Durability::None);
+        write_txn.set_durability(redb::Durability::None)?;
         {
             let mut table = write_txn.open_table(BLOCK_SECTIONS)?;
             table.insert(modifier_id.as_slice(), section_bytes)?;
@@ -209,10 +233,10 @@ impl HeaderSectionTables {
     /// (resurrection attempt via a delayed peer delivery, a
     /// rogue peer pushing directly, or an executor bug that
     /// bypassed receive gating). `SECTION_HEIGHT_INDEX` provides
-    /// the height lookup that was stamped at header-store time —
-    /// sections whose parent we never indexed
-    /// are passed through (no height to compare against; the
-    /// serve gate will catch them on read if needed).
+    /// the height lookup that was stamped at header-store time.
+    /// While the sentinel is above one, a section with no
+    /// `SECTION_HEIGHT_INDEX` row (its header is not stored) is
+    /// refused too.
     pub(crate) fn store_block_section_typed(
         &self,
         modifier_id: &[u8; 32],
@@ -220,81 +244,31 @@ impl HeaderSectionTables {
         section_type: u8,
     ) -> Result<(), StateError> {
         let mut write_txn = crate::begin_write_qr(&self.db)?;
-        write_txn.set_durability(redb::Durability::None);
-        // Sentinel guard — read sentinel + section-height INSIDE
-        // the write_txn so a concurrent persist worker that's
-        // advancing the sentinel can't race the check-then-write.
-        // Gate fires whenever `sentinel > 1` (sentinel-based, not
-        // `blocks_to_keep > 0`): the sentinel is also written by
-        // `install_snapshot_state` and `apply_popow_proof`, so a
-        // Mode 2 / NiPoPoW-bootstrapped archive node also needs
-        // the resurrection guard. A fresh archive-from-genesis
-        // store reads sentinel = 1 (default) and the gate is
-        // inert.
-        let sentinel: u32 = {
-            let meta = write_txn.open_table(STATE_META)?;
-            let bytes_opt = meta
-                .get(MINIMAL_FULL_BLOCK_HEIGHT_KEY)?
-                .map(|g| g.value().to_vec());
-            drop(meta);
-            match bytes_opt {
-                Some(bytes) => {
-                    if bytes.len() != 4 {
-                        return Err(StateError::DbCorruption {
-                            table: "state_meta",
-                            key: hex::encode(MINIMAL_FULL_BLOCK_HEIGHT_KEY.as_bytes()),
-                            reason: format!(
-                                "minimal_full_block_height payload has unexpected length: {}",
-                                bytes.len()
-                            ),
-                        });
-                    }
-                    let mut buf = [0u8; 4];
-                    buf.copy_from_slice(&bytes);
-                    u32::from_le_bytes(buf)
-                }
-                None => 1,
-            }
-        };
-        if sentinel > 1 {
-            // Section height — tombstone-retained by eviction so
-            // sub-sentinel resurrection attempts are detected
-            // post-eviction (see delete_block_sections_at_height_in_txn).
-            // Fail-CLOSED on Ok(None): the boot backfill gate
-            // makes SECTION_HEIGHT_INDEX complete
-            // when sentinel > 1, so an unindexed section is
-            // either an orphan or an attacker direct-write
-            // attempt — either way, reject.
-            let section_height: Option<u32> = match write_txn.open_table(SECTION_HEIGHT_INDEX) {
-                Ok(t) => t.get(modifier_id.as_slice())?.map(|g| g.value()),
-                Err(redb::TableError::TableDoesNotExist(_)) => None,
-                Err(e) => return Err(e.into()),
-            };
-            match section_height {
-                Some(height) if height >= sentinel => {}
-                Some(height) => {
-                    return Err(StateError::PrunedSection {
-                        section_id: hex::encode(modifier_id),
-                        section_height: height,
-                        sentinel,
-                    });
-                }
-                None => {
-                    return Err(StateError::PrunedSection {
-                        section_id: hex::encode(modifier_id),
-                        section_height: 0,
-                        sentinel,
-                    });
-                }
-            }
-        }
-        {
-            let mut table = write_txn.open_table(BLOCK_SECTIONS)?;
-            table.insert(modifier_id.as_slice(), section_bytes)?;
-        }
-        {
-            let mut idx = write_txn.open_table(MODIFIER_TYPE_INDEX)?;
-            idx.insert(modifier_id.as_slice(), section_type)?;
+        write_txn.set_durability(redb::Durability::None)?;
+        insert_block_section_in_txn(&write_txn, modifier_id, section_bytes, section_type)?;
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Store several typed block sections in one transaction that
+    /// commits with the default `Durability::Immediate`: when this
+    /// returns `Ok`, every section is on disk, and when it returns
+    /// `Err`, none was written. Each section passes the same prune
+    /// guard as [`Self::store_block_section_typed`].
+    ///
+    /// For the sections of a block this node mined or was handed
+    /// whole (`POST /blocks`): no peer holds them yet, so the
+    /// redownload that recovers a lost `Durability::None` section
+    /// cannot recover these. Their header is stored first, durably,
+    /// and without them it can stand as the best header with a body
+    /// no node can serve.
+    pub(crate) fn store_block_sections_durable(
+        &self,
+        sections: &[(&[u8; 32], &[u8], u8)],
+    ) -> Result<(), StateError> {
+        let write_txn = crate::begin_write_qr(&self.db)?;
+        for &(modifier_id, section_bytes, section_type) in sections {
+            insert_block_section_in_txn(&write_txn, modifier_id, section_bytes, section_type)?;
         }
         write_txn.commit()?;
         Ok(())
@@ -465,7 +439,7 @@ impl HeaderSectionTables {
                 }
             }
             let mut cs_table = write_txn.open_table(CHAIN_STATE_META)?;
-            cs_table.insert("chain_state", cs_after.serialize().as_slice())?;
+            persist_header_chain_state(&mut cs_table, &cs_after)?;
         }
         write_txn.commit()?;
 
@@ -691,7 +665,7 @@ impl HeaderSectionTables {
             }
 
             let mut cs_table = write_txn.open_table(CHAIN_STATE_META)?;
-            cs_table.insert("chain_state", cs_after.serialize().as_slice())?;
+            persist_header_chain_state(&mut cs_table, cs_after)?;
 
             // HEADERS_BY_HEIGHT — every batched header gets appended at
             // its height (idempotent). Orphans land here too so
@@ -842,7 +816,7 @@ impl HeaderSectionTables {
                 cs.best_header_height = height;
                 cs.best_header_score = score.clone();
                 let mut chain_meta = write_txn.open_table(CHAIN_STATE_META)?;
-                chain_meta.insert("chain_state", cs.serialize().as_slice())?;
+                persist_header_chain_state(&mut chain_meta, &cs)?;
 
                 let mut idx_table = write_txn.open_table(HEADER_CHAIN_INDEX)?;
                 rewrite_best_chain_into_index(
@@ -868,5 +842,137 @@ impl HeaderSectionTables {
             cs_meta.best_header_score = score;
         }
         Ok(())
+    }
+}
+
+/// The prune-guarded insert behind every typed section write: the section
+/// bytes into `BLOCK_SECTIONS` and its type into `MODIFIER_TYPE_INDEX`,
+/// unless the sentinel is above one and the section's
+/// `SECTION_HEIGHT_INDEX` height is missing or below it
+/// ([`StateError::PrunedSection`]).
+fn insert_block_section_in_txn(
+    write_txn: &redb::WriteTransaction,
+    modifier_id: &[u8; 32],
+    section_bytes: &[u8],
+    section_type: u8,
+) -> Result<(), StateError> {
+    // Sentinel guard — read sentinel + section-height INSIDE
+    // the write_txn so a concurrent persist worker that's
+    // advancing the sentinel can't race the check-then-write.
+    // Gate fires whenever `sentinel > 1` (sentinel-based, not
+    // `blocks_to_keep > 0`): the sentinel is also written by
+    // `install_snapshot_state` and `apply_popow_proof`, so a
+    // Mode 2 / NiPoPoW-bootstrapped archive node also needs
+    // the resurrection guard. A fresh archive-from-genesis
+    // store reads sentinel = 1 (default) and the gate is
+    // inert.
+    let sentinel: u32 = {
+        let meta = write_txn.open_table(STATE_META)?;
+        let bytes_opt = meta
+            .get(MINIMAL_FULL_BLOCK_HEIGHT_KEY)?
+            .map(|g| g.value().to_vec());
+        drop(meta);
+        match bytes_opt {
+            Some(bytes) => {
+                if bytes.len() != 4 {
+                    return Err(StateError::DbCorruption {
+                        table: "state_meta",
+                        key: hex::encode(MINIMAL_FULL_BLOCK_HEIGHT_KEY.as_bytes()),
+                        reason: format!(
+                            "minimal_full_block_height payload has unexpected length: {}",
+                            bytes.len()
+                        ),
+                    });
+                }
+                let mut buf = [0u8; 4];
+                buf.copy_from_slice(&bytes);
+                u32::from_le_bytes(buf)
+            }
+            None => 1,
+        }
+    };
+    if sentinel > 1 {
+        // Section height — tombstone-retained by eviction so
+        // sub-sentinel resurrection attempts are detected
+        // post-eviction (see delete_block_sections_at_height_in_txn).
+        // Fail-CLOSED on Ok(None): the boot backfill gate
+        // makes SECTION_HEIGHT_INDEX complete
+        // when sentinel > 1, so an unindexed section is
+        // either an orphan or an attacker direct-write
+        // attempt — either way, reject.
+        let section_height: Option<u32> = match write_txn.open_table(SECTION_HEIGHT_INDEX) {
+            Ok(t) => t.get(modifier_id.as_slice())?.map(|g| g.value()),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(e.into()),
+        };
+        match section_height {
+            Some(height) if height >= sentinel => {}
+            Some(height) => {
+                return Err(StateError::PrunedSection {
+                    section_id: hex::encode(modifier_id),
+                    section_height: height,
+                    sentinel,
+                });
+            }
+            None => {
+                return Err(StateError::PrunedSection {
+                    section_id: hex::encode(modifier_id),
+                    section_height: 0,
+                    sentinel,
+                });
+            }
+        }
+    }
+    {
+        let mut table = write_txn.open_table(BLOCK_SECTIONS)?;
+        table.insert(modifier_id.as_slice(), section_bytes)?;
+    }
+    {
+        let mut idx = write_txn.open_table(MODIFIER_TYPE_INDEX)?;
+        idx.insert(modifier_id.as_slice(), section_type)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod metadata_ownership_tests {
+    use super::*;
+
+    // ----- error paths -----
+
+    #[test]
+    fn header_publication_preserves_only_committed_full_block_tip() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::create(directory.path().join("ownership.redb")).unwrap();
+        let mut committed = crate::chain::ChainState::empty().to_persisted();
+        committed.best_full_block_height = 7;
+        committed.best_full_block_id = [7; 32];
+        let initial = db.begin_write().unwrap();
+        initial
+            .open_table(CHAIN_STATE_META)
+            .unwrap()
+            .insert("chain_state", committed.serialize().as_slice())
+            .unwrap();
+        initial.commit().unwrap();
+        // Foreground state leads the queued AVL commit by one block.
+        let mut proposed = committed.clone();
+        proposed.best_full_block_height = 8;
+        proposed.best_full_block_id = [8; 32];
+        proposed.best_header_height = 100;
+        proposed.best_header_id = [100; 32];
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(CHAIN_STATE_META).unwrap();
+            persist_header_chain_state(&mut table, &proposed).unwrap();
+        }
+        write.commit().unwrap();
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(CHAIN_STATE_META).unwrap();
+        let result =
+            ChainStateMeta::deserialize(table.get("chain_state").unwrap().unwrap().value())
+                .unwrap();
+        assert_eq!(result.best_full_block_height, 7);
+        assert_eq!(result.best_full_block_id, [7; 32]);
+        assert_eq!(result.best_header_height, 100);
     }
 }

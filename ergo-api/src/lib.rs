@@ -38,10 +38,11 @@ pub use compat::{NodeChainQuery, Parameters, ScalaInfo};
 pub use ergo_wallet_protocol::chain;
 pub use mining::{mining_router, MiningApiError, NodeMining, NoopNodeMining};
 pub use server::{
-    bind, realtime_handle, router_with_wallet, serve, serve_on, serve_on_with_mempool,
+    bind, router_with_wallet, serve, serve_on, serve_on_with_mempool,
     serve_on_with_mempool_and_wallet_and_security,
     serve_on_with_mempool_and_wallet_and_security_and_hosts,
-    serve_on_with_mempool_and_wallet_and_security_and_hosts_and_wallet_moved, ServerCtx,
+    serve_on_with_mempool_and_wallet_and_security_and_hosts_and_wallet_moved, ApiServices,
+    ServerCtx,
 };
 pub use traits::{
     ChainParamsView, DefaultWalletChain, MempoolView, NodeAdmin, NodeReadState, NodeSubmit,
@@ -49,3 +50,6 @@ pub use traits::{
     WalletChainError,
 };
 pub use types::*;
+
+/// Coherent pool output/spend overlay for wallet construction.
+pub use traits::MempoolBoxSnapshot;

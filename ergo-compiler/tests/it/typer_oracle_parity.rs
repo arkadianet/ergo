@@ -274,20 +274,8 @@ fn assert_err(result: Result<String, CompileError>, verb: &str, src: &str) -> Co
 /// The oracle's `REJECT <line>:<col>` token is advisory (E5) — this test pins
 /// the advisory channel so positions stay USEFUL for tooling, without making
 /// them consensus-graded facts.
-const POSITION_DEVIATION_SOURCES: &[(&str, &str)] = &[
-    // Scala's MethodNotFound cites `obj.sourceContext` (SigmaTyper.scala:93) —
-    // the Height CASE-OBJECT singleton's write-once SourceContext
-    // (values.scala:81-90, TyperOracle.scala Risk R1). That slot is JVM-global
-    // mutable state: its value depends on which source touched the singleton
-    // first (in batch mode the position CHANGES across sources; the fresh-JVM
-    // capture records 1:5, an artifact of the singleton mechanism itself).
-    // This port deliberately does not replicate write-once singletons — the
-    // error cites the Ident's real offset (1:1) instead.
-    (
-        "HEIGHT.foo",
-        "cites the Height case-object singleton's write-once SourceContext (Risk R1)",
-    ),
-];
+// SigmaTyper.scala:145-147 (v6.0.6) cites the selector, including HEIGHT.foo.
+const POSITION_DEVIATION_SOURCES: &[(&str, &str)] = &[];
 
 /// Every `REJECT` record with a non-`0:0` oracle position: our
 /// `CompileError::pos()` must convert (span::line_col) to the SAME `line:col`
@@ -344,20 +332,20 @@ fn seed_reject_records_position_parity() {
         .iter()
         .map(|&(s, reason)| format!("{s:?} ({reason})"))
         .collect();
-    // 22 through §26; §27 (issue #332) adds 8 positioned typer rejects.
+    // The 6.0.6 seed has 31 positioned rejects, including the val ascription.
     assert_eq!(
         positioned,
-        30,
+        31,
         "swept {positioned} positioned reject records (pre-deviation-filter), \
-         expected exactly 30 — seed may have shrunk/grown. Currently excluded \
+         expected exactly 31 — seed may have shrunk/grown. Currently excluded \
          from the exact-match count: [{}]",
         deviation_notes.join(", ")
     );
     assert_eq!(
         checked,
-        29,
+        31,
         "checked {checked} positioned reject records for EXACT line:col parity \
-         (positioned minus POSITION_DEVIATION_SOURCES), expected exactly 29 — \
+         (positioned minus POSITION_DEVIATION_SOURCES), expected exactly 31 — \
          a POSITION_DEVIATION_SOURCES entry was added/removed. Currently \
          excluded: [{}]",
         deviation_notes.join(", ")
@@ -505,6 +493,27 @@ fn v2_gated_sources_reject_method_not_found() {
     }
 }
 
+/// `g.exp(u)` with an `UnsignedBigInt` argument is typed through a Select
+/// renamed to `expUnsigned`, which the typer synthesizes without a source
+/// context (SigmaTyper.scala:240-246, v6.0.6). At tree_version 2, where
+/// `expUnsigned` does not exist, its MethodNotFound therefore has no position,
+/// wherever the receiver sits. JVM TyperOracle (fresh JVM,
+/// ORACLE_TREE_VERSION=2): `REJECT 0:0 MethodNotFound` for every source below.
+#[test]
+fn v2_exp_unsigned_rename_method_not_found_has_no_position() {
+    let sources = [
+        "groupGenerator.exp(unsignedBigInt(\"5\"))",
+        "{ val u = unsignedBigInt(\"5\"); groupGenerator.exp(u) }",
+        "   groupGenerator.exp(unsignedBigInt(\"5\"))",
+        "{ val g = groupGenerator; val u = unsignedBigInt(\"5\")\n  g.exp(u) }",
+    ];
+    for src in sources {
+        let err = assert_err(typecheck_verb("tc", src, 2), "tc", src);
+        assert_eq!(err.class(), "MethodNotFound", "v2 class for {src:?}");
+        assert_eq!(err.pos(), 0, "no source context for {src:?}");
+    }
+}
+
 /// B4 (wave B): numeric `toBytes`/`toBits` print `%SNumericType.<m>` at tree_version < 3
 /// (shared `SNumericTypeMethods` container) and the concrete `%Int`/`%Long.<m>` at V6.
 /// The §21 seed records pin the v2 owner (byte-swept here); the same sources are pinned
@@ -626,7 +635,7 @@ fn gap_check_edge_vectors() {
 #[test]
 #[ignore = "live oracle re-derivation: run manually after editing golden_seed.txt"]
 fn seed_live_oracle_parity() {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::Write;
     use std::process::{Command, Stdio};
 
     let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
@@ -634,58 +643,91 @@ fn seed_live_oracle_parity() {
         .join("..")
         .join("scripts/jvm_typer_oracle");
 
-    let mut ordered: Vec<(String, String, String)> = Vec::new(); // (verb, src, expected_sexpr)
+    let mut ordered = Vec::new(); // (verb, source, expected_sexpr, tree_version)
     for line in seed.lines() {
         let Some((verb, src, expected)) = parse_seed_line(line) else {
             continue;
         };
         if let Some(sexpr) = expected.strip_prefix("OK ") {
             if !SWEEP_SKIP.iter().any(|&(v, s)| v == verb && s == src) {
-                ordered.push((verb.to_string(), src.to_string(), sexpr.to_string()));
+                let version = if V2_ACCEPT_SOURCES.contains(&src) {
+                    2
+                } else {
+                    3
+                };
+                ordered.push((
+                    verb.to_string(),
+                    src.to_string(),
+                    sexpr.to_string(),
+                    version,
+                ));
             }
         }
     }
 
-    let mut child = Command::new("scala-cli")
-        .arg("run")
-        .arg(&oracle_path)
-        .env("ORACLE_TREE_VERSION", "3")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn scala-cli");
-
-    {
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        for (verb, src, _) in &ordered {
-            let hex = src
-                .as_bytes()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
-            writeln!(stdin, "{verb} {hex}").expect("write");
-        }
-    }
-
-    let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-    let live: Vec<String> = stdout
-        .lines()
-        .map(|l| l.expect("read line"))
-        .filter(|l| l.starts_with("OK ") || l.starts_with("REJECT ") || l.starts_with("ERR "))
-        .collect();
-    child.wait().expect("oracle exit");
-
-    assert_eq!(live.len(), ordered.len(), "oracle returned fewer verdicts");
     let mut divergences = Vec::new();
-    for ((verb, src, committed), live_line) in ordered.iter().zip(&live) {
-        let live_sexpr = live_line.strip_prefix("OK ").unwrap_or_else(|| {
-            panic!("expected OK from live oracle for {verb} {src:?}, got {live_line}")
+    // The version is process-wide in TyperOracle. Preserve the seed's v2
+    // SNumericType records rather than comparing them with v3 method owners.
+    for version in [2, 3] {
+        let batch: Vec<_> = ordered.iter().filter(|r| r.3 == version).collect();
+        let mut child = Command::new("scala-cli")
+            .arg("run")
+            .arg(&oracle_path)
+            .arg("--server=false")
+            .env("ORACLE_TREE_VERSION", version.to_string())
+            .env("ORACLE_NETWORK", "testnet")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn scala-cli");
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let requests: Vec<_> = batch
+            .iter()
+            .map(|(verb, source, _, _)| {
+                let hex: String = source
+                    .as_bytes()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                format!("{verb} {hex}\n")
+            })
+            .collect();
+        // Feed concurrently while wait_with_output drains both output pipes.
+        let feeder = std::thread::spawn(move || -> std::io::Result<()> {
+            for request in requests {
+                stdin.write_all(request.as_bytes())?;
+            }
+            Ok(())
         });
-        if live_sexpr != committed {
-            divergences.push(format!("{verb} {src:?}: committed != live\n  committed: {committed}\n  live:      {live_sexpr}"));
+        let output = child.wait_with_output().expect("oracle exit");
+        feeder
+            .join()
+            .expect("stdin feeder thread")
+            .expect("write requests");
+        assert!(
+            output.status.success(),
+            "v{version} oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 oracle output");
+        let live: Vec<_> = stdout
+            .lines()
+            .filter(|line| {
+                line.starts_with("OK ") || line.starts_with("REJECT ") || line.starts_with("ERR ")
+            })
+            .collect();
+        assert_eq!(live.len(), batch.len(), "v{version} oracle reply count");
+        for ((verb, src, committed, _), live_line) in batch.into_iter().zip(live) {
+            let live_sexpr = live_line.strip_prefix("OK ").unwrap_or_else(|| {
+                panic!("expected OK for v{version} {verb} {src:?}, got {live_line}")
+            });
+            if live_sexpr != committed {
+                divergences.push(format!("v{version} {verb} {src:?}: committed != live\n  committed: {committed}\n  live:      {live_sexpr}"));
+            }
         }
     }
+
     assert!(
         divergences.is_empty(),
         "{} live-oracle divergence(s):\n{}",
@@ -901,7 +943,7 @@ fn corpus_typed_verdict_parity() {
 /// `scala-cli` on PATH + network (first run).  Run after updating the corpus:
 ///
 /// ```text
-/// cargo test -p ergo-compiler --test typer_oracle_parity -- --ignored --nocapture
+/// cargo test -p ergo-compiler --test it typer_oracle_parity:: -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore = "live oracle re-derivation: run manually after editing the corpus"]

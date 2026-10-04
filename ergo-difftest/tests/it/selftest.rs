@@ -3,7 +3,8 @@
 //! A decode panic during a campaign must be CAUGHT and reported, never abort
 //! the process — that is the whole basis of the no-panic invariant. We assert
 //! it in a subprocess (real `main`, not the libtest harness, which would
-//! otherwise interfere with the swapped panic hook).
+//! otherwise share stderr output with other tests). The caller's panic hook
+//! is preserved by all harness entrypoints.
 
 use std::process::Command;
 

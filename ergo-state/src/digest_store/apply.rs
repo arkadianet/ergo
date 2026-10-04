@@ -48,8 +48,8 @@ impl DigestStateStore {
             });
         }
         // Internal fork-choice invariants on the caller-supplied
-        // chain state (best_header must lead or equal best_full_block;
-        // score is never empty). Full validation of best_header_*
+        // chain state (a full chain needs a header chain; score is never
+        // empty). A heavier header branch can be shorter. Validation of best_header_*
         // against persisted header state needs the header tables this
         // sibling does not own; these cheap invariants catch an
         // obviously-nonsense best-header view at the seam.
@@ -136,6 +136,9 @@ impl DigestStateStore {
 }
 
 impl crate::backend::ChainStateRead for DigestStateStore {
+    fn keep_versions(&self) -> u32 {
+        self.keep_versions
+    }
     fn height(&self) -> u32 {
         self.chain_state.best_full_block_height
     }
@@ -156,6 +159,18 @@ impl crate::backend::ChainStateRead for DigestStateStore {
 }
 
 impl crate::backend::HeaderSectionStore for DigestStateStore {
+    fn has_session_mark_at_height(&self, height: u32) -> Result<bool, StateError> {
+        for id in &self.session_invalids {
+            if self
+                .get_header_meta(id)?
+                .is_some_and(|meta| meta.height == height)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn get_header(&self, header_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         self.headers.get_header(header_id)
     }
@@ -215,6 +230,12 @@ impl crate::backend::HeaderSectionStore for DigestStateStore {
     ) -> Result<(), StateError> {
         self.headers
             .store_block_section_typed(modifier_id, section_bytes, section_type)
+    }
+    fn store_block_sections_durable(
+        &self,
+        sections: &[(&[u8; 32], &[u8], u8)],
+    ) -> Result<(), StateError> {
+        self.headers.store_block_sections_durable(sections)
     }
     fn begin_header_batch(&mut self) {
         self.headers.begin_header_batch()

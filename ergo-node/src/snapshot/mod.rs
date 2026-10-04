@@ -13,8 +13,8 @@
 //! else reads cached in-memory state.
 //!
 //! This struct holds the DTOs ([`NodeSnapshot`], [`SnapshotParts`]) and
-//! their small support types; [`build`] assembles a `NodeSnapshot` from a
-//! `SnapshotParts`, and [`publisher`] owns the per-tick publish + stall-clock
+//! their small support types; `build` assembles a `NodeSnapshot` from a
+//! `SnapshotParts`, and `publisher` owns the per-tick publish + stall-clock
 //! bookkeeping.
 
 mod build;
@@ -93,11 +93,10 @@ pub struct NodeSnapshot {
     /// priority order (matches Scala's `MempoolReader.getAll`).
     /// Each entry is `(tx_id, serialized_tx_bytes)` — bytes are
     /// the canonical wire form preserved by mempool admission.
-    /// `Arc`-shared so paged + by-id + batch handlers pay no copy
-    /// per request. Drives the three mempool read endpoints
-    /// (`/transactions/unconfirmed?offset=&limit=`,
-    /// `/transactions/unconfirmed/byTransactionId/{id}`, and
-    /// `POST /transactions/unconfirmed/byTransactionIds`).
+    /// `Arc`-shared so paged and by-id handlers pay no copy per request.
+    /// Drives the full-transaction mempool reads, such as
+    /// `/transactions/unconfirmed?offset=&limit=` and
+    /// `/transactions/unconfirmed/byTransactionId/{id}`.
     pub pool_full_txs: Arc<Vec<(Digest32, Arc<[u8]>)>>,
     /// Per-peer last-observed sync-info classification — Scala's
     /// `syncTracker.fullInfo` analogue. Snapshotted from
@@ -154,9 +153,10 @@ pub struct PeerSyncProjection {
     /// / `"Fork"` / `"Unknown"`. String form so the bridge passes it
     /// through without depending on `ergo-p2p::sync::PeerChainStatus`.
     pub status: &'static str,
-    /// Peer's reported (V1) or inferred-from-overlap (V2) best
-    /// height, or `None` when we have no overlap with our chain.
+    /// Parsed peer tip-header height or an inferred shared-header height.
     pub peer_height: Option<u32>,
+    pub height_source: Option<&'static str>,
+    pub last_sync_seconds: u64,
 }
 
 /// Aggregated delivery-tracker counters at snapshot time.
@@ -402,8 +402,8 @@ pub struct SnapshotParts<'a> {
     pub snapshot_manifests: Vec<(i32, String)>,
     /// The most recent block-apply REJECTION projected to the API DTO
     /// (age computed at publish time from the executor's `Instant`), or `None`.
-    /// Drives `ApiStatus.last_block_apply_error` and the
-    /// `HealthStatus::Rejecting` overlay in `build_snapshot`.
+    /// Drives `ApiStatus.last_block_apply_error`. Overlays health as
+    /// `Rejecting` until applied blocks pass that height or a sibling applies there.
     pub last_block_apply_error: Option<ergo_api::types::ApiBlockApplyError>,
     /// Monotonic block-apply rejection count, for the
     /// `ergo_node_block_apply_errors_total` Prometheus counter.

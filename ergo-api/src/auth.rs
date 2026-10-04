@@ -15,9 +15,9 @@
 //!   (`http/api/ApiError.scala:37`).
 //!
 //! Mounted by [`crate::wallet::router_with_security`] and [`crate::server`] around the
-//! `/wallet/*` and `/node/*` subtrees when an [`ApiSecurity`] is
-//! configured. Public routes (`/info`, `/blocks/*`, `/peers/*`, …) do not
-//! receive the layer.
+//! privileged routes (wallets, scans, admin controls, mining and block submission).
+//! Without a configured [`ApiSecurity`], they fail closed. Public reads and
+//! transaction submissions do not receive the layer.
 //!
 //! **Mounting discipline**: always attach this gate with
 //! `Router::route_layer`, never `Router::layer`. A plain `layer` also
@@ -26,7 +26,7 @@
 //! path node-wide then answers `403 invalid.api-key` instead of `404`,
 //! masking "route does not exist" as "you need a key". Whole-prefix
 //! gating (Scala's `pathPrefix(...) & withAuth`) is preserved via
-//! explicit catch-all routes ([`unknown_gated_subpath`]) that
+//! explicit catch-all routes (`unknown_gated_subpath`) that
 //! `route_layer` does cover. Regression pinned by
 //! `tests/openapi_native_runtime_mount.rs`.
 
@@ -46,6 +46,10 @@ use subtle::ConstantTimeEq;
 /// HTTP header name carrying the operator's plaintext API key. Matches
 /// Scala `ApiRoute.apiKeyHeaderName = "api_key"`.
 pub const API_KEY_HEADER: &str = "api_key";
+
+/// Operator guidance shared by the compat and v1 gates when no hash is set.
+pub const API_KEY_NOT_CONFIGURED: &str =
+    "API key not configured: set [api.security] api_key_hash (see docs/configuration.md)";
 
 /// Operator-side state required by [`require_api_key`]. Built once at
 /// server boot from the loaded `[api.security].api_key_hash` config
@@ -125,19 +129,35 @@ type Blake2b256 = Blake2b<U32>;
 
 /// axum middleware that gates a router subtree on the `api_key` header.
 ///
+/// Without a configured verifier, returns a distinct 403 with setup guidance.
 /// Returns 403 + the Scala-parity JSON envelope on missing header or
 /// hash mismatch. Forwards to the inner handler only when the header's
 /// Blake2b-256 hex digest matches the configured hash byte-for-byte
 /// (constant time).
 pub async fn require_api_key(
-    State(sec): State<Arc<ApiSecurity>>,
+    State(sec): State<Option<Arc<ApiSecurity>>>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
+    let Some(sec) = sec else {
+        return reject_unconfigured();
+    };
     if !request_is_authorized(&sec, &req) {
         return reject_invalid();
     }
     next.run(req).await
+}
+
+pub(crate) fn reject_unconfigured() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": 403,
+            "reason": "api-key-not-configured",
+            "detail": API_KEY_NOT_CONFIGURED,
+        })),
+    )
+        .into_response()
 }
 
 pub(crate) fn request_is_authorized(sec: &ApiSecurity, req: &Request<Body>) -> bool {

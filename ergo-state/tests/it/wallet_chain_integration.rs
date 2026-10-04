@@ -11,6 +11,7 @@
 //!
 //! Uses synthetic data only — no fixture files required.
 
+use redb::ReadableDatabase;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 

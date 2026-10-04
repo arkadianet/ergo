@@ -3,6 +3,7 @@
 
 use ergo_state::wallet::tables::*;
 use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
+use redb::ReadableDatabase;
 use redb::{Database, ReadableTable};
 
 #[test]

@@ -18,7 +18,7 @@ fn registry_derived_scalar_matches_direct_derivation() {
          abandon abandon abandon abandon abandon art";
     let m = Mnemonic::import(mnemonic_phrase).unwrap();
     let seed = m.to_seed("");
-    let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+    let master = ExtendedSecretKey::derive_master_key(&seed[..]).unwrap();
     let unlocked = UnlockedMaster::Modern(master);
 
     // Path m/44'/429'/0'/0/0 — derivation vector.
@@ -53,7 +53,7 @@ fn registry_untracked_pubkey_returns_none() {
          abandon abandon abandon abandon abandon about";
     let m = Mnemonic::import(mnemonic_phrase).unwrap();
     let seed = m.to_seed("");
-    let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+    let master = ExtendedSecretKey::derive_master_key(&seed[..]).unwrap();
     let unlocked = UnlockedMaster::Modern(master);
     let registry = SecretRegistry::from_master_key(&unlocked, &BTreeMap::new()).unwrap();
 

@@ -8,7 +8,7 @@ use ergo_ser::autolykos::AutolykosSolution;
 use ergo_ser::header::{write_header, Header};
 use ergo_state::store::StateStore;
 use ergo_state::test_helpers::SharedBuf;
-use ergo_state::ChainStateRead;
+use ergo_state::{ChainStateRead, HeaderSectionStore};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -106,7 +106,11 @@ fn persist_failed_propagation_does_not_duplicate_worker_event() {
 /// synthesized meta written by `persist_apply` under the
 /// `test-helpers` feature: timestamp = `1_700_000_000 + height`,
 /// parent_id = previous `best_full_block_id`.
-fn apply_empty_block(store: &mut StateStore, height: u32, parent_id: [u8; 32]) -> [u8; 32] {
+pub(super) fn apply_empty_block(
+    store: &mut StateStore,
+    height: u32,
+    parent_id: [u8; 32],
+) -> [u8; 32] {
     let header = Header {
         version: 2,
         parent_id: ModifierId::from_bytes(parent_id),
@@ -424,81 +428,58 @@ fn too_deep_fork_sets_wedge_and_reagreement_clears_it() {
 }
 
 #[test]
-fn full_chain_reorg_rolls_back_without_marking_new_branch_invalid() {
+fn header_only_reorg_keeps_applied_chain_and_registers_fork_downloads() {
     let mut store = open_initialized_store();
-    let h2b = id(0x22);
-    let h3b = id(0x33);
-
-    let h1 = apply_empty_block(&mut store, 1, [0u8; 32]);
-    let h2a = apply_empty_block(&mut store, 2, h1);
-    let _h3a = apply_empty_block(&mut store, 3, h2a);
-
+    let common = apply_empty_block(&mut store, 1, [0; 32]);
+    let old2 = apply_empty_block(&mut store, 2, common);
+    let old3 = apply_empty_block(&mut store, 3, old2);
+    let mut raw = store.get_header(&old2).unwrap().unwrap();
+    let mut header =
+        ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&raw)).unwrap();
+    header.solution = AutolykosSolution::V2 {
+        pk: GroupElement::from_bytes([0; 33]),
+        nonce: [1; 8],
+    };
+    let mut writer = VlqWriter::new();
+    write_header(&mut writer, &header).unwrap();
+    raw = writer.result();
+    let branch = *blake2b256(&raw).as_bytes();
     store
         .store_validated_header(
-            &h2b,
-            &[0x22; 8],
+            &branch,
+            &raw,
             &ergo_state::chain::HeaderMeta {
-                parent_id: h1,
+                parent_id: common,
                 height: 2,
-                cumulative_score: vec![2],
-                pow_validity: 1,
-                timestamp: 2,
-            },
-            None,
-        )
-        .unwrap();
-    store
-        .store_validated_header(
-            &h3b,
-            &[0x33; 8],
-            &ergo_state::chain::HeaderMeta {
-                parent_id: h2b,
-                height: 3,
                 cumulative_score: vec![9],
                 pow_validity: 1,
-                timestamp: 3,
+                timestamp: header.timestamp,
             },
-            Some((3, vec![9])),
+            Some((2, vec![9])),
         )
         .unwrap();
-
     let mut executor = SyncExecutor::new(
         ProtocolParams::mainnet_default(),
         DifficultyParams::mainnet(),
     );
-    let mut coordinator = SyncCoordinator::new(1);
-    coordinator.sync_state_mut().add_pending_block(2, h2a);
-    coordinator.sync_state_mut().add_pending_block(2, h2b);
-
+    let mut coordinator = SyncCoordinator::new(3);
     let mut store = ergo_state::StateBackendKind::Utxo(store);
     assert_eq!(
-        executor
-            .rollback_full_chain_to_best_header(&mut store, &mut coordinator, None)
-            .unwrap(),
-        ReorgOutcome::Performed
+        executor.full_chain_fork_point(&store).unwrap(),
+        ForkPoint::Found(1, common)
     );
-
-    let cs = store.chain_state_meta();
-    assert_eq!(cs.best_full_block_height, 1);
-    assert_eq!(cs.best_full_block_id, h1);
-    assert_eq!(cs.best_header_id, h3b);
-    assert_eq!(coordinator.sync_state().best_full_block_height(), 1);
-    assert!(!ergo_state::HeaderSectionStore::is_invalid(&store, &h2b).unwrap());
-    assert!(!ergo_state::HeaderSectionStore::is_invalid(&store, &h3b).unwrap());
-
-    let pending: Vec<[u8; 32]> = coordinator
+    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+    assert_eq!(store.chain_state_meta().best_full_block_id, old3);
+    assert!(!store.is_invalid(&branch).unwrap());
+    assert!(coordinator
         .sync_state()
-        .pending_blocks_iter()
-        .map(|b| b.header_id)
-        .collect();
-    assert!(
-        !pending.contains(&h2a),
-        "stale old-branch pending block must be pruned"
-    );
-    assert!(
-        pending.contains(&h2b),
-        "new best-branch pending block must be retained"
-    );
+        .blocks_to_download()
+        .iter()
+        .any(|block| block.header_id == branch));
+    assert!(coordinator
+        .assembly_mut()
+        .expected_section_ids(&branch)
+        .is_some());
 }
 
 #[test]
@@ -723,6 +704,77 @@ fn far_ahead_orphan_after_header_sync_is_buffered_for_fork_recovery() {
         .collect();
     assert_eq!(stored[0].0, p);
     assert_eq!(stored[0].2, bytes);
+}
+
+#[test]
+fn batch_validation_rolls_back_hash_matching_malformed_headers() {
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut store = ergo_state::StateBackendKind::Utxo(
+        StateStore::open(
+            tempfile::tempdir()
+                .unwrap()
+                .path()
+                .join("state.redb")
+                .as_path(),
+        )
+        .unwrap(),
+    );
+    let mut coordinator = SyncCoordinator::new(0);
+    let p = peer(9030);
+    let now = Instant::now();
+    let first_bytes = vec![1];
+    let second_bytes = vec![2];
+    let first_id = *blake2b256(&first_bytes).as_bytes();
+    let second_id = *blake2b256(&second_bytes).as_bytes();
+    assert_ne!(first_id, second_id);
+    coordinator.delivery_mut_for_test().request(
+        p,
+        ergo_p2p::types::ModifierTypeId::Header.as_byte(),
+        &[first_id, second_id],
+        now,
+    );
+    coordinator.delivery_mut_for_test().mark_received(&first_id);
+    coordinator
+        .delivery_mut_for_test()
+        .mark_received(&second_id);
+
+    let actions = executor.execute_all(
+        vec![
+            Action::ValidateHeader {
+                peer: p,
+                modifier_id: first_id,
+                header_bytes: first_bytes,
+            },
+            Action::ValidateHeader {
+                peer: p,
+                modifier_id: second_id,
+                header_bytes: second_bytes,
+            },
+        ],
+        &mut store,
+        &mut coordinator,
+        now,
+        None,
+    );
+
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| matches!(action, Action::Penalize { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        coordinator.delivery().status(&first_id),
+        ergo_p2p::delivery::ModifierStatus::Unknown
+    );
+    assert_eq!(
+        coordinator.delivery().status(&second_id),
+        ergo_p2p::delivery::ModifierStatus::Unknown
+    );
 }
 
 #[test]
@@ -1035,9 +1087,10 @@ fn recover_coordinator_leaves_done_unset_during_bootstrap() {
 
 #[test]
 fn recover_coordinator_anchors_the_walk_on_the_prune_sentinel_floor() {
-    // Mode 3 tick order: the activation seed lands in `SyncState` before
-    // recovery runs. A walk anchored at `best_full_block_height` (0 on a
-    // node that has applied nothing) would register the bottom of the
+    // A floor above the applied tip (a NiPoPoW proof floor, or a legacy
+    // header-derived floor before repair) is mirrored into `SyncState`
+    // before recovery runs. A walk anchored at `best_full_block_height` (0
+    // on a node that has applied nothing) would register the bottom of the
     // chain — a range `blocks_to_download` discards wholesale, because it
     // anchors at `max(best_full_block_height, prune_sentinel - 1)` and
     // drops everything below the sentinel. Recovery must use the same
@@ -1157,20 +1210,7 @@ fn is_validation_verdict_true_for_consensus_rule_failures() {
 }
 
 #[test]
-fn is_validation_verdict_true_for_header_meta_and_epoch_extension() {
-    // The other two documented verdict branches: a header-rule failure and an
-    // extension/epoch-rule failure are both definitive consensus rejects.
-    let header_meta = BlockProcessError::HeaderMeta(
-        ergo_validation::header::HeaderValidationError::TimestampNotMonotonic {
-            parent_ts: 100,
-            child_ts: 99,
-        },
-    );
-    assert!(
-        is_validation_verdict(&header_meta),
-        "header-rule failure is a verdict"
-    );
-
+fn is_validation_verdict_true_for_epoch_extension() {
     let epoch_ext = BlockProcessError::EpochExtension(
         ergo_validation::voting::extension_validation::ExtensionValidationError::BlockVersion {
             computed: 3,
@@ -1204,6 +1244,26 @@ fn is_validation_verdict_false_for_io_and_consistency_failures() {
     // DigestApply is session-scoped by contract (a stale local root and a bad
     // block are observationally identical in digest mode).
     let cases = [
+        BlockProcessError::HeaderMeta(
+            ergo_validation::header::HeaderValidationError::MetaTimestampMismatch {
+                meta: 100,
+                header: 99,
+            },
+        ),
+        BlockProcessError::HeaderMeta(
+            ergo_validation::header::HeaderValidationError::HeaderIdMismatch {
+                expected: id(1),
+                computed: id(2),
+            },
+        ),
+        BlockProcessError::HeaderMeta(
+            ergo_validation::header::HeaderValidationError::PowNotValidated { pow_validity: 0 },
+        ),
+        BlockProcessError::HeaderMeta(
+            ergo_validation::header::HeaderValidationError::HeaderParseFailed(
+                "truncated local row".into(),
+            ),
+        ),
         BlockProcessError::Deserialize("truncated section".to_string()),
         BlockProcessError::HeaderNotFound { id: id(0xAA) },
         BlockProcessError::ParentNotFound { id: id(0xBB) },
@@ -1221,4 +1281,1098 @@ fn is_validation_verdict_false_for_io_and_consistency_failures() {
             "non-verdict failure must NOT invalidate: {e}"
         );
     }
+}
+
+mod session_promotion {
+    use super::*;
+    use ergo_state::HeaderSectionStore;
+
+    // ----- helpers -----
+
+    fn header(
+        store: &mut ergo_state::StateBackendKind,
+        byte: u8,
+        parent: u8,
+        height: u32,
+        score: u8,
+        best: bool,
+    ) {
+        store
+            .store_validated_header(
+                &id(byte),
+                &[byte; 8],
+                &ergo_state::chain::HeaderMeta {
+                    parent_id: if parent == 0 { [0; 32] } else { id(parent) },
+                    height,
+                    cumulative_score: vec![score],
+                    pow_validity: 1,
+                    timestamp: u64::from(height),
+                },
+                best.then_some((height, vec![score])),
+            )
+            .unwrap();
+    }
+
+    fn fail(store: &mut ergo_state::StateBackendKind, rejected: u8, height: u32) {
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        executor.invalidate_or_session_mark(
+            store,
+            &mut SyncCoordinator::new(0),
+            id(rejected),
+            height,
+            &block_proc::BlockProcessError::State(ergo_state::store::StateError::DigestMismatch {
+                computed: "local".to_owned(),
+                expected: "header".to_owned(),
+            }),
+        );
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn session_promotion_demoted_branch_prunes_pending_and_assembly() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 1, 2, 2, true);
+        header(&mut store, 3, 0, 1, 1, false);
+        header(&mut store, 4, 3, 2, 2, false);
+        let mut coordinator = SyncCoordinator::new(0);
+        coordinator.sync_state_mut().set_best_known_header(2);
+        for (h, byte) in [(1, 1), (2, 2)] {
+            coordinator.sync_state_mut().add_pending_block(h, id(byte));
+            coordinator.assembly_mut().register_header(
+                ergo_ser::modifier_id::ExpectedSections::from_header(
+                    &id(byte),
+                    &id(byte + 10),
+                    &id(byte + 20),
+                    &id(byte + 30),
+                ),
+                false,
+            );
+        }
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        executor.invalidate_or_session_mark(
+            &mut store,
+            &mut coordinator,
+            id(1),
+            1,
+            &block_proc::BlockProcessError::Deserialize("local".into()),
+        );
+        assert_eq!(store.chain_state_meta().best_header_id, id(4));
+        assert!(!coordinator
+            .sync_state()
+            .pending_blocks_iter()
+            .any(|b| b.header_id == id(1) || b.header_id == id(2)));
+        assert!(coordinator
+            .assembly_mut()
+            .expected_section_ids(&id(1))
+            .is_none());
+        assert!(coordinator
+            .assembly_mut()
+            .expected_section_ids(&id(2))
+            .is_none());
+    }
+
+    #[test]
+    fn durable_promotion_demoted_branch_prunes_pending_and_assembly() {
+        for promote in [false, true] {
+            let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+            header(&mut store, 1, 0, 1, 1, true);
+            header(&mut store, 2, 1, 2, 2, true);
+            if promote {
+                header(&mut store, 3, 0, 1, 1, false);
+                header(&mut store, 4, 3, 2, 2, false);
+            }
+            let mut coordinator = SyncCoordinator::new(0);
+            coordinator.sync_state_mut().set_best_known_header(2);
+            for (h, byte) in [(1, 1), (2, 2)] {
+                coordinator.sync_state_mut().add_pending_block(h, id(byte));
+                coordinator.assembly_mut().register_header(
+                    ergo_ser::modifier_id::ExpectedSections::from_header(
+                        &id(byte),
+                        &id(byte + 10),
+                        &id(byte + 20),
+                        &id(byte + 30),
+                    ),
+                    false,
+                );
+            }
+            let section_ids: Vec<_> = [id(1), id(2)]
+                .iter()
+                .flat_map(|id| coordinator.assembly_mut().expected_section_ids(id).unwrap())
+                .collect();
+            let mut executor = SyncExecutor::new(
+                ProtocolParams::mainnet_default(),
+                DifficultyParams::mainnet(),
+            );
+            executor.invalidate_or_session_mark(
+                &mut store,
+                &mut coordinator,
+                id(1),
+                1,
+                &block_proc::BlockProcessError::AdProofsHashMismatch {
+                    header_id: id(1),
+                    declared_root: id(10),
+                    computed_root: id(11),
+                },
+            );
+            if promote {
+                assert_eq!(store.chain_state_meta().best_header_id, id(4));
+            } else {
+                assert_eq!(store.chain_state_meta().best_header_height, 0);
+            }
+            for (_, section_id) in section_ids {
+                assert!(coordinator
+                    .assembly_mut()
+                    .identify_section(&section_id)
+                    .is_none());
+            }
+            assert!(!coordinator
+                .sync_state()
+                .pending_blocks_iter()
+                .any(|b| b.header_id == id(1) || b.header_id == id(2)));
+            assert!(coordinator
+                .assembly_mut()
+                .expected_section_ids(&id(1))
+                .is_none());
+            assert!(coordinator
+                .assembly_mut()
+                .expected_section_ids(&id(2))
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn session_promotion_multiple_candidates_selects_greatest_score() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 3, false);
+        header(&mut store, 3, 0, 1, 2, false);
+        fail(&mut store, 1, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(2));
+        assert_eq!(store.get_header_id_at_height(1).unwrap(), Some(id(2)));
+    }
+
+    #[test]
+    fn session_promotion_equal_candidates_keeps_first() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 1, false);
+        header(&mut store, 3, 0, 1, 1, false);
+        fail(&mut store, 1, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(2));
+    }
+
+    #[test]
+    fn session_promotion_stored_descendant_selects_eligible_tip() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 1, 2, 2, true);
+        header(&mut store, 3, 0, 1, 1, false);
+        header(&mut store, 4, 3, 2, 2, false);
+        fail(&mut store, 1, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(4));
+        assert_eq!(store.get_header_id_at_height(1).unwrap(), Some(id(3)));
+    }
+
+    #[test]
+    fn session_promotion_search_boundary_limits_configured_depth() {
+        let depth = crate::header_proc::SESSION_PROMOTION_SEARCH_DEPTH as u8;
+        for tip in [depth, depth + 1] {
+            let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+            for h in 1..=tip {
+                header(&mut store, h, h - 1, u32::from(h), h, true);
+                header(
+                    &mut store,
+                    h + 32,
+                    if h == 1 { 0 } else { h + 31 },
+                    u32::from(h),
+                    h,
+                    false,
+                );
+            }
+            fail(&mut store, 1, 1);
+            assert_eq!(
+                store.chain_state_meta().best_header_id,
+                id(if tip == depth { tip + 32 } else { tip })
+            );
+        }
+    }
+
+    #[test]
+    fn session_promotion_existing_mark_retries_selection() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 1, false);
+        store.mark_session_invalid(id(1));
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        executor.try_apply_next_blocks(
+            &mut store,
+            &mut SyncCoordinator::new(0),
+            Instant::now(),
+            None,
+        );
+        assert_eq!(store.chain_state_meta().best_header_id, id(2));
+    }
+
+    #[test]
+    fn durable_promotion_failed_header_read_retries_selection() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 1, false);
+        let db = store.as_utxo().unwrap().db_arc();
+        let txn = db.begin_write().unwrap();
+        txn.open_table(redb::TableDefinition::<&[u8], &[u8]>::new("headers"))
+            .unwrap()
+            .remove(id(2).as_slice())
+            .unwrap();
+        txn.commit().unwrap();
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        let mut coordinator = SyncCoordinator::new(0);
+        executor.invalidate_or_session_mark(
+            &mut store,
+            &mut coordinator,
+            id(1),
+            1,
+            &block_proc::BlockProcessError::AdProofsHashMismatch {
+                header_id: id(1),
+                declared_root: id(10),
+                computed_root: id(11),
+            },
+        );
+        assert!(store.is_durably_invalid(&id(1)).unwrap());
+        assert_ne!(store.chain_state_meta().best_header_id, id(2));
+        header(&mut store, 2, 0, 1, 1, false);
+        executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+        assert_eq!(store.chain_state_meta().best_header_id, id(2));
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn session_promotion_different_parent_keeps_best() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 99, 1, 1, false);
+        fail(&mut store, 1, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(1));
+    }
+
+    #[test]
+    fn session_promotion_unrelated_failure_preserves_best() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 2, false);
+        header(&mut store, 3, 0, 1, 3, false);
+        fail(&mut store, 2, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(1));
+    }
+
+    #[test]
+    fn session_promotion_durable_mark_retries_selection() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 1, false);
+        let mut meta = store.get_header_meta(&id(1)).unwrap().unwrap();
+        meta.pow_validity = 3;
+        store
+            .store_validated_header(&id(1), &[1; 8], &meta, None)
+            .unwrap();
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        executor.try_apply_next_blocks(
+            &mut store,
+            &mut SyncCoordinator::new(0),
+            Instant::now(),
+            None,
+        );
+        assert_eq!(store.chain_state_meta().best_header_id, id(2));
+    }
+
+    #[test]
+    fn session_promotion_non_tip_failure_preserves_best() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 1, false);
+        header(&mut store, 3, 1, 2, 2, true);
+        fail(&mut store, 1, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(3));
+    }
+
+    #[test]
+    fn session_promotion_failure_above_next_height_preserves_best() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 1, 2, 2, true);
+        header(&mut store, 3, 1, 2, 3, false);
+        header(&mut store, 4, 2, 3, 3, true);
+        header(&mut store, 5, 3, 3, 4, false);
+        fail(&mut store, 2, 2);
+        assert_eq!(store.chain_state_meta().best_header_id, id(4));
+    }
+}
+
+#[test]
+fn queued_body_actions_obey_current_executor_mode() {
+    let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let extension = ergo_ser::extension::Extension {
+        header_id: ModifierId::from_bytes(id(9)),
+        fields: vec![],
+    };
+    let mut writer = VlqWriter::new();
+    ergo_ser::extension::write_extension(&mut writer, &extension).unwrap();
+    let bytes = writer.result();
+    let section_id = id(10);
+    let now = Instant::now();
+    for headers_only in [true, false] {
+        let mut coordinator = SyncCoordinator::new_with_window_and_mode(0, 100, headers_only);
+        coordinator.set_bootstrap_in_progress(!headers_only);
+        assert!(executor
+            .execute(
+                Action::PersistSection {
+                    modifier_id: section_id,
+                    section_bytes: bytes.clone(),
+                    section_type: 108
+                },
+                &mut store,
+                &mut coordinator,
+                now,
+                None
+            )
+            .is_empty());
+        assert!(executor
+            .execute(
+                Action::AssembleBlock { header_id: id(9) },
+                &mut store,
+                &mut coordinator,
+                now,
+                None
+            )
+            .is_empty());
+        assert!(store.get_block_section(&section_id).unwrap().is_none());
+        assert_eq!(store.chain_state_meta().best_full_block_height, 0);
+        assert!(executor.last_block_apply_error().is_none());
+    }
+    let mut coordinator = SyncCoordinator::new(0);
+    executor.execute(
+        Action::PersistSection {
+            modifier_id: section_id,
+            section_bytes: bytes.clone(),
+            section_type: 108,
+        },
+        &mut store,
+        &mut coordinator,
+        now,
+        None,
+    );
+    assert_eq!(store.get_block_section(&section_id).unwrap(), Some(bytes));
+}
+
+#[test]
+fn older_header_progress_retries_epoch_context_bucket_once() {
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let context_parent = id(8);
+    let missing_parent = id(7);
+    executor.context_retry_parents.insert(context_parent);
+    assert!(executor.orphan_retry_parents(&HashSet::new()).is_empty());
+    assert!(executor.context_retry_parents.contains(&context_parent));
+    let older_ancestor = id(1);
+    let eligible = executor.orphan_retry_parents(&HashSet::from([older_ancestor]));
+    assert_eq!(eligible, HashSet::from([older_ancestor, context_parent]));
+    assert!(!eligible.contains(&missing_parent));
+    assert!(executor.context_retry_parents.is_empty());
+    // Rebuffering after that attempt belongs to the next progress event.
+    executor.context_retry_parents.insert(context_parent);
+    assert!(executor.orphan_retry_parents(&HashSet::new()).is_empty());
+}
+
+fn install_header_cache_fixture(
+    store: &mut ergo_state::StateBackendKind,
+    header: Header,
+    best: bool,
+) -> (header_proc::ProcessedHeader, Vec<u8>) {
+    let (bytes, id) = ergo_ser::header::serialize_header(&header).unwrap();
+    let id = *id.as_bytes();
+    let meta = ergo_state::chain::HeaderMeta {
+        parent_id: *header.parent_id.as_bytes(),
+        height: header.height,
+        cumulative_score: header.height.to_be_bytes().to_vec(),
+        pow_validity: 1,
+        timestamp: header.timestamp,
+    };
+    store
+        .store_validated_header(
+            &id,
+            &bytes,
+            &meta,
+            best.then_some((header.height, meta.cumulative_score.clone())),
+        )
+        .unwrap();
+    let checked = CheckedHeader::from_persisted_parts(
+        &bytes,
+        id,
+        1,
+        meta.height,
+        meta.parent_id,
+        meta.timestamp,
+    )
+    .unwrap();
+    (
+        header_proc::ProcessedHeader {
+            header_id: id,
+            height: header.height,
+            parent_id: meta.parent_id,
+            is_new_best: best,
+            transactions_root: *header.transactions_root.as_bytes(),
+            extension_root: *header.extension_root.as_bytes(),
+            ad_proofs_root: *header.ad_proofs_root.as_bytes(),
+            header,
+            checked,
+        },
+        bytes,
+    )
+}
+
+#[test]
+fn recent_header_cache_ignores_losing_forks_and_rebuilds_winning_ancestry() {
+    // This is a cache/storage fixture: synthetic fork rows carry a trusted
+    // test marker. It does not verify their PoW or execute peer admission.
+    let rows: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/headers_1_10.json"
+    ))
+    .unwrap();
+    let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut originals = Vec::new();
+    let mut headers = Vec::new();
+    for row in rows.as_array().unwrap().iter().take(3) {
+        let bytes = hex::decode(row["bytes"].as_str().unwrap()).unwrap();
+        let header =
+            ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
+                .unwrap();
+        headers.push(header.clone());
+        let (processed, bytes) = install_header_cache_fixture(&mut store, header, true);
+        originals.push(processed.header_id);
+        executor.push_validated_header(&processed, &bytes, &store);
+    }
+    let original_cache = executor.last_headers.clone();
+    let mut fork2 = headers[1].clone();
+    fork2.timestamp += 1;
+    let (fork2, bytes2) = install_header_cache_fixture(&mut store, fork2, false);
+    executor.push_validated_header(&fork2, &bytes2, &store);
+    let mut fork3 = headers[2].clone();
+    fork3.parent_id = ModifierId::from_bytes(fork2.header_id);
+    let (fork3, bytes3) = install_header_cache_fixture(&mut store, fork3, false);
+    executor.push_validated_header(&fork3, &bytes3, &store);
+    assert_eq!(
+        executor
+            .last_headers
+            .iter()
+            .map(|(h, _)| *h.header_id())
+            .collect::<Vec<_>>(),
+        originals.iter().rev().copied().collect::<Vec<_>>()
+    );
+    assert_eq!(executor.header_index[&2], originals[1]);
+    let mut fork4 = headers[2].clone();
+    fork4.height = 4;
+    fork4.timestamp += 1;
+    fork4.parent_id = ModifierId::from_bytes(fork3.header_id);
+    let (fork4, bytes4) = install_header_cache_fixture(&mut store, fork4, true);
+    executor.push_validated_header(&fork4, &bytes4, &store);
+    let expected = vec![
+        fork4.header_id,
+        fork3.header_id,
+        fork2.header_id,
+        originals[0],
+    ];
+    assert_eq!(
+        executor
+            .last_headers
+            .iter()
+            .map(|(h, _)| *h.header_id())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(executor.header_index[&2], fork2.header_id);
+    assert_eq!(executor.header_index[&3], fork3.header_id);
+    assert_eq!(executor.header_index[&4], fork4.header_id);
+    assert_eq!(*original_cache[0].0.header_id(), originals[2]);
+    let mut hydrated = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    hydrated.hydrate_from_store(&store).unwrap();
+    assert_eq!(
+        hydrated.cached_header_bytes(50),
+        executor.cached_header_bytes(50)
+    );
+}
+
+#[test]
+fn winning_header_fork_repairs_index_below_applied_full_tip() {
+    // Real in-process store commits establish an applied empty test chain.
+    // Fork headers are trusted synthetic cache fixtures; no PoW or script
+    // acceptance, peer admission, or full-block rollback is asserted here.
+    let mut utxo = open_initialized_store();
+    let mut applied_headers = Vec::new();
+    let mut parent = [0; 32];
+    for height in 1..=5 {
+        parent = apply_empty_block(&mut utxo, height, parent);
+        let bytes = utxo.get_header(&parent).unwrap().unwrap();
+        let header =
+            ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
+                .unwrap();
+        applied_headers.push(header);
+    }
+    let applied_tip = parent;
+    let mut store = ergo_state::StateBackendKind::Utxo(utxo);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut originals = Vec::new();
+    let mut template = applied_headers.last().unwrap().clone();
+    for height in 1..=10 {
+        let header = if height <= 5 {
+            applied_headers[(height - 1) as usize].clone()
+        } else {
+            template.height = height;
+            template.timestamp += 1;
+            template.parent_id = ModifierId::from_bytes(*originals.last().unwrap());
+            template.clone()
+        };
+        let (processed, bytes) = install_header_cache_fixture(&mut store, header, true);
+        originals.push(processed.header_id);
+        executor.push_validated_header(&processed, &bytes, &store);
+    }
+    assert_eq!(store.chain_state_meta().best_full_block_height, 5);
+    assert_eq!(store.chain_state_meta().best_full_block_id, applied_tip);
+
+    let mut fork_parent = originals[2];
+    let mut fork_ids = Vec::new();
+    for height in 4..=11 {
+        let mut header = template.clone();
+        header.height = height;
+        header.timestamp = 1_700_000_001 + u64::from(height);
+        header.parent_id = ModifierId::from_bytes(fork_parent);
+        let winning = height == 11;
+        let (processed, bytes) = install_header_cache_fixture(&mut store, header, winning);
+        fork_parent = processed.header_id;
+        fork_ids.push(processed.header_id);
+        executor.push_validated_header(&processed, &bytes, &store);
+        if !winning {
+            assert_eq!(executor.header_index_get(4), Some(originals[3]));
+            assert_eq!(executor.header_index_get(5), Some(originals[4]));
+        }
+    }
+    for height in 1..=3 {
+        assert_eq!(
+            executor.header_index_get(height),
+            Some(originals[(height - 1) as usize])
+        );
+    }
+    for height in 4..=11 {
+        let expected = fork_ids[(height - 4) as usize];
+        // Check the cache before a storage-backed accessor could refresh it.
+        assert_eq!(executor.header_index_get(height), Some(expected));
+        assert_eq!(
+            store.get_header_id_at_height(height).unwrap(),
+            Some(expected)
+        );
+    }
+    assert_eq!(executor.header_index_len(), 11);
+    assert_eq!(store.chain_state_meta().best_full_block_id, applied_tip);
+    assert_eq!(store.chain_state_meta().best_full_block_height, 5);
+    let cached_ids = executor
+        .last_headers
+        .iter()
+        .map(|(h, _)| *h.header_id())
+        .collect::<Vec<_>>();
+    let expected_ids = fork_ids
+        .iter()
+        .rev()
+        .chain(originals[..3].iter().rev())
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(cached_ids, expected_ids);
+}
+
+fn mainnet_headers_1_10() -> Vec<(Vec<u8>, Header)> {
+    let rows: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/headers_1_10.json"
+    ))
+    .unwrap();
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let bytes = hex::decode(row["bytes"].as_str().unwrap()).unwrap();
+            let header =
+                ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
+                    .unwrap();
+            (bytes, header)
+        })
+        .collect()
+}
+
+/// Commit a NiPoPoW proof over mainnet headers whose stored chain is not
+/// contiguous: `prefix` heights below a contiguous `suffix` of `k` headers.
+/// Interlinks are left empty; `apply_popow_proof` trusts its caller.
+fn sparse_popow_store(
+    headers: &[(Vec<u8>, Header)],
+    prefix: &[u32],
+    suffix: std::ops::RangeInclusive<u32>,
+) -> ergo_state::StateBackendKind {
+    let popow = |height: u32| ergo_ser::popow_header::PoPowHeader {
+        header: headers[height as usize - 1].1.clone(),
+        interlinks: vec![],
+        interlinks_proof: vec![],
+    };
+    let mut store = open_initialized_store();
+    store
+        .apply_popow_proof(&ergo_ser::popow_proof::NipopowProof {
+            m: 1,
+            k: suffix.end() - suffix.start() + 1,
+            prefix: prefix.iter().map(|height| popow(*height)).collect(),
+            suffix_head: popow(*suffix.start()),
+            suffix_tail: (*suffix.start() + 1..=*suffix.end())
+                .map(|height| headers[height as usize - 1].1.clone())
+                .collect(),
+            continuous: true,
+        })
+        .unwrap();
+    ergo_state::StateBackendKind::Utxo(store)
+}
+
+fn validate_header_action(headers: &[(Vec<u8>, Header)], height: u32) -> Action {
+    let bytes = headers[height as usize - 1].0.clone();
+    Action::ValidateHeader {
+        peer: peer(9030),
+        modifier_id: *blake2b256(&bytes).as_bytes(),
+        header_bytes: bytes,
+    }
+}
+
+fn cached_heights(executor: &SyncExecutor) -> Vec<u32> {
+    executor
+        .last_headers
+        .iter()
+        .map(|(header, _)| header.height())
+        .collect()
+}
+
+#[test]
+fn sparse_popow_store_accepts_next_header_and_restarts() {
+    // Real proof apply and real-PoW mainnet headers. The proof stores 1 and
+    // 5 below its 6..=7 suffix, so 2..=4 are absent by construction.
+    let headers = mainnet_headers_1_10();
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    // Boot hydration ran on the fresh store, before the proof arrived.
+    executor
+        .hydrate_from_store(&ergo_state::StateBackendKind::Utxo(open_initialized_store()))
+        .unwrap();
+    let mut store = sparse_popow_store(&headers, &[1, 5], 6..=7);
+    assert!(matches!(
+        store.chain_state_meta().header_availability,
+        ergo_state::chain::HeaderAvailability::PoPowSparse {
+            dense_from_height: 5,
+            proof_suffix_height: 6,
+        }
+    ));
+    let mut coordinator = SyncCoordinator::new(0);
+    let actions = executor.execute(
+        validate_header_action(&headers, 8),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, Action::Penalize { .. })),
+        "{actions:?}"
+    );
+    assert_eq!(store.chain_state_meta().best_header_height, 8);
+    assert_eq!(cached_heights(&executor), vec![8]);
+
+    // Restart: boot hydration ends at the proof's absent prefix ancestor.
+    let mut restarted = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    restarted.hydrate_from_store(&store).unwrap();
+    restarted.load_header_index(&store).unwrap();
+    assert_eq!(cached_heights(&restarted), vec![8, 7, 6, 5]);
+    assert_eq!(restarted.header_index_len(), 4);
+    let mut coordinator = SyncCoordinator::new(0);
+    restarted.execute(
+        validate_header_action(&headers, 9),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert_eq!(store.chain_state_meta().best_header_height, 9);
+    assert_eq!(cached_heights(&restarted), vec![9, 8, 7, 6, 5]);
+    assert_eq!(
+        restarted.header_index_get(9),
+        Some(*blake2b256(&headers[8].0).as_bytes())
+    );
+}
+
+#[test]
+fn sparse_popow_store_accepts_next_header_batch() {
+    let headers = mainnet_headers_1_10();
+    let mut store = sparse_popow_store(&headers, &[1, 5], 6..=7);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut coordinator = SyncCoordinator::new(0);
+    let actions = executor.execute_all(
+        vec![
+            validate_header_action(&headers, 9),
+            validate_header_action(&headers, 8),
+        ],
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, Action::Penalize { .. })),
+        "{actions:?}"
+    );
+    assert_eq!(store.chain_state_meta().best_header_height, 9);
+    assert_eq!(cached_heights(&executor), vec![9, 8]);
+}
+
+#[test]
+fn hydration_ends_below_the_proof_suffix_head_but_not_in_dense_ancestry() {
+    // A Scala proof need not carry its suffix head's parent, which can sit at
+    // or above `dense_from_height` (suffix head - k + 1, saturating).
+    let headers = mainnet_headers_1_10();
+    let store = sparse_popow_store(&headers, &[1], 4..=8);
+    assert!(matches!(
+        store.chain_state_meta().header_availability,
+        ergo_state::chain::HeaderAvailability::PoPowSparse {
+            dense_from_height: 0,
+            proof_suffix_height: 4,
+        }
+    ));
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    executor.hydrate_from_store(&store).unwrap();
+    assert_eq!(cached_heights(&executor), vec![8, 7, 6, 5, 4]);
+
+    // The same hole in Dense ancestry remains a hydration failure.
+    let mut dense = open_initialized_store();
+    let (bytes, header) = &headers[3];
+    let id = *blake2b256(bytes).as_bytes();
+    dense.store_header(&id, bytes).unwrap();
+    dense
+        .store_header_meta(
+            &id,
+            &ergo_state::chain::HeaderMeta {
+                parent_id: *header.parent_id.as_bytes(),
+                height: header.height,
+                cumulative_score: vec![4],
+                pow_validity: 1,
+                timestamp: header.timestamp,
+            },
+        )
+        .unwrap();
+    dense
+        .test_force_set_best_header_unsafe(id, header.height, vec![4])
+        .unwrap();
+    let dense = ergo_state::StateBackendKind::Utxo(dense);
+    match executor.hydrate_from_store(&dense) {
+        Err(HydrationError::MissingPersistedRow {
+            phase: "hydrate_from_store",
+            kind: "header",
+            id,
+        }) => assert_eq!(id, hex::encode(blake2b256(&headers[2].0).as_bytes())),
+        other => panic!("expected the Dense ancestor gap to fail, got {other:?}"),
+    }
+}
+
+/// Startup as boot runs it: recent-header hydration, then the index loader.
+fn restarted_executor(store: &ergo_state::StateBackendKind) -> SyncExecutor {
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    executor.hydrate_from_store(store).unwrap();
+    executor.load_header_index(store).unwrap();
+    executor
+}
+
+/// Install a trusted synthetic child of `parent` and feed it to the cache.
+/// `salt` separates same-height siblings.
+fn push_fork_header(
+    executor: &mut SyncExecutor,
+    store: &mut ergo_state::StateBackendKind,
+    template: &Header,
+    parent: [u8; 32],
+    salt: u64,
+    best: bool,
+) -> [u8; 32] {
+    let parent_height = store.get_header_meta(&parent).unwrap().unwrap().height;
+    let mut header = template.clone();
+    header.height = parent_height + 1;
+    header.parent_id = ModifierId::from_bytes(parent);
+    header.timestamp = template.timestamp + u64::from(header.height) + salt;
+    let (processed, bytes) = install_header_cache_fixture(store, header, best);
+    executor.push_validated_header(&processed, &bytes, store);
+    processed.header_id
+}
+
+#[test]
+fn restarted_header_fork_repairs_only_the_indexed_range() {
+    // Real applied empty chain; fork rows are trusted synthetic fixtures.
+    let mut utxo = open_initialized_store();
+    let mut tip = [0; 32];
+    for height in 1..=20 {
+        tip = apply_empty_block(&mut utxo, height, tip);
+    }
+    let template = ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(
+        &utxo.get_header(&tip).unwrap().unwrap(),
+    ))
+    .unwrap();
+    let parent_of_tip = *template.parent_id.as_bytes();
+    let mut store = ergo_state::StateBackendKind::Utxo(utxo);
+
+    // A synced restart indexes nothing: every stored header is applied.
+    let mut executor = restarted_executor(&store);
+    assert_eq!(executor.header_index_len(), 0);
+    let a = push_fork_header(&mut executor, &mut store, &template, tip, 0, true);
+    let b = push_fork_header(&mut executor, &mut store, &template, tip, 1, false);
+    let c = push_fork_header(&mut executor, &mut store, &template, b, 0, true);
+    assert_ne!(a, b);
+    assert_eq!(executor.header_index_len(), 2);
+    assert_eq!(executor.header_index_get(21), Some(b));
+    assert_eq!(executor.header_index_get(22), Some(c));
+    assert_eq!(cached_heights(&executor)[..3], [22, 21, 20]);
+
+    // A winning fork from below the tip with nothing indexed yet records only
+    // the unapplied gap above the applied tip.
+    let mut executor = restarted_executor(&store);
+    let sibling = push_fork_header(
+        &mut executor,
+        &mut store,
+        &template,
+        parent_of_tip,
+        2,
+        false,
+    );
+    let winner = push_fork_header(&mut executor, &mut store, &template, sibling, 2, true);
+    assert_eq!(store.chain_state_meta().best_full_block_height, 20);
+    assert_eq!(executor.header_index_len(), 1);
+    assert_eq!(executor.header_index_get(21), Some(winner));
+}
+
+#[test]
+fn sparse_store_header_fork_repair_never_walks_into_the_proof_prefix() {
+    // Proof prefix {1, 5} and suffix 6..=7, then real headers 8..=10.
+    let headers = mainnet_headers_1_10();
+    let store_through_10 = || {
+        let mut store = sparse_popow_store(&headers, &[1, 5], 6..=7);
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        let mut coordinator = SyncCoordinator::new(0);
+        for height in 8..=10 {
+            executor.execute(
+                validate_header_action(&headers, height),
+                &mut store,
+                &mut coordinator,
+                Instant::now(),
+                None,
+            );
+        }
+        assert_eq!(store.chain_state_meta().best_header_height, 10);
+        store
+    };
+    let tip = *blake2b256(&headers[9].0).as_bytes();
+    let template = headers[9].1.clone();
+
+    // Synced restart after a snapshot install: nothing is unapplied.
+    let mut store = store_through_10();
+    store
+        .as_utxo_mut()
+        .unwrap()
+        .test_force_set_best_full_block_unsafe(tip, 10)
+        .unwrap();
+    let mut restarted = restarted_executor(&store);
+    assert_eq!(cached_heights(&restarted), vec![10, 9, 8, 7, 6, 5]);
+    push_fork_header(&mut restarted, &mut store, &template, tip, 0, true);
+    let b = push_fork_header(&mut restarted, &mut store, &template, tip, 1, false);
+    let c = push_fork_header(&mut restarted, &mut store, &template, b, 0, true);
+    assert_eq!(restarted.header_index_len(), 2);
+    assert_eq!(restarted.header_index_get(11), Some(b));
+    assert_eq!(restarted.header_index_get(12), Some(c));
+
+    // Attached without the startup index loader: the repair covers the
+    // unapplied gap down to the proof's absent prefix, then stops.
+    let mut store = store_through_10();
+    let mut attached = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    attached.hydrate_from_store(&store).unwrap();
+    let parent_of_tip = *template.parent_id.as_bytes();
+    let sibling = push_fork_header(
+        &mut attached,
+        &mut store,
+        &template,
+        parent_of_tip,
+        1,
+        false,
+    );
+    let winner = push_fork_header(&mut attached, &mut store, &template, sibling, 1, true);
+    assert_eq!(attached.header_index_get(11), Some(winner));
+    assert_eq!(attached.header_index_get(10), Some(sibling));
+    assert_eq!(
+        attached.header_index_get(5),
+        Some(*blake2b256(&headers[4].0).as_bytes())
+    );
+    assert_eq!(attached.header_index_len(), 7);
+}
+
+/// Mainnet header 1 as the stored best header. A nonzero `timestamp_skew`
+/// makes its metadata contradict its bytes: local corruption, not peer data.
+fn store_with_header_1(
+    headers: &[(Vec<u8>, Header)],
+    timestamp_skew: u64,
+) -> ergo_state::StateBackendKind {
+    let mut store = open_initialized_store();
+    let (bytes, header) = &headers[0];
+    let id = *blake2b256(bytes).as_bytes();
+    store.store_header(&id, bytes).unwrap();
+    store
+        .store_header_meta(
+            &id,
+            &ergo_state::chain::HeaderMeta {
+                parent_id: *header.parent_id.as_bytes(),
+                height: header.height,
+                cumulative_score: vec![1],
+                pow_validity: 1,
+                timestamp: header.timestamp + timestamp_skew,
+            },
+        )
+        .unwrap();
+    store
+        .test_force_set_best_header_unsafe(id, header.height, vec![1])
+        .unwrap();
+    ergo_state::StateBackendKind::Utxo(store)
+}
+
+// Local failures must stop processing rather than penalize the peer that
+// delivered a valid header (the `Penalize` these paths would otherwise send).
+
+#[test]
+#[should_panic(expected = "local header processing failure is fatal: stored header")]
+fn local_header_failure_stops_single_header_validation() {
+    let headers = mainnet_headers_1_10();
+    let mut store = store_with_header_1(&headers, 1);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    executor.execute(
+        validate_header_action(&headers, 2),
+        &mut store,
+        &mut SyncCoordinator::new(0),
+        Instant::now(),
+        None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "local header processing failure is fatal: stored header")]
+fn local_header_failure_stops_batch_validation() {
+    let headers = mainnet_headers_1_10();
+    let mut store = store_with_header_1(&headers, 1);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    executor.execute_all(
+        vec![
+            validate_header_action(&headers, 2),
+            validate_header_action(&headers, 3),
+        ],
+        &mut store,
+        &mut SyncCoordinator::new(0),
+        Instant::now(),
+        None,
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "local header processing failure is fatal: header finalization bytes do not match"
+)]
+fn local_header_failure_stops_orphan_drain() {
+    let headers = mainnet_headers_1_10();
+    let mut store = store_with_header_1(&headers, 0);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut coordinator = SyncCoordinator::new(0);
+    // A buffered orphan whose retained bytes no longer match its PoW-checked
+    // header: the retained-byte contract is local, whoever sent it.
+    let pre = header_proc::pre_validate_header(&headers[2].0).unwrap();
+    let orphan_id = *pre.header_id();
+    assert!(executor.buffer_or_defer_orphan_header(
+        peer(9030),
+        pre,
+        headers[3].0.clone(),
+        orphan_id,
+        3,
+        &store,
+        &mut coordinator,
+    ));
+    // Installing the orphan's parent retries it in the orphan drain.
+    executor.execute(
+        validate_header_action(&headers, 2),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
 }

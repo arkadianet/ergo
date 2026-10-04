@@ -2,8 +2,9 @@
 //!
 //! Takes incoming events (messages received, timeouts, state changes) and
 //! produces outgoing actions (send messages, persist data, validate headers).
-//! Pure logic — no I/O or async beyond `tracing` diagnostics; every other
-//! effect is an emitted `Action`. The caller (network loop) executes actions.
+//! Decisions emit `Action`s; the caller executes their network and state
+//! mutations. Read-only `ChainView` queries may access the backing store,
+//! and diagnostics are emitted directly through `tracing`.
 //!
 //! Integrates: DeliveryTracker, AssemblyTracker, SyncState, PeerChainStatus.
 //!
@@ -58,7 +59,11 @@ pub enum Action {
     NoteDeliveryOutcome { peer: PeerId, succeeded: bool },
     /// A header has been received and should be validated + persisted.
     /// The caller runs PoW check, chain linkage, difficulty adjustment.
-    ValidateHeader { peer: PeerId, header_bytes: Vec<u8> },
+    ValidateHeader {
+        peer: PeerId,
+        modifier_id: [u8; 32],
+        header_bytes: Vec<u8>,
+    },
     /// A block section has been received. Persist it.
     ///
     /// `section_type` is the wire `ModifierTypeId` byte (102 / 104 / 108)
@@ -98,7 +103,8 @@ pub trait ChainView {
     }
     /// Check if a header is marked invalid.
     fn is_invalid(&self, header_id: &[u8; 32]) -> bool;
-    /// Recent header IDs on the best chain (newest first, for SyncInfo V1).
+    /// Recent best-chain IDs, newest first. The V1 wire builder reverses them
+    /// to its canonical oldest-first order and adds pregenesis if appropriate.
     fn recent_header_ids(&self, count: usize) -> Vec<[u8; 32]>;
     /// Recent serialized headers on the best chain (newest first, for SyncInfo V2).
     fn recent_header_bytes(&self, count: usize) -> Vec<Vec<u8>>;
@@ -185,11 +191,12 @@ pub struct PeerSyncSnapshot {
     /// Chain-comparison classification from the latest SyncInfo.
     /// `Equal` / `Younger` / `Older` / `Fork` / `Unknown`.
     pub status: ergo_p2p::sync::PeerChainStatus,
-    /// Peer's reported best-block height. V1 SyncInfo carries this
-    /// directly; V2 SyncInfo (post-v4) sends raw headers instead and
-    /// we infer the height by looking up the newest peer-header that
-    /// sits on our best chain (None when no overlap or pre-handshake).
+    /// Height from a parsed V2 tip header, or inferred by finding a
+    /// peer-advertised header ID on our best chain (V1 / fallback).
     pub peer_height: Option<u32>,
+    /// True only when the height came from a parsed peer header, rather
+    /// than an overlap lookup. Do not infer this from negotiated version.
+    pub height_from_header: bool,
     /// Last update timestamp (monotonic). Lets observers age out
     /// stale entries after the peer disconnects.
     pub observed_at: std::time::Instant,
@@ -380,7 +387,7 @@ impl SyncCoordinator {
     /// call: `(header_id, delivering peer)` for each header accepted by
     /// `on_header_validated`. The action loop folds these into its bounded
     /// first-deliverer ring after each `execute_all`. Same drain pattern
-    /// as [`take_net_stats`] — pure observability, never read by sync.
+    /// as [`Self::take_net_stats`] — pure observability, never read by sync.
     pub fn take_first_deliverers(&mut self) -> Vec<([u8; 32], PeerId)> {
         std::mem::take(&mut self.first_deliverers)
     }

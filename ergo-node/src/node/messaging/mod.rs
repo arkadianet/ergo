@@ -16,4 +16,4 @@ mod manifest;
 mod popow;
 mod utxo_chunk;
 
-pub(in crate::node) use dispatch::handle_message;
+pub(in crate::node) use dispatch::{admit_frame, handle_message};

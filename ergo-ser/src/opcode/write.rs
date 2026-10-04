@@ -23,19 +23,16 @@ fn relation2_bool_pair(opcode: u8, a: &Expr, b: &Expr) -> Option<(bool, bool)> {
     if !matches!(opcode_pattern(opcode), Some(ArgPattern::Relation2)) {
         return None;
     }
-    match (a, b) {
-        (
-            Expr::Const {
-                tpe: SigmaType::SBoolean,
-                val: SigmaValue::Boolean(left),
-            },
-            Expr::Const {
-                tpe: SigmaType::SBoolean,
-                val: SigmaValue::Boolean(right),
-            },
-        ) => Some((*left, *right)),
-        _ => None,
-    }
+    // `TrueLeaf` / `FalseLeaf` are Boolean constants here too, so a relation
+    // over them packs like one over `01 01` / `01 00` (see [`boolean_leaf`]).
+    let boolean = |e: &Expr| match e {
+        Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(b),
+        } => Some(*b),
+        other => boolean_leaf(other),
+    };
+    Some((boolean(a)?, boolean(b)?))
 }
 
 /// The packed bit values if `node` is a `ConcreteCollection` (`0x83`) whose
@@ -66,9 +63,42 @@ fn concrete_bool_collection(node: &IrNode) -> Option<Vec<bool>> {
                 tpe: SigmaType::SBoolean,
                 val: SigmaValue::Boolean(b),
             } => Some(*b),
-            _ => None,
+            other => boolean_leaf(other),
         })
         .collect()
+}
+
+/// `TrueLeaf` / `FalseLeaf` (opcodes 0x7F / 0x80) as the Boolean they are.
+///
+/// Scala declares both as `ConstantNode`s (`values.scala:771`, `:782`), so the
+/// parser accepts the bare opcode while every write treats them as constants:
+/// `ValueSerializer.serialize` sends a `Constant` through `ConstantSerializer`
+/// or the segregation store (`ValueSerializer.scala:362-370`), and a
+/// `Coll[Boolean]` of them counts as constants for the packed `0x85` form
+/// (`values.scala:871`). The writer never emits the opcode form.
+fn boolean_leaf(expr: &Expr) -> Option<bool> {
+    match expr {
+        Expr::Op(IrNode {
+            opcode: 0x7F,
+            payload: Payload::Zero,
+        }) => Some(true),
+        Expr::Op(IrNode {
+            opcode: 0x80,
+            payload: Payload::Zero,
+        }) => Some(false),
+        _ => None,
+    }
+}
+
+/// Collection expression counts use the reference's unsigned-short field.
+/// Caller-constructed IR must fit that field before any narrowing or packing.
+fn collection_count(count: usize) -> Result<u16, WriteError> {
+    u16::try_from(count).map_err(|_| {
+        WriteError::InvalidData(format!(
+            "collection expression has {count} elements, maximum is {}",
+            u16::MAX
+        ))
+    })
 }
 
 /// Constant sink for the segregation write pass — the Rust analogue of Scala's
@@ -191,6 +221,17 @@ fn write_expr_inner(
     } else {
         expr
     };
+    let leaf;
+    let expr = match boolean_leaf(expr) {
+        Some(b) => {
+            leaf = Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(b),
+            };
+            &leaf
+        }
+        None => expr,
+    };
     match expr {
         Expr::Const { tpe, val } => match sink {
             // Segregation: append to the store, emit ConstPlaceholder (opcode
@@ -204,6 +245,16 @@ fn write_expr_inner(
             None => write_constant(w, tpe, val)?,
         },
         Expr::Op(node) => {
+            // Check before building the compact Boolean copy as well.
+            match &node.payload {
+                Payload::ConcreteCollection { items, .. } => {
+                    collection_count(items.len())?;
+                }
+                Payload::BoolCollection { bits } => {
+                    collection_count(bits.len())?;
+                }
+                _ => {}
+            }
             if let Some(bits) = concrete_bool_collection(node) {
                 // Scala's `ConcreteCollectionSerializer` dispatches an
                 // all-boolean-*constant* collection to
@@ -323,7 +374,7 @@ fn write_payload(
             w.put_u32(*index);
         }
 
-        Payload::TaggedVar { id, .. } => {
+        Payload::TaggedVar { id, tpe } => {
             // 1-byte write to mirror Scala TaggedVariableSerializer.scala:12
             // (`w.put(varId)`). For the round-trip to be byte-faithful
             // with our `id: u32` field that sign-extends on read, we
@@ -338,7 +389,11 @@ fn write_payload(
                  valid ids are 0..=127 or 0xFFFF_FF80..=0xFFFF_FFFF"
             );
             w.put_u8(as_byte);
-            // Type is never written (see parse comment above).
+            // TaggedVariableSerializer.serialize always writes the type.
+            let tpe = tpe.as_ref().ok_or_else(|| {
+                WriteError::InvalidData("TaggedVar requires its type on the wire".into())
+            })?;
+            write_type(w, tpe)?;
         }
 
         Payload::ValDef { id, rhs, .. } => {
@@ -419,7 +474,7 @@ fn write_payload(
         }
 
         Payload::ConcreteCollection { elem_type, items } => {
-            w.put_u16(items.len() as u16);
+            w.put_u16(collection_count(items.len())?);
             write_type(w, elem_type)?;
             for item in items {
                 write_expr_inner(w, item, sink.as_deref_mut(), tree_version)?;
@@ -427,7 +482,7 @@ fn write_payload(
         }
 
         Payload::BoolCollection { bits } => {
-            w.put_u16(bits.len() as u16);
+            w.put_u16(collection_count(bits.len())?);
             let n_bytes = bits.len().div_ceil(8);
             let mut packed = vec![0u8; n_bytes];
             for (i, &bit) in bits.iter().enumerate() {
@@ -537,4 +592,56 @@ fn write_payload(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod count_tests {
+    use super::*;
+
+    #[test]
+    fn collection_count_field_boundaries() {
+        assert_eq!(collection_count(u16::MAX as usize).unwrap(), u16::MAX);
+        assert!(collection_count(u16::MAX as usize + 1).is_err());
+    }
+
+    #[test]
+    fn public_writer_refuses_all_oversized_collection_forms() {
+        let count = u16::MAX as usize + 1;
+        let boolean = Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(true),
+        };
+        let integer = Expr::Const {
+            tpe: SigmaType::SInt,
+            val: SigmaValue::Int(1),
+        };
+        let payloads = [
+            (
+                0x85,
+                Payload::BoolCollection {
+                    bits: vec![true; count],
+                },
+            ),
+            (
+                0x83,
+                Payload::ConcreteCollection {
+                    elem_type: SigmaType::SBoolean,
+                    items: vec![boolean; count],
+                },
+            ),
+            (
+                0x83,
+                Payload::ConcreteCollection {
+                    elem_type: SigmaType::SInt,
+                    items: vec![integer; count],
+                },
+            ),
+        ];
+        for (opcode, payload) in payloads {
+            let mut writer = VlqWriter::new();
+            let expression = Expr::Op(IrNode { opcode, payload });
+            assert!(write_expr(&mut writer, &expression, false).is_err());
+            assert!(writer.result().is_empty(), "no narrowed root count emitted");
+        }
+    }
 }

@@ -26,10 +26,24 @@ members = [
 ]
 
 [workspace.package]
-version    = "0.8.0"
+version    = "0.11.0"
 edition    = "2021"
+rust-version = "1.99.0"
 license    = "MIT OR Apache-2.0"
 repository = "https://github.com/arkadianet/ergo"
+
+# Small, reviewable policy shared by every member. Test unwraps remain allowed;
+# public API documentation is enforced by the strict rustdoc CI gate.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_html_tags = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
 
 [workspace.dependencies]
 # Internal crates — keep paths here so a single edit moves every member.
@@ -59,24 +73,24 @@ ergo-rest-json     = { path = "ergo-rest-json" }
 ergo-node          = { path = "ergo-node" }
 
 # Cryptography
-aes-gcm  = "0.10"
+aes-gcm  = "0.11"
 blake2   = "0.10"
 k256     = "0.13"
 md5      = "0.7"
 pbkdf2   = "0.12"
 sha2     = "0.10"
 gf2_192  = "0.28"
-bip39    = "2"
+bip39    = { version = "2", features = ["zeroize"] }
 hmac     = "0.12"
 
 # Numerics
-num-bigint  = "0.4"
+num-bigint  = "0.5"
 num-integer = "0.1"
 num-traits  = "0.2"
-libc        = "0.2"
 
 # Encoding / parsing
 flate2 = "1"
+time = "0.3"
 bincode    = "1.3"
 hex        = "0.4"
 subtle     = "2"
@@ -93,17 +107,22 @@ bytes      = "1"
 # Errors / async runtime
 thiserror   = "2"
 tokio       = "1"
-async-trait = "0.1"
+async-trait = "0.1.92"
 zeroize    = { version = "1", features = ["derive"] }
 rpassword  = "7"
+# Safe Unix-only socket creation mask used by the wallet daemon.
+rustix     = "1.1"
 
 # Storage / data structures
-redb              = "2"
+redb              = { version = "4", features = ["cache_metrics"] }
+# Read-only source locking and copy-only v2-to-v3 migration.
+redb_legacy = { package = "redb", version = "=2.6.3" }
 ergo_avltree_rust = "0.1.1"
 lru               = "0.18"
 crossbeam-channel = "0.5"
 arc-swap          = "1"
 parking_lot       = "0.12"
+scoped-tls-hkt    = "0.1.5"
 
 # Parallelism
 rayon = "1.11"
@@ -138,6 +157,9 @@ tracing-appender   = "0.2"
 # `/api/v1/host` endpoint (RSS, DB sizes, disk space). Pinned at a stable
 # minor; default features only.
 sysinfo = { version = "0.32", default-features = false, features = ["system", "disk"] }
+# Optional local IP metadata and bounded background reverse DNS for peer details.
+maxminddb = "0.29"
+dns-lookup = "3"
 
 # Test infrastructure
 tempfile = "3"

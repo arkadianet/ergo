@@ -217,20 +217,18 @@ fn install_snapshot_refused_carries_current_height_in_display() {
 }
 
 #[test]
-fn install_snapshot_root_mismatch_carries_both_hashes_in_display() {
-    let computed = "aa".repeat(32);
-    let expected_hex = "bb".repeat(32);
+fn install_snapshot_root_mismatch_carries_both_state_roots_in_display() {
+    let computed = "aa".repeat(33);
+    let expected_hex = "bb".repeat(33);
     let e = StateError::InstallSnapshotRootMismatch {
         computed: computed.clone(),
         expected: expected_hex.clone(),
     };
     assert_eq!(variant_label(&e), "InstallSnapshotRootMismatch");
-    // Exact Display contract pins the install-site framing + both
-    // hashes; a future variant rename or wording drift fails here.
     assert_eq!(
         e.to_string(),
         format!(
-            "install_snapshot_state: reconstructed root {computed} != expected state_root prefix {expected_hex}"
+            "install_snapshot_state: reconstructed state_root {computed} != expected state_root {expected_hex}"
         )
     );
 }

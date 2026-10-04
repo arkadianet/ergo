@@ -97,6 +97,9 @@ fn app() -> axum::Router {
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
+        local_reverse_proxy: false,
+        services: Arc::new(ergo_api::ApiServices::new()),
+        script_config: Default::default(),
     };
     router_with_mempool_and_wallet_and_security(
         ctx,
@@ -108,6 +111,9 @@ fn app() -> axum::Router {
 
 fn moved_app(address: &str, with_security: bool) -> axum::Router {
     let ctx = ServerCtx {
+        local_reverse_proxy: false,
+        services: Arc::new(ergo_api::ApiServices::new()),
+        script_config: Default::default(),
         read: Arc::new(UnusedReadState),
         compat: None,
         submit: None,
@@ -241,12 +247,19 @@ async fn external_wallet_routes_preserve_api_key_gate() {
 }
 
 #[tokio::test]
-async fn external_wallet_routes_can_be_unauthenticated_in_test_mode() {
-    let response = moved_app("http://127.0.0.1:19090", false)
-        .oneshot(get("/api/v1/wallet/status"))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::GONE);
+async fn external_wallet_routes_require_a_configured_key_before_ownership_guidance() {
+    for path in ["/wallet/status", "/api/v1/wallet/status", "/scan/listAll"] {
+        let response = moved_app("http://127.0.0.1:19090", false)
+            .oneshot(get_with_header(path, API_KEY_HEADER, PLAINTEXT_KEY))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["reason"], "api-key-not-configured", "{path}");
+    }
 }
 
 #[tokio::test]

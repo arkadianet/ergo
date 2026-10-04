@@ -4,6 +4,7 @@ mod bip39_oracle;
 mod cli_smoke;
 mod ergo_p2pk_address_oracle;
 mod hints_bag_basic;
+mod leading_zero_master_oracle;
 mod multi_sig_oracle;
 mod node_position_basic;
 mod pre_1627_derivation_oracle;

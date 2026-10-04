@@ -1,0 +1,3 @@
+box-valuse-unbound-sized-reject#0	REJECT NoSuchElementException
+box-valuse-bound-sized-accept#1	ACCEPT c0843d0808d801d60108d372010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400
+box-valuse-unbound-unsized-reject#2	REJECT NoSuchElementException

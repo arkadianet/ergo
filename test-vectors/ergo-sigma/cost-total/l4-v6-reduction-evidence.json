@@ -1,12 +1,12 @@
 {
   "manifest": {
     "scala": {
-      "ergo_version": "6.0.2",
-      "sigmastate_version": "6.0.2",
+      "ergo_version": "6.0.6",
+      "sigmastate_version": "6.0.6",
       "node_app_version": "6.0.5",
       "source_shas": {
-        "sigma": "23dd29f612249c169d09fae9bca76d7cc02e144c",
-        "ergo": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+        "sigma": "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042",
+        "ergo": "23aabead88774d27f2c9190ace3c9abbc8f1d5cb"
       }
     },
     "rust": {
@@ -19,10 +19,10 @@
     },
     "tool": {
       "script": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
-      "script_sha256": "a68d698272ab9db8029332d575745a1ef7bf2b08f83751eeefa89e7e92c06ae2",
+      "script_sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
       "scala_cli_version": "1.12.1",
       "jvm_version": "OpenJDK 17.0.17 Corretto-17.0.17.10.1",
-      "git_sha": "6c2952dea696132e9de9d37fb38f72484896c55f"
+      "git_sha": "d3c7de477ddd56044aa5044774156c17be1760c4"
     },
     "context": {
       "network": "mainnet",
@@ -37,7 +37,7 @@
     },
     "run": {
       "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false --suppress-outdated-dependency-warning -- verify < test-vectors/ergo-sigma/cost-total/l4-v6-reduction-requests.jsonl",
-      "timestamp": "2026-09-15T22:36:39.611700+00:00",
+      "timestamp": "2026-09-29T17:37:29.100007+00:00",
       "selected": 2,
       "executed": 2,
       "skipped": 0,
@@ -47,9 +47,9 @@
     "evidence": {
       "test-vectors/ergo-sigma/cost-total/l4-v6-reduction-requests.jsonl": "5e25ef1671013017090bb18962bbb931a189cfae6c921c169c29844aa4277e37",
       "test-vectors/ergo-sigma/cost-total/l4-v6-reject-valid.json": "ea8d141a49d242dd1af61106d81fc36e61bb55cdaa2a046068c7a552bdbb430e",
-      "oracle_responses_sha256": "94bcbc871d93f388ca568827ea6300e482adcc3cd8bbd21285ea21a0e571bb93"
+      "oracle_responses_sha256": "2be6dde2b45e8c7fb7970cc6c21238bc43f616a1cfb234e1737e92b7428a6305"
     },
-    "note": "The independent full transaction oracle remains ergo 6.0.5 / sigma-state 6.0.6 in the frozen bundle. The pinned verify surface uses 6.0.2 and independently reproduces both input-0 observations. Requests serialize the frozen boxes/transaction/header context; init=0 isolates input reduction."
+    "note": "The independent full transaction oracle remains ergo 6.0.5 / sigma-state 6.0.6 in the frozen bundle. The pinned verify surface uses 6.0.6 and independently reproduces both input-0 observations. Requests serialize the frozen boxes/transaction/header context; init=0 isolates input reduction."
   },
   "observations": [
     {
@@ -57,6 +57,8 @@
       "height": 1628276,
       "input_index": 0,
       "verify": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 440,
         "crypto_block_cost": 0,
@@ -74,6 +76,8 @@
       "height": 1628279,
       "input_index": 0,
       "verify": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 514,
         "crypto_block_cost": 0,

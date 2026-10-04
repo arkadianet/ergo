@@ -97,14 +97,23 @@ pub(super) fn build_scaffold(
         executor.apply_phase_metrics(),
         std::time::Duration::from_secs(5),
     );
+    // Keep potentially blocking filesystem probes separate from wedge telemetry.
+    let live_storage =
+        crate::node::storage_probe::spawn(host_paths, std::time::Duration::from_secs(10));
+    let peer_details =
+        crate::peer_details::PeerResolver::new(&config.peer_details, &config.data_dir);
+    if config.api_bind.is_some() {
+        peer_details.start_updates(&config.peer_details, &config.data_dir);
+    }
     let read_state: Arc<dyn ergo_api::NodeReadState> = SnapshotReadState::new(
         snapshot_publisher.handle(),
         identity_slot.clone(),
-        host_paths,
+        live_storage,
         voting_targets_slot.clone(),
         executor.apply_phase_metrics(),
         live_telemetry,
     )
+    .with_peer_details(peer_details)
     .into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =
         SubmitBridge::new(submit_tx.clone(), event_tx.clone())
@@ -127,6 +136,10 @@ pub(super) struct ApiBind {
     pub api_handle: Option<JoinHandle<()>>,
     pub api_shutdown_tx: Option<oneshot::Sender<()>>,
     pub wallet_session_id: u64,
+    pub wallet_rescan: Arc<ergo_wallet_service::engine::RescanCoordinator>,
+    pub wallet_cancel: tokio::sync::watch::Sender<bool>,
+    pub wallet_handle: Option<JoinHandle<Result<(), ergo_api::wallet::WalletAdminError>>>,
+    pub api_services: Option<Arc<ergo_api::ApiServices>>,
     pub live_wallet_hook: Option<Arc<super::super::wallet_bridge::WalletStateHook>>,
 }
 
@@ -196,10 +209,21 @@ fn build_wallet_chain_wiring(
     }
 }
 
+fn recover_wallet_for_boot(
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    rescan: &ergo_wallet_service::engine::RescanCoordinator,
+) -> Result<(), NodeError> {
+    ergo_wallet_service::engine::recover_interrupted_rescan(store, rescan)
+        .map_err(|error| format!("wallet boot: failed to mark interrupted rescan: {error}").into())
+}
+
 /// Bind the REST API (if `[api] bind = Some(_)`): builds the Scala-compat
 /// bridge, wires the wallet admin + writer task, assembles `ServerCtx`, and
-/// starts serving. Bind failure is logged-and-degraded, not fatal — REST is
+/// starts serving. REST bind failure is logged-and-degraded, not fatal — REST is
 /// an operator surface, not a prerequisite for sync/validation availability.
+/// Wallet rescan-recovery failure is fatal: wallet tables share the node's
+/// database, and serving a partially rebuilt scan without durable invalidation
+/// would expose stale wallet data.
 ///
 /// Embedded mode builds wallet hydration, the writer task, and
 /// `live_wallet_hook` before the REST-bind checks. External mode skips all
@@ -213,6 +237,7 @@ pub(super) async fn bind(
     read_state: Arc<dyn ergo_api::NodeReadState>,
     submit_bridge: Arc<dyn ergo_api::NodeSubmit>,
     indexer_handle: Option<ergo_indexer::IndexerHandle>,
+    indexer_event_observer: Option<Arc<crate::realtime_indexer_bridge::RealtimeIndexerObserver>>,
     mempool: &mut ergo_mempool::Mempool,
     wallet_store: Option<Arc<dyn ergo_wallet_service::wallet::WalletStore>>,
     mining_bridge: Option<Arc<dyn ergo_api::NodeMining>>,
@@ -221,6 +246,7 @@ pub(super) async fn bind(
     peer_connect_tx: &mpsc::Sender<std::net::SocketAddr>,
     votes_changed_tx: &mpsc::Sender<()>,
 ) -> Result<ApiBind, NodeError> {
+    let security = api_security(config)?;
     let network_prefix = config.chain_spec.network_params.address_prefix;
     // P5 mempool overlay: hand the snapshot-backed view to
     // the API so `/blockchain/balance` (and future unspent
@@ -258,6 +284,9 @@ pub(super) async fn bind(
     );
 
     let mut wallet_session_id = 0;
+    let wallet_rescan = Arc::new(ergo_wallet_service::engine::RescanCoordinator::new());
+    let (wallet_cancel, wallet_shutdown) = tokio::sync::watch::channel(false);
+    let mut wallet_handle = None;
     let (wallet_admin, hook): (
         Arc<dyn ergo_api::wallet::WalletAdmin>,
         Option<Arc<super::super::wallet_bridge::WalletStateHook>>,
@@ -268,12 +297,8 @@ pub(super) async fn bind(
         // writer task and the chain-apply hook + rollback guard, and registers
         // it with the new wallet session so shutdown can cancel a running
         // rescan.
-        let rescan = Arc::new(ergo_wallet_service::engine::RescanCoordinator::new());
-        if let Err(error) =
-            ergo_wallet_service::engine::recover_interrupted_rescan(wallet_store.as_ref(), &rescan)
-        {
-            tracing::warn!(%error, "wallet boot: failed to recover interrupted rescan; wallet remains fail-closed");
-        }
+        let rescan = wallet_rescan.clone();
+        recover_wallet_for_boot(wallet_store.as_ref(), &rescan)?;
         let (chain_client, chain_accessor) = wallet_writer_chain.take().ok_or_else(|| {
             NodeError::from("wallet boot: chain client was not constructed".to_string())
         })?;
@@ -344,14 +369,7 @@ pub(super) async fn bind(
             },
         );
         wallet_session_id = wallet.session_id;
-        let writer_handle = tokio::spawn(wallet.writer.run());
-        if let Err(error) =
-            crate::wallet_boot::track_wallet_task(wallet_session_id, writer_handle).await
-        {
-            return Err(NodeError::from(format!(
-                "wallet writer task registration failed: {error}"
-            )));
-        }
+        wallet_handle = Some(tokio::spawn(wallet.writer.run_supervised(wallet_shutdown)));
         let wallet_admin: Arc<dyn ergo_api::wallet::WalletAdmin> = Arc::new(wallet.admin);
         (wallet_admin, Some(Arc::new(wallet.hook)))
     } else {
@@ -365,6 +383,10 @@ pub(super) async fn bind(
             api_handle: None,
             api_shutdown_tx: None,
             wallet_session_id,
+            wallet_rescan,
+            wallet_cancel,
+            wallet_handle,
+            api_services: None,
             live_wallet_hook: hook,
         });
     };
@@ -391,6 +413,10 @@ pub(super) async fn bind(
                 api_handle: None,
                 api_shutdown_tx: None,
                 wallet_session_id,
+                wallet_rescan,
+                wallet_cancel,
+                wallet_handle,
+                api_services: None,
                 live_wallet_hook: hook,
             });
         }
@@ -408,6 +434,8 @@ pub(super) async fn bind(
         name: config.node_name.clone(),
         app_version: api_info.version.clone(),
         network: api_info.network.clone(),
+        state_type: config.state_type,
+        voting_length: config.chain_spec.voting.voting_length,
         launch_time_unix_ms: api_info.started_at_unix_ms,
         rest_api_url: Some(format!("http://{actual}")),
         min_relay_fee_nano_erg: config.mempool_config.min_relay_fee_nano_erg,
@@ -429,7 +457,31 @@ pub(super) async fn bind(
     let indexer_for_api: Option<Arc<dyn ergo_indexer::IndexerQuery>> = indexer_handle
         .clone()
         .map(|h| Arc::new(h) as Arc<dyn ergo_indexer::IndexerQuery>);
-    // Realtime WS bridge (A2): the same process-wide bus the
+    // Restore admitted delivery obligations before node-owned realtime observers
+    // and the API listener start. An unavailable store disables webhooks rather
+    // than acknowledging registrations that would disappear at restart.
+    let webhook_path = config.data_dir.join("webhooks.redb");
+    let api_services = tokio::task::spawn_blocking(move || {
+        let webhook_engine = crate::webhook_store::RedbWebhookStore::open(&webhook_path)
+            .and_then(|store| {
+                ergo_api::v1::WebhookEngine::durable(Default::default(), Arc::new(store))
+            })
+            .map(Arc::new);
+        let webhook_engine = match webhook_engine {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                tracing::error!(%error, "durable webhook store unavailable; webhooks disabled");
+                None
+            }
+        };
+        Arc::new(ergo_api::ApiServices::with_webhooks(webhook_engine))
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::error!(%error, "webhook storage initialization failed; webhooks disabled");
+        Arc::new(ergo_api::ApiServices::with_webhooks(None))
+    });
+    // Realtime WS bridge (A2): the same node-owned bus the
     // router feeds the `blocks` coarse-ring bridge into. Wiring
     // it as a `MempoolObserver` lets admit/evict publish
     // `tx_accepted`/`tx_dropped` on the `mempool` channel
@@ -437,9 +489,14 @@ pub(super) async fn bind(
     // coarse ring (which only carries block/reorg/peer events).
     mempool.set_observer(Some(Arc::new(
         crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
-            ergo_api::realtime_handle().bus,
+            api_services.realtime.bus.clone(),
         ),
     )));
+    // Restore any durable webhook cursor before activating this observer.
+    // Disabled indexers and boot failures without a store have no observer.
+    if let Some(observer) = indexer_event_observer {
+        observer.activate(api_services.realtime.bus.clone());
+    }
     let mut admin = crate::api_bridge::ShutdownAdmin::new(
         shutdown_notify.clone(),
         Some(peer_connect_tx.clone()),
@@ -481,32 +538,17 @@ pub(super) async fn bind(
         // backend's boot dispatch (Mode 5) doesn't reach
         // here yet, but the gate is the right shape now.
         utxo_reads_supported: config.state_type == crate::config::StateType::Utxo,
+        local_reverse_proxy: config.api_local_reverse_proxy,
+        services: api_services.clone(),
+        script_config: config.api_script.clone(),
     };
-    // Mandatory api_key_hash per Scala ErgoApp.scala:40-43.
-    // `NodeConfig::load` rejects (api_bind = Some,
-    // api_key_hash = None) at config.rs, so the typical
-    // production path hits the Ok branches below. We still
-    // surface a typed error rather than panic for callers
-    // that build `NodeConfig` literals and bypass `load()`
-    // (integration tests, future programmatic spawn paths,
-    // etc.).
-    let Some(hash) = config.api_key_hash.clone() else {
-        return Err("config invariant broken: api_bind = Some(_) requires \
-             api_key_hash = Some(_); NodeConfig::load would have \
-             rejected this, so the caller built a NodeConfig \
-             literal that bypassed validation"
-            .into());
-    };
-    let security_inner = ergo_api::auth::ApiSecurity::new(hash)
-        .map_err(|e| -> NodeError { format!("invalid api_key_hash in NodeConfig: {e}").into() })?;
-    let security = Arc::new(security_inner);
     let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts_and_wallet_moved(
         api_ctx,
         listener,
         api_shutdown_rx,
         Some(admin_handle),
         wallet_admin,
-        Some(security),
+        security,
         &config.api_allowed_hosts,
         wallet_moved,
     );
@@ -516,19 +558,65 @@ pub(super) async fn bind(
         api_handle: Some(handle),
         api_shutdown_tx: Some(api_shutdown_tx),
         wallet_session_id,
+        wallet_rescan,
+        wallet_cancel,
+        wallet_handle,
+        api_services: Some(api_services),
         live_wallet_hook: hook,
     })
 }
 
+/// Preserve absent credentials as a closed privileged surface, and reject malformed
+/// hashes even for programmatic configs that bypass the loader.
+fn api_security(
+    config: &NodeConfig,
+) -> Result<Option<Arc<ergo_api::auth::ApiSecurity>>, NodeError> {
+    config
+        .api_key_hash
+        .clone()
+        .map(ergo_api::auth::ApiSecurity::new)
+        .transpose()
+        .map(|security| security.map(Arc::new))
+        .map_err(|e| -> NodeError { format!("invalid api_key_hash in NodeConfig: {e}").into() })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::build_wallet_chain_wiring;
+    use super::*;
+    use clap::Parser;
     use ergo_state::store::StateStore;
     use ergo_wallet_service::engine::recover_interrupted_rescan;
     use ergo_wallet_service::engine::RescanCoordinator;
     use ergo_wallet_service::wallet::types::TrackedPubkeyMeta;
     use ergo_wallet_service::wallet::{RedbWalletStore, RescanState, WalletStore};
+    use ergo_wallet_service::wallet::{WalletRead, WalletStoreError, WalletWrite};
     use std::sync::Arc;
+
+    fn template_config(source: &str) -> (tempfile::TempDir, NodeConfig) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        std::fs::write(&path, source).unwrap();
+        let cli = crate::config::Cli::parse_from([
+            "ergo-node",
+            "--config",
+            path.to_str().unwrap(),
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+        ]);
+        (dir, NodeConfig::load(cli).expect("template loads"))
+    }
+
+    struct WriteFailingStore(RedbWalletStore);
+
+    impl WalletStore for WriteFailingStore {
+        fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+            self.0.begin_read()
+        }
+
+        fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+            Err(redb::Error::Io(std::io::Error::other("injected recovery write failure")).into())
+        }
+    }
 
     fn submit_bridge() -> Arc<dyn ergo_api::NodeSubmit> {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -740,5 +828,47 @@ mod tests {
             build_wallet_chain_wiring(&backend, None, submit_bridge(), false, None, Vec::new());
         assert!(wiring.writer.is_none());
         assert!(wiring.api.is_none());
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn api_security_programmatic_malformed_hash_rejected() {
+        let (_dir, mut config) = template_config(include_str!("../../../ergo-node.toml"));
+        config.api_key_hash = Some("bad hash".into());
+        assert!(api_security(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid api_key_hash"));
+    }
+
+    #[test]
+    fn wallet_rescan_recovery_failure_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::new(Arc::new(
+            redb::Database::create(dir.path().join("state.redb")).unwrap(),
+        ));
+        let mut write = store.begin_write().unwrap();
+        write
+            .set_rescan_state(&RescanState::Running { from_height: 7 })
+            .unwrap();
+        write.commit().unwrap();
+
+        let store = WriteFailingStore(store);
+        let error = recover_wallet_for_boot(&store, &RescanCoordinator::new()).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("wallet boot: failed to mark interrupted rescan"),
+            "{message}"
+        );
+        assert!(
+            message.contains("injected recovery write failure"),
+            "{message}"
+        );
+        assert_eq!(
+            store.begin_read().unwrap().rescan_state().unwrap(),
+            RescanState::Running { from_height: 7 }
+        );
+        assert!(!store.begin_read().unwrap().scan_invalidated().unwrap());
     }
 }

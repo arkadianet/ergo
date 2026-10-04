@@ -1,14 +1,28 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use rustix::fs::Mode;
+use rustix::process::umask;
 
 use thiserror::Error;
 use tokio::net::UnixListener;
 
 const OWNER_MAGIC: &str = "ergo-walletd-socket:";
+// umask belongs to the process, so concurrent daemon binds must not restore
+// each other's mask while one is still creating its socket.
+static SOCKET_BIND_MASK: Mutex<()> = Mutex::new(());
+
+struct RestoreUmask(Mode);
+impl Drop for RestoreUmask {
+    fn drop(&mut self) {
+        umask(self.0);
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum SocketError {
@@ -49,6 +63,7 @@ impl UnixSocketGuard {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&owner_path)?;
         file.write_all(token.as_bytes())?;
         file.sync_all()?;
@@ -95,11 +110,14 @@ impl Drop for UnixSocketGuard {
 
 pub fn bind_restricted(path: &Path) -> Result<(UnixListener, UnixSocketGuard), SocketError> {
     let mut guard = UnixSocketGuard::claim(path)?;
-    let previous_umask = unsafe { libc::umask(0o077) };
-    let listener = UnixListener::bind(path);
-    unsafe {
-        libc::umask(previous_umask);
-    }
+    let listener = {
+        let _lock = SOCKET_BIND_MASK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = RestoreUmask(umask(Mode::from_bits_truncate(0o077)));
+        // The socket is owner-only at creation, before the final chmod.
+        UnixListener::bind(path)
+    };
     let listener = match listener {
         Ok(listener) => listener,
         Err(error) => {
@@ -178,25 +196,13 @@ mod tests {
     }
 
     fn make_stale_socket(path: &Path) {
-        use std::os::unix::ffi::OsStrExt;
-        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-        assert!(fd >= 0);
-        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        let bytes = path.as_os_str().as_bytes();
-        assert!(bytes.len() < address.sun_path.len());
-        for (target, source) in address.sun_path.iter_mut().zip(bytes) {
-            *target = *source as libc::c_char;
-        }
-        let result = unsafe {
-            libc::bind(
-                fd,
-                (&address as *const libc::sockaddr_un).cast(),
-                std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
-            )
-        };
-        assert_eq!(result, 0);
-        assert_eq!(unsafe { libc::close(fd) }, 0);
+        let listener = StdUnixListener::bind(path).unwrap();
+        drop(listener);
+        let error = UnixStream::connect(path).unwrap_err();
+        assert_eq!(
+            error.raw_os_error(),
+            Some(rustix::io::Errno::CONNREFUSED.raw_os_error())
+        );
     }
 
     #[test]
@@ -214,6 +220,11 @@ mod tests {
 
         let live = dir.path().join("live.sock");
         let _listener = StdUnixListener::bind(&live).unwrap();
+        let error = StdUnixListener::bind(&live).unwrap_err();
+        assert_eq!(
+            error.raw_os_error(),
+            Some(rustix::io::Errno::ADDRINUSE.raw_os_error())
+        );
         fs::write(owner_for(&live), b"ergo-walletd-socket:1:1").unwrap();
         assert!(matches!(
             UnixSocketGuard::claim(&live),

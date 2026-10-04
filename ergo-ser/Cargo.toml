@@ -3,6 +3,7 @@ name        = "ergo-ser"
 description = "Consensus-typed wire-format serializers for Ergo: headers, block transactions, ergo boxes, ErgoTree (with sigma type/value codecs), addresses, AD proofs, autolykos solutions, and difficulty encoding. Built on top of ergo-primitives' VlqReader/VlqWriter."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -15,10 +16,10 @@ bs58            = { workspace = true }
 indexmap        = { workspace = true }
 
 [features]
-# Gates `tests/roundtrip_triage.rs`, a diagnostic harness for
-# investigating individual mainnet box bytes that fail round-trip.
-# Default `cargo test` does not compile it; the diagnostics CI lane
-# runs it for ad-hoc triage.
+# Gates `tests/it/roundtrip_triage.rs`, a manual diagnostic harness
+# investigating mainnet transaction round-trip divergence. It also
+# carries #[ignore], so --all-features remains hermetic. The diagnostics
+# CI lane compiles it; operators select it explicitly with --ignored.
 diagnostics = []
 
 [dev-dependencies]
@@ -30,3 +31,6 @@ serde_json = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

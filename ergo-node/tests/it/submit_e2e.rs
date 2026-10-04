@@ -79,6 +79,37 @@ async fn api_addr_resolves_ephemeral_port() {
     handle.shutdown().await.expect("clean shutdown");
 }
 
+/// Boot must bind and serve public reads while keeping the admin bridge closed.
+#[tokio::test]
+async fn api_unconfigured_boot_serves_reads_and_denies_shutdown() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = make_test_config(tmp.path().to_path_buf());
+    config.api_key_hash = None;
+    let handle = spawn_node(config).await;
+    let addr = handle.api_addr.expect("keyless API binds");
+    for (method, path, expected) in [
+        ("POST", "/node/shutdown", "403 Forbidden"),
+        ("GET", "/info", "200 OK"),
+    ] {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let text = String::from_utf8(response).unwrap();
+        assert!(text.contains(expected), "{text}");
+        if method == "POST" {
+            assert!(text.contains("api-key-not-configured"));
+        }
+    }
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown request was not dispatched");
+}
+
 /// Scala `/info` `restApiUrl` must reflect the actually-bound socket,
 /// not the requested bind string. Regression guard for the bind →
 /// serve_on split: when `api_bind = 127.0.0.1:0`, the kernel assigns an
@@ -470,7 +501,7 @@ async fn http_post_in_flight_during_shutdown_drains_gracefully() {
     assert!(
         text.starts_with("HTTP/1.1"),
         "response must be well-formed HTTP after graceful shutdown; got: {:?}",
-        &text.chars().take(300).collect::<String>(),
+        text.chars().take(300).collect::<String>(),
     );
     // The structured-response assertion: with the action loop gone and
     // submit_rx dropped, the bridge surfaces `shutting_down` and the
@@ -482,7 +513,7 @@ async fn http_post_in_flight_during_shutdown_drains_gracefully() {
         text.contains("shutting_down"),
         "response should carry the `shutting_down` reason from the closed \
          bridge channel; got: {:?}",
-        &text.chars().take(300).collect::<String>(),
+        text.chars().take(300).collect::<String>(),
     );
 
     shutdown_task
@@ -518,4 +549,138 @@ async fn fee_recommendation_uses_configured_relay_floor() {
         );
     }
     node.shutdown().await.unwrap();
+}
+
+/// The documented TOML policy must gate every endpoint after real node boot.
+#[tokio::test]
+async fn native_script_toml_policy_gates_all_routes_at_boot() {
+    use clap::Parser;
+    use reqwest::StatusCode;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("node.toml");
+    std::fs::write(
+        &path,
+        r#"
+network = "devnet"
+[api]
+bind = "127.0.0.1:0"
+[api.security]
+api_key_hash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
+[api.script]
+require_api_key = true
+max_cost = 12345
+[peers]
+known = ["127.0.0.1:1"]
+bind_addr = "127.0.0.1:0"
+"#,
+    )
+    .unwrap();
+    let cli = ergo_node::config::Cli::parse_from([
+        "ergo-node",
+        "--config",
+        path.to_str().unwrap(),
+        "--data-dir",
+        tmp.path().join("data").to_str().unwrap(),
+    ]);
+    let config = ergo_node::config::NodeConfig::load(cli).unwrap();
+    assert!(config.api_script.require_api_key);
+    assert_eq!(config.api_script.max_cost, 12345);
+    // Public networks append bootstrap seeds during TOML load. Devnet keeps
+    // this policy test on loopback, with no fixed inbound port or public dials.
+    assert_eq!(config.network, ergo_node::config::Network::Devnet);
+    assert_eq!(config.known_peers, vec!["127.0.0.1:1".parse().unwrap()]);
+    assert_eq!(config.bind_addr, Some("127.0.0.1:0".parse().unwrap()));
+    let handle = spawn_node(config).await;
+    let addr = handle.api_addr.unwrap();
+    // Read the framed HTTP response, rather than waiting for TCP EOF. The
+    // client's total deadline also bounds reading the body on a slow CI host.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    for (route, expected_status, expected_reason, expected_detail) in [
+        (
+            "compile",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "Failed to deserialize the JSON body into the target type",
+        ),
+        (
+            "inspect",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "one input is required",
+        ),
+        (
+            "execute",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "one script input is required",
+        ),
+        (
+            "cost",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "one script input is required",
+        ),
+        (
+            "simulate",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "Failed to deserialize the JSON body into the target type",
+        ),
+        (
+            "explain",
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "Failed to deserialize the JSON body into the target type",
+        ),
+        (
+            "diff",
+            StatusCode::NOT_IMPLEMENTED,
+            "oracle_unavailable",
+            "configure a Scala node or bundled reducer to enable script/diff",
+        ),
+    ] {
+        for key in [None, Some("hello")] {
+            let mut request = client
+                .post(format!("http://{addr}/api/v1/script/{route}"))
+                .json(&serde_json::json!({}));
+            if let Some(key) = key {
+                request = request.header("api_key", key);
+            }
+            let context = format!("{route}, api_key present={}", key.is_some());
+            let response = request
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("{context}: HTTP request failed: {e}"));
+            let status = response.status();
+            let body = response
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|e| panic!("{context}: response body is not JSON: {e}"));
+            if key.is_none() {
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{context}: {body}");
+                assert_eq!(body["error"]["reason"], "unauthorized", "{context}: {body}");
+            } else {
+                // Prove the key reaches this route's body validation (or its
+                // explicit unconfigured oracle), rather than accepting a 404,
+                // server error, or any response that merely omits unauthorized.
+                assert_eq!(status, expected_status, "{context}: {body}");
+                assert_eq!(
+                    body["error"]["reason"], expected_reason,
+                    "{context}: {body}"
+                );
+                assert!(
+                    body["error"]["detail"]
+                        .as_str()
+                        .is_some_and(|detail| detail.contains(expected_detail)),
+                    "{context}: {body}"
+                );
+            }
+        }
+    }
+    handle.shutdown().await.unwrap();
 }

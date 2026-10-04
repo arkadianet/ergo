@@ -298,20 +298,9 @@ pub(crate) fn value_to_typed_sigma(
 
 /// Count total nodes in a SigmaBoolean tree (for SigmaPropBytes PerItem cost).
 pub(crate) fn count_sigma_nodes(sb: &SigmaBoolean) -> usize {
-    match sb {
-        SigmaBoolean::TrivialProp(_) | SigmaBoolean::ProveDlog(_) => 1,
-        // Scala `ProveDHTuple.size = 4` ("one node for each EcPoint",
-        // SigmaBoolean.scala). SigmaPropBytes' PerItemCost(35,6,1) is charged
-        // over `SigmaBoolean.size`, so a DHTuple counts 3 nodes more than a
-        // Dlog (compounding through CAND/COR/CTHRESHOLD children).
-        SigmaBoolean::ProveDHTuple { .. } => 4,
-        SigmaBoolean::Cand(children) | SigmaBoolean::Cor(children) => {
-            1 + children.iter().map(count_sigma_nodes).sum::<usize>()
-        }
-        SigmaBoolean::Cthreshold { children, .. } => {
-            1 + children.iter().map(count_sigma_nodes).sum::<usize>()
-        }
-    }
+    // The shared representation caches logical size, counting repeated children
+    // and all four DHTuple points without expanding the stored graph.
+    sb.size()
 }
 
 /// Convert a typed SigmaValue to a runtime Value.
@@ -589,11 +578,12 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
         (SigmaType::SBox, SigmaValue::OpaqueBoxBytes(bytes)) => {
             use ergo_ser::register::RegisterId;
             let mut r = ergo_primitives::reader::VlqReader::new(bytes);
-            let ergo_box =
-                ergo_ser::ergo_box::read_ergo_box(&mut r).map_err(|e| EvalError::TypeError {
+            let ergo_box = ergo_ser::ergo_box::read_accepted_ergo_box(&mut r).map_err(|e| {
+                EvalError::TypeError {
                     expected: "valid SBox constant",
                     got: format!("box deser error: {e}"),
-                })?;
+                }
+            })?;
             if !r.is_empty() {
                 return Err(EvalError::TypeError {
                     expected: "valid SBox constant",
@@ -616,32 +606,32 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
             let registers = [
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R4)
                     .cloned(),
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R5)
                     .cloned(),
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R6)
                     .cloned(),
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R7)
                     .cloned(),
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R8)
                     .cloned(),
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R9)
                     .cloned(),
             ];

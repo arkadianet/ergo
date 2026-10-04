@@ -92,7 +92,7 @@ impl NipopowVerifier {
     /// Borrow the current best NiPoPoW proof, if any. Needed by the
     /// sync-layer orchestration (`drive_popow_bootstrap`) so it can
     /// hand the proof directly to
-    /// [`ergo_state::store::StateStore::apply_popow_proof`] without
+    /// `ergo_state::store::StateStore::apply_popow_proof` without
     /// going through the consumed-headers projection.
     pub fn best_proof(&self) -> Option<&NipopowProof> {
         self.best_proof.as_ref()
@@ -270,11 +270,16 @@ mod tests {
     }
 
     fn popow_hdr(h: Header) -> PoPowHeader {
-        PoPowHeader {
-            header: h,
-            interlinks: vec![],
-            interlinks_proof: vec![],
+        if h.height == 1 {
+            return PoPowHeader {
+                header: h,
+                interlinks: vec![],
+                interlinks_proof: vec![0u8; 8],
+            };
         }
+        let links = vec![ModifierId::from_bytes([0x11; 32])];
+        let fields = crate::popow::algos::pack_interlinks(&links);
+        crate::popow::algos::build_popow_header(h, links, &fields).unwrap()
     }
 
     /// Build a synthetic valid 2-header proof: genesis + height 2,
@@ -420,11 +425,10 @@ mod tests {
     /// - `has_valid_heights`: 1-element chain, no pairs to compare
     /// - `has_valid_connections`: prefix_to_check.len() == 1, loop
     ///   range `1..1` is empty; suffix_tail is empty → no checks
-    /// - `has_valid_proofs`: empty prefix + empty interlinks_proof
-    ///   on suffix_head → vacuously valid
+    /// - `has_valid_proofs`: empty prefix + canonical empty proof
+    ///   on suffix_head → the height-1 genesis exception applies
     /// - `has_valid_difficulty_headers`: continuous=false → trivial
-    /// - `has_valid_per_header_pow`: genesis is skipped
-    ///   (parent_id == zeros)
+    /// - `has_valid_per_header_pow`: height 1 is skipped
     #[test]
     fn genesis_only_proof_passes_is_valid() {
         let g = header(GENESIS_HEX);

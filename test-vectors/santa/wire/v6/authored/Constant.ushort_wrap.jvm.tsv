@@ -1,0 +1,4 @@
+coll-byte-length-wraps-accept#0	ACCEPT 0e01ab
+coll-int-length-wraps-accept#1	ACCEPT 100102
+bigint-size-wraps-accept#2	ACCEPT 060101
+coll-byte-length-wraps-to-65536-reject#3	REJECT IllegalArgumentException

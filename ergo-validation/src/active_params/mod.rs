@@ -6,12 +6,12 @@
 //! [`crate::voting::extension_validation`]; this module owns the
 //! parser, the persistence codec, and the launch-time defaults.
 //!
-//! - [`launch`] — `scala_launch*` mainnet/testnet launch-time defaults.
-//! - [`extension_codec`] — `parse_active_params` /
+//! - `launch` — `scala_launch*` mainnet/testnet launch-time defaults.
+//! - `extension_codec` — `parse_active_params` /
 //!   `active_params_to_extension_fields`, the block-extension wire
 //!   format (a genuinely different format from the redb persist codec
 //!   below, despite encoding the same struct).
-//! - [`persist_codec`] — `validate`/`serialize`/`deserialize`, the redb
+//! - `persist_codec` — `validate`/`serialize`/`deserialize`, the redb
 //!   storage wire format. Kept together deliberately: `deserialize`
 //!   documents matching the exact byte-shape `serialize` produces
 //!   (v1/v2 auto-detection).
@@ -24,6 +24,9 @@ pub use extension_codec::{active_params_to_extension_fields, parse_active_params
 pub use launch::{
     scala_launch, scala_launch_for_network, scala_launch_mainnet, scala_launch_testnet,
 };
+
+/// System-parameter extension fields as fixed-width keys and serialized values.
+pub type ActiveParameterFields = Vec<([u8; 2], Vec<u8>)>;
 
 use crate::voting::validation_settings::{
     ErgoValidationSettingsUpdate, ValidationSettingsCodecError,
@@ -134,6 +137,9 @@ pub enum ActiveParamsError {
     /// `extra` contains the same id twice.
     #[error("extra entry has duplicate id {0}")]
     ExtraDuplicateId(u8),
+    /// The persistent field count does not fit its one-byte encoding.
+    #[error("codec: parameter count {0} exceeds 255")]
+    TooManyParameters(usize),
     /// Persistence-codec input was truncated.
     #[error("codec: unexpected end of input")]
     UnexpectedEof,

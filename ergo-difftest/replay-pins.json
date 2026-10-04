@@ -2,7 +2,7 @@
   "network": "mainnet",
   "node_version": "6.0.2",
   "source": "archival Scala node :9053",
-  "comment": "Height -> committed (headerId, stateRoot) pins for the streamed differential replay driver (see docs/interface-contracts.md section 2). These make a retired block range reproducible with ZERO committed block bytes: the replay driver asserts GET /blocks/at/{h} matches headerId before applying, and diffs the Rust root_digest() against stateRoot. Heights 1-5 = hermetic genesis seed; the rest are known-gnarly incident heights (700000 curated corpus; 836113 diagnose block; 844665 range fixture; 1805523 adproofs mined-block reject; 1808895 register-provenance stall; 1818476 indexer-degrade incident).",
+  "comment": "Historical mainnet header/root observations from the recorded Scala 6.0.2 source. The replay driver binds requested, decoded and pinned identities before application, and counts a pin only after the applied root matches. Its fixed diagnostic context supports contiguous heights 1..=200; later incident pins are retained historical metadata, not implemented replay coverage or proof of archive availability. Heights 1-5 also have committed hermetic fixtures.",
   "heights": {
     "1": {"headerId": "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b", "stateRoot": "18b7a08878f2a7ee4389c5a1cece1e2724abe8b8adc8916240dd1bcac069177303"},
     "2": {"headerId": "855fc5c9eed868b43ea2c3df99ec17dd9d903187d891e2365a89b98125c994b2", "stateRoot": "6291b70477f591ee8efb8a962d36ddbe3ac57591e39fe45ffb8c51c4939e419803"},

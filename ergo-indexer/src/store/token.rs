@@ -13,7 +13,6 @@ use redb::ReadTransaction;
 use ergo_primitives::reader::VlqReader;
 
 use crate::error::{IndexerError, SpillParentKind};
-use crate::segment::SEGMENT_THRESHOLD;
 use crate::segment_id::{box_segment_id, token_unique_id};
 use crate::store::segment::read_spill_in;
 use crate::store::tables::INDEXED_TOKEN;
@@ -58,8 +57,9 @@ pub(crate) fn read_token_box_entries_in(
         return Ok(None);
     };
     let unique_id = token_unique_id(token_id);
-    let count = t.segment.box_segment_count.max(0) as usize;
-    let mut entries = Vec::with_capacity(count * SEGMENT_THRESHOLD + t.segment.boxes.len());
+    // A declared spill count does not prove any spill rows exist. Grow only
+    // after each referenced row has been read and decoded.
+    let mut entries = Vec::new();
     for seg_num in 0..t.segment.box_segment_count {
         let seg_id = box_segment_id(&unique_id, seg_num);
         let spill = read_spill_in(read_txn, &seg_id)?.ok_or_else(|| {

@@ -71,6 +71,7 @@ mod multisig;
 mod reads;
 pub mod rescan;
 mod scan;
+mod scan_guard;
 mod send;
 mod sign;
 pub mod submit;
@@ -168,6 +169,13 @@ impl WalletEngine {
 
     pub fn config(&self) -> &WalletEngineConfig {
         &self.config
+    }
+
+    /// Refuse commands that consume scan results while the durable history
+    /// is invalidated. Status, recovery, keys and registry administration stay
+    /// available independently of wallet history.
+    fn require_valid_scan(&self) -> Result<(), ergo_wallet_protocol::WalletAdminError> {
+        scan_guard::require_valid_scan(self.store.as_ref())
     }
 
     /// Whether the wallet is locked (no in-memory master key). Native

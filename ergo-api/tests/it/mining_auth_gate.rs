@@ -5,9 +5,7 @@
 //! the miner payout identity — operator surface that used to be mounted
 //! with no gate (audit finding M-2; drift flagged in
 //! `dev-docs/v1-api-design.md`). All four routes now sit behind the same
-//! api_key middleware as `/node/shutdown` whenever security is wired —
-//! which production always does, since config load mandates
-//! `api_key_hash` whenever the API server is enabled.
+//! api_key middleware as `/node/shutdown`. An absent verifier denies access.
 //!
 //! Pinned on the *real* merged router (`router_with_mempool_and_wallet_and_security`
 //! with `mining = Some(NoopNodeMining)`, `security = Some(hello)`):
@@ -84,6 +82,9 @@ fn app() -> axum::Router {
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
+        local_reverse_proxy: false,
+        services: Arc::new(ergo_api::ApiServices::new()),
+        script_config: Default::default(),
     };
     router_with_mempool_and_wallet_and_security(
         ctx,

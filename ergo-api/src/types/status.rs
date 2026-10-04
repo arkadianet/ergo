@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 /// Single-call dashboard view: collapses sync + tip + peer count.
 /// Polled at 1 Hz by the UI header strip.
 ///
-/// Derives `Default` (like [`ApiIdentity`]) so test stubs can write
+/// Derives `Default` (like [`crate::ApiIdentity`]) so test stubs can write
 /// `ApiStatus { <overrides>, ..Default::default() }` and stop breaking
 /// on every added field.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
@@ -31,8 +31,9 @@ pub struct ApiStatus {
     pub bootstrap: Option<ApiBootstrapStatus>,
     /// The most recent block this node REJECTED during apply — a consensus
     /// fork-from-network signal (the node refused a block its peers may have
-    /// accepted). `None` when no rejection has occurred this session. A
-    /// persistent `Some(_)` is an operator page.
+    /// accepted). `None` when no rejection has occurred this session. Retained
+    /// after recovery for diagnosis: a known nonzero rejected height below
+    /// `best_full_block_height` is historical, not an active rejection alarm.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_block_apply_error: Option<ApiBlockApplyError>,
     /// Monotonic count of block-apply rejections since node start (the
@@ -119,23 +120,25 @@ pub struct ApiStatus {
     /// apply's start timestamp by a thread nothing can starve.
     #[serde(default)]
     pub apply_age_ms: Option<i64>,
-    /// On-disk size of `state.redb` in bytes, probed per status read.
-    /// `None` when the file is absent (never synced / failed to open).
+    /// On-disk size of `state.redb` in bytes, from the background storage
+    /// sampler (refreshed every 10 s). `None` before the first sample or
+    /// when the file is absent (never synced / failed to open).
     /// The `ergo_state_db_bytes` Prometheus gauge source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_db_bytes: Option<u64>,
-    /// On-disk size of the indexer redb in bytes, probed per status
-    /// read. `None` when `[indexer] enabled = false` or the file is
-    /// absent. The `ergo_index_db_bytes` Prometheus gauge source.
+    /// On-disk size of the indexer redb in bytes, from the background
+    /// storage sampler. `None` before the first sample, when
+    /// `[indexer] enabled = false`, or when the file is absent. The `ergo_index_db_bytes` Prometheus gauge source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_db_bytes: Option<u64>,
-    /// Free bytes on the filesystem holding the data dir, probed per
-    /// status read. `None` when the mount could not be determined. The
+    /// Free bytes on the filesystem holding the data dir, from the
+    /// background storage sampler. `None` before the first sample or when
+    /// the mount could not be determined. The
     /// `ergo_disk_free_bytes` Prometheus gauge source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_free_bytes: Option<u64>,
-    /// Total bytes on the filesystem holding the data dir, probed per
-    /// status read. The `ergo_disk_total_bytes` Prometheus gauge source.
+    /// Total bytes on the filesystem holding the data dir, from the
+    /// background storage sampler. The `ergo_disk_total_bytes` Prometheus gauge source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_total_bytes: Option<u64>,
     /// Wall-clock wedge: the running apply has exceeded the telemetry
@@ -302,6 +305,9 @@ pub struct ApiBootstrapStatus {
     /// started.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub popow_phase: Option<ApiPopowPhase>,
+    /// Reason NiPoPoW bootstrap was abandoned, when application failed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub popow_abandon_reason: Option<String>,
     /// Number of distinct peers that have responded with a NiPoPoW
     /// proof so far. `0` when popow_phase is absent or before any
     /// inbound proof.
@@ -312,7 +318,7 @@ pub struct ApiBootstrapStatus {
     /// bootstrapped history. Absent when the store reports the
     /// default (Dense) and no NiPoPoW bootstrap is in progress.
     ///
-    /// Distinct from [`ApiIdentity::history_mode`] — that field is the
+    /// Distinct from [`crate::ApiIdentity::history_mode`] — that field is the
     /// operator-configured chain-retention policy (archive / pruned /
     /// utxo-bootstrapped / headers-only), this field is the on-disk
     /// header-section shape (dense from genesis vs sparse with a
@@ -333,6 +339,8 @@ pub struct ApiBootstrapStatus {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiBootstrapPhase {
+    /// Local failure stopped bootstrap; operator intervention is required.
+    Halted,
     /// Outbound peer-query fan-out; no manifest selected yet.
     Discovery,
     /// Manifest selected by quorum; download in flight.
@@ -363,6 +371,8 @@ pub enum ApiPopowPhase {
     /// Proof applied to the chain state — `header_availability` is
     /// now `Sparse`.
     Applied,
+    /// Proof application failed; ordinary header sync may proceed.
+    Abandoned,
     /// Bounded forward catch-up from the proof's anchor height in
     /// flight.
     Catchup,
@@ -486,6 +496,7 @@ mod tests {
             (ApiPopowPhase::Requesting, "requesting"),
             (ApiPopowPhase::QuorumMet, "quorum_met"),
             (ApiPopowPhase::Applied, "applied"),
+            (ApiPopowPhase::Abandoned, "abandoned"),
             (ApiPopowPhase::Catchup, "catchup"),
         ] {
             let got = serde_json::to_value(variant).unwrap();
@@ -499,6 +510,7 @@ mod tests {
             ApiPopowPhase::Requesting,
             ApiPopowPhase::QuorumMet,
             ApiPopowPhase::Applied,
+            ApiPopowPhase::Abandoned,
             ApiPopowPhase::Catchup,
         ] {
             let s = serde_json::to_string(&v).unwrap();
@@ -551,6 +563,7 @@ mod tests {
             trust_check_passed: false,
             started_unix_ms: 0,
             popow_phase,
+            popow_abandon_reason: None,
             popow_providers: None,
             header_availability,
             popow_dense_from_height: None,

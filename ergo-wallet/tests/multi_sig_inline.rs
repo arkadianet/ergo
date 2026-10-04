@@ -54,7 +54,7 @@ fn generates_commitments_only_for_known_branches_of_compound() {
     let pk_b = dummy_dlog(0xB);
     let pk_c = dummy_dlog(0xC);
     // AND(pk_a, pk_b, pk_c). generate_for has only pk_a + pk_c.
-    let tree = SigmaBoolean::Cand(vec![pk_a.clone(), pk_b.clone(), pk_c.clone()]);
+    let tree = SigmaBoolean::Cand(vec![pk_a.clone(), pk_b.clone(), pk_c.clone()].into());
     let bag = generate_commitments_for(&tree, &[pk_a, pk_c], &mut OsRngBackend).unwrap();
     // 2 leaves × 2 hints each = 4 hints.
     assert_eq!(bag.hints.len(), 4);
@@ -64,7 +64,7 @@ fn generates_commitments_only_for_known_branches_of_compound() {
 fn positions_distinguish_compound_children() {
     let pk_a = dummy_dlog(0xA);
     // AND(pk_a, pk_a) — duplicate leaf.
-    let tree = SigmaBoolean::Cand(vec![pk_a.clone(), pk_a.clone()]);
+    let tree = SigmaBoolean::Cand(vec![pk_a.clone(), pk_a.clone()].into());
     let bag =
         generate_commitments_for(&tree, std::slice::from_ref(&pk_a), &mut OsRngBackend).unwrap();
     // 2 leaves × 2 hints each = 4. The two OwnCommitments must
@@ -101,7 +101,7 @@ fn single_prover_generate_sign_extract_round_trip() {
 
     let alice_image = SigmaBoolean::ProveDlog(GroupElement::from_bytes(alice_pk));
     let bob_image = SigmaBoolean::ProveDlog(GroupElement::from_bytes(bob_pk));
-    let tree = SigmaBoolean::Cand(vec![alice_image.clone(), bob_image.clone()]);
+    let tree = SigmaBoolean::Cand(vec![alice_image.clone(), bob_image.clone()].into());
 
     let registry = SecretRegistry::empty()
         .merge_external_secrets(&[
@@ -276,7 +276,7 @@ fn compound_prover_consumes_real_secret_proof_from_bag() {
 
     let alice_image = SigmaBoolean::ProveDlog(GroupElement::from_bytes(alice_pk));
     let bob_image = SigmaBoolean::ProveDlog(GroupElement::from_bytes(bob_pk));
-    let tree = SigmaBoolean::Cand(vec![alice_image.clone(), bob_image.clone()]);
+    let tree = SigmaBoolean::Cand(vec![alice_image.clone(), bob_image.clone()].into());
 
     // Step 1: Full registry signs the AND tree.
     let full_registry = SecretRegistry::empty()
@@ -392,7 +392,7 @@ fn generate_then_sign_then_extract_real_secret() {
 
     let alice_image = SigmaBoolean::ProveDlog(GroupElement::from_bytes(alice_pk));
     let bob_image = SigmaBoolean::ProveDlog(GroupElement::from_bytes(bob_pk));
-    let tree = SigmaBoolean::Cand(vec![alice_image.clone(), bob_image.clone()]);
+    let tree = SigmaBoolean::Cand(vec![alice_image.clone(), bob_image.clone()].into());
 
     // Single prover holds both secrets.
     let registry = SecretRegistry::empty()
@@ -602,7 +602,7 @@ fn threshold_simulated_secret_proof_does_not_count_as_real() {
     // atLeast(2, [Dlog(a), Dlog(b)])
     let tree = SigmaBoolean::Cthreshold {
         k: 2,
-        children: vec![a_image.clone(), b_image.clone()],
+        children: vec![a_image.clone(), b_image.clone()].into(),
     };
 
     // Empty registry — no backing secrets.
@@ -692,7 +692,7 @@ fn threshold_own_commitment_without_secret_rejects() {
     // atLeast(2, [Dlog(a), Dlog(b)])
     let tree = SigmaBoolean::Cthreshold {
         k: 2,
-        children: vec![a_image.clone(), b_image.clone()],
+        children: vec![a_image.clone(), b_image.clone()].into(),
     };
 
     // Empty registry — no secrets.
@@ -728,13 +728,13 @@ fn threshold_own_commitment_without_secret_rejects() {
 
     let oc_a = OwnCommitment {
         image: a_image.clone(),
-        secret_randomness: r_bytes_a,
+        secret_randomness: r_bytes_a.into(),
         commitment: FirstProverMessage::Schnorr(r_pt_a),
         position: pos_child0,
     };
     let oc_b = OwnCommitment {
         image: b_image.clone(),
-        secret_randomness: r_bytes_b,
+        secret_randomness: r_bytes_b.into(),
         commitment: FirstProverMessage::Schnorr(r_pt_b),
         position: pos_child1,
     };
@@ -802,7 +802,7 @@ fn threshold_duplicate_leaf_with_single_hint_rejects() {
     // atLeast(2, [Dlog(a), Dlog(a)])
     let tree = SigmaBoolean::Cthreshold {
         k: 2,
-        children: vec![a_image.clone(), a_image.clone()],
+        children: vec![a_image.clone(), a_image.clone()].into(),
     };
 
     // Empty registry — this prover has no DLog secret for `a`.
@@ -992,10 +992,10 @@ fn nested_simulated_or_inside_threshold_proves_correctly() {
     let img_c = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_c));
 
     // atLeast(1, [OR(a, b), c])  — c alone satisfies k=1.
-    let or_subtree = SigmaBoolean::Cor(vec![img_a, img_b]);
+    let or_subtree = SigmaBoolean::Cor(vec![img_a, img_b].into());
     let tree = SigmaBoolean::Cthreshold {
         k: 1,
-        children: vec![or_subtree, img_c],
+        children: vec![or_subtree, img_c].into(),
     };
 
     // Only c's secret in the registry; OR(a, b) must be fully simulated.
@@ -1058,8 +1058,8 @@ fn or_with_unprovable_compound_child_routes_to_simulated() {
     let img_c = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_c));
 
     // OR(OR(a, b), c) — only c's secret is available.
-    let inner_or = SigmaBoolean::Cor(vec![img_a, img_b]);
-    let outer_or = SigmaBoolean::Cor(vec![inner_or, img_c]);
+    let inner_or = SigmaBoolean::Cor(vec![img_a, img_b].into());
+    let outer_or = SigmaBoolean::Cor(vec![inner_or, img_c].into());
 
     let registry = SecretRegistry::empty()
         .merge_external_secrets(&[ProverExternalSecret::Dlog {
@@ -1128,11 +1128,11 @@ fn nested_simulated_or_of_or_inside_threshold_proves_correctly() {
 
     // atLeast(1, [OR(OR(a, b), c), d])  — d alone satisfies k=1.
     // OR(OR(a,b), c) is fully simulated (no secret for a, b, or c).
-    let inner_or = SigmaBoolean::Cor(vec![img_a, img_b]);
-    let outer_or = SigmaBoolean::Cor(vec![inner_or, img_c]);
+    let inner_or = SigmaBoolean::Cor(vec![img_a, img_b].into());
+    let outer_or = SigmaBoolean::Cor(vec![inner_or, img_c].into());
     let tree = SigmaBoolean::Cthreshold {
         k: 1,
-        children: vec![outer_or, img_d],
+        children: vec![outer_or, img_d].into(),
     };
 
     let registry = SecretRegistry::empty()
@@ -1200,7 +1200,7 @@ fn or_hint_only_reconstruction_byte_identical() {
     };
     let img_a = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_a));
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
-    let tree = SigmaBoolean::Cor(vec![img_a.clone(), img_b.clone()]);
+    let tree = SigmaBoolean::Cor(vec![img_a.clone(), img_b.clone()].into());
     let message = b"or hint-only reconstruction";
 
     // Step 1: original signer has only A's secret; signs OR(A, B).
@@ -1298,7 +1298,7 @@ fn or_both_provable_empty_bag_verifies() {
     };
     let img_a = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_a));
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
-    let tree = SigmaBoolean::Cor(vec![img_a, img_b]);
+    let tree = SigmaBoolean::Cor(vec![img_a, img_b].into());
     let message = b"or both provable empty bag";
 
     let registry = SecretRegistry::empty()
@@ -1368,7 +1368,7 @@ fn or_non_real_sibling_with_bag_sim_hint_and_overlapping_registry() {
     };
     let img_a = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_a));
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
-    let tree = SigmaBoolean::Cor(vec![img_a.clone(), img_b.clone()]);
+    let tree = SigmaBoolean::Cor(vec![img_a.clone(), img_b.clone()].into());
     let message = b"or sim-bag with overlapping registry";
 
     // Step 1: original signer has only A's secret; signs OR(A, B) — A real, B simulated.
@@ -1479,10 +1479,13 @@ fn or_with_and_sibling_hint_only_reconstruction_byte_identical() {
     let img_a = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_a));
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
     let img_c = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_c));
-    let tree = SigmaBoolean::Cor(vec![
-        img_a.clone(),
-        SigmaBoolean::Cand(vec![img_b.clone(), img_c.clone()]),
-    ]);
+    let tree = SigmaBoolean::Cor(
+        vec![
+            img_a.clone(),
+            SigmaBoolean::Cand(vec![img_b.clone(), img_c.clone()].into()),
+        ]
+        .into(),
+    );
     let message = b"or-with-and-sibling hint-only";
 
     // Original signer: only A's secret. A real, AND(B,C) fully simulated.
@@ -1565,10 +1568,13 @@ fn or_with_partial_sim_coverage_in_compound_sibling_errors() {
     let img_a = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_a));
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
     let img_c = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_c));
-    let tree = SigmaBoolean::Cor(vec![
-        img_a.clone(),
-        SigmaBoolean::Cor(vec![img_b.clone(), img_c.clone()]),
-    ]);
+    let tree = SigmaBoolean::Cor(
+        vec![
+            img_a.clone(),
+            SigmaBoolean::Cor(vec![img_b.clone(), img_c.clone()].into()),
+        ]
+        .into(),
+    );
     let message = b"or(a, or(b, c)) partial-bag";
 
     let signer_registry = SecretRegistry::empty()
@@ -1659,10 +1665,13 @@ fn or_with_partial_sim_coverage_and_registry_real_branch_signs() {
     let img_a = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_a));
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
     let img_c = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_c));
-    let tree = SigmaBoolean::Cor(vec![
-        img_a.clone(),
-        SigmaBoolean::Cor(vec![img_b.clone(), img_c.clone()]),
-    ]);
+    let tree = SigmaBoolean::Cor(
+        vec![
+            img_a.clone(),
+            SigmaBoolean::Cor(vec![img_b.clone(), img_c.clone()].into()),
+        ]
+        .into(),
+    );
     let message = b"partial bag, registry-backed real branch";
 
     // Construct a bag that carries a partial Sim* (Sim(B) only, no Sim(C))
@@ -1751,10 +1760,13 @@ fn or_partial_sibling_with_compound_real_picking_bag_leaf_errors() {
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
     let img_c = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_c));
     let img_d = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_d));
-    let tree = SigmaBoolean::Cor(vec![
-        SigmaBoolean::Cor(vec![img_a.clone(), img_b]),
-        SigmaBoolean::Cor(vec![img_c.clone(), img_d.clone()]),
-    ]);
+    let tree = SigmaBoolean::Cor(
+        vec![
+            SigmaBoolean::Cor(vec![img_a.clone(), img_b].into()),
+            SigmaBoolean::Cor(vec![img_c.clone(), img_d.clone()].into()),
+        ]
+        .into(),
+    );
     let message = b"OR(OR(A,B), OR(C,D)) compound-real bag-picked";
 
     // Original signer holds only A — outer real_idx=0, inner OR(A,B) real_idx=0,
@@ -1853,13 +1865,16 @@ fn or_with_threshold_sibling_hint_only_reconstruction_byte_identical() {
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
     let img_c = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_c));
     let img_d = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_d));
-    let tree = SigmaBoolean::Cor(vec![
-        img_a.clone(),
-        SigmaBoolean::Cthreshold {
-            k: 2,
-            children: vec![img_b.clone(), img_c.clone(), img_d.clone()],
-        },
-    ]);
+    let tree = SigmaBoolean::Cor(
+        vec![
+            img_a.clone(),
+            SigmaBoolean::Cthreshold {
+                k: 2,
+                children: vec![img_b.clone(), img_c.clone(), img_d.clone()].into(),
+            },
+        ]
+        .into(),
+    );
     let message = b"OR(A, atLeast(2, [B,C,D])) hint-only";
 
     let signer_registry = SecretRegistry::empty()
@@ -1931,13 +1946,16 @@ fn or_with_threshold_k_equals_n_sibling_hint_only_reconstruction_byte_identical(
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
     let img_c = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_c));
     let img_d = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_d));
-    let tree = SigmaBoolean::Cor(vec![
-        img_a.clone(),
-        SigmaBoolean::Cthreshold {
-            k: 3,
-            children: vec![img_b.clone(), img_c.clone(), img_d.clone()],
-        },
-    ]);
+    let tree = SigmaBoolean::Cor(
+        vec![
+            img_a.clone(),
+            SigmaBoolean::Cthreshold {
+                k: 3,
+                children: vec![img_b.clone(), img_c.clone(), img_d.clone()].into(),
+            },
+        ]
+        .into(),
+    );
     let message = b"OR(A, atLeast(3, [B,C,D])) hint-only";
 
     let signer_registry = SecretRegistry::empty()
@@ -2010,13 +2028,16 @@ fn or_with_threshold_k_equals_zero_sibling_and_registry_real_branch_signs() {
     let img_a = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_a));
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
     let img_c = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_c));
-    let tree = SigmaBoolean::Cor(vec![
-        img_a.clone(),
-        SigmaBoolean::Cthreshold {
-            k: 0,
-            children: vec![img_b.clone(), img_c.clone()],
-        },
-    ]);
+    let tree = SigmaBoolean::Cor(
+        vec![
+            img_a.clone(),
+            SigmaBoolean::Cthreshold {
+                k: 0,
+                children: vec![img_b.clone(), img_c.clone()].into(),
+            },
+        ]
+        .into(),
+    );
     let message = b"OR(A, atLeast(0, [B,C])) registry-backed real";
 
     let signer_registry = SecretRegistry::empty()
@@ -2085,13 +2106,16 @@ fn or_with_threshold_k_equals_zero_sibling_and_bag_backed_real_branch_errors() {
     let img_a = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_a));
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
     let img_c = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_c));
-    let tree = SigmaBoolean::Cor(vec![
-        img_a.clone(),
-        SigmaBoolean::Cthreshold {
-            k: 0,
-            children: vec![img_b.clone(), img_c.clone()],
-        },
-    ]);
+    let tree = SigmaBoolean::Cor(
+        vec![
+            img_a.clone(),
+            SigmaBoolean::Cthreshold {
+                k: 0,
+                children: vec![img_b.clone(), img_c.clone()].into(),
+            },
+        ]
+        .into(),
+    );
     let message = b"OR(A, atLeast(0, [B,C])) bag-backed real errors";
 
     let signer_registry = SecretRegistry::empty()
@@ -2160,7 +2184,7 @@ fn or_with_no_sim_coverage_and_bag_backed_real_branch_errors() {
 
     let img_a = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_a));
     let img_b = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_b));
-    let tree = SigmaBoolean::Cor(vec![img_a.clone(), img_b.clone()]);
+    let tree = SigmaBoolean::Cor(vec![img_a.clone(), img_b.clone()].into());
     let message = b"OR(A, B) bag-backed A, no Sim(B)";
 
     let signer_registry = SecretRegistry::empty()
@@ -2246,7 +2270,7 @@ fn two_of_three_threshold_with_combined_registry() {
     let img_c = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_c));
     let tree = SigmaBoolean::Cthreshold {
         k: 2,
-        children: vec![img_a, img_b, img_c],
+        children: vec![img_a, img_b, img_c].into(),
     };
 
     // Assembler has A's and B's secrets (not C's). This is k=2 satisfied.
@@ -2310,7 +2334,7 @@ fn dapp_and_with_combined_registry() {
 
     let img_w = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_wallet));
     let img_d = SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk_dapp));
-    let tree = SigmaBoolean::Cand(vec![img_w, img_d]);
+    let tree = SigmaBoolean::Cand(vec![img_w, img_d].into());
 
     let registry = SecretRegistry::empty()
         .merge_external_secrets(&[
@@ -2431,7 +2455,7 @@ fn two_of_three_threshold_signed_by_two_parties_without_sharing_secrets() {
     let (_, _, c) = party(13);
     let tree = SigmaBoolean::Cthreshold {
         k: 2,
-        children: vec![a.clone(), b.clone(), c.clone()],
+        children: vec![a.clone(), b.clone(), c.clone()].into(),
     };
     two_party_flow(&tree, [&a, &b, &c], [sa, sb], [pka, pkb]);
 }
@@ -2441,6 +2465,6 @@ fn two_of_two_and_signed_by_two_parties_without_sharing_secrets() {
     let (sa, pka, a) = party(17);
     let (sb, pkb, b) = party(19);
     let (_, _, c) = party(23); // not in the tree; nothing to simulate
-    let tree = SigmaBoolean::Cand(vec![a.clone(), b.clone()]);
+    let tree = SigmaBoolean::Cand(vec![a.clone(), b.clone()].into());
     two_party_flow(&tree, [&a, &b, &c], [sa, sb], [pka, pkb]);
 }

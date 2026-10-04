@@ -25,7 +25,7 @@
 //!
 //! Exception to that rule: this reader applies one defense-in-depth
 //! guard on the peer-controlled `links_qty` count before passing it to
-//! `Vec::with_capacity` — see [`POPOW_HEADER_MAX_INTERLINKS`]. The DoS
+//! `Vec::with_capacity` — see `POPOW_HEADER_MAX_INTERLINKS`. The DoS
 //! must be caught at the alloc site (no upstream layer sees per-field
 //! counts before bytes are interpreted); honest-input semantics are
 //! unchanged.

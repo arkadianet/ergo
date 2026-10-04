@@ -654,7 +654,7 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<bool
         );
     }
     ensure!(
-        fixture.manifest["scala_sigmastate"] == "6.0.2",
+        fixture.manifest["scala_sigmastate"] == "6.0.6",
         "{}: unpinned oracle",
         path.display()
     );
@@ -1209,6 +1209,7 @@ fn serializer_upcast_versions_match_jvm() -> Result<()> {
             version,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             body: root.clone(),
         };
@@ -1408,7 +1409,7 @@ fn avl_constructor_preconditions_match_jvm_probe() -> Result<()> {
     let fixture: Value = serde_json::from_slice(&read_fixture(&path)?)?;
     let probe = &fixture["constructor_probe"];
     ensure!(
-        probe["oracle"] == "sigma-state:6.0.2 / scrypto:3.0.0",
+        probe["oracle"] == "sigma-state:6.0.6 / scrypto:3.1.1",
         "pinned constructor"
     );
     let cases = probe["cases"].as_array().context("constructor probes")?;

@@ -12,7 +12,7 @@
 //!   `best_full_block_height`).
 //! - `Halted(reason)` returns the `503 indexer-halted` envelope; the
 //!   `<reason>` substitution is the kebab-case form of `IndexerHaltReason`.
-//! - `CaughtUp` lets the handler run; with no record in the (None) store
+//! - `CaughtUp` lets the handler run; with no record in an actual empty store
 //!   the handler emits the canonical `404 not-found` envelope.
 //! - Negative byIndex values short-circuit to 404 (i64 → u64 guard).
 //! - Malformed byId hex (wrong length, non-hex chars) maps to 404 — Scala's
@@ -119,11 +119,12 @@ async fn halt_reason_kebab_case_covers_every_variant() {
 
 #[tokio::test]
 async fn box_by_id_404_when_caught_up_and_record_absent() {
-    let app = build_app(|| {
-        let h = IndexerHandle::syncing(700_000);
-        h.set_status(IndexerStatus::CaughtUp);
-        h
-    });
+    let directory = tempfile::tempdir().unwrap();
+    let (store, _) =
+        ergo_indexer::IndexerStore::open(&directory.path().join("indexer.redb")).unwrap();
+    let handle = IndexerHandle::with_store(store, 700_000);
+    handle.set_status(IndexerStatus::CaughtUp);
+    let app = build_app(|| handle);
     let (status, body) = json_get(app, &format!("/blockchain/box/byId/{HEX_64_AA}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], 404);
@@ -133,11 +134,12 @@ async fn box_by_id_404_when_caught_up_and_record_absent() {
 
 #[tokio::test]
 async fn box_by_index_404_when_caught_up_and_record_absent() {
-    let app = build_app(|| {
-        let h = IndexerHandle::syncing(700_000);
-        h.set_status(IndexerStatus::CaughtUp);
-        h
-    });
+    let directory = tempfile::tempdir().unwrap();
+    let (store, _) =
+        ergo_indexer::IndexerStore::open(&directory.path().join("indexer.redb")).unwrap();
+    let handle = IndexerHandle::with_store(store, 700_000);
+    handle.set_status(IndexerStatus::CaughtUp);
+    let app = build_app(|| handle);
     let (status, body) = json_get(app, "/blockchain/box/byIndex/123456789").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["reason"], "not-found");

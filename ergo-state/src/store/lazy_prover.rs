@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::mpsc::{channel, Receiver, Sender};
 
 use bytes::Bytes;
 use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
@@ -12,33 +11,30 @@ use super::StateError;
 use crate::avl::node::{AvlNode, NodeId};
 use crate::avl::tree::AvlTree;
 
-struct Resolver {
+struct Resolver<'a> {
     ids: HashMap<[u8; 32], NodeId>,
-    requests: Sender<NodeId>,
-    replies: Receiver<Result<AvlNode, StateError>>,
+    read_node: &'a mut dyn FnMut(NodeId) -> Result<AvlNode, StateError>,
 }
 
-thread_local! {
-    static RESOLVER: RefCell<Option<Resolver>> = const { RefCell::new(None) };
-}
+// The upstream API accepts a function pointer, so scope a borrowed callback
+// to this synchronous proof. The callback owns no tree state and cannot
+// escape its scope or move to another thread. The helper restores the prior
+// callback on both normal return and unwinding, including nested proofs.
+scoped_tls_hkt::scoped_thread_local!(
+    static RESOLVER: for<'a> &'a (dyn Fn(&[u8; 32]) -> Result<Node, StateError> + 'a)
+);
 
 fn failure(what: &'static str) -> StateError {
     StateError::InternalInvariant { what }
 }
 
-impl Resolver {
+impl Resolver<'_> {
     fn load(&mut self, label: &[u8; 32]) -> Result<Node, StateError> {
-        let id = self
+        let id = *self
             .ids
             .get(label)
             .ok_or_else(|| failure("prover: unknown label"))?;
-        self.requests
-            .send(*id)
-            .map_err(|_| failure("prover: node reader stopped"))?;
-        let node = self
-            .replies
-            .recv()
-            .map_err(|_| failure("prover: node reply missing"))??;
+        let node = (self.read_node)(id)?;
         let loaded = match node {
             AvlNode::Leaf {
                 key,
@@ -78,7 +74,7 @@ impl Resolver {
         let mut loaded = loaded.borrow_mut();
         if loaded.label() != *label {
             return Err(failure(
-                "prover: arena node does not match authenticated label",
+                "prover: stored node does not match authenticated label",
             ));
         }
         loaded.reset();
@@ -87,19 +83,14 @@ impl Resolver {
 }
 
 fn resolve(label: &[u8; 32]) -> Node {
-    RESOLVER.with(|slot| {
-        slot.borrow_mut()
-            .as_mut()
-            .expect("scoped prover resolver")
-            .load(label)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error)))
-    })
+    RESOLVER
+        .with(|load| load(label).unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error))))
 }
 
 /// Generate a proof by expanding only nodes the upstream prover visits.
-/// The arena stays on its owning thread, including uncommitted pipeline
-/// writes; the scoped worker adapts the upstream function-pointer resolver
-/// without sharing its non-Send node graph or borrowing the arena unsafely.
+/// Both the arena and the non-Send prover graph stay on the calling thread,
+/// including uncommitted pipeline writes. A scoped callback adapts the
+/// upstream function-pointer resolver without per-node channel round trips.
 /// Every expanded node is authenticated against its parent label. Untouched
 /// subtrees remain hash stubs, bounding work by the operation paths rather
 /// than the entire UTXO set. No prover state survives this call.
@@ -113,48 +104,47 @@ pub(super) fn prove(
     let root_label = *tree.root_label().as_bytes();
     let height = tree.tree_height();
     let _session = tree.begin_read_session();
-    let (requests, requested) = channel();
-    let (replies, reply) = channel();
-    std::thread::scope(|scope| {
-        let worker = std::thread::Builder::new()
-            .name("utxo-proof".into())
-            .spawn_scoped(scope, move || {
-                RESOLVER.with(|slot| {
-                    *slot.borrow_mut() = Some(Resolver {
-                        ids: HashMap::from([(root_label, root_id)]),
-                        requests,
-                        replies: reply,
-                    });
-                });
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut oracle = AVLTree::new(resolve, 32, None);
-                    oracle.root = Some(std::rc::Rc::new(RefCell::new(resolve(&root_label))));
-                    oracle.height = height as usize;
-                    let mut prover = BatchAVLProver::new(oracle, true);
-                    apply_change_set_to_prover(&mut prover, to_lookup, to_remove, to_insert)
-                }));
-                RESOLVER.with(|slot| {
-                    slot.borrow_mut().take();
-                });
-                result.unwrap_or_else(|payload| {
-                    Err(payload
-                        .downcast::<StateError>()
-                        .map(|error| *error)
-                        .unwrap_or_else(|_| failure("prover: upstream prover panicked")))
-                })
-            })
-            .map_err(|_| failure("prover: failed to start worker"))?;
-        while let Ok(id) = requested.recv() {
-            let node =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tree.prover_node(id)))
-                    .unwrap_or_else(|_| Err(failure("prover: arena read panicked")));
-            if replies.send(node).is_err() {
-                break;
-            }
-        }
-        worker
-            .join()
-            .map_err(|_| failure("prover: worker panicked"))?
+    prove_from_reader(
+        root_id,
+        root_label,
+        height,
+        to_lookup,
+        to_remove,
+        to_insert,
+        |id| tree.prover_node(id),
+    )
+}
+
+/// The caller retains ownership of the read view. Both the live arena and a
+/// committed database snapshot use the same authenticated, scoped resolver.
+pub(super) fn prove_from_reader(
+    root_id: NodeId,
+    root_label: [u8; 32],
+    height: u8,
+    to_lookup: &[[u8; 32]],
+    to_remove: &DryRunRemoveMap,
+    to_insert: &DryRunInsertMap,
+    mut read_node: impl FnMut(NodeId) -> Result<AvlNode, StateError>,
+) -> Result<(ADDigest, Vec<u8>), StateError> {
+    let resolver = RefCell::new(Resolver {
+        ids: HashMap::from([(root_label, root_id)]),
+        read_node: &mut read_node,
+    });
+    let load = |label: &[u8; 32]| resolver.borrow_mut().load(label);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        RESOLVER.set(&load, || {
+            let mut oracle = AVLTree::new(resolve, 32, None);
+            oracle.root = Some(std::rc::Rc::new(RefCell::new(resolve(&root_label))));
+            oracle.height = height as usize;
+            let mut prover = BatchAVLProver::new(oracle, true);
+            apply_change_set_to_prover(&mut prover, to_lookup, to_remove, to_insert)
+        })
+    }));
+    result.unwrap_or_else(|payload| {
+        Err(payload
+            .downcast::<StateError>()
+            .map(|error| *error)
+            .unwrap_or_else(|_| failure("prover: upstream prover or node reader panicked")))
     })
 }
 
@@ -217,6 +207,30 @@ mod tests {
     }
 
     #[test]
+    fn lazy_proof_matches_full_hydration_for_a_large_mixed_batch() {
+        let mut tree = AvlTree::new();
+        for index in 0..8192 {
+            tree.insert(key(index), vec![42; 32]);
+        }
+        let parent = tree.root_digest();
+        let lookups: Vec<_> = (0..128)
+            .flat_map(|index| [key(index * 17), key(index * 17)])
+            .collect();
+        let removed = (2048..2304).map(|index| (key(index), ())).collect();
+        let inserted = (9000..9256)
+            .map(|index| (key(index), index.to_be_bytes().to_vec()))
+            .collect();
+        let actual = prove(&tree, &lookups, &removed, &inserted).unwrap();
+        assert_eq!(
+            actual,
+            apply_change_set_via_prover(&tree, &lookups, &removed, &inserted).unwrap(),
+        );
+        self_check_candidate_proof(&parent, &lookups, &removed, &inserted, &actual.1, &actual.0)
+            .unwrap();
+        assert_eq!(tree.root_digest(), parent);
+    }
+
+    #[test]
     fn lazy_proof_failure_does_not_poison_later_calls() {
         let mut tree = AvlTree::new();
         tree.insert(key(1), vec![1]);
@@ -243,9 +257,169 @@ mod tests {
     }
 
     #[test]
+    fn nested_proof_restores_the_outer_reader_after_success_and_failure() {
+        let mut outer = AvlTree::new();
+        let mut inner = AvlTree::new();
+        for index in 0..128 {
+            outer.insert(key(index), vec![index as u8]);
+            inner.insert(key(1000 + index), vec![42]);
+        }
+        let expected = apply_change_set_via_prover(
+            &outer,
+            &[key(42)],
+            &DryRunRemoveMap::new(),
+            &DryRunInsertMap::new(),
+        )
+        .unwrap();
+        let mut nested = false;
+        assert!(!RESOLVER.is_set());
+        let actual = prove_from_reader(
+            outer.root_id(),
+            *outer.root_label().as_bytes(),
+            outer.tree_height(),
+            &[key(42)],
+            &DryRunRemoveMap::new(),
+            &DryRunInsertMap::new(),
+            |id| {
+                if !nested {
+                    nested = true;
+                    assert!(prove(
+                        &inner,
+                        &[key(1042)],
+                        &DryRunRemoveMap::new(),
+                        &DryRunInsertMap::new(),
+                    )
+                    .is_ok());
+                    assert!(prove_from_reader(
+                        inner.root_id(),
+                        *inner.root_label().as_bytes(),
+                        inner.tree_height(),
+                        &[],
+                        &DryRunRemoveMap::new(),
+                        &DryRunInsertMap::new(),
+                        |_| panic!("injected nested node-reader panic"),
+                    )
+                    .is_err());
+                    assert!(RESOLVER.is_set());
+                }
+                outer.prover_node(id)
+            },
+        )
+        .unwrap();
+        assert!(nested);
+        assert_eq!(actual, expected);
+        assert!(!RESOLVER.is_set());
+    }
+
+    #[test]
+    fn concurrent_proofs_have_independent_readers() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let workers: Vec<_> = (0..4)
+            .map(|worker| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut tree = AvlTree::new();
+                    for index in 0..256 {
+                        tree.insert(key(index), vec![worker; 32]);
+                    }
+                    barrier.wait();
+                    for index in 0..32 {
+                        let lookup = [key(index)];
+                        let removed = DryRunRemoveMap::from([(key(64 + index), ())]);
+                        let inserted = DryRunInsertMap::from([(key(1000 + index), vec![worker])]);
+                        assert_eq!(
+                            prove(&tree, &lookup, &removed, &inserted).unwrap(),
+                            apply_change_set_via_prover(&tree, &lookup, &removed, &inserted)
+                                .unwrap(),
+                        );
+                        assert!(!RESOLVER.is_set());
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
     fn lazy_proof_rejects_missing_root() {
         let tree = AvlTree::new_empty_with_label(42, 0, Digest32::from_bytes([0; 32]));
         assert!(prove(&tree, &[], &DryRunRemoveMap::new(), &DryRunInsertMap::new()).is_err());
+    }
+
+    #[test]
+    fn unvisited_children_are_not_read() {
+        let mut tree = AvlTree::new();
+        for index in 0..128 {
+            tree.insert(key(index), vec![index as u8]);
+        }
+        let root_id = tree.root_id();
+        let root = tree.prover_node(root_id).unwrap();
+        let expected = apply_change_set_via_prover(
+            &tree,
+            &[],
+            &DryRunRemoveMap::new(),
+            &DryRunInsertMap::new(),
+        )
+        .unwrap();
+        let mut reads = 0;
+        let actual = prove_from_reader(
+            root_id,
+            *tree.root_label().as_bytes(),
+            tree.tree_height(),
+            &[],
+            &DryRunRemoveMap::new(),
+            &DryRunInsertMap::new(),
+            |id| {
+                reads += 1;
+                if id == root_id {
+                    Ok(root.clone())
+                } else {
+                    Err(failure("injected unused child read failure"))
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(reads, 1, "only the requested root is read");
+    }
+
+    #[test]
+    fn loaded_leaf_is_authenticated_before_use() {
+        let mut tree = AvlTree::new();
+        for index in 0..128 {
+            tree.insert(key(index), vec![index as u8]);
+        }
+        let target = key(42);
+        let result = prove_from_reader(
+            tree.root_id(),
+            *tree.root_label().as_bytes(),
+            tree.tree_height(),
+            &[target],
+            &DryRunRemoveMap::new(),
+            &DryRunInsertMap::new(),
+            |id| {
+                let mut node = tree.prover_node(id)?;
+                if let AvlNode::Leaf { key, value, .. } = &mut node {
+                    if *key == target {
+                        value.push(0xff);
+                    }
+                }
+                Ok(node)
+            },
+        );
+        assert!(
+            result.is_err(),
+            "loaded data must not bypass label verification"
+        );
+        assert!(prove(
+            &tree,
+            &[target],
+            &DryRunRemoveMap::new(),
+            &DryRunInsertMap::new()
+        )
+        .is_ok());
     }
 
     #[test]

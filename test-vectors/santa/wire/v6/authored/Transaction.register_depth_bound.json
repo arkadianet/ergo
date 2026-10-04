@@ -1,0 +1,30 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.register_depth_bound",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "register-coll109-accept#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-parse-depth",
+      "description" : "Output R4 = Coll^109[Byte] (each outer collection holding one element, the innermost empty). The register is read with getValue (ErgoBoxCandidate.scala:231): one value level plus one per collection level, 110 = MaxTreeDepth. Round-trip identity.",
+      "bytes_hex" : "0155e925cba0a46aaee2ccbf49d5fa861ec5978b4810d3506e996e1d4e70ee0d9800000000018094ebdc030008d30100010c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c1a01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010100",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "register-coll110-reject#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-parse-depth",
+      "description" : "Output R4 = Coll^110[Byte]: 111 levels, and the JVM throws DeserializeCallDepthExceeded at parse. An impl without the counter round-trips it: the over-accept.",
+      "bytes_hex" : "0155e925cba0a46aaee2ccbf49d5fa861ec5978b4810d3506e996e1d4e70ee0d9800000000018094ebdc030008d30100010c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c1a0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010100",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

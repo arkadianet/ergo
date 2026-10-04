@@ -19,6 +19,7 @@
 //! - POST and GET twins emit byte-identical envelopes for the same
 //!   `(address, offset, limit)` triple.
 
+use ergo_indexer_types::IndexerReadError;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -342,6 +343,7 @@ fn p2pk_tree(pubkey: [u8; 33]) -> (ErgoTree, Vec<u8>) {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: Vec::new(),
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,
@@ -498,102 +500,142 @@ impl IndexerQuery for StubIndexer {
         self.status.clone()
     }
 
-    fn box_by_id(&self, _: &BoxId) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_id(&self, _: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn box_by_global_index(&self, _: u64) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_global_index(&self, _: u64) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn boxes_by_global_range(&self, _: u64, _: u64) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-
-    fn tx_by_id(&self, _: &TxId) -> Option<IndexedTxDto> {
-        None
-    }
-    fn tx_by_global_index(&self, _: u64) -> Option<IndexedTxDto> {
-        None
-    }
-    fn txs_by_global_range(&self, _: u64, _: u64) -> Vec<IndexedTxDto> {
-        Vec::new()
+    fn boxes_by_global_range(
+        &self,
+        _: u64,
+        _: u64,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn address_balance(&self, _: &TreeHash) -> Option<BalanceDto> {
-        None
+    fn tx_by_id(&self, _: &TxId) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn address_txs_paged(&self, tree_hash: &TreeHash, p: Page, _dir: SortDir) -> Vec<IndexedTxDto> {
-        match &self.addr_txs {
-            Some((h, txs, _)) if h == tree_hash => {
-                let lo = p.offset as usize;
-                let hi = lo.saturating_add(p.limit as usize).min(txs.len());
-                if lo >= txs.len() {
-                    Vec::new()
-                } else {
-                    txs[lo..hi].to_vec()
+    fn tx_by_global_index(&self, _: u64) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
+    }
+    fn txs_by_global_range(&self, _: u64, _: u64) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+
+    fn address_balance(&self, _: &TreeHash) -> Result<Option<BalanceDto>, IndexerReadError> {
+        Ok(None)
+    }
+    fn address_txs_paged(
+        &self,
+        tree_hash: &TreeHash,
+        p: Page,
+        _dir: SortDir,
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok({
+            match &self.addr_txs {
+                Some((h, txs, _)) if h == tree_hash => {
+                    let lo = p.offset as usize;
+                    let hi = lo.saturating_add(p.limit as usize).min(txs.len());
+                    if lo >= txs.len() {
+                        Vec::new()
+                    } else {
+                        txs[lo..hi].to_vec()
+                    }
                 }
+                _ => Vec::new(),
             }
-            _ => Vec::new(),
-        }
+        })
     }
     fn address_boxes_paged(
         &self,
         tree_hash: &TreeHash,
         p: Page,
         _dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        match &self.addr_boxes {
-            Some((h, boxes, _)) if h == tree_hash => {
-                let lo = p.offset as usize;
-                let hi = lo.saturating_add(p.limit as usize).min(boxes.len());
-                if lo >= boxes.len() {
-                    Vec::new()
-                } else {
-                    boxes[lo..hi].to_vec()
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok({
+            match &self.addr_boxes {
+                Some((h, boxes, _)) if h == tree_hash => {
+                    let lo = p.offset as usize;
+                    let hi = lo.saturating_add(p.limit as usize).min(boxes.len());
+                    if lo >= boxes.len() {
+                        Vec::new()
+                    } else {
+                        boxes[lo..hi].to_vec()
+                    }
                 }
+                _ => Vec::new(),
             }
-            _ => Vec::new(),
-        }
+        })
     }
-    fn address_unspent_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn address_unspent_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn address_total_txs(&self, tree_hash: &TreeHash) -> u64 {
-        match &self.addr_txs {
-            Some((h, _, total)) if h == tree_hash => *total,
-            _ => 0,
-        }
+    fn address_total_txs(&self, tree_hash: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok({
+            match &self.addr_txs {
+                Some((h, _, total)) if h == tree_hash => *total,
+                _ => 0,
+            }
+        })
     }
-    fn address_total_boxes(&self, tree_hash: &TreeHash) -> u64 {
-        match &self.addr_boxes {
-            Some((h, _, total)) if h == tree_hash => *total,
-            _ => 0,
-        }
-    }
-
-    fn template_boxes_paged(&self, _: &TemplateHash, _: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-    fn template_unspent_paged(&self, _: &TemplateHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-    fn template_total_boxes(&self, _: &TemplateHash) -> u64 {
-        0
+    fn address_total_boxes(&self, tree_hash: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok({
+            match &self.addr_boxes {
+                Some((h, _, total)) if h == tree_hash => *total,
+                _ => 0,
+            }
+        })
     }
 
-    fn token_by_id(&self, _: &TokenId) -> Option<IndexedTokenDto> {
-        None
+    fn template_boxes_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn tokens_by_ids(&self, _: &[TokenId]) -> Vec<IndexedTokenDto> {
-        Vec::new()
+    fn template_unspent_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn token_boxes_paged(&self, _: &TokenId, _: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn template_total_boxes(&self, _: &TemplateHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
-    fn token_unspent_paged(&self, _: &TokenId, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
+
+    fn token_by_id(&self, _: &TokenId) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn token_total_boxes(&self, _: &TokenId) -> u64 {
-        0
+    fn tokens_by_ids(&self, _: &[TokenId]) -> Result<Vec<IndexedTokenDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn token_boxes_paged(
+        &self,
+        _: &TokenId,
+        _: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn token_unspent_paged(
+        &self,
+        _: &TokenId,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn token_total_boxes(&self, _: &TokenId) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 }
 

@@ -32,3 +32,4 @@ pub use write::{
 };
 
 pub(crate) use parse::parse_body_with_constants;
+pub(crate) use types::{check_array_length, MAX_EXPR_DEPTH};

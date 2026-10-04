@@ -413,6 +413,7 @@ mod tests {
             version: 0,
             has_size: false,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: Vec::new(),
             body: Expr::Const { tpe, val },
         }
@@ -423,6 +424,7 @@ mod tests {
             version: 0,
             has_size: false,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants,
             body: Expr::Op(IrNode {
                 opcode: 0x73,
@@ -490,6 +492,7 @@ mod tests {
             version: 0,
             has_size: false,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: Vec::new(),
             body: Expr::Op(IrNode {
                 opcode: 0xFF, // arbitrary non-placeholder opcode
@@ -586,6 +589,7 @@ mod tests {
             version: 0,
             has_size: false,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants: vec![
                 (SigmaType::SBoolean, SigmaValue::Boolean(true)),
                 (SigmaType::SBoolean, SigmaValue::Boolean(true)),
@@ -694,6 +698,7 @@ mod tests {
             version: 0,
             has_size: false,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             body: Expr::Op(IrNode {
                 opcode: 0x95, // If
@@ -858,6 +863,7 @@ mod pre_reduction_check_tests {
             version: 0,
             has_size: false,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: Vec::new(),
             body: Expr::Const {
                 tpe: SigmaType::SSigmaProp,
@@ -908,6 +914,7 @@ mod pre_reduction_check_tests {
             version: 0,
             has_size: false,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants: vec![
                 (SigmaType::SSigmaProp, p2pk_trivial()),
                 (

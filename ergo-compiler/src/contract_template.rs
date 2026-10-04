@@ -3,7 +3,7 @@
 //! (`sc/.../sigma/compiler/SigmaTemplateCompiler.scala:22-53`, sigma-state
 //! 6.0.2). Drives [`crate::contract_parse::parse_contract`] → typer (with the
 //! named-param TYPE env) → the SHARED graph-building pipeline
-//! ([`crate::tree::graph_build`]) with one `ConstantPlaceholder(index, tpe)`
+//! (`crate::tree::graph_build`) with one `ConstantPlaceholder(index, tpe)`
 //! seeded per param → a [`ContractTemplate`] metadata record.
 //!
 //! ## Placeholder-index assignment — map iteration order
@@ -19,7 +19,7 @@
 //! declaration order. For **≥5** params the `.toMap` upgrades to a
 //! JVM `HashMap` whose iteration order is `improve(String.hashCode)` bucket
 //! order, NOT declaration order — reproduced here via
-//! [`crate::param_order::iteration_order_2_12`] (Scala 2.12 `HashTrieMap` walk,
+//! `crate::param_order::iteration_order_2_12` (Scala 2.12 `HashTrieMap` walk,
 //! the version the `ct` oracle and ergo-appkit pin).
 //!
 //! CRUCIAL: `constTypes`/`constValues`/`parameters` (and each
@@ -47,7 +47,7 @@ use crate::typed::{node_tpe, ConstPayload};
 /// Scala's `Map1..Map4` preserve insertion order; `.toMap` upgrades to a
 /// hash map ABOVE this many entries. At or below it, placeholder
 /// index assignment is declaration order; above it, Scala 2.12 `HashTrieMap`
-/// iteration order ([`crate::param_order::iteration_order_2_12`]).
+/// iteration order (`crate::param_order::iteration_order_2_12`).
 pub const MAX_DECLARATION_ORDER_PARAMS: usize = 4;
 
 /// A contract-template parameter record (`org.ergoplatform.sdk.Parameter`,
@@ -64,6 +64,13 @@ pub struct Parameter {
 /// bytes (`ValueSerializer.serialize` of the graph-built body, with inline
 /// `ConstantPlaceholder(index)` nodes for params). `tree_version` is always
 /// `None` here (`ContractTemplate.apply`, ContractTemplate.scala:204-211).
+///
+/// Manual construction is trusted: parameter indices must address `const_types`,
+/// defaults must have the same count/types as that table, and expression
+/// placeholders/child types must agree with it. All types/values/expressions must
+/// satisfy the wire writers' bounds. Serialization does not validate these
+/// relationships; invalid manual fields can panic or emit inconsistent bytes.
+/// Prefer [`compile_contract`] for validated source input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContractTemplate {
     pub name: String,
@@ -378,6 +385,7 @@ impl ContractTemplate {
             version: tree_version,
             has_size: tree_version > 0,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants,
             body: self.expression_tree.clone(),
         })
@@ -387,6 +395,11 @@ impl ContractTemplate {
     /// (`ValueSerializer.serialize(expressionTree, w)`), the natural byte-exact
     /// oracle target (ContractTemplate JSON `expressionTree` field / binary
     /// serializer's inner block).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a manually constructed expression violates the wire writer's
+    /// invariants or bounds. See [`ContractTemplate`] for construction requirements.
     pub fn expression_tree_bytes(&self) -> Vec<u8> {
         let mut w = VlqWriter::new();
         // The graph-built root already holds inline constants + placeholders; the
@@ -398,6 +411,12 @@ impl ContractTemplate {
 
     /// Full `ContractTemplate.serializer` bytes (ContractTemplate.scala:227-260),
     /// the canonical wire form used for byte-exact oracle parity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if manually constructed types, default values or the expression
+    /// cannot serialize. This method trusts the table/parameter relationships
+    /// documented on [`ContractTemplate`]; it is not a validating constructor.
     pub fn serialize(&self) -> Vec<u8> {
         let mut w = VlqWriter::new();
         // putOption(treeVersion)(putUByte) — always None here → 0x00.

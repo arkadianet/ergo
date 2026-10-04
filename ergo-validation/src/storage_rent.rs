@@ -14,6 +14,9 @@
 //!   the helper indirectly through `ChainParamsView::compute_storage_fee`
 //!   so `ergo-api` does not take a direct `ergo-validation` dep.
 
+/// Scala 6.0.7 rule 125 activation. The same height applies on every network.
+pub const DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT: u32 = 1_885_000;
+
 /// Storage fee for a box of `box_bytes_len` bytes at `storage_fee_factor`
 /// nanoErg per byte per storage period. Returns the consensus-canonical
 /// i32 result, including the wrap-on-overflow regime that mainnet

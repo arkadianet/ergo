@@ -5,16 +5,16 @@
 //!
 //! Pure functions, no I/O.
 //!
-//! - [`update_fork`] — the soft-fork voting state machine (`update_fork`
+//! - `update_fork` — the soft-fork voting state machine (`update_fork`
 //!   itself kept as one function: its six triggers all key on a shared
 //!   pre-mutation snapshot, and the inline comments cross-reference each
 //!   other to explain why).
-//! - [`update_params`] — non-fork parameter updates from votes, plus the
+//! - `update_params` — non-fork parameter updates from votes, plus the
 //!   shared read/write-by-id and step/min/max tables `descriptors` also
 //!   reads from.
-//! - [`descriptors`] — `ParamDescriptor` / `votable_param_*`, the
+//! - `descriptors` — `ParamDescriptor` / `votable_param_*`, the
 //!   operator-facing view of the votable table.
-//! - [`select_votes`] — `select_candidate_votes`, the miner-facing
+//! - `select_votes` — `select_candidate_votes`, the miner-facing
 //!   candidate-header vote selector.
 
 mod descriptors;

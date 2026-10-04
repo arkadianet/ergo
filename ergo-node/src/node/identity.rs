@@ -39,11 +39,9 @@ pub enum BootstrapKind {
 /// from the three protocol-visible dimensions: `state_type`,
 /// `verify_transactions`, and `blocks_to_keep`.
 ///
-/// Live arms today: Mode 1 (archive), Mode 2 (utxo-bootstrapped via
-/// the `utxo_bootstrap` short-circuit), Mode 3 (pruned, `n > 0` after
-/// the rollback-window floor check), and Mode 6 (canonical
-/// headers-only, `(Digest, false, 0)`). Mode 5 (Digest Verifier
-/// without headers-only) is the remaining deferred arm.
+/// The classifier names canonical Modes 1–6. Runtime support additionally
+/// checks bootstrap intent, subsystem compatibility and the pruning floor;
+/// a mode label alone does not certify historical reference parity.
 #[cfg(test)]
 pub(crate) fn mode_label_for(config: &NodeConfig) -> String {
     mode_label_for_inputs(&IdentityInputs::from_config(config), 1, BootstrapKind::None)
@@ -67,6 +65,7 @@ pub struct IdentityInputs {
     pub utxo_bootstrap: bool,
     pub nipopow_bootstrap: bool,
     pub mining_enabled: bool,
+    pub mempool_enabled: bool,
     pub extra_index_enabled: bool,
     pub declared_addr: Option<std::net::SocketAddr>,
     pub bind_addr: Option<std::net::SocketAddr>,
@@ -82,6 +81,7 @@ impl IdentityInputs {
             utxo_bootstrap: config.utxo_bootstrap,
             nipopow_bootstrap: config.nipopow_bootstrap,
             mining_enabled: config.mining_config.enabled,
+            mempool_enabled: config.mempool_config.enabled,
             extra_index_enabled: config.indexer_config.enabled,
             declared_addr: config.declared_addr,
             bind_addr: config.bind_addr,
@@ -119,9 +119,8 @@ pub enum NodeMode {
         utxo: bool,
         nipopow: bool,
     },
-    /// Mode 5 — Digest Verifier (deferred): digest + verify_tx +
-    /// keep = -1. Reachable through classification but rejected at
-    /// the runtime activation gate.
+    /// Mode 5 — Digest Verifier: digest + verify_tx + keep = -1.
+    /// Runtime support also requires both bootstrap flags to be disabled.
     DigestVerifier,
     /// Mode 6 — canonical headers-only: digest + !verify_tx +
     /// keep = 0 + !utxo_bootstrap. NiPoPoW may augment the header
@@ -146,10 +145,10 @@ pub enum NodeMode {
 /// `PartialHeaderSync` is classified but NOT a supported resume
 /// state today: the reducer's constructor at
 /// `ergo-sync/src/popow_bootstrap.rs` is contract-fresh-only, and
-/// `apply_popow_proof` returns `ApplyPopowProofWrongMode` on a
-/// non-fresh store. The boot path refuses to start on this row
+/// `apply_popow_proof` returns `ApplyPopowProofNotFresh` on a Dense
+/// store with an existing header tip. The boot path refuses to start on this row
 /// rather than arming a reducer whose proof apply would later
-/// trigger the sync-tick's terminal mark_applied. Lifting that
+/// abandon bootstrap because the store is not fresh. Lifting that
 /// restriction needs new reducer + apply-path machinery and is
 /// out of scope for the initial Mode 4 envelope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,11 +294,8 @@ pub fn classify_node_mode(inputs: &IdentityInputs) -> NodeMode {
             };
         }
         if inputs.verify_transactions && inputs.blocks_to_keep == -1 {
-            // Mode 5 (digest verifier) is deferred; the runtime
-            // gate at `validate_runtime_mode_support` rejects boot
-            // attempts. Classification still names the mode so the
-            // operator's diagnostic surface knows what they
-            // intended.
+            // Runtime support separately checks bootstrap flags and
+            // subsystems before admitting the canonical digest verifier.
             return NodeMode::DigestVerifier;
         }
         return NodeMode::Invalid {
@@ -484,6 +480,7 @@ pub(crate) fn build_api_identity_from_inputs(
         utxo_bootstrap: utxo_bootstrap_effective,
         nipopow_bootstrap: nipopow_bootstrap_effective,
         mining: inputs.mining_enabled,
+        mempool_enabled: inputs.mempool_enabled,
         extra_index_enabled: inputs.extra_index_enabled,
         declared_addr: inputs.declared_addr.map(|a| a.to_string()),
         bind_addr: inputs.bind_addr.map(|a| a.to_string()),

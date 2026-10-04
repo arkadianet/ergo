@@ -221,6 +221,59 @@ pub(super) async fn events_handler(
     Json(feed).into_response()
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct ActivityQuery {
+    session: Option<String>,
+    #[serde(default)]
+    since: u64,
+    limit: Option<usize>,
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/diagnostics/activity", tag = "node",
+    security(("ApiKeyAuth" = [])),
+    params(
+        ("session" = Option<String>, Query, description = "Session ID from the previous page; required with a nonzero since cursor"),
+        ("since" = Option<u64>, Query, description = "Exclusive sequence cursor (decimal); default 0"),
+        ("limit" = Option<usize>, Query, description = "Records per page, 1–500; default 256"),
+    ),
+    responses(
+        (status = 200, description = "Bounded session log history; oldest first. Follow nextSeq while hasMore, and surface gap/reset/droppedTotal. Not the durable file archive.", body = crate::types::ApiActivityPage),
+        (status = 400, description = "Invalid cursor or limit"),
+        (status = 403, description = "Operator API key required"),
+        (status = 503, description = "Capture unavailable or temporarily busy"),
+    ),
+)]
+pub(super) async fn activity_handler(
+    State(read): State<Arc<dyn NodeReadState>>,
+    Query(query): Query<ActivityQuery>,
+) -> Response {
+    let limit = query.limit.unwrap_or(256);
+    let response = if !(1..=500).contains(&limit)
+        || query
+            .session
+            .as_ref()
+            .is_some_and(|s| s.is_empty() || s.len() > 128)
+        || (query.since > 0 && query.session.is_none())
+    {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"reason": "invalid-activity-cursor", "detail": "Use a session with since, and a limit from 1 to 500."}))).into_response()
+    } else if let Some(page) = read.activity(query.session.as_deref(), query.since, limit) {
+        Json(page).into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"reason": "activity-unavailable"})),
+        )
+            .into_response()
+    };
+    let mut response = response;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/info",
@@ -514,7 +567,7 @@ ergo_solutions_invalid_pow_total {solutions_invalid_pow}
 # HELP ergo_solutions_stale_parent_total Solutions rejected as stale parent since boot.
 # TYPE ergo_solutions_stale_parent_total counter
 ergo_solutions_stale_parent_total {solutions_stale_parent}
-# HELP ergo_rss_kb Resident set size, KiB (Linux; 0 elsewhere).
+# HELP ergo_rss_kb Resident memory, KiB (working set on Windows; 0 if unavailable).
 # TYPE ergo_rss_kb gauge
 ergo_rss_kb {rss_kb}
 # HELP ergo_state_db_bytes On-disk size of state.redb (0 when absent).

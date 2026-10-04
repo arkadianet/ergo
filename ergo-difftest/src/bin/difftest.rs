@@ -9,9 +9,9 @@
 //!   difftest --repro 00938503 --surface ergo_tree --check-canonical 00938503
 //!                                             # hermetic canonical-bytes gate (known-bug re-injection)
 
-use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
+use std::{fs, io};
 
 use ergo_difftest::{from_hex, run_campaign, run_input, Outcome};
 
@@ -51,6 +51,7 @@ fn main() -> ExitCode {
     let mut minimize_mode = false;
     let mut regressions_dir: Option<String> = None;
     let mut min_coverage: Option<f64> = None;
+    let mut selftest_mode = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -98,18 +99,7 @@ fn main() -> ExitCode {
                     std::process::exit(2);
                 }));
             }
-            "--selftest" => {
-                return match ergo_difftest::selftest() {
-                    Ok(()) => {
-                        println!("selftest: ok");
-                        ExitCode::SUCCESS
-                    }
-                    Err(e) => {
-                        eprintln!("selftest: FAILED: {e}");
-                        ExitCode::FAILURE
-                    }
-                };
-            }
+            "--selftest" => selftest_mode = true,
             "-h" | "--help" => {
                 print_help();
                 return ExitCode::SUCCESS;
@@ -121,6 +111,71 @@ fn main() -> ExitCode {
             }
         }
         i += 1;
+    }
+
+    if selftest_mode {
+        if args.len() != 1 {
+            eprintln!("--selftest must be used alone");
+            return ExitCode::from(2);
+        }
+        return match ergo_difftest::selftest() {
+            Ok(()) => {
+                println!("selftest: ok");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("selftest: FAILED: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if let Some(threshold) = min_coverage {
+        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            eprintln!("--min-coverage: expected a finite float in 0.0..=1.0");
+            return ExitCode::from(2);
+        }
+        if !structured_mode || oracle_mode || repro.is_some() || methodcall_mode {
+            eprintln!("--min-coverage requires a hermetic --structured campaign");
+            return ExitCode::from(2);
+        }
+    }
+    if iters == 0 && repro.is_none() && !methodcall_mode {
+        eprintln!("--iters must be positive for a campaign");
+        return ExitCode::from(2);
+    }
+    if minimize_mode && !oracle_mode {
+        eprintln!("--minimize requires --oracle");
+        return ExitCode::from(2);
+    }
+    if oracle_script.is_some() && !oracle_mode && !methodcall_mode {
+        eprintln!("--oracle-script requires --oracle or --methodcall");
+        return ExitCode::from(2);
+    }
+    // Every oracle campaign writes its execution journal there; a single
+    // oracle repro writes one only when it files a minimized record.
+    if regressions_dir.is_some() && (!oracle_mode || (repro.is_some() && !minimize_mode)) {
+        eprintln!("--regressions-dir requires an --oracle campaign or --oracle --repro --minimize");
+        return ExitCode::from(2);
+    }
+    if methodcall_mode && (oracle_mode || structured_mode || repro.is_some() || minimize_mode) {
+        eprintln!("--methodcall cannot be combined with other execution modes");
+        return ExitCode::from(2);
+    }
+    if corpus_dir.is_some() && (structured_mode || repro.is_some() || methodcall_mode) {
+        eprintln!("--corpus is only used by byte-mutation campaigns");
+        return ExitCode::from(2);
+    }
+    if oracle_mode && structured_mode && repro.is_none() {
+        let unsupported: Vec<_> = ergo_difftest::oracle::oracle_surfaces()
+            .into_iter()
+            .filter(|spec| only.as_deref().is_none_or(|name| spec.name == name))
+            .filter(|spec| structured_oracle_surface(spec.name).is_none())
+            .map(|spec| spec.name)
+            .collect();
+        if !unsupported.is_empty() {
+            eprintln!("--structured --oracle: no matching framed generator for {}; select a supported --surface", unsupported.join(", "));
+            return ExitCode::from(2);
+        }
     }
 
     // Reject a misspelled/unsupported --surface so a typo can't silently run zero
@@ -179,7 +234,8 @@ fn main() -> ExitCode {
         // --check-canonical <expected_hex>: hermetic known-bug re-injection gate.
         // Decodes the input as an ErgoTree, re-encodes it, and compares the result
         // to the pinned expected canonical bytes.  Exit 0 = bytes match (no bug);
-        // exit 1 = mismatch (bug detected).  Hermetic: no JVM required.
+        // exit 1 = mismatch or re-encode failure (bug detected).  Hermetic: no
+        // JVM required.
         if let Some(ref expected_hex) = check_canonical {
             return run_check_canonical(&bytes, expected_hex);
         }
@@ -224,7 +280,13 @@ fn main() -> ExitCode {
     }
 
     let corpus = match &corpus_dir {
-        Some(dir) => load_corpus(dir),
+        Some(dir) => match load_corpus(dir) {
+            Ok(corpus) => corpus,
+            Err(error) => {
+                eprintln!("{ORACLE_ERROR_MARKER} --corpus {dir:?}: {error}");
+                return exit_harness_error();
+            }
+        },
         None => Vec::new(),
     };
 
@@ -306,25 +368,31 @@ fn run_check_canonical(input: &[u8], expected_hex: &str) -> ExitCode {
     use ergo_primitives::writer::VlqWriter;
     use ergo_ser::ergo_tree::{read_ergo_tree, write_ergo_tree};
 
+    let Some(expected) = from_hex(expected_hex) else {
+        eprintln!("--check-canonical: expected valid hex");
+        return ExitCode::from(2);
+    };
+    let expected_hex = ergo_difftest::to_hex(&expected);
     let mut r = VlqReader::new(input);
     let tree = match read_ergo_tree(&mut r) {
         Ok(t) => t,
         Err(e) => {
-            println!(
-                "[CANONICAL-GATE] SKIP: input rejected by read_ergo_tree — cannot check canonical form ({e:?})"
-            );
-            // A rejection on clean HEAD means the trigger_hex is bad.
-            // We exit 0 so the gate (which expects exit 0 on clean HEAD)
-            // isn't tripped by an unusable trigger, but the SKIP makes it
-            // visible.  The re-injection path will also fail at this step
-            // if the bugged code also rejects — meaning the class is wrong.
-            return ExitCode::SUCCESS;
+            eprintln!("[CANONICAL-GATE] HARNESS ERROR: input rejected; canonical form was not checked ({e:?})");
+            return exit_harness_error();
         }
     };
 
+    if r.remaining() != 0 {
+        eprintln!("[CANONICAL-GATE] HARNESS ERROR: trailing input bytes");
+        return exit_harness_error();
+    }
+    // The whole input decoded, so the comparison is complete: a writer that
+    // cannot re-encode the tree fails to reproduce the expected bytes.
     let mut w = VlqWriter::new();
     if let Err(e) = write_ergo_tree(&mut w, &tree) {
-        eprintln!("[CANONICAL-GATE] write_ergo_tree failed: {e:?}");
+        println!(
+            "[CANONICAL-GATE] FAIL: re-encode failed after a complete decode: {e:?}\n  expected: {expected_hex}"
+        );
         return ExitCode::FAILURE;
     }
     let actual_hex = ergo_difftest::to_hex(&w.result());
@@ -433,7 +501,8 @@ fn run_methodcall(script: Option<String>) -> ExitCode {
 /// Hermetic STRUCTURED campaign: run [`ergo_difftest::run_structured_campaign`]
 /// and print the no-panic / fixed-point stats PLUS the per-surface adversarial-
 /// feature coverage union and ratio. The coverage report is the point of this
-/// mode — it proves each surface's generator reaches every declared bug surface.
+/// mode measures the declared constructor labels reached; it does not prove
+/// execution coverage or known-bug rediscovery.
 ///
 /// If `min_coverage` is `Some(threshold)`, the binary exits non-zero when the
 /// overall union coverage ratio (touched / declared across all surfaces) is
@@ -532,6 +601,28 @@ fn run_structured(
     ExitCode::SUCCESS
 }
 
+/// One observed differential class, retaining its first concrete occurrence.
+struct CampaignClass {
+    count: u64,
+    first_iter: u64,
+    divergence: ergo_difftest::oracle::Divergence,
+}
+
+fn observe_divergence(
+    classes: &mut std::collections::HashMap<String, CampaignClass>,
+    divergence: ergo_difftest::oracle::Divergence,
+    iter: u64,
+) {
+    classes
+        .entry(divergence_signature(&divergence))
+        .and_modify(|class| class.count += 1)
+        .or_insert(CampaignClass {
+            count: 1,
+            first_iter: iter,
+            divergence,
+        });
+}
+
 /// Differential campaign against the JVM reference oracle. Without `only` it
 /// diffs every oracle surface per input; with `only` it restricts to that one
 /// (already validated against the oracle surface set in `main`). When
@@ -573,9 +664,9 @@ fn run_oracle(
         .filter(|spec| only.is_none_or(|o| spec.name == o))
         .collect();
     let mut rng = Rng::new(seed);
-    // Dedup by root-cause signature so a soak reports unique CLASSES (with a
-    // count + one representative), not thousands of instances of the same bug.
-    let mut classes: std::collections::HashMap<String, (u64, ergo_difftest::oracle::Divergence)> =
+    // Group by observable signature, not a proven common root cause. Retain
+    // the first concrete generating iteration with its representative input.
+    let mut classes: std::collections::HashMap<String, CampaignClass> =
         std::collections::HashMap::new();
     let mut total = 0u64;
     let mut checked = 0u64;
@@ -598,10 +689,7 @@ fn run_oracle(
                 Ok(None) => {}
                 Ok(Some(d)) => {
                     total += 1;
-                    classes
-                        .entry(divergence_signature(&d))
-                        .and_modify(|e| e.0 += 1)
-                        .or_insert((1, d));
+                    observe_divergence(&mut classes, d, iter);
                 }
                 Err(e) => {
                     // A dead pipe is a HARNESS failure, not a clean campaign.
@@ -623,6 +711,36 @@ fn run_oracle(
         }
     }
 
+    let execution = match ergo_difftest::execution_metadata::ExecutionMetadata::capture(
+        &oracle,
+        regressions_dir,
+        serde_json::json!({
+            "seed": seed, "iters": iters, "surfaces": surfaces.iter().map(|spec| spec.name).collect::<Vec<_>>(),
+            "generation_mode": if structured { "structured-gen" } else { "oracle-mutation" },
+            "ordered_corpus_sha256": corpus.iter().map(|bytes| {
+                use sha2::Digest;
+                format!("{:x}", sha2::Sha256::digest(bytes))
+            }).collect::<Vec<_>>(),
+        }),
+    ) {
+        Ok(execution) => {
+            for spec in &surfaces {
+                if !execution.complete_for(spec.name) {
+                    eprintln!(
+                        "{ORACLE_ERROR_MARKER} actual JVM/JAR authority unavailable for {}",
+                        spec.name
+                    );
+                    harness_error = true;
+                }
+            }
+            Some(execution)
+        }
+        Err(error) => {
+            eprintln!("{ORACLE_ERROR_MARKER} execution journal failed: {error}");
+            harness_error = true;
+            None
+        }
+    };
     let unique = classes.len();
     println!(
         "oracle: checks={checked} surfaces={} unique_classes={unique} total_divergences={total}",
@@ -643,8 +761,15 @@ fn run_oracle(
         return ExitCode::SUCCESS;
     }
     let mut sorted: Vec<_> = classes.into_values().collect();
-    sorted.sort_by_key(|(count, _)| std::cmp::Reverse(*count));
-    for (count, d) in &sorted {
+    sorted.sort_by_key(|class| {
+        (
+            std::cmp::Reverse(class.count),
+            divergence_signature(&class.divergence),
+        )
+    });
+    for class in &sorted {
+        let count = class.count;
+        let d = &class.divergence;
         println!(
             "  [{:?}] {} (x{count})\n    rust={:?}\n    jvm ={:?}\n    repro: difftest --repro {}",
             d.kind, d.surface, d.rust, d.jvm, d.input_hex
@@ -659,12 +784,16 @@ fn run_oracle(
             &mut oracle,
             regressions_dir,
             seed,
-            "oracle-mutation",
+            if structured {
+                "structured-gen"
+            } else {
+                "oracle-mutation"
+            },
+            execution.as_ref(),
         )
     {
-        // A pipe death during minimize/classify means records were NOT filed,
-        // so the pending count downstream is an undercount. Fail as a harness
-        // error rather than let a partial record set read as the whole truth.
+        // Optional processing failures remain harness errors even when original
+        // pending records were preserved. Incomplete filing also fails loudly.
         harness_error = true;
     }
 
@@ -675,107 +804,91 @@ fn run_oracle(
     }
 }
 
-/// Minimize every unique divergence from a campaign, classify it, and file it.
+/// Minimize and file every observed class, retaining the original on failure.
 ///
-/// Returns `false` when the ORACLE PIPE failed part-way — a minimize or
-/// classify step that could not reach the JVM leaves the record set
-/// incomplete, which the caller must surface as a harness error rather than as
-/// a smaller-than-real finding count. A minimizer that merely cannot shrink an
-/// input (a local, non-pipe failure) is not a harness error.
+/// Any processing or filing error makes the run incomplete. Successful fallback
+/// filing preserves evidence; it does not convert failed minimization to a pass.
+#[allow(clippy::too_many_arguments)]
 fn minimize_and_file_campaign(
-    sorted: &[(u64, ergo_difftest::oracle::Divergence)],
+    sorted: &[CampaignClass],
     surfaces: &[ergo_difftest::oracle::SurfaceSpec],
     oracle: &mut ergo_difftest::oracle::Oracle,
     regressions_dir: &std::path::Path,
     campaign_seed: u64,
     provenance: &str,
+    execution: Option<&ergo_difftest::execution_metadata::ExecutionMetadata>,
 ) -> bool {
+    use ergo_difftest::from_hex;
     use ergo_difftest::minimize::minimize_divergence;
-    use ergo_difftest::regressions::{classify_and_file, SeedInfo};
-    use ergo_difftest::{from_hex, to_hex};
+    use ergo_difftest::regressions::{auto_file, record_after_minimization, SeedInfo};
 
     let mut minimized_count = 0u64;
-    let mut pending_count = 0u64;
-    let mut artifact_count = 0u64;
-    let mut pipe_ok = true;
-
-    for (_, div) in sorted {
-        // Find the matching SurfaceSpec for this divergence's surface.
-        let Some(spec) = surfaces.iter().find(|s| s.name == div.surface) else {
-            eprintln!(
-                "minimize: no SurfaceSpec for surface {:?} — skip",
-                div.surface
-            );
-            continue;
-        };
-
-        let Some(orig_bytes) = from_hex(&div.input_hex) else {
-            eprintln!("minimize: bad input_hex for {} — skip", div.surface);
-            continue;
-        };
-
-        // Minimize.
-        eprint!("minimize: {} ({} bytes)…", div.surface, orig_bytes.len());
-        let (min_bytes, min_div) = match minimize_divergence(&orig_bytes, spec, oracle) {
-            Ok(pair) => pair,
-            Err(e) => {
-                let msg = e.to_string();
-                // `minimize_divergence` surfaces both local shrink failures and
-                // io errors from the pipe through one Err channel; only the
-                // latter invalidates the record set.
-                if e.kind() == std::io::ErrorKind::UnexpectedEof
-                    || e.kind() == std::io::ErrorKind::BrokenPipe
-                {
-                    eprintln!("{ORACLE_ERROR_MARKER} minimize pipe failure: {msg}");
-                    pipe_ok = false;
-                } else {
-                    eprintln!(" FAILED: {msg}");
-                }
-                continue;
-            }
-        };
-        eprintln!(" → {} bytes ({})", min_bytes.len(), to_hex(&min_bytes));
-        minimized_count += 1;
-
-        // Classify + file.
-        let seed_info = Some(SeedInfo {
-            seed: campaign_seed,
-            iter: 0, // campaign iter not tracked per-class; use 0
-        });
-        match classify_and_file(
-            &min_div,
-            spec,
-            oracle,
-            seed_info,
+    let mut filed_count = 0u64;
+    let mut complete = true;
+    for class in sorted {
+        let div = &class.divergence;
+        let result = (|| {
+            let spec = surfaces
+                .iter()
+                .find(|spec| spec.name == div.surface)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "missing SurfaceSpec for detected divergence",
+                    )
+                })?;
+            let bytes = from_hex(&div.input_hex).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid input_hex in detected divergence",
+                )
+            })?;
+            eprintln!("minimize: {} ({} bytes)", div.surface, bytes.len());
+            minimize_divergence(&bytes, spec, oracle).map(|(_, divergence)| divergence)
+        })();
+        let mut record = record_after_minimization(
+            div,
+            result,
+            Some(SeedInfo {
+                seed: campaign_seed,
+                iter: class.first_iter,
+            }),
             provenance,
-            regressions_dir,
-        ) {
-            Ok((path, triage)) => {
-                if triage.is_pending() {
-                    pending_count += 1;
-                    println!("  [PENDING]       filed → {}", path.display());
-                } else {
-                    artifact_count += 1;
-                    println!("  [KnownArtifact] filed → {}", path.display());
-                }
+        );
+        if let Some(execution) = execution {
+            if let Err(error) = execution.attach(&mut record, regressions_dir) {
+                eprintln!("{ORACLE_ERROR_MARKER} record authority failed: {error}");
+                complete = false;
             }
-            Err(e) => {
+        } else {
+            complete = false;
+        }
+        if let Some(error) = &record.processing_error {
+            eprintln!("{ORACLE_ERROR_MARKER} minimize failed for {}: {error}; retaining original pending input", div.surface);
+            complete = false;
+        } else {
+            minimized_count += 1;
+        }
+        match auto_file(&record, regressions_dir) {
+            Ok(path) => {
+                filed_count += 1;
+                println!("  [PENDING] filed → {}", path.display());
+            }
+            Err(error) => {
                 eprintln!(
-                    "{ORACLE_ERROR_MARKER} classify/file error for {}: {e}",
+                    "{ORACLE_ERROR_MARKER} file error for {}: {error}",
                     div.surface
                 );
-                pipe_ok = false;
+                complete = false;
             }
         }
     }
-
     println!(
-        "\nminimize summary: checks={} unique_divergences={} minimized={minimized_count} \
-         pending_queued={pending_count} known_artifacts={artifact_count}",
-        sorted.iter().map(|(c, _)| c).sum::<u64>(),
+        "\nminimize summary: checks={} unique_divergences={} minimized={minimized_count} pending_queued={filed_count} known_artifacts=0",
+        sorted.iter().map(|class| class.count).sum::<u64>(),
         sorted.len(),
     );
-    pipe_ok
+    complete && usize::try_from(filed_count).ok() == Some(sorted.len())
 }
 
 /// Replay a SINGLE input against the JVM oracle (the `--oracle --repro` path), so
@@ -838,9 +951,8 @@ fn run_oracle_repro_minimize(
     regressions_dir: &std::path::Path,
 ) -> ExitCode {
     use ergo_difftest::minimize::minimize_divergence;
-    use ergo_difftest::oracle::{oracle_surfaces, Oracle};
-    use ergo_difftest::regressions::{classify_and_file, SeedInfo};
-    use ergo_difftest::to_hex;
+    use ergo_difftest::oracle::{diff, oracle_surfaces, Oracle};
+    use ergo_difftest::regressions::{auto_file, record_after_minimization};
 
     let script = script.unwrap_or_else(|| "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala".into());
     eprintln!(
@@ -859,58 +971,73 @@ fn run_oracle_repro_minimize(
         return ExitCode::from(2);
     };
 
-    eprint!("minimize: {} ({} bytes)…", surface, bytes.len());
-    let (min_bytes, min_div) = match minimize_divergence(bytes, &spec, &mut oracle) {
-        Ok(pair) => pair,
-        Err(e) => {
-            eprintln!(" FAILED: {e}");
-            return ExitCode::FAILURE;
+    let original = match diff(&spec, bytes, &mut oracle) {
+        Ok(Some(divergence)) => divergence,
+        Ok(None) => {
+            println!("node and JVM reference agree on this input; nothing to minimize");
+            return ExitCode::SUCCESS;
+        }
+        Err(error) => {
+            eprintln!("{ORACLE_ERROR_MARKER} initial repro check failed: {error}");
+            return exit_harness_error();
         }
     };
-    eprintln!(" → {} bytes ({})", min_bytes.len(), to_hex(&min_bytes));
-
-    match classify_and_file(
-        &min_div,
-        &spec,
-        &mut oracle,
-        None::<SeedInfo>,
-        "repro",
+    let result = minimize_divergence(bytes, &spec, &mut oracle).map(|(_, divergence)| divergence);
+    let mut record = record_after_minimization(&original, result, None, "repro");
+    let mut failed = record.processing_error.is_some();
+    match ergo_difftest::execution_metadata::ExecutionMetadata::capture(
+        &oracle,
         regressions_dir,
+        serde_json::json!({"surfaces": [surface], "generation_mode": "repro", "input_hex": ergo_difftest::to_hex(bytes)}),
     ) {
-        Ok((path, triage)) => {
-            println!("triage={} filed → {}", min_div.input_hex, path.display());
-            if triage.is_pending() {
-                println!("  → PENDING (genuine candidate; check QUEUE.md)");
-            } else {
-                println!("  → KnownArtifact (benign; not queued)");
+        Ok(execution) => {
+            failed |= !execution.complete_for(surface);
+            if let Err(error) = execution.attach(&mut record, regressions_dir) {
+                eprintln!("{ORACLE_ERROR_MARKER} record authority failed: {error}");
+                failed = true;
             }
-            ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("classify/file error: {e}");
-            ExitCode::FAILURE
+        Err(error) => {
+            eprintln!("{ORACLE_ERROR_MARKER} execution journal failed: {error}");
+            failed = true;
+        }
+    }
+    if let Some(error) = &record.processing_error {
+        eprintln!(
+            "{ORACLE_ERROR_MARKER} minimize failed: {error}; retaining original pending input"
+        );
+    }
+    match auto_file(&record, regressions_dir) {
+        Ok(path) => {
+            println!("  [PENDING] filed → {}", path.display());
+            if failed {
+                exit_harness_error()
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => {
+            eprintln!("{ORACLE_ERROR_MARKER} file error: {error}");
+            exit_harness_error()
         }
     }
 }
 
-/// Structured bytes for an ORACLE surface. Maps the oracle surface name onto a
-/// gen surface. The consensus-complete `reduce` surface (eval + cost) is fed the
-/// EVAL-RICH `sigma_expr` generator — well-typed ErgoTree bodies that reduce
-/// non-trivially, exercising the atLeast / coll-eq / token-eq / deserialize cost
-/// vocabulary where the eval/cost bug class lives. Every other oracle surface with
-/// a matching gen surface uses it directly; anything else falls back to `ergo_tree`.
+/// Grammar mapping for supported structured oracle surfaces. Framed verifier
+/// protocols have no matching generator and are refused before spawning a JVM.
+fn structured_oracle_surface(oracle_surface: &str) -> Option<&str> {
+    match oracle_surface {
+        "reduce" => Some("sigma_expr"),
+        "reduce_ctx" => Some("ctx_expr"),
+        "validate" => Some("transaction"),
+        s if ergo_difftest::gen::SURFACES.contains(&s) => Some(s),
+        _ => None,
+    }
+}
+
 fn structured_oracle_bytes(seed: u64, iter: u64, oracle_surface: &str) -> Vec<u8> {
-    let gen_surface = match oracle_surface {
-        "reduce" => "sigma_expr",
-        // `reduce_ctx` consumes a `contextExtension · ergoBoxCandidate` frame.
-        "reduce_ctx" => "ctx_expr",
-        // `validate` (stateless-tx) parses a transaction first, so it needs
-        // transaction-shaped bytes — without this it falls back to `ergo_tree`
-        // and both sides reject immediately (no differential signal).
-        "validate" => "transaction",
-        s if ergo_difftest::gen::SURFACES.contains(&s) => s,
-        _ => "ergo_tree",
-    };
+    let gen_surface = structured_oracle_surface(oracle_surface)
+        .expect("structured oracle surfaces validated before dispatch");
     ergo_difftest::gen::gen_structured_at(seed, iter, gen_surface).bytes
 }
 
@@ -956,62 +1083,78 @@ fn take_next(args: &[String], i: &mut usize, flag: &str) -> String {
     })
 }
 
-/// Load seed bytes from every regular file in `dir`:
-/// * `.hex` — the whole file is one hex string,
-/// * `.json` — every quoted hex string (≥ 8 hex chars) is extracted as a seed
-///   (covers the `bytes`/`ergoTree`/register hex fields in the test vectors),
-/// * anything else — raw bytes.
-///
-/// A mixed real-wire-bytes corpus is good: mutations of real trees, boxes, and
-/// constants exercise every oracle surface near the valid manifold.
-fn load_corpus(dir: &str) -> Vec<Vec<u8>> {
+/// Load regular files in lexical path order. JSON contributes decoded string
+/// values (not object keys), hex files must be valid UTF-8 hex, and other files
+/// contribute raw bytes. Requested unreadable/malformed/empty corpora fail.
+fn load_corpus(dir: &str) -> io::Result<Vec<Vec<u8>>> {
+    let mut entries = fs::read_dir(Path::new(dir))?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.path());
     let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(Path::new(dir)) else {
-        eprintln!("--corpus: cannot read directory {dir}");
-        return out;
-    };
-    for e in entries.flatten() {
-        let path = e.path();
-        if !path.is_file() {
+    for entry in entries {
+        if !entry.file_type()?.is_file() {
             continue;
         }
+        let path = entry.path();
         let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+        if matches!(ext, "txt" | "md") {
+            continue;
+        }
+        let data = fs::read(&path)?;
         match ext {
             "hex" => {
-                if let Ok(data) = fs::read(&path) {
-                    if let Some(b) = from_hex(&String::from_utf8_lossy(&data)) {
-                        out.push(b);
-                    }
-                }
+                let text = std::str::from_utf8(&data).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: {e}", path.display()),
+                    )
+                })?;
+                out.push(from_hex(text).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: invalid hex", path.display()),
+                    )
+                })?);
             }
             "json" => {
-                if let Ok(text) = fs::read_to_string(&path) {
-                    out.extend(extract_hex_strings(&text));
-                }
+                let value: serde_json::Value = serde_json::from_slice(&data).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: {e}", path.display()),
+                    )
+                })?;
+                extract_hex_values(&value, &mut out);
             }
-            "txt" | "md" => {}
-            _ => {
-                if let Ok(data) = fs::read(&path) {
-                    out.push(data);
-                }
-            }
+            _ => out.push(data),
         }
     }
-    out
+    if out.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "requested corpus contains no usable seeds",
+        ));
+    }
+    Ok(out)
 }
 
-/// Pull every quoted, even-length hex string of ≥ 8 chars out of JSON text.
-fn extract_hex_strings(text: &str) -> Vec<Vec<u8>> {
-    let mut out = Vec::new();
-    for chunk in text.split('"') {
-        let len = chunk.len();
-        if len >= 8 && len.is_multiple_of(2) && chunk.bytes().all(|b| b.is_ascii_hexdigit()) {
-            if let Some(b) = from_hex(chunk) {
-                out.push(b);
+fn extract_hex_values(value: &serde_json::Value, out: &mut Vec<Vec<u8>>) {
+    match value {
+        serde_json::Value::String(text) if text.len() >= 8 => {
+            if let Some(bytes) = from_hex(text) {
+                out.push(bytes);
             }
         }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                extract_hex_values(value, out);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                extract_hex_values(value, out);
+            }
+        }
+        _ => {}
     }
-    out
 }
 
 fn print_help() {
@@ -1031,11 +1174,12 @@ fn print_help() {
          \x20 --structured     structure-aware generators + per-surface coverage report\n\
          \x20                  (combine with --oracle to diff structured bytes vs the JVM)\n\
          \x20 --min-coverage R  coverage gate: exit non-zero if union ratio < R (0.0..1.0)\n\
-         \x20                  use with --structured; CI uses 0.80\n\
+         \x20                  requires hermetic --structured; CI uses 0.80\n\
          \x20 --minimize       after --oracle campaign: minimize+classify+file each unique\n\
          \x20                  divergence; with --repro: minimize+file that one input\n\
          \x20                  (--repro --minimize requires --surface)\n\
-         \x20 --regressions-dir D  where to file records (default: ergo-difftest/regressions)\n\
+         \x20 --regressions-dir D  execution journals and filed records\n\
+         \x20                  (default: ergo-difftest/regressions)\n\
          \x20 --selftest       verify the harness's own bug-detection has teeth\n\
          \n\
          EXIT CODES:\n\
@@ -1059,6 +1203,60 @@ mod tests {
         assert_eq!(planned_checks(100_000, 12), 1_200_000u128);
     }
 
+    #[test]
+    fn corpus_order_and_json_values_are_deterministic() {
+        let directory = tempfile::tempdir().unwrap();
+        // Creation order deliberately differs from lexical path order.
+        fs::write(directory.path().join("b.bin"), [2]).unwrap();
+        fs::write(directory.path().join("a.bin"), [1]).unwrap();
+        fs::write(
+            directory.path().join("c.json"),
+            br#"{"deadbeef":{"nested":["12345678","\u0061bcdef01"]},"count":12345678}"#,
+        )
+        .unwrap();
+        let expected = vec![
+            vec![1],
+            vec![2],
+            vec![0x12, 0x34, 0x56, 0x78],
+            vec![0xab, 0xcd, 0xef, 1],
+        ];
+        let path = directory.path().to_str().unwrap();
+        assert_eq!(load_corpus(path).unwrap(), expected);
+        assert_eq!(load_corpus(path).unwrap(), expected);
+    }
+
+    #[test]
+    fn structured_oracle_mapping_preserves_protocol_frames() {
+        assert_eq!(structured_oracle_surface("reduce"), Some("sigma_expr"));
+        assert_eq!(structured_oracle_surface("reduce_ctx"), Some("ctx_expr"));
+        assert_eq!(structured_oracle_surface("validate"), Some("transaction"));
+        assert_eq!(structured_oracle_surface("header"), Some("header"));
+        assert_eq!(structured_oracle_surface("verify"), None);
+        assert_eq!(structured_oracle_surface("verify_avl"), None);
+    }
+
+    #[test]
+    fn grouped_class_preserves_its_first_nonzero_generating_iteration() {
+        use ergo_difftest::oracle::{Divergence, DivergenceKind, Verdict};
+        let first = Divergence {
+            surface: "ergo_tree",
+            kind: DivergenceKind::Canonical,
+            input_hex: "deadbeef".into(),
+            rust: Verdict::Accept("00".into()),
+            jvm: Verdict::Accept("01".into()),
+        };
+        let mut later = first.clone();
+        later.input_hex = "aabb".into();
+        let mut classes = std::collections::HashMap::new();
+        observe_divergence(&mut classes, first.clone(), 42);
+        observe_divergence(&mut classes, later, 99);
+        let class = classes.values().next().unwrap();
+        assert_eq!(classes.len(), 1);
+        assert_eq!(class.count, 2);
+        assert_eq!(class.first_iter, 42);
+        assert_eq!(class.divergence, first);
+    }
+
     // ----- round-trips -----
 
     #[test]
@@ -1070,6 +1268,19 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn requested_corpus_failures_are_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(load_corpus(directory.path().join("missing").to_str().unwrap()).is_err());
+        assert!(load_corpus(directory.path().to_str().unwrap()).is_err());
+        let hex = directory.path().join("bad.hex");
+        fs::write(&hex, "not hex").unwrap();
+        assert!(load_corpus(directory.path().to_str().unwrap()).is_err());
+        fs::remove_file(hex).unwrap();
+        fs::write(directory.path().join("bad.json"), "{").unwrap();
+        assert!(load_corpus(directory.path().to_str().unwrap()).is_err());
+    }
 
     #[test]
     fn planned_checks_u64_max_iters_does_not_overflow() {

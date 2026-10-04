@@ -1,8 +1,8 @@
 //! Integration tests for `AddressBook` persistence semantics.
 //!
 //! These exercise the on-disk file end-to-end: open → write → drop →
-//! reopen → load. Unit tests in `address_book.rs` cover the codec and
-//! eviction logic; this file covers what survives a process restart.
+//! reopen → load. Unit tests in `address_book/mod.rs` cover the codec and
+//! eviction logic; this file covers clean object drop/reopen, not process exit or power loss.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, SystemTime};
@@ -186,8 +186,13 @@ fn corruption_renames_and_starts_fresh() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peers.redb");
 
-    // Write garbage that redb cannot parse as a valid file.
-    std::fs::write(&path, b"not a redb file at all, just bytes").unwrap();
+    // Corrupt both commit-slot checksums in a real redb file. Short garbage
+    // is an I/O/invalid-input error in redb 4 and must not be quarantined.
+    drop(AddressBook::open_at_with_cache(&path, 1024 * 1024).unwrap());
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[176] ^= 0xff; // slot 0 checksum: 64 + 112
+    bytes[304] ^= 0xff; // slot 1 checksum: 192 + 112
+    std::fs::write(&path, bytes).unwrap();
 
     // Open should succeed by renaming the corrupt file and creating fresh.
     let book = AddressBook::open_at(&path).expect("recover from corruption");
@@ -241,7 +246,7 @@ fn add_known_does_not_overwrite_handshaked_record() {
 
 #[test]
 fn peer_manager_restores_known_peers_and_bans_from_persisted_address_book() {
-    // End-to-end restore-on-restart: persist a handful of peers + a
+    // Restore across clean object reopen: persist a handful of peers + a
     // ban via AddressBook, drop the book, reopen from the same path,
     // call load_all, hydrate a PeerManager via restore_known_peer +
     // restore_ban, and verify the PeerManager's observable state
@@ -387,4 +392,64 @@ fn mark_failure_atomic_under_concurrent_calls() {
         N_THREADS * N_PER_THREAD,
         "every increment must land — no lost updates from split-txn race"
     );
+}
+
+#[test]
+fn live_file_lock_and_directory_errors_never_quarantine_or_replace() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peers.redb");
+    {
+        let book = AddressBook::open_at_with_cache(&path, 1024 * 1024).unwrap();
+        book.add_known(sock(1, 2, 3, 4, 9030), PeerOrigin::Gossip)
+            .unwrap();
+    }
+    let live = AddressBook::open_at_with_cache(&path, 1024 * 1024).unwrap();
+    assert!(AddressBook::open_at_with_cache(&path, 1024 * 1024).is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    drop(live);
+    assert_eq!(
+        AddressBook::open_at_with_cache(&path, 1024 * 1024)
+            .unwrap()
+            .load_all(false)
+            .unwrap()
+            .peers[0]
+            .addr,
+        sock(1, 2, 3, 4, 9030)
+    );
+    let directory = dir.path().join("directory.redb");
+    std::fs::create_dir(&directory).unwrap();
+    assert!(AddressBook::open_at_with_cache(&directory, 1024 * 1024).is_err());
+    assert!(directory.is_dir());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+}
+
+#[test]
+fn future_redb_file_versions_are_preserved_even_when_upstream_calls_them_corrupt() {
+    use ergo_p2p::address_book::AddressBookError;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peers.redb");
+    drop(AddressBook::open_at_with_cache(&path, 1024 * 1024).unwrap());
+    let mut bytes = std::fs::read(&path).unwrap();
+    // Both redb commit slots start with a file-format version. Upstream checks
+    // the version before its slot checksum and calls >3 Corrupted.
+    bytes[64] = 4;
+    bytes[192] = 4;
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(matches!(
+        AddressBook::open_at_with_cache(&path, 1024 * 1024),
+        Err(AddressBookError::UnsupportedFileFormat { version: 4 })
+    ));
+    assert!(std::fs::read(&path).unwrap() == bytes);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn malformed_short_file_io_error_preserves_original_without_quarantine() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peers.redb");
+    let bytes = b"not a redb file at all, just bytes";
+    std::fs::write(&path, bytes).unwrap();
+    assert!(AddressBook::open_at_with_cache(&path, 1024 * 1024).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }

@@ -1,3 +1,4 @@
+use redb::ReadableDatabase;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -22,6 +23,10 @@ use crate::wallet::types::{
 };
 use crate::wallet::WalletScanCursor;
 use redb::{Database, ReadTransaction, ReadableTable, ReadableTableMetadata, WriteTransaction};
+
+pub(crate) fn read_redb(db: &Database) -> Result<ReadTransaction, redb::TransactionError> {
+    ReadableDatabase::begin_read(db)
+}
 
 #[allow(clippy::result_large_err)]
 pub(crate) fn begin_write_quick(db: &Database) -> Result<WriteTransaction, redb::TransactionError> {
@@ -203,7 +208,17 @@ impl RedbWalletStore {
     }
 
     pub fn open_standalone(path: impl AsRef<Path>) -> Result<Self, WalletStoreError> {
-        let db = Arc::new(Database::create(path.as_ref())?);
+        let path = path.as_ref();
+        let db = match Database::create(path) {
+            Ok(db) => Arc::new(db),
+            Err(redb::DatabaseError::UpgradeRequired(version)) => {
+                return Err(WalletStoreError::decode(format!(
+                    "{} uses legacy redb file format {version}; stop the daemon, retain a backup, and run `ergo-node migrate-redb <source> <new-destination>` before switching to the verified copy",
+                    path.display(),
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        };
         crate::wallet::migrate_standalone_schema(&db)?;
         Ok(Self {
             db,
@@ -239,7 +254,7 @@ impl RedbWalletStore {
 impl WalletStore for RedbWalletStore {
     fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
         Ok(Box::new(RedbWalletRead {
-            txn: self.db.begin_read()?,
+            txn: crate::wallet::store::read_redb(&self.db)?,
             standalone: self.standalone,
         }))
     }
@@ -256,7 +271,7 @@ impl WalletStore for RedbWalletStore {
 impl WalletStore for Database {
     fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
         Ok(Box::new(RedbWalletRead {
-            txn: self.begin_read()?,
+            txn: ReadableDatabase::begin_read(self)?,
             standalone: false,
         }))
     }
@@ -1121,13 +1136,13 @@ impl WalletWrite for RedbWalletWrite<'_> {
         for key in existing {
             visible.remove(key)?;
         }
-        let mut visible_index = 0u32;
-        for (index, pubkey, path) in all_tracked {
-            if index == 0 && path.is_empty() {
-                continue;
-            }
-            visible.insert(visible_index, pubkey)?;
-            visible_index += 1;
+        for (index, pubkey) in crate::state::visible_pubkeys_with_paths(&all_tracked)
+            .into_iter()
+            .enumerate()
+        {
+            let index = u32::try_from(index)
+                .map_err(|_| WalletStoreError::decode("visible address count exceeds u32"))?;
+            visible.insert(index, pubkey)?;
         }
         Ok(())
     }
@@ -1610,7 +1625,7 @@ mod tests {
             read.applied_header_at_or_below(10).unwrap(),
             Some((1, header_id))
         );
-        let txn = reopened.db.begin_read().unwrap();
+        let txn = crate::wallet::store::read_redb(&reopened.db).unwrap();
         assert!(txn
             .open_table(crate::wallet::tables::WALLET_SCHEMA_VERSION_TABLE)
             .unwrap()
@@ -2002,7 +2017,7 @@ mod tests {
     }
 
     fn applied_header_rows(store: &RedbWalletStore) -> u64 {
-        let txn = store.db.begin_read().unwrap();
+        let txn = crate::wallet::store::read_redb(&store.db).unwrap();
         txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADERS)
             .unwrap()
             .len()
@@ -2010,7 +2025,7 @@ mod tests {
     }
 
     fn applied_header_id_rows(db: &Database) -> u64 {
-        let txn = db.begin_read().unwrap();
+        let txn = crate::wallet::store::read_redb(db).unwrap();
         txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADER_IDS)
             .unwrap()
             .len()
@@ -2167,5 +2182,38 @@ mod tests {
         block_id[..4].copy_from_slice(&height.to_be_bytes());
         block_id[4..8].copy_from_slice(b"wltd");
         block_id
+    }
+}
+
+#[cfg(test)]
+mod legacy_format_tests {
+    use super::*;
+    #[test]
+    fn opening_legacy_wallet_requires_copy_migration_and_preserves_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.redb");
+        {
+            let db = redb_legacy::Database::create(&path).unwrap();
+            let write = db.begin_write().unwrap();
+            write
+                .open_table(redb_legacy::TableDefinition::<(), u32>::new(
+                    "wallet_scan_height",
+                ))
+                .unwrap()
+                .insert((), 12)
+                .unwrap();
+            write.commit().unwrap();
+        }
+        let original = std::fs::read(&path).unwrap();
+        let error = match RedbWalletStore::open_standalone(&path) {
+            Ok(_) => panic!("legacy wallet must require explicit copy migration"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("ergo-node migrate-redb"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

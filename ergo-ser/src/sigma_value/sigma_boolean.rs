@@ -5,7 +5,7 @@ use ergo_primitives::group_element::{canonical_encoding, read_group_element};
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
-use super::SigmaBoolean;
+use super::{is_valid_cthreshold_shape, SigmaBoolean};
 use crate::error::WriteError;
 
 // SigmaPropCodes from sigmastate-interpreter (SigmaPropCodes.scala).
@@ -34,43 +34,45 @@ pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) -> Result<(), W
         }
         Ok(())
     }
-    match sb {
-        SigmaBoolean::TrivialProp(false) => w.put_u8(TRIVIAL_PROP_FALSE),
-        SigmaBoolean::TrivialProp(true) => w.put_u8(TRIVIAL_PROP_TRUE),
-        SigmaBoolean::ProveDlog(ge) => {
-            w.put_u8(PROVE_DLOG);
-            w.put_bytes(&canonical_encoding(*ge.as_bytes()));
-        }
-        SigmaBoolean::ProveDHTuple { g, h, u, v } => {
-            w.put_u8(PROVE_DHTUPLE);
-            w.put_bytes(&canonical_encoding(*g.as_bytes()));
-            w.put_bytes(&canonical_encoding(*h.as_bytes()));
-            w.put_bytes(&canonical_encoding(*u.as_bytes()));
-            w.put_bytes(&canonical_encoding(*v.as_bytes()));
-        }
-        SigmaBoolean::Cand(children) => {
-            check_children_len(children.len(), "Cand")?;
-            w.put_u8(SIGMA_AND);
-            w.put_u16(children.len() as u16);
-            for child in children {
-                write_sigma_boolean(w, child)?;
+    let mut pending = vec![sb];
+    while let Some(sb) = pending.pop() {
+        match sb {
+            SigmaBoolean::TrivialProp(false) => w.put_u8(TRIVIAL_PROP_FALSE),
+            SigmaBoolean::TrivialProp(true) => w.put_u8(TRIVIAL_PROP_TRUE),
+            SigmaBoolean::ProveDlog(ge) => {
+                w.put_u8(PROVE_DLOG);
+                w.put_bytes(&canonical_encoding(*ge.as_bytes()));
             }
-        }
-        SigmaBoolean::Cor(children) => {
-            check_children_len(children.len(), "Cor")?;
-            w.put_u8(SIGMA_OR);
-            w.put_u16(children.len() as u16);
-            for child in children {
-                write_sigma_boolean(w, child)?;
+            SigmaBoolean::ProveDHTuple { g, h, u, v } => {
+                w.put_u8(PROVE_DHTUPLE);
+                w.put_bytes(&canonical_encoding(*g.as_bytes()));
+                w.put_bytes(&canonical_encoding(*h.as_bytes()));
+                w.put_bytes(&canonical_encoding(*u.as_bytes()));
+                w.put_bytes(&canonical_encoding(*v.as_bytes()));
             }
-        }
-        SigmaBoolean::Cthreshold { k, children } => {
-            check_children_len(children.len(), "Cthreshold")?;
-            w.put_u8(SIGMA_THRESHOLD);
-            w.put_u16(*k);
-            w.put_u16(children.len() as u16);
-            for child in children {
-                write_sigma_boolean(w, child)?;
+            SigmaBoolean::Cand(children) => {
+                check_children_len(children.len(), "Cand")?;
+                w.put_u8(SIGMA_AND);
+                w.put_u16(children.len() as u16);
+                pending.extend(children.iter().rev());
+            }
+            SigmaBoolean::Cor(children) => {
+                check_children_len(children.len(), "Cor")?;
+                w.put_u8(SIGMA_OR);
+                w.put_u16(children.len() as u16);
+                pending.extend(children.iter().rev());
+            }
+            SigmaBoolean::Cthreshold { k, children } => {
+                let n = children.len();
+                if !is_valid_cthreshold_shape(*k, n) {
+                    return Err(WriteError::InvalidData(format!(
+                        "Cthreshold invariant requires 0 <= k <= n <= 255: k={k}, n={n}"
+                    )));
+                }
+                w.put_u8(SIGMA_THRESHOLD);
+                w.put_u16(*k);
+                w.put_u16(n as u16);
+                pending.extend(children.iter().rev());
             }
         }
     }
@@ -83,7 +85,7 @@ pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) -> Result<(), W
 /// that bound here so a deeply nested `Cand`/`Cor`/`Cthreshold` chain from peer
 /// data (a box register or context-extension `SigmaProp` constant) is rejected
 /// rather than overflowing the worker-thread stack.
-const MAX_SIGMA_TREE_DEPTH: usize = 110;
+pub(super) const MAX_SIGMA_TREE_DEPTH: usize = 110;
 
 pub(super) fn read_sigma_boolean_at_depth(
     r: &mut VlqReader,
@@ -92,11 +94,38 @@ pub(super) fn read_sigma_boolean_at_depth(
     // `>=`: depth is 0-based (root enters at 0) while Scala increments the
     // shared reader level BEFORE parsing each nested node, so Rust `depth` ==
     // Scala `level - 1`; `depth >= MAX` matches Scala's `level > MaxTreeDepth`.
-    if depth >= MAX_SIGMA_TREE_DEPTH {
+    //
+    // `depth` carries the enclosing EXPRESSION depth (threaded in by
+    // `parse_node` via the constant's value), but not the depth consumed by an
+    // enclosing nested BOX script, which lives on the reader. Scala keeps all
+    // three on one counter, so a sigma chain inside a nested box must continue
+    // from the reader's base too: without it, N nested boxes plus a chain just
+    // under the bound is accepted here and rejected by the reference.
+    // Compared, not substituted: `depth` stays LOCAL so the `next = depth + 1`
+    // recursion below adds one level per node. Folding the base into `depth`
+    // here would re-add it at every level, growing the effective depth twice as
+    // fast as the reference and rejecting chains Scala accepts.
+    let effective_depth = r.depth_floor().saturating_add(depth);
+    if effective_depth >= MAX_SIGMA_TREE_DEPTH {
         return Err(ReadError::DepthLimitExceeded {
             max: MAX_SIGMA_TREE_DEPTH,
         });
     }
+    // `SigmaBoolean.serializer.parse` holds one reader level per node
+    // (SigmaBoolean.scala:72-103).
+    r.enter_level();
+    let node = read_sigma_boolean_node(r, depth)?;
+    r.exit_level();
+    Ok(node)
+}
+
+// Initial reservation is a resource policy, not a child-count acceptance cap.
+// Grow only after complete children are decoded; retain reference read order.
+fn initial_children(count: usize) -> Vec<SigmaBoolean> {
+    Vec::with_capacity(count.min(64))
+}
+
+fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoolean, ReadError> {
     let tag = r.get_u8()?;
     let next = depth + 1;
     match tag {
@@ -112,31 +141,45 @@ pub(super) fn read_sigma_boolean_at_depth(
         }
         SIGMA_AND => {
             let count = r.get_u16()? as usize;
-            let mut children = Vec::with_capacity(count);
+            let mut children = initial_children(count);
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
-            Ok(SigmaBoolean::Cand(children))
+            Ok(SigmaBoolean::Cand(children.into()))
         }
         SIGMA_OR => {
             let count = r.get_u16()? as usize;
-            let mut children = Vec::with_capacity(count);
+            let mut children = initial_children(count);
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
-            Ok(SigmaBoolean::Cor(children))
+            Ok(SigmaBoolean::Cor(children.into()))
         }
         SIGMA_THRESHOLD => {
-            // Scala: k = r.getUShort(), n = r.getUShort()
+            // Scala: k = r.getUShort(), n = r.getUShort(), then the n children,
+            // and only then `CTHRESHOLD`'s constructor `require(0 <= k && k <= n
+            // && n <= 255)` (SigmaBoolean.scala:94-101, :223). So a
+            // `ValidationException` among the children wins over the bound, and
+            // the bound itself is an `IllegalArgumentException`: a hard reject.
             let k = r.get_u16()?;
             let count = r.get_u16()? as usize;
-            let mut children = Vec::with_capacity(count);
+            let mut children = initial_children(count);
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
-            Ok(SigmaBoolean::Cthreshold { k, children })
+            if !r.is_trusted() && !is_valid_cthreshold_shape(k, count) {
+                return Err(ReadError::HardReject(format!(
+                    "Cthreshold invariant requires 0 <= k <= n <= 255: k={k}, n={count}"
+                )));
+            }
+            Ok(SigmaBoolean::Cthreshold {
+                k,
+                children: children.into(),
+            })
         }
-        _ => Err(ReadError::InvalidData(format!(
+        // Scala's `SigmaBoolean.serializer.parse` matches the tag with no
+        // default case: a `MatchError`, a hard reject.
+        _ => Err(ReadError::HardReject(format!(
             "unknown SigmaBoolean tag: 0x{tag:02X}"
         ))),
     }
@@ -148,6 +191,48 @@ mod tests {
     use crate::sigma_type::SigmaType;
     use crate::sigma_value::{read_value, write_constant, write_value, SigmaValue};
     use ergo_primitives::group_element::GroupElement;
+
+    #[test]
+    fn child_reservation_is_bounded_independently_of_declared_count() {
+        for count in [0, 1, 64, 255, u16::MAX as usize] {
+            assert!(initial_children(count).capacity() <= 64);
+        }
+    }
+
+    #[test]
+    fn parsed_nodes_grow_children_instead_of_reserving_the_declared_count() {
+        // `Vec::with_capacity(65)` is exactly 65. Storage that starts from the
+        // bounded 64-entry reservation must grow on the 65th decoded child, so
+        // its capacity cannot equal the declared count. Checked at every
+        // compound node's own parser call site.
+        const COUNT: u16 = 65;
+        for header in [vec![SIGMA_AND], vec![SIGMA_OR], vec![SIGMA_THRESHOLD]] {
+            let mut w = VlqWriter::new();
+            w.put_bytes(&header);
+            if header == [SIGMA_THRESHOLD] {
+                w.put_u16(1);
+            }
+            w.put_u16(COUNT);
+            for _ in 0..COUNT {
+                w.put_u8(TRIVIAL_PROP_TRUE);
+            }
+            let bytes = w.result();
+            let mut r = VlqReader::new(&bytes);
+            let children = match read_sigma_boolean_at_depth(&mut r, 0).unwrap() {
+                SigmaBoolean::Cand(children)
+                | SigmaBoolean::Cor(children)
+                | SigmaBoolean::Cthreshold { children, .. } => children,
+                other => panic!("expected a compound node, got {other:?}"),
+            };
+            assert!(r.is_empty());
+            assert_eq!(children.len(), usize::from(COUNT));
+            assert!(
+                children.capacity() > usize::from(COUNT),
+                "0x{:02X}: children reserved for the declared count",
+                header[0]
+            );
+        }
+    }
 
     // ----- helpers -----
 
@@ -201,24 +286,30 @@ mod tests {
 
     #[test]
     fn roundtrip_sigma_prop_cand() {
-        let sb = SigmaBoolean::Cand(vec![
-            SigmaBoolean::ProveDlog(fake_ge(0xAA)),
-            SigmaBoolean::ProveDlog(fake_ge(0xBB)),
-        ]);
+        let sb = SigmaBoolean::Cand(
+            vec![
+                SigmaBoolean::ProveDlog(fake_ge(0xAA)),
+                SigmaBoolean::ProveDlog(fake_ge(0xBB)),
+            ]
+            .into(),
+        );
         roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
     }
 
     #[test]
     fn roundtrip_sigma_prop_cor() {
-        let sb = SigmaBoolean::Cor(vec![
-            SigmaBoolean::ProveDlog(fake_ge(0xCC)),
-            SigmaBoolean::ProveDHTuple {
-                g: fake_ge(0x11),
-                h: fake_ge(0x22),
-                u: fake_ge(0x33),
-                v: fake_ge(0x44),
-            },
-        ]);
+        let sb = SigmaBoolean::Cor(
+            vec![
+                SigmaBoolean::ProveDlog(fake_ge(0xCC)),
+                SigmaBoolean::ProveDHTuple {
+                    g: fake_ge(0x11),
+                    h: fake_ge(0x22),
+                    u: fake_ge(0x33),
+                    v: fake_ge(0x44),
+                },
+            ]
+            .into(),
+        );
         roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
     }
 
@@ -230,7 +321,8 @@ mod tests {
                 SigmaBoolean::ProveDlog(fake_ge(0xAA)),
                 SigmaBoolean::ProveDlog(fake_ge(0xBB)),
                 SigmaBoolean::ProveDlog(fake_ge(0xCC)),
-            ],
+            ]
+            .into(),
         };
         roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
     }
@@ -240,7 +332,7 @@ mod tests {
         // A single-child Cand chain within MaxTreeDepth (110) must still parse.
         let mut sb = SigmaBoolean::TrivialProp(true);
         for _ in 0..100 {
-            sb = SigmaBoolean::Cand(vec![sb]);
+            sb = SigmaBoolean::Cand(vec![sb].into());
         }
         roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
     }
@@ -254,7 +346,7 @@ mod tests {
         // throws DeserializeCallDepthExceeded past depth 110.
         let mut sb = SigmaBoolean::TrivialProp(true);
         for _ in 0..200 {
-            sb = SigmaBoolean::Cand(vec![sb]);
+            sb = SigmaBoolean::Cand(vec![sb].into());
         }
         let mut w = VlqWriter::new();
         write_value(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
@@ -269,24 +361,21 @@ mod tests {
 
     #[test]
     fn read_sigma_boolean_depth_boundary_matches_scala() {
-        // Scala rejects the 110-deep chain (level reaches 111 before the leaf)
-        // and accepts the 109-deep one. With a 0-based counter and `depth >=
-        // MAX`, our leaf sits at depth == (#Cand), so 110 Cands reject and 109
-        // accept — the exact Scala boundary.
+        // DataSerializer consumes one level before SigmaBoolean's own nodes.
+        // Captured sigma-state 6.0.2 verdicts: decode_depth.tsv.
         let chain = |n: usize| {
             let mut sb = SigmaBoolean::TrivialProp(true);
             for _ in 0..n {
-                sb = SigmaBoolean::Cand(vec![sb]);
+                sb = SigmaBoolean::Cand(vec![sb].into());
             }
             let mut w = VlqWriter::new();
             write_value(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
             w.result()
         };
-        // 109 Cands: accepted.
-        let ok = chain(MAX_SIGMA_TREE_DEPTH - 1);
+        // 108 Cands plus DataSerializer and the leaf: 110 levels.
+        let ok = chain(MAX_SIGMA_TREE_DEPTH - 2);
         assert!(read_value(&mut VlqReader::new(&ok), &SigmaType::SSigmaProp).is_ok());
-        // 110 Cands: rejected (matches Scala level 111 > MaxTreeDepth).
-        let bad = chain(MAX_SIGMA_TREE_DEPTH);
+        let bad = chain(MAX_SIGMA_TREE_DEPTH - 1);
         assert!(matches!(
             read_value(&mut VlqReader::new(&bad), &SigmaType::SSigmaProp).unwrap_err(),
             ReadError::DepthLimitExceeded { .. }
@@ -303,7 +392,7 @@ mod tests {
         let sigma_const = |m: usize| {
             let mut sb = SigmaBoolean::TrivialProp(true);
             for _ in 0..m {
-                sb = SigmaBoolean::Cand(vec![sb]);
+                sb = SigmaBoolean::Cand(vec![sb].into());
             }
             let mut w = VlqWriter::new();
             write_constant(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
@@ -324,6 +413,94 @@ mod tests {
         // 40 expr + 40 sigma = 80 < 110 → accepted.
         let ok = body(40, 40);
         assert!(crate::opcode::parse_body(&mut VlqReader::new(&ok), 0).is_ok());
+    }
+
+    fn cthreshold_bytes(k: u16, n: u16) -> Vec<u8> {
+        let mut w = VlqWriter::new();
+        w.put_u8(SIGMA_THRESHOLD);
+        w.put_u16(k);
+        w.put_u16(n);
+        for _ in 0..n {
+            w.put_u8(TRIVIAL_PROP_TRUE);
+        }
+        w.result()
+    }
+
+    #[test]
+    fn write_sigma_boolean_rejects_invalid_cthreshold_shapes() {
+        for (k, n) in [(2u16, 1usize), (256, 1), (0, 256), (256, 256)] {
+            let mut w = VlqWriter::new();
+            let result = write_sigma_boolean(
+                &mut w,
+                &SigmaBoolean::Cthreshold {
+                    k,
+                    children: vec![SigmaBoolean::TrivialProp(true); n].into(),
+                },
+            );
+            assert!(result.is_err(), "k={k}, n={n} must be rejected");
+        }
+    }
+
+    #[test]
+    fn write_sigma_boolean_accepts_cthreshold_boundaries() {
+        for (k, n) in [(0u16, 0usize), (1, 1), (255, 255)] {
+            let mut w = VlqWriter::new();
+            let result = write_sigma_boolean(
+                &mut w,
+                &SigmaBoolean::Cthreshold {
+                    k,
+                    children: vec![SigmaBoolean::TrivialProp(true); n].into(),
+                },
+            );
+            assert!(result.is_ok(), "k={k}, n={n} must be accepted");
+        }
+    }
+
+    #[test]
+    fn untrusted_cthreshold_reader_rejects_invalid_shapes() {
+        // CTHRESHOLD's `require` is an IllegalArgumentException: hard. JVM
+        // (SANTA SigmaBoolean.conjecture_bounds #0, #2, blessed on 6.0.6):
+        // `REJECT IllegalArgumentException`.
+        for (k, n) in [(3u16, 2u16), (0, 256)] {
+            let bytes = cthreshold_bytes(k, n);
+            let mut r = VlqReader::new(&bytes);
+            let err = read_value(&mut r, &SigmaType::SSigmaProp).unwrap_err();
+            assert!(
+                matches!(&err, ReadError::HardReject(_)),
+                "k={k}, n={n} returned {err:?}"
+            );
+            assert!(r.is_empty(), "k={k}, n={n}: the children are read first");
+        }
+    }
+
+    #[test]
+    fn trusted_cthreshold_reader_preserves_malformed_values() {
+        for (k, n) in [(3u16, 2u16), (0, 256)] {
+            let bytes = cthreshold_bytes(k, n);
+            let mut r = VlqReader::new(&bytes).trusted();
+            let decoded = read_value(&mut r, &SigmaType::SSigmaProp).unwrap();
+            match decoded {
+                SigmaValue::SigmaProp(SigmaBoolean::Cthreshold {
+                    k: decoded_k,
+                    children,
+                }) => {
+                    assert_eq!(decoded_k, k);
+                    assert_eq!(children.len(), n as usize);
+                }
+                other => panic!("unexpected decoded value: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn valid_cthreshold_boundaries_roundtrip() {
+        for (k, n) in [(0u16, 0usize), (1, 1), (255, 255)] {
+            let sb = SigmaBoolean::Cthreshold {
+                k,
+                children: vec![SigmaBoolean::TrivialProp(true); n].into(),
+            };
+            roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
+        }
     }
 
     #[test]

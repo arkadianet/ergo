@@ -76,6 +76,7 @@ const FORK_REPLACEMENT: u8 = 0x20;
 fn proposition_tree() -> ErgoTree {
     ErgoTree {
         version: 0,
+        reserved_header_bits: 0,
         has_size: true,
         constant_segregation: true,
         constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
@@ -408,7 +409,7 @@ fn syncer(chain: Arc<dyn ChainClient>, store: Arc<RedbWalletStore>) -> Standalon
 /// order. Iterating the `scan_id` key prefix is what the store's own reads do,
 /// so this sees exactly the rows the rewind rewrites.
 fn scan_box_rows(wallet: &Wallet) -> Vec<ScanTrackedBox> {
-    let txn = wallet.database.begin_read().unwrap();
+    let txn = redb::ReadableDatabase::begin_read(wallet.database.as_ref()).unwrap();
     let Ok(rows) = txn.open_table(WALLET_SCAN_BOXES) else {
         return Vec::new();
     };
@@ -429,7 +430,7 @@ fn scan_box_rows(wallet: &Wallet) -> Vec<ScanTrackedBox> {
 /// One row, read by its `(scan_id, box_id)` key, so a *missing* row is
 /// reported as missing rather than as an empty scan.
 fn scan_box_row(wallet: &Wallet, box_id: [u8; 32]) -> Option<ScanTrackedBox> {
-    let txn = wallet.database.begin_read().unwrap();
+    let txn = redb::ReadableDatabase::begin_read(wallet.database.as_ref()).unwrap();
     let rows = match txn.open_table(WALLET_SCAN_BOXES) {
         Ok(rows) => rows,
         Err(_) => return None,
@@ -439,7 +440,7 @@ fn scan_box_row(wallet: &Wallet, box_id: [u8; 32]) -> Option<ScanTrackedBox> {
 }
 
 fn scan_tx_rows(wallet: &Wallet) -> Vec<ScanTxRecord> {
-    let txn = wallet.database.begin_read().unwrap();
+    let txn = redb::ReadableDatabase::begin_read(wallet.database.as_ref()).unwrap();
     let Ok(rows) = txn.open_table(WALLET_SCAN_TXS) else {
         return Vec::new();
     };
@@ -456,7 +457,7 @@ fn scan_tx_rows(wallet: &Wallet) -> Vec<ScanTxRecord> {
 /// behavioural assertion can miss: a removed box would still look "already
 /// applied" to the spend path of a later block.
 fn reverse_index(wallet: &Wallet) -> BTreeMap<[u8; 32], Vec<u16>> {
-    let txn = wallet.database.begin_read().unwrap();
+    let txn = redb::ReadableDatabase::begin_read(wallet.database.as_ref()).unwrap();
     let Ok(index) = txn.open_table(WALLET_SCAN_BOX_INDEX) else {
         return BTreeMap::new();
     };

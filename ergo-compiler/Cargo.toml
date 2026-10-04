@@ -1,8 +1,9 @@
 [package]
 name        = "ergo-compiler"
-description = "ErgoScript → ErgoTree compiler. M1+M2: lexer + parser + binder + typer, production-faithful to the Scala reference (sigmastate.lang.SigmaCompiler, sigma-state 6.0.2). Later milestones add lowering and byte-identical ErgoTree emission."
+description = "ErgoScript → ErgoTree compiler. Parser, binder, typer, graph transformations and wire emission tested against pinned Scala fixtures, with explicit compiled-output validation."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -26,3 +27,6 @@ ergo-sigma = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

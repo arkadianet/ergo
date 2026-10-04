@@ -769,25 +769,17 @@ pub(crate) fn router_with_security_and_moved(
             any(crate::auth::unknown_gated_subpath),
         )
         .with_state(admin);
-    match (security, daemon_address) {
-        (Some(sec), Some(address)) => r.route_layer(axum::middleware::from_fn_with_state(
+    match daemon_address {
+        Some(address) => r.route_layer(axum::middleware::from_fn_with_state(
             super::WalletMovedGuard {
                 daemon_address: Arc::from(address),
-                security: Some(sec),
+                security,
             },
             super::wallet_moved_guard,
         )),
-        (None, Some(address)) => r.route_layer(axum::middleware::from_fn_with_state(
-            super::WalletMovedGuard {
-                daemon_address: Arc::from(address),
-                security: None,
-            },
-            super::wallet_moved_guard,
-        )),
-        (Some(sec), None) => r.route_layer(axum::middleware::from_fn_with_state(
-            sec,
+        None => r.route_layer(axum::middleware::from_fn_with_state(
+            security,
             crate::auth::require_api_key,
         )),
-        (None, None) => r,
     }
 }

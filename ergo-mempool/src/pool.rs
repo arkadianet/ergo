@@ -4,7 +4,7 @@
 //! are maintained in lockstep — every mutation preserves the
 //! invariants asserted in [`OrderedPool::check_invariants`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -188,6 +188,10 @@ pub struct OrderedPool {
     /// spends an output currently in `by_output`. Edges are removed
     /// when either endpoint leaves the pool.
     children_of: HashMap<TxId, Vec<TxId>>,
+    /// Live descendants orphaned by a bounded eviction. Keeping this work
+    /// with the pool makes transactional admission clones retain it only
+    /// when their mutations commit. One key per live entry bounds storage.
+    pending_orphan_eviction: BTreeSet<[u8; 32]>,
     total_bytes: usize,
     /// Monotonic counter bumped on every candidate-visible pool mutation:
     /// `insert`, `remove`, and the family-weight walk's `rekey_weight` (which
@@ -212,6 +216,7 @@ impl OrderedPool {
             by_input: HashMap::with_capacity(cap * 2),
             by_output: HashMap::with_capacity(cap * 2),
             children_of: HashMap::new(),
+            pending_orphan_eviction: BTreeSet::new(),
             total_bytes: 0,
             revision: 0,
         }
@@ -229,6 +234,7 @@ impl OrderedPool {
             by_input: self.by_input.clone(),
             by_output: self.by_output.clone(),
             children_of: self.children_of.clone(),
+            pending_orphan_eviction: self.pending_orphan_eviction.clone(),
             total_bytes: self.total_bytes,
             revision: self.revision,
         }
@@ -254,6 +260,16 @@ impl OrderedPool {
 
     pub fn contains(&self, tx_id: &TxId) -> bool {
         self.by_tx_id.contains_key(tx_id)
+    }
+
+    pub(crate) fn orphan_eviction_pending(&self) -> usize {
+        self.pending_orphan_eviction.len()
+    }
+
+    pub(crate) fn next_orphan_eviction(&mut self) -> Option<TxId> {
+        self.pending_orphan_eviction
+            .pop_first()
+            .map(Digest32::from_bytes)
     }
 
     pub fn get(&self, tx_id: &TxId) -> Option<&Entry> {
@@ -339,6 +355,7 @@ impl OrderedPool {
     pub(crate) fn remove(&mut self, tx_id: &TxId) -> Option<Entry> {
         let key = self.by_tx_id.remove(tx_id)?;
         let entry = self.ordered.remove(&key)?;
+        self.pending_orphan_eviction.remove(tx_id.as_bytes());
         for b in &entry.inputs {
             self.by_input.remove(b);
         }
@@ -366,7 +383,8 @@ impl OrderedPool {
 
     /// Remove `tx_id` and all descendants (children, grandchildren, …).
     /// Bounded by `max_depth` nodes visited to avoid pathological
-    /// family walks. Returns removed entries in removal order (parent
+    /// family walks, with at least the root removed to ensure progress even
+    /// when the configured bound is zero. Returns entries in removal order (parent
     /// last — children are removed first so their `parents_in_pool`
     /// backreferences stay consistent during the sweep).
     /// Discards the truncation frontier; production callers use the
@@ -403,7 +421,7 @@ impl OrderedPool {
             if !seen.insert(next) {
                 continue;
             }
-            if ordered_ids.len() >= max_depth {
+            if ordered_ids.len() >= max_depth.max(1) {
                 // Cap hit BEFORE visiting `next`: it (and everything else
                 // still queued) is an un-removed descendant of a removed node.
                 to_visit.push(next);
@@ -598,9 +616,9 @@ impl OrderedPool {
     }
 
     /// [`Self::remove_with_descendants_debiting`] that also returns the
-    /// truncation frontier (see [`Self::remove_with_descendants_frontier`]) so
-    /// the recheck cascade can carry orphaned deep descendants into bounded
-    /// follow-up eviction.
+    /// truncation frontier (see [`Self::remove_with_descendants_frontier`]).
+    /// Every caller also retains that frontier in the pool's bounded work set,
+    /// including admission, package replacement, and reorg eviction.
     pub(crate) fn remove_with_descendants_debiting_frontier(
         &mut self,
         tx_id: &TxId,
@@ -611,6 +629,8 @@ impl OrderedPool {
         for entry in &removed {
             self.update_family(&entry.inputs, -i128::from(entry.weight), bounds);
         }
+        self.pending_orphan_eviction
+            .extend(frontier.iter().map(|id| *id.as_bytes()));
         (removed, frontier)
     }
 
@@ -655,6 +675,12 @@ impl OrderedPool {
             self.ordered.len(),
             self.by_tx_id.len(),
             "ordered and by_tx_id sizes diverged"
+        );
+        assert!(
+            self.pending_orphan_eviction
+                .iter()
+                .all(|id| self.contains(&Digest32::from_bytes(*id))),
+            "cleanup frontier must contain only live pool entries"
         );
         let mut computed_bytes = 0usize;
         let mut seen_inputs = std::collections::HashSet::new();

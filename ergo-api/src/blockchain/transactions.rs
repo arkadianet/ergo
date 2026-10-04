@@ -65,8 +65,9 @@ pub async fn tx_by_id_handler(
     };
     let tx_id: TxId = TxId::from_bytes(raw);
     match state.indexer.tx_by_id(&tx_id) {
-        Some(tx) => render_indexed_tx(&state, &tx),
-        None => not_found("transaction not found"),
+        Ok(Some(tx)) => render_indexed_tx(&state, &tx),
+        Ok(None) => not_found("transaction not found"),
+        Err(error) => internal_error(&format!("indexer read failed: {error}")),
     }
 }
 
@@ -79,8 +80,9 @@ pub async fn tx_by_index_handler(
         return not_found("transaction not found");
     }
     match state.indexer.tx_by_global_index(n as u64) {
-        Some(tx) => render_indexed_tx(&state, &tx),
-        None => not_found("transaction not found"),
+        Ok(Some(tx)) => render_indexed_tx(&state, &tx),
+        Ok(None) => not_found("transaction not found"),
+        Err(error) => internal_error(&format!("indexer read failed: {error}")),
     }
 }
 
@@ -181,6 +183,7 @@ fn dereference_box(
     let b = state
         .indexer
         .box_by_global_index(global_index as u64)
+        .map_err(|error| error.to_string())?
         .ok_or_else(|| {
             format!("tx references missing {role} box at global index {global_index}")
         })?;
@@ -206,7 +209,11 @@ pub async fn tx_detail_handler(
     };
     let tx_id = TxId::from_bytes(raw);
 
-    if let Some(tx) = state.indexer.tx_by_id(&tx_id) {
+    let indexed_tx = match state.indexer.tx_by_id(&tx_id) {
+        Ok(tx) => tx,
+        Err(error) => return internal_error(&format!("indexer read failed: {error}")),
+    };
+    if let Some(tx) = indexed_tx {
         return match build_tx_detail_confirmed(&state, &tx) {
             Ok(d) => Json(d).into_response(),
             Err(detail) => internal_error(&detail),
@@ -300,25 +307,31 @@ fn build_tx_detail_unconfirmed(
     let inputs = tx
         .inputs
         .iter()
-        .map(|input| {
+        .map(|input| -> Result<ApiIoBox, String> {
             let box_id_hex = hex::encode(input.box_id.as_bytes());
-            if let Some(b) = state.indexer.box_by_id(&input.box_id) {
-                io_from_candidate(state.network, Some(box_id_hex), &b.box_data.candidate)
-            } else if let Some(eb) = pool_outputs.get(&input.box_id) {
-                io_from_candidate(state.network, Some(box_id_hex), &eb.candidate)
-            } else {
-                // Unresolved: emit null for every projected field —
-                // including tokens — so "unknown" can't read as
-                // "known to have none".
-                ApiIoBox {
-                    box_id: Some(box_id_hex),
-                    address: None,
-                    value: None,
-                    tokens: None,
-                }
-            }
+            Ok(
+                if let Some(b) = state
+                    .indexer
+                    .box_by_id(&input.box_id)
+                    .map_err(|error| error.to_string())?
+                {
+                    io_from_candidate(state.network, Some(box_id_hex), &b.box_data.candidate)
+                } else if let Some(eb) = pool_outputs.get(&input.box_id) {
+                    io_from_candidate(state.network, Some(box_id_hex), &eb.candidate)
+                } else {
+                    // Unresolved: emit null for every projected field —
+                    // including tokens — so "unknown" can't read as
+                    // "known to have none".
+                    ApiIoBox {
+                        box_id: Some(box_id_hex),
+                        address: None,
+                        value: None,
+                        tokens: None,
+                    }
+                },
+            )
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(ApiTxDetail {
         tx_id: tx_id_hex.to_string(),

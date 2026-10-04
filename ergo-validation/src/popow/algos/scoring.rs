@@ -227,6 +227,19 @@ mod tests {
     }
 
     #[test]
+    fn genesis_predicate_uses_height_not_parent_id() {
+        let mut h1 = header_from_hex(GENESIS_HEX);
+        h1.parent_id = ergo_primitives::digest::ModifierId::from_bytes([0xAA; 32]);
+        assert!(super::is_genesis(&h1));
+        assert_eq!(max_level_of(&h1), GENESIS_LEVEL);
+
+        let mut h2 = header_from_hex(HEIGHT_2_V1_HEX);
+        h2.parent_id = ergo_primitives::digest::ModifierId::from_bytes([0u8; 32]);
+        assert!(!super::is_genesis(&h2));
+        assert_ne!(max_level_of(&h2), GENESIS_LEVEL);
+    }
+
+    #[test]
     fn max_level_of_non_genesis_v1_returns_finite_level() {
         // Height 2: real mainnet v1 header. We don't pin a specific
         // level value here (no Scala-extracted oracle vector is

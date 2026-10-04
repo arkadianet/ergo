@@ -11,7 +11,7 @@ async runtime, or signing implementation.
 `serde`, `serde_json`, and `hex`. The crate must not acquire an Ergo workspace
 crate, `redb`, `tokio`, `axum`, or `utoipa`; this boundary is checked by
 `tests/dependency_boundary.rs`.
-**Depended on by:** `ergo-api`, `ergo-wallet-service`
+**Depended on by:** `ergo-api`, `ergo-wallet-service`, `ergo-node`, `ergo-walletd`
 **Approx LOC:** ~2.5K (`src/**/*.rs`)
 
 ## Start here

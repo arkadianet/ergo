@@ -34,7 +34,7 @@ pub(crate) fn ergo_box_to_eval_box(b: &ErgoBox, index: usize) -> Result<EvalBox,
         id: *id.as_bytes(),
         transaction_id: *b.transaction_id.as_bytes(),
         output_index: b.index,
-        registers: copy_registers(&b.candidate.additional_registers),
+        registers: copy_registers(b.candidate.additional_registers()),
         tokens: b
             .candidate
             .tokens
@@ -85,7 +85,7 @@ pub(crate) fn candidate_to_eval_box(
         id: *id.as_bytes(),
         transaction_id: *tx_id.as_bytes(),
         output_index: index,
-        registers: copy_registers(&c.additional_registers),
+        registers: copy_registers(c.additional_registers()),
         tokens: c
             .tokens
             .iter()

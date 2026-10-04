@@ -1,8 +1,8 @@
 {
   "oracle": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala",
   "scala": "2.12",
-  "sigma_state": "6.0.2",
-  "ergo_core": "6.0.2",
+  "sigma_state": "6.0.6",
+  "ergo_core": "6.0.6",
   "command": "scala-cli --skip-cli-updates run scripts/jvm_serde_oracle/ErgoSerdeOracle.scala --server=false --suppress-outdated-dependency-warning < test-vectors/ergo-tree-root-gate/requests.txt > test-vectors/ergo-tree-root-gate/responses.txt",
   "selected": 28,
   "executed": 28,

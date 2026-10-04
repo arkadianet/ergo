@@ -58,7 +58,7 @@ pub enum Hint {
 pub struct OwnCommitment {
     pub image: SigmaBoolean,
     /// `r` in scalar form — must NEVER leak (compromises the secret on reveal).
-    pub secret_randomness: [u8; 32],
+    pub secret_randomness: zeroize::Zeroizing<[u8; 32]>,
     /// Public first-prover message corresponding to `r`.
     pub commitment: FirstProverMessage,
     /// Position of this leaf in the proposition tree (depth-first).
@@ -168,6 +168,46 @@ pub struct TransactionHintsBag {
     pub public_hints: BTreeMap<u32, HintsBag>,
 }
 
+/// Owned, message-bound commitments for the native signing API. This type
+/// deliberately has no `Clone` implementation and never exposes secret hints.
+/// Signing consumes it, including on errors, so its nonce material cannot be
+/// submitted to a second signing operation through this API.
+#[derive(Debug)]
+pub struct BoundTransactionHints {
+    hints: TransactionHintsBag,
+    message_hash: [u8; 32],
+}
+
+impl BoundTransactionHints {
+    pub(crate) fn new(hints: TransactionHintsBag, message: &[u8]) -> Self {
+        Self {
+            hints,
+            message_hash: ergo_sigma::blake2b256(message),
+        }
+    }
+
+    /// Public commitments to distribute to other participants; nonce material
+    /// remains exclusively owned by this object.
+    pub fn public_hints(&self) -> TransactionHintsBag {
+        TransactionHintsBag {
+            secret_hints: BTreeMap::new(),
+            public_hints: self.hints.public_hints.clone(),
+        }
+    }
+
+    pub(crate) fn into_for_message(
+        self,
+        message: &[u8],
+    ) -> Result<TransactionHintsBag, crate::error::WalletError> {
+        if self.message_hash != ergo_sigma::blake2b256(message) {
+            return Err(crate::error::WalletError::TxBuild(
+                "commitments belong to a different signing message".into(),
+            ));
+        }
+        Ok(self.hints)
+    }
+}
+
 impl TransactionHintsBag {
     pub const fn empty() -> Self {
         Self {
@@ -196,6 +236,8 @@ impl TransactionHintsBag {
 
     /// Combined (secret + public) hints for the given input.
     /// Mirrors Scala `allHintsForInput`.
+    /// Low-level compatibility API: callers must never reuse an own nonce
+    /// across signing operations. Native callers should use bound commitments.
     pub fn all_for_input(&self, index: u32) -> HintsBag {
         let mut combined = HintsBag::empty();
         if let Some(s) = self.secret_hints.get(&index) {
@@ -215,10 +257,21 @@ mod tests {
     fn sample_own_commitment() -> OwnCommitment {
         OwnCommitment {
             image: SigmaBoolean::TrivialProp(true),
-            secret_randomness: [0xAB; 32],
+            secret_randomness: [0xAB; 32].into(),
             commitment: FirstProverMessage::Schnorr([0x02; 33]),
             position: NodePosition::crypto_tree_prefix(),
         }
+    }
+
+    #[test]
+    fn bound_commitments_reject_another_message_and_hide_private_hints() {
+        let mut bag = TransactionHintsBag::empty();
+        let mut leaf = HintsBag::empty();
+        leaf.add(Hint::OwnCommitment(sample_own_commitment()));
+        bag.replace_for_input(0, leaf);
+        let bound = BoundTransactionHints::new(bag, b"transaction A");
+        assert!(bound.public_hints().secret_hints.is_empty());
+        assert!(bound.into_for_message(b"transaction B").is_err());
     }
 
     #[test]

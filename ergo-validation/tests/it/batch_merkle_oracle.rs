@@ -2,8 +2,7 @@
 //!
 //! For every fixture in
 //! `test-vectors/ergo-crypto/batch-merkle/fixtures.json` (output of
-//! `BatchMerkleProofSerializer` over scrypto 2.3.0, the version
-//! pinned in `reference/ergo/avldb/build.sbt`):
+//! `BatchMerkleProofSerializer` over historical scrypto 2.3.0):
 //!
 //! 1. The codec roundtrips: `deserialize(captured) → parsed`,
 //!    `serialize(parsed) == captured`.
@@ -20,10 +19,9 @@
 //! Drift here breaks NiPoPoW interlinks-proof validation: the
 //! `BatchMerkleProof` inside each `PoPowHeader` is the artifact
 //! `check_popow_header_interlinks_proof` consumes. That path is
-//! the logarithmic-time bootstrap surface (optional per the
-//! checklist's "one mode first" rule, but still load-bearing once
-//! NiPoPoW sync is wired) — `header_id` itself does not consult
-//! this proof.
+//! the Mode4 bootstrap surface — `header_id` itself does not consult
+//! this proof. A separate ten-case capture below pins scrypto3.1.1,
+//! the dependency in Ergo v6.0.5, including duplicate leaf positions.
 
 use ergo_crypto::merkle::{merkle_proof_by_indices, BatchProofEntry, IndexedBatchProof};
 use ergo_ser::batch_merkle_proof::{
@@ -250,4 +248,41 @@ fn flipped_sibling_byte_fails_verify() {
         !verify_batch_merkle_proof(&parsed, &expected_root),
         "corrupted-sibling proof must NOT verify against the original root",
     );
+}
+
+/// Current pinned dependency capture. Duplicate leaf values remain separate
+/// positions, including odd-width and sparse proofs. This asserts exact
+/// external roots, wire construction and verification for all ten captures.
+#[test]
+fn scrypto_3_1_1_all_captured_shapes_match() {
+    let raw =
+        include_str!("../../../test-vectors/ergo-crypto/batch-merkle/scrypto-3.1.1/fixtures.json");
+    let fixtures: Vec<Fixture> = serde_json::from_str(raw).unwrap();
+    assert_eq!(fixtures.len(), 10);
+    assert_eq!(
+        fixtures
+            .iter()
+            .filter(|fx| {
+                fx.leaves
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    < fx.leaves.len()
+            })
+            .count(),
+        3
+    );
+    for fx in &fixtures {
+        assert_roundtrip(fx);
+        let leaves: Vec<Vec<u8>> = fx.leaves.iter().map(|s| hex::decode(s).unwrap()).collect();
+        let refs: Vec<&[u8]> = leaves.iter().map(Vec::as_slice).collect();
+        let proof = merkle_proof_by_indices(&refs, &fx.indices)
+            .unwrap_or_else(|| panic!("{}: no proof", fx.label));
+        assert_eq!(
+            serialize_batch_merkle_proof(&to_wire(proof)),
+            hex::decode(&fx.expected_bytes).unwrap(),
+            "{}: construction differs from scrypto3.1.1",
+            fx.label
+        );
+    }
 }

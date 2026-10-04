@@ -251,7 +251,7 @@ id             = "unparsed-tree-canonical"
 surface        = "ergo_tree"
 class          = "canonical"
 wire_reachable = true
-fix_file       = "ergo-ser/src/ergo_tree.rs"
+fix_file       = "ergo-ser/src/ergo_tree/mod.rs"
 reinject       = "In write_ergo_tree, remove the Expr::Unparsed(raw) shortcut and force re-serialize through the header+size writer even for unparsed bodies"
 budget_iters   = 50000
 # 0D = version=5 (bits 0-2 = 0b101=5) | has_size (bit3=0x08); 01 = size=1; D3 = body (TrueProp)

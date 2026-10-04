@@ -78,8 +78,19 @@ impl WalletAdmin for StubAdmin {
     }
     async fn transaction_by_id(
         &self,
-        _: String,
+        id: String,
     ) -> Result<Option<WalletTransactionEntry>, WalletAdminError> {
+        if id == "cd".repeat(32) {
+            return Ok(self
+                .transactions(Page {
+                    offset: 0,
+                    limit: 1,
+                })
+                .await?
+                .items
+                .into_iter()
+                .next());
+        }
         Ok(None) // simulate "not found" — handler returns 404
     }
     async fn transactions_by_scan_id(
@@ -186,7 +197,7 @@ impl WalletAdmin for StubAdmin {
 
 fn app() -> axum::Router {
     let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin::default());
-    ergo_api::wallet::router_with_security(admin, None) // read smoke test; auth gate not exercised
+    ergo_api::wallet::router_with_security(admin, Some(super::auth::security()))
 }
 
 // ----- happy path -----
@@ -196,6 +207,7 @@ async fn balances_returns_camelcase_shape() {
     let resp = app()
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::GET)
                 .uri("/wallet/balances")
                 .body(Body::empty())
@@ -218,6 +230,7 @@ async fn addresses_returns_array() {
     let resp = app()
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::GET)
                 .uri("/wallet/addresses")
                 .body(Body::empty())
@@ -240,6 +253,7 @@ async fn boxes_returns_paginated_shape() {
     let resp = app()
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::GET)
                 .uri("/wallet/boxes?offset=0&limit=50")
                 .body(Body::empty())
@@ -259,6 +273,7 @@ async fn boxes_unspent_returns_200() {
     let resp = app()
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::GET)
                 .uri("/wallet/boxes/unspent")
                 .body(Body::empty())
@@ -274,6 +289,7 @@ async fn transactions_returns_paginated_shape() {
     let resp = app()
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::GET)
                 .uri("/wallet/transactions")
                 .body(Body::empty())
@@ -284,6 +300,7 @@ async fn transactions_returns_paginated_shape() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    super::published_schema::assert_response("/wallet/transactions", "get", &body);
     assert_eq!(body["total"], 1);
     assert!(body["items"].is_array());
 }
@@ -293,6 +310,7 @@ async fn transaction_by_id_not_found_returns_404() {
     let resp = app()
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::GET)
                 .uri("/wallet/transactionById?id=deadbeef")
                 .body(Body::empty())
@@ -311,6 +329,7 @@ async fn transactions_by_scan_id_with_payments_id_returns_200() {
     let resp = app()
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::GET)
                 .uri("/wallet/transactionsByScanId/10")
                 .body(Body::empty())
@@ -328,11 +347,14 @@ async fn transactions_by_scan_id_forwards_user_scan_ids() {
     // an empty page, matching Scala's filter-by-membership `[]`). Hold the
     // concrete admin so the recorder can pin that the path id arrives verbatim.
     let admin = Arc::new(StubAdmin::default());
-    let router =
-        ergo_api::wallet::router_with_security(admin.clone() as Arc<dyn WalletAdmin>, None);
+    let router = ergo_api::wallet::router_with_security(
+        admin.clone() as Arc<dyn WalletAdmin>,
+        Some(super::auth::security()),
+    );
     let resp = router
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::GET)
                 .uri("/wallet/transactionsByScanId/99")
                 .body(Body::empty())
@@ -350,4 +372,23 @@ async fn transactions_by_scan_id_forwards_user_scan_ids() {
         Some(99),
         "path scan id forwarded to the admin verbatim"
     );
+}
+
+#[tokio::test]
+async fn transaction_by_id_success_matches_published_summary_shape() {
+    let resp = app()
+        .oneshot(
+            Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
+                .uri(format!("/wallet/transactionById?id={}", "cd".repeat(32)))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    super::published_schema::assert_response("/wallet/transactionById", "get", &body);
+    assert_eq!(body["txId"], "cd".repeat(32));
 }

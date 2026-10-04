@@ -47,7 +47,7 @@ pub fn migrate_standalone_schema(db: &Arc<Database>) -> Result<(), WalletStoreEr
 
 fn migrate_schema_with_index(db: &Arc<Database>, standalone: bool) -> Result<(), WalletStoreError> {
     let (version, height, stored_id) = {
-        let txn = db.begin_read()?;
+        let txn = crate::wallet::store::read_redb(db)?;
         let version = match txn.open_table(tables::WALLET_SCHEMA_VERSION_TABLE) {
             Ok(table) => table.get(())?.map(|row| row.value()),
             Err(redb::TableError::TableDoesNotExist(_)) => None,
@@ -89,10 +89,11 @@ fn migrate_schema_with_index(db: &Arc<Database>, standalone: bool) -> Result<(),
                 None
             }
             Ok(expected) => Some(expected),
-            Err(_) => {
+            Err(WalletStoreError::Decode(_)) => {
                 invalidate = true;
                 None
             }
+            Err(error) => return Err(error),
         },
     };
 
@@ -174,7 +175,7 @@ fn read_index_header(
     height: u32,
     standalone: bool,
 ) -> Result<[u8; 32], WalletStoreError> {
-    let txn = db.begin_read()?;
+    let txn = crate::wallet::store::read_redb(db)?;
     let table = if standalone {
         txn.open_table(tables::WALLET_APPLIED_HEADERS)
     } else {
@@ -257,7 +258,7 @@ mod tests {
 
         migrate_schema(&db).unwrap();
 
-        let txn = db.begin_read().unwrap();
+        let txn = crate::wallet::store::read_redb(&db).unwrap();
         assert_eq!(
             txn.open_table(tables::WALLET_SCHEMA_VERSION_TABLE)
                 .unwrap()
@@ -290,7 +291,7 @@ mod tests {
         }
 
         migrate_schema(&db).unwrap();
-        let txn = db.begin_read().unwrap();
+        let txn = crate::wallet::store::read_redb(&db).unwrap();
         assert!(txn
             .open_table(tables::WALLET_SCAN_INVALIDATED)
             .unwrap()
@@ -338,7 +339,7 @@ mod tests {
         }
 
         migrate_schema(&db).unwrap();
-        let txn = db.begin_read().unwrap();
+        let txn = crate::wallet::store::read_redb(&db).unwrap();
         assert!(txn
             .open_table(tables::WALLET_SCAN_INVALIDATED)
             .unwrap()
@@ -352,5 +353,100 @@ mod tests {
             .get(())
             .unwrap()
             .is_none());
+    }
+    #[test]
+    fn migrate_schema_unreadable_chain_index_preserves_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+        let wrong_type: redb::TableDefinition<u64, u64> = redb::TableDefinition::new("chain_index");
+        let txn = db.begin_write().unwrap();
+        txn.open_table(wrong_type).unwrap().insert(7, 42).unwrap();
+        txn.open_table(tables::WALLET_SCAN_HEIGHT)
+            .unwrap()
+            .insert((), 7)
+            .unwrap();
+        txn.open_table(tables::WALLET_SCAN_HEADER_ID)
+            .unwrap()
+            .insert((), [0x42; 32])
+            .unwrap();
+        txn.open_table(tables::WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .insert((), false)
+            .unwrap();
+        txn.open_table(tables::WALLET_SCHEMA_VERSION_TABLE)
+            .unwrap()
+            .insert((), 1)
+            .unwrap();
+        txn.commit().unwrap();
+
+        assert!(matches!(
+            migrate_schema(&db),
+            Err(WalletStoreError::Database(_))
+        ));
+        let txn = crate::wallet::store::read_redb(&db).unwrap();
+        assert_eq!(
+            txn.open_table(tables::WALLET_SCAN_HEIGHT)
+                .unwrap()
+                .get(())
+                .unwrap()
+                .unwrap()
+                .value(),
+            7
+        );
+        assert_eq!(
+            txn.open_table(tables::WALLET_SCAN_HEADER_ID)
+                .unwrap()
+                .get(())
+                .unwrap()
+                .unwrap()
+                .value(),
+            [0x42; 32]
+        );
+        assert!(!txn
+            .open_table(tables::WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .get(())
+            .unwrap()
+            .unwrap()
+            .value());
+        assert_eq!(
+            txn.open_table(tables::WALLET_SCHEMA_VERSION_TABLE)
+                .unwrap()
+                .get(())
+                .unwrap()
+                .unwrap()
+                .value(),
+            1
+        );
+    }
+
+    #[test]
+    fn migrate_schema_corrupt_chain_index_invalidates_cursor() {
+        // Absent table, absent row, and malformed row are recoverable corruption.
+        for row in [None, Some(Vec::new()), Some(vec![0x42; 31])] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+            let txn = db.begin_write().unwrap();
+            if let Some(bytes) = row {
+                let mut table = txn.open_table(tables::CHAIN_INDEX).unwrap();
+                if !bytes.is_empty() {
+                    table.insert(7, bytes.as_slice()).unwrap();
+                }
+            }
+            txn.open_table(tables::WALLET_SCAN_HEIGHT)
+                .unwrap()
+                .insert((), 7)
+                .unwrap();
+            txn.open_table(tables::WALLET_SCAN_HEADER_ID)
+                .unwrap()
+                .insert((), [0x42; 32])
+                .unwrap();
+            txn.commit().unwrap();
+
+            migrate_schema(&db).unwrap();
+            let read = RedbWalletStore::new(db).begin_read().unwrap();
+            assert!(read.scan_invalidated().unwrap());
+            assert_eq!(read.scan_cursor().unwrap(), None);
+        }
     }
 }

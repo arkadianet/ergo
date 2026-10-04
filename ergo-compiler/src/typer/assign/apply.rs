@@ -29,12 +29,16 @@ pub(crate) fn assign_apply(
     } = &func
     {
         if type_args.len() == 1 {
-            if let TypedExpr::Select { obj, field, .. } = input.as_ref() {
+            if let TypedExpr::Select {
+                obj, field, pos, ..
+            } = input.as_ref()
+            {
                 return assign_apply_explicit_method(
                     env,
                     obj.as_ref().clone(),
                     field.clone(),
                     type_args[0].clone(),
+                    *pos,
                     args,
                     ctx,
                 );
@@ -46,6 +50,7 @@ pub(crate) fn assign_apply(
         obj,
         field,
         res_type,
+        pos,
         ..
     } = &func
     {
@@ -54,6 +59,7 @@ pub(crate) fn assign_apply(
             obj.as_ref().clone(),
             field.clone(),
             res_type.clone(),
+            *pos,
             args,
             ctx,
         );
@@ -78,6 +84,7 @@ pub(crate) fn assign_apply_explicit_method(
     obj: TypedExpr,
     field: String,
     range_tpe: SType,
+    sel_pos: Pos,
     args: Vec<TypedExpr>,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
@@ -87,8 +94,8 @@ pub(crate) fn assign_apply_explicit_method(
     // we propagate as TyperError — verdict parity, class-tag differs).
     let n_args = if field == "getVarFromInput"
         && args.len() == 2
-        && numeric_const_value(&args[0]).is_some()
-        && numeric_const_value(&args[1]).is_some()
+        && numeric_constant_parts(&args[0]).is_some()
+        && numeric_constant_parts(&args[1]).is_some()
     {
         vec![
             narrow_numeric_const_to(&args[0], &SType::SShort, ctx.tree_version)?,
@@ -100,20 +107,18 @@ pub(crate) fn assign_apply_explicit_method(
 
     let new_obj = assign_type(env, obj, ctx)?;
     let t_obj = node_tpe(&new_obj).clone();
-    // The Select/Apply construct starts at its receiver; Scala cites
-    // `sel.sourceContext` / `obj.sourceContext` (SigmaTyper.scala:121,93,162).
-    let sel_pos = node_pos(&new_obj);
+    // SigmaTyper.scala:214,227 (v6.0.6): errors cite sel.sourceContext.
     let new_args = type_all(env, n_args, ctx)?;
     if !container_exists(&t_obj) {
         return Err(TyperError::typer(
             sel_pos,
-            format!("Cannot get field '{field}' in the object of non-product type {t_obj:?}"),
+            format!("Cannot select field '{field}': receiver has non-product type {t_obj:?}"),
         ));
     }
     let method = get_method(&t_obj, &field, ctx.tree_version).ok_or_else(|| {
         TyperError::method_not_found(
             sel_pos,
-            format!("Cannot find method '{field}' in the object of Product type {t_obj:?}"),
+            format!("Cannot find method '{field}' on receiver of type {t_obj:?}"),
         )
     })?;
     // subst = Map(genFunTpe.tpeParams.head.ident -> rangeTpe) (SigmaTyper.scala:156).
@@ -191,23 +196,26 @@ pub(crate) fn assign_apply_select(
     obj: TypedExpr,
     n_original: String,
     res_type: Option<SType>,
+    sel_pos: Pos,
     args: Vec<TypedExpr>,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
     let new_args = type_all(env, args, ctx)?;
-    // exp -> expUnsigned rename (SigmaTyper.scala:188-193).
-    let n = if n_original == "exp"
+    // exp -> expUnsigned rename (SigmaTyper.scala:240-245, v6.0.6).
+    let renamed = n_original == "exp"
         && new_args
             .first()
-            .is_some_and(|a| matches!(node_tpe(a), SType::SUnsignedBigInt))
-    {
+            .is_some_and(|a| matches!(node_tpe(a), SType::SUnsignedBigInt));
+    let n = if renamed {
         "expUnsigned".to_string()
     } else {
         n_original
     };
     // newSel = assignType(Select(obj, n, resType)) — re-runs §1.5.
-    // The Select construct starts at its receiver (`sel.sourceContext`).
-    let sel_pos = node_pos(&obj);
+    // SigmaTyper.scala:240-246 (v6.0.6): the synthesized `expUnsigned` Select
+    // carries no source context, so every error citing it has no position
+    // (the JVM oracle records `0:0`); otherwise the original selector's.
+    let sel_pos = if renamed { 0 } else { sel_pos };
     let sel = TypedExpr::Select {
         obj: Box::new(obj.clone()),
         field: n.clone(),
@@ -601,7 +609,7 @@ pub(crate) fn adapt_apply_args(
         // Range-checked via const_downcast (Scala toByteExact throws ArithmeticException
         // on overflow; we propagate as TyperError — verdict parity, class-tag differs).
         "getVar" | "executeFromVar"
-            if typed_args.len() == 1 && numeric_const_value(&typed_args[0]).is_some() =>
+            if typed_args.len() == 1 && numeric_constant_parts(&typed_args[0]).is_some() =>
         {
             Ok(vec![narrow_numeric_const_to(
                 &typed_args[0],
@@ -611,8 +619,8 @@ pub(crate) fn adapt_apply_args(
         }
         "getVarFromInput"
             if typed_args.len() == 2
-                && numeric_const_value(&typed_args[0]).is_some()
-                && numeric_const_value(&typed_args[1]).is_some() =>
+                && numeric_constant_parts(&typed_args[0]).is_some()
+                && numeric_constant_parts(&typed_args[1]).is_some() =>
         {
             Ok(vec![
                 narrow_numeric_const_to(&typed_args[0], &SType::SShort, ctx.tree_version)?,
@@ -728,17 +736,6 @@ pub(crate) fn finalize_collection(
 // small helpers for the Apply arms
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Numeric value of a numeric `Constant` (Byte/Short/Int/Long), else `None`.
-pub(crate) fn numeric_const_value(e: &TypedExpr) -> Option<i64> {
-    numeric_constant_parts(e).map(|(payload, _)| match payload {
-        ConstPayload::Byte(v) => v as i64,
-        ConstPayload::Short(v) => v as i64,
-        ConstPayload::Int(v) => v as i64,
-        ConstPayload::Long(v) => v,
-        _ => unreachable!("numeric_constant_parts only yields numeric payloads"),
-    })
-}
-
 /// `(payload, type)` of a numeric `Constant` (Byte/Short/Int/Long/BigInt), else
 /// `None`.  Mirrors the `Constant(index, _: SNumericType)` match arms.
 pub(crate) fn numeric_constant_parts(e: &TypedExpr) -> Option<(ConstPayload, SType)> {
@@ -761,7 +758,7 @@ pub(crate) fn numeric_constant_parts(e: &TypedExpr) -> Option<(ConstPayload, STy
 /// Scala throws `ArithmeticException` on overflow; we return `Err(TyperError)`.
 /// Verdict parity is exact (both sides REJECT on out-of-range input).
 /// Class-tag deviation: ArithmeticException vs TyperError — recorded in
-/// lib.rs § "Known M2 deviations".
+/// compiler-design-ledger.md § "Known M2 deviations".
 pub(crate) fn narrow_numeric_const_to(
     e: &TypedExpr,
     target: &SType,

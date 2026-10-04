@@ -56,6 +56,9 @@ pub enum PopowByIdLookup {
 
 #[derive(Debug, Error)]
 pub enum StateError {
+    /// Invalid manifest metadata after independently authenticating every chunk.
+    #[error("invalid snapshot manifest: {0}")]
+    InvalidSnapshotManifest(String),
     #[error("redb error: {0}")]
     Db(#[source] Box<redb::Error>),
     #[error("redb database error: {0}")]
@@ -68,6 +71,8 @@ pub enum StateError {
     TableError(#[source] Box<redb::TableError>),
     #[error("redb commit error: {0}")]
     CommitError(#[source] Box<redb::CommitError>),
+    #[error("redb durability error: {0}")]
+    DurabilityError(#[source] redb::SetDurabilityError),
     #[error("state digest mismatch: computed {computed}, expected {expected}")]
     DigestMismatch { computed: String, expected: String },
     /// Shipped-ADProofs transition replay failed during UTXO-mode block
@@ -114,6 +119,16 @@ pub enum StateError {
     ApplyPopowProofWrongMode {
         mode_description: String,
         best_header_height: u32,
+    },
+    #[error(
+        "apply_popow_proof refused: store is not fresh \
+         (best_header_id={}, best_header_height={})",
+        hex::encode(current_header_id),
+        current_header_height
+    )]
+    ApplyPopowProofNotFresh {
+        current_header_id: [u8; 32],
+        current_header_height: u32,
     },
     /// `apply_popow_proof` refused because the store already has
     /// full-block state applied. Reciprocal guard to
@@ -170,16 +185,20 @@ pub enum StateError {
          (bootstrap requires a fresh data_dir)"
     )]
     InstallSnapshotRefused { current_height: u32 },
-    /// `install_snapshot_state` reconstructed the AVL+ root from the
-    /// snapshot chunks, but it did not equal the expected
-    /// `state_root` prefix carried by the snapshot header. Distinct
-    /// from `DigestMismatch` (steady-state apply/rollback divergence)
-    /// so operator triage can tell a Mode 2 install rejection apart
-    /// from a steady-state consensus failure.
+    /// `install_snapshot_state` reconstructed the AVL+ root and height from
+    /// the snapshot chunks, but the full 33-byte digest did not equal the
+    /// expected `state_root`. Distinct from `DigestMismatch` (steady-state
+    /// apply/rollback divergence) so operator triage can tell a Mode 2 install
+    /// rejection apart from a steady-state consensus failure.
     #[error(
-        "install_snapshot_state: reconstructed root {computed} != expected state_root prefix {expected}"
+        "install_snapshot_state: reconstructed state_root {computed} != expected state_root {expected}"
     )]
     InstallSnapshotRootMismatch { computed: String, expected: String },
+    /// An older snapshot import used node zero as its root, conflicting with
+    /// the runtime null-node sentinel. Reinstall into a fresh database rather
+    /// than guessing how to relocate historical nodes and undo references.
+    #[error("snapshot has legacy zero-based node IDs; retain this database and reinstall a verified snapshot into a fresh database")]
+    LegacySnapshotNodeIds,
     /// `install_snapshot_state` was called with a `snapshot_height`
     /// above the store's current `best_header_height`. Production
     /// Mode 4 always runs header sync (NiPoPoW prefix or Mode 2's
@@ -242,15 +261,16 @@ pub enum StateError {
          boundaries, the first non-trivial boundary is at 1024 testnet / 52224 mainnet)"
     )]
     InstallSnapshotAtGenesisRefused,
-    /// Mode 3: `store_block_section_typed` rejected a
-    /// section write whose parent header is below the current
-    /// prune sentinel. Returned to the caller (sync executor)
-    /// which logs + silently drops; the peer is NOT penalized
+    /// Mode 3: `store_block_section_typed` or
+    /// `store_block_sections_durable` rejected a section write whose
+    /// parent header is below the current prune sentinel, or not
+    /// stored while the sentinel is above one. Returned to the caller
+    /// (sync executor) which logs + silently drops; the peer is NOT penalized
     /// because timing-racy late deliveries are normal during sync.
     /// Defense-in-depth against an executor that bypasses
     /// receive-side gating.
     #[error(
-        "store_block_section_typed: section_id={section_id} at height {section_height} \
+        "block section write refused: section_id={section_id} at height {section_height} \
          is below prune sentinel {sentinel}"
     )]
     PrunedSection {
@@ -323,7 +343,7 @@ pub enum StateError {
         at: PopowMissingAt,
     },
     /// Internal invariant violation at a specific block height —
-    /// typed-detail companion to [`InternalInvariant`] for sites
+    /// typed-detail companion to [`Self::InternalInvariant`] for sites
     /// where the failure context is a height (e.g. expected
     /// HEADER_CHAIN_INDEX row missing for a height the prover just
     /// validated, voted_params cache reload missing a row the
@@ -625,6 +645,12 @@ impl From<redb::TableError> for StateError {
 impl From<redb::CommitError> for StateError {
     fn from(e: redb::CommitError) -> Self {
         StateError::CommitError(Box::new(e))
+    }
+}
+
+impl From<redb::SetDurabilityError> for StateError {
+    fn from(e: redb::SetDurabilityError) -> Self {
+        Self::DurabilityError(e)
     }
 }
 

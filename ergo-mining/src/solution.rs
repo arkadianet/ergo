@@ -46,8 +46,12 @@ pub enum SolutionOutcome {
     Accepted(SubmittedBlock),
     /// PoW hit > target. Returns 400.
     InvalidPow,
-    /// Cached candidate's parent no longer equals the live best-full
-    /// block id. Returns 400 "stale candidate (best-full flipped)".
+    /// The solved template is no longer current. From [`verify_solution`]:
+    /// its parent no longer equals the live best-full block id. From
+    /// [`crate::handle::MiningHandle::verify_solution`] also: the template was
+    /// withdrawn after a block mined on its parent failed to apply, and then
+    /// `candidate_parent` may equal `live_parent`. Returns 400
+    /// `stale_candidate`.
     StaleParent {
         /// What the candidate was built against.
         candidate_parent: [u8; 32],

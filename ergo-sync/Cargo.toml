@@ -3,6 +3,7 @@ name        = "ergo-sync"
 description = "Sync coordinator for the Ergo Rust node: header-first chain sync, parallel block validation, peer-aware modifier delivery, and the executor that drives ergo-p2p / ergo-validation / ergo-state in lockstep through IBD and steady-state."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -37,3 +38,6 @@ tracing-subscriber = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

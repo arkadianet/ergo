@@ -1,0 +1,63 @@
+{
+  "reference_repository": "https://github.com/ergoplatform/ergo",
+  "reference_tag": "v6.0.5",
+  "reference_revision": "5528ef569a41ebccbc8658212e6ee3c97d990b96",
+  "source_observations": [
+    {
+      "url": "https://raw.githubusercontent.com/ergoplatform/ergo/5528ef569a41ebccbc8658212e6ee3c97d990b96/src/main/scala/org/ergoplatform/nodeView/history/ErgoHistoryReader.scala",
+      "status": 200,
+      "bytes": 22222,
+      "sha256": "89046ca3a97827dd553c1414232b488207cb1878f04cb06134d16143609aeb24",
+      "elapsed_seconds": 0.3503977319924161
+    },
+    {
+      "url": "https://raw.githubusercontent.com/ergoplatform/ergo/5528ef569a41ebccbc8658212e6ee3c97d990b96/ergo-core/src/main/scala/org/ergoplatform/modifiers/history/header/PreGenesisHeader.scala",
+      "status": 200,
+      "bytes": 682,
+      "sha256": "26c39af5d23a7429375f37f4833d99d6449e7d682aaa5f001d0a491cdcca60a8",
+      "elapsed_seconds": 0.2691250210045837
+    },
+    {
+      "url": "https://raw.githubusercontent.com/ergoplatform/ergo/5528ef569a41ebccbc8658212e6ee3c97d990b96/ergo-core/src/main/scala/org/ergoplatform/modifiers/history/header/Header.scala",
+      "status": 200,
+      "bytes": 9130,
+      "sha256": "559a7fadac8b0c0f30cfd0b4175096c054245ee0bdbc495c5f64a96f7ec0eceb",
+      "elapsed_seconds": 0.287266714964062
+    }
+  ],
+  "scala_version": "2.12.21",
+  "java": "Corretto17.0.17",
+  "jars": {
+    "scala-library-2.12.21.jar": "e2f4040c95cc4dd1cfeaae38bdde596e4b36933632451efa7d8564c6a359510c",
+    "scala-compiler-2.12.21.jar": "fb1bb6b0d7e8e922f03b5294ef0af23b9d2bd1cde6819ecb820c57210db4548e",
+    "scala-reflect-2.12.21.jar": "8b91a08ba69a0564689793e732f06768d0914ec9e90fa8c3d1b55c5bf4600c14"
+  },
+  "method_sha256": "5aaa7e8af2451c89c2a921c4f5b362013859fb75df1969553063528402ad9ddf",
+  "producer_sha256": "ea0bfc00923af4e5e9c935bd196cbb848ab6718b2ce3b8a1db025a6b8fa9f91d",
+  "executed": [
+    {
+      "name": "compile",
+      "exit_code": 0,
+      "elapsed_seconds": 2.7744742580107413,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "command_scope": "Plain Scala compiler/run with only compiler/library/reflect2.12.21"
+    },
+    {
+      "name": "capture",
+      "exit_code": 0,
+      "elapsed_seconds": 0.23142566002206877,
+      "stdout_sha256": "b5c515ed4eb184bdfa8d42c03b2a1ae8975b7079b697d82df6f5b9433f3b070f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "command_scope": "Plain Scala compiler/run with only compiler/library/reflect2.12.21"
+    }
+  ],
+  "files": {
+    "CaptureCompareV1.scala": "d1c3f86ad561021a6014ec8cb9a9c6aeb10049c3f601f8442058c78e5e194e4f",
+    "ErgoHistoryReader.scala": "89046ca3a97827dd553c1414232b488207cb1878f04cb06134d16143609aeb24",
+    "Header.scala": "559a7fadac8b0c0f30cfd0b4175096c054245ee0bdbc495c5f64a96f7ec0eceb",
+    "PreGenesisHeader.scala": "26c39af5d23a7429375f37f4833d99d6449e7d682aaa5f001d0a491cdcca60a8",
+    "observations.tsv": "b5c515ed4eb184bdfa8d42c03b2a1ae8975b7079b697d82df6f5b9433f3b070f"
+  },
+  "scope": "Selected unchanged compareV1/syncInfoV1 methods, minimal local metadata/ID adapter; no full node or network exchange."
+}

@@ -4,6 +4,11 @@
 //! Finds the first transaction that reaches proof verification and fails,
 //! then dumps the script structure, constants, reduction path, and proof
 //! details for the failing input.
+//!
+//! Requires extracted transactions_700000_700200.json and
+//! headers_700000_700500.json in test-vectors/mainnet. Run with
+//! `cargo test --locked -p ergo-validation --features diagnostics
+//! --test trace_emission_700000 -- --ignored --nocapture`.
 
 use std::collections::HashMap;
 
@@ -62,6 +67,7 @@ struct HeaderVector {
 }
 
 #[test]
+#[ignore = "manual trace; requires extracted 700000-700200 transactions and 700000-700500 headers"]
 fn trace_first_proof_failed() {
     let result = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
@@ -83,6 +89,8 @@ fn trace_inner() {
         &std::fs::read_to_string("../test-vectors/mainnet/headers_700000_700500.json").unwrap(),
     )
     .unwrap();
+    assert!(!tx_data.is_empty(), "700k capture has no transactions");
+    assert!(!header_data.is_empty(), "700k capture has no headers");
     let header_info: HashMap<u32, ([u8; 33], u64)> = header_data
         .iter()
         .map(|v| {
@@ -176,7 +184,7 @@ fn trace_inner() {
                 }
                 eprintln!(
                     "    registers: {}",
-                    box_data.candidate.additional_registers.registers.len()
+                    box_data.candidate.additional_registers().registers.len()
                 );
 
                 eprintln!("\n    ErgoTree:");

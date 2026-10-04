@@ -3,8 +3,8 @@
 
 use parking_lot::RwLock;
 
-use super::build::build_transaction_impl;
-use super::send::{transaction_sign_impl, transaction_sign_impl_with_snapshot};
+use super::build::build_transaction_impl_with_snapshot;
+use super::send::transaction_sign_impl_with_snapshot;
 use crate::engine::{
     map_chain_error, map_submit_error, SigningView, TxSubmitter, WalletChainAccess,
 };
@@ -53,20 +53,25 @@ pub(crate) fn sign_transaction_native_impl(
     state: &RwLock<crate::state::WalletState>,
     store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
+    mempool: &dyn crate::engine::MempoolOverlay,
 ) -> Result<ergo_wallet_protocol::native::dto::SignTxResponse, WalletAdminError> {
     let externals: Vec<ergo_wallet_protocol::scala::sending::ExternalSecretDto> = req
         .external_secrets
         .iter()
         .map(native_external_to_compat)
         .collect();
-    let signed_bytes = transaction_sign_impl(
+    let snapshot = super::chain::PoolSigningView::new(
+        chain.signing_view().map_err(map_chain_error)?,
+        mempool.box_snapshot(&[]).outputs,
+    );
+    let signed_bytes = transaction_sign_impl_with_snapshot(
         req.unsigned_transaction.bytes_hex(),
         Some(&externals),
         None,
         storage,
         state,
         store,
-        chain,
+        &snapshot,
     )?;
     let tx_id = signed_tx_id_hex(&signed_bytes)?;
     Ok(ergo_wallet_protocol::native::dto::SignTxResponse {
@@ -106,14 +111,20 @@ pub(crate) async fn send_transaction_native_impl(
     chain: &dyn WalletChainAccess,
     submitter: &dyn TxSubmitter,
     network: ergo_ser::address::NetworkPrefix,
+    mempool: &dyn crate::engine::MempoolOverlay,
 ) -> Result<ergo_wallet_protocol::native::dto::SendTxResponse, WalletAdminError> {
     use ergo_wallet_protocol::native::dto::{SendTxRequest, SendTxResponse};
 
     // 1. Produce signed bytes (build+sign own secrets for `intent`; decode for `signed`).
     let (signed_bytes, snapshot) = match req {
         SendTxRequest::Intent { intent } => {
-            let built = build_transaction_impl(intent, state, store, chain, network)?;
-            let snapshot = chain.signing_view().map_err(map_chain_error)?;
+            let (built, pool_snapshot) = build_transaction_impl_with_snapshot(
+                intent, state, store, chain, network, mempool,
+            )?;
+            let snapshot: Box<dyn SigningView> = Box::new(super::chain::PoolSigningView::new(
+                chain.signing_view().map_err(map_chain_error)?,
+                pool_snapshot.outputs,
+            ));
             let bytes = transaction_sign_impl_with_snapshot(
                 built.unsigned_transaction.bytes_hex(),
                 None,

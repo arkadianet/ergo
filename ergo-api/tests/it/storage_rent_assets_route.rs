@@ -6,6 +6,7 @@
 //! rendering, and that a row whose box record is missing (index desync)
 //! fails the response with a 500 rather than emitting empty assets.
 
+use ergo_indexer_types::IndexerReadError;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -45,6 +46,7 @@ fn size_delimited_tree() -> ErgoTree {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SBoolean,
@@ -140,6 +142,9 @@ fn build_app_with_params(
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
+        local_reverse_proxy: false,
+        services: Arc::new(ergo_api::ApiServices::new()),
+        script_config: Default::default(),
     };
     router_with_mempool(ctx, None)
 }
@@ -354,69 +359,106 @@ impl IndexerQuery for StubIndexer {
         IndexerStatus::CaughtUp
     }
 
-    fn box_by_id(&self, box_id: &BoxId) -> Option<IndexedBoxDto> {
-        self.boxes.get(box_id).cloned()
+    fn box_by_id(&self, box_id: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(self.boxes.get(box_id).cloned())
     }
-    fn box_by_global_index(&self, _: u64) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_global_index(&self, _: u64) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn boxes_by_global_range(&self, _: u64, _: u64) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-
-    fn tx_by_id(&self, _: &TxId) -> Option<IndexedTxDto> {
-        None
-    }
-    fn tx_by_global_index(&self, _: u64) -> Option<IndexedTxDto> {
-        None
-    }
-    fn txs_by_global_range(&self, _: u64, _: u64) -> Vec<IndexedTxDto> {
-        Vec::new()
+    fn boxes_by_global_range(
+        &self,
+        _: u64,
+        _: u64,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn address_balance(&self, _: &TreeHash) -> Option<BalanceDto> {
-        None
+    fn tx_by_id(&self, _: &TxId) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn address_txs_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedTxDto> {
-        Vec::new()
+    fn tx_by_global_index(&self, _: u64) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn address_boxes_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-    fn address_unspent_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-    fn address_total_txs(&self, _: &TreeHash) -> u64 {
-        0
-    }
-    fn address_total_boxes(&self, _: &TreeHash) -> u64 {
-        0
+    fn txs_by_global_range(&self, _: u64, _: u64) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn template_boxes_paged(&self, _: &TemplateHash, _: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn address_balance(&self, _: &TreeHash) -> Result<Option<BalanceDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn template_unspent_paged(&self, _: &TemplateHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn address_txs_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn template_total_boxes(&self, _: &TemplateHash) -> u64 {
-        0
+    fn address_boxes_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn address_unspent_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn address_total_txs(&self, _: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
+    }
+    fn address_total_boxes(&self, _: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 
-    fn token_by_id(&self, _: &TokenId) -> Option<IndexedTokenDto> {
-        None
+    fn template_boxes_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn tokens_by_ids(&self, _: &[TokenId]) -> Vec<IndexedTokenDto> {
-        Vec::new()
+    fn template_unspent_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn token_boxes_paged(&self, _: &TokenId, _: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn template_total_boxes(&self, _: &TemplateHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
-    fn token_unspent_paged(&self, _: &TokenId, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
+
+    fn token_by_id(&self, _: &TokenId) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn token_total_boxes(&self, _: &TokenId) -> u64 {
-        0
+    fn tokens_by_ids(&self, _: &[TokenId]) -> Result<Vec<IndexedTokenDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn token_boxes_paged(
+        &self,
+        _: &TokenId,
+        _: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn token_unspent_paged(
+        &self,
+        _: &TokenId,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn token_total_boxes(&self, _: &TokenId) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 
     // Storage-rent overrides: ignore cutoff/paging and return the fixture
@@ -426,11 +468,11 @@ impl IndexerQuery for StubIndexer {
         _: u32,
         _: Page,
         _: SortDir,
-    ) -> Vec<StorageRentEligibleDto> {
-        self.rows.clone()
+    ) -> Result<Vec<StorageRentEligibleDto>, IndexerReadError> {
+        Ok(self.rows.clone())
     }
-    fn storage_rent_eligible_total(&self, _: u32) -> u64 {
-        self.rows.len() as u64
+    fn storage_rent_eligible_total(&self, _: u32) -> Result<u64, IndexerReadError> {
+        Ok(self.rows.len() as u64)
     }
     fn storage_rent_in_creation_range(
         &self,
@@ -438,11 +480,15 @@ impl IndexerQuery for StubIndexer {
         _: u32,
         _: Page,
         _: SortDir,
-    ) -> Vec<StorageRentEligibleDto> {
-        self.rows.clone()
+    ) -> Result<Vec<StorageRentEligibleDto>, IndexerReadError> {
+        Ok(self.rows.clone())
     }
-    fn storage_rent_total_in_creation_range(&self, _: u32, _: u32) -> u64 {
-        self.rows.len() as u64
+    fn storage_rent_total_in_creation_range(
+        &self,
+        _: u32,
+        _: u32,
+    ) -> Result<u64, IndexerReadError> {
+        Ok(self.rows.len() as u64)
     }
 }
 

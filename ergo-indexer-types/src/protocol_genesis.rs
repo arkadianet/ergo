@@ -19,7 +19,7 @@
 //! every other unknown input — the latter still indicates a real
 //! indexer/chain divergence and should halt.
 
-/// Mainnet protocol-genesis box IDs (foundation, no-premine, emission).
+/// Mainnet protocol-genesis box IDs (emission, no-premine, foundation).
 /// Order is the same as `genesis_boxes.json`.
 pub const PROTOCOL_GENESIS_BOX_IDS_MAINNET: [[u8; 32]; 3] = [
     // Emission contract — re-spent every block from h=1.

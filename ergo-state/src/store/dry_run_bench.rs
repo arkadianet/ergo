@@ -64,7 +64,7 @@ const TIGHT_BUDGET: usize = 16 * 1024 * 1024;
 fn key(i: u64) -> [u8; 32] {
     let mut out = [0u8; 32];
     let mut state = i.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5DEE_CE66_D3A2_1B37;
-    for chunk in out.chunks_exact_mut(8) {
+    for chunk in out.as_chunks_mut::<8>().0 {
         state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);

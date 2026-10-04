@@ -18,7 +18,8 @@
 //   fallbacks keep that from presenting as "not found".
 // - header.difficulty is a decimal STRING (may exceed 2^53) — displayed
 //   verbatim, never via Number().
-import { api, getJson } from './api-client.js';
+import { api, lookupJson as getJson } from './api-client.js';
+import { loadTransaction } from './transaction-source.js';
 import { makeTable, copyBtn } from './table.js';
 import { erg, num, bytes, dur, truncMiddle, blockTime } from './format.js';
 import { minerNode, pkToAddress, fetchOwnPk, poolLabel } from './miners.js';
@@ -176,6 +177,36 @@ function gatedMiss() {
   return 'extra-index still syncing';
 }
 
+// Authoritative answers besides 404: a 400 rejects the query on this network
+// (`invalid-address`) and the extra-index gate's 503 says the index cannot
+// answer yet. Any other failure leaves the lookup unanswered.
+export function lookupVerdict(error) {
+  if (error?.status === 400) return 'invalid';
+  if (error?.status === 503 && /^indexer-(syncing|halted)$/.test(error.message)) return 'gated';
+  return null;
+}
+
+// Gated read: `{ value }` for a body or a 404 (null), `{ verdict }` for an
+// authoritative refusal; any other failure rejects.
+async function gatedRead(path) {
+  try {
+    return { value: await getJson(path), verdict: null };
+  } catch (e) {
+    const verdict = lookupVerdict(e);
+    if (!verdict) throw e;
+    return { value: null, verdict };
+  }
+}
+
+// Why the index gate refused a lookup, from a refreshed status. A gate that
+// has cleared since then leaves the lookup unanswered: retry it.
+async function gateMiss() {
+  await refreshIndexerStatus();
+  const miss = gatedMiss();
+  if (!miss) throw new Error('extra-index gate cleared during the lookup');
+  return miss;
+}
+
 // ---- search ----
 
 const HEX64 = /^[0-9a-fA-F]{64}$/;
@@ -195,6 +226,15 @@ const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{9,4096}$/;
 let searchSeq = 0;
 
 async function runSearch(q) {
+  const myRoute = seq;
+  const mine = searchSeq + 1;
+  try { return await probeSearch(q); }
+  catch {
+    if (myRoute === seq && mine === searchSeq) setStatus('Search unavailable — a node lookup failed. Try again.');
+  }
+}
+
+async function probeSearch(q) {
   const query = q.trim();
   if (!query) return;
   const mine = ++searchSeq;
@@ -222,7 +262,8 @@ async function runSearch(q) {
   // syncing-indexer nodes still resolve.
   if (HEX64.test(query)) {
     const id = query.toLowerCase();
-    const [blk, tx, pooled, box, token] = await Promise.all([
+    // Settled, not Promise.all: a failed probe cannot discard another's hit.
+    const settled = await Promise.allSettled([
       getJson(`/blocks/${id}/header`),
       getJson(`/api/v1/transactions/${id}/detail`),
       // Mempool-only probe: the slim detail route above mounts only when an
@@ -233,11 +274,22 @@ async function runSearch(q) {
       indexerReady() ? getJson(`/blockchain/token/byId/${id}`) : null,
     ]);
     if (stale()) return;
+    const [blk, tx, pooled, box, token] = settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
     setStatus('');
     if (blk) return go(`block/${id}`);
     if (tx || pooled) return go(`tx/${id}`);
     if (box) return go(`box/${id}`);
     if (token) return go(`token/${id}`);
+    // Without a hit, only authoritative answers establish absence.
+    const failures = settled.filter((r) => r.status === 'rejected').map((r) => r.reason);
+    const failed = failures.find((e) => !lookupVerdict(e));
+    if (failed) throw failed;
+    if (failures.some((e) => lookupVerdict(e) === 'gated')) {
+      const miss = await gateMiss();
+      if (stale()) return;
+      setStatus(`not found — searched blocks + mempool only (${miss})`);
+      return;
+    }
     setStatus(indexerReady() ? 'no block, transaction, box, or token with that id' : `not found — searched blocks + mempool only (${gatedMiss()})`);
     return;
   }
@@ -245,11 +297,17 @@ async function runSearch(q) {
   // Address: any base58-decodable address is a "hit" (the chain has no
   // existence probe — unknown addresses legitimately show a zero balance).
   if (BASE58.test(query)) {
-    const bal = await getJson(`/blockchain/balanceForAddress/${encodeURIComponent(query)}`);
+    const { value: bal, verdict } = await gatedRead(`/blockchain/balanceForAddress/${encodeURIComponent(query)}`);
     if (stale()) return;
     if (bal) {
       setStatus('');
       go(`address/${query}`);
+    } else if (verdict === 'invalid') {
+      setStatus('not a valid address for this network');
+    } else if (verdict === 'gated') {
+      const miss = await gateMiss();
+      if (stale()) return;
+      setStatus(`address lookups unavailable — ${miss}`);
     } else {
       setStatus(indexerReady() ? 'not a valid address for this network' : `address lookups unavailable — ${gatedMiss()}`);
     }
@@ -268,6 +326,16 @@ export function focusSearch() {
     input.focus();
     input.select();
   }
+}
+
+export async function searchQuery(query) {
+  const routeAt = seq;
+  const ticket = ++searchSeq;
+  if (input) input.value = query;
+  setStatus('Checking search availability…');
+  await refreshIndexerStatus();
+  if (routeAt !== seq || ticket !== searchSeq) return;
+  return runSearch(query);
 }
 
 // ---- views ----
@@ -289,10 +357,14 @@ function notFound(what, extra) {
 // `idx` may be stale — the index could have fallen behind and 503'd this very
 // request since our last status read — so refresh before deciding whether this
 // is a GENUINE not-found (index caught up) or a degraded one (unavailable /
-// halted / syncing). Re-checks the route seq across its own await.
-async function notFoundGated(what, mySeq, readyMsg) {
+// halted / syncing). Re-checks the route seq across its own await. `verdict`
+// is the lookup's authoritative refusal, if any (see `lookupVerdict`).
+async function notFoundGated(what, mySeq, readyMsg, verdict) {
+  if (verdict === 'invalid') return notFound(what, readyMsg);
   await refreshIndexerStatus();
   if (mySeq !== seq) return;
+  // A gate that has since cleared did not answer this lookup.
+  if (verdict === 'gated' && indexerReady()) throw new Error(`${what} lookup unavailable`);
   notFound(what, indexerReady() ? readyMsg || null : gatedMiss());
 }
 
@@ -436,7 +508,9 @@ async function renderBlock(id, mySeq) {
   next.href = '#';
   next.onclick = async (e) => {
     e.preventDefault();
-    const ids = await getJson(`/blocks/at/${h.height + 1}`);
+    let ids;
+    try { ids = await getJson(`/blocks/at/${h.height + 1}`); }
+    catch { if (mySeq === seq) setStatus('Next block lookup unavailable. Try again.'); return; }
     // The resolve is async — if the user navigated away meanwhile, don't yank
     // them to the next block.
     if (mySeq !== seq) return;
@@ -526,30 +600,14 @@ function ioLine(b) {
 
 async function renderTx(id, mySeq) {
   loading();
-  // Status is derived ONLY from source-authoritative endpoints, never from the
-  // source-hiding slim /detail route (which searches the index *then* the
-  // mempool and hides which it hit — so its mere presence can't prove
-  // confirmed vs pending):
-  //   • rich  = /blockchain/transaction/byId — CONFIRMED-only (carries blockId)
-  //   • pool  = /transactions/unconfirmed/byTransactionId — MEMPOOL-only
-  //   • slim  = /api/v1/transactions/:id/detail — used ONLY to render IO, and
-  //             only in the degraded case where rich 503s behind a syncing
-  //             index; by then `pool` has authoritatively ruled out mempool.
-  // Residual: during the ~1-block mempool→index turnover a tx can momentarily
-  // satisfy both rich-null and pool; it then reads "unconfirmed" until the
-  // index ingests the block (rich resolves → confirmed). That flip is inherent
-  // to any multi-read explorer and self-corrects on the next refresh.
-  const rich = await getJson(`/blockchain/transaction/byId/${id}`);
-  let pool = null;
-  let slim = null;
-  if (!rich) {
-    [pool, slim] = await Promise.all([
-      getJson(`/transactions/unconfirmed/byTransactionId/${id}`),
-      getJson(`/api/v1/transactions/${id}/detail`),
-    ]);
-  }
+  const { rich, pool, slim, status, failures } = await loadTransaction(id);
   if (mySeq !== seq) return;
-  if (!rich && !pool && !slim) return notFoundGated('transaction', mySeq);
+  // When only the index gate refused, the other sources answered absent.
+  if (status === 'unavailable' && failures.every((e) => lookupVerdict(e) === 'gated')) {
+    return notFoundGated('transaction', mySeq, null, 'gated');
+  }
+  if (status === 'unavailable') throw new Error('transaction lookup unavailable');
+  if (status === 'absent') return notFoundGated('transaction', mySeq);
   body.replaceChildren();
 
   const { panel: p, body: pb } = panel('Transaction');
@@ -564,20 +622,10 @@ async function renderTx(id, mySeq) {
     kvRow(grid, 'time', tsNode(rich.timestamp));
     kvRow(grid, 'size', bytes(rich.size));
     kvRow(grid, 'index in block', String(rich.index));
-  } else if (pool || indexerReady()) {
-    // pool → authoritatively in the mempool. OR: the index is caught up yet the
-    // confirmed-only rich route missed while slim resolved → slim served it from
-    // the mempool (it searches the index first), so it's pending too. (This also
-    // covers a pool probe that failed rather than 404'd — getJson collapses both
-    // to null — without mislabelling a mempool tx as confirmed on a healthy node.)
+  } else if (status === 'unconfirmed') {
     kvRow(grid, 'status', el('span', 'pill pill--warn', 'unconfirmed'));
   } else {
-    // Index is BEHIND (rich 503'd) and pool ruled out mempool: slim is our only
-    // source. Best-effort "confirmed", flagged as detail-limited — naming the
-    // real degradation (syncing vs halted vs unavailable), not assuming syncing.
-    const s = el('span');
-    s.append(el('span', 'pill pill--ok', 'confirmed'), el('span', 'muted', ` · ${gatedMiss()} — limited detail`));
-    kvRow(grid, 'status', s);
+    kvRow(grid, 'status', el('span', 'pill pill--warn', 'confirmation status unavailable · limited detail'));
   }
   pb.append(grid);
   body.append(p);
@@ -629,9 +677,9 @@ async function renderTx(id, mySeq) {
 
 async function renderBox(id, mySeq) {
   loading();
-  const b = await getJson(`/blockchain/box/byId/${id}`);
+  const { value: b, verdict } = await gatedRead(`/blockchain/box/byId/${id}`);
   if (mySeq !== seq) return;
-  if (!b) return notFoundGated('box', mySeq);
+  if (!b) return notFoundGated('box', mySeq, null, verdict);
   await fetchTokenMeta((b.assets || []).map((a) => a.tokenId), indexerReady());
   if (mySeq !== seq) return;
   body.replaceChildren();
@@ -682,9 +730,9 @@ async function renderBox(id, mySeq) {
 // returns a bare array (no total) → its pager is prev/next only.
 async function renderAddress(addr, mySeq) {
   loading();
-  const bal = await getJson(`/blockchain/balanceForAddress/${encodeURIComponent(addr)}`);
+  const { value: bal, verdict } = await gatedRead(`/blockchain/balanceForAddress/${encodeURIComponent(addr)}`);
   if (mySeq !== seq) return;
-  if (!bal) return notFoundGated('address', mySeq, 'invalid for this network');
+  if (!bal) return notFoundGated('address', mySeq, 'invalid for this network', verdict);
   await fetchTokenMeta((bal.confirmed?.tokens || []).map((t) => t.tokenId), indexerReady());
   if (mySeq !== seq) return;
   body.replaceChildren();
@@ -757,6 +805,7 @@ async function renderAddress(addr, mySeq) {
     // keyboard users aren't dumped to <body> on every page.
     const focusPg = document.activeElement?.dataset?.pg || null;
     tabHost.replaceChildren(el('div', 'muted', 'loading…'));
+    try {
     if (mode === 'txs') {
       const r = await getJson(`/blockchain/transaction/byAddress/${encodeURIComponent(addr)}?offset=${offset}&limit=${PAGE}`);
       if (stale()) return;
@@ -798,6 +847,9 @@ async function renderAddress(addr, mySeq) {
       tabHost.append(pagerEl(offset, null, rows.length, move));
       refocusPager(tabHost, focusPg);
     }
+    } catch {
+      if (!stale()) tabHost.replaceChildren(banner('warn', 'Page unavailable — a node lookup failed. Try another tab or retry.'));
+    }
   }
 
   select('txs');
@@ -805,9 +857,9 @@ async function renderAddress(addr, mySeq) {
 
 async function renderToken(id, mySeq) {
   loading();
-  const t = await getJson(`/blockchain/token/byId/${id}`);
+  const { value: t, verdict } = await gatedRead(`/blockchain/token/byId/${id}`);
   if (mySeq !== seq) return;
-  if (!t) return notFoundGated('token', mySeq);
+  if (!t) return notFoundGated('token', mySeq, null, verdict);
   body.replaceChildren();
 
   const { panel: p, body: pb } = panel(t.name ? `Token · ${t.name}` : 'Token');
@@ -833,6 +885,7 @@ async function renderToken(id, mySeq) {
   async function pageBoxes() {
     const myPage = ++pageEpoch;
     const focusPg = document.activeElement?.dataset?.pg || null;
+    try {
     const r = await getJson(`/blockchain/box/byTokenId/${id}?offset=${offset}&limit=${PAGE}`);
     if (mySeq !== seq || myPage !== pageEpoch) return;
     const items = r?.items || [];
@@ -867,6 +920,9 @@ async function renderToken(id, mySeq) {
     );
     boxSection.replaceChildren(bp);
     refocusPager(boxSection, focusPg);
+    } catch {
+      if (mySeq === seq && myPage === pageEpoch) boxSection.replaceChildren(banner('warn', 'Page unavailable — a node lookup failed. Reopen the token to retry.'));
+    }
   }
   await pageBoxes();
 }
@@ -887,6 +943,10 @@ function route() {
   const focused = (p) =>
     p.then(() => {
       if (my === seq) focusView();
+    }).catch(() => {
+      if (my !== seq) return;
+      body.replaceChildren(banner('warn', 'Lookup unavailable — the node could not answer this request. Try again.'));
+      focusView();
     });
   if (!kind) return focused(renderHome(my));
   // SECURITY: validate the entity id against a strict shape BEFORE it can reach

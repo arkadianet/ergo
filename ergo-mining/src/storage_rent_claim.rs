@@ -49,7 +49,7 @@ use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::SigmaValue;
 use ergo_ser::token::Token;
 use ergo_ser::transaction::{write_transaction, Transaction};
-use ergo_validation::storage_rent::compute_storage_fee;
+use ergo_validation::storage_rent::{compute_storage_fee, DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT};
 use ergo_validation::{
     reemission_obligation_core, validate_transaction_parsed, CheckedTransaction, CostAccumulator,
     ProtocolParams, ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules,
@@ -88,8 +88,11 @@ pub struct RentClaim {
 /// `params` supplies the consensus parameters that gate claimability:
 /// `storage_period`, `storage_fee_factor`, `min_value_per_byte`, and
 /// `max_box_size`. `max_claims` bounds how many boxes (and thus outputs)
-/// one claim may carry; it is clamped to `i16::MAX` so every var-127
-/// output index fits the wire format.
+/// one claim may carry; it is clamped below `i16::MAX` to reserve a miner
+/// output while keeping the output count and var-127 indices within Scala's cap.
+/// From height 1,885,000, fully consumed boxes name separate miner outputs.
+/// If the pooled proceeds cannot fund those outputs' dust floors, no claim
+/// is produced.
 ///
 /// `reemission_rules` (EIP-27 networks) excludes boxes still carrying
 /// re-emission tokens: such a box is consensus-unclaimable via storage
@@ -108,8 +111,9 @@ pub fn build_rent_claim(
     miner_pubkey: &[u8; 33],
     reemission_rules: Option<&ReemissionRuleInputs>,
 ) -> Result<Option<RentClaim>, MiningError> {
-    // Clamp so every var-127 output index fits the i16 the wire uses.
-    let max_claims = max_claims.min(i16::MAX as usize);
+    // Reserve one output for the miner even when every input is recreated;
+    // both the total output count and each index must fit Scala's Short cap.
+    let max_claims = max_claims.min(i16::MAX as usize - 1);
     let max_box_size = params.max_box_size as usize;
 
     // Destination of each claimed box's value, decided in one pass so the
@@ -118,7 +122,7 @@ pub fn build_rent_claim(
     enum Dest {
         /// Recreate branch: var 127 names this recreated-output index.
         Recreate(usize),
-        /// Full-consume branch: var 127 names the aggregate P2PK output.
+        /// Full-consume branch: var 127 names a miner P2PK output.
         FullConsume,
     }
 
@@ -199,7 +203,7 @@ pub fn build_rent_claim(
                 b.candidate.ergo_tree_bytes().to_vec(),
                 current_height,
                 b.candidate.tokens.clone(),
-                b.candidate.additional_registers.clone(),
+                b.candidate.additional_registers().clone(),
                 b.candidate.register_bytes().to_vec(),
             );
             // The recreated output must clear the validator's box rules:
@@ -236,9 +240,21 @@ pub fn build_rent_claim(
     }
 
     // The aggregate P2PK output sits right after every recreated box, so
-    // recreate inputs' var-127 indices stay valid and full-consume inputs
-    // name this index.
+    // recreate inputs' var-127 indices stay valid. Full-consume inputs name
+    // this output before activation, and distinct miner outputs afterwards.
     let p2pk_index = recreated.len();
+    let full_consume_count = claimed
+        .iter()
+        .filter(|(_, dest)| matches!(dest, Dest::FullConsume))
+        .count();
+    // Before activation preserve the single aggregate output. Afterwards every
+    // full-consume input needs a different existing output, even though the
+    // interpreter permits it to point to any output.
+    let payout_count = if current_height >= DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT {
+        full_consume_count.max(1)
+    } else {
+        1
+    };
     let p2pk_tree = parse_p2pk_tree(miner_pubkey)?;
 
     // Trim seized tokens until the P2PK output fits max_box_size; excess
@@ -264,15 +280,57 @@ pub fn build_rent_claim(
         return Ok(None);
     }
 
+    // Fund each additional miner output at its exact dust floor from the
+    // pooled proceeds, leaving the remainder (and seized tokens) in the first.
+    // This also lets tiny full-consume boxes share the rent freed by recreate
+    // inputs without reusing an output index.
+    let mut extra_payouts = Vec::with_capacity(payout_count - 1);
+    let mut remaining_value = p2pk_value;
+    for offset in 1..payout_count {
+        let mut payout = build_p2pk_box(0, &p2pk_tree, current_height, vec![])?;
+        let mut minimum = 0;
+        loop {
+            payout.value = minimum;
+            let (needed, size) =
+                box_min_value_and_size(&payout, p2pk_index + offset, params.min_value_per_byte)?;
+            if size > max_box_size {
+                return Ok(None);
+            }
+            if minimum >= needed {
+                break;
+            }
+            minimum = needed;
+        }
+        let Some(rest) = remaining_value.checked_sub(minimum) else {
+            return Ok(None);
+        };
+        remaining_value = rest;
+        extra_payouts.push(payout);
+    }
+    p2pk_box.value = remaining_value;
+    let (remaining_minimum, _) =
+        box_min_value_and_size(&p2pk_box, p2pk_index, params.min_value_per_byte)?;
+    if remaining_value < remaining_minimum {
+        return Ok(None);
+    }
+
     let mut output_candidates = recreated;
     output_candidates.push(p2pk_box);
+    output_candidates.extend(extra_payouts);
 
     let mut inputs: Vec<Input> = Vec::with_capacity(claimed.len());
     let mut resolved_inputs: Vec<ErgoBox> = Vec::with_capacity(claimed.len());
+    let mut full_consume_index = p2pk_index;
     for (b, dest) in claimed {
         let output_idx = match dest {
             Dest::Recreate(i) => i,
-            Dest::FullConsume => p2pk_index,
+            Dest::FullConsume => {
+                let index = full_consume_index;
+                if current_height >= DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT {
+                    full_consume_index += 1;
+                }
+                index
+            }
         };
         inputs.push(rent_input(b, output_idx)?);
         resolved_inputs.push(b.clone());
@@ -519,6 +577,7 @@ mod tests {
             version: 0,
             has_size: true,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
             body: Expr::Const {
                 tpe: SigmaType::SBoolean,
@@ -576,16 +635,7 @@ mod tests {
         write_transaction(&mut w, &claim.tx).unwrap();
         let bytes = w.result();
 
-        let ctx = TransactionContext {
-            height,
-            miner_pubkey: MINER_PK,
-            pre_header_timestamp: 0,
-            activated_script_version: 2,
-            pre_header_version: 3,
-            pre_header_parent_id: [0u8; 32],
-            pre_header_n_bits: 0,
-            pre_header_votes: [0u8; 3],
-        };
+        let ctx = rent_context(height);
         let mut cost =
             CostAccumulator::new(JitCost::from_block_cost(params.max_block_cost).unwrap());
         let mut cx = TxValidationCtx {
@@ -816,6 +866,231 @@ mod tests {
 
         validate_rent(&claim, height, &params)
             .expect("mixed-branch claim must pass consensus validation");
+    }
+
+    #[test]
+    fn rent_distinct_full_consume_batch_at_activation() {
+        let params = rent_params(10, 1_250_000);
+        for height in [
+            DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT - 1,
+            DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT,
+            DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT + 1,
+        ] {
+            for mixed in [false, true] {
+                let mut boxes = vec![aged_box(1_000_000, 0, 0xE1), aged_box(1_000_000, 0, 0xE2)];
+                if mixed {
+                    boxes.insert(1, aged_box(10_000_000_000, 0, 0xE3));
+                }
+                let claim = build_rent_claim(&boxes, height, &params, CLAIMS, &MINER_PK, None)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(claim.tx.inputs.len(), boxes.len());
+                let indices: std::collections::HashSet<_> =
+                    claim.tx.inputs.iter().map(var127).collect();
+                if height >= DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT {
+                    assert_eq!(indices.len(), boxes.len());
+                    assert_eq!(claim.tx.output_candidates.len(), boxes.len());
+                } else {
+                    assert_eq!(indices.len(), boxes.len() - 1);
+                }
+                validate_rent(&claim, height, &params).unwrap();
+                validate_rent_raw(&claim, height, &params).unwrap();
+                assert_eq!(
+                    claim
+                        .tx
+                        .output_candidates
+                        .iter()
+                        .map(|b| b.value)
+                        .sum::<u64>(),
+                    claim
+                        .resolved_inputs
+                        .iter()
+                        .map(|b| b.candidate.value)
+                        .sum::<u64>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rent_distinct_shared_recreation_exploit_rejected_in_both_pipelines() {
+        let params = rent_params(10, 1_250_000);
+        for height in [
+            DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT - 1,
+            DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT,
+        ] {
+            let boxes = [
+                aged_box(1_000_000_000, 0, 0xE4),
+                aged_box(1_000_000_000, 0, 0xE5),
+            ];
+            let mut claim = build_rent_claim(&boxes, height, &params, CLAIMS, &MINER_PK, None)
+                .unwrap()
+                .unwrap();
+            // Both otherwise-identical expired inputs point at one recreated
+            // output. Move the missing recreation's ERG into the miner payout.
+            let removed = claim.tx.output_candidates.remove(1);
+            claim.tx.output_candidates[1].value += removed.value;
+            claim.tx.inputs[1] = rent_input(&claim.resolved_inputs[1], 0).unwrap();
+            for result in [
+                validate_rent(&claim, height, &params),
+                validate_rent_raw(&claim, height, &params),
+            ] {
+                if height < DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT {
+                    result.unwrap();
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(ValidationError::DuplicateStorageRentOutput { index: 1 })
+                    ));
+                }
+            }
+            // Block/checkpoint path must enforce the rule even with scripts skipped.
+            let mut w = VlqWriter::new();
+            write_transaction(&mut w, &claim.tx).unwrap();
+            let ctx = rent_context(height);
+            let mut cost =
+                CostAccumulator::new(JitCost::from_block_cost(params.max_block_cost).unwrap());
+            let mut cx = TxValidationCtx {
+                ctx: &ctx,
+                params: &params,
+                cost: &mut cost,
+                last_headers: &[],
+                rules: TxValidationRules::default(),
+            };
+            let result = validate_transaction_parsed(
+                claim.tx.clone(),
+                &w.result(),
+                claim.resolved_inputs.clone(),
+                vec![],
+                true,
+                &mut cx,
+            );
+            assert_eq!(
+                result.is_ok(),
+                height < DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT
+            );
+        }
+    }
+
+    #[test]
+    fn rent_distinct_full_consume_tokens_stay_in_first_payout() {
+        let height = DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT;
+        let params = rent_params(10, 1_250_000);
+        let boxes = [
+            box_with_tokens(1_000_000, 0, 0xEB, tokens_from(0, 2)),
+            box_with_tokens(1_000_000, 0, 0xEC, tokens_from(2, 2)),
+        ];
+        let claim = build_rent_claim(&boxes, height, &params, CLAIMS, &MINER_PK, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.tx.output_candidates[0].tokens.len(), 4);
+        assert!(claim.tx.output_candidates[1].tokens.is_empty());
+        assert_eq!(var127(&claim.tx.inputs[0]), 0);
+        assert_eq!(var127(&claim.tx.inputs[1]), 1);
+        validate_rent(&claim, height, &params).unwrap();
+    }
+
+    #[test]
+    fn rent_distinct_payouts_cross_vlq_index_boundary() {
+        let height = DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT;
+        let params = rent_params(10, 1_250_000);
+        let boxes: Vec<_> = (0..130).map(|i| aged_box(1_000_000, 0, i)).collect();
+        let claim = build_rent_claim(&boxes, height, &params, 130, &MINER_PK, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.tx.inputs.len(), 130);
+        assert_eq!(claim.tx.output_candidates.len(), 130);
+        assert_eq!(var127(&claim.tx.inputs[129]), 129);
+        validate_rent(&claim, height, &params).unwrap();
+    }
+
+    #[test]
+    fn rent_distinct_unfundable_payouts_produce_no_claim() {
+        let height = DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT;
+        let params = rent_params(10, 1_250_000);
+        let boxes = [aged_box(20_000, 0, 0xE9), aged_box(20_000, 0, 0xEA)];
+        // Enough for one pooled output, but not two separate dust floors.
+        assert!(
+            build_rent_claim(&boxes, height - 1, &params, CLAIMS, &MINER_PK, None)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            build_rent_claim(&boxes, height, &params, CLAIMS, &MINER_PK, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rent_distinct_tiny_consumes_can_use_pooled_recreation_rent() {
+        let height = DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT;
+        let params = rent_params(10, 1_250_000);
+        let boxes = [
+            aged_box(1, 0, 0xE6),
+            aged_box(1, 0, 0xE7),
+            aged_box(1_000_000_000, 0, 0xE8),
+        ];
+        let claim = build_rent_claim(&boxes, height, &params, CLAIMS, &MINER_PK, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.tx.inputs.len(), 3);
+        assert_eq!(
+            claim
+                .tx
+                .inputs
+                .iter()
+                .map(var127)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        validate_rent(&claim, height, &params).unwrap();
+    }
+
+    fn rent_context(height: u32) -> TransactionContext {
+        TransactionContext {
+            height,
+            miner_pubkey: MINER_PK,
+            pre_header_timestamp: 0,
+            activated_script_version: 2,
+            pre_header_version: 3,
+            pre_header_parent_id: [0; 32],
+            pre_header_n_bits: 0,
+            pre_header_votes: [0; 3],
+        }
+    }
+
+    fn validate_rent_raw(
+        claim: &RentClaim,
+        height: u32,
+        params: &ProtocolParams,
+    ) -> Result<(), ValidationError> {
+        struct View<'a>(&'a [ErgoBox]);
+        impl ergo_validation::UtxoView for View<'_> {
+            fn get_box(&self, id: &Digest32) -> Option<ErgoBox> {
+                self.0.iter().find(|b| b.box_id().unwrap() == *id).cloned()
+            }
+        }
+        let mut w = VlqWriter::new();
+        write_transaction(&mut w, &claim.tx).unwrap();
+        let ctx = rent_context(height);
+        let mut cost =
+            CostAccumulator::new(JitCost::from_block_cost(params.max_block_cost).unwrap());
+        let mut cx = TxValidationCtx {
+            ctx: &ctx,
+            params,
+            cost: &mut cost,
+            last_headers: &[],
+            rules: TxValidationRules::default(),
+        };
+        ergo_validation::validate_transaction(
+            &w.result(),
+            &View(&claim.resolved_inputs),
+            &ergo_validation::LocalPolicy::default_policy(),
+            &mut cx,
+        )
+        .map(|_| ())
     }
 
     #[test]

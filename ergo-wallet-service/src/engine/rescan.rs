@@ -14,7 +14,7 @@
 //! (or cursor) a restart interrupted.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use ergo_wallet_protocol::WalletAdminError;
@@ -81,6 +81,8 @@ pub struct RescanCoordinator {
     fail_closed: AtomicBool,
     scan_rebuild: AtomicBool,
     shutdown_requested: AtomicBool,
+    generation: AtomicU64,
+    active_generation: AtomicU64,
 }
 
 impl RescanCoordinator {
@@ -101,6 +103,7 @@ impl RescanCoordinator {
     }
 
     fn finish_task_locked(&self) {
+        self.active_generation.store(0, Ordering::SeqCst);
         self.cancel_requested.store(false, Ordering::SeqCst);
         self.task_active.store(false, Ordering::SeqCst);
     }
@@ -163,6 +166,11 @@ impl RescanCoordinator {
     /// Clear every fence and the task/cancel flags.
     pub fn clear_guards(&self) {
         let _transition = self.transition();
+        if self.task_active() {
+            self.cancel_requested.store(true, Ordering::SeqCst);
+            self.latch_fail_closed_locked();
+            return;
+        }
         self.clear_state_locked();
         self.finish_task_locked();
     }
@@ -171,6 +179,10 @@ impl RescanCoordinator {
     /// and cancellation requests left by a previous session.
     pub fn begin_session(&self) {
         let _transition = self.transition();
+        // A successor session must never revive a storage-owning old worker.
+        if self.task_active() {
+            return;
+        }
         self.shutdown_requested.store(false, Ordering::SeqCst);
         self.cancel_requested.store(false, Ordering::SeqCst);
     }
@@ -202,6 +214,12 @@ impl RescanCoordinator {
         if self.task_active() {
             return Err(BeginRescanError::AlreadyInProgress);
         }
+        let generation = self
+            .generation
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
+            .map_err(|_| BeginRescanError::Store("rescan generation exhausted".into()))?
+            + 1;
+        self.active_generation.store(generation, Ordering::SeqCst);
         self.task_active.store(true, Ordering::SeqCst);
         let full_rebuild = start_h == 0;
         if was_fail_closed {
@@ -241,6 +259,33 @@ impl RescanCoordinator {
         } else {
             self.clear_state_locked();
         }
+        self.finish_task_locked();
+    }
+
+    /// The rollback guard sharing this coordinator's generation ownership.
+    pub fn rescan_guard(self: &Arc<Self>) -> WalletRescanGuard {
+        WalletRescanGuard::new(self.clone())
+    }
+
+    fn owns_generation(&self, generation: u64) -> bool {
+        generation != 0 && self.active_generation.load(Ordering::SeqCst) == generation
+    }
+
+    fn generation_cancelled(&self, generation: u64) -> bool {
+        !self.owns_generation(generation) || self.rescan_cancelled() || self.shutdown_requested()
+    }
+
+    fn finish_generation(&self, generation: u64, keep_blocked: bool, panicking: bool) {
+        let _transition = self.transition();
+        if !self.owns_generation(generation) {
+            return;
+        }
+        if keep_blocked || panicking || self.cancel_requested() || self.shutdown_requested() {
+            self.latch_fail_closed_locked();
+        } else {
+            self.clear_state_locked();
+        }
+        // Release process-local ownership even if the database is unavailable.
         self.finish_task_locked();
     }
 
@@ -291,25 +336,25 @@ impl RescanGuard for WalletRescanGuard {
     /// rescan invalidates because the rescan was working against a chain
     /// state that's now gone.
     fn abort_in_progress(&self, txn: &WriteTransaction) -> Result<(), redb::Error> {
-        if self.coordinator.task_active() {
-            self.coordinator
-                .cancel_requested
-                .store(true, Ordering::SeqCst);
-            self.coordinator.latch_fail_closed();
+        let coordinator = &self.coordinator;
+        let _transition = coordinator.transition();
+        if coordinator.task_active() {
+            coordinator.active_generation.store(0, Ordering::SeqCst);
+            coordinator.task_active.store(false, Ordering::SeqCst);
+            coordinator.cancel_requested.store(true, Ordering::SeqCst);
+            coordinator.latch_fail_closed_locked();
             txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
         }
         Ok(())
     }
 
-    /// Unconditionally invalidate: wallet history cannot be replayed on the
-    /// failure branches that call this, whether or not a rescan was active.
     fn force_invalidate(&self, txn: &WriteTransaction) -> Result<(), redb::Error> {
-        if self.coordinator.task_active() {
-            self.coordinator
-                .cancel_requested
-                .store(true, Ordering::SeqCst);
-        }
-        self.coordinator.latch_fail_closed();
+        let coordinator = &self.coordinator;
+        let _transition = coordinator.transition();
+        coordinator.active_generation.store(0, Ordering::SeqCst);
+        coordinator.task_active.store(false, Ordering::SeqCst);
+        coordinator.cancel_requested.store(true, Ordering::SeqCst);
+        coordinator.latch_fail_closed_locked();
         txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
         Ok(())
     }
@@ -403,6 +448,15 @@ impl RebuildRescan {
         let reached_for_tip = reached_height.clone();
         let mut flags = flags;
         flags.start();
+        let generation = flags.generation;
+        if rescan.generation_cancelled(generation) {
+            return;
+        }
+        let owner = rescan.clone();
+        let store = crate::runtime::generation_guarded_store(
+            store,
+            Arc::new(move || owner.owns_generation(generation)),
+        );
         let result = WalletScanService::rescan_full_rebuild_store(
             store.as_ref(),
             trees,
@@ -422,7 +476,7 @@ impl RebuildRescan {
                     source: WalletStoreError::decode(e.to_string()),
                 })
             },
-            || rescan.rescan_cancelled(),
+            || rescan.generation_cancelled(generation),
             scan_matcher
                 .as_ref()
                 .map(|matcher| matcher as &dyn ScanRescanMatcher),
@@ -431,7 +485,7 @@ impl RebuildRescan {
             Ok(_) => RescanState::Idle,
             Err(error) => rescan_failure_state(start_h, error),
         };
-        let state_result = persist_rescan_state(store.as_ref(), &state);
+        let state_result = persist_owned_rescan_state(store.as_ref(), &rescan, generation, &state);
         let scan_invalidated = if state_result.is_ok() {
             store
                 .read()
@@ -459,8 +513,16 @@ impl ServiceRescan {
         } = self;
         let mut flags = flags;
         flags.start();
-        let result =
-            service.rescan_to_tip_with_cancellation(from_height, || rescan.rescan_cancelled());
+        let generation = flags.generation;
+        if rescan.generation_cancelled(generation) {
+            return;
+        }
+        let owner = rescan.clone();
+        let result = service.rescan_to_tip_owned(
+            from_height,
+            || rescan.generation_cancelled(generation),
+            move || owner.owns_generation(generation),
+        );
         if let Err(error) = &result {
             let already_failed = store
                 .read()
@@ -468,8 +530,10 @@ impl ServiceRescan {
                 .map(|state| matches!(state, RescanState::Failed { .. }))
                 .unwrap_or(false);
             if !already_failed {
-                let _ = persist_rescan_state(
+                let _ = persist_owned_rescan_state(
                     store.as_ref(),
+                    &rescan,
+                    generation,
                     &RescanState::Failed {
                         height: from_height,
                         reason: error.to_string(),
@@ -496,6 +560,18 @@ impl WalletEngine {
     /// exists.
     #[allow(clippy::result_large_err)]
     pub fn prepare_rescan(&mut self, from_height: u32) -> Result<RescanJob, WalletAdminError> {
+        if from_height > 0 {
+            let read = self
+                .store
+                .read()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            if read
+                .scan_invalidated()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            {
+                return Err(WalletAdminError::ScanInvalidated);
+            }
+        }
         let tip_h = rescan_tip(self.chain.as_ref())?;
         if let Some(service) = self.service.as_deref() {
             return self.prepare_service_rescan(service, from_height.min(tip_h), tip_h);
@@ -633,9 +709,7 @@ fn begin_rescan_process(
         Err(BeginRescanError::AlreadyInProgress) => Err(WalletAdminError::RescanUnavailable(
             "rescan already in progress".to_string(),
         )),
-        Err(BeginRescanError::Shutdown) => Err(WalletAdminError::RescanUnavailable(
-            "wallet is shutting down".to_string(),
-        )),
+        Err(BeginRescanError::Shutdown) => Err(WalletAdminError::ShuttingDown),
         Err(BeginRescanError::InvalidStart { requested, cursor }) => {
             let cursor = cursor
                 .map(|height| height.to_string())
@@ -650,20 +724,35 @@ fn begin_rescan_process(
 
 #[allow(clippy::result_large_err)]
 fn rescan_tip(chain: &dyn WalletChainAccess) -> Result<u32, WalletAdminError> {
-    if !chain
-        .read_block_at_supported()
-        .map_err(map_rescan_read_error)?
-    {
-        return Err(WalletAdminError::RescanUnavailable(
-            "chain block-read not available on this backend".to_string(),
-        ));
-    }
     if chain.is_pruned() {
         return Err(WalletAdminError::RestorePruningUnsupported);
     }
-    chain
+    let tip = chain
         .tip_height()
-        .map_err(|e| WalletAdminError::Internal(e.to_string()))
+        .map_err(|e| WalletAdminError::Internal(format!("chain tip read failed: {e}")))?;
+    // Genesis has no blocks to replay, and a full rescan must still clear stale data.
+    if tip == 0 {
+        return Ok(0);
+    }
+    if chain
+        .read_block_at(1)
+        .map_err(map_rescan_read_error)?
+        .is_none()
+    {
+        return Err(WalletAdminError::RescanUnavailable(
+            "chain block-read history is unavailable at height 1".into(),
+        ));
+    }
+    if chain
+        .read_block_at(tip)
+        .map_err(map_rescan_read_error)?
+        .is_none()
+    {
+        return Err(WalletAdminError::RescanUnavailable(format!(
+            "chain tip block is unavailable at height {tip}"
+        )));
+    }
+    Ok(tip)
 }
 
 fn recover_corrupt_scan_registry(store: &dyn WalletStore) -> Result<(), WalletStoreError> {
@@ -688,6 +777,22 @@ fn fail_closed_after_scan_recovery_error(store: &dyn WalletStore, rescan: &Resca
 fn clear_scan_registry_for_recovery(store: &dyn WalletStore) -> Result<(), WalletStoreError> {
     let mut write = store.begin_write()?;
     write.clear_scan_registry()?;
+    write.commit()
+}
+
+fn persist_owned_rescan_state(
+    store: &dyn WalletStore,
+    rescan: &RescanCoordinator,
+    generation: u64,
+    state: &RescanState,
+) -> Result<(), WalletStoreError> {
+    let mut write = store.begin_write()?;
+    if !rescan.owns_generation(generation)
+        || (matches!(state, RescanState::Idle) && rescan.generation_cancelled(generation))
+    {
+        return Ok(());
+    }
+    write.set_rescan_state(state)?;
     write.commit()
 }
 
@@ -731,6 +836,7 @@ fn rescan_should_stay_blocked(
 /// job ends, including by unwinding or by being dropped without running.
 struct RescanFlagsGuard {
     rescan: Arc<RescanCoordinator>,
+    generation: u64,
     keep_blocked: bool,
 }
 
@@ -740,6 +846,7 @@ impl RescanFlagsGuard {
     /// [`RescanCoordinator::fail_rescan_start`].
     fn armed(rescan: Arc<RescanCoordinator>) -> Self {
         Self {
+            generation: rescan.active_generation.load(Ordering::SeqCst),
             rescan,
             keep_blocked: true,
         }
@@ -753,14 +860,17 @@ impl RescanFlagsGuard {
 
     fn block(&mut self) {
         self.keep_blocked = true;
-        self.rescan.latch_fail_closed();
+        let _transition = self.rescan.transition();
+        if self.rescan.owns_generation(self.generation) {
+            self.rescan.latch_fail_closed_locked();
+        }
     }
 }
 
 impl Drop for RescanFlagsGuard {
     fn drop(&mut self) {
         self.rescan
-            .finish_rescan(self.keep_blocked, std::thread::panicking());
+            .finish_generation(self.generation, self.keep_blocked, std::thread::panicking());
     }
 }
 
@@ -917,7 +1027,7 @@ mod tests {
         RescanGuard::abort_in_progress(&WalletRescanGuard::new(rescan.clone()), &txn).unwrap();
         txn.commit().unwrap();
         assert!(rescan.cancel_requested());
-        assert!(rescan.task_active());
+        assert!(!rescan.task_active());
         assert!(rescan.in_progress());
     }
 
@@ -943,9 +1053,14 @@ mod tests {
 
         fn read_block_at(
             &self,
-            _height: u32,
+            height: u32,
         ) -> Result<Option<crate::wallet::scan::RescanBlock>, RescanReadError> {
-            Ok(None)
+            Ok(
+                (height > 0 && height <= self.tip).then_some(crate::wallet::scan::RescanBlock {
+                    block_id: [height as u8; 32],
+                    txs: vec![],
+                }),
+            )
         }
 
         fn read_block_at_supported(&self) -> Result<bool, RescanReadError> {
@@ -1284,5 +1399,394 @@ mod boot_recovery_tests {
         assert!(!rescan.fail_closed());
         assert!(!rescan.in_progress());
         assert!(!rescan.scan_rebuild_in_progress());
+    }
+}
+
+#[cfg(test)]
+mod rescan_preflight_tests {
+    use super::rescan_tip as rescan_chain_preflight;
+    use super::WalletChainAccess;
+    use crate::engine::ChainAccessError;
+    use crate::wallet::scan::{RescanBlock, RescanReadError};
+    use ergo_wallet_protocol::WalletAdminError;
+
+    // ----- helpers -----
+
+    struct HeightOneChain;
+
+    impl WalletChainAccess for HeightOneChain {
+        fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
+            Ok(0)
+        }
+
+        fn tip_height(&self) -> Result<u32, ChainAccessError> {
+            Ok(1)
+        }
+
+        fn is_pruned(&self) -> bool {
+            false
+        }
+
+        fn read_block_at(&self, height: u32) -> Result<Option<RescanBlock>, RescanReadError> {
+            Ok((height == 1).then_some(RescanBlock {
+                block_id: [1; 32],
+                txs: vec![],
+            }))
+        }
+    }
+
+    struct MissingHeightOneChain;
+
+    impl WalletChainAccess for MissingHeightOneChain {
+        fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
+            Ok(0)
+        }
+
+        fn tip_height(&self) -> Result<u32, ChainAccessError> {
+            Ok(10)
+        }
+
+        fn is_pruned(&self) -> bool {
+            false
+        }
+
+        fn read_block_at(&self, _height: u32) -> Result<Option<RescanBlock>, RescanReadError> {
+            Ok(None)
+        }
+    }
+
+    struct FailingChain;
+
+    impl WalletChainAccess for FailingChain {
+        fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
+            Ok(0)
+        }
+
+        fn is_pruned(&self) -> bool {
+            false
+        }
+
+        fn read_block_at(&self, _height: u32) -> Result<Option<RescanBlock>, RescanReadError> {
+            Ok(None)
+        }
+
+        fn tip_height(&self) -> Result<u32, ChainAccessError> {
+            Err(ChainAccessError::NoCommittedState)
+        }
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn rescan_preflight_height_one_succeeds() {
+        let chain = HeightOneChain;
+        assert_eq!(rescan_chain_preflight(&chain).unwrap(), 1);
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn missing_height_one_is_refused_before_rebuild() {
+        let chain = MissingHeightOneChain;
+        assert!(matches!(
+            rescan_chain_preflight(&chain),
+            Err(WalletAdminError::RescanUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn chain_read_errors_are_not_treated_as_tip_zero() {
+        let chain = FailingChain;
+        assert!(matches!(
+            rescan_chain_preflight(&chain),
+            Err(WalletAdminError::Internal(message)) if message.contains("chain tip read failed")
+        ));
+    }
+
+    #[test]
+    fn rescan_preflight_missing_tip_block_reports_tip_height() {
+        struct MissingTipChain;
+        impl WalletChainAccess for MissingTipChain {
+            fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
+                Ok(0)
+            }
+            fn tip_height(&self) -> Result<u32, ChainAccessError> {
+                Ok(10)
+            }
+            fn is_pruned(&self) -> bool {
+                false
+            }
+            fn read_block_at(&self, height: u32) -> Result<Option<RescanBlock>, RescanReadError> {
+                HeightOneChain.read_block_at(height)
+            }
+        }
+        assert!(matches!(
+            rescan_chain_preflight(&MissingTipChain),
+            Err(WalletAdminError::RescanUnavailable(message))
+                if message == "chain tip block is unavailable at height 10"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    use crate::wallet::{RedbWalletStore, WalletRead, WalletWrite};
+    use std::sync::atomic::AtomicUsize;
+
+    fn store() -> (tempfile::TempDir, Arc<redb::Database>, Arc<dyn WalletStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("wallet.redb")).unwrap());
+        let store = Arc::new(RedbWalletStore::new(db.clone())) as Arc<dyn WalletStore>;
+        (dir, db, store)
+    }
+
+    fn claim(store: &dyn WalletStore, control: &Arc<RescanCoordinator>) -> RescanFlagsGuard {
+        claim_from(store, control, 0)
+    }
+
+    fn claim_from(
+        store: &dyn WalletStore,
+        control: &Arc<RescanCoordinator>,
+        from_height: u32,
+    ) -> RescanFlagsGuard {
+        control
+            .begin_rescan(from_height, store, from_height)
+            .unwrap();
+        let mut guard = RescanFlagsGuard::armed(control.clone());
+        persist_owned_rescan_state(
+            store,
+            control,
+            guard.generation,
+            &RescanState::Running { from_height },
+        )
+        .unwrap();
+        guard.start();
+        guard
+    }
+
+    #[test]
+    fn rescan_identity_single_owner_admits_and_releases() {
+        let (_dir, _db, store) = store();
+        let control = Arc::new(RescanCoordinator::new());
+        let guard = claim(store.as_ref(), &control);
+        let generation = guard.generation;
+        assert!(control.in_progress());
+        assert!(control.owns_generation(guard.generation));
+        drop(guard);
+        assert!(!control.owns_generation(generation));
+        assert!(!control.task_active());
+        assert!(!control.in_progress());
+        assert!(!control.cancel_requested());
+    }
+
+    #[test]
+    fn rescan_identity_second_admission_rejected() {
+        let (_dir, _db, store) = store();
+        let control = Arc::new(RescanCoordinator::new());
+        let guard = claim(store.as_ref(), &control);
+        assert!(matches!(
+            control.begin_rescan(0, store.as_ref(), 0),
+            Err(BeginRescanError::AlreadyInProgress)
+        ));
+        assert!(control.owns_generation(guard.generation));
+        drop(guard);
+        assert!(!control.task_active());
+    }
+
+    #[test]
+    fn rescan_ownership_is_independent_between_embedded_nodes() {
+        let (_dir, db, store) = store();
+        let left = Arc::new(RescanCoordinator::new());
+        let right = Arc::new(RescanCoordinator::new());
+        let a = claim(store.as_ref(), &left);
+        let b = claim(store.as_ref(), &right);
+        let write = db.begin_write().unwrap();
+        left.rescan_guard().abort_in_progress(&write).unwrap();
+        write.commit().unwrap();
+        assert!(!left.owns_generation(a.generation));
+        assert!(right.owns_generation(b.generation));
+        assert!(right.task_active());
+        drop(b);
+        assert!(!right.task_active());
+        assert!(!right.in_progress());
+    }
+
+    #[test]
+    fn rescan_identity_cancelled_owner_cannot_release_successor() {
+        let (_dir, db, store) = store();
+        let control = Arc::new(RescanCoordinator::new());
+        let a = claim(store.as_ref(), &control);
+        let write = db.begin_write().unwrap();
+        control.rescan_guard().abort_in_progress(&write).unwrap();
+        write.commit().unwrap();
+        assert!(!control.owns_generation(a.generation));
+        let b = claim(store.as_ref(), &control);
+        assert_ne!(a.generation, b.generation);
+        drop(a);
+        assert!(control.owns_generation(b.generation));
+        assert!(control.task_active());
+        drop(b);
+        assert!(!control.task_active());
+    }
+
+    #[test]
+    fn rescan_single_owner_persists_idle_and_releases_flags() {
+        for from_height in [0, 12] {
+            let (_dir, _db, store) = store();
+            let control = Arc::new(RescanCoordinator::new());
+            let guard = claim_from(store.as_ref(), &control, from_height);
+            assert_eq!(control.scan_rebuild_in_progress(), from_height == 0);
+            assert_eq!(
+                store.read().unwrap().rescan_state().unwrap(),
+                RescanState::Running { from_height }
+            );
+            persist_owned_rescan_state(
+                store.as_ref(),
+                &control,
+                guard.generation,
+                &RescanState::Idle,
+            )
+            .unwrap();
+            drop(guard);
+            assert!(!control.in_progress());
+            assert!(!control.task_active());
+            assert!(!control.scan_rebuild_in_progress());
+            assert_eq!(
+                store.read().unwrap().rescan_state().unwrap(),
+                RescanState::Idle
+            );
+        }
+    }
+
+    #[test]
+    fn rescan_cancelled_owner_preserves_successor_state_and_flags() {
+        for force in [false, true] {
+            let (_dir, db, store) = store();
+            let control = Arc::new(RescanCoordinator::new());
+            let a = claim(store.as_ref(), &control);
+            let write = db.begin_write().unwrap();
+            if force {
+                control.rescan_guard().force_invalidate(&write).unwrap();
+            } else {
+                control.rescan_guard().abort_in_progress(&write).unwrap();
+            }
+            write.commit().unwrap();
+            assert!(control.generation_cancelled(a.generation));
+            assert!(matches!(
+                control.begin_rescan(7, store.as_ref(), 7),
+                Err(BeginRescanError::InvalidStart { .. })
+            ));
+            let b = claim(store.as_ref(), &control);
+            for state in [
+                RescanState::Idle,
+                RescanState::Failed {
+                    height: 0,
+                    reason: "cancelled".into(),
+                },
+            ] {
+                persist_owned_rescan_state(store.as_ref(), &control, a.generation, &state).unwrap();
+                assert_eq!(
+                    store.read().unwrap().rescan_state().unwrap(),
+                    RescanState::Running { from_height: 0 }
+                );
+            }
+            drop(a);
+            assert!(control.owns_generation(b.generation));
+            assert!(control.scan_rebuild_in_progress());
+            drop(b);
+            assert!(!control.scan_rebuild_in_progress());
+        }
+    }
+
+    #[test]
+    fn rescan_cleanup_releases_memory_when_storage_writes_fail() {
+        struct ToggleStore {
+            inner: Arc<dyn WalletStore>,
+            fail: AtomicBool,
+            attempts: AtomicUsize,
+        }
+        impl WalletStore for ToggleStore {
+            fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+                self.inner.begin_read()
+            }
+            fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                if self.fail.load(Ordering::SeqCst) {
+                    Err(WalletStoreError::decode("synthetic write failure"))
+                } else {
+                    self.inner.begin_write()
+                }
+            }
+        }
+        let (_dir, _db, inner) = store();
+        let store = ToggleStore {
+            inner,
+            fail: AtomicBool::new(false),
+            attempts: AtomicUsize::new(0),
+        };
+        let control = Arc::new(RescanCoordinator::new());
+        let guard = claim(&store, &control);
+        assert!(control.scan_rebuild_in_progress());
+        store.fail.store(true, Ordering::SeqCst);
+        assert!(
+            persist_owned_rescan_state(&store, &control, guard.generation, &RescanState::Idle)
+                .is_err()
+        );
+        let attempts = store.attempts.load(Ordering::SeqCst);
+        drop(guard);
+        assert!(!control.task_active());
+        assert!(!control.in_progress());
+        assert!(!control.scan_rebuild_in_progress());
+        assert_eq!(
+            store.attempts.load(Ordering::SeqCst),
+            attempts,
+            "volatile release must not depend on another database write"
+        );
+        store.fail.store(false, Ordering::SeqCst);
+        let successor = claim_from(&store, &control, 7);
+        assert_eq!(
+            store.read().unwrap().rescan_state().unwrap(),
+            RescanState::Running { from_height: 7 }
+        );
+        assert!(!control.scan_rebuild_in_progress());
+        drop(successor);
+        assert!(!control.in_progress());
+    }
+    #[test]
+    fn rescan_replaced_before_clear_transaction_preserves_invalidation() {
+        use std::cell::Cell;
+        let (_dir, db, store) = store();
+        let control = Arc::new(RescanCoordinator::new());
+        let first = claim(store.as_ref(), &control);
+        let mut successor = None;
+        let reached_tip = Cell::new(false);
+        let result = WalletScanService::rescan_full_rebuild_store(
+            store.as_ref(),
+            Default::default(),
+            Default::default(),
+            0,
+            0,
+            |_| unreachable!("genesis has no blocks"),
+            || {
+                reached_tip.set(true);
+                Ok(0)
+            },
+            || {
+                let cancelled = !control.owns_generation(first.generation);
+                if reached_tip.get() && successor.is_none() {
+                    let txn = db.begin_write().unwrap();
+                    control.rescan_guard().abort_in_progress(&txn).unwrap();
+                    txn.commit().unwrap();
+                    successor = Some(claim(store.as_ref(), &control));
+                }
+                cancelled
+            },
+            None,
+        );
+        assert!(matches!(result, Err(RescanError::Cancelled { height: 0 })));
+        assert!(store.read().unwrap().scan_invalidated().unwrap());
+        drop(first);
+        assert!(control.owns_generation(successor.as_ref().unwrap().generation));
     }
 }

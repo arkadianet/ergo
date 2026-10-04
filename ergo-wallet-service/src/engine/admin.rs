@@ -113,7 +113,9 @@ impl WalletEngine {
                     format!("rescan_failed: {reason}")
                 }
                 crate::wallet::RescanState::Running { .. } => "rescan_running".to_string(),
-                crate::wallet::RescanState::Idle if invalidated => "scan_invalidated".to_string(),
+                crate::wallet::RescanState::Idle if invalidated => {
+                    WalletAdminError::ScanInvalidated.to_string()
+                }
                 crate::wallet::RescanState::Idle => String::new(),
             },
         })
@@ -150,6 +152,9 @@ impl WalletEngine {
         storage
             .init(strength_enum, &pass, &mnemonic_pass)
             .map_err(|e| match e {
+                ergo_wallet::error::WalletError::WalletAlreadyInitialized => {
+                    WalletAdminError::WalletExists
+                }
                 ergo_wallet::error::WalletError::InvalidMnemonic(_) => {
                     WalletAdminError::InvalidMnemonic
                 }
@@ -178,6 +183,9 @@ impl WalletEngine {
         storage
             .restore(&mnemonic, &mnemonic_pass, &pass, use_pre_1627)
             .map_err(|e| match e {
+                ergo_wallet::error::WalletError::WalletAlreadyInitialized => {
+                    WalletAdminError::WalletExists
+                }
                 ergo_wallet::error::WalletError::InvalidMnemonic(_) => {
                     WalletAdminError::InvalidMnemonic
                 }

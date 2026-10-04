@@ -58,10 +58,7 @@ impl ExtendedSecretKey {
     /// Sigma 5.0 requires the `usePre1627KeyDerivation` flag from
     /// the secret-file metadata, which the encrypted secret-file
     /// loader handles.
-    pub fn derive_master_key(seed: &[u8], use_pre_1627: bool) -> Result<Self, WalletError> {
-        // Master derivation is identical in both modes per Ergo issue
-        // #1627; the divergence is in CHILD derivation.
-        let _ = use_pre_1627;
+    pub fn derive_master_key(seed: &[u8]) -> Result<Self, WalletError> {
         // Standard BIP32: HMAC-SHA512 with key "Bitcoin seed".
         //
         // Accepted residual: `result` (the raw 64-byte HMAC output) and
@@ -247,8 +244,9 @@ impl ExtendedSecretKey {
 /// `secret_bytes` and the chain code are wiped on drop.
 #[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct ExtendedSecretKeyLegacy {
-    /// Variable-length unsigned big-endian secret bytes (1..=32 bytes).
-    /// MAY be shorter than 32 bytes when the underlying scalar has
+    /// The master keeps its complete 32-byte HMAC output. Children use
+    /// variable-length unsigned big-endian bytes (1..=32 bytes), and
+    /// may be shorter than 32 bytes when the underlying scalar has
     /// leading zero bytes — this is the "31 bit child key" condition
     /// that the post-1627 fix corrected by left-padding.
     pub(crate) secret_bytes: Vec<u8>,
@@ -278,18 +276,39 @@ impl ExtendedSecretKeyLegacy {
 
     /// Derive the BIP32 master key in pre-1627 mode. The master
     /// derivation is IDENTICAL to post-1627 mode — the 1627 bug is
-    /// strictly in CHILD derivation. We strip leading zeros from the
-    /// 32-byte secret to match Scala's `BigIntegers.asUnsignedByteArray`
-    /// convention.
+    /// strictly in CHILD derivation. Preserve all 32 master bytes, including
+    /// leading zeros; only derived children use the variable-length convention.
     pub fn derive_master_key(seed: &[u8]) -> Result<Self, WalletError> {
-        let post = ExtendedSecretKey::derive_master_key(seed, false)?;
-        let mut bytes: Vec<u8> = post.secret_bytes().to_vec();
-        while bytes.len() > 1 && bytes[0] == 0 {
-            bytes.remove(0);
-        }
+        let post = ExtendedSecretKey::derive_master_key(seed)?;
         Ok(Self {
-            secret_bytes: bytes,
+            secret_bytes: post.secret_bytes().to_vec(),
             chain_code: post.chain_code,
+        })
+    }
+
+    /// Recover the earlier Rust-specific legacy master-trimming behavior.
+    /// Use only when restoring addresses created by that implementation;
+    /// Scala legacy imports must use [`Self::derive_master_key`]. This choice
+    /// is explicit because encrypted seed metadata alone cannot distinguish
+    /// old Rust legacy wallets from Scala legacy wallets.
+    pub fn derive_master_key_legacy_rust(seed: &[u8]) -> Result<Self, WalletError> {
+        let master = Self::derive_master_key(seed)?;
+        Ok(master.legacy_rust_trimmed_master().unwrap_or(master))
+    }
+
+    /// This master in the earlier Rust encoding, with leading zero bytes
+    /// dropped. `None` when nothing would be dropped: both encodings then
+    /// derive the same keys.
+    pub(crate) fn legacy_rust_trimmed_master(&self) -> Option<Self> {
+        let leading = self
+            .secret_bytes
+            .iter()
+            .take(self.secret_bytes.len().saturating_sub(1))
+            .take_while(|byte| **byte == 0)
+            .count();
+        (leading > 0).then(|| Self {
+            secret_bytes: self.secret_bytes[leading..].to_vec(),
+            chain_code: self.chain_code,
         })
     }
 
@@ -420,7 +439,7 @@ mod tests {
     #[test]
     fn bip32_vector_1_master_key_post_1627() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let xsk = ExtendedSecretKey::derive_master_key(&seed, false)
+        let xsk = ExtendedSecretKey::derive_master_key(&seed[..])
             .expect("standard BIP32 master key must derive");
         assert_eq!(
             hex::encode(xsk.secret_bytes()),
@@ -440,7 +459,7 @@ mod tests {
     #[test]
     fn bip32_vector_1_first_hardened_child() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..]).unwrap();
         // m/0' = hardened index 0 = HARDENED_OFFSET | 0
         let child = master
             .derive_child(HARDENED_OFFSET)
@@ -462,7 +481,7 @@ mod tests {
     #[test]
     fn bip32_vector_1_two_step_derive_at_path() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..]).unwrap();
         // m/0'/1
         let path: DerivationPath = "m/0'/1".parse().unwrap();
         let leaf = master
@@ -478,7 +497,7 @@ mod tests {
     #[test]
     fn extended_pubkey_from_xsk_returns_compressed_secp256k1_pubkey() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..]).unwrap();
         let xpub = master.public_key();
         // BIP32 Vector 1, master pubkey (compressed sec1):
         // 0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2
@@ -503,7 +522,7 @@ mod tests {
         )
         .unwrap();
         let seed = mnemonic.to_seed("");
-        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed).unwrap();
+        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed[..]).unwrap();
         let path: DerivationPath = "m/44'/429'/0'/0/0".parse().unwrap();
         let leaf = master.derive_at_path(&path).unwrap();
         let pk = leaf.public_key().unwrap().compressed_bytes();
@@ -527,7 +546,7 @@ mod tests {
         )
         .unwrap();
         let seed = mnemonic.to_seed("");
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..]).unwrap();
         let path: DerivationPath = "m/44'/429'/0'/0/0".parse().unwrap();
         let leaf = master.derive_at_path(&path).unwrap();
         let pk = leaf.public_key().compressed_bytes();
@@ -536,12 +555,10 @@ mod tests {
         assert_eq!(hex::encode(pk), expected_pubkey_hex);
     }
 
-    /// Pre-1627 intermediate values — must come from Scala oracle.
-    /// Currently #[ignore]'d pending engineer extraction.
+    /// Pre-1627 intermediate values from Scala 6.0.6, including the child
+    /// whose leading zero is stripped before the next hardened HMAC input.
     #[test]
-    #[ignore = "intermediate vectors must be Scala-extracted before un-ignoring"]
     fn pre_1627_intermediate_vectors_match_scala() {
-        use crate::derivation::DerivationPath;
         use crate::mnemonic::Mnemonic;
         let mnemonic = Mnemonic::import(
             "race relax argue hair sorry riot there spirit ready \
@@ -549,12 +566,27 @@ mod tests {
         )
         .unwrap();
         let seed = mnemonic.to_seed("");
-        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed).unwrap();
-        let expected_master_hex: &str = "<EXTRACT_FROM_SCALA>";
-        let expected_master_chain_hex: &str = "<EXTRACT_FROM_SCALA>";
-        assert_eq!(hex::encode(master.secret_bytes()), expected_master_hex);
-        assert_eq!(hex::encode(master.chain_code()), expected_master_chain_hex);
-        // Suppress unused variable warning — path would be used after Scala extraction.
-        let _path: DerivationPath = "m/44'/429'/0'/0/0".parse().unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../test-vectors/wallet/scala_6_0_6.json"))
+                .unwrap();
+        let steps = fixture["legacyDerivation"].as_array().unwrap();
+        let indices = [44 | 0x8000_0000, 429 | 0x8000_0000, 0x8000_0000, 0, 0];
+        assert_eq!(steps.len(), indices.len() + 1);
+        let mut key = ExtendedSecretKeyLegacy::derive_master_key(&seed[..]).unwrap();
+        for (depth, expected) in steps.iter().enumerate() {
+            assert_eq!(
+                hex::encode(key.secret_bytes()),
+                expected["secret"],
+                "depth {depth}"
+            );
+            assert_eq!(
+                hex::encode(key.chain_code()),
+                expected["chainCode"],
+                "depth {depth}"
+            );
+            if let Some(index) = indices.get(depth) {
+                key = key.derive_child(*index).unwrap();
+            }
+        }
     }
 }

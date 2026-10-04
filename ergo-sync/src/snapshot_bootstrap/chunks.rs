@@ -17,7 +17,7 @@ use ergo_primitives::digest::Digest32;
 pub const MAX_INFLIGHT_CHUNKS: usize = 16;
 
 /// Per-chunk request timeout. Same intent as
-/// [`MANIFEST_REQUEST_TIMEOUT`] but applied to each
+/// `MANIFEST_REQUEST_TIMEOUT` but applied to each
 /// `GetUtxoSnapshotChunk` independently. A silent peer's chunk
 /// slot is freed and re-tried against another quorum voter.
 pub const CHUNK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -94,6 +94,11 @@ pub enum ChunkReceiveOutcome {
 }
 
 impl ChunkAssembly {
+    /// Whether this peer currently owns a chunk request.
+    pub fn has_requests_from(&self, peer: &PeerId) -> bool {
+        self.inflight.values().any(|request| &request.peer == peer)
+    }
+
     /// Initialize the assembly with the expected chunk IDs from
     /// the verified manifest. Empty list = no chunks needed
     /// (entire tree fits in the manifest); `is_complete()`

@@ -17,8 +17,9 @@ use crate::Mempool;
 ///
 /// Each entry is a `Clone` of an in-pool `Entry`, so the snapshot
 /// holds no borrow against the source mempool. `Entry::bytes` is an
-/// `Arc<[u8]>`, so the per-entry clone is cheap (refcount bump +
-/// copy of small per-entry metadata, no payload reallocation).
+/// `Arc<[u8]>`, so serialized transaction bytes are shared. Other entry
+/// vectors and materialized output boxes are cloned; borrow an existing
+/// snapshot when another independent copy is unnecessary.
 #[derive(Debug, Clone)]
 pub struct MempoolReadSnapshot {
     entries: Vec<Entry>,

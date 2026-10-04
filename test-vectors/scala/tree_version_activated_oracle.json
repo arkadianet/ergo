@@ -1,5 +1,5 @@
 {
-  "_source": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala (sigma-state 6.0.2 + ergo-core 6.0.2), runs 2026-09-07 with the <surface>@<activated> spec; `oracle` is the JVM output line verbatim",
+  "_source": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala (sigma-state 6.0.6 + ergo-core 6.0.6), runs 2026-09-30 with the <surface>@<activated> spec; `oracle` is the JVM output line verbatim",
   "_rule": "VersionContext.scala:20 require(activatedVersion < JitActivationVersion(2) || ergoTreeVersion <= activatedVersion); a failing require is re-thrown by ErgoTreeSerializer.deserializeErgoTree as a SerializerException (hard reject, size bit or not); below activated 2 the require is inert and a failing body is kept as UnparsedErgoTree when the size bit is set",
   "_issue": "#327",
   "vectors": [

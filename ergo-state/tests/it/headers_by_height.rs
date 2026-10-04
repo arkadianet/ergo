@@ -308,12 +308,9 @@ fn backfill_populates_existing_data() {
 }
 
 #[test]
-fn backfill_handles_corrupt_row_lengths_robustly() {
-    // The reader path returns a Serialization error on rows whose
-    // length isn't a multiple of 32. The backfill only writes
-    // well-formed concat'd rows, so this test pins the reader
-    // contract — corrupt rows on a future DB version would surface
-    // immediately rather than masquerading as truncated header lists.
+fn forward_index_write_returns_a_complete_healthy_row() {
+    // This exercises the ordinary forward-write/read contract. Malformed-row
+    // error handling requires a separate malformed-row case.
     let (mut store, _g) = fresh_store();
     let h1 = id(0xAA);
     store

@@ -95,6 +95,7 @@ fn tree(version: u8, cseg: bool, constants: Vec<(SigmaType, SigmaValue)>, body: 
         version,
         has_size: true,
         constant_segregation: cseg,
+        reserved_header_bits: 0,
         constants,
         body,
     }

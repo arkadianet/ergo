@@ -156,7 +156,7 @@ pub(crate) fn tx_hints_bag_to_dto(
         match hint {
             Hint::OwnCommitment(oc) => HintDto::OwnCommitment {
                 image: sigma_boolean_to_json(&oc.image),
-                secret: hex::encode(oc.secret_randomness),
+                secret: hex::encode(&oc.secret_randomness[..]),
                 commitment: fpm_to_json(&oc.commitment),
                 position: node_position_to_str(&oc.position.positions),
             },
@@ -284,7 +284,7 @@ pub(crate) fn tx_hints_bag_from_dto(
                 };
                 Ok(Hint::OwnCommitment(OwnCommitment {
                     image: sb,
-                    secret_randomness: parse_secret(secret)?,
+                    secret_randomness: parse_secret(secret)?.into(),
                     commitment: fpm_from_json(commitment)?,
                     position: pos,
                 }))
@@ -362,6 +362,21 @@ pub(crate) fn tx_hints_bag_from_dto(
         }
     }
 
+    // Validate the caller's public designation before decoding any secret
+    // nonce. add_for_input partitions by variant, which otherwise silently
+    // imports a secret supplied in the public-only transport bucket.
+    if dto
+        .public_hints
+        .values()
+        .flatten()
+        .any(|hint| matches!(hint, HintDto::OwnCommitment { .. }))
+    {
+        return Err(WalletAdminError::BadRequest(
+            "publicHints cannot contain cmtWithSecret; place private commitments in secretHints"
+                .into(),
+        ));
+    }
+
     let mut tbag = TransactionHintsBag::empty();
 
     // Secret hints (OwnCommitment) → secret_hints in TransactionHintsBag.
@@ -390,4 +405,61 @@ pub(crate) fn tx_hints_bag_from_dto(
     }
 
     Ok(tbag)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_wallet_protocol::scala::sending::{
+        FirstProverMessageJson, HintDto, SigmaBooleanJson, TxHintsBagDto,
+    };
+
+    fn own_hint() -> HintDto {
+        let point = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        HintDto::OwnCommitment {
+            image: SigmaBooleanJson {
+                inner: serde_json::json!({"type": "proveDlog", "h": point}),
+            },
+            secret: "ab".repeat(32),
+            commitment: FirstProverMessageJson::Dlog { a: point.into() },
+            position: "0".into(),
+        }
+    }
+
+    #[test]
+    fn public_bucket_rejects_private_commitments_before_decoding() {
+        let mut dto = TxHintsBagDto::default();
+        let mut hint = own_hint();
+        if let HintDto::OwnCommitment { image, .. } = &mut hint {
+            image.inner = serde_json::Value::Null;
+        }
+        dto.public_hints.insert("0".into(), vec![hint]);
+        let error = tx_hints_bag_from_dto(&dto).unwrap_err();
+        assert!(matches!(error, WalletAdminError::BadRequest(_)));
+        assert!(!error.to_string().contains(&"ab".repeat(32)));
+    }
+
+    #[test]
+    fn explicit_private_commitments_and_public_commitments_roundtrip() {
+        let own = own_hint();
+        let HintDto::OwnCommitment {
+            image,
+            commitment,
+            position,
+            ..
+        } = &own
+        else {
+            unreachable!()
+        };
+        let public = HintDto::RealCommitment {
+            image: image.clone(),
+            commitment: commitment.clone(),
+            position: position.clone(),
+        };
+        let mut dto = TxHintsBagDto::default();
+        dto.secret_hints.insert("0".into(), vec![own]);
+        dto.public_hints.insert("0".into(), vec![public]);
+        let internal = tx_hints_bag_from_dto(&dto).unwrap();
+        assert_eq!(tx_hints_bag_to_dto(&internal), dto);
+    }
 }

@@ -62,6 +62,16 @@ info:
     - `GET /emission/scripts` is served on mainnet; testnet/dev
       return 404 pending an oracle capture.
 
+    ## Different response shapes
+
+    These routes are mounted but answer with a shape other than the
+    Scala schema documented for them:
+
+    - `GET /peers/trackInfo` — aggregate delivery counters
+      `{numRequested, numReceived, numFailed}` (as
+      `/api/v1/network/track-info`), not Scala's per-modifier
+      `{invalidModifierApproxSize, requested, received}` object.
+
     ## Wallet (integrated)
 
     Unlike the Scala node, this build ships an **integrated wallet** —
@@ -643,6 +653,44 @@ components:
           description: Size of ErgoTransaction in bytes
           type: integer
           format: int32
+
+    WalletTransactionsPage:
+      type: object
+      required: [total, items]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletTransactionEntry'
+
+    WalletTransactionEntry:
+      type: object
+      description: Lean wallet summary; does not contain full transaction inputs and outputs.
+      required: [txId, blockHeight, blockId, walletOutputs, walletInputs]
+      properties:
+        txId:
+          $ref: '#/components/schemas/TransactionId'
+        blockHeight:
+          type: integer
+          minimum: 0
+        blockId:
+          $ref: '#/components/schemas/ModifierId'
+        walletOutputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModifierId'
+        walletInputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModifierId'
+        scanIds:
+          type: array
+          items:
+            type: integer
+            minimum: 0
 
     WalletTransaction:
       type: object
@@ -2430,6 +2478,47 @@ components:
             chain era (parent changed) vs the previously published one — the
             getblocktemplate clean_jobs signal (discard prior jobs).
           example: true
+        metrics:
+          $ref: '#/components/schemas/CandidateMetrics'
+
+    CandidateMetrics:
+      type: object
+      description: >-
+        Node-specific observations of this exact template after transaction
+        selection and trimming. Older nodes may omit metrics entirely.
+      required: [transaction_count, selected_transaction_count, fees_nano_erg, transactions_size_bytes, max_block_size_bytes, validation_cost, max_block_cost]
+      properties:
+        transaction_count:
+          type: integer
+          minimum: 0
+          description: All template transactions, including emission, rent self-claim and fee collection when present.
+        selected_transaction_count:
+          type: integer
+          minimum: 0
+          description: Mempool transactions retained in the final template.
+        fees_nano_erg:
+          type: string
+          pattern: '^[0-9]+$'
+          description: Exact nanoERG paid by the fee-collection transaction; excludes emission and rent self-claims.
+          example: '1100000'
+        transactions_size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Serialized BlockTransactions section including framing; excludes header, extension and AD proofs.
+        max_block_size_bytes:
+          type: integer
+          format: int64
+          description: Protocol size limit governing this template's transaction section.
+        validation_cost:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Sum of validated transaction costs in protocol block-cost units, not JIT units or milliseconds.
+        max_block_cost:
+          type: integer
+          format: int64
+          description: Protocol block-cost limit governing this template.
 
     Peer:
       type: object
@@ -2460,13 +2549,13 @@ components:
       type: object
       required:
         - lastIncomingMessage
-        - currentNetworkTime
+        - currentSystemTime
       properties:
         lastIncomingMessage:
           type: integer
           allOf:
             - $ref: '#/components/schemas/Timestamp'
-        currentNetworkTime:
+        currentSystemTime:
           type: integer
           allOf:
             - $ref: '#/components/schemas/Timestamp'
@@ -2556,6 +2645,9 @@ components:
 
     TrackInfo:
       type: object
+      description: >-
+        Scala delivery-tracker state. This build serves aggregate counters
+        instead; see `GET /peers/trackInfo`.
       required:
         - invalidModifierApproxSize
         - requested
@@ -3065,6 +3157,30 @@ components:
           nullable: true
           description: Detailed error description
 
+    ScriptServiceError:
+      description: Nested error returned by bounded script computation.
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - reason
+            - message
+            - detail
+          properties:
+            reason:
+              type: string
+              enum: [internal_error, overloaded, shutting_down, timeout]
+              description: Stable machine-readable failure reason.
+            message:
+              type: string
+              description: Human-readable failure description.
+            detail:
+              type: string
+              description: Remediation hint (may be empty).
+
     StorageRentEligibleResponse:
       description: Paged envelope of storage-rent-eligible boxes.
       type: object
@@ -3279,6 +3395,8 @@ paths:
 
     post:
       summary: Send a mined block
+      security:
+        - ApiKeyAuth: []
       operationId: sendMinedBlock
       tags:
         - blocks
@@ -4406,7 +4524,7 @@ paths:
     post:
       summary: Add address to peers list
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       operationId: connectToPeer
       tags:
         - peers
@@ -4466,9 +4584,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/PeersStatus'
+                $ref: '#/components/schemas/PeersStatus'
         default:
           description: Error
           content:
@@ -4501,6 +4617,11 @@ paths:
   /peers/trackInfo:
     get:
       summary: Get track info reported by peers, including count of invalid modifiers and details of requested and received modifiers
+      description: >-
+        Divergence: this build serves aggregate delivery counters
+        `{numRequested, numReceived, numFailed}` (non-negative integers, the
+        same counters as `/api/v1/network/track-info`), not the Scala
+        per-modifier object documented here.
       operationId: getPeersTrackInfo
       tags:
         - peers
@@ -4510,9 +4631,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/TrackInfo'
+                $ref: '#/components/schemas/TrackInfo'
         default:
           description: Error
           content:
@@ -4768,7 +4887,7 @@ paths:
   /wallet/init:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Initialize new wallet with randomly generated seed
       operationId: walletInit
       tags:
@@ -4796,7 +4915,7 @@ paths:
   /wallet/restore:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Create new wallet from existing mnemonic seed
       operationId: walletRestore
       tags:
@@ -4820,7 +4939,7 @@ paths:
   /wallet/check:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Check whether mnemonic phrase is corresponding to the wallet seed
       operationId: checkSeed
       tags:
@@ -4848,7 +4967,7 @@ paths:
   /wallet/unlock:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Unlock wallet
       operationId: walletUnlock
       tags:
@@ -4872,7 +4991,7 @@ paths:
   /wallet/lock:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Lock wallet
       operationId: walletLock
       tags:
@@ -4890,7 +5009,7 @@ paths:
   /wallet/rescan:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Rescan wallet (all the available full blocks). When fromHeight is set wallet would not see any boxes below it.
       description: >-
         A full rescan (fromHeight omitted or 0) replays every available full block and rebuilds
@@ -4928,7 +5047,7 @@ paths:
   /wallet/status:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get wallet status
       operationId: getWalletStatus
       tags:
@@ -4950,7 +5069,7 @@ paths:
   /wallet/updateChangeAddress:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Update address to be used to send change to
       operationId: walletUpdateChangeAddress
       tags:
@@ -4979,7 +5098,7 @@ paths:
   /wallet/deriveKey:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Derive new key according to a provided path
       operationId: walletDeriveKey
       tags:
@@ -5007,7 +5126,7 @@ paths:
   /wallet/deriveNextKey:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Derive next key
       operationId: walletDeriveNextKey
       tags:
@@ -5029,7 +5148,7 @@ paths:
   /wallet/balances:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get total amount of confirmed Ergo tokens and assets
       operationId: walletBalances
       tags:
@@ -5051,41 +5170,24 @@ paths:
   /wallet/transactions:
     parameters:
       - in: query
-        name: minInclusionHeight
-        required: false
-        description: Minimal tx inclusion height
+        name: offset
+        description: Number of wallet summaries to skip
         schema:
           type: integer
-          format: int32
           minimum: 0
+          default: 0
       - in: query
-        name: maxInclusionHeight
-        required: false
-        description: Maximal tx inclusion height
+        name: limit
+        description: Maximum number of wallet summaries to return
         schema:
           type: integer
-          format: int32
           minimum: 0
-      - in: query
-        name: minConfirmations
-        required: false
-        description: Minimal confirmations number
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - in: query
-        name: maxConfirmations
-        required: false
-        description: Maximal confirmations number
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
+          default: 50
     get:
       security:
-        - ApiKeyAuth: [api_key]
-      summary: Get a list of all wallet-related transactions
+        - ApiKeyAuth: []
+      summary: Get wallet transaction summaries (paged)
+      description: Lean summaries served by this node; Scala full-transaction arrays and height/confirmation filters are not implemented.
       operationId: walletTransactions
       tags:
         - wallet
@@ -5095,9 +5197,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/WalletTransaction'
+                $ref: '#/components/schemas/WalletTransactionsPage'
         default:
           description: Error
           content:
@@ -5115,7 +5215,7 @@ paths:
           type: string
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get wallet-related transaction by id
       operationId: walletGetTransaction
       tags:
@@ -5126,9 +5226,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/WalletTransaction'
+                $ref: '#/components/schemas/WalletTransactionEntry'
         '404':
           description: Transaction with specified id not found in wallet
           content:
@@ -5168,7 +5266,7 @@ paths:
           default: 50
     get:
       security:
-        - ApiKeyAuth: [ api_key ]
+        - ApiKeyAuth: []
       summary: Get scan-related transactions by scan id
       description: >-
         Scan 10 (payments) returns the wallet's own transaction listing; user
@@ -5273,7 +5371,7 @@ paths:
           default: 0
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get a list of all wallet-related boxes, both spent and unspent. Set minConfirmations to -1 to get
         mempool boxes included.
       operationId: walletBoxes
@@ -5298,7 +5396,7 @@ paths:
   /wallet/boxes/collect:
     post:
       security:
-        - ApiKeyAuth: [ api_key ]
+        - ApiKeyAuth: []
       summary: Get a list of collected boxes.
       operationId: walletBoxesCollect
       tags:
@@ -5383,7 +5481,7 @@ paths:
           default: 0
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get a list of unspent boxes. Set minConfirmations to -1 to have mempool boxes considered.
       operationId: walletUnspentBoxes
       tags:
@@ -5407,7 +5505,7 @@ paths:
   /wallet/balances/withUnconfirmed:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get summary amount of confirmed plus unconfirmed Ergo tokens and assets
       operationId: walletBalancesUnconfirmed
       tags:
@@ -5429,7 +5527,7 @@ paths:
   /wallet/addresses:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get wallet addresses
       operationId: walletAddresses
       tags:
@@ -5453,7 +5551,7 @@ paths:
   /wallet/transaction/generate:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Generate arbitrary transaction from array of requests.
       operationId: walletTransactionGenerate
       tags:
@@ -5496,7 +5594,7 @@ paths:
   /wallet/transaction/generateUnsigned:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Generate unsigned transaction from array of requests.
       operationId: walletUnsignedTransactionGenerate
       tags:
@@ -5532,7 +5630,7 @@ paths:
   /wallet/transaction/sign:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Sign arbitrary unsigned transaction with wallet secrets and also secrets provided.
       operationId: walletTransactionSign
       tags:
@@ -5573,7 +5671,7 @@ paths:
   /wallet/transaction/send:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Generate and send arbitrary transaction
       operationId: walletTransactionGenerateAndSend
       tags:
@@ -5608,7 +5706,7 @@ paths:
   /wallet/payment/send:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Generate and send payment transaction (default fee of 0.001 Erg is used)
       operationId: walletPaymentTransactionGenerateAndSend
       tags:
@@ -5644,7 +5742,7 @@ paths:
   /wallet/getPrivateKey:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get the private key corresponding to a known address
       operationId: walletGetPrivateKey
       tags:
@@ -5678,7 +5776,7 @@ paths:
   /mining/candidate:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Request block candidate
       operationId: miningRequestBlockCandidate
       tags:
@@ -5713,7 +5811,7 @@ paths:
   /mining/candidateWithTxs:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Request block candidate
       operationId: miningRequestBlockCandidateWithMandatoryTransactions
       tags:
@@ -5741,7 +5839,7 @@ paths:
   /mining/rewardAddress:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Read miner reward address
       operationId: miningReadMinerRewardAddress
       tags:
@@ -5763,7 +5861,7 @@ paths:
   /mining/rewardPublicKey:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Read public key associated with miner rewards
       operationId: miningReadMinerRewardPubkey
       tags:
@@ -5785,7 +5883,7 @@ paths:
   /mining/solution:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Submit solution for current candidate
       operationId: miningSubmitSolution
       tags:
@@ -5815,7 +5913,7 @@ paths:
   /utxo/getBoxesBinaryProof:
     post:
       security:
-        -  ApiKeyAuth: [api_key]
+        -  ApiKeyAuth: []
       summary: Get serialized batch proof for given set of boxes
       operationId: getBoxesBinaryProof
       tags:
@@ -6078,8 +6176,7 @@ paths:
 
   /script/p2sAddress:
     post:
-      security:
-        - ApiKeyAuth: [api_key]
+      security: []
       summary: Create P2SAddress from Sigma source
       operationId: scriptP2SAddress
       tags:
@@ -6103,6 +6200,32 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Wallet read or internal computation failure.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ApiError'
+                  - $ref: '#/components/schemas/ScriptServiceError'
+        '503':
+          description: Compute overloaded or shutting_down.
+          headers:
+            Retry-After:
+              description: Present on overloaded responses; retry after 1 second.
+              schema:
+                type: string
+                enum: ['1']
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScriptServiceError'
+        '504':
+          description: Computation timed out (timeout).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScriptServiceError'
         default:
           description: Error
           content:
@@ -6112,8 +6235,7 @@ paths:
 
   /script/p2shAddress:
     post:
-      security:
-        - ApiKeyAuth: [api_key]
+      security: []
       summary: Create P2SHAddress from Sigma source
       operationId: scriptP2SHAddress
       tags:
@@ -6137,6 +6259,32 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Wallet read or internal computation failure.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ApiError'
+                  - $ref: '#/components/schemas/ScriptServiceError'
+        '503':
+          description: Compute overloaded or shutting_down.
+          headers:
+            Retry-After:
+              description: Present on overloaded responses; retry after 1 second.
+              schema:
+                type: string
+                enum: ['1']
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScriptServiceError'
+        '504':
+          description: Computation timed out (timeout).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScriptServiceError'
         default:
           description: Error
           content:
@@ -6202,7 +6350,7 @@ paths:
   /script/executeWithContext:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Execute script with context
       operationId: executeWithContext
       tags:
@@ -6236,7 +6384,7 @@ paths:
   /scan/register:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Register a scan
       operationId: registerScan
       tags:
@@ -6270,7 +6418,7 @@ paths:
   /scan/deregister:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Stop tracking and deregister scan
       operationId: deregisterScan
       tags:
@@ -6304,7 +6452,7 @@ paths:
   /scan/listAll:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: List all the registered scans
       operationId: listAllScans
       tags:
@@ -6387,7 +6535,7 @@ paths:
           default: 0
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: List boxes which are not spent.
       operationId: listUnspentScans
       tags:
@@ -6485,7 +6633,7 @@ paths:
           default: 0
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: List boxes which are spent.
       operationId: listSpentScans
       tags:
@@ -6524,7 +6672,7 @@ paths:
   /scan/stopTracking:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Stop scan-related box tracking
       operationId: scanStopTracking
       tags:
@@ -6560,7 +6708,7 @@ paths:
   /scan/p2sRule:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Create and register a scan to track P2S address provided
       operationId: scriptP2SRule
       tags:
@@ -6599,7 +6747,7 @@ paths:
   /wallet/generateCommitments:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Generate signature commitments for inputs of an unsigned transaction
       operationId: generateCommitments
       tags:
@@ -6634,7 +6782,7 @@ paths:
   /wallet/extractHints:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Extract hints from a transaction
       operationId: extractHints
       tags:
@@ -6669,7 +6817,7 @@ paths:
   /scan/addBox:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: >-
         Adds a box to scans, writes box to database if it is not there.
         Scan ids must be registered user scans (ids 1-10 are reserved and
@@ -6713,7 +6861,7 @@ paths:
   /node/shutdown:
     post:
       security:
-        - ApiKeyAuth: [ api_key ]
+        - ApiKeyAuth: []
       summary: Shuts down the node
       operationId: nodeShutdown
       tags:

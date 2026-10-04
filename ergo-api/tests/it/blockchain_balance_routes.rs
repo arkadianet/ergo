@@ -23,6 +23,7 @@
 //!   so the wire shape is stable across snapshot rebuilds (the underlying
 //!   `pool_outputs` HashMap iteration order is non-deterministic).
 
+use ergo_indexer_types::IndexerReadError;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -308,6 +309,7 @@ fn p2pk_tree(pubkey: [u8; 33]) -> (ErgoTree, Vec<u8>) {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: Vec::new(),
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,
@@ -371,6 +373,9 @@ fn build_app_with_mempool(
             emission: None,
             emission_scripts: None,
             utxo_reads_supported: true,
+            local_reverse_proxy: false,
+            services: Arc::new(ergo_api::ApiServices::new()),
+            script_config: Default::default(),
         },
         None, // admin — tests don't exercise the shutdown endpoint
     )
@@ -541,6 +546,69 @@ impl NodeReadState for StubReadState {
     }
 }
 
+// ----- corrupted persisted rows -----
+
+#[tokio::test]
+async fn caught_up_corrupt_address_row_returns_errors_for_queries_and_health() {
+    let temporary = tempfile::TempDir::new().unwrap();
+    let database_path = temporary.path().join("indexer.redb");
+    let (store, _) = ergo_indexer::IndexerStore::open(&database_path).unwrap();
+    drop(store);
+    let (address, tree_hash) = p2pk_address_and_hash([0x02; 33]);
+    {
+        let database = redb::Database::open(&database_path).unwrap();
+        let transaction = database.begin_write().unwrap();
+        {
+            let mut table = transaction
+                .open_table(redb::TableDefinition::<&[u8], &[u8]>::new(
+                    "indexed_address",
+                ))
+                .unwrap();
+            table
+                .insert(tree_hash.as_bytes().as_slice(), [0xff].as_slice())
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+    let (store, _) = ergo_indexer::IndexerStore::open(&database_path).unwrap();
+    let handle = ergo_indexer::IndexerHandle::with_store(store, 1234);
+    handle.set_status(IndexerStatus::CaughtUp);
+    let app = router(
+        Arc::new(StubReadState { full_height: 1234 }),
+        None,
+        None,
+        Some(Arc::new(handle.clone()) as Arc<dyn IndexerQuery>),
+        NetworkPrefix::Mainnet,
+    );
+    // A real storage decode failure must not appear as a successful zero
+    // balance, empty page, or a healthy caught-up index.
+    for path in [
+        format!("/blockchain/balanceForAddress/{address}"),
+        format!("/api/v1/addresses/{address}/balance"),
+        format!("/blockchain/box/byAddress/{address}"),
+        format!("/api/v1/boxes/by-address/{address}"),
+        "/api/v1/indexer/status".to_string(),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(&path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{path}"
+        );
+    }
+    assert!(handle.health().is_err());
+    // An unrelated successful missing-row query cannot clear the corruption.
+    assert!(handle
+        .box_by_id(&Digest32::from_bytes([0x99; 32]))
+        .unwrap()
+        .is_none());
+    assert!(handle.health().is_err());
+}
+
 // ---------------- StubIndexer with seedable balance -------------------------
 
 struct StubIndexer {
@@ -568,68 +636,110 @@ impl IndexerQuery for StubIndexer {
     fn status(&self) -> IndexerStatus {
         self.status.clone()
     }
-    fn box_by_id(&self, _: &BoxId) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_id(&self, _: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn box_by_global_index(&self, _: u64) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_global_index(&self, _: u64) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn boxes_by_global_range(&self, _: u64, _: u64) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn boxes_by_global_range(
+        &self,
+        _: u64,
+        _: u64,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn tx_by_id(&self, _: &TxId) -> Option<IndexedTxDto> {
-        None
+    fn tx_by_id(&self, _: &TxId) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn tx_by_global_index(&self, _: u64) -> Option<IndexedTxDto> {
-        None
+    fn tx_by_global_index(&self, _: u64) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn txs_by_global_range(&self, _: u64, _: u64) -> Vec<IndexedTxDto> {
-        Vec::new()
+    fn txs_by_global_range(&self, _: u64, _: u64) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn address_balance(&self, tree_hash: &TreeHash) -> Option<BalanceDto> {
-        self.balance
-            .as_ref()
-            .filter(|(h, _)| h == tree_hash)
-            .map(|(_, dto)| dto.clone())
+    fn address_balance(
+        &self,
+        tree_hash: &TreeHash,
+    ) -> Result<Option<BalanceDto>, IndexerReadError> {
+        Ok({
+            self.balance
+                .as_ref()
+                .filter(|(h, _)| h == tree_hash)
+                .map(|(_, dto)| dto.clone())
+        })
     }
-    fn address_txs_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedTxDto> {
-        Vec::new()
+    fn address_txs_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn address_boxes_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn address_boxes_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn address_unspent_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn address_unspent_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn address_total_txs(&self, _: &TreeHash) -> u64 {
-        0
+    fn address_total_txs(&self, _: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
-    fn address_total_boxes(&self, _: &TreeHash) -> u64 {
-        0
+    fn address_total_boxes(&self, _: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
-    fn template_boxes_paged(&self, _: &TemplateHash, _: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn template_boxes_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn template_unspent_paged(&self, _: &TemplateHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn template_unspent_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn template_total_boxes(&self, _: &TemplateHash) -> u64 {
-        0
+    fn template_total_boxes(&self, _: &TemplateHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
-    fn token_by_id(&self, _: &TokenId) -> Option<IndexedTokenDto> {
-        None
+    fn token_by_id(&self, _: &TokenId) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn tokens_by_ids(&self, _: &[TokenId]) -> Vec<IndexedTokenDto> {
-        Vec::new()
+    fn tokens_by_ids(&self, _: &[TokenId]) -> Result<Vec<IndexedTokenDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn token_boxes_paged(&self, _: &TokenId, _: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn token_boxes_paged(
+        &self,
+        _: &TokenId,
+        _: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn token_unspent_paged(&self, _: &TokenId, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn token_unspent_paged(
+        &self,
+        _: &TokenId,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn token_total_boxes(&self, _: &TokenId) -> u64 {
-        0
+    fn token_total_boxes(&self, _: &TokenId) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 }
 

@@ -16,6 +16,349 @@ infrastructure.
 
 ## [Unreleased]
 
+### Added
+
+- Persist webhook registrations, signing secrets and admitted delivery retries
+  in a private `webhooks.redb` database. Restarts retain delivery IDs and retry
+  state; consumers must deduplicate retries and reconcile events missed before
+  admission. Storage failures disable webhooks while public API routes remain
+  available. See [`docs/configuration.md`](docs/configuration.md#webhook-state).
+
+### Changed
+
+- UTXO-snapshot bootstraps (Modes 2 and 4) by earlier releases stored the
+  snapshot root at AVL node ID 0, the ID the store also reads as a null child.
+  Such databases now fail to open with `LegacySnapshotNodeIds` rather than
+  serving misread lookups. Keep the old database and bootstrap from a
+  verified snapshot into a fresh data directory; stores synced from genesis
+  and snapshots installed by this release are unaffected.
+- Wallet unlock checks every persisted tracked key against the unlocked
+  secret before deriving, signing or exporting keys. Pre-1627 wallets that an
+  earlier release restored from a master beginning with a zero byte keep the
+  earlier Rust derivation for signing, `/wallet/getPrivateKey` and new keys
+  (their addresses differ from Scala's for the same secret file) and log a
+  warning; any other mismatch refuses the unlock with `TrackedKeyMismatch`.
+- `/wallet/addresses` follows Scala's key storage order; an unlock rewrites a
+  list stored in the earlier insertion order.
+- `POST /transactions/unconfirmed/byTransactionIds` returns Scala's shape: the
+  requested IDs that are pooled, in pool order, instead of full transactions.
+- Upgrade normal storage to redb 4.3. Legacy redb 2.6 file-format v2 databases
+  require the copy-only `ergo-node migrate-redb SOURCE DESTINATION` command
+  before startup. Originals remain intact; the offline converter locks the
+  source, upgrades only a temporary copy, verifies schemas and contents, and
+  publishes without replacing an existing destination. See the migration,
+  backup, recovery and rollback instructions in [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases).
+- Indexer apply and repair commits now use synchronous `Immediate` durability
+  instead of `Eventual`, preserving durable guarantees across platforms with
+  possible additional flush latency. Unsupported peer database formats
+  fail node startup. Live-file locks and I/O failures preserve the database
+  and keep the existing best-effort peer fallback; automatic quarantine is
+  limited to an explicit corruption error.
+- Indexer schema 3: on first start an existing indexer database is deleted
+  and rebuilt from genesis, and `/blockchain/*` answers `503 indexer-syncing`
+  until it catches up. The rebuild applies two Scala-parity corrections to
+  already-indexed history: EIP-4 token names, descriptions and decimals use
+  the JVM text and digit projections, and outputs with soft-fork-wrapped
+  scripts are listed under the template hash Scala records for them (for
+  example the mainnet block 1,702,686 output).
+
+### Removed
+
+- The unused Mode 3 header-flip seed:
+  `ergo_state::store::activation_minimal_full_block_height`,
+  `SyncState::flip_seed_height` and the height argument of
+  `SyncState::check_headers_synced`. Fresh pruned UTXO stores replay full
+  blocks from genesis and prune after apply, so nothing seeds the prune
+  floor when the header chain is declared synced.
+
+## [0.11.0] - 2026-09-30
+
+Scala consensus and compiler parity fixes, more reliable full-chain selection,
+and faster authenticated UTXO proof generation.
+
+### Added
+
+- Add authenticated POST aliases for wallet lock and next-key derivation while
+  retaining the existing authenticated GET routes (#453).
+- Pin block-section storage and serving behavior against Scala-produced
+  fixtures, and document the archived IBD/RSS baseline and cache guidance
+  (#455).
+
+### Changed
+
+- Generate authenticated UTXO proofs on the arena owner's thread and prefetch
+  missing nodes in bounded batches to reduce proof-generation overhead (#454).
+- Use operating-system randomness for peer selection and gossip while keeping
+  the documented peer quality and recency policies (#453).
+- Refresh JVM oracle fixtures and compiler expectations against sigma-state
+  6.0.6 (#438, #441).
+
+### Fixed
+
+- Select full chains by cumulative work over contiguous available blocks.
+  Preserve the applied tip during header-only forks, adopt shorter heavier
+  chains when their bodies are available, and allow complete competing branches
+  to advance while another branch withholds bodies. Use the applied branch's
+  ancestors for epoch votes and preserve independent header and full tips across
+  digest-store restarts (#453).
+- Enforce Scala's header-age retention rule, retry silent NiPoPoW peers, and
+  remove losing sibling assembly records after their height is applied (#453).
+- Match Scala's unsigned-short and VLQ reads, context-extension ID validation,
+  transaction and standalone-box binding stores, canonical box serialization,
+  and `substConstants` size/count handling (#435, #437, #439, #440, #442, #447).
+- Match Scala's constructor-cast and numeric-operand checks, Boolean leaf
+  decoding, box and ErgoTree read windows, and validation-only soft-fork
+  degradation. Preserve the reader levels left open by a degraded tree
+  (#435, #443, #444, #445, #446, #448).
+- Read deeply nested type descriptors iteratively and grow compound-type
+  buffers only as their children arrive, avoiding excessive allocation from
+  untrusted declared counts (#439, #448).
+- Match sigma-state 6.0.6 ErgoScript typing and source-position behavior (#441).
+- Reject AVL-tree expressions used as sizeless box-script roots. Recognize the
+  reference serializer's compact-type expansion beyond the ErgoTree size window
+  in the nightly fuzz invariant, with both crash inputs retained as regressions
+  (#456).
+- Display transaction sources correctly in the mempool dashboard (#434).
+
+## [0.10.0] - 2026-09-28
+
+Decoder depth and type-validation fixes for Scala parity, protection against
+stack exhaustion from peer transactions, and expanded peer diagnostics with
+optional local IP metadata and reverse DNS.
+
+### Security
+
+- Bound recursive decoding through nested box scripts and registers to address
+  peer-supplied transactions that could exhaust the stack and abort the node.
+  Startup and store recovery, Tokio workers and blocking tasks, Rayon, mining
+  and indexing threads now request 8 MiB stacks as additional protection
+  (#429, #432).
+
+### Added
+
+- Add optional `details` and `network` objects to peer responses from
+  `GET /api/v1/peers`, `GET /api/v1/network/peers` and
+  `GET /api/v1/network/connected`. Details include peer-reported handshake
+  mode, delivery health, sync observation age and height source, and connection
+  setup time in `connection_setup_ms`. Setup time measures TCP and handshake
+  completion, not ping latency; `session_id` is a decimal string. Height source
+  distinguishes `reported_header` from `inferred_from_overlap`, which can
+  understate the remote tip (#430).
+- Expand the Peers dashboard with searchable client and network details, a
+  connection detail drawer, and traffic rates calculated from snapshot
+  timestamps alongside cumulative byte counts (#430).
+- Add `[api.peer_details]` with `auto_download = false` and
+  `reverse_dns = false` as separate opt-ins. Optional `geoip_db` and `asn_db`
+  paths default to absent, resolve relative to the data directory, and override
+  automatic downloads. Local MMDB files provide approximate location and ASN
+  data; existing cached databases remain usable with downloads disabled.
+  Enrichment is for display and does not affect peer selection or scoring.
+  Reverse DNS uses the OS resolver, disclosing public peer IPs to it; local and
+  special addresses are excluded from DNS and database lookups (#430).
+- With `auto_download` enabled and the API running, download monthly DB-IP Lite
+  City and ASN datasets over HTTPS, checking at startup and every 24 hours.
+  Validated updates take effect without restarting; failed updates retain the
+  previous database (#430).
+
+### Changed
+
+- Tighten the differential test harness to check Scala's serialization steps
+  and verify header IDs against consumed wire bytes before excluding them from
+  structural comparisons (#428).
+
+### Fixed
+
+- Reject nested box scripts and registers that exceed the shared decoding
+  depth budget of 110, matching the Scala reference node. Keep the budget
+  active across the entire inline box and count expression and data-value
+  levels separately, including constants in registers and context extensions
+  (#429, #432).
+- Reject numeric casts with nonnumeric targets or reliably inferred nonnumeric
+  inputs, `SelectField` on a known non-tuple, and `BlockValue` items other than
+  `ValDef` or `FunDef`, matching the Scala reference node. Type inference after
+  inline boxes no longer relies on outer bindings or constant-pool types that
+  nested parsing may have changed (#431).
+
+## [0.9.1] - 2026-09-28
+
+Block relay and mining reliability release: Scala-parity block announcements,
+mined-block storage and recovery fixes, a storage-rent validation parity fix,
+indexer and candidate-construction performance work, and an operator activity
+log in the dashboard.
+
+### Added
+
+- Operator-key-protected `GET /api/v1/diagnostics/activity` serves recent
+  structured logs with session cursors and `Cache-Control: no-store`. Retention
+  is bounded to 2,048 INFO-or-higher records and 4 MiB per process session;
+  responses report resets, evictions, truncation and capture losses. The new
+  Activity & logs workspace adds filtering, paused inspection and NDJSON
+  downloads. File logs remain the durable history (#405).
+- Mining candidate responses include optional `metrics` from the assembled
+  template: total and selected transaction counts, fees, transaction-section
+  size, validation cost and active size/cost limits. Fees are decimal strings
+  in nanoERG; existing mining fields retain their encodings (#405).
+- Dashboard storage-rent estimates show boxes newly eligible in the next block
+  and next 720 blocks, with distinct token counts. Estimates require a healthy,
+  caught-up index and exclude already-overdue boxes; they are not guaranteed
+  miner revenue (#405).
+
+### Changed
+
+- Redesign the dashboard with separate header, block and index sync rings,
+  a stage table, recent-block chart and table, and workspace search. Reorganize
+  the wallet into Assets, Build transaction, Receive, Activity and Manage.
+  Multi-recipient ERG/token payments use the existing wallet APIs, with unsigned
+  transaction review and explicit confirmation before signing and broadcasting;
+  uncertain submission outcomes retain the signed bytes for retry (#405).
+- Mining with the default `candidate_base_cache = false` loads authenticated
+  UTXO paths on demand instead of loading the entire tree for each candidate.
+  Full builds also avoid copying the frozen mempool snapshot, reducing candidate
+  construction work without requiring a configuration change (#414).
+- Run indexer catch-up on a dedicated worker so database work does not occupy
+  async runtime workers. Commit up to 16 blocks per atomic batch, checking
+  50 ms and 8 MiB budgets between blocks; shutdown waits for the worker to
+  finish its in-flight work (#414).
+- Reduce indexer history reads and writes by locating historical spends in
+  ordered segments and writing only changed rows. Address, template and token
+  pages read the needed segments in one consistent read transaction, avoiding
+  full-history materialization; unspent queries filter before pagination (#414).
+- Report sampled resident memory on Windows and macOS when available, instead
+  of always reporting zero on those platforms (#414).
+- Announce applied remote blocks less than two hours old and within 16 heights
+  of the header tip, advertising their headers and servable sections. Mined
+  blocks now announce on mainnet and testnet as well as devnet. A mined block
+  that becomes the best header announces before apply, after header validation,
+  section storage and checks that section bytes match the header roots. If apply
+  fails, the node logs an error; the announcement stands, and later mined blocks
+  on that parent announce only after they apply. `POST /blocks` announces after
+  successful apply with the remote freshness and tip gates (#413).
+
+### Fixed
+
+- Reject storage-rent claims whose readable `Short` output index selects an
+  output that fails the rent checks, even if the box's script would pass.
+  Rejection occurs before charging rent-check cost. An `Int` or other non-Short
+  index, or a negative or out-of-range Short index, uses ordinary script
+  verification instead of granting a rent spend. This aligns block validation
+  and mempool admission with Scala (#402).
+- Refresh SyncInfo to a peer after accepting a requested header, including an
+  already-known header or one that does not advance the best header. This keeps
+  peers' view of the node current for relay decisions; unsolicited or rejected
+  deliveries do not trigger the refresh (#399).
+- Store mined headers through the header pipeline before their sections,
+  allowing mining on pruned UTXO nodes. Snapshot- or NiPoPoW-bootstrapped UTXO
+  nodes can mine once a peer block above the bootstrap height has applied;
+  candidate construction still needs the parent's extension (#419).
+- Durably store all sections of a mined block or `POST /blocks` submission in
+  one transaction before announcement or apply, preventing a crash during
+  apply from losing the body. A refused mined header leaves no sections behind.
+  A failed section write is reported to storage health and leaves the stored
+  header without its body; resubmitting the same solution retries storage and
+  apply. Fork submissions are reported as stored forks rather than validation
+  failures. Header and section commits remain separate (#419).
+- Withdraw every template on a locally mined block's parent when that block
+  becomes the best header but fails to apply, and rebuild immediately. Solutions
+  to withdrawn templates return 400 `stale_candidate` before storage, counted
+  as stale rather than invalid PoW, unless they also solve an offered template.
+  `GET /mining/candidate` returns 503 until replacement work is published;
+  withdrawal wakes longpoll waiters and rebuilt work carries `clean_jobs`.
+  A section-write failure keeps the template available for resubmission (#421).
+- Prefer recovering a stored mined header with missing sections when a
+  resubmitted solution also solves a newer template on the same parent. This
+  restores the original block instead of storing a competing fork; withdrawn
+  templates remain ineligible and storage-read errors propagate (#422).
+- Evict a transaction specifically named by block-validation failure from the
+  mempool, along with dependent transactions, so rebuilt mining templates do
+  not repeatedly include it. This covers local and remote blocks in UTXO and
+  digest modes; failures that identify no transaction leave the pool alone
+  (#423).
+- Allow an eligible equal-work branch to replace a best-header chain blocked
+  by a session-marked first unapplied block. Search stored alternatives within
+  16 heights of the applied tip after rejection, update branch downloads, and
+  retain session marks across in-process UTXO rebuilds. Alternative branches
+  must descend from the applied tip without crossing marked or invalid headers;
+  ordinary greater-work selection is unchanged (#425).
+- Preserve the selected best header during digest-state rollback, allowing
+  reorg application to continue instead of stalling on the old header tip
+  (#425).
+- Retain block-rejection details as history once applied blocks advance beyond
+  the rejected height, rather than keeping an active dashboard and health alarm.
+  `/health` also clears its rejection state when a different block applies at
+  the same height (#405, #425).
+
+## [0.9.0] - 2026-09-25
+
+Consensus, P2P, NiPoPoW and snapshot hardening release, continuing conformance
+work against the Scala reference. Shipped configurations no longer contain a
+default API key, and v1 reads now report storage failures honestly with bounded
+concurrency and timeouts. Wallet rescans fail closed, with committed scan and
+signing state laying the groundwork for wallet extraction. The redesigned
+dashboard leads with sync health and adds an interactive Voting workspace.
+
+**Upgrade notes.**
+
+- Neither shipped template contains an API key hash; upgrading the bundled
+  file removes the old `hello` credential. Privileged compat/native routes
+  return `403 api-key-not-configured` until `[api.security] api_key_hash` is
+  set; v1 Operator/Admin routes return `401 unauthorized` with setup guidance.
+  Generate and hash a random secret using the documented commands:
+
+  ```bash
+  secret=$(openssl rand -hex 32)
+  printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
+  ```
+
+  Save the secret, put the printed 64-character lowercase hash in
+  `api_key_hash = "<hash>"` under `[api.security]`, and restart. Clients send
+  the secret in the `api_key` header. Explicitly configured hashes keep their
+  behavior. `POST /blocks` now also requires the key, matching Scala; its
+  existing devnet opt-in restriction still applies. Public reads and
+  transaction submission remain available without a key (#380).
+- For a reverse proxy connecting to a loopback API bind, set
+  `[api] local_reverse_proxy = true`. This removes loopback rate-limit and
+  Admin trust exemptions and charges API transaction submissions to the public
+  mempool budget. Clients sharing the proxy's peer IP share its rate limits;
+  `X-Forwarded-For` is not trusted. Configure authentication and per-client
+  limits at the proxy (#380).
+- Failed, cancelled or interrupted wallet rescans durably invalidate scan
+  state; scan-dependent reads and spending remain unavailable until a full
+  rescan with `fromHeight=0` succeeds. Preflight failures reject the request
+  before changing wallet tables. On restart, a persisted running rescan is
+  marked failed; the node refuses to start if it cannot durably record that
+  recovery, including when the API is disabled (#377, #378, #381).
+- Wallet schema 1 is automatically migrated to schema 2 on opening the store.
+  The saved scan height gains a header ID from the applied-chain index; a
+  missing or corrupt anchor, or a mismatching saved ID, invalidates the scan
+  and requires a full rescan. Rescan lifecycle state is also persisted. Wallet
+  tables still live in `state.redb`; this release does not split the wallet
+  into a separate process (#381).
+- `[chain] genesis_id` now applies to ordinary sync and mining. An existing
+  dense header store with a missing, corrupt or mismatching canonical genesis
+  refuses startup; correct the chain configuration or use the matching data
+  directory. Incoming and mined height-1 headers with a different ID are
+  rejected. Explicitly disabled development checks remain supported (#369).
+- Restart pagination for `/api/v1/network/{peers,connected,blacklisted,sync-info}`:
+  old offset cursors now return `invalid_cursor`. New cursors resume after the
+  last address and are specific to each list (#387).
+- Store-backed v1 reads can return `503 overloaded` with `Retry-After: 1`
+  after waiting 2 seconds for capacity, or `504 timeout` after 30 seconds of
+  work. Point reads and scans have separate concurrency limits; timed-out
+  work retains its permit until it finishes (#390, #391).
+- v1 chain-store failures now return `503 chain_reader_unavailable`, while
+  corrupt chain data and indexer failures return `500`, instead of false
+  `404`s, empty results or partial pages. Stats series include the first
+  requested height, including its supply timestamp. Scala-compat and legacy
+  read behavior is preserved (#388, #392).
+- `/api/v1/status` and host storage fields use a background sample taken every
+  10 seconds. They are absent before the first sample and when a sample is
+  over 60 seconds old; `/metrics` renders absent storage values as zero (#389).
+- Change-address updates now require an unlocked wallet and a signing-owned
+  address. Slow or overloaded peers can be disconnected by the new outbound
+  queue and write limits (#359).
+- Wallet signing and submission reject a changed committed tip with a
+  conflict response; retry against the current tip (#381).
+
 ### Security
 
 - Retain the parse-time byte basis for `SBox` and `SHeader` values, and reject
@@ -27,37 +370,131 @@ infrastructure.
   the canonical bytes. `SelectField` now accepts only arity-2 tuples, as
   Scala's `SelectField.eval` matches `Tuple2` alone (#357).
 - Reject trailing bytes after an SBox materialized from the data serializer,
-  matching the reference reader's end-of-input contract.
+  matching the reference reader's end-of-input contract (#357).
+- Bound each peer's outbound queue to 16 MiB of retained payload allocations
+  and framing, with a separate 2,048-message limit. Interrupt writes on
+  overflow or disconnect, and close connections after a 30-second write timeout (#359).
+- Apply IP bans to every registered connection from that IP, including other
+  ports and pending handshakes; clean up all corresponding live runtimes (#359).
+- Require an unlocked wallet and verify change-address signing ownership from
+  the active master key before persisting a change address (#359).
+- Reject unknown P2P modifier types before changing delivery state and batches
+  over 400 entries before allocating entries. Coalesced traffic now uses the
+  same throttle, with batching restricted to header modifiers (#365).
+- Verify header bytes against the claimed modifier ID before acknowledging
+  delivery. Definitive validation failures reset delivery state so the header
+  can be requested again; valid orphans and known headers stay received (#366).
+- Enforce `0 <= k <= n <= 255` when decoding untrusted `Cthreshold` values or
+  writing them normally. Invalid shapes produce typed verifier errors before
+  polynomial arithmetic; byte offsets and crypto-cost accumulation are
+  checked for overflow. Trusted historical decoding is preserved (#367).
+- Apply the previous epoch's maximum block size to rule 306 at epoch
+  transitions, fixing incorrect acceptance or rejection when the cap changes.
+  Transaction and script validation still use the new epoch's parameters,
+  matching Scala, in both UTXO and digest processing (#368).
+- Enforce configured genesis identity during ordinary header validation,
+  mining and startup checks of existing dense header stores (#369).
+- Reject generic empty batch Merkle proofs for every root. NiPoPoW permits
+  empty interlinks only with the canonical empty proof at height 1; genesis
+  scoring, PoW skipping, proving and mining now use Scala's height-1 predicate
+  instead of treating any zero-parent header as genesis (#370).
+- Require P2P NiPoPoW bootstrap responses to use `m=6`, `k=10` and continuous
+  proofs with an exact-length, height-contiguous suffix. Validate suffix parent
+  IDs, timestamps and difficulty before counting a provider; missing required
+  epoch context rejects the proof. Sparse-prefix difficulty validation remains
+  limited by the historical context carried in the proof (#371, #373).
+- Apply NiPoPoW proofs only to fresh dense state. A header tip arriving before
+  installation now rejects the apply before a state write begins (#372).
+- Reject zero-transaction block sections at parse, including stored sections,
+  matching Scala. Transactions without inputs or outputs still parse and fail
+  block validation, marking their header invalid instead of causing endless
+  section retries (#374).
+- Authenticate snapshot AVL height against the full 33-byte header state root,
+  the reconstructed graph and the final reconstructed digest. Snapshots with
+  the same root label but a different height are rejected (#375).
+- Fully parse snapshot manifests and enumerate chunk IDs before accepting
+  verified bytes; reject duplicate expected chunk IDs (#376).
+- Remove the shipped `hello` API credential and fail closed on privileged
+  routes when no key is configured. Authenticate `POST /blocks`, matching
+  Scala's block-submission gate (#380).
+
+### Added
+
+- `[chain] devnet_magic = [..]`: override the private devnet's P2P wire
+  magic (default `[7, 7, 7, 7]`) so several devnets can coexist or one can
+  join another private network; rejected for mainnet and testnet (#362).
+- Include measured `cost` in Scala-compatible unconfirmed transaction JSON,
+  with `null` when unknown. Confirmed transaction JSON is unchanged (#359).
+- Dashboard Voting workspace with saved and desired parameter values,
+  one-step vote previews, unreachable-target guidance and an interactive
+  block-height history chart with keyboard inspection and a change ledger (#361).
+- Native wallet status reports scan invalidation and rescan failures with the
+  height and reason, including interruption by restart (#377, #381).
+- `[api] local_reverse_proxy` declares a proxy on loopback so rate limits,
+  Admin policy and transaction budgets use the public-client posture (#380).
+- Dashboard authentication distinguishes an unconfigured API key from an
+  invalid key and shows setup guidance (#380).
+
+### Changed
+
+- Redesign the dashboard around sync state, measured throughput, API freshness
+  and diagnostic alerts, distinguishing applied blocks from known headers.
+  Add peer filtering, global chain search, clearer mempool states and responsive
+  tables and navigation; public dashboard reads have a timeout (#361).
+- Paginate v1 network lists by stable address keys, preventing duplicates and
+  skipped peers when snapshots reorder or peers join before the cursor (#387).
+- Move v1 chain and indexer reads onto blocking workers with separate point
+  and scan limits (16 and 4 concurrent reads), bounded waits and timeouts so
+  bulk reads cannot pin the node's async runtime workers (#390, #391).
+- Sample disk space and database sizes on a dedicated background thread,
+  keeping filesystem probes off API requests and the node runtime (#389).
+- **Development:** reduce measured CI wall time from 59 to about 8 minutes
+  through test-store tuning, binary consolidation and crate-group sharding (#353).
 
 ### Fixed
 
+- UTXO sync no longer waits for historical ADProofs that peers may not retain.
+  Generate and verify proofs locally using on-demand AVL reads instead of
+  rebuilding the entire prover tree per block. Script validation and header
+  commitments remain enforced; digest mode still downloads proofs (#358).
 - Retain locally regenerated ADProofs sections for blocks inside the
   114,688-block suffix window (Scala `adProofsSuffixLength`), so near-tip
   full-block API responses include proofs for UTXO nodes. Historical blocks
   still validate without downloading or retaining them; digest nodes still
-  download and verify shipped proofs.
-
-- Bound each peer's outbound queue to 16 MiB of retained payload allocations
-  and framing, with a separate 2,048-message limit. Interrupt writes on
-  overflow or disconnect, and close connections after a 30-second write timeout.
-- Apply IP bans to every registered connection from that IP, including other
-  ports and pending handshakes; clean up all corresponding live runtimes.
+  download and verify shipped proofs (#358).
 - Floor `/transactions/getFee` recommendations at the configured minimum relay
-  fee instead of using the minimum box-value parameter.
+  fee instead of using the minimum box-value parameter (#359).
 - Decline mempool transactions carrying the configured re-emission token in
   outputs before script execution. Reward distributions that burn the token
-  remain eligible; block validation rules are unchanged.
-- Require an unlocked wallet and verify change-address signing ownership from
-  the active master key before persisting a change address.
-
-### Added
-
-- Include measured `cost` in Scala-compatible unconfirmed transaction JSON,
-  with `null` when unknown. Confirmed transaction JSON is unchanged.
-- UTXO sync no longer waits for historical ADProofs that peers may not retain.
-  Generate and verify proofs locally using on-demand AVL reads instead of
-  rebuilding the entire prover tree per block. Script validation and header
-  commitments remain enforced; digest mode still downloads proofs.
+  remain eligible; block validation rules are unchanged (#359).
+- Return no mining candidate when emission has ended and there are no
+  transactions, rather than constructing an empty block section (#374).
+- Recover snapshot bootstrap from bad suppliers and unusable epochs by clearing
+  assembly state and retrying discovery; reopen discovery after quorum loss.
+  Recheck the canonical anchor before installation. Local storage and invariant
+  failures report a `halted` phase requiring operator intervention (#376).
+- Stop wallet rescans on missing or unreadable blocks, tip-read failures and
+  malformed output-box matches instead of silently skipping history. Persist
+  invalidation on failure or cancellation, recover interrupted rescans at boot,
+  and allow rescans on a genesis-only chain (#377, #378, #381).
+- Commit wallet writes and the `(height, header_id)` scan cursor atomically
+  with chain apply and rollback, including the persist pipeline, through the
+  new wallet-store interface (#381).
+- Build wallet signing inputs and context from one committed full-block
+  snapshot and reject signing or submission when the committed tip changes (#381).
+- Report the chain-spec voting epoch length in v1 and legacy voting history
+  on every network, fixing devnet's zero epoch length (#385).
+- Release cache pins registered after their persist job was already
+  acknowledged, preventing durable nodes from remaining over the cache budget
+  and inflating `arena_unpersisted_pinned_bytes` (#386).
+- Propagate v1 chain and indexer read failures instead of reporting absent
+  records, empty results or truncated pages. Distinguish unavailable chain
+  storage (`503`) from corrupt records (`500`); indexer failures return
+  `500 internal_error`, without exposing store error text (#388, #392).
+- Include the first requested height in v1 difficulty and fee series and
+  restore the first supply point's timestamp (#392).
+- Remove the duplicate `[api]` table that prevented the example configuration
+  from parsing (#380).
 
 ## [0.8.0] - 2026-09-21
 

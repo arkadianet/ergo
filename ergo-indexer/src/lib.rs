@@ -16,7 +16,7 @@
 //!
 //! * [`store`] — redb tables + transaction helpers (`IndexerStore`).
 //! * [`apply`] / [`rollback`] — per-block apply and rollback paths.
-//! * [`segment`] / [`segment_buffer`] / [`segment_id`] — segmented
+//! * [`segment`] / `segment_buffer` / [`segment_id`] — segmented
 //!   indexes (address / template / token) with spill-on-overflow.
 //! * [`address`] / [`template`] / [`token`] — per-type apply
 //!   bookkeeping (balance maintenance, mint metadata, etc.).
@@ -30,7 +30,9 @@ pub mod address;
 pub mod apply;
 pub mod config;
 pub mod error;
+pub mod events;
 pub mod handle;
+mod jvm_int;
 pub mod rebuild;
 pub mod rollback;
 pub mod scratch;
@@ -46,6 +48,7 @@ pub mod token;
 pub use apply::{apply_block, apply_block_with_scratch, IndexerBlock};
 pub use config::IndexerConfig;
 pub use error::IndexerError;
+pub use events::{BlockChanges, BoxChange, BoxChangeKind, IndexerObserver};
 pub use handle::IndexerHandle;
 pub use rebuild::rebuild_secondary_indexes;
 pub use rollback::rollback_one_block;
@@ -56,7 +59,8 @@ pub use store::{
     ROLLBACK_WINDOW,
 };
 pub use task::{
-    ChainTip, IndexerChainSource, IndexerFullBlock, IndexerPoll, IndexerTask, MAX_SECTION_RETRIES,
+    ChainTip, IndexerChainSource, IndexerFullBlock, IndexerPoll, IndexerTask, IndexerWorker,
+    MAX_SECTION_RETRIES,
 };
 
 pub use ergo_indexer_types::{

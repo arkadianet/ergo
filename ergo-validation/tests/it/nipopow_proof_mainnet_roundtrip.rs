@@ -101,7 +101,7 @@ fn nipopow_proof_mainnet_h1_through_h3_roundtrips_and_validates() {
     let blocks = load_blocks();
 
     // Compose a minimal NipopowProof:
-    //   prefix      = [genesis]            (PoPowHeader with empty interlinks/proof)
+    //   prefix      = [genesis]            (PoPowHeader with canonical empty proof)
     //   suffix_head = h=2                  (PoPowHeader with 1-interlink proof)
     //   suffix_tail = [h=3]                (raw Header — Scala parity for tail format)
     //

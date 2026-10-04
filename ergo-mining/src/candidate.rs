@@ -37,9 +37,9 @@ use ergo_ser::autolykos::AutolykosSolution;
 use ergo_ser::block_transactions::{write_block_transactions_with_version, BlockTransactions};
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::{read_header, serialize_header_without_pow, Header};
-use ergo_ser::transaction::{bytes_to_sign, write_transaction, Transaction};
+use ergo_ser::transaction::{write_transaction, Transaction};
 use ergo_validation::active_params::active_params_to_extension_fields;
-use ergo_validation::popow::algos::unpack_interlinks;
+use ergo_validation::popow::algos::{is_genesis, unpack_interlinks};
 use ergo_validation::voting::validation_settings::validation_settings_update_to_extension_fields;
 use ergo_validation::{
     compute_epoch_votes, compute_next_params, validate_transaction_parsed,
@@ -57,17 +57,17 @@ use std::collections::BTreeMap;
 /// decrease and id-9 votes; while active only `{1..=8, 120}` are accepted.
 const RULE_HDR_VOTES_UNKNOWN: u16 = 215;
 
-use crate::candidate_selection::{select_user_txs, CandidateOverlay};
+use crate::candidate_selection::{select_user_txs_cancellable, CandidateOverlay};
 use crate::coinbase::{build_fee_tx, build_pre_eip27_emission_tx};
 use crate::emission_box::lookup_emission_box_from_parent;
 use crate::emission_rules::MonetarySettings;
-use crate::error::MiningError;
+use crate::error::{check_build_cancelled, MiningError};
 use crate::extension_builder::build_candidate_extension_fields;
 use crate::reemission::{build_post_eip27_emission_tx, ReemissionSettings};
 use crate::state_view::CandidateStateView;
 use crate::storage_rent_claim::build_budget_bounded_rent_claim;
 use crate::tx_selection::block_cost_safety_gap;
-use crate::work_message::WorkMessage;
+use crate::work_message::{CandidateMetrics, WorkMessage};
 use ergo_validation::pre_header::{
     build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
 };
@@ -75,20 +75,29 @@ use ergo_validation::pre_header::{
 /// Wall-clock cost of the expensive `generate_candidate` phases, measured per
 /// build and surfaced on the engine's build-complete log line.
 ///
-/// The buckets cover the five named phases; cheap assembly steps between them
-/// are unmeasured, so the fields do not sum to the engine's total build time.
+/// Setup, rent lookup, assembly, and publication cover work around the named
+/// consensus phases; worker dispatch overhead is measured by the coordinator.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PhaseTimings {
+    /// Snapshot/context/extension setup in the engine and candidate builder.
+    pub setup: std::time::Duration,
+    /// Indexer eligibility paging and committed-snapshot box materialization.
+    pub rent_resolve: std::time::Duration,
+    /// Assembly work between the explicitly timed phases.
+    pub assembly: std::time::Duration,
+    /// Atomic template publication and suspect bookkeeping.
+    pub publish: std::time::Duration,
+    /// The ordered transaction list reused a previously verified state proof.
+    pub proof_reused: bool,
     /// Phases 8–9: emission tx build + validation.
     pub emission: std::time::Duration,
     /// Phase 9c: storage-rent claim build (zero when rent disabled/empty).
     pub rent: std::time::Duration,
     /// Phases 9d–9e: mempool selection + per-tx re-validation + fee-tx trim.
     pub select: std::time::Duration,
-    /// Phase 10: AVL+ dry-run (new_state_root + proof bytes) — the report's
-    /// prime cost suspect.
+    /// Phase 10: AVL+ dry-run or verified proof-cache lookup.
     pub dryrun: std::time::Duration,
-    /// Phase 12: tx/witness-id derivation + transactions/extension roots.
+    /// Phase 12: validated tx-id reuse, witness ids, and Merkle roots.
     pub roots: std::time::Duration,
 }
 
@@ -140,7 +149,8 @@ pub struct Candidate {
 
 /// Build a candidate for the next block. Returns `None` if the chain
 /// has not reached a state from which mining is possible (tip below
-/// height 10, or a tip-flip caught by the post-dry-run guard).
+/// height 10, no transactions available, or a tip-flip caught by the
+/// post-dry-run guard).
 ///
 /// **Applied-tip contract:** the caller is expected to have gated on the
 /// mining-started latch (`BestTip::synced`) already, and every consensus input
@@ -163,7 +173,46 @@ pub fn generate_candidate<V: CandidateStateView>(
     view: &V,
     network: ergo_chain_spec::Network,
     mode: BuildMode,
-    mempool: MempoolReadSnapshot,
+    mempool: &MempoolReadSnapshot,
+    miner_pk: &[u8; 33],
+    monetary: &MonetarySettings,
+    reemission: Option<&ReemissionSettings>,
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    chain_config: &DifficultyParams,
+    eligible_rent_boxes: &[ErgoBox],
+    voting_targets: &BTreeMap<u8, i64>,
+    voting_settings: &VotingSettings,
+    custom_extension_fields: &[([u8; 2], Vec<u8>)],
+    suspects_out: &mut Vec<Digest32>,
+) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
+    generate_candidate_cancellable(
+        view,
+        network,
+        mode,
+        mempool,
+        miner_pk,
+        monetary,
+        reemission,
+        reemission_rules,
+        chain_config,
+        eligible_rent_boxes,
+        voting_targets,
+        voting_settings,
+        custom_extension_fields,
+        suspects_out,
+        &|| false,
+    )
+}
+
+/// Build against a frozen context, stopping between expensive phases when the
+/// applied parent changes. Dry-run cancellation waits for the complete AVL
+/// operation to return and restore its pristine base; it never interrupts it.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_candidate_cancellable<V: CandidateStateView>(
+    view: &V,
+    network: ergo_chain_spec::Network,
+    mode: BuildMode,
+    mempool: &MempoolReadSnapshot,
     miner_pk: &[u8; 33],
     monetary: &MonetarySettings,
     reemission: Option<&ReemissionSettings>,
@@ -190,7 +239,11 @@ pub fn generate_candidate<V: CandidateStateView>(
     // tip and evicts the still-invalid ones. A side-output (not part of the
     // Candidate) because suspects are diagnostic, not consensus artifacts.
     suspects_out: &mut Vec<Digest32>,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
+    check_build_cancelled(should_cancel)?;
+    let build_start = std::time::Instant::now();
+    let setup_start = std::time::Instant::now();
     // 1. Tip + parent header (all reads via one committed view — see
     //    `CandidateStateView`; the snapshot impl sources them from a single
     //    redb read txn so the whole build is one consistent committed view).
@@ -234,12 +287,12 @@ pub fn generate_candidate<V: CandidateStateView>(
     // 2b. Epoch-boundary recompute. At a voting-epoch start the candidate's
     //     extension must carry the recomputed parameter map + cumulative
     //     validation settings, and its header version is the RECOMPUTED version
-    //     (exBlockVersion, rule 410). We run the SAME `compute_next_params` the
-    //     block validator runs (`block_proc.rs`), so a peer re-running it accepts
-    //     the block by construction. Off-boundary ⇒ `None`, version unchanged.
-    //     NB: the block's transactions still validate under the PREVIOUS epoch's
-    //     params (`active_params`) — Scala applies the recomputed set only from
-    //     the next block — so tx selection below is unaffected.
+    //     (exBlockVersion, rule 410). We run the same `compute_next_params` as
+    //     block validation; this establishes the epoch payload relation, while
+    //     the remaining block checks still apply. Off-boundary ⇒ `None`.
+    //     The target extension takes effect before its transactions execute;
+    //     selection below uses the same target parameters and cumulative
+    //     script settings as full-block validation.
     let is_epoch_start =
         candidate_height > 0 && candidate_height.is_multiple_of(voting_settings.voting_length);
     let epoch_payload = if is_epoch_start {
@@ -309,6 +362,8 @@ pub fn generate_candidate<V: CandidateStateView>(
         rule_215_disabled,
     );
 
+    check_build_cancelled(should_cancel)?;
+
     // 3. Difficulty retarget (or parent's nBits when non-recalc)
     let new_n_bits = if genesis {
         parent_header.n_bits
@@ -362,10 +417,14 @@ pub fn generate_candidate<V: CandidateStateView>(
     //    the validator runs, so the serialized extension re-parses to the same
     //    params/settings the validator recomputes.
     let extension_fields = if genesis {
-        custom_extension_fields
+        crate::extension_builder::validate_custom_extension_fields(custom_extension_fields)?;
+        let fields = custom_extension_fields
             .iter()
             .map(|(k, v)| (k.to_vec(), v.clone()))
-            .collect()
+            .collect();
+        // The builder below applies this section cap itself; genesis bypasses it.
+        crate::extension_builder::validate_candidate_extension_size(&fields)?;
+        fields
     } else {
         let parent_extension_bytes = read_parent_extension_bytes(view, &parent_header)?;
         let parent_interlinks = unpack_interlinks_from_extension(&parent_extension_bytes)?;
@@ -373,7 +432,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         // extension is malformed or missing them. Fail the build with a typed error
         // here rather than panicking the engine task downstream (`update_interlinks`
         // asserts a non-empty interlinks vector for a non-genesis header).
-        if *parent_header.parent_id.as_bytes() != [0u8; 32] && parent_interlinks.is_empty() {
+        if !is_genesis(&parent_header) && parent_interlinks.is_empty() {
             return Err(MiningError::Decode {
                 op: "parent_interlinks",
                 reason: "non-genesis parent extension carries no interlinks fields".into(),
@@ -382,6 +441,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         let epoch_boundary_fields = epoch_payload
             .as_ref()
             .map(|p| p.extension_fields())
+            .transpose()?
             .unwrap_or_default();
         build_candidate_extension_fields(
             &parent_header,
@@ -392,6 +452,9 @@ pub fn generate_candidate<V: CandidateStateView>(
             custom_extension_fields,
         )?
     };
+
+    timings.setup = setup_start.elapsed();
+    check_build_cancelled(should_cancel)?;
 
     // 8. Coinbase: emission tx. Three regimes:
     //   - reemission = Some + height > activation_height: post-EIP-27,
@@ -425,15 +488,19 @@ pub fn generate_candidate<V: CandidateStateView>(
         .transpose()?;
 
     // 9. Validate the emission (coinbase) tx → CheckedTransaction, using the
-    //    live voted params (from_active) so cost / min-value / storage
-    //    params match the validator that judges the submitted block.
-    let block_cap = JitCost::from_block_cost(active_params.max_block_cost as u64).map_err(|e| {
+    //    target voted parameters and accumulated script statuses, matching
+    //    the validator that judges the submitted block.
+    let params = ProtocolParams::for_block(
+        &active_params,
+        epoch_payload.as_ref().map(|payload| &payload.computed),
+        &validation_settings,
+    );
+    let block_cap = JitCost::from_block_cost(params.max_block_cost).map_err(|e| {
         MiningError::IdComputation {
             op: "max_block_cost_to_jit",
             reason: format!("{e:?}"),
         }
     })?;
-    let params = ProtocolParams::from_active(&active_params);
     let ctx = TransactionContext {
         height: candidate_height,
         miner_pubkey: *miner_pk,
@@ -478,7 +545,10 @@ pub fn generate_candidate<V: CandidateStateView>(
             (None, 0, CostAccumulator::new(block_cap))
         };
     let emission_cost = emission_cost_acc.total_block_cost();
+    let mut final_validation_cost = emission_cost;
+    let mut final_section_size = None;
     timings.emission = phase_start.elapsed();
+    check_build_cancelled(should_cancel)?;
 
     // 9b–9e. Block enrichment — skipped wholesale in a Minimal build: no
     //        overlay, no rent claim, no mempool selection, no fee tx. The
@@ -491,8 +561,8 @@ pub fn generate_candidate<V: CandidateStateView>(
         //     base view the submit-time validator uses) with the emission tx.
         let base: &dyn UtxoView = view;
         let mut overlay = CandidateOverlay::new(base);
-        if let Some(tx) = &emission_tx {
-            overlay.apply_tx(tx)?;
+        if let Some(tx) = &checked_emission {
+            overlay.apply_checked(tx);
         }
 
         // 9c. Pinned storage-rent self-claim, sized to FILL the block budget.
@@ -505,8 +575,10 @@ pub fn generate_candidate<V: CandidateStateView>(
         //     overlay BEFORE mempool selection so any conflicting fee-bearing
         //     claim on the same box is excluded. Zero fee; proceeds to the
         //     miner P2PK.
-        let max_block_cost = active_params.max_block_cost as u64;
+        let max_block_cost = params.max_block_cost;
         let safety_gap = block_cost_safety_gap(max_block_cost);
+        // Rule306 prices the serialized section against the parent row,
+        // while target epoch parameters price the transaction scripts.
         let max_block_size = active_params.max_block_size as u64;
         let phase_start = std::time::Instant::now();
         let rent_cost_ceiling = max_block_cost
@@ -529,12 +601,13 @@ pub fn generate_candidate<V: CandidateStateView>(
             reemission_rules,
         )? {
             Some((checked, cost, size)) => {
-                overlay.apply_tx(checked.transaction())?;
+                overlay.apply_checked(&checked);
                 (Some(checked), cost, size)
             }
             None => (None, 0, 0),
         };
         timings.rent = phase_start.elapsed();
+        check_build_cancelled(should_cancel)?;
 
         // 9d. Select mempool transactions into the budget remaining after the
         //     coinbase + rent claim. The overlay (emission + rent applied)
@@ -551,15 +624,16 @@ pub fn generate_candidate<V: CandidateStateView>(
             .saturating_sub(rent_size)
             .saturating_sub(BLOCK_ASSEMBLY_SIZE_RESERVE);
 
-        let selected = select_user_txs(
+        let selected = select_user_txs_cancellable(
             &mut overlay,
-            &mempool,
+            mempool,
             &ctx,
             &params,
             last_headers.as_slice(),
             cost_budget,
             size_budget,
             reemission_rules,
+            should_cancel,
         )?;
 
         // Forward consensus-revalidation-failure suspects to the
@@ -580,23 +654,26 @@ pub fn generate_candidate<V: CandidateStateView>(
         let mut user_checked = selected.checked; // Vec<(CheckedTransaction, cost)>
         let cost_ceiling = max_block_cost.saturating_sub(safety_gap);
         let checked_fee = loop {
+            check_build_cancelled(should_cancel)?;
             let user_raw: Vec<Transaction> = user_checked
                 .iter()
                 .map(|(c, _)| c.transaction().clone())
                 .collect();
             let fee_tx_opt = build_fee_tx(&user_raw, miner_pk, candidate_height)?;
+            check_build_cancelled(should_cancel)?;
 
             // Fresh overlay over [emission, rent, kept user txs] so the fee tx's
             // inputs resolve against exactly the block's contents.
             let mut fee_overlay = CandidateOverlay::new(base);
-            if let Some(tx) = &emission_tx {
-                fee_overlay.apply_tx(tx)?;
+            if let Some(tx) = &checked_emission {
+                fee_overlay.apply_checked(tx);
             }
             if let Some(cr) = &checked_rent {
-                fee_overlay.apply_tx(cr.transaction())?;
+                fee_overlay.apply_checked(cr);
             }
             for (c, _) in &user_checked {
-                fee_overlay.apply_tx(c.transaction())?;
+                check_build_cancelled(should_cancel)?;
+                fee_overlay.apply_checked(c);
             }
 
             let (checked_fee, fee_cost) = match &fee_tx_opt {
@@ -612,6 +689,7 @@ pub fn generate_candidate<V: CandidateStateView>(
                             }
                         })?;
                     let mut fee_cost_acc = CostAccumulator::new(block_cap);
+                    check_build_cancelled(should_cancel)?;
                     let cf = {
                         let mut fee_ctx = TxValidationCtx {
                             ctx: &ctx,
@@ -655,11 +733,15 @@ pub fn generate_candidate<V: CandidateStateView>(
             if let Some(ft) = &fee_tx_opt {
                 probe.push(ft.clone());
             }
+            check_build_cancelled(should_cancel)?;
             let section_size = block_transactions_section_size(&probe, pre_header.version)?;
+            check_build_cancelled(should_cancel)?;
 
             if (total_cost <= cost_ceiling && section_size <= max_block_size as usize)
                 || user_checked.is_empty()
             {
+                final_validation_cost = total_cost;
+                final_section_size = Some(section_size as u64);
                 break checked_fee;
             }
             user_checked.pop();
@@ -671,6 +753,14 @@ pub fn generate_candidate<V: CandidateStateView>(
 
     // 9f. Assemble the final tx list in block order:
     //     emission, rent, user txs, fee.
+    let selected_transaction_count = user_checked.len() as u32;
+    let fees_nano_erg = checked_fee.as_ref().map_or(0, |fee| {
+        fee.transaction()
+            .output_candidates
+            .iter()
+            .map(|o| o.value)
+            .sum()
+    });
     let mut checked: Vec<CheckedTransaction> = Vec::with_capacity(3 + user_checked.len());
     checked.extend(checked_emission);
     if let Some(cr) = checked_rent {
@@ -682,13 +772,26 @@ pub fn generate_candidate<V: CandidateStateView>(
     if let Some(cf) = checked_fee {
         checked.push(cf);
     }
+    // BlockTransactions.scala:42 requires a non-empty section, including after
+    // emission ends. Wait for a rent claim or user transaction before mining.
+    if checked.is_empty() {
+        return Ok(None);
+    }
     let raw_txs: Vec<Transaction> = checked.iter().map(|c| c.transaction().clone()).collect();
+    // Full builds already measured the final section in the trim loop. Minimal
+    // builds measure their emission-only section once, outside the serve path.
+    let transactions_size_bytes = match final_section_size {
+        Some(size) => size,
+        None => block_transactions_section_size(&raw_txs, pre_header.version)? as u64,
+    };
 
     // 10. Dry-run AVL+ to obtain new_state_root + raw_proof_bytes.
+    check_build_cancelled(should_cancel)?;
     let phase_start = std::time::Instant::now();
     let (new_state_root, ad_proof_bytes, snapshot_tip_id) =
         view.candidate_dry_run(&checked).map_err(state_err)?;
     timings.dryrun = phase_start.elapsed();
+    check_build_cancelled(should_cancel)?;
 
     // 11. Parent-id guard: best-full advanced during generation.
     if snapshot_tip_id != parent_id {
@@ -699,16 +802,10 @@ pub fn generate_candidate<V: CandidateStateView>(
     let phase_start = std::time::Instant::now();
     let ad_proofs_root = Digest32::from_bytes(*blake2b256(&ad_proof_bytes).as_bytes());
 
-    let tx_ids_owned: Vec<[u8; 32]> = raw_txs
-        .iter()
-        .map(|tx| {
-            let bts = bytes_to_sign(tx).map_err(|e| MiningError::IdComputation {
-                op: "bytes_to_sign",
-                reason: format!("{e:?}"),
-            })?;
-            Ok::<[u8; 32], MiningError>(*blake2b256(&bts).as_bytes())
-        })
-        .collect::<Result<_, _>>()?;
+    // Every entry passed consensus validation under this candidate's context.
+    // Its id is immutable and already derived from exactly these transaction
+    // bytes; reuse it instead of serializing bytes-to-sign again.
+    let tx_ids_owned: Vec<[u8; 32]> = checked.iter().map(|tx| *tx.tx_id()).collect();
     let witness_ids_owned: Vec<Vec<u8>> = if pre_header.version >= 2 {
         raw_txs
             .iter()
@@ -738,6 +835,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         .collect();
     let extension_root_bytes = extension_root(&extension_field_refs);
     timings.roots = phase_start.elapsed();
+    check_build_cancelled(should_cancel)?;
 
     // 13. Assemble header with placeholder solution.
     let placeholder_solution = AutolykosSolution::V2 {
@@ -771,6 +869,15 @@ pub fn generate_candidate<V: CandidateStateView>(
         target: target.clone(),
         height: candidate_height,
         pk: *miner_pk,
+        metrics: CandidateMetrics {
+            transaction_count: raw_txs.len() as u32,
+            selected_transaction_count,
+            fees_nano_erg,
+            transactions_size_bytes,
+            max_block_size_bytes: active_params.max_block_size as u64,
+            validation_cost: final_validation_cost,
+            max_block_cost: params.max_block_cost,
+        },
     };
 
     // 16. Pack the cached candidate.
@@ -787,6 +894,15 @@ pub fn generate_candidate<V: CandidateStateView>(
 
     let _ = (validation_settings,); // reserved for v2 user-tx validation
 
+    check_build_cancelled(should_cancel)?;
+    timings.assembly = build_start.elapsed().saturating_sub(
+        timings.setup
+            + timings.emission
+            + timings.rent
+            + timings.select
+            + timings.dryrun
+            + timings.roots,
+    );
     Ok(Some((candidate, work_msg, timings)))
 }
 
@@ -857,12 +973,19 @@ impl EpochBoundaryPayload {
     /// The `0x00` parameter fields + `0x02` validation-settings chunks for the
     /// extension, in a deterministic order (params then settings) so the
     /// off-loop and on-loop builds produce byte-identical extensions.
-    fn extension_fields(&self) -> Vec<([u8; 2], Vec<u8>)> {
-        let mut fields = active_params_to_extension_fields(&self.computed);
+    fn extension_fields(
+        &self,
+    ) -> Result<ergo_validation::active_params::ActiveParameterFields, MiningError> {
+        let mut fields = active_params_to_extension_fields(&self.computed).map_err(|error| {
+            MiningError::Decode {
+                op: "epoch_parameters",
+                reason: error.to_string(),
+            }
+        })?;
         fields.extend(validation_settings_update_to_extension_fields(
             &self.cumulative,
         ));
-        fields
+        Ok(fields)
     }
 }
 
@@ -1113,9 +1236,9 @@ mod tests {
 
     /// Serialize an interlinks vector into the canonical Extension section
     /// bytes — `pack_interlinks` into 2-byte-keyed fields, then
-    /// `write_extension` — i.e. exactly what `apply_mined_block` / peer ingest
-    /// persist for a block's parent. This is the byte form the read side under
-    /// test must accept.
+    /// `write_extension` — i.e. exactly what `store_mined_sections` / peer
+    /// ingest persist for a block's parent. This is the byte form the read
+    /// side under test must accept.
     fn canonical_extension_bytes(header_id: [u8; 32], interlinks: &[ModifierId]) -> Vec<u8> {
         let fields = pack_interlinks(interlinks);
         let ext = Extension {
@@ -1206,17 +1329,17 @@ mod tests {
     // ----- happy path -----
 
     #[test]
-    fn candidate_exhausted_emission_builds_without_emission_transaction() {
+    fn candidate_exhausted_emission_without_transactions_returns_none() {
         let mut header = crate::genesis::parent_header();
         header.height = 14;
         header.n_bits = 16_842_752;
         let view = ExhaustedView { header };
         for mode in [BuildMode::Minimal, BuildMode::Full] {
-            let (candidate, _, _) = generate_candidate(
+            let candidate = generate_candidate(
                 &view,
                 ergo_chain_spec::Network::Mainnet,
                 mode,
-                MempoolReadSnapshot::empty(),
+                &MempoolReadSnapshot::empty(),
                 &[0x02; 33],
                 &MonetarySettings::mainnet(),
                 None,
@@ -1228,10 +1351,205 @@ mod tests {
                 &[],
                 &mut vec![],
             )
+            .unwrap();
+            assert!(candidate.is_none());
+        }
+    }
+
+    fn generate_with_custom_fields(
+        view: &ExhaustedView,
+        network: ergo_chain_spec::Network,
+        custom: &[([u8; 2], Vec<u8>)],
+    ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
+        generate_candidate(
+            view,
+            network,
+            BuildMode::Minimal,
+            &MempoolReadSnapshot::empty(),
+            &[0x02; 33],
+            &MonetarySettings::mainnet(),
+            None,
+            None,
+            &DifficultyParams::mainnet(),
+            &[],
+            &BTreeMap::new(),
+            &VotingSettings::mainnet(),
+            custom,
+            &mut vec![],
+        )
+    }
+
+    /// Individually legal custom fields whose complete section, header ID and
+    /// count prefix included, is one byte over the 32,768-byte cap.
+    fn one_byte_over_section_cap() -> Vec<([u8; 2], Vec<u8>)> {
+        let mut fields: Vec<_> = (0..488u16)
+            .map(|id| ([3 + (id >> 8) as u8, id as u8], vec![0; 64]))
+            .collect();
+        fields.push(([5, 0], vec![0; 36]));
+        fields
+    }
+
+    fn rule_error(
+        result: Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError>,
+        rule: &str,
+    ) {
+        match result {
+            Err(MiningError::InvalidConfig(message)) if message.contains(rule) => {}
+            other => panic!("expected {rule} refusal, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    // ----- error paths -----
+
+    /// Devnet genesis copies custom fields verbatim instead of running the
+    /// extension builder, so it needs its own field rules and section cap.
+    #[test]
+    fn genesis_candidate_enforces_custom_field_rules_and_section_cap() {
+        let view = ExhaustedView {
+            header: crate::genesis::parent_header(),
+        };
+        let devnet = ergo_chain_spec::Network::Devnet;
+        rule_error(
+            generate_with_custom_fields(&view, devnet, &[([0xAE, 0x00], vec![0; 65])]),
+            "rule 404",
+        );
+        rule_error(
+            generate_with_custom_fields(&view, devnet, &one_byte_over_section_cap()),
+            "32769 bytes > 32768 (rule 400)",
+        );
+        // The same fields fit without the extra byte; the build then reaches
+        // the shared genesis emission box, which this stub view lacks.
+        let mut at_cap = one_byte_over_section_cap();
+        at_cap.last_mut().unwrap().1.pop();
+        assert!(matches!(
+            generate_with_custom_fields(&view, devnet, &at_cap),
+            Err(MiningError::EmissionInvariant { .. })
+        ));
+    }
+
+    /// Ordinary candidates take the cap from the extension builder, which
+    /// also counts the interlinks.
+    #[test]
+    fn ordinary_candidate_enforces_section_cap_through_the_builder() {
+        let mut header = crate::genesis::parent_header();
+        header.height = 14;
+        header.n_bits = 16_842_752;
+        let view = ExhaustedView { header };
+        rule_error(
+            generate_with_custom_fields(
+                &view,
+                ergo_chain_spec::Network::Mainnet,
+                &one_byte_over_section_cap(),
+            ),
+            "(rule 400)",
+        );
+    }
+
+    /// Ancestry from a real store after a UTXO-snapshot install; every other
+    /// input is the exhausted-emission stub, so a build that clears the
+    /// difficulty recalculation returns `None`.
+    struct InstalledSnapshotView<'a> {
+        snapshot: &'a ergo_state::store::CommittedSnapshot,
+        stub: ExhaustedView,
+    }
+
+    impl UtxoView for InstalledSnapshotView<'_> {
+        fn get_box(&self, _: &Digest32) -> Option<ErgoBox> {
+            None
+        }
+    }
+
+    impl CandidateStateView for InstalledSnapshotView<'_> {
+        fn emission_identity(
+            &self,
+            tip: &[u8; 32],
+        ) -> Result<Option<Option<Digest32>>, StateError> {
+            self.stub.emission_identity(tip)
+        }
+        fn best_full_block_id(&self) -> [u8; 32] {
+            CandidateStateView::best_full_block_id(self.snapshot)
+        }
+        fn best_full_block_height(&self) -> u32 {
+            CandidateStateView::best_full_block_height(self.snapshot)
+        }
+        fn get_header_bytes(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+            CandidateStateView::get_header_bytes(self.snapshot, id)
+        }
+        fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
+            CandidateStateView::header_id_at_height(self.snapshot, height)
+        }
+        fn block_section(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+            self.stub.block_section(id)
+        }
+        fn last_applied_chain_window_10(&self) -> Result<[Header; 10], StateError> {
+            self.stub.last_applied_chain_window_10()
+        }
+        fn tip_snapshot_params(
+            &self,
+        ) -> Result<
+            (
+                ActiveProtocolParameters,
+                ergo_validation::ErgoValidationSettings,
+            ),
+            StateError,
+        > {
+            self.stub.tip_snapshot_params()
+        }
+        fn candidate_dry_run(
+            &self,
+            checked: &[CheckedTransaction],
+        ) -> Result<(ergo_primitives::digest::ADDigest, Vec<u8>, [u8; 32]), StateError> {
+            self.stub.candidate_dry_run(checked)
+        }
+        fn mode2_trust_first_epoch_armed(&self) -> Result<bool, StateError> {
+            self.stub.mode2_trust_first_epoch_armed()
+        }
+    }
+
+    #[test]
+    fn candidate_retargets_from_ancestors_below_a_utxo_snapshot_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = crate::state_view::ancestry_tests::snapshot_installed_store(dir.path());
+        let snapshot = store.committed_snapshot().unwrap().unwrap();
+        let tip = CandidateStateView::best_full_block_id(&snapshot);
+        let bytes = CandidateStateView::get_header_bytes(&snapshot, &tip)
             .unwrap()
             .unwrap();
-            assert!(candidate.transactions.is_empty());
-        }
+        let view = InstalledSnapshotView {
+            snapshot: &snapshot,
+            stub: ExhaustedView {
+                header: read_header(&mut VlqReader::new(&bytes)).unwrap(),
+            },
+        };
+        // Two-block epochs make height 11 a recalculation height whose window
+        // reaches below the snapshot anchor at height 8.
+        let mut difficulty = DifficultyParams::mainnet();
+        difficulty.epoch_length = 2;
+        difficulty.eip37_epoch_length = None;
+        difficulty.eip37_activation_height = None;
+        difficulty.v2_activation = None;
+        assert_eq!(
+            previous_heights_for_recalculation(11, 2),
+            vec![0, 2, 4, 6, 8, 10]
+        );
+        let candidate = generate_candidate(
+            &view,
+            ergo_chain_spec::Network::Mainnet,
+            BuildMode::Minimal,
+            &MempoolReadSnapshot::empty(),
+            &[0x02; 33],
+            &MonetarySettings::mainnet(),
+            None,
+            None,
+            &difficulty,
+            &[],
+            &BTreeMap::new(),
+            &VotingSettings::mainnet(),
+            &[],
+            &mut vec![],
+        )
+        .unwrap();
+        assert!(candidate.is_none());
     }
 
     // ----- round-trips -----
@@ -1403,6 +1721,7 @@ mod tests {
             header_id: ModifierId::from_bytes([0u8; 32]),
             fields: payload
                 .extension_fields()
+                .unwrap()
                 .into_iter()
                 .map(|(key, value)| ExtensionField { key, value })
                 .collect(),
@@ -1432,12 +1751,10 @@ mod tests {
         }
     }
 
-    /// THE consensus oracle for epoch-boundary mining: the extension + header an
-    /// epoch-boundary candidate would carry must PASS the real block validator
-    /// (`validate_epoch_extension` — the exact path a peer runs in
-    /// `block_proc.rs`), for the SAME epoch-vote tally the miner used. If it
-    /// passes here, peers accept the mined block. Covered: a quiet epoch (no
-    /// votes) and an approved parameter increase.
+    /// Internal epoch-extension compatibility: fields produced by the miner
+    /// must pass `validate_epoch_extension` with the same tally and settings.
+    /// Covers a quiet epoch and an approved parameter increase. This does not
+    /// run full block/script/PoW validation or an independent Scala peer.
     #[test]
     fn epoch_boundary_payload_passes_validate_epoch_extension() {
         use ergo_validation::active_params::scala_launch;
@@ -1481,7 +1798,7 @@ mod tests {
                 false,
             )
             .unwrap_or_else(|e| {
-                panic!("a peer must accept the mined boundary block [{label}]: {e:?}")
+                panic!("epoch-extension helper must accept these fields [{label}]: {e:?}")
             });
             // The validator's recompute must equal the miner's — the block's
             // next-epoch params are exactly what we serialized.

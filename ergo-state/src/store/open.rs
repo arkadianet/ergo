@@ -8,6 +8,7 @@
 //! function on the same struct from `mod.rs`.
 
 use super::*;
+use redb::ReadableDatabase;
 
 impl StateStore {
     /// Disable commit durability for this database instance in logic tests.
@@ -40,12 +41,11 @@ impl StateStore {
     /// Open with explicit launch parameters. Production callers feed
     /// `scala_launch_for_network(chain_spec.network)` so the height-0
     /// voted-params row matches Scala `LaunchParameters` for that
-    /// network. In Scala, `MainnetLaunchParameters` and
-    /// `TestnetLaunchParameters` carry identical data (`DefaultParameters`
-    /// plus empty `proposedUpdate`); the dispatch is preserved here so
-    /// the seam is in place if a future network introduces a real launch
-    /// override. Only `DevnetLaunchParameters` and
-    /// `Devnet60LaunchParameters` do today, by setting `BlockVersion`.
+    /// network. Pinned Scala6.0.5 mainnet launches at version1; testnet
+    /// launches at version4 with proposed disables215/409 and no activated
+    /// settings. Devnet variants also override launch version. Launch data
+    /// initializes a missing height0 row; opening an existing row preserves
+    /// its stored parameters rather than silently migrating them.
     pub fn open_with_launch_params(
         path: &Path,
         launch_params: ergo_validation::ActiveProtocolParameters,
@@ -58,7 +58,7 @@ impl StateStore {
     /// network-aware shape; defaults `voting_settings` to mainnet.
     /// Tests that pass `scala_launch_for_network(Network::Testnet)`
     /// here will silently use mainnet voting cadence — use
-    /// [`open_with_cache_launch_voting`] instead.
+    /// [`Self::open_with_cache_launch_voting`] instead.
     pub fn open_with_cache_and_launch(
         path: &Path,
         cache_bytes: usize,
@@ -82,35 +82,71 @@ impl StateStore {
         launch_params: ergo_validation::ActiveProtocolParameters,
         voting_settings: ergo_chain_spec::VotingParams,
     ) -> Result<Self, StateError> {
-        Self::open_with_cache_launch_voting_and_wallet(
+        Self::open_with_cache_budgets_launch_voting(
             path,
             cache_bytes,
+            crate::DEFAULT_REDB_CACHE_BYTES,
+            launch_params,
+            voting_settings,
+        )
+    }
+
+    /// Open with independent AVL and redb budgets and network parameters.
+    pub fn open_with_cache_budgets_launch_voting(
+        path: &Path,
+        cache_bytes: usize,
+        redb_cache_bytes: usize,
+        launch_params: ergo_validation::ActiveProtocolParameters,
+        voting_settings: ergo_chain_spec::VotingParams,
+    ) -> Result<Self, StateError> {
+        Self::open_with_cache_budgets_launch_voting_and_wallet(
+            path,
+            cache_bytes,
+            redb_cache_bytes,
             launch_params,
             voting_settings,
             true,
         )
     }
 
-    /// Opens the chain store without touching wallet tables. Used when the
-    /// wallet is owned by an external process.
+    /// Open the chain store without touching wallet tables.
     pub fn open_with_cache_launch_voting_without_wallet(
         path: &Path,
         cache_bytes: usize,
         launch_params: ergo_validation::ActiveProtocolParameters,
         voting_settings: ergo_chain_spec::VotingParams,
     ) -> Result<Self, StateError> {
-        Self::open_with_cache_launch_voting_and_wallet(
+        Self::open_with_cache_budgets_launch_voting_without_wallet(
             path,
             cache_bytes,
+            crate::DEFAULT_REDB_CACHE_BYTES,
+            launch_params,
+            voting_settings,
+        )
+    }
+
+    /// Open an external-wallet chain store with independent cache budgets.
+    pub fn open_with_cache_budgets_launch_voting_without_wallet(
+        path: &Path,
+        cache_bytes: usize,
+        redb_cache_bytes: usize,
+        launch_params: ergo_validation::ActiveProtocolParameters,
+        voting_settings: ergo_chain_spec::VotingParams,
+    ) -> Result<Self, StateError> {
+        Self::open_with_cache_budgets_launch_voting_and_wallet(
+            path,
+            cache_bytes,
+            redb_cache_bytes,
             launch_params,
             voting_settings,
             false,
         )
     }
 
-    fn open_with_cache_launch_voting_and_wallet(
+    fn open_with_cache_budgets_launch_voting_and_wallet(
         path: &Path,
         cache_bytes: usize,
+        redb_cache_bytes: usize,
         launch_params: ergo_validation::ActiveProtocolParameters,
         voting_settings: ergo_chain_spec::VotingParams,
         migrate_wallet: bool,
@@ -118,6 +154,7 @@ impl StateStore {
         let t0 = std::time::Instant::now();
         let db = Arc::new(
             Database::builder()
+                .set_cache_size(redb_cache_bytes)
                 .set_repair_callback(|session| {
                     info!(
                         progress_pct = session.progress() * 100.0,
@@ -143,6 +180,20 @@ impl StateStore {
                             .get("root")?
                             .map(|guard| StateMeta::deserialize(guard.value()))
                             .transpose()?;
+                        // Older snapshot imports wrote the root at node zero.
+                        // Applied blocks keep node IDs, and a root rotation
+                        // moves node zero into an internal child, so look for
+                        // the row itself as well as a zero root. Genesis and
+                        // current installs allocate from one.
+                        if table.get(UTXO_BOOTSTRAP_INSTALLED_V1_KEY)?.is_some()
+                            && (meta.as_ref().is_some_and(|meta| meta.root_node_id == 0)
+                                || Self::has_null_node_row(&read_txn)?)
+                        {
+                            // Relocating node zero would leave its parent and
+                            // historical undo references inconsistent. Refuse
+                            // before allocator migration or mutable use.
+                            return Err(StateError::LegacySnapshotNodeIds);
+                        }
                         let (has_alloc, alloc_nid) = match table.get("allocator")? {
                             Some(ag) => (true, AllocMeta::deserialize(ag.value())?.next_id),
                             None => (false, 0),
@@ -250,7 +301,19 @@ impl StateStore {
                 Err(e) => return Err(e.into()),
             };
             match from_table {
-                Some(cs) => cs,
+                Some(cs) => {
+                    if cs.best_full_block_height != height {
+                        return Err(StateError::DbCorruption {
+                            table: "chain_state_meta",
+                            key: "chain_state".into(),
+                            reason: format!(
+                                "full-block height {} disagrees with AVL height {height}",
+                                cs.best_full_block_height
+                            ),
+                        });
+                    }
+                    cs
+                }
                 None if height > 0 => {
                     // Derive from committed state: best_full_block = current tip.
                     // best_header defaults to same (header-first sync hasn't started).
@@ -324,6 +387,7 @@ impl StateStore {
             headers: crate::header_store::HeaderSectionTables::new(db.clone()),
             db,
             db_path: path.to_path_buf(),
+            redb_cache_bytes,
             tree,
             height,
             genesis_committed,
@@ -492,4 +556,39 @@ pub(super) fn write_mode2_trust_sentinel(
     let mut table = write_txn.open_table(CHAIN_STATE_META)?;
     table.insert(MODE2_TRUST_FIRST_EPOCH_KEY, [0x01u8].as_slice())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod cache_budget_tests {
+    use super::*;
+    #[test]
+    fn separate_cache_budgets_survive_reopen_without_changing_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.redb");
+        let root;
+        {
+            let mut store = StateStore::open_with_cache_budgets_launch_voting(
+                &path,
+                16384,
+                65536,
+                ergo_validation::scala_launch(),
+                ergo_chain_spec::VotingParams::mainnet(),
+            )
+            .unwrap();
+            root = store.root_digest();
+            assert_eq!(store.metrics().arena_cache_capacity_bytes, 16384);
+            assert_eq!(store.metrics().redb_cache_capacity_bytes, 65536);
+        }
+        let mut store = StateStore::open_with_cache_budgets_launch_voting(
+            &path,
+            8192,
+            32768,
+            ergo_validation::scala_launch(),
+            ergo_chain_spec::VotingParams::mainnet(),
+        )
+        .unwrap();
+        assert_eq!(store.root_digest(), root);
+        assert_eq!(store.metrics().arena_cache_capacity_bytes, 8192);
+        assert_eq!(store.metrics().redb_cache_capacity_bytes, 32768);
+    }
 }

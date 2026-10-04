@@ -1,4 +1,4 @@
-use super::scoring::max_level_of;
+use super::{is_genesis, scoring::max_level_of};
 
 /// Parameters governing NiPoPoW proof construction (KMZ17). Mirrors
 /// Scala `PoPowParams(m, k, continuous)`.
@@ -18,7 +18,7 @@ pub struct PoPowParams {
 ///
 /// Preconditions:
 /// * `chain.len() >= k + m`.
-/// * `chain[0]` is genesis (`parent_id == zeros`).
+/// * `chain[0]` is genesis (`height == 1`).
 /// * `params.k >= 1`.
 ///
 /// Returns `Err` on precondition violation.
@@ -49,8 +49,8 @@ pub fn prove(
         ));
     }
     let genesis = chain.first().ok_or_else(|| "empty chain".to_string())?;
-    if *genesis.header.parent_id.as_bytes() != [0u8; 32] {
-        return Err("chain.first() must be genesis (parent_id == zeros)".into());
+    if !is_genesis(&genesis.header) {
+        return Err("chain.first() must be genesis (height == 1)".into());
     }
 
     let k = params.k as usize;
@@ -195,8 +195,9 @@ mod tests {
 
     #[test]
     fn prove_rejects_non_genesis_anchored_chain() {
-        // h2 first (not genesis) → must error.
-        let h2 = header_from_hex(HEIGHT_2_V1_HEX);
+        // Height 2 with a zero parent is not genesis and must error.
+        let mut h2 = header_from_hex(HEIGHT_2_V1_HEX);
+        h2.parent_id = ModifierId::from_bytes([0u8; 32]);
         let chain: Vec<ergo_ser::popow_header::PoPowHeader> = (0..3)
             .map(|_| ergo_ser::popow_header::PoPowHeader {
                 header: h2.clone(),

@@ -20,6 +20,7 @@ use ergo_ser::modifier_id::{
     compute_section_id, TYPE_AD_PROOFS, TYPE_BLOCK_TRANSACTIONS, TYPE_EXTENSION,
 };
 use ergo_state::store::StateStore;
+use redb::ReadableDatabase;
 use std::path::PathBuf;
 
 // ----- helpers -----

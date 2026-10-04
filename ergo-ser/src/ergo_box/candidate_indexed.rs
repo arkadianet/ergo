@@ -18,7 +18,7 @@ pub fn write_ergo_box_candidate_indexed(
     token_id_table: &[TokenId],
 ) -> Result<(), WriteError> {
     w.put_u64(c.value);
-    w.put_bytes(&c.ergo_tree_bytes);
+    w.put_bytes(c.checked_serialized_ergo_tree_bytes()?);
     w.put_u32(c.creation_height);
     check_token_count(c.tokens.len())?;
     w.put_u8(c.tokens.len() as u8);
@@ -58,6 +58,10 @@ pub fn read_ergo_box_candidate_indexed(
     r: &mut VlqReader,
     token_id_table: &[TokenId],
 ) -> Result<ErgoBoxCandidate, ReadError> {
+    // The box window; a tree sets its own window from its start and
+    // restores this one after it.
+    let box_limit = r.position_limit();
+    r.set_position_limit(Some(r.position() + super::MAX_BOX_SIZE));
     let value = r.get_u64()?;
     let tree_start = r.position();
     let ergo_tree = read_ergo_tree(r)?;
@@ -87,7 +91,9 @@ pub fn read_ergo_box_candidate_indexed(
     let tree_end = r.position();
     let ergo_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
 
-    read_box_tail(r, value, ergo_tree, ergo_tree_bytes, token_id_table)
+    let candidate = read_box_tail(r, value, ergo_tree, ergo_tree_bytes, token_id_table)?;
+    r.set_position_limit(box_limit);
+    Ok(candidate)
 }
 
 /// Read the box tail (creation_height, tokens, registers) and assemble the full candidate.
@@ -115,18 +121,30 @@ fn read_box_tail(
             amount,
         });
     }
-    let reg_start = r.position();
     let additional_registers = read_registers(r)?;
-    let reg_end = r.position();
-    let register_bytes = r.data_slice(reg_start, reg_end).to_vec();
+    // The canonical re-serialization of the parsed registers, never the
+    // verbatim wire slice: Scala writes an output box's registers back from
+    // its parsed values (`ValueSerializer.serialize` on each stored
+    // `EvaluatedValue`), so a transaction id and its output box ids commit to
+    // those bytes. A register the reference accepts in a non-canonical form
+    // (the `TrueLeaf` opcode `7f`, a collection length above 2^32) would
+    // otherwise give the transaction a different id than the reference's.
+    // Same rule as the standalone reader, `read_ergo_box_candidate`.
+    let mut rw = VlqWriter::new();
+    crate::register::write_registers(&mut rw, &additional_registers)
+        .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
+    let register_bytes = rw.result();
+    let canonical_tree_bytes = super::canonical_tree_bytes(&ergo_tree, &ergo_tree_bytes);
     Ok(ErgoBoxCandidate {
         value,
         ergo_tree,
         ergo_tree_bytes,
+        canonical_tree_bytes,
         creation_height,
         tokens,
         additional_registers,
         register_bytes,
+        received_box_identity: None,
     })
 }
 
@@ -145,6 +163,7 @@ mod tests {
             version: 0,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             // Root must be SSigmaProp: under `has_size`, a non-SigmaProp root
             // (e.g. `Const(SBoolean, true)`) fails Scala's

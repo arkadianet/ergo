@@ -13,7 +13,7 @@
 //! storage-rent-eligible boxes against that snapshot via the injected
 //! `resolve_rent` closure (the eligible-id list itself comes from the
 //! indexer's eventually-consistent extra-index), runs the unchanged
-//! [`generate_candidate`]
+//! [`crate::candidate::generate_candidate`]
 //! against the snapshot, and CAS-publishes the result into the served cache
 //! only if the live tip still matches the parent it built against. A reorg
 //! or tip advance during the build wastes the work, never serves a
@@ -27,10 +27,12 @@ use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
 use ergo_state::store::{BaseDisposition, CommittedSnapshot, DryRunBase};
 
-use crate::candidate::{generate_candidate, BuildMode, Candidate};
+use crate::candidate::{generate_candidate_cancellable, BuildMode, Candidate, PhaseTimings};
 use crate::error::MiningError;
 use crate::handle::MiningHandle;
-use crate::state_view::CachedSnapshotView;
+use crate::state_view::{
+    CachedSnapshotView, CandidateProofCache, CandidateStateView, ProofCachingView,
+};
 use crate::work_message::WorkMessage;
 
 /// Why a build was requested. Recorded on the template identity for metrics;
@@ -49,6 +51,15 @@ pub enum BuildReason {
     /// force a same-tip rebuild so the new header votes take effect on the next
     /// mined block instead of waiting for the next tip / mempool change.
     VotesChanged,
+    /// A locally mined block that became the best header failed to apply, so
+    /// every template on its parent was withdrawn
+    /// ([`crate::handle::MiningHandle::withdraw_templates_for_parent`]);
+    /// rebuild on the same tip now. Scala's
+    /// `CandidateGenerator.onSolvedBlockFailed` drops its cached candidates
+    /// the same way (v6.0.6 23aabead8 `CandidateGenerator.scala:94-104`) and
+    /// builds again on the next candidate request; the eager rebuild is this
+    /// node's choice, so a miner polling for work is not left without it.
+    SolvedBlockFailed,
 }
 
 /// How far the header tip may lead the applied full-block tip while mining
@@ -129,8 +140,10 @@ pub struct TemplateIdentity {
     pub chain_seq: u64,
     /// Monotonic publish counter; bumps on every newly published template.
     pub template_seq: u64,
-    /// True iff `chain_seq` advanced versus the previously published template
-    /// (the parent changed). True for the first template ever published.
+    /// True iff `chain_seq` advanced versus the newest offered template (the
+    /// parent changed). True when no template is offered: the first template
+    /// ever published, and the rebuild after
+    /// [`crate::handle::MiningHandle::withdraw_templates_for_parent`].
     pub clean_jobs: bool,
     /// Wall-clock at publish, passed in by the caller (the cache never reads the
     /// clock itself, so publish is deterministic under test).
@@ -208,7 +221,7 @@ pub(crate) fn should_publish(best_tip: &BestTip, built_parent: &[u8; 32]) -> boo
 /// ergo-mining free of any ergo-indexer dependency.
 ///
 /// Consensus-safety: the snapshot is one redb read transaction; the build
-/// runs the unchanged [`generate_candidate`] against it (byte-identical to
+/// runs the unchanged [`crate::candidate::generate_candidate`] against it (byte-identical to
 /// an on-loop build for the same parent + tx-set, per the `ergo-state`
 /// parity tests); and the result is only served if the live tip still
 /// matches — so a reorg during the build wastes work rather than serving a
@@ -216,9 +229,8 @@ pub(crate) fn should_publish(best_tip: &BestTip, built_parent: &[u8; 32]) -> boo
 /// action loop regardless.
 ///
 /// `base` is the optional per-tip dry-run base cache slot. `None` ⇒ the
-/// uncached path: every build full-hydrates the AVL tree (today's behaviour;
-/// all existing callers and tests pass `None`). `Some(slot)` ⇒ the build's
-/// AVL dry-run routes through [`CachedSnapshotView`], reusing the memoized
+/// uncached path: each build loads authenticated AVL paths on demand.
+/// `Some(slot)` ⇒ the AVL dry-run routes through [`CachedSnapshotView`], reusing the memoized
 /// pristine tree when the slot already holds one for this committed tip and
 /// rehydrating on a miss/tip-change. The slot is `!Send` (it owns an
 /// `Rc<RefCell<Node>>` graph), so it must be owned by the single dedicated
@@ -245,10 +257,70 @@ pub fn build_and_publish(
     resolve_rent: impl FnOnce(&CommittedSnapshot, u32) -> Vec<ErgoBox>,
     disposition_out: &mut Option<BaseDisposition>,
 ) -> Result<BuildOutcome, MiningError> {
+    build_and_publish_inner(
+        reader,
+        handle,
+        intent,
+        mode,
+        base,
+        None,
+        now_ms,
+        resolve_rent,
+        disposition_out,
+    )
+}
+
+/// Build with a worker-owned, single-entry cache of previously verified AVL
+/// results. Validation still runs under the freshly frozen candidate context;
+/// only an identical ordered transaction list on the same committed parent
+/// and state root can reuse the proof. New parents cooperatively stop stale
+/// work between stages without interrupting the worker's request/reply.
+#[allow(clippy::too_many_arguments)]
+pub fn build_and_publish_cached(
+    reader: &ChainStoreReader,
+    handle: &MiningHandle,
+    intent: &BuildIntent,
+    mode: BuildMode,
+    base: Option<&mut Option<DryRunBase>>,
+    proof_cache: &mut CandidateProofCache,
+    now_ms: impl Fn() -> u64,
+    resolve_rent: impl FnOnce(&CommittedSnapshot, u32) -> Vec<ErgoBox>,
+    disposition_out: &mut Option<BaseDisposition>,
+) -> Result<BuildOutcome, MiningError> {
+    build_and_publish_inner(
+        reader,
+        handle,
+        intent,
+        mode,
+        base,
+        Some(proof_cache),
+        now_ms,
+        resolve_rent,
+        disposition_out,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_and_publish_inner(
+    reader: &ChainStoreReader,
+    handle: &MiningHandle,
+    intent: &BuildIntent,
+    mode: BuildMode,
+    base: Option<&mut Option<DryRunBase>>,
+    proof_cache: Option<&mut CandidateProofCache>,
+    now_ms: impl Fn() -> u64,
+    resolve_rent: impl FnOnce(&CommittedSnapshot, u32) -> Vec<ErgoBox>,
+    disposition_out: &mut Option<BaseDisposition>,
+) -> Result<BuildOutcome, MiningError> {
+    let setup_start = std::time::Instant::now();
     // Reset at entry so the documented None-for-non-building contract holds
     // even when a caller reuses one slot across calls — the early-return
     // outcomes below never write it otherwise.
     *disposition_out = None;
+    let live_tip = handle.best_tip();
+    if live_tip.synced && live_tip.parent_id != intent.expected_parent {
+        return Ok(BuildOutcome::DroppedStale);
+    }
     let snapshot = match reader
         .committed_snapshot()
         .map_err(|e| MiningError::StateRead {
@@ -258,6 +330,10 @@ pub fn build_and_publish(
         Some(s) => s,
         None => return Ok(BuildOutcome::NoState),
     };
+    let live_tip = handle.best_tip();
+    if live_tip.synced && live_tip.parent_id != intent.expected_parent {
+        return Ok(BuildOutcome::DroppedStale);
+    }
 
     // Commit-visibility: build against the intent's expected (in-memory)
     // parent, once the committed snapshot reflects it. Persisted state can
@@ -285,12 +361,25 @@ pub fn build_and_publish(
     if !handle.best_tip().synced {
         return Ok(BuildOutcome::NotSynced);
     }
+    // Same-parent mempool changes deliberately do not cancel the in-flight
+    // candidate: allowing it to publish prevents starvation under steady load.
+    let should_cancel = || {
+        let tip = handle.best_tip();
+        !tip.synced || tip.parent_id != intent.expected_parent
+    };
+    if should_cancel() {
+        return Ok(BuildOutcome::DroppedStale);
+    }
+    let mut rent_resolve_time = std::time::Duration::ZERO;
 
     // Minimal builds freeze nothing from the pool and never touch the
     // indexer: the emission-only template needs neither, and skipping both
     // is what makes the minimal publish fast.
+    // The intent already owns a frozen snapshot. Borrow it for a full build;
+    // cloning it would copy every entry's vectors and materialized output boxes.
+    let empty_mempool = MempoolReadSnapshot::empty();
     let (mempool, eligible_rent_boxes) = match mode {
-        BuildMode::Minimal => (MempoolReadSnapshot::empty(), Vec::new()),
+        BuildMode::Minimal => (&empty_mempool, Vec::new()),
         BuildMode::Full => {
             // Storage-rent eligibility, resolved HERE so each box is materialized
             // against THIS committed snapshot — never a newer live view (a box
@@ -302,21 +391,27 @@ pub fn build_and_publish(
             // never claimed blind. The resolver is injected by the node driver (it
             // owns the indexer handle); rent disabled ⇒ never called.
             let eligible = if handle.claim_storage_rent() {
-                resolve_rent(&snapshot, snapshot.best_full_block_height() + 1)
+                let started = std::time::Instant::now();
+                let eligible = resolve_rent(&snapshot, snapshot.best_full_block_height() + 1);
+                rent_resolve_time = started.elapsed();
+                eligible
             } else {
                 Vec::new()
             };
-            ((*intent.mempool).clone(), eligible)
+            (intent.mempool.as_ref(), eligible)
         }
     };
 
-    // The dry-run is the build's dominant cost (full AVL hydration). When a
-    // base-cache slot is supplied, route the build through `CachedSnapshotView`
+    if should_cancel() {
+        return Ok(BuildOutcome::DroppedStale);
+    }
+
+    // When a base-cache slot is supplied, route the build through `CachedSnapshotView`
     // so same-tip rebuilds reuse the memoized pristine tree; otherwise build
-    // directly against the snapshot (every build full-hydrates). Both views
+    // directly against the snapshot (authenticated paths loaded on demand). Both views
     // serve every non-dry-run read from the same one held transaction, so the
-    // candidate is identical bar the dry-run's hydration source — which is
-    // itself byte-identical (proven against the uncached oracle in ergo-state).
+    // candidate proof is byte-identical (checked against full hydration in
+    // ergo-state's snapshot tests).
     // Snapshot the operator's current voting targets once for this build (read
     // under the shared lock); both build paths pass it by reference.
     let voting_targets = handle.voting_targets();
@@ -329,51 +424,55 @@ pub fn build_and_publish(
     // tip without a restart.
     let custom_extension_fields = handle.resolve_extension_fields()?;
     let mut suspects: Vec<Digest32> = Vec::new();
+    let engine_setup_time = setup_start.elapsed().saturating_sub(rent_resolve_time);
     let built = match base {
         Some(slot) => {
             let view = CachedSnapshotView::new(&snapshot, slot);
-            let result = generate_candidate(
+            let result = generate_from_view(
                 &view,
-                handle.network(),
+                snapshot.state_root(),
+                proof_cache,
+                handle,
+                intent,
                 mode,
                 mempool,
-                &intent.miner_pk,
-                handle.monetary(),
-                handle.reemission_ref(),
-                handle.reemission_rules_ref(),
-                handle.chain_config(),
-                eligible_rent_boxes.as_slice(),
+                &eligible_rent_boxes,
                 &voting_targets,
-                handle.voting_settings(),
                 &custom_extension_fields,
                 &mut suspects,
+                &should_cancel,
             );
-            // Read disposition from the view regardless of whether the build
-            // succeeded — the path taken (Hit/Advanced/Rehydrated/…) is
-            // informative even on a dry-run or build error.
             *disposition_out = view.last_disposition();
-            result?
+            result
         }
-        None => generate_candidate(
+        None => generate_from_view(
             &snapshot,
-            handle.network(),
+            snapshot.state_root(),
+            proof_cache,
+            handle,
+            intent,
             mode,
             mempool,
-            &intent.miner_pk,
-            handle.monetary(),
-            handle.reemission_ref(),
-            handle.reemission_rules_ref(),
-            handle.chain_config(),
-            eligible_rent_boxes.as_slice(),
+            &eligible_rent_boxes,
             &voting_targets,
-            handle.voting_settings(),
             &custom_extension_fields,
             &mut suspects,
-        )?,
+            &should_cancel,
+        ),
     };
-    let Some((candidate, work, timings)) = built else {
+    let built = match built {
+        Err(MiningError::BuildCancelled) => return Ok(BuildOutcome::DroppedStale),
+        other => other?,
+    };
+    let Some((candidate, work, mut timings)) = built else {
         return Ok(BuildOutcome::Raced);
     };
+    timings.setup += engine_setup_time;
+    timings.rent_resolve = rent_resolve_time;
+    if should_cancel() {
+        return Ok(BuildOutcome::DroppedStale);
+    }
+    let publish_start = std::time::Instant::now();
 
     // CAS-publish: serve only if the live tip still matches the parent we
     // built against. The published template's era is stamped from the live
@@ -405,9 +504,61 @@ pub fn build_and_publish(
             if mode == BuildMode::Full {
                 handle.record_suspects(suspects);
             }
+            timings.publish = publish_start.elapsed();
             Ok(BuildOutcome::Published { timings })
         }
         None => Ok(BuildOutcome::DroppedStale),
+    }
+}
+
+/// Apply the optional proof wrapper to either state-view implementation while
+/// keeping all candidate validation and cancellation checkpoints identical.
+#[allow(clippy::too_many_arguments)]
+fn generate_from_view<V: CandidateStateView>(
+    view: &V,
+    parent_root: ergo_primitives::digest::ADDigest,
+    proof_cache: Option<&mut CandidateProofCache>,
+    handle: &MiningHandle,
+    intent: &BuildIntent,
+    mode: BuildMode,
+    mempool: &MempoolReadSnapshot,
+    eligible_rent_boxes: &[ErgoBox],
+    voting_targets: &std::collections::BTreeMap<u8, i64>,
+    custom_extension_fields: &[([u8; 2], Vec<u8>)],
+    suspects: &mut Vec<Digest32>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
+    macro_rules! generate {
+        ($view:expr) => {
+            generate_candidate_cancellable(
+                $view,
+                handle.network(),
+                mode,
+                mempool,
+                &intent.miner_pk,
+                handle.monetary(),
+                handle.reemission_ref(),
+                handle.reemission_rules_ref(),
+                handle.chain_config(),
+                eligible_rent_boxes,
+                voting_targets,
+                handle.voting_settings(),
+                custom_extension_fields,
+                suspects,
+                should_cancel,
+            )
+        };
+    }
+    match proof_cache {
+        Some(cache) => {
+            let cached = ProofCachingView::new(view, parent_root, cache);
+            let mut result = generate!(&cached)?;
+            if let Some((_, _, timings)) = &mut result {
+                timings.proof_reused = cached.cache_hit() == Some(true);
+            }
+            Ok(result)
+        }
+        None => generate!(view),
     }
 }
 

@@ -148,6 +148,9 @@ pub enum EvictionReason {
     ByteBudget,
     Confirmed,
     InputConflict,
+    /// Deferred descendant removal after its pooled ancestor was evicted.
+    /// This is a dependency decision, without a verdict on the child's scripts.
+    DependencyRemoved,
     /// Evicted by the proactive tip-revalidation pass: the tx (or a cascade
     /// descendant of one) is no longer valid at the new tip.
     TipInvalid,
@@ -249,6 +252,9 @@ impl From<ergo_state::diff::TxDiff> for TxDiff {
 #[derive(Debug, Clone)]
 pub struct MempoolConfig {
     pub enabled: bool,
+    /// Admission policy only: reject empty-proof inputs carrying extension variable 127.
+    /// Node configuration enables this by default on mainnet; blocks remain unaffected.
+    pub reject_storage_rent_txs: bool,
     pub max_pool_size: usize,
     pub max_pool_bytes: usize,
     pub min_relay_fee_nano_erg: u64,
@@ -345,6 +351,7 @@ impl Default for MempoolConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            reject_storage_rent_txs: false,
             max_pool_size: 1000,
             max_pool_bytes: 64 * 1024 * 1024,
             min_relay_fee_nano_erg: 1_000_000,
@@ -390,7 +397,7 @@ impl Default for MempoolConfig {
 }
 
 impl MempoolConfig {
-    /// Project the staging-related config fields into [`StagingCaps`].
+    /// Project the staging-related config fields into [`crate::staging::StagingCaps`].
     pub fn staging_caps(&self) -> crate::staging::StagingCaps {
         crate::staging::StagingCaps {
             max_count: self.staging_max_count,

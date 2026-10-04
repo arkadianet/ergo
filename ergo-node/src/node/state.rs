@@ -282,7 +282,6 @@ pub(crate) struct NodeState {
     /// request fan-out, proof apply, and the bounded forward catchup
     /// kickoff. Read by `drive_popow_bootstrap` (sync_tick.rs) and
     /// `handle_inbound_popow_proof` (messaging.rs).
-    #[allow(dead_code)]
     pub(super) popow_bootstrap: Option<ergo_sync::popow_bootstrap::PopowBootstrap>,
     /// Mirror of `config.utxo_bootstrap`. The outbound discovery
     /// fan-out checks this flag at each sync_tick to decide whether
@@ -354,17 +353,27 @@ pub(crate) struct NodeState {
     /// Mirrors "mining wiring exists" for the snapshot emitter (the wiring
     /// itself lives on the action loop, out of the emitter's reach).
     pub(super) mining_enabled: bool,
-    /// Mirror of `config.api_bind.is_some_and(|a| !a.ip().is_loopback())`.
+    /// Parent of a self-mined block that became the best header and then
+    /// failed to apply. While a mined block's parent equals it, the block is
+    /// announced only after it applies: the templates on that parent are
+    /// withdrawn and rebuilt, but a deterministic builder/validator mismatch
+    /// reproduces on the fresh template, so each solution on it would
+    /// otherwise advertise another block this node rejects. Cleared when a
+    /// block applies (the full tip moves); see `block_relay`.
+    pub(super) mined_apply_failed_parent: Option<[u8; 32]>,
+    /// True for a non-loopback API bind or `config.api_local_reverse_proxy`.
     /// The `api_key` gate never covers `POST /transactions*` /
     /// `/api/v1/mempool/{submit,check}` (read/submit routes are
     /// unauthenticated by design — see `docs/configuration.md`), so once
     /// the operator opts into a non-loopback `[api] bind` (which requires
-    /// `public_bind = true` at load), that submission surface is reachable
-    /// by arbitrary internet callers. `admission::admit_api_transaction`
-    /// reads this to route such submissions through `TxSource::PublicApi`
+    /// `public_bind = true` at load) or declares a loopback reverse proxy,
+    /// that submission surface is reachable by arbitrary internet callers.
+    /// `admission::admit_api_transaction` reads this to route such submissions
+    /// through `TxSource::PublicApi`
     /// (shared global budget) instead of `TxSource::Api` (local reserve),
     /// so a public unauthenticated flood cannot exhaust the reserve the
-    /// operator's own loopback tooling depends on.
+    /// operator's tooling depends on. With a declared proxy, direct local
+    /// API submissions also use the public budget.
     pub(super) api_publicly_bound: bool,
     /// Active mempool priority-weight function converted at boot to its
     /// wire form. Snapshot ticks read this directly — no per-tick

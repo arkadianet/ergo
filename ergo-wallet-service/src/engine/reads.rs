@@ -12,6 +12,7 @@ use super::WalletEngine;
 
 impl WalletEngine {
     pub fn balances(&self) -> Result<WalletBalances, WalletAdminError> {
+        self.require_valid_scan()?;
         let balance = if let Some(service) = self.service.as_deref() {
             service
                 .confirmed_balance()
@@ -66,6 +67,7 @@ impl WalletEngine {
     /// (a real OffChainRegistry tracking pool-created boxes as spendable inputs)
     /// is a tracked follow-up.
     pub fn balances_with_unconfirmed(&self) -> Result<WalletBalances, WalletAdminError> {
+        self.require_valid_scan()?;
         use ergo_primitives::digest::Digest32;
 
         let read = self
@@ -139,6 +141,7 @@ impl WalletEngine {
         &self,
         include_unconfirmed: bool,
     ) -> Result<ergo_wallet_protocol::native::dto::WalletBalanceDto, WalletAdminError> {
+        self.require_valid_scan()?;
         use ergo_primitives::digest::Digest32;
         use ergo_wallet_protocol::native::dto::{
             NanoErgBreakdownDto, ReemissionInfoDto, ScopeDto, UnconfirmedDeltaDto, WalletAssetDto,
@@ -290,6 +293,7 @@ impl WalletEngine {
     }
 
     pub fn boxes(&self, page: Page) -> Result<WalletBoxesPage, WalletAdminError> {
+        self.require_valid_scan()?;
         let all = if let Some(service) = self.service.as_deref() {
             service
                 .boxes()
@@ -306,6 +310,7 @@ impl WalletEngine {
     }
 
     pub fn boxes_unspent(&self, page: Page) -> Result<WalletBoxesPage, WalletAdminError> {
+        self.require_valid_scan()?;
         let unspent = if let Some(service) = self.service.as_deref() {
             service
                 .confirmed_boxes()
@@ -322,6 +327,7 @@ impl WalletEngine {
     }
 
     pub fn transactions(&self, page: Page) -> Result<WalletTransactionsPage, WalletAdminError> {
+        self.require_valid_scan()?;
         let all = if let Some(service) = self.service.as_deref() {
             service
                 .transactions()
@@ -341,6 +347,7 @@ impl WalletEngine {
         &self,
         tx_id_hex: String,
     ) -> Result<Option<WalletTransactionEntry>, WalletAdminError> {
+        self.require_valid_scan()?;
         let tx_bytes = hex::decode(&tx_id_hex)
             .map_err(|_| WalletAdminError::Internal("tx_id_hex is not valid hex".to_string()))
             .and_then(|v| {
@@ -369,6 +376,7 @@ impl WalletEngine {
         scan_id: u32,
         page: Page,
     ) -> Result<WalletTransactionsPage, WalletAdminError> {
+        self.require_valid_scan()?;
         // Payments scan (10): the wallet's own transactions, served from
         // WALLET_TXS. (Approximate Scala parity: Scala filters by per-tx scan
         // tags, where pure miner-reward receipts carry MiningScanId (9), not 10 —
@@ -445,6 +453,9 @@ impl WalletEngine {
             crate::wallet::RescanState::Failed { height, reason } => {
                 RescanStateDto::Failed { height, reason }
             }
+            crate::wallet::RescanState::Idle if scan_invalidated => RescanStateDto::Required {
+                detail: WalletAdminError::ScanInvalidated.to_string(),
+            },
             crate::wallet::RescanState::Idle if self.chain.is_pruned() => {
                 RescanStateDto::Unavailable {
                     detail: "node is pruned; block replay unavailable".to_string(),
@@ -520,6 +531,7 @@ impl WalletEngine {
         offset: u32,
         limit: u32,
     ) -> Result<ergo_wallet_protocol::native::dto::BoxPage, WalletAdminError> {
+        self.require_valid_scan()?;
         use ergo_wallet_protocol::native::dto::BoxPage;
         let read = self
             .store
@@ -557,6 +569,7 @@ impl WalletEngine {
         &self,
         box_id_hex: String,
     ) -> Result<Option<ergo_wallet_protocol::native::dto::WalletBoxSummary>, WalletAdminError> {
+        self.require_valid_scan()?;
         let box_id = decode_hex32(&box_id_hex)?;
         let read = self
             .store
@@ -575,6 +588,7 @@ impl WalletEngine {
         offset: u32,
         limit: u32,
     ) -> Result<ergo_wallet_protocol::native::dto::TxPage, WalletAdminError> {
+        self.require_valid_scan()?;
         use ergo_wallet_protocol::native::dto::TxPage;
         let read = self
             .store
@@ -613,6 +627,7 @@ impl WalletEngine {
         tx_id_hex: String,
     ) -> Result<Option<ergo_wallet_protocol::native::dto::WalletTransactionSummary>, WalletAdminError>
     {
+        self.require_valid_scan()?;
         let tx_id = decode_hex32(&tx_id_hex)?;
         let read = self
             .store

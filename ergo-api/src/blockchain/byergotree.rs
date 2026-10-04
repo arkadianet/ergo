@@ -1,7 +1,7 @@
 //! `/blockchain/box/byErgoTree` (#24) and `/blockchain/box/unspent/byErgoTree` (#25).
 //!
 //! Both routes accept a hex-encoded ErgoTree as a JSON-string body. The
-//! hex is decoded, the parsed tree is re-serialized to canonical bytes,
+//! hex is decoded and structurally parsed, then the received bytes are
 //! hashed (blake2b256), and the resulting tree_hash is dispatched into
 //! the same address-keyed reader methods used by /box/byAddress and
 //! /box/unspent/byAddress (extra-index parity doc lines 1553-1554).
@@ -26,7 +26,7 @@ use super::{
 
 /// `POST /blockchain/box/byErgoTree`. Body is a JSON-string holding the
 /// hex-encoded ergotree. Dispatches into `address_boxes_paged` after
-/// hashing the canonical tree bytes.
+/// hashing the validated received tree bytes.
 pub async fn boxes_by_ergo_tree_post_handler(
     State(state): State<BlockchainState>,
     Query(q): Query<PagedQuery>,
@@ -40,10 +40,21 @@ pub async fn boxes_by_ergo_tree_post_handler(
         Ok(h) => h,
         Err(resp) => return *resp,
     };
-    let boxes = state
+    let boxes = match state
         .indexer
-        .address_boxes_paged(&tree_hash, page, SortDir::Desc);
-    let total = state.indexer.address_total_boxes(&tree_hash) as i64;
+        .address_boxes_paged(&tree_hash, page, SortDir::Desc)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
+    let total = match state.indexer.address_total_boxes(&tree_hash) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    } as i64;
     let items = match boxes
         .iter()
         .map(|b| build_indexed_box_response(state.network, b))
@@ -94,7 +105,12 @@ pub async fn boxes_unspent_by_ergo_tree_post_handler(
     // `render_unspent_by_address` uses — Scala wires this hash-then-
     // dispatch path explicitly (`BlockchainApiRoute.scala` byErgoTree
     // case), so the P5 overlay semantics are byte-identical to slice 4.
-    let mut confirmed = state.indexer.address_unspent_paged(&tree_hash, page, dir);
+    let mut confirmed = match state.indexer.address_unspent_paged(&tree_hash, page, dir) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
     if exclude_mempool_spent {
         confirmed.retain(|b| match b.box_data.box_id() {
             Ok(id) => !state.mempool.is_spent_by_pool(&id),
@@ -120,8 +136,8 @@ pub async fn boxes_unspent_by_ergo_tree_post_handler(
     }
 }
 
-/// Hex-decode the ErgoTree body and dispatch through the canonical
-/// blake2b256 step that the indexer uses to key its address records.
+/// Hex-decode and validate the ErgoTree, then hash the received bytes,
+/// matching the indexer's cached proposition-byte address identity.
 /// Surfacing hex-decode and parse failures separately would let callers
 /// distinguish them — Scala emits a generic 400 for either, so we
 /// flatten both into the `invalid-ergo-tree` envelope.

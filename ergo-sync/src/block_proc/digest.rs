@@ -1,8 +1,6 @@
 //! Digest-backend block processing (Mode 5): ADProofs-resolved input
 //! boxes + the same full transaction validation as the UTXO path, with
-//! linear-only apply. Deliberately kept as a sibling of [`super::utxo`]
-//! rather than a generalization so the UTXO path stays byte-for-byte
-//! unchanged.
+//! linear-only apply, kept separate from [`super::utxo`].
 
 use std::time::Instant;
 
@@ -23,49 +21,10 @@ use ergo_validation::block::{
 use ergo_validation::context::ProtocolParams;
 use ergo_validation::header::CheckedHeader;
 use ergo_validation::voting::validate_epoch_extension;
-use ergo_validation::{ChainHeaderReader, ChainHeaderReaderError, HeaderView};
 
 use crate::perf::BlockPerfCounters;
 
 use super::{BlockProcessError, ProcessedBlock};
-
-/// Digest-backend counterpart of [`StoreChainHeaderReader`]: same
-/// `header.votes` lookup over the shared header tables, reading through
-/// the `HeaderSectionStore` trait the digest store implements. Kept as a
-/// sibling type rather than generalizing `StoreChainHeaderReader` so the
-/// UTXO path stays byte-for-byte unchanged.
-struct DigestChainHeaderReader<'a> {
-    store: &'a DigestStateStore,
-}
-
-impl<'a> ChainHeaderReader for DigestChainHeaderReader<'a> {
-    fn header_at(&self, height: u32) -> Result<HeaderView, ChainHeaderReaderError> {
-        let header_id = self
-            .store
-            .get_header_id_at_height(height)
-            .map_err(|e| ChainHeaderReaderError::Backend {
-                height,
-                source: Box::new(e),
-            })?
-            .ok_or(ChainHeaderReaderError::NotFound(height))?;
-        let header_bytes = self
-            .store
-            .get_header(&header_id)
-            .map_err(|e| ChainHeaderReaderError::Backend {
-                height,
-                source: Box::new(e),
-            })?
-            .ok_or(ChainHeaderReaderError::NotFound(height))?;
-        let mut r = VlqReader::new(&header_bytes);
-        let header = read_header(&mut r).map_err(|e| ChainHeaderReaderError::Backend {
-            height,
-            source: format!("header decode at h={height}: {e:?}").into(),
-        })?;
-        Ok(HeaderView {
-            votes: header.votes,
-        })
-    }
-}
 
 /// Digest-backend counterpart of [`load_last_headers`]: identical
 /// backward walk over the shared header tables, reading through the
@@ -319,30 +278,25 @@ pub(super) fn process_block_digest(
     //    `voted_params_row` flows into `apply_block_digest` so epoch-
     //    boundary parameters land on disk in lockstep with the digest.
     let voting_length = store.voting_settings().voting_length;
-    let voted_params_row: Option<ergo_validation::ActiveProtocolParameters> =
-        if height > 0 && height.is_multiple_of(voting_length) {
-            let chain_reader = DigestChainHeaderReader { store };
-            let epoch_votes =
-                ergo_validation::compute_epoch_votes(&chain_reader, height, voting_length)
-                    .map_err(|e| {
-                        BlockProcessError::Deserialize(format!(
-                            "compute_epoch_votes at h={height}: {e}"
-                        ))
-                    })?;
-            let outcome = validate_epoch_extension(
-                &extension,
-                &header,
-                store.active_params(),
-                store.validation_settings(),
-                &epoch_votes,
-                store.voting_settings(),
-                // No install-trust path in digest mode.
-                false,
-            )?;
-            Some(outcome.computed)
-        } else {
-            None
-        };
+    let voted_params_row: Option<ergo_validation::ActiveProtocolParameters> = if height > 0
+        && height.is_multiple_of(voting_length)
+    {
+        let epoch_votes =
+            super::branch_epoch_votes(store, *header.parent_id.as_bytes(), height, voting_length)?;
+        let outcome = validate_epoch_extension(
+            &extension,
+            &header,
+            store.active_params(),
+            store.validation_settings(),
+            &epoch_votes,
+            store.voting_settings(),
+            // No install-trust path in digest mode.
+            false,
+        )?;
+        Some(outcome.computed)
+    } else {
+        None
+    };
 
     // 4. Linear-apply preflights, mirroring `DigestStateStore::apply_full_block`.
     //    Height must be tip+1 and the parent must BE the committed tip.
@@ -546,13 +500,14 @@ pub(super) fn process_block_digest(
             }
         };
     // The target epoch extension is validated before its parameters price transactions.
-    let active_for_this_block =
-        ProtocolParams::for_block(store.active_params(), voted_params_row.as_ref());
+    let rule_306_max_block_size = ProtocolParams::from_active(store.active_params()).max_block_size;
+    let active_for_this_block = super::target_block_params(&*store, voted_params_row.as_ref());
     let params = &active_for_this_block;
     let ctx = BlockValidationContext {
         parent: &parent_checked,
         utxo: &digest_view,
         params,
+        rule_306_max_block_size,
         voting_length,
         votes_unknown_rule_disabled,
         parent_extension: parent_extension.as_ref(),
@@ -569,7 +524,8 @@ pub(super) fn process_block_digest(
         &extension,
         &ctx,
         &tx_group_elements,
-    )?;
+    )
+    .map_err(|error| BlockProcessError::with_transactions(error, &block_txs.transactions))?;
     let t_validate = t0.elapsed();
     let tx_count = checked_block.transactions().len();
 

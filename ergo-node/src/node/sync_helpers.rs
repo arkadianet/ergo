@@ -14,13 +14,54 @@
 //!   download window.
 
 use ergo_p2p::message;
-use ergo_p2p::peer::PeerId;
+use ergo_p2p::peer::{PeerId, SyncVersion};
 use ergo_state::{ChainStateRead, StateBackendKind};
 use ergo_sync::coordinator::Action;
 use std::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{send_to_peer, NodeState};
+
+/// Scala's `sendSync` waits for a proof while bootstrap is enabled and
+/// history has no best header (ErgoNodeViewSynchronizer.scala:343-347).
+/// Its reply path suppresses empty sync info too (:367-371). Reducer
+/// presence means bootstrap was enabled at boot; terminal abandonment
+/// releases this gate so ordinary sync can recover.
+pub(super) fn popow_blocks_sync_info(state: &NodeState) -> bool {
+    state.popow_bootstrap.as_ref().is_some_and(|popow| {
+        popow.is_active(state.store.chain_state_meta().best_header_height == 0)
+    })
+}
+
+/// Dispatch the handshake's initial sync without consuming the peer's sync
+/// cadence while fresh NiPoPoW bootstrap is waiting for proofs.
+pub(super) fn send_initial_sync_info(
+    state: &mut NodeState,
+    peer: &PeerId,
+    sync_version: ergo_p2p::peer::SyncVersion,
+    now: Instant,
+) {
+    if popow_blocks_sync_info(state) {
+        return;
+    }
+    if !try_send_anchor_sync_info(state, peer, now) {
+        match ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store) {
+            Ok(payload) => {
+                if !send_to_peer(state, peer, message::CODE_SYNC_INFO, payload) {
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(peer = %peer, error = %e, "failed to serialize SyncInfo; skipping send");
+                return;
+            }
+        }
+    }
+    state
+        .coordinator
+        .sync_state_mut()
+        .mark_sync_sent(*peer, now);
+}
 
 /// Step C+D — try to send a crafted single-anchor SyncInfo to `peer`,
 /// returning `true` if the anchor path was used. Falls through to
@@ -54,7 +95,7 @@ pub(super) fn try_send_anchor_sync_info(
     peer: &PeerId,
     now: Instant,
 ) -> bool {
-    if !state.enable_anchor_scheduler {
+    if popow_blocks_sync_info(state) || !state.enable_anchor_scheduler {
         return false;
     }
     // **Bridge reservation**: a deterministic subset of the connected
@@ -120,6 +161,52 @@ pub(super) fn try_send_anchor_sync_info(
         }
         Err(_) => false,
     }
+}
+
+/// Post-header SyncInfo for a peer that delivered a header we requested.
+///
+/// Sends the next anchor when the anchored scheduler has one for this
+/// peer, otherwise the tip-tail SyncInfo in the peer's version. Sending
+/// tip-tail to every peer instead causes massive Inv duplication (one
+/// peer's tip-tail response overlaps another's anchored response), so the
+/// anchored path is tried first. `mark_sync_sent` fires either way so the
+/// sync throttle accounts for the dispatch. A peer that is no longer
+/// registered gets nothing.
+pub(super) fn send_post_header_sync_info(
+    state: &mut NodeState,
+    peer: PeerId,
+    now: Instant,
+    out: &mut Vec<Action>,
+) {
+    if !state.registry.peers.contains_key(&peer) {
+        return;
+    }
+    if !try_send_anchor_sync_info(state, &peer, now) {
+        if let Some(rt) = state.registry.peers.get(&peer) {
+            let payload_res = match rt.sync_version {
+                SyncVersion::V2 => {
+                    let headers = state.executor.cached_header_bytes(50);
+                    message::serialize_sync_info(&message::SyncInfo::V2 { headers })
+                }
+                SyncVersion::V1 => {
+                    ergo_sync::coordinator::build_sync_info_payload(rt.sync_version, &state.store)
+                }
+            };
+            match payload_res {
+                Ok(payload) => out.push(Action::SendToPeer {
+                    peer,
+                    code: message::CODE_SYNC_INFO,
+                    payload,
+                }),
+                Err(e) => warn!(
+                    peer = %peer,
+                    error = %e,
+                    "failed to serialize SyncInfo; skipping send"
+                ),
+            }
+        }
+    }
+    state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
 }
 
 /// Hedge `RequestModifier` dispatch. After `on_inv` registers
@@ -215,7 +302,10 @@ fn pick_hedge_peers(state: &NodeState, exclude: PeerId, n: usize) -> Vec<PeerId>
 pub(super) fn maybe_exit_ibd(store: &mut StateBackendKind, fb_before: u32, fb: u32, bh: u32) {
     if let Some(u) = store.as_utxo_mut() {
         if fb > fb_before && u.ibd_mode() && bh > 0 && bh.saturating_sub(fb) < 10 {
-            u.set_ibd_mode(false, 0);
+            if let Err(error) = u.set_ibd_mode(false, 0) {
+                tracing::error!(%error, "IBD durability boundary failed; retaining IBD mode");
+                return;
+            }
             info!(gap = bh - fb, durability = "Immediate", "IBD complete",);
         }
     }

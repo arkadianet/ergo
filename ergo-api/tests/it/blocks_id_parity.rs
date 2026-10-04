@@ -12,6 +12,7 @@
 //! both cases into `None`, which the handler translates to 404 with a
 //! minimal error body.
 
+use ergo_api::compat::ChainReadError;
 use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
@@ -35,6 +36,9 @@ const HEADER_ID_UNSERIALISABLE: &str =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 /// What the bridge reports when a stored section will not re-parse; the 500
 /// body must carry it so the operator sees why.
+const HEADER_ID_UNREADABLE: &str =
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const STORE_FAILURE: &str = "redb: I/O failure";
 const PARSE_FAILURE: &str = "parse block_transactions: invalid data";
 
 struct StubReadState;
@@ -186,10 +190,28 @@ impl NodeChainQuery for StubCompat {
         self.try_full_block_by_id(header_id_hex).ok().flatten()
     }
 
-    fn try_full_block_by_id(&self, header_id_hex: &str) -> Result<Option<ScalaFullBlock>, String> {
+    fn try_full_block_by_id(
+        &self,
+        header_id_hex: &str,
+    ) -> Result<Option<ScalaFullBlock>, ChainReadError> {
         match header_id_hex {
             HEADER_ID_700K => Ok(Some(self.full_block_700k.clone())),
-            HEADER_ID_UNSERIALISABLE => Err(PARSE_FAILURE.to_string()),
+            HEADER_ID_UNREADABLE => Err(ChainReadError::Unavailable(STORE_FAILURE.into())),
+            HEADER_ID_UNSERIALISABLE => Err(ChainReadError::Corrupt(PARSE_FAILURE.to_string())),
+            _ => Ok(None),
+        }
+    }
+
+    fn header_by_id(&self, id: &str) -> Option<ergo_api::compat::types::ScalaHeader> {
+        self.try_header_by_id(id).ok().flatten()
+    }
+    fn try_header_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<ergo_api::compat::types::ScalaHeader>, ChainReadError> {
+        match id {
+            HEADER_ID_UNREADABLE => Err(ChainReadError::Unavailable(STORE_FAILURE.into())),
+            HEADER_ID_700K => Ok(Some(self.full_block_700k.header.clone())),
             _ => Ok(None),
         }
     }
@@ -203,10 +225,11 @@ impl NodeChainQuery for StubCompat {
     fn try_block_transactions_by_id(
         &self,
         header_id_hex: &str,
-    ) -> Result<Option<ScalaBlockTransactions>, String> {
+    ) -> Result<Option<ScalaBlockTransactions>, ChainReadError> {
         match header_id_hex {
             HEADER_ID_700K => Ok(Some(self.full_block_700k.block_transactions.clone())),
-            HEADER_ID_UNSERIALISABLE => Err(PARSE_FAILURE.to_string()),
+            HEADER_ID_UNREADABLE => Err(ChainReadError::Unavailable(STORE_FAILURE.into())),
+            HEADER_ID_UNSERIALISABLE => Err(ChainReadError::Corrupt(PARSE_FAILURE.to_string())),
             _ => Ok(None),
         }
     }
@@ -318,4 +341,28 @@ async fn unknown_block_transactions_returns_404() {
     let path = format!("/blocks/{unknown}/transactions");
     let (status, _) = json_get(build_app(), &path).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn compat_block_by_id_store_read_failure_stays_500() {
+    let (status, body) = json_get(build_app(), &format!("/blocks/{HEADER_ID_UNREADABLE}")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        body,
+        serde_json::json!({"error":500, "reason":"internal-error", "detail":format!("block could not be serialised: {STORE_FAILURE}")})
+    );
+}
+
+#[tokio::test]
+async fn compat_header_by_id_store_read_failure_stays_404() {
+    let (status, body) = json_get(
+        build_app(),
+        &format!("/blocks/{HEADER_ID_UNREADABLE}/header"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        body,
+        serde_json::json!({"error":404, "reason":"not-found", "detail":"header not found"})
+    );
 }

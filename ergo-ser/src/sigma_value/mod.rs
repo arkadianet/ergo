@@ -21,8 +21,10 @@ mod avl_tree;
 mod bigint;
 mod boxed;
 mod coll;
+mod shared;
 mod sigma_boolean;
 
+pub use shared::{SigmaChildren, SigmaChildrenIntoIter};
 pub use sigma_boolean::write_sigma_boolean;
 
 use avl_tree::{read_avl_tree, write_avl_tree};
@@ -37,7 +39,7 @@ use sigma_boolean::read_sigma_boolean_at_depth;
 /// atoms (`ProveDlog`, `ProveDHTuple`); inner nodes (`Cand`, `Cor`,
 /// `Cthreshold`) compose them into the conjunctions / disjunctions /
 /// k-of-n thresholds that an [`super::ergo_tree::ErgoTree`] reduces to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum SigmaBoolean {
     /// Statically-known proposition that always evaluates to the wrapped
     /// boolean — used when reduction collapses the tree to a constant.
@@ -58,9 +60,9 @@ pub enum SigmaBoolean {
         v: GroupElement,
     },
     /// Conjunction — every child must be satisfied.
-    Cand(Vec<SigmaBoolean>),
+    Cand(SigmaChildren),
     /// Disjunction — at least one child must be satisfied.
-    Cor(Vec<SigmaBoolean>),
+    Cor(SigmaChildren),
     /// `k`-of-n threshold — at least `k` of the `children` must be
     /// satisfied.
     Cthreshold {
@@ -69,8 +71,14 @@ pub enum SigmaBoolean {
         /// 255 must not be truncated to a `u8`.
         k: u16,
         /// Candidate sub-propositions.
-        children: Vec<SigmaBoolean>,
+        children: SigmaChildren,
     },
+}
+
+pub const MAX_CTHRESHOLD_CHILDREN: usize = 255;
+
+pub fn is_valid_cthreshold_shape(k: u16, n: usize) -> bool {
+    usize::from(k) <= n && n <= MAX_CTHRESHOLD_CHILDREN
 }
 
 /// On-chain AVL+ tree handle: the authenticated digest plus the tree's
@@ -220,7 +228,7 @@ impl SigmaValue {
     /// `SOption.OptionTypeCode` pre-v3) — for BOTH `Some` and `None`. So a
     /// materialized `Option` constant (either variant) is rejected on a pre-v3
     /// tree; an empty `Coll[Option[T]]` materializes none and is accepted. Used
-    /// by the pre-v3 constant gates alongside [`contains_header`].
+    /// by the pre-v3 constant gates alongside [`Self::contains_header`].
     pub fn contains_option(&self) -> bool {
         match self {
             SigmaValue::Opt(_) => true,
@@ -273,6 +281,24 @@ pub fn write_constant(
 pub fn read_constant(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), ReadError> {
     let tpe = read_type(r)?;
     let val = read_value(r, &tpe)?;
+    Ok((tpe, val))
+}
+
+/// A constant reached through Scala's `r.getValue()` (registers/extensions),
+/// which enters ValueSerializer before ConstantSerializer/DataSerializer.
+pub(crate) fn read_constant_as_expr(
+    r: &mut VlqReader,
+) -> Result<(SigmaType, SigmaValue), ReadError> {
+    if r.depth_floor() >= crate::opcode::MAX_EXPR_DEPTH {
+        return Err(ReadError::DepthLimitExceeded {
+            max: crate::opcode::MAX_EXPR_DEPTH,
+        });
+    }
+    // The `ValueSerializer.deserialize` frame `getValue` enters.
+    r.enter_level();
+    let tpe = read_type(r)?;
+    let val = read_value_at_depth(r, &tpe, 1)?;
+    r.exit_level();
     Ok((tpe, val))
 }
 
@@ -387,6 +413,27 @@ pub(crate) fn read_value_at_depth(
     tpe: &SigmaType,
     depth: usize,
 ) -> Result<SigmaValue, ReadError> {
+    // DataSerializer increments the same reader level as ValueSerializer.
+    // This includes primitive values and every composite-value child.
+    if r.depth_floor().saturating_add(depth) >= crate::opcode::MAX_EXPR_DEPTH {
+        return Err(ReadError::DepthLimitExceeded {
+            max: crate::opcode::MAX_EXPR_DEPTH,
+        });
+    }
+    // `CoreDataSerializer.deserialize` (and `DataSerializer`'s `SBox` /
+    // `SHeader` arm, which replaces it) holds one reader level for the value
+    // and gives it back only when the value reads.
+    r.enter_level();
+    let value = read_value_in_frame(r, tpe, depth)?;
+    r.exit_level();
+    Ok(value)
+}
+
+fn read_value_in_frame(
+    r: &mut VlqReader,
+    tpe: &SigmaType,
+    depth: usize,
+) -> Result<SigmaValue, ReadError> {
     match tpe {
         SigmaType::SBoolean => {
             let b = r.get_u8()?;
@@ -415,7 +462,7 @@ pub(crate) fn read_value_at_depth(
         SigmaType::SGroupElement => Ok(SigmaValue::GroupElement(read_group_element(r)?)),
         SigmaType::SSigmaProp => {
             // Continue the shared depth budget into the SigmaBoolean tree.
-            let sb = read_sigma_boolean_at_depth(r, depth)?;
+            let sb = read_sigma_boolean_at_depth(r, depth + 1)?;
             Ok(SigmaValue::SigmaProp(sb))
         }
         SigmaType::SAvlTree => {
@@ -427,6 +474,17 @@ pub(crate) fn read_value_at_depth(
             Ok(SigmaValue::Coll(coll))
         }
         SigmaType::SOption(elem_type) => {
+            // Inside a pre-v3 tree `CoreDataSerializer` has no `SOption` case
+            // (`CoreDataSerializer.scala:140`): its fallback runs
+            // `CheckSerializableTypeCode` on code 36, a `ValidationException`
+            // (rule 1009) thrown before the option's tag or content is read.
+            if r.ergo_tree_version().is_some_and(|v| v < 3) {
+                return Err(ReadError::SigmaValidation {
+                    rule_id: 1009,
+                    args: vec![36],
+                    message: "SOption value requires ErgoTree version >= 3".into(),
+                });
+            }
             let opt = read_option(r, elem_type, depth)?;
             Ok(SigmaValue::Opt(opt))
         }
@@ -439,12 +497,11 @@ pub(crate) fn read_value_at_depth(
         }
         SigmaType::SUnit => Ok(SigmaValue::Unit),
         SigmaType::SString => {
+            // `getUIntExact`, then `getBytes(size)` (CoreDataSerializer.scala:
+            // 104-110): no length cap of its own. A read that begins inside the
+            // position limit reads the whole string; a string longer than the
+            // input fails the reader's `require` (hard).
             let len = r.get_u32_exact()? as usize;
-            if len > 4096 {
-                return Err(ReadError::InvalidData(format!(
-                    "SString value too long: {len}"
-                )));
-            }
             let bytes = r.get_bytes(len)?;
             // Scala CoreDataSerializer.scala:104-110 decodes SString values
             // with `new String(bytes, UTF_8)` (lossy). The decoded value is
@@ -458,7 +515,10 @@ pub(crate) fn read_value_at_depth(
             let v = read_unsigned_bigint_value(r)?;
             Ok(SigmaValue::BigInt(v))
         }
-        SigmaType::SBox => read_opaque_box(r),
+        // Carry the shared budget into the box's script: Scala's reader level
+        // does not reset when `DataSerializer` parses an SBox, so a box<->tree
+        // nesting chain is bounded by MaxTreeDepth there and must be here too.
+        SigmaType::SBox => read_opaque_box(r, depth),
         // SHeader: full block-header data format (Scala DataSerializer ->
         // ErgoHeader.sigmaSerializer.parse). This decoder is version-agnostic;
         // the v3+ (isV3OrLaterErgoTreeVersion) gate is applied by the callers
@@ -477,6 +537,16 @@ pub(crate) fn read_value_at_depth(
         // a v3 SHeader constant whose pk carries an invalid SEC1 prefix; we
         // accepted while this surfaced as a wrap-able InvalidData.
         SigmaType::SHeader => {
+            // Inside a pre-v3 tree `DataSerializer`'s `SHeader` case is gated
+            // off (`DataSerializer.scala:39`) and the fallback's
+            // `CheckSerializableTypeCode` passes code 104, so it throws a
+            // `SerializerException` before the header is read: a hard reject.
+            if r.ergo_tree_version().is_some_and(|v| v < 3) {
+                return Err(ReadError::HardReject(
+                    "SHeader value requires ErgoTree version >= 3 (Scala SerializerException)"
+                        .into(),
+                ));
+            }
             let start = r.position();
             let h = crate::header::read_header(r)
                 .map_err(|e| ReadError::HardReject(format!("SHeader value: {e}")))?;
@@ -496,25 +566,25 @@ pub(crate) fn read_value_at_depth(
             args: vec![112],
             message: "SFunc value deserialization is not supported".into(),
         }),
+        SigmaType::NoType => Err(ReadError::InvalidData(
+            "NoType has no data representation".into(),
+        )),
         SigmaType::SReserved10 | SigmaType::SReserved11 => Err(ReadError::InvalidData(format!(
             "reserved type value deserialization not supported: {tpe:?}"
         ))),
+        // `CoreDataSerializer.deserialize`'s fallback (`CoreDataSerializer.scala:
+        // 144-146`) runs `CheckSerializableTypeCode`, which passes every code up
+        // to `LastDataType` (111), and then throws a `SerializerException`
+        // ("Not defined DataSerializer"). These codes (97..=106) pass the rule,
+        // so the refusal is hard: a size-delimited tree does not degrade on it.
+        // `SFunc` (112) fails the rule itself, a `ValidationException`, above.
         SigmaType::SAny
         | SigmaType::SContext
         | SigmaType::SPreHeader
         | SigmaType::SGlobal
-        | SigmaType::STypeVar(_) => Err(ReadError::SigmaValidation {
-            rule_id: 1009,
-            args: vec![match tpe {
-                SigmaType::SAny => 97,
-                SigmaType::SContext => 101,
-                SigmaType::STypeVar(_) => 103,
-                SigmaType::SPreHeader => 105,
-                SigmaType::SGlobal => 106,
-                _ => unreachable!(),
-            }],
-            message: format!("value deserialization not supported for {tpe:?}"),
-        }),
+        | SigmaType::STypeVar(_) => Err(ReadError::HardReject(format!(
+            "Not defined DataSerializer for type {tpe:?} (Scala SerializerException)"
+        ))),
     }
 }
 

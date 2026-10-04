@@ -46,6 +46,7 @@ fn parseable_tree_true() -> ErgoTree {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,
@@ -59,6 +60,7 @@ fn parseable_tree_false() -> ErgoTree {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,
@@ -243,11 +245,9 @@ fn apply_decodes_eip4_metadata_from_registers() {
 }
 
 #[test]
-fn apply_skips_token_record_when_token_id_does_not_match_first_input() {
-    // Token id != first_input.box_id → is_mint = false → no IndexedToken
-    // record gets created. There's also nothing to append to (no record
-    // → try_load_token_into_map returns None → segment append skipped),
-    // so read_token_box_entries returns None.
+fn apply_refuses_transfer_without_original_mint_metadata() {
+    // A transfer on an empty index has no prior emission record. Refuse it
+    // atomically; an absent parent must not look like a complete projection.
     let (store, _tmp) = open_store();
     let token_id = TokenId::from_bytes([0xDD; 32]);
     let token = Token {
@@ -269,7 +269,14 @@ fn apply_skips_token_record_when_token_id_does_not_match_first_input() {
         header_id: Digest32::from_bytes([0x13; 32]),
         transactions: std::slice::from_ref(&tx),
     };
-    apply_block(&store, &IndexerMeta::empty(), &block).unwrap();
+    assert!(matches!(
+        apply_block(&store, &IndexerMeta::empty(), &block),
+        Err(ergo_indexer::IndexerError::TokenMetadataMissing { token_id: missing })
+            if missing == token_id
+    ));
+    assert_eq!(store.read_meta().unwrap(), IndexerMeta::empty());
+    assert!(store.read_undo(1).unwrap().is_none());
+    assert!(store.read_box(&sealed_box_id(&tx, 0)).unwrap().is_none());
 
     assert!(
         store.read_token(&token_id).unwrap().is_none(),
@@ -889,4 +896,132 @@ fn rollback_preserves_record_when_pre_block_segment_entries_remain() {
         Some(50),
         "record preserved across partial rollback"
     );
+}
+
+/// Remove only a token parent from an owned, closed disposable database.
+fn remove_mint_metadata(store: IndexerStore, token_id: Digest32) -> IndexerStore {
+    let path = store.path().to_path_buf();
+    drop(store);
+    {
+        let db = redb::Database::open(&path).unwrap();
+        let write = db.begin_write().unwrap();
+        let key = token_unique_id(&token_id);
+        write
+            .open_table(redb::TableDefinition::<&[u8], &[u8]>::new("indexed_token"))
+            .unwrap()
+            .remove(key.as_bytes().as_slice())
+            .unwrap();
+        write.commit().unwrap();
+    }
+    IndexerStore::open(&path).unwrap().0
+}
+
+#[test]
+fn missing_mint_metadata_preserves_apply_and_rollback_checkpoints() {
+    for rollback in [false, true] {
+        let (store, _tmp) = open_store();
+        let (input, token_id) = mint_input_and_token_id(0xAB);
+        let token = Token {
+            token_id,
+            amount: 100,
+        };
+        let mint = Transaction {
+            inputs: vec![input],
+            data_inputs: vec![],
+            output_candidates: vec![candidate_with_tokens(
+                1_000_000,
+                parseable_tree_true(),
+                1,
+                vec![token.clone()],
+            )],
+        };
+        let block1 = IndexerBlock {
+            height: 1,
+            header_id: Digest32::from_bytes([1; 32]),
+            transactions: std::slice::from_ref(&mint),
+        };
+        let meta1 = apply_block(&store, &IndexerMeta::empty(), &block1).unwrap();
+        let transfer = Transaction {
+            inputs: vec![input_spending(sealed_box_id(&mint, 0))],
+            data_inputs: vec![],
+            output_candidates: vec![candidate_with_tokens(
+                900_000,
+                parseable_tree_true(),
+                2,
+                vec![token],
+            )],
+        };
+        let block2 = IndexerBlock {
+            height: 2,
+            header_id: Digest32::from_bytes([2; 32]),
+            transactions: std::slice::from_ref(&transfer),
+        };
+        let before = if rollback {
+            apply_block(&store, &meta1, &block2).unwrap()
+        } else {
+            meta1
+        };
+        let store = remove_mint_metadata(store, token_id);
+        let box_before = store.read_box(&sealed_box_id(&mint, 0)).unwrap();
+        let undo_before = store.read_undo(before.indexed_height).unwrap();
+        let result = if rollback {
+            rollback_one_block(&store, &before, &block2)
+        } else {
+            apply_block(&store, &before, &block2)
+        };
+        assert!(
+            matches!(result, Err(ergo_indexer::IndexerError::TokenMetadataMissing { token_id: missing }) if missing == token_id)
+        );
+        assert_eq!(store.read_meta().unwrap(), before);
+        assert_eq!(store.read_undo(before.indexed_height).unwrap(), undo_before);
+        assert_eq!(
+            store.read_box(&sealed_box_id(&mint, 0)).unwrap(),
+            box_before
+        );
+        assert_eq!(
+            store
+                .read_box(&sealed_box_id(&transfer, 0))
+                .unwrap()
+                .is_some(),
+            rollback
+        );
+    }
+}
+
+#[test]
+fn repair_cannot_clear_its_marker_when_mint_metadata_is_missing() {
+    let (store, _tmp) = open_store();
+    let (input, token_id) = mint_input_and_token_id(0xAB);
+    let mint = Transaction {
+        inputs: vec![input],
+        data_inputs: vec![],
+        output_candidates: vec![candidate_with_tokens(
+            1_000_000,
+            parseable_tree_true(),
+            1,
+            vec![Token {
+                token_id,
+                amount: 100,
+            }],
+        )],
+    };
+    let block = IndexerBlock {
+        height: 1,
+        header_id: Digest32::from_bytes([1; 32]),
+        transactions: std::slice::from_ref(&mint),
+    };
+    let before = apply_block(&store, &IndexerMeta::empty(), &block).unwrap();
+    let mut store = remove_mint_metadata(store, token_id);
+    for _ in 0..2 {
+        assert!(
+            matches!(ergo_indexer::rebuild_secondary_indexes(&store), Err(ergo_indexer::IndexerError::TokenMetadataMissing { token_id: missing }) if missing == token_id)
+        );
+        assert!(store.secondary_repair_pending().unwrap());
+        assert_eq!(store.secondary_repair_next_gi().unwrap(), Some(0));
+        assert_eq!(store.read_meta().unwrap(), before);
+        assert!(store.read_box(&sealed_box_id(&mint, 0)).unwrap().is_some());
+        let path = store.path().to_path_buf();
+        drop(store);
+        store = IndexerStore::open(&path).unwrap().0;
+    }
 }

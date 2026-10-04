@@ -1,12 +1,34 @@
 //! Connection-limit configuration for [`super::PeerManager`].
 //!
 //! Carries the four anti-eclipse caps (max total, target outbound,
-//! per-IP, per-/16 subnet) and the [`ConnectError`] variants the
+//! per-IP, per-network group) and the [`ConnectError`] variants the
 //! manager surfaces when a dial / accept hits a limit.
 
 use thiserror::Error;
 
 use crate::handshake::Version;
+use crate::peer::canonical_ip;
+
+/// IPv4 uses /16 groups; IPv6 uses /48 groups so rotating host addresses or
+/// /64s within one site allocation cannot consume the whole peer pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NetworkGroup {
+    V4([u8; 2]),
+    V6([u8; 6]),
+}
+
+pub(super) fn network_group(ip: std::net::IpAddr) -> NetworkGroup {
+    match canonical_ip(ip) {
+        std::net::IpAddr::V4(ip) => {
+            let bytes = ip.octets();
+            NetworkGroup::V4([bytes[0], bytes[1]])
+        }
+        std::net::IpAddr::V6(ip) => {
+            let bytes = ip.octets();
+            NetworkGroup::V6(bytes[..6].try_into().unwrap())
+        }
+    }
+}
 
 pub const DEFAULT_MAX_CONNECTIONS: usize = 384;
 pub const DEFAULT_TARGET_OUTBOUND: usize = 96;
@@ -27,6 +49,7 @@ pub struct PeerLimits {
     /// capacity. `0` = outbound-only (accept no inbound).
     pub max_inbound: usize,
     pub per_ip_limit: usize,
+    /// Maximum connections in one IPv4 /16 or IPv6 /48 group.
     pub per_subnet_limit: usize,
 }
 

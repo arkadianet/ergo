@@ -12,9 +12,10 @@
 //!
 //! This module is the pure data structure: indices, caps, eviction order,
 //! and pruning. It runs NO validation and emits NO actions — wiring lives
-//! in `admission` / `reorg`. Every entry is deserialize-only work bounded by
-//! the caps here; the "no script eval without charging `CostBudgets`"
-//! invariant is upheld by the callers that promote entries out of staging.
+//! in `mempool.rs`. Orphans retain a cheap structural projection; held entries
+//! retain previously charged validation facts and materialized outputs.
+//! Promotion and stale package-member validation are metered by their callers;
+//! rollback-demoted transactions retain the explicit budget exemption.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -56,8 +57,8 @@ pub struct StagedTx {
     /// ALL declared regular inputs (from `peek_structure` / `Validated`).
     pub input_box_ids: Vec<Digest32>,
     /// Declared DATA inputs. Tracked so block-advance pruning can drop an
-    /// entry whose data-input box was confirmed-and-consumed (it can never be
-    /// admitted again). Empty when unknown.
+    /// entry whose data-input box was consumed at the current tip. A later
+    /// reorg may restore it, allowing a fresh submission. Empty when unknown.
     pub data_input_box_ids: Vec<Digest32>,
     /// ALL created outputs.
     pub output_box_ids: Vec<Digest32>,
@@ -495,7 +496,7 @@ impl StagingPool {
 
     /// Drop every staged tx that spends (as a REGULAR input) or reads (as a
     /// DATA input) any box in `spent` — that box has been confirmed-and-
-    /// consumed on-chain, so the tx can never be admitted again. Returns
+    /// consumed at this tip, so the retained entry is stale. Returns
     /// removed entries.
     pub fn prune_spent_inputs(&mut self, spent: &HashSet<Digest32>) -> Vec<StagedTx> {
         if spent.is_empty() || self.by_tx_id.is_empty() {

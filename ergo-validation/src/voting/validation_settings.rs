@@ -71,7 +71,7 @@ const EXTENSION_FIELD_VALUE_MAX: usize = 255;
 /// An EMPTY update (no disabled rules, no status updates) yields NO fields —
 /// the absence of any `0x02` entry is how the parser encodes "initial
 /// settings". A non-empty update is serialized to one byte string and split
-/// into `0x02`-prefixed chunks of at most [`EXTENSION_FIELD_VALUE_MAX`] bytes,
+/// into `0x02`-prefixed chunks of at most `EXTENSION_FIELD_VALUE_MAX` bytes,
 /// keyed by ascending chunk index in `key[1]`. The parser concatenates chunks
 /// in index order before deserializing, so the chunk boundary is not consensus-
 /// relevant — only the concatenation is — but the chunking keeps each field

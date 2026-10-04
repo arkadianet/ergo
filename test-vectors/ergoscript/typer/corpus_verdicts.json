@@ -193,8 +193,8 @@
   },
   "hodlcoin/phoenix-hodlcoin-contracts/phoenix_v1_hodlerg_bank.es": {
     "class": "TyperException",
-    "col": 71,
-    "line": 140,
+    "col": 17,
+    "line": 107,
     "verdict": "reject"
   },
   "hodlcoin/phoenix-hodlcoin-contracts/phoenix_v1_hodlerg_fee.es": {
@@ -205,14 +205,14 @@
   },
   "hodlcoin/phoenix-hodlcoin-contracts/phoenix_v1_hodlerg_proxy.es": {
     "class": "TyperException",
-    "col": 43,
-    "line": 118,
+    "col": 21,
+    "line": 88,
     "verdict": "reject"
   },
   "hodlcoin/phoenix-hodlcoin-contracts/phoenix_v1_hodltoken_bank.es": {
     "class": "TyperException",
-    "col": 75,
-    "line": 185,
+    "col": 17,
+    "line": 136,
     "verdict": "reject"
   },
   "hodlcoin/phoenix-hodlcoin-contracts/phoenix_v1_hodltoken_fee.es": {
@@ -229,8 +229,8 @@
   },
   "hodlcoin/phoenix/phoenix_v1_hodlcoin_bank.es": {
     "class": "TyperException",
-    "col": 71,
-    "line": 140,
+    "col": 9,
+    "line": 58,
     "verdict": "reject"
   },
   "hodlcoin/phoenix/phoenix_v1_hodlcoin_fee.es": {
@@ -253,14 +253,14 @@
   },
   "hodlcoin/phoenix/phoenix_v1_hodlcoin_proxy.es": {
     "class": "TyperException",
-    "col": 39,
-    "line": 118,
+    "col": 13,
+    "line": 73,
     "verdict": "reject"
   },
   "hodlcoin/phoenix/phoenix_v1_hodltoken_bank.es": {
     "class": "TyperException",
-    "col": 63,
-    "line": 185,
+    "col": 17,
+    "line": 136,
     "verdict": "reject"
   },
   "hodlcoin/phoenix/phoenix_v1_hodltoken_fee.es": {

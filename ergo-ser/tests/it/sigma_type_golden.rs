@@ -399,8 +399,8 @@ fn stuple_count_above_127_uses_single_count_byte() {
 
 #[test]
 fn sfunc_dom_count_above_127_uses_single_count_byte() {
-    // SFunc with 200-element domain. read_type recursion depth
-    // is fine because each element is a primitive (SInt = 1 byte).
+    // SFunc with 200-element domain. Each element is a primitive
+    // (SInt = 1 byte), so the type is wide, not deep.
     let t_dom: Vec<SigmaType> = (0..200).map(|_| SigmaType::SInt).collect();
     let t = SigmaType::SFunc {
         t_dom,

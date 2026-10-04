@@ -29,6 +29,7 @@ pub fn sigma_type_name(t: &SigmaType) -> String {
         SigmaType::SSigmaProp => "sigma_prop".into(),
         SigmaType::SReserved10 => "reserved_10".into(),
         SigmaType::SReserved11 => "reserved_11".into(),
+        SigmaType::NoType => "no_type".into(),
         SigmaType::SAny => "any".into(),
         SigmaType::SUnit => "unit".into(),
         SigmaType::SBox => "box".into(),

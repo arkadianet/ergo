@@ -1,0 +1,55 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Constant.ushort_wrap",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "coll-byte-length-wraps-accept#0",
+      "kind" : "Constant",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A Coll[Byte] constant (0e) whose length is written as 2^32 + 1 (8180808010), then the byte ab. A collection's length in data is a getUShort (CoreDataSerializer.scala:132), which scorex-util reads as getULong().toInt and only then checks 0..65535: it reads as 1. Written back as 0e 01 ab. NON-IDENTITY. An impl that range-checks the full value rejects it: the over-reject.",
+      "bytes_hex" : "0e8180808010ab",
+      "expected_bytes_hex" : "0e01ab",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "coll-int-length-wraps-accept#1",
+      "kind" : "Constant",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A Coll[Int] constant (10) whose length is written as 2^32 + 1, then Int 1 (02): one item, written back as 10 01 02. NON-IDENTITY.",
+      "bytes_hex" : "10818080801002",
+      "expected_bytes_hex" : "100102",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "bigint-size-wraps-accept#2",
+      "kind" : "Constant",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A BigInt constant (06) whose size is written as 2^32 + 1, then the byte 01. A BigInt's size is a getUShort as well (CoreDataSerializer.scala:112): it reads as 1, BigInt 1, written back as 06 01 01. NON-IDENTITY.",
+      "bytes_hex" : "06818080801001",
+      "expected_bytes_hex" : "060101",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "coll-byte-length-wraps-to-65536-reject#3",
+      "kind" : "Constant",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A Coll[Byte] constant whose length is written as 2^32 + 2^16 (8080848010): truncated to 32 bits it is 65536, outside the unsigned short range: the JVM rejects. An impl that keeps the low 16 bits reads 0 and accepts an empty collection: the over-accept.",
+      "bytes_hex" : "0e8080848010",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

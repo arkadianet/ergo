@@ -133,6 +133,19 @@ pub struct MeteredPayload {
 }
 
 impl MeteredPayload {
+    #[cfg(test)]
+    pub(crate) fn for_test(inner: Vec<u8>, budget: &EventByteBudget) -> Self {
+        let permit = budget
+            .bytes()
+            .clone()
+            .try_acquire_many_owned(charge_for(inner.len(), budget.capacity()))
+            .expect("test payload exceeds event byte budget");
+        Self {
+            inner,
+            _permit: permit,
+        }
+    }
+
     /// Settle the permits taken while READING the frame against the
     /// payload the frame turned out to carry, and wrap it.
     ///

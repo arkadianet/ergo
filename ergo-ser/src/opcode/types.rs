@@ -1,5 +1,6 @@
 use crate::sigma_type::SigmaType;
 use crate::sigma_value::SigmaValue;
+use ergo_primitives::reader::ReadError;
 
 /// Maximum byte value that encodes an inline Constant (type code), not an opcode.
 pub(super) const LAST_CONSTANT_CODE: u8 = 0x70;
@@ -11,7 +12,23 @@ pub(super) const LAST_CONSTANT_CODE: u8 = 0x70;
 /// stay consensus-compatible (Scala does not soft-fork this into an
 /// `UnparsedErgoTree`), as well as to bound stack use. No real ErgoTree comes
 /// close to this depth.
-pub(super) const MAX_EXPR_DEPTH: usize = 110;
+pub(crate) const MAX_EXPR_DEPTH: usize = 110;
+
+/// Scala `sigma.util.MaxArrayLength`: `safeNewArray` refuses to allocate more
+/// items than this (`sigma/util/package.scala:7-13`).
+pub(crate) const MAX_ARRAY_LENGTH: usize = 100_000;
+
+/// Scala `safeNewArray(len)`: a count above [`MAX_ARRAY_LENGTH`] throws a
+/// `RuntimeException` before any item is read. It is not a
+/// `ValidationException`, so a size-delimited tree does not degrade on it.
+pub(crate) fn check_array_length(len: usize, what: &str) -> Result<(), ReadError> {
+    if len > MAX_ARRAY_LENGTH {
+        return Err(ReadError::HardReject(format!(
+            "cannot allocate {what} with {len} items: max limit is {MAX_ARRAY_LENGTH} (Scala safeNewArray)"
+        )));
+    }
+    Ok(())
+}
 
 /// Convenience alias used at the [`crate::ergo_tree`] boundary, where
 /// the body of a tree is just a single root [`Expr`].
@@ -554,6 +571,8 @@ pub fn opcode_name(op: u8) -> &'static str {
         0xB3 => "Append",
         0xB4 => "Slice",
         0xB5 => "Filter",
+        0xB6 => "CreateAvlTree",
+        0xB7 => "TreeLookup",
         0xB8 => "FlatMap",
         0xC1 => "ExtractAmount",
         0xC2 => "ExtractScriptBytes",
@@ -596,6 +615,13 @@ pub fn opcode_name(op: u8) -> &'static str {
         0xEF => "LogicalNot",
         0xF0 => "Negation",
         0xF1 => "BitInversion",
+        0xF2 => "BitOr",
+        0xF3 => "BitAnd",
+        0xF4 => "BinXor",
+        0xF5 => "BitXor",
+        0xF6 => "BitShiftRight",
+        0xF7 => "BitShiftLeft",
+        0xF8 => "BitShiftRightZeroed",
         0xFE => "Context",
         0xFF => "XorOf",
         _ => "???",

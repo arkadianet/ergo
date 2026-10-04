@@ -1,0 +1,5 @@
+network	voting_length	soft_fork_epochs	threshold	votes_zero	minus	at	plus
+mainnet	1024	32	29491	false	false	false	true
+testnet	128	32	3686	false	false	false	true
+devnet	33554432	32	107374182	false	false	false	true
+custom	100000000	32	-126477107	true	false	false	true

@@ -43,7 +43,7 @@ fn source_map_cites_each_lowered_node_at_its_source_offset() {
     assert_eq!(map.offset(by_op(0xED)), Some(at(src, "HEIGHT > 100")));
     assert_eq!(map.offset(by_op(0xA3)), Some(at(src, "HEIGHT"))); // Height
     assert_eq!(map.offset(by_op(0xA5)), Some(at(src, "OUTPUTS"))); // Outputs
-    assert_eq!(map.offset(by_op(0xC1)), Some(at(src, "OUTPUTS(0).value"))); // ExtractAmount
+    assert_eq!(map.offset(by_op(0xC1)), Some(at(src, "value"))); // ExtractAmount
 }
 
 #[test]

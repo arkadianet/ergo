@@ -1,0 +1,25 @@
+{
+  "snapshot_sha256": "821af804d3e275968d85b6f646833be1ef04f59dafa853e77af8bc7f2cafb60f",
+  "snapshot_bytes": 403714048,
+  "runner_commit": "4c132be3e2a1fd8190517975cb27b846e90e3800",
+  "runner_dirty": false,
+  "binaries": {
+    "candidate": {
+      "sha256": "d710d7207322522fdf8f849c390e92adc2890e6a91fe63f225888f8ddf2484a0",
+      "source_commit": "c1ec894d5eda42be18351adccea27cea2365ee33"
+    }
+  },
+  "platform": "Linux-7.1.5-76070105-generic-x86_64-with-glibc2.39",
+  "cpu": "AMD Ryzen 7 7800X3D 8-Core Processor",
+  "ram": "MemTotal:       64920620 kB",
+  "filesystem": "/dev/mapper/data-root ext4",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "conditions": "fresh processes and AVL/redb caches; snapshot pages OS-cache warm; no global cache drop; other host work uncontrolled",
+  "scope": "mainnet UTXO full-body validation, current voted params, EIP-27, root checks and clean reopen; excludes header PoW/downloads, indexer, wallets, mining and APIs",
+  "blocks": 150,
+  "proof_policy": "regenerate",
+  "persist_jobs": 64,
+  "flush_interval": 500,
+  "retained_seconds": 3,
+  "timeout_seconds": 300
+}

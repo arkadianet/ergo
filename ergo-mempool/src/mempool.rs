@@ -16,7 +16,7 @@ use ergo_validation::{TxValidationCtx, TxValidationRules};
 use crate::admission::{
     self, AdmissionOutcome, CheckOutcome, RejectReason, Validated, ValidationErr, Validator,
 };
-use crate::budget::CostBudgets;
+use crate::budget::{BudgetVerdict, CostBudgets};
 use crate::invalidation::InvalidationCache;
 use crate::overlay::{CommittedOnly, PoolUtxoOverlay};
 use crate::pool::{Entry, FamilyBounds, OrderedPool};
@@ -53,6 +53,11 @@ struct PackageMember {
     source: TxSource,
 }
 
+enum PackageValidationError {
+    Budget(RejectReason),
+    Validation(ValidationErr),
+}
+
 /// Top-level mempool handle. Bundles all the sub-components so callers
 /// don't thread six pieces through every call site. Production wiring
 /// holds one `Mempool` on `NodeState` and drives it via the three
@@ -70,16 +75,6 @@ pub struct Mempool {
     /// every existing caller and test keeps working unchanged; the node
     /// wires a `Some(_)` after boot once the realtime bus exists.
     observer: Option<Arc<dyn MempoolObserver>>,
-    /// Descendants left pooled when an evicting recheck cascade truncated
-    /// at `max_family_depth` (the [`OrderedPool::remove_with_descendants_frontier`]
-    /// frontier). Their evicted ancestor is gone, so they are orphaned and
-    /// must be dependency-evicted — but doing the whole family in one op would
-    /// reintroduce the O(family) cost the depth cap prevents, so they are
-    /// drained under the per-pass budget across successive recheck passes.
-    /// Only ever fed from the `admission::is_recheck_evictable` arm (a hard
-    /// invalidity, or an unresolved DATA input), so a transient
-    /// unresolved-spend-input (demoted-parent) tx is never enqueued here.
-    pending_orphan_eviction: Vec<TxId>,
     /// Brief holding store for orphans (child-before-parent) and held
     /// parents/singles (parent-before-child) that cannot be admitted yet.
     /// A side effect of `process` alone — `check` (`/check`) never touches
@@ -115,7 +110,6 @@ impl Mempool {
             unresolved,
             revalidation,
             observer: None,
-            pending_orphan_eviction: Vec::new(),
             staging,
         }
     }
@@ -211,6 +205,49 @@ impl Mempool {
         self.invalidation.contains(tx_id)
     }
 
+    /// Invalidate a transaction named by block validation using the same bounded
+    /// descendant removal and revocation semantics as a failed pool recheck.
+    pub fn invalidate(&mut self, id: TxId, now: std::time::Instant) -> Vec<MempoolAction> {
+        if !self.contains(&id) {
+            return Vec::new();
+        }
+        let bounds = FamilyBounds::new(
+            self.config.max_family_depth,
+            self.config.max_family_ops,
+            self.config.max_family_update_ms,
+        );
+        let removed = self.remove_invalid_family(&id, self.config.max_family_depth, bounds);
+        self.invalidation.insert(
+            id,
+            crate::invalidation::InvalidationReason::ValidationFailed,
+            now,
+        );
+        let tx_ids: Vec<_> = removed.into_iter().map(|e| e.tx_id).collect();
+        let actions = vec![
+            MempoolAction::RevokeBroadcast {
+                tx_ids: tx_ids.clone(),
+            },
+            MempoolAction::Observe {
+                event: ObservedEvent::Evicted {
+                    tx_ids,
+                    reason: EvictionReason::TipInvalid,
+                },
+            },
+        ];
+        emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
+        actions
+    }
+
+    fn remove_invalid_family(
+        &mut self,
+        id: &TxId,
+        max_depth: usize,
+        bounds: FamilyBounds,
+    ) -> Vec<Entry> {
+        self.pool
+            .remove_with_descendants_debiting(id, max_depth, bounds)
+    }
+
     pub fn tip(&self) -> Option<&TipPointer> {
         self.tip.as_ref()
     }
@@ -221,6 +258,12 @@ impl Mempool {
 
     pub fn revalidation_pending(&self) -> usize {
         self.revalidation.len()
+    }
+
+    /// Descendant eviction work left by a bounded removal. Maintenance ticks
+    /// must run while this is nonzero even when no transaction is demoted.
+    pub fn orphan_eviction_pending(&self) -> usize {
+        self.pool.orphan_eviction_pending()
     }
 
     /// Admit a raw transaction. Returns `(outcome, actions)`.
@@ -263,7 +306,7 @@ impl Mempool {
             return (outcome, Vec::new());
         }
         let mut held_out: Option<admission::HeldCandidate> = None;
-        let (outcome, mut actions) = {
+        let (mut outcome, mut actions) = {
             let mut cx = admission::AdmissionCtx {
                 tip_ctx,
                 config: &self.config,
@@ -285,19 +328,31 @@ impl Mempool {
         // Emit the PARENT admission's tracing/observer BEFORE any staging
         // side effect, so resolution's own per-child tracing (emitted inside
         // `resolve_orphans`) is not double-counted against this outcome.
-        emit_tracing_for_admission(
-            &outcome,
-            &actions,
-            &source,
-            self.pool.len(),
-            self.pool.total_bytes(),
-            self.observer.as_deref(),
-            self.tip,
-        );
+        // A package may turn the initial unresolved-input decision into an
+        // admission. Defer that one verdict; successful packages emit once
+        // per admitted member inside try_package.
+        let defer_verdict = self.config.staging_enabled
+            && matches!(
+                &outcome,
+                AdmissionOutcome::Rejected {
+                    reason: RejectReason::UnresolvedInput
+                }
+            );
+        if !defer_verdict {
+            emit_tracing_for_admission(
+                &outcome,
+                &actions,
+                &source,
+                self.pool.len(),
+                self.pool.total_bytes(),
+                self.observer.as_deref(),
+                self.tip,
+            );
+        }
 
         // ── Staging side effects — `process` ONLY (never `check`) ────────
-        // Staging never gossips; the only `BroadcastInv` here come from
-        // `resolve_orphans` promoting a child through the real commit path.
+        // Holding never gossips. Orphan promotion and package admission
+        // broadcast only after their real pool commit.
         if self.config.staging_enabled {
             match &outcome {
                 AdmissionOutcome::Admitted { tx_id, .. } => {
@@ -323,7 +378,22 @@ impl Mempool {
                     // (P4). Only if that isn't applicable do we fall back to
                     // holding the child as a plain orphan (P2).
                     match self.try_package(tx_bytes, &source, now, tip_ctx, validator) {
-                        Some(pkg_actions) => actions.extend(pkg_actions),
+                        Some((package_outcome, pkg_actions)) => {
+                            if matches!(
+                                &package_outcome,
+                                AdmissionOutcome::Rejected {
+                                    reason: RejectReason::PeerBudgetExhausted
+                                        | RejectReason::GlobalBudgetExhausted
+                                }
+                            ) {
+                                // The package was deferred for resources,
+                                // not for genuinely unknown ancestry. Allow
+                                // a later budget-reset retry to reach it.
+                                self.unresolved.remove(tx_bytes);
+                            }
+                            outcome = package_outcome;
+                            actions.extend(pkg_actions);
+                        }
                         None => self.stage_orphan(tx_bytes, &source, now, tip_ctx, validator),
                     }
                 }
@@ -348,6 +418,17 @@ impl Mempool {
                 }
                 _ => {}
             }
+        }
+        if defer_verdict && matches!(&outcome, AdmissionOutcome::Rejected { .. }) {
+            emit_tracing_for_admission(
+                &outcome,
+                &actions,
+                &source,
+                self.pool.len(),
+                self.pool.total_bytes(),
+                self.observer.as_deref(),
+                self.tip,
+            );
         }
         (outcome, actions)
     }
@@ -612,7 +693,7 @@ impl Mempool {
     /// * `None` — not a package situation (no held ancestor, or a deeper
     ///   non-held ancestor is still missing). The caller falls back to holding
     ///   the child as a plain orphan.
-    /// * `Some(actions)` — the package path handled the child. Either the
+    /// * `Some((outcome, actions))` — the package path handled the child. Either the
     ///   package was admitted (actions carry the members' `BroadcastInv` +
     ///   any incumbent `RevokeBroadcast`, plus cascade promotions), or it was
     ///   rejected and the child was itself held for a future descendant
@@ -625,7 +706,8 @@ impl Mempool {
         now: std::time::Instant,
         tip_ctx: &admission::TipContext<'_>,
         validator: &V,
-    ) -> Option<Vec<MempoolAction>> {
+    ) -> Option<(AdmissionOutcome, Vec<MempoolAction>)> {
+        let rejected = |reason| (AdmissionOutcome::Rejected { reason }, Vec::new());
         let s = validator.peek_structure(c_bytes).ok()?;
         // Walk up to the HELD staged ancestors, ancestors-first. `None` if a
         // missing input has no held creator (a plain orphan) or the walk
@@ -702,9 +784,31 @@ impl Mempool {
                         }
                         // Stale/invalid at the new tip → evict it and abort: the
                         // child's ancestor chain is broken.
-                        Err(_) => {
+                        Err(PackageValidationError::Budget(_)) => {
+                            // Budget exhaustion is temporary, not evidence
+                            // that the held ancestor became invalid. Report
+                            // the submitter's own budget state: when only the
+                            // ancestor's source is exhausted, the child's input
+                            // stays unresolved for now, and a retry may reach
+                            // the package once that budget resets.
+                            let reason = match self
+                                .budgets
+                                .pre_admission_check(source.budget_source())
+                            {
+                                BudgetVerdict::PeerExhausted => RejectReason::PeerBudgetExhausted,
+                                BudgetVerdict::GlobalExhausted => {
+                                    RejectReason::GlobalBudgetExhausted
+                                }
+                                BudgetVerdict::Ok => {
+                                    self.unresolved.remove(c_bytes);
+                                    RejectReason::UnresolvedInput
+                                }
+                            };
+                            return Some(rejected(reason));
+                        }
+                        Err(PackageValidationError::Validation(_)) => {
                             self.staging.remove(hid);
-                            return Some(Vec::new());
+                            return Some(rejected(RejectReason::UnresolvedInput));
                         }
                     }
                 }
@@ -726,11 +830,29 @@ impl Mempool {
                 Ok(v) => v,
                 // A deeper ancestor is still genuinely missing → let the caller
                 // hold the child as a plain orphan instead.
-                Err(ValidationErr::UnresolvedInput) | Err(ValidationErr::UnresolvedDataInput) => {
-                    return None
+                Err(PackageValidationError::Validation(
+                    ValidationErr::UnresolvedInput | ValidationErr::UnresolvedDataInput,
+                )) => return None,
+                // Hard-invalid (or other) → drop the child; the held ancestors
+                // stay. The package pass is where the child's failure surfaced,
+                // so it gets single-tx admission's penalty and cache routing.
+                Err(PackageValidationError::Validation(error)) => {
+                    let (reason, penalty) = admission::classify(&error, tip_ctx);
+                    let mut actions = Vec::new();
+                    if let (Some(peer), Some(kind)) = (source.peer(), penalty) {
+                        actions.push(MempoolAction::Penalize { peer, kind });
+                    }
+                    admission::record_failed_tx(
+                        &mut self.invalidation,
+                        &mut self.unresolved,
+                        s.tx_id,
+                        c_bytes,
+                        &error,
+                        now,
+                    );
+                    return Some((AdmissionOutcome::Rejected { reason }, actions));
                 }
-                // Hard-invalid (or other) → drop the child; the held ancestors stay.
-                Err(_) => return Some(Vec::new()),
+                Err(PackageValidationError::Budget(reason)) => return Some(rejected(reason)),
             };
         let c_weight = self.weight_fn.compute(WeightInputs {
             tx_id: &c_validated.tx_id,
@@ -753,9 +875,9 @@ impl Mempool {
         });
 
         // Per-member observability data captured before the vec is consumed.
-        let member_meta: Vec<(TxId, u64, u32, u64)> = members
+        let member_meta: Vec<(TxId, u64, u32, u64, TxSource)> = members
             .iter()
-            .map(|m| (m.tx_id, m.fee, m.size_bytes, m.weight))
+            .map(|m| (m.tx_id, m.fee, m.size_bytes, m.weight, m.source.clone()))
             .collect();
 
         match self.commit_package(members, tip_ctx) {
@@ -785,7 +907,8 @@ impl Mempool {
                 // observer/journal per member (staging itself never gossips —
                 // these go out only because the package really entered the
                 // pool via the atomic commit).
-                for (tx_id, fee, size, weight) in &member_meta {
+                for (tx_id, fee, size, weight, member_source) in &member_meta {
+                    let member_action_start = actions.len();
                     actions.push(MempoolAction::BroadcastInv {
                         tx_id: *tx_id,
                         // Exclude the peer that sent the child (which triggered
@@ -801,21 +924,38 @@ impl Mempool {
                             size: *size,
                         },
                     });
-                    if let Some(obs) = self.observer.as_deref() {
-                        obs.on_admitted(*tx_id, *fee, *size);
-                    }
+                    emit_tracing_for_admission(
+                        &AdmissionOutcome::Admitted {
+                            tx_id: *tx_id,
+                            fee: *fee,
+                            size: *size,
+                        },
+                        &actions[member_action_start..],
+                        member_source,
+                        self.pool.len(),
+                        self.pool.total_bytes(),
+                        self.observer.as_deref(),
+                        self.tip,
+                    );
                 }
                 emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
                 // Cascade: the newly-pooled members' outputs may resolve other
                 // waiting orphans.
                 let member_outputs: Vec<Digest32> = member_meta
                     .iter()
-                    .filter_map(|(id, _, _, _)| self.pool.get(id).map(|e| e.outputs.clone()))
+                    .filter_map(|(id, _, _, _, _)| self.pool.get(id).map(|e| e.outputs.clone()))
                     .flatten()
                     .collect();
                 let cascade = self.resolve_orphans(member_outputs, now, tip_ctx, validator);
                 actions.extend(cascade);
-                Some(actions)
+                Some((
+                    AdmissionOutcome::Admitted {
+                        tx_id: c_validated.tx_id,
+                        fee: c_validated.fee,
+                        size: c_validated.size_bytes,
+                    },
+                    actions,
+                ))
             }
             None => {
                 // Package rejected. The child validated, so hold IT (so a future
@@ -836,7 +976,7 @@ impl Mempool {
                     now,
                     tip_ctx.tip,
                 );
-                Some(Vec::new())
+                Some(rejected(RejectReason::UnresolvedInput))
             }
         }
     }
@@ -912,9 +1052,26 @@ impl Mempool {
         source: &TxSource,
         tip_ctx: &admission::TipContext<'_>,
         validator: &V,
-    ) -> Result<Validated, ValidationErr> {
+    ) -> Result<Validated, PackageValidationError> {
+        // Every new evaluation must pass its own source's remaining budget,
+        // including stale held ancestors. Cached same-tip facts spend no work.
+        if !matches!(source, TxSource::DemotedFromBlock) {
+            match self.budgets.pre_admission_check(source.budget_source()) {
+                BudgetVerdict::Ok => {}
+                BudgetVerdict::PeerExhausted => {
+                    return Err(PackageValidationError::Budget(
+                        RejectReason::PeerBudgetExhausted,
+                    ))
+                }
+                BudgetVerdict::GlobalExhausted => {
+                    return Err(PackageValidationError::Budget(
+                        RejectReason::GlobalBudgetExhausted,
+                    ))
+                }
+            }
+        }
         let cap = JitCost::from_block_cost(self.config.max_tx_cost)
-            .map_err(|_| ValidationErr::CostExceeded)?;
+            .map_err(|_| PackageValidationError::Validation(ValidationErr::CostExceeded))?;
         let mut cost = CostAccumulator::new(cap);
         let overlay_view = PoolUtxoOverlay::new(tip_ctx.utxo, overlay);
         let committed_view = CommittedOnly::new(tip_ctx.utxo);
@@ -938,7 +1095,7 @@ impl Mempool {
         if !matches!(source, TxSource::DemotedFromBlock) {
             self.budgets.charge(source.budget_source(), cost.consumed());
         }
-        res
+        res.map_err(PackageValidationError::Validation)
     }
 
     /// Decide + atomically commit a package (members ancestors-first, each
@@ -1265,7 +1422,8 @@ impl Mempool {
         actions
     }
 
-    /// Drain up to `revalidation_per_tick` demoted txs through admission.
+    /// Drain bounded orphan eviction work, then up to `revalidation_per_tick`
+    /// demoted txs through admission. Eviction continues between tip changes.
     pub fn tick_revalidation<V: Validator>(
         &mut self,
         now: std::time::Instant,
@@ -1273,11 +1431,34 @@ impl Mempool {
         validator: &V,
     ) -> Vec<MempoolAction> {
         let pending_before = self.revalidation.len();
-        // Quiet fast path: empty queue means the call is a no-op (per
-        // reorg::tick_revalidation's contract). Skip the start/complete
-        // pair so a tick that does nothing produces zero log lines.
-        if pending_before == 0 {
+        // Quiet fast path when neither bounded maintenance queue has work.
+        if pending_before == 0 && self.orphan_eviction_pending() == 0 {
             return Vec::new();
+        }
+
+        let bounds = FamilyBounds::new(
+            self.config.max_family_depth,
+            self.config.max_family_ops,
+            self.config.max_family_update_ms,
+        );
+        let mut removed = Vec::new();
+        let mut cost = 0;
+        let cost_cap = u128::from(self.config.mempool_cleanup_cost_mult)
+            .saturating_mul(u128::from(tip_ctx.params.max_block_cost));
+        self.drain_orphan_evictions(
+            self.config.max_family_depth,
+            bounds,
+            self.config.max_tx_cost,
+            &mut HashMap::new(),
+            &mut removed,
+            &mut cost,
+            cost_cap,
+        );
+        let mut actions = Vec::new();
+        push_evictions(&mut actions, removed, EvictionReason::DependencyRemoved);
+        if pending_before == 0 {
+            emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
+            return actions;
         }
 
         let t0 = std::time::Instant::now();
@@ -1295,7 +1476,12 @@ impl Mempool {
             unresolved: &mut self.unresolved,
             weight_fn: &*self.weight_fn,
         };
-        let actions = reorg::tick_revalidation(now, &mut cx, &mut self.revalidation, validator);
+        actions.extend(reorg::tick_revalidation(
+            now,
+            &mut cx,
+            &mut self.revalidation,
+            validator,
+        ));
 
         // Per-action evictions (rare during revalidation but possible
         // if a demoted tx wins a double-spend conflict against an
@@ -1362,17 +1548,19 @@ impl Mempool {
     /// inputs) never evicts on it — leaving it pooled leaks it, which is why
     /// Scala's `CleanupWorker` eliminates it. Eviction goes through
     /// the family-weight debiting wrapper and routes the FAILED ROOT
-    /// id through the shared `admission::record_failed_tx` classifier (here
-    /// always the blacklist arm, since only hard-invalid failures reach it), so
+    /// id through the shared `admission::record_failed_tx` classifier (the blacklist for hard failures, unresolved suppression for
+    /// a missing data input), so
     /// it stops being relayed. Cascade descendants are dependency-evicted only
     /// (never cached). A descendant BEYOND the `max_family_depth` cascade bound
     /// is not removed in the same op (the cap guards against an O(family) spike),
     /// but it is not abandoned either: the removal returns the truncation
-    /// frontier, which is queued in `pending_orphan_eviction` and swept by
-    /// [`Self::drain_orphan_evictions`] under this pass's cost budget, carrying
+    /// frontier, which is retained by the pool and swept by
+    /// `Self::drain_orphan_evictions` under this pass's cost budget, carrying
     /// the deeper frontier forward until the whole invalid subtree is gone. Only
-    /// evicting cascades feed that queue, so a transient `UnresolvedInput`
-    /// (demoted-parent) tx is never swept.
+    /// bounded removals (evicting cascades, replacement, capacity and
+    /// input-conflict evictions) feed that queue, so a transient
+    /// `UnresolvedInput` (demoted-parent) tx is never swept. Swept descendants
+    /// are reported as `DependencyRemoved`, whatever queued them.
     ///
     /// `now` is injected and stamps all per-tx bookkeeping (the rotation clock),
     /// so the pass is deterministic and unit-testable; the only wall-clock read
@@ -1466,31 +1654,32 @@ impl Mempool {
             )));
         }
 
-        // Dependency-evict any descendants orphaned by this pass's hard-invalid
-        // cascades that the depth cap left pooled (bounded by the remaining
-        // budget; leftovers carry to the next pass).
+        // Dependency-evict queued descendants the depth cap left pooled, from
+        // this pass's hard-invalid cascades or earlier admission/reorg removals
+        // (bounded by the remaining budget; leftovers carry to the next pass).
+        // They are dependency removals, reported apart from tip verdicts.
+        let mut dependency_removed = Vec::new();
         self.drain_orphan_evictions(
             max_family_depth,
             bounds,
             max_tx_cost,
             &mut pool_outputs,
-            &mut removed_for_actions,
+            &mut dependency_removed,
             &mut cost_acc,
             cost_cap,
         );
 
-        let evicted = removed_for_actions.len();
-        if !removed_for_actions.is_empty() {
-            actions.push(MempoolAction::RevokeBroadcast {
-                tx_ids: removed_for_actions.clone(),
-            });
-            actions.push(MempoolAction::Observe {
-                event: ObservedEvent::Evicted {
-                    tx_ids: removed_for_actions,
-                    reason: EvictionReason::TipInvalid,
-                },
-            });
-        }
+        let evicted = removed_for_actions.len() + dependency_removed.len();
+        push_evictions(
+            &mut actions,
+            removed_for_actions,
+            EvictionReason::TipInvalid,
+        );
+        push_evictions(
+            &mut actions,
+            dependency_removed,
+            EvictionReason::DependencyRemoved,
+        );
 
         // Re-broadcast half of Scala `MempoolAuditor.rebroadcastTransactions`:
         // after the eviction pass, re-advertise up to `rebroadcast_count`
@@ -1604,16 +1793,7 @@ impl Mempool {
                 self.pool.touch_rechecked(&id, now);
             }
             Err(err) => {
-                let (removed, frontier) = self.pool.remove_with_descendants_debiting_frontier(
-                    &id,
-                    max_family_depth,
-                    bounds,
-                );
-                // Descendants past the depth cap are orphaned by this eviction;
-                // queue them for bounded dependency-eviction (drained under the
-                // per-pass budget) rather than leaving them to linger as
-                // retained UnresolvedInput.
-                self.pending_orphan_eviction.extend(frontier);
+                let removed = self.remove_invalid_family(&id, max_family_depth, bounds);
                 for e in &removed {
                     for out in &e.outputs {
                         pool_outputs.remove(out);
@@ -1660,37 +1840,30 @@ impl Mempool {
         cost_acc: &mut u128,
         cost_cap: u128,
     ) {
-        if self.pending_orphan_eviction.is_empty() {
+        if self.orphan_eviction_pending() == 0 {
             return;
         }
         // Work-queue: process queued orphans and any deeper frontier they
         // surface within this pass, until the queue drains or the budget is
         // hit. Whatever remains on a budget cutoff persists to the next pass.
-        let mut work: std::collections::VecDeque<TxId> =
-            std::mem::take(&mut self.pending_orphan_eviction).into();
-        while let Some(id) = work.pop_front() {
-            if *cost_acc >= cost_cap {
-                work.push_front(id);
+        while *cost_acc < cost_cap {
+            let Some(id) = self.pool.next_orphan_eviction() else {
                 break;
-            }
+            };
             if !self.pool.contains(&id) {
                 continue; // already gone (confirmed / swept by another cascade)
             }
-            let (removed, frontier) =
-                self.pool
-                    .remove_with_descendants_debiting_frontier(&id, max_family_depth, bounds);
-            *cost_acc = cost_acc.saturating_add(u128::from(max_tx_cost));
+            let removed = self
+                .pool
+                .remove_with_descendants_debiting(&id, max_family_depth, bounds);
+            *cost_acc = cost_acc.saturating_add(u128::from(max_tx_cost.max(1)));
             for e in &removed {
                 for out in &e.outputs {
                     pool_outputs.remove(out);
                 }
                 removed_for_actions.push(e.tx_id);
             }
-            for f in frontier {
-                work.push_back(f);
-            }
         }
-        self.pending_orphan_eviction = work.into();
     }
 
     /// Targeted recheck of a SPECIFIC set of pooled tx ids — Component B's
@@ -1703,7 +1876,7 @@ impl Mempool {
     ///
     /// Suspects are an ADVISORY hint computed against a possibly-stale build
     /// snapshot, so every id is RE-VALIDATED against the live `tip_ctx` here
-    /// (via the shared [`Self::recheck_one`]): a suspect that is valid at the
+    /// (via the shared `Self::recheck_one`): a suspect that is valid at the
     /// current tip is kept; only still-hard-invalid ones are evicted, with the
     /// exact eviction/debit/blacklist semantics of the full pass. Ids no longer
     /// pooled (confirmed/already-evicted) are skipped. Bounded by the same
@@ -1776,28 +1949,28 @@ impl Mempool {
         }
 
         // Same orphan-cascade drain as the full pass (see `recheck_and_evict`).
+        let mut dependency_removed = Vec::new();
         self.drain_orphan_evictions(
             max_family_depth,
             bounds,
             max_tx_cost,
             &mut pool_outputs,
-            &mut removed_for_actions,
+            &mut dependency_removed,
             &mut cost_acc,
             cost_cap,
         );
 
-        let evicted = removed_for_actions.len();
-        if !removed_for_actions.is_empty() {
-            actions.push(MempoolAction::RevokeBroadcast {
-                tx_ids: removed_for_actions.clone(),
-            });
-            actions.push(MempoolAction::Observe {
-                event: ObservedEvent::Evicted {
-                    tx_ids: removed_for_actions,
-                    reason: EvictionReason::TipInvalid,
-                },
-            });
-        }
+        let evicted = removed_for_actions.len() + dependency_removed.len();
+        push_evictions(
+            &mut actions,
+            removed_for_actions,
+            EvictionReason::TipInvalid,
+        );
+        push_evictions(
+            &mut actions,
+            dependency_removed,
+            EvictionReason::DependencyRemoved,
+        );
         emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
         info!(
             event = "mempool_suspect_recheck_completed",
@@ -1899,7 +2072,23 @@ impl Mempool {
     }
 }
 
+/// Revoke relay of removed txs and report them under `reason`.
+fn push_evictions(actions: &mut Vec<MempoolAction>, tx_ids: Vec<TxId>, reason: EvictionReason) {
+    if tx_ids.is_empty() {
+        return;
+    }
+    actions.push(MempoolAction::RevokeBroadcast {
+        tx_ids: tx_ids.clone(),
+    });
+    actions.push(MempoolAction::Observe {
+        event: ObservedEvent::Evicted { tx_ids, reason },
+    });
+}
+
 #[cfg(test)]
 mod recheck_tests;
 #[cfg(test)]
 mod staging_tests;
+
+#[cfg(test)]
+mod invalidate_tests;

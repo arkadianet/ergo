@@ -15,7 +15,7 @@ fn parse(toml_str: &str) -> TomlConfig {
 /// Blake2b256("hello") — same `(secret, hash)` pair used by the
 /// Scala node at `reference/ergo/src/main/resources/*.conf` and
 /// by the Scala IT client at `NodeApi.scala:52`. Lets `load()`
-/// pass the mandatory-hash gate without making every test fixture
+/// exercise configured-key behavior without making every test fixture
 /// restate it. Tests that exercise the validation paths write
 /// their own TOMLs and assert the rejection.
 ///
@@ -40,9 +40,7 @@ fn temp_toml(body: &str) -> tempfile::NamedTempFile {
     file
 }
 
-/// Default per-test TOML carrying only the mandatory api_key_hash, so
-/// tests that don't care about TOML structure still satisfy `load()`'s
-/// hash gate. Bind the returned guard for the test's lifetime.
+/// Default per-test TOML carrying an explicit API key hash. Bind the returned guard for the test's lifetime.
 fn default_toml() -> tempfile::NamedTempFile {
     temp_toml(&format!(
         "[api.security]\napi_key_hash = \"{TEST_DEFAULT_API_KEY_HASH}\"\n"
@@ -51,6 +49,7 @@ fn default_toml() -> tempfile::NamedTempFile {
 
 fn minimal_cli<P: AsRef<std::path::Path>>(tmp_toml: Option<P>) -> Cli {
     Cli {
+        command: None,
         config: tmp_toml.map(|p| p.as_ref().to_path_buf()),
         network: Some("mainnet".into()),
         peers: vec!["127.0.0.1:9030".parse().unwrap()],
@@ -68,7 +67,7 @@ fn minimal_cli<P: AsRef<std::path::Path>>(tmp_toml: Option<P>) -> Cli {
     }
 }
 
-/// Auto-appends the mandatory api_key_hash unless the caller's TOML
+/// Auto-appends the configured-key fixture unless the caller's TOML
 /// already pins one (tests that assert on hash-validation errors set
 /// their own). Returns the temp-file guard; bind it for the test's
 /// lifetime — the file is removed on drop.
@@ -299,11 +298,80 @@ fn default_api_bind_is_loopback() {
     let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     let addr = cfg.api_bind.expect("default bind set");
+    assert!(!cfg.peer_details.reverse_dns);
+    assert!(!cfg.peer_details.auto_download);
+    assert!(cfg.peer_details.geoip_db.is_none());
+    assert!(cfg.peer_details.asn_db.is_none());
     assert!(
         addr.ip().is_loopback(),
         "default api bind must be loopback, got {addr}"
     );
     assert_eq!(addr.port(), 9099);
+}
+
+#[test]
+fn peer_details_config_preserves_paths_and_rejects_typos() {
+    let config: super::toml_sections::TomlConfig = toml::from_str(
+        r#"
+[api.peer_details]
+reverse_dns = true
+auto_download = true
+geoip_db = "geoip/city.mmdb"
+asn_db = "geoip/asn.mmdb"
+"#,
+    )
+    .unwrap();
+    assert!(config.api.peer_details.reverse_dns);
+    assert!(config.api.peer_details.auto_download);
+    assert_eq!(
+        config.api.peer_details.geoip_db.unwrap(),
+        std::path::PathBuf::from("geoip/city.mmdb")
+    );
+    assert_eq!(
+        config.api.peer_details.asn_db.unwrap(),
+        std::path::PathBuf::from("geoip/asn.mmdb")
+    );
+    assert!(toml::from_str::<super::toml_sections::TomlConfig>(
+        "[api.peer_details]\nreverse_dns_typo = false"
+    )
+    .is_err());
+}
+
+#[test]
+fn peer_details_external_options_are_independent_and_opt_in() {
+    for source in [
+        "",
+        "[api]",
+        "[api.peer_details]",
+        "[api.peer_details]\ngeoip_db = 'city.mmdb'",
+    ] {
+        let config = parse(source);
+        assert!(!config.api.peer_details.auto_download);
+        assert!(!config.api.peer_details.reverse_dns);
+    }
+    let config = parse("[api.peer_details]\nauto_download = true");
+    assert!(config.api.peer_details.auto_download);
+    assert!(!config.api.peer_details.reverse_dns);
+    let config = parse("[api.peer_details]\nreverse_dns = true");
+    assert!(!config.api.peer_details.auto_download);
+    assert!(config.api.peer_details.reverse_dns);
+}
+
+#[test]
+fn api_local_reverse_proxy_defaults_false() {
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert!(!cfg.api_local_reverse_proxy);
+}
+
+#[test]
+fn api_local_reverse_proxy_explicit_true() {
+    let path =
+        write_toml("[api]\nlocal_reverse_proxy = true\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n");
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert!(cfg.api_local_reverse_proxy);
 }
 
 #[test]
@@ -368,63 +436,11 @@ fn wallet_section_unknown_field_rejected() {
 }
 
 #[test]
-fn wallet_mode_defaults_to_embedded() {
-    let path = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n");
-    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("default wallet mode loads");
-    assert_eq!(cfg.wallet_mode, WalletMode::Embedded);
-    assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:9090");
-}
-
-#[test]
-fn wallet_mode_external_accepts_daemon_address() {
-    let path = write_toml(
-        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
-         [wallet]\nmode = \"external\"\ndaemon_address = \"http://127.0.0.1:19090\"\n",
-    );
-    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("external wallet mode loads");
-    assert_eq!(cfg.wallet_mode, WalletMode::External);
-    assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:19090");
-}
-
-#[test]
-fn wallet_mode_rejects_unknown_value() {
-    let path = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n[wallet]\nmode = \"remote\"\n");
-    let err = NodeConfig::load(minimal_cli(Some(&path))).expect_err("unknown wallet mode rejects");
-    assert!(
-        err.contains("wallet mode"),
-        "error must identify wallet mode: {err}"
-    );
-}
-
-#[test]
-fn external_wallet_mining_requires_pinned_key() {
-    let path = write_toml(
-        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
-         [wallet]\nmode = \"external\"\n\
-         [mining]\nenabled = true\n",
-    );
-    let err = NodeConfig::load(minimal_cli(Some(&path)))
-        .expect_err("external mining without a pinned key rejects");
-    assert!(
-        err.contains("miner_public_key_hex"),
-        "error must name the missing key: {err}"
-    );
-}
-
-#[test]
-fn api_enabled_requires_api_key_hash() {
-    // Scala-parity boot rule (ErgoApp.scala:40-43). Without the
-    // hash, `load()` must refuse to return Ok rather than silently
-    // mounting `/wallet/*` ungated. Note: minimal_cli's default
-    // TOML provides the hash, so this test writes its own TOML
-    // *without* the hash to exercise the rejection path.
-    let path = temp_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n");
-    let cli = minimal_cli(Some(&path));
-    let err = NodeConfig::load(cli).expect_err("must refuse missing hash");
-    assert!(
-        err.contains("api_key_hash is required"),
-        "error must cite the missing hash: {err}"
-    );
+fn api_enabled_absent_api_key_hash_loads() {
+    let path = temp_toml("[api]\ndisabled = false\n");
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("keyless API loads");
+    assert!(cfg.api_bind.unwrap().ip().is_loopback());
+    assert!(cfg.api_key_hash.is_none());
 }
 
 #[test]
@@ -468,6 +484,18 @@ fn api_key_hash_non_hex_rejected() {
 }
 
 #[test]
+fn api_key_hash_non_hex_rejected_even_when_disabled() {
+    for disabled in [false, true] {
+        let path = temp_toml(&format!(
+            "[api]\ndisabled = {disabled}\n[api.security]\napi_key_hash = \"{}\"\n",
+            "z".repeat(64)
+        ));
+        let err = NodeConfig::load(minimal_cli(Some(&path))).expect_err("invalid supplied hash");
+        assert!(err.contains("lowercase hex"), "{err}");
+    }
+}
+
+#[test]
 fn api_disabled_does_not_require_api_key_hash() {
     // Counterpart to `api_enabled_requires_api_key_hash`: when the
     // operator turns off the API server entirely, there's no
@@ -477,6 +505,40 @@ fn api_disabled_does_not_require_api_key_hash() {
     let cfg = NodeConfig::load(cli).expect("api disabled should load without hash");
     assert!(cfg.api_bind.is_none());
     assert!(cfg.api_key_hash.is_none());
+}
+
+#[test]
+fn shipped_ready_template_parses_without_api_credentials() {
+    let source = include_str!("../../ergo-node.toml");
+    let cfg = parse(source);
+    assert_eq!(cfg.api.disabled, Some(false));
+    assert!(cfg.api.security.is_none());
+    assert!(!cfg.api.peer_details.reverse_dns);
+    assert!(!cfg.api.peer_details.auto_download);
+    assert!(!source.contains(TEST_DEFAULT_API_KEY_HASH));
+    let path = temp_toml(source);
+    let resolved = NodeConfig::load(minimal_cli(Some(&path))).expect("template resolves");
+    assert!(resolved.api_bind.unwrap().ip().is_loopback());
+    assert!(resolved.api_key_hash.is_none());
+}
+
+#[test]
+fn shipped_example_template_parses_with_one_api_table() {
+    let source = include_str!("../../ergo-node.toml.example");
+    let cfg = parse(source);
+    assert_eq!(cfg.api.disabled, Some(false));
+    assert_eq!(
+        source.lines().filter(|line| line.trim() == "[api]").count(),
+        1
+    );
+    assert!(cfg.api.security.is_none());
+    assert!(!cfg.api.peer_details.reverse_dns);
+    assert!(!cfg.api.peer_details.auto_download);
+    assert!(!source.contains(TEST_DEFAULT_API_KEY_HASH));
+    let path = temp_toml(source);
+    let resolved = NodeConfig::load(minimal_cli(Some(&path))).expect("template resolves");
+    assert!(resolved.api_bind.unwrap().ip().is_loopback());
+    assert!(resolved.api_key_hash.is_none());
 }
 
 #[test]
@@ -1667,7 +1729,7 @@ fn load_mining_enabled_via_cli_without_toml_section_uses_serde_defaults() {
     assert!(cfg.mining_config.use_external_miner);
     assert_eq!(
         cfg.mining_config.block_candidate_generation_interval_ms,
-        1000
+        250
     );
 }
 
@@ -1683,6 +1745,19 @@ fn load_mining_enabled_via_toml_without_pubkey_succeeds() {
     assert!(cfg.mining_config.enabled);
     assert!(cfg.mining_config.miner_public_key_hex.is_none());
     assert!(cfg.mining_config.use_external_miner);
+}
+
+#[test]
+fn load_mining_explicit_refresh_interval_preserves_override() {
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [mining]\nenabled = true\nblock_candidate_generation_interval_ms = 1000\n",
+    );
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("load");
+    assert_eq!(
+        cfg.mining_config.block_candidate_generation_interval_ms,
+        1000
+    );
 }
 
 // ----- Mode 2 (UTXO snapshot bootstrap) part 1 -----
@@ -2274,4 +2349,130 @@ fn header_checkpoint_without_nipopow_bootstrap_accepted() {
         .expect("checkpoint without nipopow_bootstrap must not trip R6");
     assert!(!cfg.nipopow_bootstrap);
     assert!(cfg.header_checkpoint.is_some());
+}
+
+#[test]
+fn storage_rent_relay_policy_network_defaults_and_overrides() {
+    for network in ["mainnet", "testnet", "devnet"] {
+        for override_value in [None, Some(false), Some(true)] {
+            let section = override_value.map_or(String::new(), |v| {
+                format!("[mempool]\nreject_storage_rent_txs = {v}\n")
+            });
+            let path = write_toml(&section);
+            let mut cli = minimal_cli(Some(&path));
+            cli.network = Some(network.into());
+            let cfg = NodeConfig::load(cli).expect("load storage-rent policy");
+            assert_eq!(
+                cfg.mempool_config.reject_storage_rent_txs,
+                override_value.unwrap_or(network == "mainnet"),
+                "network={network}, override={override_value:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn redb_cache_budgets_default_independently_of_avl_and_cli() {
+    let cfg = NodeConfig::load(minimal_cli::<&std::path::Path>(None)).unwrap();
+    assert_eq!(cfg.redb_cache_budgets, RedbCacheBudgets::default());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.toml");
+    std::fs::write(&path, "[store]\ncache_bytes = 2097152\nstate_redb_cache_bytes = 16777216\nindexer_redb_cache_bytes = 33554432\npeers_redb_cache_bytes = 1048576\n").unwrap();
+    let mut cli = minimal_cli(Some(&path));
+    cli.cache_bytes = Some(4194304);
+    let cfg = NodeConfig::load(cli).unwrap();
+    assert_eq!(cfg.cache_bytes, Some(4194304));
+    assert_eq!(
+        cfg.redb_cache_budgets,
+        RedbCacheBudgets {
+            state: 16777216,
+            indexer: 33554432,
+            peers: 1048576
+        }
+    );
+}
+
+#[test]
+fn redb_cache_budgets_allow_disabled_cache_and_reject_negative_sizes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.toml");
+    std::fs::write(&path, "[store]\nstate_redb_cache_bytes = 0\n").unwrap();
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert_eq!(cfg.redb_cache_budgets.state, 0);
+    assert_eq!(
+        cfg.redb_cache_budgets.peers,
+        ergo_state::DEFAULT_REDB_CACHE_BYTES
+    );
+    for field in [
+        "state_redb_cache_bytes",
+        "indexer_redb_cache_bytes",
+        "peers_redb_cache_bytes",
+    ] {
+        std::fs::write(&path, format!("[store]\n{field} = -1\n")).unwrap();
+        assert!(NodeConfig::load(minimal_cli(Some(&path))).is_err());
+    }
+}
+
+#[test]
+fn api_script_policy_resolves_and_rejects_misspellings_and_invalid_costs() {
+    let path = write_toml("[api.script]\nrequire_api_key = true\nmax_cost = 12345\n");
+    let config = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert!(config.api_script.require_api_key);
+    assert_eq!(config.api_script.max_cost, 12345);
+    for source in [
+        "[api.script]\nrequire_api_keys = true\n",
+        "[api]\nscript_require_api_key = true\n",
+        "[api.script]\nmax_cost = 0\n",
+        "[api.script]\nmax_cost = 8001092\n",
+    ] {
+        let path = write_toml(source);
+        assert!(
+            NodeConfig::load(minimal_cli(Some(&path))).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn wallet_mode_defaults_to_embedded() {
+    let path = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n");
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("default wallet mode loads");
+    assert_eq!(cfg.wallet_mode, WalletMode::Embedded);
+    assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:9090");
+}
+
+#[test]
+fn wallet_mode_external_accepts_daemon_address() {
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [wallet]\nmode = \"external\"\ndaemon_address = \"http://127.0.0.1:19090\"\n",
+    );
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("external wallet mode loads");
+    assert_eq!(cfg.wallet_mode, WalletMode::External);
+    assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:19090");
+}
+
+#[test]
+fn wallet_mode_rejects_unknown_value() {
+    let path = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n[wallet]\nmode = \"remote\"\n");
+    let err = NodeConfig::load(minimal_cli(Some(&path))).expect_err("unknown wallet mode rejects");
+    assert!(
+        err.contains("wallet mode"),
+        "error must identify wallet mode: {err}"
+    );
+}
+
+#[test]
+fn external_wallet_mining_requires_pinned_key() {
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [wallet]\nmode = \"external\"\n\
+         [mining]\nenabled = true\n",
+    );
+    let err = NodeConfig::load(minimal_cli(Some(&path)))
+        .expect_err("external mining without a pinned key rejects");
+    assert!(
+        err.contains("miner_public_key_hex"),
+        "error must name the missing key: {err}"
+    );
 }

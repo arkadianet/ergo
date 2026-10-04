@@ -88,9 +88,9 @@ fn header(height: u32, parent: ModifierId, nonce: [u8; 8]) -> Header {
     }
 }
 
-/// Apply one empty-but-real full block: persist the header, persist the
-/// `BlockTransactions` section (so `blocks-since` can serve the block's
-/// transactions), then apply it to the UTXO state. Returns the block id.
+/// Apply one block with a small, untracked transaction section. The committed
+/// UTXO state stays unchanged: only the chain API's section reader is exercised.
+/// Returns the block id.
 fn apply_block(
     store: &mut StateStore,
     height: u32,
@@ -106,7 +106,7 @@ fn apply_block(
         &mut writer,
         &BlockTransactions {
             header_id: id,
-            transactions: Vec::new(),
+            transactions: vec![small_transaction(height)],
         },
     )
     .unwrap();
@@ -123,6 +123,39 @@ fn apply_block(
         .apply_block_unchecked_for_test(height, &id_bytes, &root, &[])
         .unwrap();
     id_bytes
+}
+
+/// A structurally valid transaction that the chain API can parse and serve.
+/// Its input is synthetic, as in the full-size fixture; consensus validation
+/// and UTXO application are outside these transport tests.
+fn small_transaction(height: u32) -> Transaction {
+    let tree = ErgoTree {
+        version: 0,
+        reserved_header_bits: 0,
+        has_size: true,
+        constant_segregation: true,
+        constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
+        body: Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(true),
+        },
+    };
+    Transaction {
+        inputs: vec![Input {
+            box_id: Digest32::from_bytes([height as u8; 32]),
+            spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty())
+                .expect("valid spending proof"),
+        }],
+        data_inputs: Vec::new(),
+        output_candidates: vec![ErgoBoxCandidate::new(
+            1_000_000,
+            tree,
+            height,
+            Vec::new(),
+            AdditionalRegisters::empty(),
+        )
+        .expect("valid candidate")],
+    }
 }
 
 /// A small, deterministic committed chain: genesis plus `TIP_HEIGHT` blocks.
@@ -170,6 +203,7 @@ const JSON_ENVELOPE_ALLOWANCE_PER_BLOCK: u64 = 64 * 1024;
 fn fat_transaction(height: u32, seed: u8) -> Transaction {
     let tree = ErgoTree {
         version: 0,
+        reserved_header_bits: 0,
         has_size: true,
         constant_segregation: true,
         constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
@@ -543,7 +577,9 @@ fn real_node_tip_blocks_since_and_sync_against_a_seeded_state_store() {
         let height = offset as u32 + 1;
         assert_eq!(block.height, height);
         assert_eq!(block.block_id, ids[height as usize - 1]);
-        assert!(block.transactions.is_empty());
+        assert_eq!(block.transactions.len(), 1);
+        assert_eq!(block.transactions[0].inputs.len(), 1);
+        assert_eq!(block.transactions[0].outputs.len(), 1);
     }
     // The parent chain is contiguous, so the wallet's parent-mismatch check has
     // something real to agree with.
@@ -646,7 +682,7 @@ fn real_node_tip_blocks_since_and_sync_against_a_seeded_state_store() {
 /// The paging contract, on the real node and over real HTTP, with blocks that
 /// are actually big.
 ///
-/// The other tests in this module use empty blocks, where any page size works
+/// The other tests in this module use tiny blocks, where any page size works
 /// because the response is a few hundred bytes. A real mainnet page is not like
 /// that: every output box crosses the wire hex-encoded, so a page of `N` blocks
 /// costs roughly twice their serialized bytes, and the daemon refuses any body

@@ -91,13 +91,29 @@ pub(super) fn admin_router(
             post(set_votes_handler),
         )
         .with_state(admin);
-    match security {
-        Some(security) => routes.route_layer(axum::middleware::from_fn_with_state(
+    routes.route_layer(axum::middleware::from_fn_with_state(
+        security,
+        crate::auth::require_api_key,
+    ))
+}
+
+/// Log data is operator-only even when no admin/write handle is wired.
+pub(super) fn activity_router(
+    read: Arc<dyn NodeReadState>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+) -> FamilyRouter {
+    FamilyRouter::new(ApiFamily::Rust)
+        .route(
+            "/api/v1/diagnostics/activity",
+            "/api/v1/diagnostics/activity",
+            &["get"],
+            get(super::handlers::activity_handler),
+        )
+        .with_state(read)
+        .route_layer(axum::middleware::from_fn_with_state(
             security,
             crate::auth::require_api_key,
-        )),
-        None => routes,
-    }
+        ))
 }
 
 pub(super) fn conditional_chain_router(

@@ -1,0 +1,30 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.nested_box_depth_bound",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "nested-box-coll108-accept#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-parse-depth",
+      "description" : "Spending-proof extension {1: Box} whose tree is size-flagged and segregated (header 0x18), constants [Coll^108[Byte], SigmaProp(true)]. The Box is read on the transaction's reader: getValue and the Box data value take 2 levels, the constant 108 more, 110 = MaxTreeDepth. Round-trip identity.",
+      "bytes_hex" : "0155e925cba0a46aaee2ccbf49d5fa861ec5978b4810d3506e996e1d4e70ee0d9800010163c0843d18dc01020c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c1a01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010008d3730101000034f68cf17c0cb534f7520e96a6b979ac92dbdbcdb8d50b97936a7ae08974c595000000018094ebdc030008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "nested-box-coll109-reject#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-parse-depth",
+      "description" : "The same Box with constant Coll^109[Byte]: 111 levels, rejected at parse. An impl that parses a size-flagged tree on a fresh reader counts only 109 and round-trips the tx: the over-accept.",
+      "bytes_hex" : "0155e925cba0a46aaee2ccbf49d5fa861ec5978b4810d3506e996e1d4e70ee0d9800010163c0843d18de01020c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c1a0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010008d3730101000034f68cf17c0cb534f7520e96a6b979ac92dbdbcdb8d50b97936a7ae08974c595000000018094ebdc030008d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

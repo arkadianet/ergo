@@ -70,6 +70,12 @@ pub struct MethodRef {
 ///                             SEC1-compressed point; the printer decompresses to the
 ///                             affine (x_hex,y_hex) pair (D-T6).
 ///   SigmaProp(inner_str)    → opaque rendering
+///
+/// Manual construction bypasses compiler/environment validation. Curve bytes
+/// must be valid non-identity compressed secp256k1 points; numeric decimal
+/// payloads must satisfy their declared type and version bounds. Prefer values
+/// produced by the public typecheck/lift pipeline when passing them to printers
+/// or emitters.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstPayload {
     /// `@true` or `@false` — values.scala TrueLeaf/FalseLeaf, BooleanConstant.
@@ -112,7 +118,7 @@ pub enum ConstPayload {
     /// the Scala `Ecp.toString` affine `(x_hex,y_hex,1)` form.
     GroupElement([u8; 33]),
     /// Opaque SigmaProp payload — an env-injected label with no curve bytes;
-    /// not emittable (lib.rs D-E3). Real keys use [`ConstPayload::ProveDlog`].
+    /// not emittable (compiler-design-ledger.md D-E3). Real keys use [`ConstPayload::ProveDlog`].
     SigmaProp(String),
     /// `SigmaPropConstant(ProveDlog(pubkey))` produced by the binder's PK rule
     /// (SigmaBinder.scala:105-106, SigmaPredef.scala:159-166).
@@ -131,6 +137,12 @@ pub enum ConstPayload {
 }
 
 /// Typed ErgoScript AST node.
+///
+/// Public fields permit trusted manual construction. Such trees must preserve
+/// node/payload types, child/signature/arity consistency and the `ConstPayload`
+/// invariants. Construction itself performs no validation. Prefer the public
+/// typecheck pipeline for source/environment input; printers and emitters rely
+/// on its established invariants.
 ///
 /// Mirrors the Scala typed vocabulary 1:1 (oracle R6). Every variant corresponds
 /// to a Scala case class or case object; the `productPrefix` returned by
@@ -165,15 +177,15 @@ pub enum TypedExpr {
     /// `SELF` — values.scala:1471 Self: SBox.
     /// Rust name `Self_` avoids the reserved keyword; productPrefix = "Self".
     Self_ { tpe: SType, pos: Pos },
-    /// `INPUTS` — values.scala:1480 Inputs: SColl[SBox].
+    /// `INPUTS` — values.scala:1480 Inputs: `SColl[SBox]`.
     Inputs { tpe: SType, pos: Pos },
-    /// `OUTPUTS` — values.scala:1484 Outputs: SColl[SBox].
+    /// `OUTPUTS` — values.scala:1484 Outputs: `SColl[SBox]`.
     Outputs { tpe: SType, pos: Pos },
     /// `CONTEXT` — values.scala:1447 Context: SContext.
     Context { tpe: SType, pos: Pos },
     /// `Global` — values.scala:1415 Global: SGlobal (prints as SigmaDslBuilder).
     Global { tpe: SType, pos: Pos },
-    /// `MinerPubkey` — values.scala:1436 MinerPubkey: SColl[SByte].
+    /// `MinerPubkey` — values.scala:1436 MinerPubkey: `SColl[SByte]`.
     MinerPubkey { tpe: SType, pos: Pos },
     /// `LastBlockUtxoRootHash` — values.scala:1490 LastBlockUtxoRootHash: SAvlTree.
     LastBlockUtxoRootHash { tpe: SType, pos: Pos },
@@ -218,7 +230,7 @@ pub enum TypedExpr {
 
     /// `Lambda(tpeParams, args, givenResType, body)` — values.scala:1395.
     /// productIterator: [tpeParams (Seq), args (Seq[(String,SType)]),
-    ///                   givenResType (SType), body (Option[Value])].
+    ///                   givenResType (SType), body (`Option[Value]`)].
     /// N2: givenResType is a bare SType; Lambda.tpe = SFunc(…) → givenResType ≠ SFunc
     ///     → never stripped in practice.
     Lambda {
@@ -242,7 +254,7 @@ pub enum TypedExpr {
     },
 
     /// `Apply(func, args)` — values.scala:1213.
-    /// productIterator: [func (Value), args (Seq[Value])].
+    /// productIterator: `[func (Value), args (Seq[Value])]`.
     Apply {
         func: Box<TypedExpr>,
         args: Vec<TypedExpr>,
@@ -251,7 +263,7 @@ pub enum TypedExpr {
     },
 
     /// `Tuple(items)` — values.scala:778.
-    /// productIterator: [items (Seq[Value])].
+    /// productIterator: `[items (Seq[Value])]`.
     Tuple {
         items: Vec<TypedExpr>,
         tpe: SType,
@@ -260,7 +272,7 @@ pub enum TypedExpr {
 
     /// `ConcreteCollection(items, elementType: V)` — values.scala:827.
     /// productIterator: [items (Seq), elementType (bare SType)].
-    /// N2: elementType (e.g. SInt) ≠ node.tpe (SColl[SInt]) → never stripped.
+    /// N2: elementType (e.g. SInt) ≠ node.tpe (`SColl[SInt]`) → never stripped.
     ConcreteCollection {
         items: Vec<TypedExpr>,
         elem_type: SType,
@@ -465,7 +477,7 @@ pub enum TypedExpr {
     },
     /// `ByIndex(input, index, default: Option[Value])` — transformers.scala:249.
     /// productIterator: [input, index, default].
-    /// default is Option[Value[V]] — rendered as "None" or unwrapped Value.
+    /// default is `Option[Value[V]`] — rendered as "None" or unwrapped Value.
     ByIndex {
         input: Box<TypedExpr>,
         index: Box<TypedExpr>,
@@ -489,7 +501,7 @@ pub enum TypedExpr {
     },
 
     // ── sigma / boolean coercions ─────────────────────────────────────────────
-    /// `BoolToSigmaProp(value)` — trees.scala:32. productIterator: [value].
+    /// `BoolToSigmaProp(value)` — trees.scala:32. productIterator: `[value]`.
     BoolToSigmaProp {
         value: Box<TypedExpr>,
         tpe: SType,
@@ -566,7 +578,7 @@ pub enum TypedExpr {
     },
 
     // ── option ops (transformers.scala) ──────────────────────────────────────
-    /// `OptionGet(input)` — transformers.scala:598. productIterator: [input].
+    /// `OptionGet(input)` — transformers.scala:598. productIterator: `[input]`.
     OptionGet {
         input: Box<TypedExpr>,
         tpe: SType,
@@ -588,7 +600,7 @@ pub enum TypedExpr {
 
     // ── context access ────────────────────────────────────────────────────────
     /// `GetVar[V](varId: Byte, tpe: SOption[V])` — transformers.scala:576.
-    /// productIterator: [varId (Byte), tpe (SOption[V])].
+    /// productIterator: `[varId (Byte), tpe (SOption[V])]`.
     /// N2: tpe = SOption(V) == GetVar.tpe = SOption(V) → always stripped.
     /// The node's type IS SOption(inner); inner is the variable's value type.
     GetVar { var_id: i8, tpe: SType, pos: Pos },
@@ -599,7 +611,7 @@ pub enum TypedExpr {
     DeserializeContext { id: i8, tpe: SType, pos: Pos },
 
     /// `DeserializeRegister[V](reg: RegisterId, tpe: V, default: Option[V])` — transformers.scala:565.
-    /// productIterator: [reg (Byte), tpe (V: SType), default (Option[Value])].
+    /// productIterator: `[reg (Byte), tpe (V: SType), default (Option[Value])]`.
     /// N2: tpe == node.tpe → always stripped.
     DeserializeRegister {
         reg: i8,
@@ -723,7 +735,7 @@ pub enum TypedExpr {
     // via the normal positional scheme for debuggability, but there are no oracle vectors
     // for these nodes.
     /// `ApplyTypes(input, typeArgs)` — values.scala:1257.
-    /// productIterator: [input (Value[SFunc]), typeArgs (Seq[SType])].
+    /// productIterator: `[input (Value[SFunc]), typeArgs (Seq[SType])]`.
     /// Present only in bound/pre-typed trees; the typer substitutes type args and
     /// replaces with the typed input.  The oracle never prints this post-typecheck.
     ApplyTypes {

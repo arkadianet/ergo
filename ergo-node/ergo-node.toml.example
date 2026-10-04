@@ -91,10 +91,20 @@ download_window = 384
 # sync_interval_stable_secs = 15
 
 [store]
-# redb + AVL arena page cache in bytes. Omit to use the binary default.
+# AVL arena clean-node cache in bytes, independent of redb caches.
 # cache_bytes = 1073741824
+# Separate per-database redb page-cache budgets (defaults: 1 GiB each).
+# These are cache limits, not process RSS limits. Zero disables that page cache.
+# state_redb_cache_bytes = 1073741824
+# indexer_redb_cache_bytes = 1073741824 # used only when indexing is enabled
+# peers_redb_cache_bytes = 1073741824
 
 [chain]
+# Devnet only (`network = "devnet"`): replace the private chain's P2P wire
+# magic [7, 7, 7, 7] so several devnets can coexist or one can join another
+# private network. Rejected for mainnet and testnet.
+# devnet_magic = [7, 7, 7, 7]
+
 # Mainnet default script-validation checkpoint is embedded. Set height = 0
 # to fully validate scripts from genesis.
 # script_validation_checkpoint_height = 1231454
@@ -115,16 +125,58 @@ download_window = 384
 # checkpoint = { height = 0, block_id = "" }
 
 [api]
-# Operator API is loopback-only by default.
-bind = "127.0.0.1:9099"
+# Dashboard, swagger, public reads and transaction submission work without a key.
+# Privileged routes stay locked: /wallet/*, /scan/*, /api/v1/wallet/*,
+# /node/shutdown, /api/v1/node/shutdown, /peers/connect, POST /api/v1/votes,
+# POST /blocks, /mining/* and v1 Operator/Admin routes (accounts, webhooks, operator controls).
+# To unlock them, generate a random secret and its Blake2b-256 hash:
+#   secret=$(openssl rand -hex 32); printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
+# Save the secret for the api_key header; set the hash in [api.security]
+# below, then restart. See docs/configuration.md.
 disabled = false
+bind = "127.0.0.1:9099"
 public_bind = false
+# Native peer details and installed local databases work without external lookups.
+# Opt in to HTTPS downloads of free DB-IP Lite City + ASN (CC BY 4.0, db-ip.com).
+# No account/API key; downloads never include peer IPs. Cached under data_dir/geoip;
+# checks daily for the monthly release, reloads on success, keeps old data on failure.
+# Downloading exposes this node's outbound IP to the provider. Disabled by default.
+peer_details.auto_download = false
+# Separate opt-in: sends public peer IPs to the OS DNS resolver. Disabled by default.
+peer_details.reverse_dns = false
+# Advanced local MMDB overrides: DB-IP or compatible MaxMind City/Country and ASN.
+# Each override disables automatic downloads for that dataset. Paths are relative
+# to data_dir; restart after changing config or replacing an override file.
+# peer_details.geoip_db = "geoip/my-city.mmdb"
+# peer_details.asn_db = "geoip/my-asn.mmdb"
+# local_reverse_proxy = false  # set true when a proxy connects to this loopback API.
+# All clients on the proxy peer IP (127.0.0.1 or ::1) share one v1 governor
+# bucket: burst 40, refill 20 tokens/s, Compute cost 10. Direct local operator
+# access also loses its exemption. Rate-limit per client at the proxy; raising
+# governor limits currently requires a code change (no TOML setting).
+# The realtime cap is 16 sockets TOTAL per peer IP across proxied and direct
+# local clients, regardless of this flag. Budget WebSocket concurrency.
+# With this flag, ALL API tx submissions use the public mempool global budget,
+# including direct local submissions; they cannot use the local reserve.
+# Admin requests with a valid key warn-and-allow; this does not enable hard deny.
+# This flag does not authenticate clients. X-Forwarded-For is never trusted. See docs/configuration.md for details.
 # allowed_hosts = ["my-node.example.com"]  # extra `Host` header values the
 # DNS-rebinding guard accepts (default []). Loopback binds always accept
 # localhost/127.0.0.1/::1/the literal bind IP regardless of this list; a
 # non-loopback bind only enforces the guard when this list is non-empty.
+# Submission routes (POST /api/v1/mempool/{submit,check},
+# POST /transactions[/bytes][/check[Bytes]], POST /blocks) are always
+# mounted without API-key authentication. Use [mempool] disabled = true to actively
+# reject tx admissions for archival or sync-test postures.
+
+# [api.security]
+# api_key_hash = "<64 lowercase hex characters>"
 
 [mempool]
+# Reject empty-proof inputs carrying extension variable 127, including mixed transactions.
+# Defaults to true on mainnet, false on testnet/devnet. Set false to relay rent claims.
+# This affects admission only; valid claims in blocks and miner self-claims remain allowed.
+# reject_storage_rent_txs = true
 # disabled = false           # set true to skip tx relay (e.g. archival or sync-test runs)
 # sort_policy = "cost"       # cost (default) | size | min
 # max_pool_size = 1000       # matches Scala mempoolCapacity
@@ -160,12 +212,6 @@ public_bind = false
 # deferred to later blocks, oldest-checked first. Must be >= 1.
 # cleanup_cost_mult = 6
 
-[api]
-# Submission routes (POST /api/v1/mempool/{submit,check},
-# POST /transactions[/bytes][/check[Bytes]], POST /blocks) are always
-# mounted, matching Scala. Use [mempool] disabled = true to actively
-# reject tx admissions for archival or sync-test postures.
-
 [indexer]
 # Extra-index (/blockchain/*) — opt-in.
 # On first start with enabled = true, creates indexer.redb under data_dir
@@ -188,9 +234,10 @@ public_bind = false
 # initialized and unlocked once. Required when [wallet] mode = "external".
 # miner_public_key_hex = "02..."
 
-# Debounce window (ms) for same-parent mempool-refresh rebuilds.
-# Floor 50. Tip changes always rebuild immediately regardless.
-# block_candidate_generation_interval_ms = 1000
+# Minimum interval (ms) between same-parent mempool-refresh signals.
+# Floor 50. Pending changes share an exact deadline and use the latest pool.
+# Applied-parent changes rebuild immediately; header-only changes do not.
+# block_candidate_generation_interval_ms = 250
 
 # Must stay true — an internal CPU miner is not supported.
 # use_external_miner = true
@@ -201,11 +248,14 @@ public_bind = false
 # claim_storage_rent = false
 # max_storage_rent_claims = 4096
 
-# Cache the hydrated AVL working set between candidate builds, keyed on
-# the committed tip: the first build per block pays the full hydration,
-# same-tip rebuilds are near-instant. Holds the full UTXO node graph
-# resident (multi-GB on mainnet archival) — enable only on a mining
-# node with RAM headroom. See docs/configuration.md.
+# Default false: load authenticated AVL paths on demand, without retaining
+# the full UTXO tree between builds. True enables the alternative full-tree
+# cache, keyed on the committed tip: the first build pays full hydration,
+# same-tip rebuilds reuse the tree and loaded paths. Validation and changed
+# transaction-set proofs still run. Independent of this option, identical
+# applied-parent/ordered-transaction builds reuse a prior verified state proof.
+# Holds the full UTXO node graph resident (multi-GB on mainnet archival) —
+# enable only on a mining node with RAM headroom. See docs/configuration.md.
 # candidate_base_cache = false
 
 [voting]

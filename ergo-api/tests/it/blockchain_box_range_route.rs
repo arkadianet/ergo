@@ -11,6 +11,7 @@
 //! - Scala mounts no method directive (`*`); GET and POST go to the
 //!   same dispatch and return identical bodies for identical queries.
 
+use ergo_indexer_types::IndexerReadError;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -81,6 +82,24 @@ async fn range_400_on_negative_offset() {
     assert_eq!(body["reason"], "bad-request");
 }
 
+#[tokio::test]
+async fn range_rejects_offsets_outside_scala_int_domain() {
+    for offset in [2147483648_i64, 4294967296, i64::MAX] {
+        let app = build_app(Arc::new(StubIndexer::caught_up(Vec::new())));
+        let (status, body) = json_get(
+            app,
+            &format!("/blockchain/box/range?offset={offset}&limit=1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["reason"], "bad-request");
+    }
+    let app = build_app(Arc::new(StubIndexer::caught_up(Vec::new())));
+    let (status, body) = json_get(app, "/blockchain/box/range?offset=2147483647&limit=0").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!([]));
+}
+
 // ---- 200 dispatch + projection --------------------------------------------
 
 #[tokio::test]
@@ -92,6 +111,7 @@ async fn range_200_returns_bare_id_array() {
     ];
     let expected_ids: Vec<String> = boxes
         .iter()
+        .rev()
         .map(|b| hex::encode(b.box_data.box_id().expect("box_id").as_bytes()))
         .collect();
     let app = build_app(Arc::new(StubIndexer::caught_up(boxes)));
@@ -123,6 +143,72 @@ async fn range_200_post_get_parity() {
     assert_eq!(b_get, b_post);
 }
 
+// ---- mounted native query parity ------------------------------------------
+
+#[tokio::test]
+async fn native_ranges_apply_latest_window_to_persisted_global_counters() {
+    use ergo_indexer::{apply_block, IndexerBlock, IndexerStore};
+    use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+    use ergo_ser::transaction::{transaction_id, Transaction};
+
+    let temporary = tempfile::TempDir::new().unwrap();
+    let (store, _) = IndexerStore::open(&temporary.path().join("indexer.redb")).unwrap();
+    let handle = IndexerHandle::with_store(store, 0);
+    let transactions: Vec<Transaction> = (0..2)
+        .map(|i| Transaction {
+            inputs: vec![Input {
+                box_id: BoxId::from_bytes([i + 1; 32]),
+                spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: (0..=i)
+                .map(|j| {
+                    fixture_box(
+                        [0x02; 33],
+                        1,
+                        1_000_000 + u64::from(i * 2 + j),
+                        i64::from(i * 2 + j),
+                    )
+                    .box_data
+                    .candidate
+                })
+                .collect(),
+        })
+        .collect();
+    let store = handle.store().unwrap();
+    let block = IndexerBlock {
+        height: 1,
+        header_id: BoxId::from_bytes([0x51; 32]),
+        transactions: &transactions,
+    };
+    apply_block(&store, &store.read_meta().unwrap(), &block).unwrap();
+    handle.set_status(IndexerStatus::CaughtUp);
+    let box_id = |n| {
+        hex::encode(
+            handle
+                .box_by_global_index(n)
+                .unwrap()
+                .unwrap()
+                .box_data
+                .box_id()
+                .unwrap()
+                .as_bytes(),
+        )
+    };
+    // Three boxes: the window ending one before the latest, newest first
+    // ([1, 0]), not the forward window starting at offset 1 ([1, 2]).
+    let expected_boxes = [box_id(1), box_id(0)];
+    let expected_tx = hex::encode(transaction_id(&transactions[0]).unwrap().as_bytes());
+    let app = build_app(Arc::new(handle));
+    let (status, body) = json_get(app.clone(), "/blockchain/box/range?offset=1&limit=2").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!(expected_boxes));
+    let (status, body) =
+        json_post_empty(app, "/blockchain/transaction/range?offset=1&limit=1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!([expected_tx]));
+}
+
 // ---- helpers --------------------------------------------------------------
 
 fn p2pk_tree(pubkey: [u8; 33]) -> ErgoTree {
@@ -138,6 +224,7 @@ fn p2pk_tree(pubkey: [u8; 33]) -> ErgoTree {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: Vec::new(),
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,
@@ -252,75 +339,125 @@ impl IndexerQuery for StubIndexer {
         self.status.clone()
     }
 
-    fn box_by_id(&self, _: &BoxId) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_id(&self, _: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn box_by_global_index(&self, _: u64) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_global_index(&self, _: u64) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn boxes_by_global_range(&self, lo: u64, hi: u64) -> Vec<IndexedBoxDto> {
-        let lo = lo as usize;
-        let hi = (hi as usize).min(self.boxes.len());
-        if lo >= self.boxes.len() {
-            Vec::new()
-        } else {
-            self.boxes[lo..hi].to_vec()
-        }
-    }
-
-    fn tx_by_id(&self, _: &TxId) -> Option<IndexedTxDto> {
-        None
-    }
-    fn tx_by_global_index(&self, _: u64) -> Option<IndexedTxDto> {
-        None
-    }
-    fn txs_by_global_range(&self, _: u64, _: u64) -> Vec<IndexedTxDto> {
-        Vec::new()
+    fn boxes_by_global_range(
+        &self,
+        lo: u64,
+        hi: u64,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok({
+            let lo = lo as usize;
+            let hi = (hi as usize).min(self.boxes.len());
+            if lo >= self.boxes.len() {
+                Vec::new()
+            } else {
+                self.boxes[lo..hi].to_vec()
+            }
+        })
     }
 
-    fn address_balance(&self, _: &TreeHash) -> Option<BalanceDto> {
-        None
+    fn tx_by_id(&self, _: &TxId) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn address_txs_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedTxDto> {
-        Vec::new()
+    fn tx_by_global_index(&self, _: u64) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn address_boxes_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-    fn address_unspent_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-    fn address_total_txs(&self, _: &TreeHash) -> u64 {
-        0
-    }
-    fn address_total_boxes(&self, _: &TreeHash) -> u64 {
-        0
+    fn txs_by_global_range(&self, _: u64, _: u64) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn template_boxes_paged(&self, _: &TemplateHash, _: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-    fn template_unspent_paged(&self, _: &TemplateHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-    fn template_total_boxes(&self, _: &TemplateHash) -> u64 {
-        0
+    fn boxes_latest_paged(&self, page: Page) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(self
+            .boxes
+            .iter()
+            .rev()
+            .skip(page.offset as usize)
+            .take(page.limit as usize)
+            .cloned()
+            .collect())
     }
 
-    fn token_by_id(&self, _: &TokenId) -> Option<IndexedTokenDto> {
-        None
+    fn address_balance(&self, _: &TreeHash) -> Result<Option<BalanceDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn tokens_by_ids(&self, _: &[TokenId]) -> Vec<IndexedTokenDto> {
-        Vec::new()
+    fn address_txs_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn token_boxes_paged(&self, _: &TokenId, _: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn address_boxes_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn token_unspent_paged(&self, _: &TokenId, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn address_unspent_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn token_total_boxes(&self, _: &TokenId) -> u64 {
-        0
+    fn address_total_txs(&self, _: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
+    }
+    fn address_total_boxes(&self, _: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
+    }
+
+    fn template_boxes_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn template_unspent_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn template_total_boxes(&self, _: &TemplateHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
+    }
+
+    fn token_by_id(&self, _: &TokenId) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
+        Ok(None)
+    }
+    fn tokens_by_ids(&self, _: &[TokenId]) -> Result<Vec<IndexedTokenDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn token_boxes_paged(
+        &self,
+        _: &TokenId,
+        _: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn token_unspent_paged(
+        &self,
+        _: &TokenId,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn token_total_boxes(&self, _: &TokenId) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 }
 

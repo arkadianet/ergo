@@ -3,10 +3,14 @@
 // "Your node" panel shows an explicit disabled state when identity.mining
 // is false. Network series follow the header tip; recently applied blocks
 // follow the local full-block tip independently while syncing.
+import { subscribe, CONFIGURE_API_KEY } from './auth.js';
 import { api } from './api-client.js';
+import { ENABLE_MINING } from './capabilities.js';
 import { makeTable } from './table.js';
 import { erg, num, bytes, dur, truncMiddle, blockTime } from './format.js';
 import { minerNode, poolLabel, fetchOwnPk, ownPkHex } from './miners.js';
+import { miningWork } from './mining-work.js';
+import { miningReward } from './mining-reward.js';
 
 const EPOCH = 128; // EIP-37 difficulty-adjustment period (blocks)
 
@@ -24,7 +28,6 @@ let emission = null;
 let recentRows = [];
 let lastFetchTip = 0;
 let lastRecentTip = 0;
-let nodeSyncState = null;
 let distWindow = 720;
 
 function el(tag, cls, text) {
@@ -67,6 +70,7 @@ export function mount(elRoot) {
         <span class="pg-count micro-label" data-sub></span>
       </div>
     </div>
+    <p class="muted" data-configure-key hidden></p>
     <div class="mn-grid">
       <section class="panel">
         <div class="panel__head"><h2 class="panel__title">Your node</h2></div>
@@ -74,7 +78,7 @@ export function mount(elRoot) {
       </section>
       <section class="panel">
         <div class="panel__head"><h2 class="panel__title">Network</h2></div>
-        <div class="panel__body" data-net></div>
+        <div class="panel__body mn-network" data-net></div>
       </section>
       <section class="panel mn-full">
         <div class="panel__head">
@@ -88,6 +92,11 @@ export function mount(elRoot) {
         <div class="panel__body" data-recent></div>
       </section>
     </div>`;
+  subscribe((s) => {
+    const guidance = elRoot.querySelector('[data-configure-key]');
+    guidance.hidden = s !== 'unconfigured';
+    guidance.textContent = CONFIGURE_API_KEY;
+  });
   els = {
     sub: elRoot.querySelector('[data-sub]'),
     you: elRoot.querySelector('[data-you]'),
@@ -97,14 +106,14 @@ export function mount(elRoot) {
     recent: elRoot.querySelector('[data-recent]'),
   };
   for (const w of [128, 720]) {
-    const b = el('button', 'btn', String(w));
+    const b = el('button', 'btn', `${w} blocks`);
     b.type = 'button';
     b.setAttribute('aria-pressed', String(w === distWindow));
     b.onclick = () => {
       if (distWindow === w) return;
       distWindow = w;
       for (const x of els.win.children) {
-        x.setAttribute('aria-pressed', String(x.textContent === String(w)));
+        x.setAttribute('aria-pressed', String(x.textContent === `${w} blocks`));
       }
       refetchStats();
     };
@@ -144,7 +153,7 @@ async function refetchStats() {
 }
 
 export async function onSlow() {
-  if (!identity) identity = await api.identity();
+  identity = await api.identity();
   const miningOn = !!identity?.mining;
   const [tipNow, infoNow, cand, rew] = await Promise.all([
     api.tip(),
@@ -155,16 +164,16 @@ export async function onSlow() {
   if (tipNow) tip = tipNow;
   if (infoNow) info = infoNow;
   if (rew?.rewardAddress) rewardAddr = rew.rewardAddress;
-  if (cand) {
-    if (candidateSeq !== cand.template_seq) {
-      candidateSeq = cand.template_seq;
+  if (miningOn) candidate = cand;
+  if (cand?.ok && cand.data) {
+    const identity = `${cand.data.msg}:${cand.data.template_seq}`;
+    if (candidateSeq !== identity) {
+      candidateSeq = identity;
       candidateSeqAt = Date.now();
     }
-    candidate = cand;
   } else if (miningOn) {
-    // Candidate 503s while the node has no work to hand out (syncing /
-    // generation race) — clear stale work; render shows the honest state.
-    candidate = null;
+    candidateSeq = null;
+    candidateSeqAt = null;
   }
 
   // Network statistics are header-based. A historical full-block tip would
@@ -190,53 +199,25 @@ export async function onSlow() {
   render();
 }
 
-export function onFast({ status }) {
-  if (status) nodeSyncState = status.sync_state;
-}
-
-function render() {
-  if (!els) return;
-  els.sub.textContent = stats
-    ? `${stats.miners.length} miners · ${num(stats.blocks)} headers through height ${num(stats.tip_height)}`
-    : '';
-
-  // ---- Your node ----
+function renderYourNode() {
+  // Keep an inspected job stable during polling; failures clear stale work.
+  if (els.you.contains(document.activeElement) && candidate?.ok) return;
+  const workDetailsOpen = els.you.querySelector('.mining-work__details')?.open || false;
   els.you.replaceChildren();
-  if (!identity) {
-    els.you.append(el('div', 'micro-label', 'loading…'));
+  if (!identity || typeof identity.mining !== 'boolean') {
+    els.you.append(el('div', 'micro-label', 'Mining configuration unavailable. Retrying…'));
   } else if (!identity.mining) {
     els.you.append(kvNode('mining', 'disabled', 'var(--tx3)'));
     els.you.append(
       el(
         'div',
         'micro-label',
-        'This node does not serve mining work. Enable mining in the node config (mining = true) to hand out candidates to external miners.',
+        ENABLE_MINING,
       ),
     );
   } else {
     els.you.append(kvNode('mining', 'enabled', 'var(--green)'));
-    if (candidate) {
-      els.you.append(kvNode('work height', num(candidate.h), 'var(--tx2)'));
-      if (candidateSeqAt) {
-        els.you.append(
-          kvNode(
-            `template #${num(candidate.template_seq)}`,
-            `refreshed ${dur(Math.max(0, Math.floor((Date.now() - candidateSeqAt) / 1000)))} ago`,
-            'var(--tx2)',
-          ),
-        );
-      }
-      if (candidate.pk) {
-        els.you.append(kvNode('miner pk', truncMiddle(candidate.pk, 10, 8), 'var(--tx3)'));
-      }
-    } else {
-      els.you.append(kvNode('Work status', nodeSyncState === 'syncing' ? 'Waiting for chain sync' : 'No candidate available', 'var(--yellow)'));
-      if (nodeSyncState === 'syncing') {
-        const syncLink = el('a', 'ex-link', 'View sync progress →');
-        syncLink.href = '#overview';
-        els.you.append(syncLink);
-      }
-    }
+    els.you.append(miningWork(candidate, { observedAt: candidateSeqAt, detailsOpen: workDetailsOpen }));
     if (rewardAddr) {
       const a = el('a', 'ex-link', truncMiddle(rewardAddr, 10, 6));
       a.href = `#explorer/address/${rewardAddr}`;
@@ -254,6 +235,14 @@ function render() {
     foot.append(wl);
     els.you.append(foot);
   }
+}
+
+function render() {
+  if (!els) return;
+  els.sub.textContent = stats
+    ? `${stats.miners.length} miners · ${num(stats.blocks)} headers through height ${num(stats.tip_height)}`
+    : '';
+  renderYourNode();
 
   // ---- Network ----
   els.net.replaceChildren();
@@ -273,11 +262,7 @@ function render() {
     els.net.append(kvNode('Next difficulty epoch', `${num(toGo)} blocks · ${dur(Math.round(toGo * tgtS))} at target pace`));
   }
   if (emission) {
-    const base = Number(emission.minerReward) / 1e9;
-    const re = Number(emission.reemitted || 0) / 1e9;
-    els.net.append(
-      kvNode('Reward at header height', re ? `${base} + ${re} ERG (re-emission)` : `${base} ERG`, 'var(--tx2)'),
-    );
+    els.net.append(miningReward(emission, 'header'));
     const issued = Number(emission.totalCoinsIssued);
     const remain = Number(emission.totalRemainCoins);
     if (issued > 0) {

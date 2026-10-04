@@ -322,6 +322,7 @@ pub(crate) async fn retrieve_rewards_impl(
     }
 
     let snapshot = chain.signing_view().map_err(map_chain_error)?;
+    let build_tip = snapshot.tip();
 
     // 2. Breakdown via the SHARED obligation (cannot drift from the build below).
     //    Fee floor = max(protocol min, configured relay floor); a sweep below it
@@ -445,6 +446,11 @@ pub(crate) async fn retrieve_rewards_impl(
     // 5. Execute: sign (mandatory self-verify, incl. `verify_reemission_spending`)
     //    then submit.
     let snapshot = chain.signing_view().map_err(map_chain_error)?;
+    if snapshot.tip() != build_tip {
+        return Err(WalletAdminError::StaleChainTip(
+            "committed chain tip changed during reward sweep construction".to_string(),
+        ));
+    }
     let signed_tx = {
         let storage = storage.read();
         sign_unsigned_tx(
@@ -491,6 +497,106 @@ pub(crate) async fn retrieve_rewards_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_primitives::{digest::ModifierId, reader::VlqReader};
+
+    // The stale-tip guard must fire before any prover/context reads or submit.
+    struct SweepSigningView {
+        tip: crate::chain::CommittedTip,
+        params: ergo_validation::ProtocolParams,
+    }
+    impl crate::engine::SigningView for SweepSigningView {
+        fn tip(&self) -> crate::chain::CommittedTip {
+            self.tip.clone()
+        }
+        fn headers(&self) -> &[ergo_ser::header::Header] {
+            panic!("stale sweep must not sign")
+        }
+        fn header_ids(&self) -> &[[u8; 32]] {
+            panic!("stale sweep must not sign")
+        }
+        fn state_context(&self) -> &ergo_wallet::tx_context::BlockchainStateContext {
+            panic!("stale sweep must not sign")
+        }
+        fn active_params(&self) -> &ergo_validation::ActiveProtocolParameters {
+            panic!("stale sweep must not sign")
+        }
+        fn signing_params(&self) -> &ergo_wallet::tx_context::BlockchainParameters {
+            panic!("stale sweep must not sign")
+        }
+        fn protocol_params(&self) -> &ergo_validation::ProtocolParams {
+            &self.params
+        }
+        fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
+            None
+        }
+        fn lookup_utxo(
+            &self,
+            _: &[u8; 32],
+        ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, crate::engine::ChainAccessError> {
+            panic!("stale sweep must not sign")
+        }
+    }
+
+    struct MovingSweepChain {
+        snapshots:
+            std::sync::Mutex<std::collections::VecDeque<Box<dyn crate::engine::SigningView>>>,
+        input: ergo_ser::ergo_box::ErgoBox,
+    }
+    impl WalletChainAccess for MovingSweepChain {
+        fn wallet_scan_height(&self) -> Result<u32, crate::engine::ChainAccessError> {
+            Ok(1)
+        }
+        fn tip_height(&self) -> Result<u32, crate::engine::ChainAccessError> {
+            Ok(1)
+        }
+        fn is_pruned(&self) -> bool {
+            false
+        }
+        fn read_block_at(
+            &self,
+            _: u32,
+        ) -> Result<Option<crate::wallet::scan::RescanBlock>, crate::wallet::scan::RescanReadError>
+        {
+            Ok(None)
+        }
+        fn lookup_utxo(
+            &self,
+            _: &[u8; 32],
+        ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, crate::engine::ChainAccessError> {
+            Ok(Some(self.input.clone()))
+        }
+        fn signing_view(
+            &self,
+        ) -> Result<Box<dyn crate::engine::SigningView>, crate::engine::ChainAccessError> {
+            Ok(self
+                .snapshots
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("two sweep snapshots"))
+        }
+    }
+
+    struct NoSubmit;
+    #[async_trait::async_trait]
+    impl TxSubmitter for NoSubmit {
+        async fn submit_transaction(
+            &self,
+            _: Vec<u8>,
+        ) -> Result<String, crate::engine::TxSubmitError> {
+            panic!("stale sweep must not submit")
+        }
+    }
+
+    // A stale sweep returns before its sole await. Polling once also ensures the
+    // regression remains independent of any runtime dependency in this crate.
+    fn ready_without_executor<T>(future: impl std::future::Future<Output = T>) -> T {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::pin::pin!(future).as_mut().poll(&mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("stale sweep must finish before submit"),
+        }
+    }
 
     const REEM: [u8; 32] = [0x11; 32];
     const OTHER: [u8; 32] = [0x22; 32];
@@ -514,6 +620,99 @@ mod tests {
             assets,
             status: crate::wallet::types::BoxStatus::Confirmed,
             provenance: crate::wallet::types::BoxProvenance::MinerReward,
+        }
+    }
+
+    #[test]
+    fn sweep_execute_changed_build_tip_refuses_signing() {
+        use crate::state::WalletState;
+        use crate::wallet::tables::WALLET_BOXES;
+        use ergo_ser::address::NetworkPrefix;
+        use ergo_wallet::storage::SecretStorage;
+        // Both a new block and a same-height fork must invalidate the breakdown.
+        for (signing_height, fork) in [(2, false), (1, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let snapshots: std::collections::VecDeque<Box<dyn crate::engine::SigningView>> = [
+                (1, [1; 32]),
+                (signing_height, if fork { [2; 32] } else { [1; 32] }),
+            ]
+            .into_iter()
+            .map(|(height, header_id)| {
+                Box::new(SweepSigningView {
+                    tip: crate::chain::CommittedTip { height, header_id },
+                    params: ergo_validation::ProtocolParams::mainnet_default(),
+                }) as Box<dyn crate::engine::SigningView>
+            })
+            .collect();
+            let txs: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+                "../../../test-vectors/mainnet/transactions_1_10.json"
+            ))
+            .unwrap();
+            let bytes = hex::decode(txs[0]["bytes"].as_str().unwrap()).unwrap();
+            let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
+            let input = ergo_ser::ergo_box::ErgoBox {
+                candidate: tx.output_candidates[1].clone(),
+                transaction_id: ModifierId::from_bytes(
+                    hex::decode(txs[0]["id"].as_str().unwrap())
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                index: 1,
+            };
+            let mut reward = reward_box(input.candidate.value, vec![]);
+            reward.box_id = *input.box_id().unwrap().as_bytes();
+            let chain = MovingSweepChain {
+                snapshots: std::sync::Mutex::new(snapshots),
+                input,
+            };
+            let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+            let mut storage = SecretStorage::open(dir.path().join("secrets"));
+            storage
+                .init(ergo_wallet::mnemonic::MnemonicStrength::Words12, "test", "")
+                .unwrap();
+            let mut state = WalletState::empty(false);
+            crate::engine::WalletBootService::unlock_and_sync(
+                &mut storage,
+                &mut state,
+                &db,
+                NetworkPrefix::Mainnet,
+                "test",
+            )
+            .unwrap();
+            let write = db.begin_write().unwrap();
+            write
+                .open_table(WALLET_BOXES)
+                .unwrap()
+                .insert(reward.box_id, bincode::serialize(&reward).unwrap())
+                .unwrap();
+            write.commit().unwrap();
+
+            let storage = RwLock::new(storage);
+            let state = RwLock::new(state);
+            let pool = crate::engine::NoopMempoolOverlay::new();
+            let pending = retrieve_rewards_impl(
+                None,
+                None,
+                MIN_FEE,
+                100_000,
+                None,
+                false,
+                &storage,
+                &state,
+                &db,
+                &chain,
+                &NoSubmit,
+                &pool,
+                NetworkPrefix::Mainnet,
+            );
+            let result = ready_without_executor(pending);
+            assert!(
+                matches!(result, Err(WalletAdminError::StaleChainTip(_))),
+                "expected stale tip, got {:?}",
+                result.err()
+            );
+            assert!(chain.snapshots.lock().unwrap().is_empty());
         }
     }
 

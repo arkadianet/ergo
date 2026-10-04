@@ -1,0 +1,107 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.tree_sigmaboolean_bounds",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "transaction-cthreshold-256-children-sized-reject#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose size-flagged tree is a SigmaProp constant CTHRESHOLD(1, 256 × TrueProp). CTHRESHOLD's require (n <= 255, SigmaBoolean.scala:223) runs after the children are read: an IllegalArgumentException, rethrown as a SerializerException, which does not degrade: the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0885020898018002d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-cthreshold-255-children-accept#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A transaction output whose CTHRESHOLD has 255 children. It parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d088402089801ff01d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-cand-no-children-accept#2",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose unsized tree is the SigmaProp constant CAND() (08 96 00): CAND carries no check, so it parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00089600010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-cand-256-children-accept#3",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose unsized tree is the SigmaProp constant CAND(256 × TrueProp) (08 96 80 02 d3…). CAND's child count is a getUShort and the constructor checks nothing (SigmaBoolean.scala:80-86, :149), so up to 65535 children parse. Round-trip identity. An impl that bounds CAND at 255 children, as CTHRESHOLD is bounded, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008968002d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-cor-256-children-accept#4",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is the same with COR (97): it parses (:87-93, :185). Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008978002d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-sigmaand-no-items-accept#5",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is the SigmaAnd node with no items (ea 00). SigmaTransformerSerializer reads a getUIntExact count into safeNewArray (SigmaTransformerSerializer.scala:20-30), and mkSigmaAnd builds SigmaAnd(items) unchecked (SigmaBuilder.scala:515-516): it parses. Round-trip identity. (Spending it fails: SigmaAnd evaluates through allZK and CAND.normalized, which requires a non-empty list; see the transaction vector sized-tree-spend.)",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00ea00010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-sigmaor-no-items-accept#6",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is SigmaOr() (eb 00): it parses, as SigmaAnd() does. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00eb00010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-sigmaand-256-items-accept#7",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is the SigmaAnd node of 256 × sigmaProp(true) (ea 80 02 08 d3…): the count is bounded only by safeNewArray's 100000, so it parses. Round-trip identity. An impl that bounds the items at 255 rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00ea800208d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-sigmaor-256-items-accept#8",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is SigmaOr of 256 × sigmaProp(true): it parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00eb800208d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d308d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

@@ -10,6 +10,7 @@
 //! `self.rebuild_from_committed()` to restore in-memory state
 //! from disk.
 
+use redb::ReadableDatabase;
 use redb::ReadableTable;
 use tracing::{info, warn};
 
@@ -27,8 +28,8 @@ impl StateStore {
     /// Three-phase: (1) pre-read all undo entries from `UNDO_LOG`
     /// before mutating the AVL tree so a DB read failure leaves
     /// the tree untouched; (2) replay each entry's change-log in
-    /// reverse via [`apply_rollback_mutations`]; (3) persist the
-    /// truncation atomically via [`persist_rollback`]. Any failure
+    /// reverse via `apply_rollback_mutations`; (3) persist the
+    /// truncation atomically via `persist_rollback`. Any failure
     /// after step 2 routes through `rebuild_from_committed` so the
     /// in-memory state is restored from committed disk state.
     ///
@@ -37,13 +38,18 @@ impl StateStore {
     /// with the chain-state rollback (both in the same
     /// `persist_rollback` txn). Pass `None, None` from test
     /// harnesses and library callers that do not manage wallet
-    /// state.
+    /// state. A wallet hook without a rescan guard is rejected before mutation.
     pub fn rollback_to(
         &mut self,
         target_height: u32,
         wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
         rescan_guard: Option<&dyn crate::wallet::apply::RescanGuard>,
     ) -> Result<(), StateError> {
+        if wallet_hook.is_some() && rescan_guard.is_none() {
+            return Err(StateError::InvalidPrecondition {
+                what: "wallet rollback requires a rescan guard",
+            });
+        }
         // Capture identity fields before any mutation so the
         // `_failed` event below carries the pre-attempt values,
         // never rebuilt-from-committed values. Depth is

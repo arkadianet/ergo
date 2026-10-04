@@ -82,6 +82,7 @@ pub enum ModifierIndexBackfillEvent {
 pub(super) const MODIFIER_INDEX_CHUNK_BYTES_BUDGET: usize = 32 * 1024 * 1024;
 pub(super) const MODIFIER_INDEX_CHUNK_ROWS_CAP: usize = 50_000;
 
+use redb::ReadableDatabase;
 use redb::{ReadableTable, ReadableTableMetadata};
 use tracing::{debug, info, warn};
 
@@ -111,19 +112,19 @@ impl StateStore {
     /// Returns the count of new entries written. Caller can use this
     /// to log a one-time migration message on first boot.
     ///
-    /// Thin wrapper over [`back_fill_modifier_type_index_with_progress`]
+    /// Thin wrapper over [`Self::back_fill_modifier_type_index_with_progress`]
     /// with a no-op callback.
     pub fn back_fill_modifier_type_index(&self) -> Result<usize, StateError> {
         self.back_fill_modifier_type_index_with_progress(|_| {})
     }
 
-    /// Same as [`back_fill_modifier_type_index`] but with a progress
+    /// Same as [`Self::back_fill_modifier_type_index`] but with a progress
     /// callback at well-defined points (Start, optionally Skipped on
     /// the sentinel-present fast path; otherwise AfterCollect,
     /// BeforeCommit, AfterCommit). Used by the node's init markers to
     /// attribute the boot-phase memory shape.
     ///
-    /// Thin wrapper over [`back_fill_modifier_type_index_chunked`]
+    /// Thin wrapper over [`Self::back_fill_modifier_type_index_chunked`]
     /// with the production chunk caps. The streaming implementation
     /// eliminates the previous `Vec<([u8;32], Vec<u8>)>` of every
     /// header row, and short-circuits on a `STATE_META` sentinel
@@ -341,7 +342,7 @@ impl StateStore {
 
             // === Write phase: tag header + 3 sections per row, commit ===
             let mut write_txn = crate::begin_write_qr(&self.db)?;
-            write_txn.set_durability(redb::Durability::None);
+            write_txn.set_durability(redb::Durability::None)?;
             let mut written_in_chunk: usize = 0;
             {
                 let sections = match write_txn.open_table(BLOCK_SECTIONS) {
@@ -466,7 +467,7 @@ impl StateStore {
         Ok(written)
     }
 
-    /// Back-fill [`HEADERS_BY_HEIGHT`] for pre-existing data.
+    /// Back-fill `HEADERS_BY_HEIGHT` for pre-existing data.
     ///
     /// Walks every header in `HEADER_META`, groups header_ids by
     /// `meta.height`, then for each height writes the index row
@@ -817,7 +818,7 @@ impl StateStore {
             }
 
             let mut write_txn = crate::begin_write_qr(&self.db)?;
-            write_txn.set_durability(redb::Durability::None);
+            write_txn.set_durability(redb::Durability::None)?;
             {
                 let mut idx = write_txn.open_table(SECTION_HEIGHT_INDEX)?;
                 for (header_id, header_bytes) in chunk.iter() {

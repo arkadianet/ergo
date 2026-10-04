@@ -44,8 +44,13 @@ fn wallet_tasks() -> std::sync::MutexGuard<'static, WalletTaskState> {
 pub(crate) fn begin_wallet_session(rescan: Arc<RescanCoordinator>) -> u64 {
     let mut tasks = wallet_tasks();
     let session_id = WALLET_SESSION_ID
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        .wrapping_add(1);
+        .try_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |id| id.checked_add(1),
+        )
+        .expect("wallet session id exhausted")
+        + 1;
     match task_session_index(&tasks, session_id) {
         Some(index) => tasks.sessions[index].1.rescan = Some(rescan.clone()),
         None => tasks.sessions.push((
@@ -65,87 +70,78 @@ fn task_session_index(state: &WalletTaskState, session_id: u64) -> Option<usize>
     state.sessions.iter().position(|(id, _)| *id == session_id)
 }
 
+/// Register a blocking wallet worker before its owner can begin draining.
 pub(crate) async fn track_wallet_task(
     session_id: u64,
     handle: JoinHandle<()>,
 ) -> Result<(), JoinError> {
-    let late_handle = {
-        let mut tasks = wallet_tasks();
-        let index = match task_session_index(&tasks, session_id) {
-            Some(index) => index,
-            None => {
-                tasks.sessions.push((
-                    session_id,
-                    WalletTaskSession {
-                        closing: false,
-                        handles: Vec::new(),
-                        rescan: None,
-                    },
-                ));
-                tasks.sessions.len() - 1
-            }
-        };
-        let session = &mut tasks.sessions[index].1;
-        if session.closing {
-            Some(handle)
-        } else {
-            session.handles.push(handle);
-            None
+    let mut tasks = wallet_tasks();
+    let index = match task_session_index(&tasks, session_id) {
+        Some(index) => index,
+        None => {
+            tasks.sessions.push((
+                session_id,
+                WalletTaskSession {
+                    closing: false,
+                    handles: Vec::new(),
+                    rescan: None,
+                },
+            ));
+            tasks.sessions.len() - 1
         }
     };
-    match late_handle {
-        Some(handle) => match handle.await {
-            Ok(()) => Ok(()),
-            Err(error) if error.is_cancelled() => {
-                tracing::info!("wallet task cancelled during shutdown");
-                Ok(())
-            }
-            Err(error) => Err(error),
-        },
-        None => Ok(()),
-    }
+    // Late registrations remain retained as well. The writer is joined before
+    // the session drain, so none can arrive after a successful drain returns.
+    tasks.sessions[index].1.handles.push(handle);
+    Ok(())
 }
 
-async fn join_wallet_handles(handles: Vec<JoinHandle<()>>, first_error: &mut Option<JoinError>) {
-    for handle in handles {
-        if let Err(error) = handle.await {
-            if error.is_cancelled() {
-                tracing::info!("wallet task cancelled during shutdown");
-            } else if first_error.is_none() {
-                *first_error = Some(error);
-            } else {
-                tracing::error!(%error, "wallet task join failed");
+/// Keep a join handle owned by its session if a drain future is cancelled.
+struct WalletTaskJoin {
+    session_id: u64,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for WalletTaskJoin {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let mut tasks = wallet_tasks();
+            if let Some(index) = task_session_index(&tasks, self.session_id) {
+                tasks.sessions[index].1.handles.push(handle);
             }
         }
     }
 }
 
 pub(crate) async fn await_wallet_tasks(session_id: u64) -> Result<(), JoinError> {
-    {
-        let mut tasks = wallet_tasks();
-        let Some(index) = task_session_index(&tasks, session_id) else {
-            return Ok(());
-        };
-        tasks.sessions[index].1.closing = true;
-    }
     let mut first_error = None;
     loop {
-        let handles = {
+        let handle = {
             let mut tasks = wallet_tasks();
             let Some(index) = task_session_index(&tasks, session_id) else {
                 return first_error.map_or(Ok(()), Err);
             };
-            std::mem::take(&mut tasks.sessions[index].1.handles)
+            let session = &mut tasks.sessions[index].1;
+            session.closing = true;
+            session.handles.pop()
         };
-        join_wallet_handles(handles, &mut first_error).await;
-        let empty = wallet_tasks()
-            .sessions
-            .iter()
-            .find(|(id, _)| *id == session_id)
-            .map(|(_, session)| session.handles.is_empty())
-            .unwrap_or(true);
-        if empty {
+        let Some(handle) = handle else {
             return first_error.map_or(Ok(()), Err);
+        };
+        let mut joining = WalletTaskJoin {
+            session_id,
+            handle: Some(handle),
+        };
+        let result = joining.handle.as_mut().unwrap().await;
+        joining.handle.take();
+        if let Err(error) = result {
+            if error.is_cancelled() {
+                tracing::info!("wallet task cancelled during shutdown");
+            } else if first_error.is_none() {
+                first_error = Some(error);
+            } else {
+                tracing::error!(%error, "wallet task join failed");
+            }
         }
     }
 }
@@ -250,9 +246,9 @@ mod tests {
         let task = tokio::spawn(async {
             panic!("injected wallet task panic");
         });
-        let mut first_error = None;
-        join_wallet_handles(vec![task], &mut first_error).await;
-        assert!(first_error.is_some());
+        let session = begin_wallet_session(Arc::new(RescanCoordinator::new()));
+        track_wallet_task(session, task).await.unwrap();
+        assert!(await_wallet_tasks(session).await.is_err());
     }
 
     /// A wallet store whose scan cursor lets a partial rescan from height 1
@@ -334,5 +330,56 @@ mod tests {
         assert!(!rescan.shutdown_requested());
         assert!(!rescan.cancel_requested());
         rescan.begin_rescan(0, &store, 0).unwrap();
+    }
+    #[tokio::test]
+    async fn cancelled_worker_join_retains_handle_for_next_shutdown_owner() {
+        let session = begin_wallet_session(Arc::new(RescanCoordinator::new()));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let entered = started.clone();
+        let (release, waiting) = std::sync::mpsc::sync_channel(1);
+        track_wallet_task(
+            session,
+            tokio::task::spawn_blocking(move || {
+                entered.notify_one();
+                waiting.recv().unwrap();
+            }),
+        )
+        .await
+        .unwrap();
+        started.notified().await;
+        let joining = tokio::spawn(async move { await_wallet_tasks(session).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let empty = {
+                    let tasks = wallet_tasks();
+                    let index = task_session_index(&tasks, session).unwrap();
+                    tasks.sessions[index].1.handles.is_empty()
+                };
+                if empty {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        joining.abort();
+        assert!(joining.await.unwrap_err().is_cancelled());
+        {
+            let tasks = wallet_tasks();
+            let index = task_session_index(&tasks, session).unwrap();
+            assert_eq!(tasks.sessions[index].1.handles.len(), 1);
+        }
+        let mut next_join = tokio::spawn(async move { await_wallet_tasks(session).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut next_join)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        next_join.await.unwrap().unwrap();
+        let tasks = wallet_tasks();
+        let index = task_session_index(&tasks, session).unwrap();
+        assert!(tasks.sessions[index].1.handles.is_empty());
     }
 }

@@ -41,6 +41,63 @@ here.
 
 ## What is implemented and parity-tested
 
+### Received block-section bytes
+
+Block sections are stored through typed persistence with their received
+payload intact, and P2P `RequestModifier` serves that payload intact, in both
+UTXO and digest modes. This is an intentional byte-fidelity difference from
+Scala 6.0.7: its history insertion serializes parsed `BlockTransactions`, and
+its P2P responder serves those stored canonical bytes. We retain received bytes
+to avoid introducing a blanket transform over embedded values with retained
+wire identity. No storage migration or canonicalization is introduced. Section identity commits
+to its type, header ID and content root, rather than a hash of the entire wire
+payload; receive-time verification recomputes that identity from parsed content.
+
+The fresh Scala-backed fixture
+`test-vectors/scala/block_section_storage_6_0_7.json` and
+`ergo-node/src/node/tests/section_wire_policy.rs` pin 22 accepted sections,
+including noncanonical Boolean/context-extension and zero-prefixed identity
+GroupElement encodings, across block versions 1 and 4. Eight wire payloads
+differ from canonical storage, while transaction IDs, transaction/witness
+roots, section IDs and canonical re-serialization agree. This evidence is
+scoped to these encodings and section admission; the synthetic input boxes
+and unmined headers do not establish full-block validity. Retained box/header
+identity (#357) must not be generalized into canonical identity.
+
+`GET /blocks/{id}/transactions` is a parsed JSON surface. Its transaction
+values and canonical transaction sizes match Scala in these cases. Rust's
+section `size` consistently describes received bytes. Scala initially reports
+received section length from its parsed-object cache, then canonical stored
+length after reopening; the shorter Boolean leaf encodings differ by one byte
+at that point. The oracle records both states separately. Reproduction and
+the exact production storage/serving seams are documented in
+[the pinned oracle archive](https://github.com/arkadianet/ergo/tree/ba2ac17932c8ca818594f110b5b25e9c07ac6dba/scripts/jvm_section_oracle/README.md).
+
+### Sync and API behavior
+
+Header admission enforces Scala's fatal rule 209 (`hdrTooOld`): a child's
+parent must be less than `[node] keep_versions` blocks below the applied
+full-block tip, and genesis requires the full tip to be below that window.
+The default window is 200. Header-only sync uses the full height, so headers
+ahead of block application remain eligible. Digest nodes use the same
+admission setting even though their persisted rollback history is unbounded.
+
+Full-chain switching waits for a contiguous, available replacement suffix
+whose cumulative work exceeds the applied tip's work. Header-only forks
+leave the applied state intact; a shorter, heavier full chain can replace a
+longer one. The header and full-block tips can differ while bodies are being
+downloaded, including across a digest-store restart. Regression coverage lives
+in `ergo-sync/src/executor/relay_tests.rs`, `ergo-sync/tests/it/header_too_old.rs`,
+and the node's periodic-driver tests.
+
+Peer gossip, sharing-list rotation, discovery fanout and sync fanout draw
+their production seeds from OS randomness. Selection functions keep explicit
+seed inputs for deterministic tests. Download reassignment retains its
+connected-peer filtering, degradation preference and recency ranking; those
+quality rules do not use wall-clock entropy. Wallet mutations `/wallet/lock`
+and `/wallet/deriveNextKey` accept POST as well as Scala-compatible GET, with
+the same API-key authentication on both methods.
+
 The surfaces below are exercised by oracle-backed tests against
 Scala-produced fixtures and/or replayed against real mainnet bytes. The
 authoritative live, subsystem-by-subsystem status is the project's parity
@@ -77,6 +134,17 @@ mainnet — far faster than a multi-hour full IBD from genesis, though the
 exact figure depends on peer and hardware conditions.
 
 ## How parity is checked
+
+Wallet-file encryption and the modern/pre-1627 derivation paths are pinned to
+fresh fixtures from Scala wallet 6.0.6 at commit
+`23aabead88774d27f2c9190ace3c9abbc8f1d5cb`. Every PR regenerates the fixture and
+unlocks a newly created Rust wallet with the Scala implementation. See
+[wallet fixture provenance](../test-vectors/wallet/README.md). Import accepts
+Scala's historical encrypted-stream field split, absent cipher algorithm/mode
+fields, and a missing/null legacy flag, as well as the authenticated field
+layout written by earlier Rust versions. New files use the Scala field split;
+older Rust binaries that only understand the previous split cannot unlock
+them. Keep an upgraded binary available before creating/restoring a wallet.
 
 Four independent oracles, ranked by signal strength, with a strict rule
 about which one counts for consensus:
@@ -120,21 +188,36 @@ Windows on every push and pull request; a `difftest` job runs the
 coverage gate) on Linux on every push; a nightly scheduled workflow runs
 longer structured and corpus-mutation campaigns (2,000,000 iterations each)
 plus bounded `cargo-fuzz` / libFuzzer / ASan passes on nightly Rust across
-six surfaces; plus the supply-chain auditors `cargo-audit`, `cargo-deny`,
+six surfaces; a nightly JVM consensus differential campaign with rotating,
+reproducible seeds and preserved oracle transcripts; plus the supply-chain auditors `cargo-audit`, `cargo-deny`,
 and `cargo-machete`. See
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and
 [`.github/workflows/fuzz.yml`](../.github/workflows/fuzz.yml).
+
+## Storage compatibility
+
+The redb 2.6 → 4 file-format change is a storage compatibility boundary, not a
+consensus or wire-format change. Use the [offline copy-only migration](operating.md#migrating-legacy-redb-databases)
+for v2 databases before startup. Table schemas and typed row contents are
+verified under both real dependency versions, including the indexer's fixed
+width tuple keys and embedded wallet tables; unknown schemas fail closed.
+Keep the old data directory and binary for rollback because a database later
+written by redb 4 may contain type metadata unreadable by redb 2.6.
 
 ## Known limitations
 
 Areas where parity is incomplete, partial, or deliberately out of scope.
 Be aware of these before depending on the node.
+The [operating-mode evidence inventory](operating-mode-evidence.md) separates
+bounded fixture/recovery tests, recorded external campaigns and remaining
+closure criteria.
 
 ### Partial (landed but incomplete)
 
-- **Mode 3 (pruned / suffix window)** — schema, handshake,
-  `block_sections` eviction, and activation at the headers-synced flip
-  have landed; a standard pruned config boots. A normal Mode 3
+- **Mode 3 (pruned / suffix window)** — schema, handshake and
+  `block_sections` eviction after apply have landed; a standard pruned
+  config boots and replays full blocks from genesis before pruning (see
+  below). A normal Mode 3
   (`state_type = utxo`, `verify = true`, `blocks_to_keep` at or above the
   rollback-window floor of `keep_versions + SAFETY_MARGIN`, i.e. 250 at
   the defaults) loads and runs. Only configurations that would undermine
@@ -142,42 +225,53 @@ Be aware of these before depending on the node.
   `blocks_to_keep < -1`, and `blocks_to_keep = 0` outside the canonical
   headers-only Mode 6 combo.
 
-  **Activation (when pruning starts).** A pruned node fixes its prune
-  low-water mark — `minimalFullBlockHeight`, the first height it will
-  download and retain full blocks from — the moment it decides the
-  header chain is synced, not on its first block apply. This matches
-  Scala: `ToDownloadProcessor.toDownload` calls
-  `FullBlockPruningProcessor.updateBestFullBlock(header)` on the header
-  that flips `isHeadersChainSynced`, and from then on
-  `nextModifiersToDownload` starts its walk at that height for a node
-  with no full blocks yet. The value is
-  `max(1, header_height - blocks_to_keep + 1)`, snapped down to the
-  start of the containing voting epoch when it exceeds `votingLength`,
-  so a retained window never begins mid-epoch. Practically, a
-  from-scratch pruned node does **not** replay the chain from genesis
-  and prune afterwards — it starts downloading block sections at the
-  sentinel. The seed is one-shot: it fires only while no full block has
-  been applied and no sentinel has been recorded, so a restart resumes
-  with the same value, a UTXO-snapshot or NiPoPoW bootstrap keeps the
-  sentinel that bootstrap wrote, and the sentinel never moves backward.
-  Archive (`blocks_to_keep = -1`) and headers-only Mode 6
-  (`blocks_to_keep = 0`) never seed one. Rollbacks whose replay window
-  would reach below the sentinel are refused rather than half-applied.
-- **Mode 4 (pruned + UTXO bootstrap)** ? builds on Mode 3 (landed) plus
+  **Fresh startup and retention.** A fresh UTXO store starts downloading
+  full blocks at height 1, even when its header chain is already synced.
+  Validation requires the applied parent state; a recent header alone cannot
+  replace the skipped UTXO history. The node replays from genesis and advances
+  `minimalFullBlockHeight` as blocks are applied and old sections are pruned.
+  The applied-block retention formula is
+  `max(1, applied_height - blocks_to_keep + 1)`, snapped down to the
+  containing voting epoch's start when it exceeds `votingLength`.
+
+  Older startup code could persist a header-derived floor before any full
+  block was applied. Boot and sync ticks repair that floor to 1 only when
+  both live and committed UTXO state remain at height 0, the header chain is
+  dense and neither bootstrap marker is present, then rebuild pending
+  downloads. A valid fresh floor is unchanged. Applied, snapshot and
+  NiPoPoW-bootstrapped stores keep their floor; the ordinary setter remains
+  monotonic. Repair failures are logged and retried. Archive
+  nodes also download from their applied parent; headers-only Mode 6 does
+  not download full blocks. Rollbacks below a retained floor are refused.
+
+  This fresh-download policy is specific to the Rust UTXO backend. The
+  committed Scala sentinel vectors cover retention calculations, while
+  native boot/reopen tests cover the guarded repair and pending range.
+  Complete historical activation and retention coverage remains open.
+- **Mode 4 (pruned + UTXO bootstrap)** — builds on Mode 3 (landed) plus
   the Mode 2 snapshot bootstrap. Tests cover a real snapshot install through
   boot and both NiPoPoW/UTXO orderings: proof-first composes; snapshot-first
   rejects the later proof and preserves state
-  (`ergo-node/tests/it/mode4_acceptance.rs`). End-to-end deferred snapshot
-  installation through real header catch-up inside `run_inner` and a live
-  multi-peer soak remain outstanding.
+  (`ergo-node/tests/it/mode4_acceptance.rs`). A three-peer acceptance test now drives snapshot discovery parked above
+  a NiPoPoW tip through real P2P header catch-up, snapshot installation, full
+  validation of the next mainnet block, and restart
+  (`ergo-node/tests/it/mode4_catchup.rs`). Long-running live multi-peer soak
+  coverage remains outstanding.
 - **Mode 5 (digest verifier)** — the storage schema, atomic-commit layer,
   and AD-proof apply seam exist; the node boots, survives the handshake,
   sync-info, and API seams, and syncs headers from live peers (the
   executor's header pipeline is backend-agnostic, so a digest store
   validates and persists headers exactly as a UTXO store does).
-  AD-proof block replay is oracle-pinned only against the mainnet window
-  in `test-vectors/mode5/`; broader corpus parity (further mainnet
-  windows, testnet, negatives) and the reorg-abort re-anchor remain open.
+  AD-proof block replay is oracle-pinned against the mainnet voting-boundary
+  window and additional mainnet/testnet windows in `test-vectors/mode5/`.
+  The additional corpus exercises full transaction validation, root-preserving
+  rollback/replay, and corrupted-proof rejection with unchanged committed
+  state (`ergo-sync/tests/it/mode5_corpus_breadth.rs`). Broader historical-era
+  coverage remains open. Bounded subprocess tests kill both digest and UTXO
+  executors after rollback/partial apply and recover external early-mainnet
+  replacement roots on reopen (`ergo-sync/src/executor/relay_tests.rs`).
+  External-window cold-open reorg campaigns still need an owned database with
+  complete historical rollback/index/parameter substrate.
 - **Mode 2 trust anchor** — the installed UTXO root verification is
   provisional pending a Scala-oracle vector. Operators using Mode 2 should
   cross-check the bootstrapped UTXO root against a known-good reference
@@ -220,6 +314,12 @@ potentially breaking:
 - Re-read [`CHANGELOG.md`](../CHANGELOG.md) before each upgrade — each entry
   calls out what moved.
 - Pin to a specific tag, not `latest`.
+
+Rust consumers upgrading to the `num-bigint 0.5` dependency must update their
+own direct dependency if they exchange `BigInt` or `BigUint` with this workspace
+(for example, through `SigmaValue`, evaluator values or difficulty helpers).
+Types from `num-bigint 0.4` and `0.5` are distinct. This dependency upgrade does
+not change the node's specified integer wire encodings.
 
 ## Reporting a consensus divergence
 

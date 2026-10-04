@@ -14,7 +14,7 @@ use super::{ErgoTree, JIT_ACTIVATION_VERSION};
 /// byte length. A `version != 0` tree with the size bit clear is rejected with a
 /// hard `SerializerException`. Version-0 trees legitimately carry no size bit.
 ///
-/// [`read_ergo_tree`] is intentionally LENIENT about this (the SANTA conformance
+/// [`crate::ergo_tree::read_ergo_tree`] is intentionally LENIENT about this (the SANTA conformance
 /// hook feeds it size-stripped trees, and higher-version soft-fork trees parse
 /// opaquely), so the consensus box-script readers enforce the rule AFTER parsing
 /// — boxes are the consensus-reachable deserialization path for ErgoTrees.
@@ -74,8 +74,8 @@ pub fn check_header_size_bit(tree: &ErgoTree) -> Result<(), ReadError> {
 /// `blockVersion >= Interpreter60Version (4)` (`BlockTransactions.scala:185-201`);
 /// every earlier block, and every stored box re-read (`ErgoBoxSerializer.parse`
 /// from the UTXO db), runs under the default context, activated 1 (`VersionContext
-/// .scala:58`). Live counterexample: mainnet block 545,684 (header version 2), tx[1]
-/// output[0] `cd07021a8e6f59fd4a` — header 0xcd = version 5 + size bit — is kept
+/// .scala:58`). Live counterexample: mainnet block 545,684 (header version 2), `tx[1]`
+/// `output[0]` `cd07021a8e6f59fd4a` — header 0xcd = version 5 + size bit — is kept
 /// as an `UnparsedErgoTree` and later spent by storage rent at 1,596,890 (header
 /// version 3); the previous static `version > 3` gate wedged a from-genesis sync
 /// on that block (#327). Spending such a box BY SCRIPT is a separate rule:
@@ -87,7 +87,7 @@ pub fn check_header_size_bit(tree: &ErgoTree) -> Result<(), ReadError> {
 /// tip's activated version (`ErgoMemPool.scala:259`, `ErgoNodeViewSynchronizer
 /// .scala:778`), so a future-version tree is refused at admission today.
 ///
-/// As with [`check_header_size_bit`], [`read_ergo_tree`] stays lenient (it wraps
+/// As with [`check_header_size_bit`], [`crate::ergo_tree::read_ergo_tree`] stays lenient (it wraps
 /// a future-version tree so the conformance hook and template-hash paths keep
 /// working); this box-script gate supplies the hard rejection at the consensus
 /// box-parse layer. Uses [`ReadError::HardReject`] so a nested `SBox`-constant
@@ -152,15 +152,14 @@ pub fn check_resolvable_methods(tree: &ErgoTree) -> Result<(), ReadError> {
 /// `ErgoTreeSerializer.scala:204-208`).
 ///
 /// **Gated on the SIZELESS case only**, exactly like [`check_resolvable_methods`]:
-/// when the size bit is set, [`read_ergo_tree`] already wraps a non-SigmaProp root
+/// when the size bit is set, [`crate::ergo_tree::read_ergo_tree`] already wraps a non-SigmaProp root
 /// as `UnparsedErgoTree` during the parse (Scala's `sizeOpt == Some` arm), so the
-/// wrapped tree's body is `Unparsed` and [`determinable_root_type`] returns `None`
+/// wrapped tree's body is `Unparsed` and `determinable_root_type` returns `None`
 /// here. The reachable case is therefore a sizeless v0 tree (rule 1012 already
-/// hard-rejects a sizeless `version != 0` tree). Our untyped IR can only judge a
-/// determinable root — an inline `Const` or a `ConstPlaceholder` resolving to its
-/// segregated constant's type; a bare Boolean/Int root (e.g. `000173`) is the
-/// reachable accept-invalid case. An `Op` root has no typechecker and would fail
-/// at evaluation instead.
+/// hard-rejects a sizeless `version != 0` tree). Conservative root inference
+/// covers constants/placeholders and known opcode/method result types. An
+/// unknown result stays undecidable here; this is not a complete typechecker
+/// or a proof that the expression will evaluate successfully.
 ///
 /// Enforced at the box-script readers (alongside [`check_header_size_bit`]) — the
 /// node's lenient codec accepts a box storing such a tree, never spends it (so the

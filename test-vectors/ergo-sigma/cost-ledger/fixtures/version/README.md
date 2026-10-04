@@ -1,7 +1,7 @@
 # VERSION cost fixtures
 
 Oracle: `scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala`,
-sigma-state / ergo-core / ergo-wallet **6.0.2**. Every expected record comes
+sigma-state / ergo-core / ergo-wallet **6.0.6**. Every expected record comes
 from `scripts/gen-cost-fixture.sh`. There are 17 JSON files and 177 Rust/JVM cases, plus one JVM-only case.
 
 `ergo-difftest/src/gen/version_cost.py` writes the tree bytes directly and

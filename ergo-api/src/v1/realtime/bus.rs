@@ -34,7 +34,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::mpsc;
 
@@ -109,7 +109,7 @@ struct Inner {
 /// The fan-out hub. `Arc`-shared between the feed task(s) and every socket.
 pub struct RealtimeBus {
     inner: Mutex<Inner>,
-    live_classes: HashSet<ChannelClass>,
+    live_classes: RwLock<HashSet<ChannelClass>>,
 }
 
 /// A live subscription handle held by one socket task. Dropping it deregisters
@@ -147,13 +147,18 @@ impl RealtimeBus {
                 subs: HashMap::new(),
                 backfill: VecDeque::with_capacity(RESUME_WINDOW.min(1024)),
             }),
-            live_classes,
+            live_classes: RwLock::new(live_classes),
         }
     }
 
-    /// A bus where only `blocks` has a live upstream (the coarse-ring
-    /// bridge). Every other class is `channel_unavailable` until its
-    /// node-internal fine-grained tap lands.
+    /// Seed the next cursor above recovered durable delivery state at boot.
+    /// Existing cursors never move backwards. Call before starting publishers.
+    pub fn advance_cursor_to(&self, next_seq: u64) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.next_seq = inner.next_seq.max(next_seq);
+    }
+
+    /// A bus where only blocks has a live upstream (the coarse-ring bridge).
     pub fn blocks_only() -> Self {
         let mut s = HashSet::new();
         s.insert(ChannelClass::Blocks);
@@ -176,7 +181,19 @@ impl RealtimeBus {
 
     /// Whether `class` has a live upstream feed on this bus.
     pub fn is_live(&self, class: ChannelClass) -> bool {
-        self.live_classes.contains(&class)
+        self.live_classes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&class)
+    }
+
+    /// Enable classes only after their real upstream observer is installed.
+    /// Merely mounting an indexer query API does not provide an event source.
+    pub fn enable_classes(&self, classes: impl IntoIterator<Item = ChannelClass>) {
+        self.live_classes
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(classes);
     }
 
     /// The current global cursor (`0` = nothing published yet).
@@ -188,8 +205,15 @@ impl RealtimeBus {
     /// Register a new subscriber (initially subscribed to nothing). The socket
     /// task fills the filter as the client subscribes.
     pub fn subscribe(self: &Arc<Self>) -> BusSubscription {
+        self.subscribe_with_filter(Arc::new(std::sync::RwLock::new(HashSet::new())))
+    }
+
+    /// Install an initialized filter before exposing the subscriber to publishers.
+    pub(crate) fn subscribe_with_filter(
+        self: &Arc<Self>,
+        filter: Arc<std::sync::RwLock<HashSet<String>>>,
+    ) -> BusSubscription {
         let (tx, rx) = mpsc::channel(SUB_QUEUE_CAP);
-        let filter = Arc::new(std::sync::RwLock::new(HashSet::new()));
         let lagged = Arc::new(AtomicBool::new(false));
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let id = g.next_sub_id;
@@ -215,11 +239,16 @@ impl RealtimeBus {
 
     /// Publish one event: assign the next global `seq`, retain it in the resume
     /// window, and fan it out to every matching subscriber under the
-    /// never-block drop policy. Returns the assigned `seq`.
+    /// never-block drop policy. Returns the assigned `seq`. If the u64 cursor
+    /// is exhausted, drops the event and returns the last assigned cursor.
     pub fn publish(&self, body: RealtimeEventBody) -> u64 {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let seq = g.next_seq;
-        g.next_seq += 1;
+        let Some(next_seq) = g.next_seq.checked_add(1) else {
+            tracing::error!("realtime cursor exhausted; event dropped");
+            return g.next_seq - 1;
+        };
+        g.next_seq = next_seq;
         let event = Arc::new(RealtimeEvent {
             seq,
             emitted_at_unix_ms: body.emitted_at_unix_ms,
@@ -408,12 +437,67 @@ mod tests {
     }
 
     #[test]
+    fn restored_cursor_is_monotonic_and_reports_missing_backfill() {
+        let bus = RealtimeBus::blocks_only();
+        bus.advance_cursor_to(18);
+        assert_eq!(bus.latest_seq(), 17);
+        let replay = bus.backfill(&keyset(&["blocks"]), 10, 100);
+        assert!(replay.gap);
+        assert!(replay.events.is_empty());
+        assert_eq!(bus.publish(blk(1)), 18);
+        bus.advance_cursor_to(4);
+        assert_eq!(bus.publish(blk(2)), 19);
+        let replay = bus.backfill(&keyset(&["blocks"]), 17, 100);
+        assert!(!replay.gap);
+        assert_eq!(
+            replay
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![18, 19]
+        );
+    }
+
+    #[test]
+    fn exhausted_cursor_drops_events_without_wrapping() {
+        let bus = RealtimeBus::blocks_only();
+        bus.advance_cursor_to(u64::MAX - 1);
+        assert_eq!(bus.publish(blk(1)), u64::MAX - 1);
+        assert_eq!(bus.publish(blk(2)), u64::MAX - 1);
+        assert_eq!(bus.latest_seq(), u64::MAX - 1);
+        assert_eq!(
+            bus.backfill(&keyset(&["blocks"]), u64::MAX - 2, 100)
+                .events
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn blocks_and_mempool_marks_mempool_live() {
         let bus = RealtimeBus::blocks_and_mempool();
         assert!(bus.is_live(ChannelClass::Blocks));
         assert!(bus.is_live(ChannelClass::Mempool));
         assert!(bus.is_live(ChannelClass::Peers));
         assert!(bus.is_live(ChannelClass::Tx));
+    }
+
+    #[test]
+    fn enabling_indexed_classes_updates_existing_bus_without_changing_cursor() {
+        let bus = RealtimeBus::blocks_and_mempool();
+        assert!(!bus.is_live(ChannelClass::Address));
+        assert!(!bus.is_live(ChannelClass::Box));
+        assert!(!bus.is_live(ChannelClass::Token));
+        bus.enable_classes([
+            ChannelClass::Address,
+            ChannelClass::Box,
+            ChannelClass::Token,
+        ]);
+        assert!(bus.is_live(ChannelClass::Address));
+        assert!(bus.is_live(ChannelClass::Box));
+        assert!(bus.is_live(ChannelClass::Token));
+        assert_eq!(bus.latest_seq(), 0);
     }
 
     #[tokio::test]

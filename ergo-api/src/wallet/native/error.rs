@@ -2,7 +2,7 @@
 //!
 //! One envelope `{reason, detail?}` (no numeric `error` — the HTTP status line
 //! carries it), mirroring the native submit error shape. This is a SEPARATE
-//! table from the Scala-compat [`crate::wallet::lifecycle::map_err`]: the two
+//! table from the Scala-compat `crate::wallet::lifecycle::map_err`: the two
 //! surfaces map the same [`WalletAdminError`] differently (Scala maps `Locked`
 //! → 400; native → 409). The native table must **not** be applied on the sign
 //! path (that path never produces `Locked`).
@@ -117,5 +117,22 @@ mod tests {
         .unwrap();
         assert!(body.get("detail").is_none());
         assert_eq!(body["reason"], "box_not_found");
+    }
+
+    #[test]
+    fn wallet_scan_invalidated_maps_to_conflict_with_recovery_detail() {
+        let (status, axum::Json(body)) = map_err(crate::wallet::WalletAdminError::ScanInvalidated);
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body = serde_json::to_value(body).unwrap();
+        assert_eq!(body["reason"], "scan_invalidated");
+        assert!(body["detail"].as_str().unwrap().contains("fromHeight=0"));
+    }
+
+    #[test]
+    fn rescan_preflight_unavailable_maps_to_conflict() {
+        let (status, _) = map_err(crate::wallet::WalletAdminError::RescanUnavailable(
+            "chain block-read history is unavailable before height 1".to_string(),
+        ));
+        assert_eq!(status, StatusCode::CONFLICT);
     }
 }

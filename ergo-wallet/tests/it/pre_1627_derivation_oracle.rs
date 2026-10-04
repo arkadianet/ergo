@@ -24,11 +24,11 @@ fn first_address(use_pre_1627: bool) -> String {
     let seed = m.to_seed("");
     let path = DerivationPath::eip3_first_address();
     let pk = if use_pre_1627 {
-        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed).unwrap();
+        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed[..]).unwrap();
         let leaf = master.derive_at_path(&path).unwrap();
         leaf.public_key().unwrap().compressed_bytes()
     } else {
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..]).unwrap();
         let leaf = master.derive_at_path(&path).unwrap();
         leaf.public_key().compressed_bytes()
     };
@@ -36,11 +36,15 @@ fn first_address(use_pre_1627: bool) -> String {
 }
 
 #[test]
-#[ignore = "pre-1627 expected address needs Scala extraction (ExtendedSecretKeySpec.scala:76) — algorithm port verified internally but not against external oracle"]
 fn pre_1627_full_address_matches_scala() {
     assert_eq!(
         first_address(true),
-        "9ewv8sxJ1jfr6j3WUSbGPMTVx3TZgcJKdnjKCbJWhiJp5U62uhP",
+        serde_json::from_str::<serde_json::Value>(include_str!(
+            "../../../test-vectors/wallet/scala_6_0_6.json"
+        ))
+        .unwrap()["pre1627Address"]
+            .as_str()
+            .unwrap(),
         "ExtendedSecretKeySpec.scala line 76",
     );
 }

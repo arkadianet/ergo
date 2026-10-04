@@ -1,6 +1,6 @@
 //! The action loop body — owned by the spawned task returned in
-//! [`super::RunHandle::loop_handle`]. Drives the four timers (dial,
-//! sync, mempool, memory), inbound event coalescing, API submission
+//! [`super::RunHandle::loop_handle`]. Drives the periodic timers (dial,
+//! sync, mempool, memory), pending mining deadlines, inbound event coalescing, API submission
 //! drain, and mining-request dispatch; runs the in-loop persist
 //! shutdown when the `shutdown_rx` arm fires.
 //!
@@ -22,8 +22,8 @@ use super::admission::{admit_api_transaction, route_mempool_actions};
 use super::events::handle_event_batch;
 use super::memory_sampler::sample_memory;
 use super::mining_dispatch::{
-    decide_mining_signal, handle_mining_request, signal_mining_engine, MiningProducerState,
-    MiningSignalIntervals, MiningTipSnapshot, MiningWiring,
+    decide_mining_signal, handle_mining_request, mining_signal_deadline, signal_mining_engine,
+    MiningProducerState, MiningSignalIntervals, MiningTipSnapshot, MiningWiring,
 };
 use super::peer_actions::{connect_to_address, flush_actions, try_dial_peers};
 use super::sync_tick::handle_sync_tick;
@@ -33,13 +33,27 @@ use super::{NodeError, NodeState};
 use ergo_mining::engine::BuildReason;
 use ergo_mining::handle::MiningHandle;
 
+/// Request wallet cancellation even if the action loop exits by unwinding.
 struct WalletShutdownOnDrop {
     session_id: u64,
 }
-
 impl Drop for WalletShutdownOnDrop {
     fn drop(&mut self) {
         crate::wallet_boot::request_rescan_shutdown_for(self.session_id);
+    }
+}
+
+fn reply_to_api_submission(state: &mut NodeState, req: SubmitRequest) {
+    let result = admit_api_transaction(state, &req.bytes, req.mode, Instant::now());
+    let _ = req.reply.send(result);
+}
+
+/// Park indefinitely while no mining work is pending. An armed deadline wakes
+/// the normal post-arm producer check without depending on mempool polling.
+async fn wait_for_mining_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -99,7 +113,7 @@ pub(super) async fn action_loop(
     }
 
     // --- Off-loop mining engine producer state ---
-    // After every state-mutating select arm we recompute the tip; on a tip
+    // After every select arm we recompute the tip; on an applied-parent
     // change we re-signal the engine (`Tip`), and while started-but-uncovered we
     // retry (`WalletReady`). On an unchanged tip whose mempool advanced,
     // a debounced `MempoolRefresh` re-signals with the same parent and a fresh
@@ -110,7 +124,7 @@ pub(super) async fn action_loop(
     // Throttle for the synced-but-uncovered recovery retry below: a build is
     // already in flight right after a tip signal, so we must NOT re-resolve the
     // reward key / re-snapshot the mempool on every post-arm pass until it
-    // publishes. Retry at most once per interval (≈ the sync-tick cadence),
+    // publishes. Retry at most once per interval through the mining deadline,
     // which both recovers promptly after a wallet unlock and keeps the loop
     // from doing redundant build-input resolution while a build is outstanding.
     const MINING_RECOVERY_RETRY: Duration = Duration::from_secs(1);
@@ -126,9 +140,15 @@ pub(super) async fn action_loop(
     // Set by the votes-changed arm; consumed in the post-arm mining block to
     // force a same-tip rebuild this iteration (so a vote change applies now).
     let mut mining_votes_dirty = false;
-    // Startup priming: publish the initial BestTip + (if the node is already
-    // nearly synced) the first BuildIntent, so an idle caught-up node serves a
-    // candidate without waiting for an unrelated state change.
+    // Set by the mining arm when a mined block that became the best header
+    // failed to apply and its parent's templates were withdrawn; taken by the
+    // post-arm mining block, which signals a same-tip rebuild so the miner
+    // gets fresh work without waiting for the recovery retry.
+    let mut mining_rebuild_requested = false;
+    let mut mining_deadline: Option<Instant> = None;
+    // Startup priming publishes the persisted BestTip. Normal online mining
+    // still waits for a freshly applied, recent block to open its startup
+    // latch; offline generation and an empty devnet have explicit exceptions.
     if let Some(wiring) = mining.as_ref() {
         let prev = mining_last_tip.best_full_id();
         mining_last_tip = signal_mining_engine(
@@ -138,10 +158,32 @@ pub(super) async fn action_loop(
             &prev,
             BuildReason::Startup,
         );
-        mining_last_recovery = Some(Instant::now());
+        mining_last_recovery = Some(tokio::time::Instant::now().into_std());
     }
 
     loop {
+        // Give queued control-plane work an explicit service opportunity before
+        // a ready peer batch. Dispatch at most one request from each queue per
+        // iteration; ordinary selection below still wakes immediately on a new
+        // request and shares progress with peer traffic and timers.
+        if !matches!(
+            shutdown_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ) {
+            shutdown_log!("[node] shutdown requested, exiting loop...");
+            break;
+        }
+        if let Ok(req) = submit_rx.try_recv() {
+            reply_to_api_submission(&mut state, req);
+        }
+        if let Ok(req) = mining_submit_rx.try_recv() {
+            mining_rebuild_requested |= handle_mining_request(
+                &mut state,
+                mining.as_ref().map(|m| &m.handle),
+                mining.as_ref().is_some_and(|m| m.offline_generation),
+                req,
+            );
+        }
         tokio::select! {
             biased;
             // Shutdown ordering matches the pre-refactor signal arms:
@@ -151,92 +193,102 @@ pub(super) async fn action_loop(
                 shutdown_log!("[node] shutdown requested, exiting loop...");
                 break;
             }
-            _ = sync_tick.tick() => {
-                handle_sync_tick(&mut state);
-            }
-            _ = dial_tick.tick() => {
-                try_dial_peers(&mut state);
-            }
-            Some(addr) = peer_connect_rx.recv() => {
-                connect_to_address(&mut state, addr);
-            }
-            Some(()) = votes_changed_rx.recv() => {
-                // Operator changed votes; coalesce any queued updates and force
-                // ONE same-tip rebuild below — each rebuild reads the latest
-                // shared target map, so extra queued notifications add nothing.
-                while votes_changed_rx.try_recv().is_ok() {}
-                mining_votes_dirty = true;
-            }
-            _ = mempool_tick.tick() => {
-                handle_mempool_tick(&mut state, mining.as_ref().map(|w| &w.handle));
-            }
-            Some(first) = event_rx.recv() => {
-                // INGEST COALESCE: drain additional queued events
-                // without yielding so consecutive header-Modifier
-                // messages from different peers can be folded into
-                // ONE `execute_all` call. The executor's batch path
-                // (rayon pre-validate + sequential finalize + one
-                // redb txn) amortizes its per-batch overhead over
-                // however many headers we hand it. With 60 peers
-                // each shipping ~400 IDs every RTT, several Modifier
-                // messages routinely queue while one is being
-                // processed; coalescing them saves N × per-batch
-                // overhead.
-                //
-                // Cap drain at MAX_COALESCE so the other timer arms
-                // (sync_tick, dial_tick, mempool_tick) aren't starved
-                // during high-throughput periods.
-                //
-                // **Outbound serving is unchanged.** This only
-                // affects how *we ingest* incoming Modifier messages
-                // from other peers; we still respond to inbound Inv /
-                // RequestModifier messages individually with the
-                // per-request semantics Scala expects.
-                const MAX_COALESCE: usize = 64;
-                let mut events = Vec::with_capacity(MAX_COALESCE);
-                events.push(first);
-                while events.len() < MAX_COALESCE {
-                    match event_rx.try_recv() {
-                        Ok(e) => events.push(e),
-                        Err(_) => break,
+            _ = async {
+                // Randomize all ordinary work while keeping shutdown priority
+                // in the outer select, even under a saturated peer channel.
+                tokio::select! {
+                    _ = sync_tick.tick() => {
+                        handle_sync_tick(&mut state);
+                    }
+                    _ = dial_tick.tick() => {
+                        try_dial_peers(&mut state);
+                    }
+                    Some(addr) = peer_connect_rx.recv() => {
+                        connect_to_address(&mut state, addr);
+                    }
+                    Some(()) = votes_changed_rx.recv() => {
+                        // Operator changed votes; coalesce any queued updates and force
+                        // ONE same-tip rebuild below — each rebuild reads the latest
+                        // shared target map, so extra queued notifications add nothing.
+                        while votes_changed_rx.try_recv().is_ok() {}
+                        mining_votes_dirty = true;
+                    }
+                    _ = mempool_tick.tick() => {
+                        handle_mempool_tick(&mut state, mining.as_ref().map(|w| &w.handle));
+                    }
+                    _ = wait_for_mining_deadline(mining_deadline) => {}
+                    Some(first) = event_rx.recv() => {
+                        // INGEST COALESCE: drain additional queued events
+                        // without yielding so consecutive header-Modifier
+                        // messages from different peers can be folded into
+                        // ONE `execute_all` call. The executor's batch path
+                        // (rayon pre-validate + sequential finalize + one
+                        // redb txn) amortizes its per-batch overhead over
+                        // however many headers we hand it. With 60 peers
+                        // each shipping ~400 IDs every RTT, several Modifier
+                        // messages routinely queue while one is being
+                        // processed; coalescing them saves N × per-batch
+                        // overhead.
+                        //
+                        // Cap drain at MAX_COALESCE so the other timer arms
+                        // (sync_tick, dial_tick, mempool_tick) aren't starved
+                        // during high-throughput periods.
+                        //
+                        // **Outbound serving is unchanged.** This only
+                        // affects how *we ingest* incoming Modifier messages
+                        // from other peers; we still respond to inbound Inv /
+                        // RequestModifier messages individually with the
+                        // per-request semantics Scala expects.
+                        const MAX_COALESCE: usize = 64;
+                        let mut events = Vec::with_capacity(MAX_COALESCE);
+                        events.push(first);
+                        while events.len() < MAX_COALESCE {
+                            match event_rx.try_recv() {
+                                Ok(e) => events.push(e),
+                                Err(_) => break,
+                            }
+                        }
+                        handle_event_batch(&mut state, events);
+                    }
+                    // API submissions cross from the axum task into the main
+                    // loop via this channel. Each request carries a oneshot
+                    // reply; ordinary channels share randomized selection,
+                    // preventing a perpetually ready peer queue from always winning.
+                    // A long handler can still delay every source.
+                    // The reply send may fail if the handler timed out and
+                    // dropped its oneshot — that's fine, the outcome is
+                    // still recorded in the mempool's anti-DoS state per
+                    // invariant #7.
+                    Some(req) = submit_rx.recv() => {
+                        reply_to_api_submission(&mut state, req);
+                    }
+                    // Mining requests (candidate fetch / solution submit).
+                    // One request is dispatched per selected iteration, sharing
+                    // randomized selection with peer and API traffic. Each request
+                    // is single-shot and replies through its own oneshot.
+                    //
+                    // When mining is disabled at startup, `mining_handle`
+                    // is `None` and `handle_mining_request` rejects with
+                    // `Unavailable`. The sender side of the channel is only
+                    // exposed through the `MiningBridge` (which is also
+                    // only constructed when enabled), so the disabled path
+                    // is unreachable in practice — the rejection is defense
+                    // in depth.
+                    Some(req) = mining_submit_rx.recv() => {
+                        mining_rebuild_requested |= handle_mining_request(
+                            &mut state,
+                            mining.as_ref().map(|m| &m.handle),
+                            mining.as_ref().is_some_and(|m| m.offline_generation),
+                            req,
+                        );
+                    }
+                    _ = mem_tick.tick() => {
+                        if let Some(path) = mem_csv_path.as_deref() {
+                            sample_memory(&state, path, &mut mem_csv_file);
+                        }
                     }
                 }
-                handle_event_batch(&mut state, events);
-            }
-            // API submissions cross from the axum task into the main
-            // loop via this channel. Each request carries a oneshot
-            // reply; we drain one per iteration to keep per-
-            // submission latency bounded by one tick of the loop.
-            // The reply send may fail if the handler timed out and
-            // dropped its oneshot — that's fine, the outcome is
-            // still recorded in the mempool's anti-DoS state per
-            // invariant #7.
-            Some(req) = submit_rx.recv() => {
-                let now = Instant::now();
-                let result = admit_api_transaction(&mut state, &req.bytes, req.mode, now);
-                let _ = req.reply.send(result);
-            }
-            // Mining requests (candidate fetch / solution submit).
-            // One request drained per iteration matches the
-            // submit_rx ordering: each request is single-shot and
-            // replies through its own oneshot, so back-to-back
-            // drains are still bounded by one tick of the loop.
-            //
-            // When mining is disabled at startup, `mining_handle`
-            // is `None` and `handle_mining_request` rejects with
-            // `Unavailable`. The sender side of the channel is only
-            // exposed through the `MiningBridge` (which is also
-            // only constructed when enabled), so the disabled path
-            // is unreachable in practice — the rejection is defense
-            // in depth.
-            Some(req) = mining_submit_rx.recv() => {
-                handle_mining_request(&mut state, mining.as_ref().map(|m| &m.handle), req);
-            }
-            _ = mem_tick.tick() => {
-                if let Some(path) = mem_csv_path.as_deref() {
-                    sample_memory(&state, path, &mut mem_csv_file);
-                }
-            }
+            } => {}
         }
 
         // Post-arm mining-engine signal. The `shutdown_rx` arm `break`s above
@@ -246,20 +298,25 @@ pub(super) async fn action_loop(
         // the select keeps the wiring in a single place rather than threaded
         // through events.rs / sync_tick.rs.
         if let Some(wiring) = mining.as_ref() {
-            let now = Instant::now();
+            let now = tokio::time::Instant::now().into_std();
             let tip_now = MiningTipSnapshot::capture(&state);
             let revision_now = state.mempool.revision();
             let has_cached = wiring.handle.cached_work_if_synced().is_some();
-            // Tip preempts recovery preempts refresh; recovery is throttled to
-            // `MINING_RECOVERY_RETRY`, refresh to the configured debounce. The
-            // precedence + gating is the pure `decide_mining_signal` (unit-
-            // tested in mining_dispatch.rs); this arm only carries out the
-            // chosen signal and advances the producer trackers.
+            // Tip preempts a requested rebuild, which preempts recovery, which
+            // preempts refresh; recovery is throttled to `MINING_RECOVERY_RETRY`,
+            // refresh to the configured debounce. The precedence + gating is the
+            // pure `decide_mining_signal` (unit-tested in mining_dispatch.rs);
+            // this arm only carries out the chosen signal and advances the
+            // producer trackers. A requested rebuild is taken here: the
+            // decision signals whenever one is requested (a solution is only
+            // accepted once mining has started), and any signal rebuilds on
+            // the current tip.
             let producer = MiningProducerState {
                 last_tip: mining_last_tip,
                 last_revision: mining_last_revision,
                 last_recovery: mining_last_recovery,
                 last_mempool_signal: mining_last_mempool_signal,
+                rebuild_requested: std::mem::take(&mut mining_rebuild_requested),
             };
             // A vote change forces a same-tip rebuild even when the tip/mempool
             // are unchanged. A tip/recovery/mempool signal (if any) takes its
@@ -284,12 +341,15 @@ pub(super) async fn action_loop(
                 mining_last_tip =
                     signal_mining_engine(&state, wiring, &mut mining_chain_seq, &prev, reason);
                 match reason {
-                    // A fresh build (tip change or recovery) already snapshots the
-                    // latest pool, so realign the refresh trackers to "current" —
-                    // don't immediately re-fire a same-parent refresh for the pool
-                    // we just captured — and reset the recovery clock so the build
-                    // gets a full interval to publish before any retry.
-                    BuildReason::Tip | BuildReason::WalletReady => {
+                    // A fresh build (tip change, a failed mined block's rebuild,
+                    // or recovery) already snapshots the latest pool, so realign
+                    // the refresh trackers to "current" — don't immediately
+                    // re-fire a same-parent refresh for the pool we just
+                    // captured — and reset the recovery clock so the build gets
+                    // a full interval to publish before any retry.
+                    BuildReason::Tip
+                    | BuildReason::WalletReady
+                    | BuildReason::SolvedBlockFailed => {
                         mining_last_revision = state.mempool.revision();
                         mining_last_mempool_signal = Some(now);
                         mining_last_recovery = Some(now);
@@ -305,7 +365,29 @@ pub(super) async fn action_loop(
                     // Startup is only used at the prime call above, never here.
                     BuildReason::Startup => {}
                 }
+            } else {
+                // Header-only transitions do not regenerate an unchanged
+                // applied parent's work, but must still be recorded so startup
+                // and future applied-tip comparisons use the latest observation.
+                mining_last_tip = tip_now;
             }
+            mining_deadline = mining_signal_deadline(
+                &MiningProducerState {
+                    last_tip: mining_last_tip,
+                    last_revision: mining_last_revision,
+                    last_recovery: mining_last_recovery,
+                    last_mempool_signal: mining_last_mempool_signal,
+                    rebuild_requested: false,
+                },
+                wiring.handle.best_tip().synced,
+                wiring.handle.cached_work_if_synced().is_some(),
+                state.mempool.revision(),
+                now,
+                MiningSignalIntervals {
+                    recovery: MINING_RECOVERY_RETRY,
+                    refresh_debounce: wiring.refresh_debounce,
+                },
+            );
         }
     }
 
@@ -471,13 +553,14 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
     // Three independent maintenance passes this tick:
     //  - recheck (A): full-pool recheck-and-evict on a tip change.
     //  - suspects (B): re-validate the off-loop build's flagged ids between blocks.
-    //  - drain: re-admit demoted/rolled-back txs from the revalidation
-    //    queue. Gated on the QUEUE being non-empty, NOT the pool — an epoch
-    //    `demote_all` empties the pool INTO the queue, so the drain must run with
-    //    `pool.size() == 0`.
+    //  - drain: continue bounded descendant eviction and re-admit demoted/
+    //    rolled-back txs. Either work queue triggers it between blocks. An
+    //    epoch `demote_all` empties the pool into the revalidation queue, so
+    //    the drain must also run with `pool.size() == 0`.
     let need_recheck = tip_changed && state.mempool.size() > 0;
     let need_suspects = !tip_changed && !suspects.is_empty();
-    let need_drain = state.mempool.revalidation_pending() > 0;
+    let need_drain =
+        state.mempool.revalidation_pending() > 0 || state.mempool.orphan_eviction_pending() > 0;
     if !(need_recheck || need_suspects || need_drain) {
         return;
     }
@@ -632,6 +715,150 @@ mod tests {
             TxSource::Api,
         );
         mempool.pool_mut().insert(entry).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mining_deadline_pending_pool_wakes_without_external_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&tmp.path().join("state.redb"));
+        let base = tokio::time::Instant::now().into_std();
+        let tip = MiningTipSnapshot::capture(&state);
+        let handle = MiningHandle::new(
+            [0x02; 33],
+            ergo_mining::emission_rules::MonetarySettings::mainnet(),
+            None,
+            ergo_crypto::difficulty::DifficultyParams::mainnet(),
+            ergo_validation::VotingSettings::mainnet(),
+        );
+        // Exercise refresh scheduling for a node that has already started;
+        // no block validation or candidate construction is involved here.
+        handle.set_best_tip(ergo_mining::engine::BestTip {
+            parent_id: tip.best_full_id(),
+            chain_seq: 0,
+            synced: true,
+        });
+        let (intent_tx, intent_rx) = tokio::sync::watch::channel(None);
+        let wiring = MiningWiring {
+            handle,
+            intent_tx,
+            refresh_debounce: Duration::from_millis(250),
+            block_interval_ms: 120_000,
+            offline_generation: false,
+        };
+        let mut prev = MiningProducerState {
+            last_tip: tip,
+            last_revision: 0,
+            last_recovery: Some(base),
+            last_mempool_signal: Some(base),
+            rebuild_requested: false,
+        };
+        let intervals = MiningSignalIntervals {
+            recovery: Duration::from_secs(1),
+            refresh_debounce: Duration::from_millis(250),
+        };
+        seed(&mut state.mempool, 1);
+        let deadline =
+            mining_signal_deadline(&prev, true, true, state.mempool.revision(), base, intervals);
+        let waiter = tokio::spawn(wait_for_mining_deadline(deadline));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        seed(&mut state.mempool, 2);
+        seed(&mut state.mempool, 3);
+        assert_eq!(
+            mining_signal_deadline(
+                &prev,
+                true,
+                true,
+                state.mempool.revision(),
+                tokio::time::Instant::now().into_std(),
+                intervals
+            ),
+            deadline
+        );
+        tokio::time::advance(Duration::from_millis(149)).await;
+        assert!(
+            !waiter.is_finished(),
+            "pending refresh must respect its interval"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        waiter.await.unwrap();
+        let now = tokio::time::Instant::now().into_std();
+        assert_eq!(
+            now,
+            base + intervals.refresh_debounce,
+            "no polling tick should be required"
+        );
+        let reason = decide_mining_signal(
+            &prev,
+            tip,
+            true,
+            true,
+            state.mempool.revision(),
+            now,
+            intervals,
+        )
+        .expect("deadline signals the pending refresh");
+        assert_eq!(reason, BuildReason::MempoolRefresh);
+        let mut chain_seq = 0;
+        signal_mining_engine(&state, &wiring, &mut chain_seq, &tip.best_full_id(), reason);
+        let intent = intent_rx
+            .borrow()
+            .clone()
+            .expect("refresh publishes an intent");
+        let mut ids: Vec<_> = intent.mempool.iter().map(|entry| entry.tx_id).collect();
+        ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        assert_eq!(
+            ids,
+            vec![dig(1), dig(2), dig(3)],
+            "intent captures the complete latest burst"
+        );
+        assert_eq!(intent.expected_parent, tip.best_full_id());
+        assert_eq!(
+            chain_seq, 0,
+            "same-parent refresh leaves the chain era unchanged"
+        );
+        prev.last_revision = state.mempool.revision();
+        prev.last_mempool_signal = Some(now);
+        assert_eq!(
+            mining_signal_deadline(&prev, true, true, state.mempool.revision(), now, intervals),
+            None,
+            "publishing the latest revision disarms the timer"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mining_deadline_first_mutation_after_quiet_interval_is_immediate() {
+        let base = tokio::time::Instant::now().into_std();
+        let tip = MiningTipSnapshot::for_test([1; 32], 100, [1; 32], 100);
+        let prev = MiningProducerState {
+            last_tip: tip,
+            last_revision: 5,
+            last_recovery: Some(base),
+            last_mempool_signal: Some(base),
+            rebuild_requested: false,
+        };
+        let intervals = MiningSignalIntervals {
+            recovery: Duration::from_secs(1),
+            refresh_debounce: Duration::from_millis(250),
+        };
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let now = tokio::time::Instant::now().into_std();
+        wait_for_mining_deadline(mining_signal_deadline(&prev, true, true, 6, now, intervals))
+            .await;
+        assert_eq!(tokio::time::Instant::now().into_std(), now);
+        assert_eq!(
+            decide_mining_signal(&prev, tip, true, true, 6, now, intervals),
+            Some(BuildReason::MempoolRefresh)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mining_deadline_disarmed_does_not_wake_or_spin() {
+        let waiter = tokio::spawn(wait_for_mining_deadline(None));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(86_400)).await;
+        assert!(!waiter.is_finished());
+        waiter.abort();
     }
 
     /// XC-1: when the tip-change diff is unrecoverable (a forward catch-up jump

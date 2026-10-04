@@ -145,7 +145,9 @@ pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
                     Ok(Err(e)) => e,
                     Err(join_err) => Box::new(join_err) as NodeError,
                 };
-                crate::wallet_boot::request_rescan_shutdown_for(handle.wallet_session_id);
+                if let Err(error) = handle.drain_wallet().await {
+                    tracing::error!(%error, "wallet cleanup failed after action-loop exit");
+                }
                 handle.drain_api_and_inbound().await;
                 if let Err(join_err) =
                     crate::wallet_boot::await_wallet_tasks(handle.wallet_session_id).await {
@@ -168,7 +170,9 @@ pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
                     Ok(Err(e)) => e,
                     Err(join_err) => Box::new(join_err) as NodeError,
                 };
-                crate::wallet_boot::request_rescan_shutdown_for(handle.wallet_session_id);
+                if let Err(error) = handle.drain_wallet().await {
+                    tracing::error!(%error, "wallet cleanup failed after action-loop exit");
+                }
                 handle.drain_api_and_inbound().await;
                 if let Err(join_err) =
                     crate::wallet_boot::await_wallet_tasks(handle.wallet_session_id).await {
@@ -343,6 +347,17 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         }
         launch_parameters.max_block_cost = cap as i32;
     }
+    info!(
+        state_redb_cache_bytes = config.redb_cache_budgets.state,
+        indexer_redb_cache_bytes = if config.indexer_config.enabled {
+            config.redb_cache_budgets.indexer
+        } else {
+            0
+        },
+        peers_redb_cache_bytes = config.redb_cache_budgets.peers,
+        "redb page-cache budgets; cache eviction metrics enabled",
+    );
+
     let is_mode_5 = crate::config::is_canonical_mode_5_combo(
         config.state_type,
         config.verify_transactions,
@@ -350,16 +365,18 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         config.utxo_bootstrap,
     );
     if is_mode_5 {
-        let store = ergo_state::DigestStateStore::open(
+        let mut store = ergo_state::DigestStateStore::open_with_redb_cache(
             &db_path,
             launch_parameters,
             config.chain_spec.voting,
             ergo_chain_spec::GenesisParams::for_network(config.chain_spec.network).state_digest,
+            config.redb_cache_budgets.state,
         )
         .map_err(|e| {
             report_boot_storage_failure(&db_path, "open_digest_state", &e);
             Box::new(e) as NodeError
         })?;
+        store.set_keep_versions(config.keep_versions);
         info!(
             path = %db_path.display(),
             state_type = config.state_type.as_str(),
@@ -389,16 +406,18 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     }
 
     let store_result = if config.wallet_mode == crate::config::WalletMode::Embedded {
-        StateStore::open_with_cache_launch_voting(
+        StateStore::open_with_cache_budgets_launch_voting(
             &db_path,
             cache_bytes,
+            config.redb_cache_budgets.state,
             launch_parameters,
             config.chain_spec.voting,
         )
     } else {
-        StateStore::open_with_cache_launch_voting_without_wallet(
+        StateStore::open_with_cache_budgets_launch_voting_without_wallet(
             &db_path,
             cache_bytes,
+            config.redb_cache_budgets.state,
             launch_parameters,
             config.chain_spec.voting,
         )
@@ -447,15 +466,6 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         state_type = config.state_type.as_str(),
         avl_arena_cache_mb = cache_bytes / (1024 * 1024),
         "opened store",
-    );
-    // Observability note: redb cache config is implicit in 2.6.3 — the
-    // `Database::builder()` call in `ergo-state::store` does not invoke
-    // `set_cache_size`, so each redb DB falls back to the library default
-    // (1 GiB per redb 2.6.3 `Builder::new`, ~90% read / ~10% write split).
-    // Log this honestly so operators don't read the AVL arena MB above as
-    // the total state-subsystem cache budget.
-    info!(
-        "redb cache: default/unset (1 GiB per DB, redb 2.6.3); cache_metrics feature disabled (evictions counter inactive)",
     );
     info!(
         height = store.height(),
@@ -716,7 +726,7 @@ async fn run_inner_with_backend(
     boot_sentinel: u32,
 ) -> Result<RunHandle, NodeError> {
     // Phase 1: peer manager + address book + known-peer seeding.
-    let (session_id, peer_manager) = peers::setup(&config);
+    let (session_id, peer_manager) = peers::setup(&config)?;
 
     // Phase 2: sync coordinator/executor, IBD/persist pipeline, indexer,
     // shadow validation, hydrate/recover, NiPoPoW resume classification.
@@ -909,6 +919,7 @@ async fn run_inner_with_backend(
         scaffold.read_state.clone(),
         scaffold.submit_bridge.clone(),
         sync.indexer_handle.clone(),
+        sync.indexer_event_observer.clone(),
         &mut mempool,
         wallet_store,
         mining_subsystem.bridge.clone(),
@@ -921,8 +932,12 @@ async fn run_inner_with_backend(
     let api_addr = api_bind.api_addr;
     let api_handle = api_bind.api_handle;
     let api_shutdown_tx = api_bind.api_shutdown_tx;
+    let api_services = api_bind.api_services;
     let live_wallet_hook = api_bind.live_wallet_hook;
     let wallet_session_id = api_bind.wallet_session_id;
+    let wallet_rescan = api_bind.wallet_rescan;
+    let wallet_cancel = api_bind.wallet_cancel;
+    let wallet_handle = api_bind.wallet_handle;
 
     // Inbound P2P listener (opt-in via `[peers] bind_addr`). Without it
     // the node runs outbound-only: peers we dialed feed us blocks/txs
@@ -1050,10 +1065,10 @@ async fn run_inner_with_backend(
         // authoritative gate — it matches the expression that determined whether
         // to enter the `if config.mining_config.enabled` arm.
         mining_enabled: mining_subsystem.handle.is_some(),
-        // Non-loopback `[api] bind` — only reachable with `public_bind =
-        // true` set (enforced at config load). See `NodeState::
-        // api_publicly_bound` for why this steers API-tx budget routing.
-        api_publicly_bound: config.api_bind.is_some_and(|addr| !addr.ip().is_loopback()),
+        mined_apply_failed_parent: None,
+        // Non-loopback bind or a declared loopback reverse proxy means API
+        // submissions are not trusted-local and must use the public budget.
+        api_publicly_bound: api_publicly_bound(config.api_bind, config.api_local_reverse_proxy),
         api_weight_function,
         recent_blocks_cache: None,
         network: config.chain_spec.network_params.address_prefix,
@@ -1152,10 +1167,16 @@ async fn run_inner_with_backend(
         shutdown_tx: Some(shutdown_tx),
         wallet_session_id,
         api_shutdown_tx,
+        api_services,
         loop_handle,
         api_handle,
+        wallet_rescan,
+        wallet_cancel,
+        wallet_handle,
         inbound_handle,
-        shadow_task_handle: sync.shadow_task_handle,
+        // Successful boot transfers the optional shadow future into its
+        // supervised RunHandle. Earlier errors drop an unstarted future.
+        shadow_task_handle: sync.shadow_future.map(tokio::spawn),
         indexer_cancel: sync.indexer_cancel,
         indexer_task_handle: sync.indexer_task_handle,
         anchor_builder_handle: Some(anchor_builder_handle),
@@ -1165,4 +1186,39 @@ async fn run_inner_with_backend(
         mining_engine_cancel_tx,
         shutdown_notify,
     })
+}
+
+/// API submissions share the public budget whenever a bind or declared
+/// reverse proxy exposes the API beyond trusted local tooling.
+fn api_publicly_bound(bind: Option<std::net::SocketAddr>, local_reverse_proxy: bool) -> bool {
+    local_reverse_proxy || bind.is_some_and(|addr| !addr.ip().is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::api_publicly_bound;
+
+    // ----- happy path -----
+
+    #[test]
+    fn api_publicly_bound_loopback_proxy_uses_public_budget() {
+        for bind in ["127.0.0.1:9099", "[::1]:9099"] {
+            let bind = Some(bind.parse().unwrap());
+            assert!(!api_publicly_bound(bind, false));
+            assert!(api_publicly_bound(bind, true));
+        }
+    }
+
+    #[test]
+    fn api_publicly_bound_remote_bind_uses_public_budget() {
+        let bind = Some("0.0.0.0:9099".parse().unwrap());
+        assert!(api_publicly_bound(bind, false));
+        assert!(api_publicly_bound(bind, true));
+    }
+
+    #[test]
+    fn api_publicly_bound_disabled_api_preserves_proxy_posture() {
+        assert!(!api_publicly_bound(None, false));
+        assert!(api_publicly_bound(None, true));
+    }
 }

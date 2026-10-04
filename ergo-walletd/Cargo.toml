@@ -3,6 +3,7 @@ name = "ergo-walletd"
 description = "Standalone watch-only Ergo wallet daemon."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
@@ -27,7 +28,6 @@ hyper-util          = { workspace = true }
 tower                = { workspace = true }
 clap                = { workspace = true, features = ["derive"] }
 hex                 = { workspace = true }
-libc                = { workspace = true }
 reqwest             = { workspace = true, features = ["blocking", "rustls-tls"] }
 serde               = { workspace = true, features = ["derive"] }
 serde_json          = { workspace = true }
@@ -36,6 +36,10 @@ tokio               = { workspace = true, features = ["rt-multi-thread", "macros
 toml                = { workspace = true }
 tracing             = { workspace = true }
 tracing-subscriber  = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Safe Unix permission-mask support; sockets are restricted at creation.
+rustix = { workspace = true, features = ["fs", "process"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -73,3 +77,6 @@ redb = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

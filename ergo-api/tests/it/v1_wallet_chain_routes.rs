@@ -337,6 +337,9 @@ fn app(chain: Option<Arc<dyn WalletChain>>) -> Router {
 
 fn production_app(chain: Option<Arc<dyn WalletChain>>, wallet_moved: Option<&str>) -> Router {
     let ctx = ServerCtx {
+        local_reverse_proxy: false,
+        services: Arc::new(ergo_api::ApiServices::new()),
+        script_config: Default::default(),
         read: Arc::new(ProductionRead),
         compat: None,
         submit: None,

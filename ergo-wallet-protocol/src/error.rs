@@ -2,6 +2,8 @@ use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WalletAdminError {
+    ShuttingDown,
+    ScanInvalidated,
     Uninitialized,
     Locked,
     InvalidMnemonic,
@@ -59,6 +61,8 @@ impl WalletErrorSurface {
     pub fn map(&self, error: &WalletAdminError) -> WalletErrorStatus {
         let reason = match self {
             Self::Scala => match error {
+                WalletAdminError::ShuttingDown => "shutting_down",
+                WalletAdminError::ScanInvalidated => "scan_invalidated",
                 WalletAdminError::Uninitialized => "wallet_uninitialized",
                 WalletAdminError::Locked => "wallet_locked",
                 WalletAdminError::InvalidMnemonic => "invalid_mnemonic",
@@ -87,6 +91,8 @@ impl WalletErrorSurface {
                 WalletAdminError::TxNotFound => "tx_not_found",
             },
             Self::NativeV1 => match error {
+                WalletAdminError::ShuttingDown => "shutting_down",
+                WalletAdminError::ScanInvalidated => "scan_invalidated",
                 WalletAdminError::Uninitialized => "wallet_uninitialized",
                 WalletAdminError::Locked => "wallet_locked",
                 WalletAdminError::InvalidMnemonic => "invalid_mnemonic",
@@ -117,11 +123,12 @@ impl WalletErrorSurface {
         };
         let detail = match (self, error) {
             (Self::Scala, _) => error.detail().map(ToOwned::to_owned),
-            (Self::NativeV1, WalletAdminError::Forbidden(_)) => None,
             (Self::NativeV1, _) => error.detail().map(ToOwned::to_owned),
         };
         let status = match self {
             Self::Scala => match error {
+                WalletAdminError::ShuttingDown => 503,
+                WalletAdminError::ScanInvalidated => 409,
                 WalletAdminError::WrongPassword => 401,
                 WalletAdminError::StaleChainTip(_) | WalletAdminError::RescanUnavailable(_) => 409,
                 WalletAdminError::Internal(_) => 500,
@@ -147,6 +154,8 @@ impl WalletErrorSurface {
                 | WalletAdminError::RescanUnavailable(_)
                 | WalletAdminError::WalletExists
                 | WalletAdminError::DerivationPathExists => 409,
+                WalletAdminError::ShuttingDown => 503,
+                WalletAdminError::ScanInvalidated => 409,
                 WalletAdminError::WrongPassword => 401,
                 WalletAdminError::Internal(_) => 500,
                 WalletAdminError::Forbidden(_) | WalletAdminError::SensitiveOpDisabled => 403,
@@ -196,6 +205,8 @@ impl WalletErrorSurface {
 impl WalletAdminError {
     pub fn reason(&self) -> &'static str {
         match self {
+            Self::ShuttingDown => "shutting_down",
+            Self::ScanInvalidated => "scan_invalidated",
             Self::Uninitialized => "wallet_uninitialized",
             Self::Locked => "wallet_locked",
             Self::InvalidMnemonic => "invalid_mnemonic",
@@ -227,6 +238,9 @@ impl WalletAdminError {
 
     pub fn detail(&self) -> Option<&str> {
         match self {
+            Self::ScanInvalidated => {
+                Some("wallet scan invalidated — run a full rescan (fromHeight=0)")
+            }
             Self::BadRequest(d)
             | Self::StaleChainTip(d)
             | Self::Internal(d)
@@ -244,6 +258,10 @@ impl WalletAdminError {
 impl fmt::Display for WalletAdminError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ShuttingDown => f.write_str("wallet shutting down"),
+            Self::ScanInvalidated => {
+                f.write_str("wallet scan invalidated — run a full rescan (fromHeight=0)")
+            }
             Self::Uninitialized => f.write_str("wallet uninitialized"),
             Self::Locked => f.write_str("wallet locked"),
             Self::InvalidMnemonic => f.write_str("invalid mnemonic"),
@@ -301,15 +319,18 @@ mod tests {
     }
 
     #[test]
-    fn native_mapping_owns_detail_without_forbidden_internal_text() {
+    fn native_mapping_preserves_bounded_error_details() {
         let error = WalletAdminError::Internal("db".to_string());
         let mapped = WalletErrorSurface::NativeV1.map(&error);
         assert_eq!(mapped.status, 500);
         assert_eq!(mapped.detail.as_deref(), Some("db"));
         let forbidden = WalletAdminError::Forbidden("private".to_string());
-        assert!(WalletErrorSurface::NativeV1
-            .map(&forbidden)
-            .detail
-            .is_none());
+        assert_eq!(
+            WalletErrorSurface::NativeV1
+                .map(&forbidden)
+                .detail
+                .as_deref(),
+            Some("private")
+        );
     }
 }

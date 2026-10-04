@@ -80,7 +80,7 @@ revision = output("git", "rev-parse", "HEAD")
 generator = "scripts/gen-cost-fixture.sh"
 now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 manifest = json.loads((root / "test-vectors/ergo-sigma/verify/manifest.json").read_text())
-manifest.update(scala_sigmastate="6.0.2", generator=f"{generator}@{revision}", date=now)
+manifest.update(scala_sigmastate="6.0.6", generator=f"{generator}@{revision}", date=now)
 manifest["rust"] = {"git_sha": revision, "toolchain": output("rustc", "--version"),
                     "features": ["ergo-sigma/cost-trace", "ergo-validation/test-helpers"]}
 manifest["tool"] = {"script": generator, "git_sha": revision,

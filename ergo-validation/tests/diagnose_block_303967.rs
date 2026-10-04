@@ -14,27 +14,27 @@
 //! the divergent regions (inputs/extensions, data inputs, token
 //! table, outputs).
 
+//!
+//! Run the capture diagnostic explicitly with `cargo test --locked
+//! -p ergo-validation --features diagnostics --test diagnose_block_303967
+//! -- --ignored --nocapture`. Missing captures fail this manual invocation.
+
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
 use ergo_rest_json::{decode_scala_transaction, ScalaTransaction};
 use ergo_ser::transaction::{bytes_to_sign, read_transaction, transaction_id, write_transaction};
 
 #[test]
+#[ignore = "manual diagnostic; requires Scala REST capture /tmp/block_303967_txs.json"]
 fn diff_per_tx_ids_for_block_303967() {
-    // Operator diagnostic: needs a REST capture at this path. Skip, rather than
-    // fail, when it is absent so feature-enabled CI runs stay green.
-    let raw = match std::fs::read_to_string("/tmp/block_303967_txs.json") {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("skipping: capture file /tmp/block_303967_txs.json absent");
-            return;
-        }
-        Err(error) => panic!("reading capture /tmp/block_303967_txs.json: {error}"),
-    };
+    let raw = std::fs::read_to_string("/tmp/block_303967_txs.json").expect(
+        "capture Scala /blocks/{blockId}/transactions into /tmp/block_303967_txs.json first",
+    );
     let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let txs_json = value["transactions"]
         .as_array()
         .expect("transactions array");
+    assert!(!txs_json.is_empty(), "capture has no transactions");
     eprintln!("block 303967: {} txs in JSON", txs_json.len());
 
     let mut mismatches: Vec<(usize, String, String)> = Vec::new();
@@ -133,17 +133,11 @@ fn diff_per_tx_ids_for_block_303967() {
 /// 4. Per-output ergoTree bytes from each output, to spot if
 ///    decode_scala_transaction is altering them.
 #[test]
+#[ignore = "manual diagnostic; requires Scala REST capture /tmp/block_303967_txs.json"]
 fn dump_culprit_tx1_bytes() {
-    // Operator diagnostic: needs a REST capture at this path. Skip, rather than
-    // fail, when it is absent so feature-enabled CI runs stay green.
-    let raw = match std::fs::read_to_string("/tmp/block_303967_txs.json") {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("skipping: capture file /tmp/block_303967_txs.json absent");
-            return;
-        }
-        Err(error) => panic!("reading capture /tmp/block_303967_txs.json: {error}"),
-    };
+    let raw = std::fs::read_to_string("/tmp/block_303967_txs.json").expect(
+        "capture Scala /blocks/{blockId}/transactions into /tmp/block_303967_txs.json first",
+    );
     let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let tx_json = &value["transactions"][1];
     let scala_id = tx_json["id"].as_str().unwrap();
@@ -231,9 +225,9 @@ fn dump_culprit_tx1_bytes() {
         eprintln!("  scala registers: {:?}", scala_regs);
         eprintln!(
             "  our   registers (count): {}",
-            out.additional_registers.registers.len()
+            out.additional_registers().registers.len()
         );
-        for (idx, reg_bytes) in out.additional_registers.registers.iter().enumerate() {
+        for (idx, reg_bytes) in out.additional_registers().registers.iter().enumerate() {
             eprintln!("    R{}: {:?}", 4 + idx, reg_bytes);
         }
     }

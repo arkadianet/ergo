@@ -35,6 +35,7 @@
 //! - The status gate fronts all four routes — `Syncing` / `Halted`
 //!   short-circuits before the handler runs.
 
+use ergo_indexer_types::IndexerReadError;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -593,6 +594,7 @@ fn p2pk_tree(pubkey: [u8; 33]) -> ErgoTree {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: Vec::new(),
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,
@@ -649,6 +651,9 @@ fn build_app_with_mempool(
             emission: None,
             emission_scripts: None,
             utxo_reads_supported: true,
+            local_reverse_proxy: false,
+            services: Arc::new(ergo_api::ApiServices::new()),
+            script_config: Default::default(),
         },
         None, // admin — tests don't exercise the shutdown endpoint
     )
@@ -868,99 +873,146 @@ impl IndexerQuery for StubIndexer {
         self.status.clone()
     }
 
-    fn box_by_id(&self, _: &BoxId) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_id(&self, _: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn box_by_global_index(&self, _: u64) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_global_index(&self, _: u64) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn boxes_by_global_range(&self, _: u64, _: u64) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-
-    fn tx_by_id(&self, _: &TxId) -> Option<IndexedTxDto> {
-        None
-    }
-    fn tx_by_global_index(&self, _: u64) -> Option<IndexedTxDto> {
-        None
-    }
-    fn txs_by_global_range(&self, _: u64, _: u64) -> Vec<IndexedTxDto> {
-        Vec::new()
+    fn boxes_by_global_range(
+        &self,
+        _: u64,
+        _: u64,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn address_balance(&self, _: &TreeHash) -> Option<BalanceDto> {
-        None
+    fn tx_by_id(&self, _: &TxId) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn address_txs_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedTxDto> {
-        Vec::new()
+    fn tx_by_global_index(&self, _: u64) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn address_boxes_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-    fn address_unspent_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-    fn address_total_txs(&self, _: &TreeHash) -> u64 {
-        0
-    }
-    fn address_total_boxes(&self, _: &TreeHash) -> u64 {
-        0
+    fn txs_by_global_range(&self, _: u64, _: u64) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn template_boxes_paged(&self, _: &TemplateHash, _: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn address_balance(&self, _: &TreeHash) -> Result<Option<BalanceDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn template_unspent_paged(&self, _: &TemplateHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn address_txs_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn template_total_boxes(&self, _: &TemplateHash) -> u64 {
-        0
+    fn address_boxes_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn address_unspent_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+    fn address_total_txs(&self, _: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
+    }
+    fn address_total_boxes(&self, _: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 
-    fn token_by_id(&self, id: &TokenId) -> Option<IndexedTokenDto> {
-        self.token.as_ref().filter(|t| &t.token_id == id).cloned()
+    fn template_boxes_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn tokens_by_ids(&self, ids: &[TokenId]) -> Vec<IndexedTokenDto> {
-        ids.iter().filter_map(|id| self.token_by_id(id)).collect()
+    fn template_unspent_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn token_boxes_paged(&self, id: &TokenId, p: Page) -> Vec<IndexedBoxDto> {
-        match &self.token_boxes {
-            Some((stored, boxes, _)) if stored == id => {
-                let lo = p.offset as usize;
-                let hi = lo.saturating_add(p.limit as usize).min(boxes.len());
-                if lo >= boxes.len() {
-                    Vec::new()
-                } else {
-                    boxes[lo..hi].to_vec()
+    fn template_total_boxes(&self, _: &TemplateHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
+    }
+
+    fn token_by_id(&self, id: &TokenId) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
+        Ok(self.token.as_ref().filter(|t| &t.token_id == id).cloned())
+    }
+    fn tokens_by_ids(&self, ids: &[TokenId]) -> Result<Vec<IndexedTokenDto>, IndexerReadError> {
+        Ok({
+            ids.iter()
+                .filter_map(|id| self.token_by_id(id).transpose())
+                .collect::<Result<Vec<_>, _>>()?
+        })
+    }
+    fn token_boxes_paged(
+        &self,
+        id: &TokenId,
+        p: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok({
+            match &self.token_boxes {
+                Some((stored, boxes, _)) if stored == id => {
+                    let lo = p.offset as usize;
+                    let hi = lo.saturating_add(p.limit as usize).min(boxes.len());
+                    if lo >= boxes.len() {
+                        Vec::new()
+                    } else {
+                        boxes[lo..hi].to_vec()
+                    }
                 }
+                _ => Vec::new(),
             }
-            _ => Vec::new(),
-        }
+        })
     }
-    fn token_unspent_paged(&self, id: &TokenId, p: Page, dir: SortDir) -> Vec<IndexedBoxDto> {
-        match &self.token_unspent {
-            Some((stored, boxes)) if stored == id => {
-                let mut sorted: Vec<IndexedErgoBox> = boxes.clone();
-                match dir {
-                    SortDir::Asc => sorted.sort_by_key(|b| b.global_index),
-                    SortDir::Desc => sorted.sort_by_key(|b| -b.global_index),
+    fn token_unspent_paged(
+        &self,
+        id: &TokenId,
+        p: Page,
+        dir: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok({
+            match &self.token_unspent {
+                Some((stored, boxes)) if stored == id => {
+                    let mut sorted: Vec<IndexedErgoBox> = boxes.clone();
+                    match dir {
+                        SortDir::Asc => sorted.sort_by_key(|b| b.global_index),
+                        SortDir::Desc => sorted.sort_by_key(|b| -b.global_index),
+                    }
+                    let lo = p.offset as usize;
+                    let hi = lo.saturating_add(p.limit as usize).min(sorted.len());
+                    if lo >= sorted.len() {
+                        Vec::new()
+                    } else {
+                        sorted[lo..hi].to_vec()
+                    }
                 }
-                let lo = p.offset as usize;
-                let hi = lo.saturating_add(p.limit as usize).min(sorted.len());
-                if lo >= sorted.len() {
-                    Vec::new()
-                } else {
-                    sorted[lo..hi].to_vec()
-                }
+                _ => Vec::new(),
             }
-            _ => Vec::new(),
-        }
+        })
     }
-    fn token_total_boxes(&self, id: &TokenId) -> u64 {
-        match &self.token_boxes {
-            Some((stored, _, total)) if stored == id => *total,
-            _ => 0,
-        }
+    fn token_total_boxes(&self, id: &TokenId) -> Result<u64, IndexerReadError> {
+        Ok({
+            match &self.token_boxes {
+                Some((stored, _, total)) if stored == id => *total,
+                _ => 0,
+            }
+        })
     }
 }
 

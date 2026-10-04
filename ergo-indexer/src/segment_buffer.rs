@@ -21,7 +21,7 @@
 //! - `append_box_entry` / `append_tx_entry` push a positive global
 //!   index onto the head and trigger one or more spills if the head
 //!   crosses the threshold.
-//! - `flip_box_segment_entry` walks the segment chain to flip the sign
+//! - `flip_box_segment_entry` searches ordered segment ranges to flip the sign
 //!   of a previously-appended entry on spend.
 //! - `pop_box_entry` / `pop_tx_entry` are the rollback inverses of
 //!   append, popping from the head and merging back the most recent
@@ -34,6 +34,7 @@
 //! `staged_spills` map and a `deleted_spills` set so the caller can
 //! persist all changes in a single redb pass at the end of the block.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -44,7 +45,7 @@ use tracing::warn;
 
 use crate::address::IndexedAddress;
 use crate::error::IndexerError;
-use crate::segment::{read_segment, Segment, SEGMENT_THRESHOLD};
+use crate::segment::{read_persisted_segment, Segment, SEGMENT_THRESHOLD};
 use crate::segment_id::{box_segment_id, tx_segment_id};
 
 /// Map keyed by spill segment id. The caller seeds this with the empty
@@ -55,6 +56,10 @@ pub(crate) type StagedSpills = HashMap<Digest32, Segment>;
 /// Set of spill segment ids that must be deleted from `SEGMENTS` at the
 /// end of a rollback (merge-back removes one spill per underflowed pop).
 pub(crate) type DeletedSpills = HashSet<Digest32>;
+
+#[cfg(test)]
+#[path = "segment_perf.rs"]
+mod perf;
 
 /// CUMULATIVE process-lifetime count of secondary-index (template / token)
 /// sign-flips SKIPPED because of a topology-drift gap — a `+gi` entry missing
@@ -137,13 +142,20 @@ pub(crate) fn append_box_entry(
     segment: &mut Segment,
     global_index: i64,
     staged_spills: &mut StagedSpills,
-) {
+) -> Result<(), IndexerError> {
     debug_assert!(
         global_index >= 0,
         "box global_index must be non-negative on append"
     );
     segment.boxes.push(global_index);
     while segment.boxes.len() > SEGMENT_THRESHOLD {
+        let next_count =
+            segment
+                .box_segment_count
+                .checked_add(1)
+                .ok_or(IndexerError::CounterRange {
+                    field: "box_segment_count",
+                })?;
         let drained: Vec<i64> = segment.boxes.drain(..SEGMENT_THRESHOLD).collect();
         let seg_id = box_segment_id(parent_id, segment.box_segment_count);
         staged_spills.insert(
@@ -155,8 +167,9 @@ pub(crate) fn append_box_entry(
                 tx_segment_count: 0,
             },
         );
-        segment.box_segment_count += 1;
+        segment.box_segment_count = next_count;
     }
+    Ok(())
 }
 
 /// Append `+tx_global_index` to the address's tx-segment head, spilling
@@ -167,10 +180,17 @@ pub(crate) fn append_tx_entry(
     addr: &mut IndexedAddress,
     tx_global_index: i64,
     staged_spills: &mut StagedSpills,
-) {
+) -> Result<(), IndexerError> {
     debug_assert!(tx_global_index >= 0, "tx global_index must be non-negative");
     addr.segment.txs.push(tx_global_index);
     while addr.segment.txs.len() > SEGMENT_THRESHOLD {
+        let next_count =
+            addr.segment
+                .tx_segment_count
+                .checked_add(1)
+                .ok_or(IndexerError::CounterRange {
+                    field: "tx_segment_count",
+                })?;
         let drained: Vec<i64> = addr.segment.txs.drain(..SEGMENT_THRESHOLD).collect();
         let seg_id = tx_segment_id(&addr.tree_hash, addr.segment.tx_segment_count);
         staged_spills.insert(
@@ -182,13 +202,14 @@ pub(crate) fn append_tx_entry(
                 tx_segment_count: 0,
             },
         );
-        addr.segment.tx_segment_count += 1;
+        addr.segment.tx_segment_count = next_count;
     }
+    Ok(())
 }
 
 /// Sign-flip the entry whose `abs(...) == global_index` from positive
-/// to negative (apply on spend). Walks the head buffer first, then the
-/// spill chain newest-first. Mirrors `Segment.findAndModBox`
+/// to negative (apply on spend). Checks the head buffer first, then searches
+/// ordered spill ranges, consuming duplicates newest-first. Mirrors `Segment.findAndModBox`
 /// (`Segment.scala:63-98`).
 ///
 /// `parent_id` keys the spill-id derivation; same value as the parent
@@ -247,7 +268,17 @@ fn flip_helper(
     segments_table: &Table<&[u8], &[u8]>,
     direction: FlipDirection,
 ) -> Result<(), IndexerError> {
-    let target = global_index.abs();
+    let target = global_index
+        .checked_abs()
+        .ok_or_else(|| IndexerError::SegmentTopologyError {
+            detail: "segment_buffer: global index cannot be i64::MIN".into(),
+        })?;
+    validate_box_order(&segment.boxes)?;
+    if segment.box_segment_count < 0 {
+        return Err(IndexerError::SegmentTopologyError {
+            detail: "segment_buffer: negative box segment count".into(),
+        });
+    }
     // Sign-aware match: Apply consumes the next +target entry, Rollback
     // consumes the next -target entry. Skipping opposite-sign entries
     // is what lets a box with duplicate token IDs in
@@ -266,7 +297,6 @@ fn flip_helper(
     // entry regardless of stored sign, and `-0` writes back as `0`. We
     // preserve that no-op-but-success behavior here so apply/rollback
     // never spuriously errors on the genesis box.
-    let matches = |e: &i64| e.abs() == target && (target == 0 || entry_sign_matches(*e, direction));
     // Also track abs-only matches so we can distinguish "no entry at all"
     // from "entry exists but every copy is already in the requested sign
     // direction". The two indicate different kinds of corruption — one
@@ -274,27 +304,66 @@ fn flip_helper(
     // double-flip (an Apply ran for the same target without a Rollback
     // between them). Surfacing them separately keeps the post-mortem
     // signal sharp on reorg paths.
-    let abs_match = |e: &i64| e.abs() == target;
-
-    let mut saw_opposite_sign = false;
-
-    if let Some(pos) = segment.boxes.iter().position(matches) {
+    let (head_pos, mut saw_opposite_sign) = flip_position(&segment.boxes, target, direction);
+    if let Some(pos) = head_pos {
         segment.boxes[pos] = -segment.boxes[pos];
         return Ok(());
     }
-    if segment.boxes.iter().any(abs_match) {
-        saw_opposite_sign = true;
+
+    // Global box numbers are append-ordered; spending changes only their
+    // signs. Find the newest spill whose first number is <= target. Starting
+    // at the newest match preserves the previous duplicate-consumption order.
+    // See Scala Segment.findAndModBox, but retain our sign-aware semantics.
+    let mut low = 0;
+    let mut high = segment.box_segment_count;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let spill = inspect_spill(
+            box_segment_id(parent_id, mid),
+            staged_spills,
+            segments_table,
+        )?;
+        validate_box_spill(&spill)?;
+        if spill.boxes[0].abs() <= target {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
     }
 
-    for seg_num in (0..segment.box_segment_count).rev() {
-        let seg_id = box_segment_id(parent_id, seg_num);
-        let spill = load_spill_for_mutation(seg_id, staged_spills, segments_table)?;
-        if let Some(pos) = spill.boxes.iter().position(matches) {
-            spill.boxes[pos] = -spill.boxes[pos];
+    // Duplicated token IDs can put the SAME box number in adjacent spills.
+    // Search older equal-number boundaries only if all matching entries in
+    // the newer spill already have the requested sign. Unrelated history is
+    // never scanned or staged for writing.
+    while low > 0 {
+        low -= 1;
+        let seg_id = box_segment_id(parent_id, low);
+        // Inspection must not mark an unchanged row for writing. Borrow
+        // already-staged data; own a disk read only until it is needed.
+        let spill = inspect_spill(seg_id, staged_spills, segments_table)?;
+        validate_box_spill(&spill)?;
+        if spill.boxes.last().expect("validated spill").abs() < target {
+            break;
+        }
+        let (pos, has_target) = flip_position(&spill.boxes, target, direction);
+        if let Some(pos) = pos {
+            match spill {
+                Cow::Borrowed(_) => {
+                    let spill = staged_spills
+                        .get_mut(&seg_id)
+                        .expect("inspected staged row");
+                    spill.boxes[pos] = -spill.boxes[pos];
+                }
+                Cow::Owned(mut spill) => {
+                    spill.boxes[pos] = -spill.boxes[pos];
+                    staged_spills.insert(seg_id, spill);
+                }
+            }
             return Ok(());
         }
-        if !saw_opposite_sign && spill.boxes.iter().any(abs_match) {
-            saw_opposite_sign = true;
+        saw_opposite_sign |= has_target;
+        if spill.boxes[0].abs() < target {
+            break;
         }
     }
 
@@ -330,6 +399,48 @@ fn flip_helper(
             ),
         })
     }
+}
+
+/// Binary searches assume unsigned global-index ordering. Reject malformed
+/// rows we inspect rather than misreporting corruption as a repairable gap.
+fn validate_box_order(boxes: &[i64]) -> Result<(), IndexerError> {
+    if boxes.contains(&i64::MIN)
+        || boxes
+            .windows(2)
+            .any(|pair| pair[0].unsigned_abs() > pair[1].unsigned_abs())
+    {
+        return Err(IndexerError::SegmentTopologyError {
+            detail: "segment_buffer: box numbers are invalid or out of order".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_box_spill(spill: &Segment) -> Result<(), IndexerError> {
+    if spill.boxes.len() != SEGMENT_THRESHOLD {
+        return Err(IndexerError::SegmentTopologyError {
+            detail: format!(
+                "segment_buffer: expected {SEGMENT_THRESHOLD} box entries in spill, got {}",
+                spill.boxes.len()
+            ),
+        });
+    }
+    validate_box_order(&spill.boxes)
+}
+
+/// Locate the first entry with the required sign within the equal-number
+/// range. Returning abs-presence separately preserves the double-flip error.
+fn flip_position(boxes: &[i64], target: i64, direction: FlipDirection) -> (Option<usize>, bool) {
+    let start = boxes.partition_point(|entry| entry.unsigned_abs() < target as u64);
+    let has_target = boxes
+        .get(start)
+        .is_some_and(|entry| entry.unsigned_abs() == target as u64);
+    let pos = boxes[start..]
+        .iter()
+        .take_while(|entry| entry.unsigned_abs() == target as u64)
+        .position(|entry| target == 0 || entry_sign_matches(*entry, direction))
+        .map(|offset| start + offset);
+    (pos, has_target)
 }
 
 fn entry_sign_matches(entry: i64, direction: FlipDirection) -> bool {
@@ -416,17 +527,16 @@ pub(crate) fn pop_tx_entry(
         })
 }
 
-/// Lazy-load helper for sign-flip: returns a mutable reference to the
-/// staged copy of the spill, loading from disk on first touch.
-fn load_spill_for_mutation<'a>(
+/// Read a spill without staging an unchanged row. A row already modified
+/// in this block wins over its persisted version and needs no clone.
+fn inspect_spill<'a>(
     seg_id: Digest32,
-    staged_spills: &'a mut StagedSpills,
+    staged_spills: &'a StagedSpills,
     segments_table: &Table<&[u8], &[u8]>,
-) -> Result<&'a mut Segment, IndexerError> {
-    use std::collections::hash_map::Entry;
-    match staged_spills.entry(seg_id) {
-        Entry::Occupied(o) => Ok(o.into_mut()),
-        Entry::Vacant(v) => {
+) -> Result<Cow<'a, Segment>, IndexerError> {
+    match staged_spills.get(&seg_id) {
+        Some(spill) => Ok(Cow::Borrowed(spill)),
+        None => {
             let loaded = read_spill_from_table(segments_table, &seg_id)?.ok_or_else(|| {
                 IndexerError::SegmentTopologyError {
                     detail: format!(
@@ -435,7 +545,7 @@ fn load_spill_for_mutation<'a>(
                     ),
                 }
             })?;
-            Ok(v.insert(loaded))
+            Ok(Cow::Owned(loaded))
         }
     }
 }
@@ -464,12 +574,14 @@ fn read_spill_from_table(
     segments_table: &Table<&[u8], &[u8]>,
     seg_id: &Digest32,
 ) -> Result<Option<Segment>, IndexerError> {
+    #[cfg(test)]
+    perf::record_spill_read();
     let Some(guard) = segments_table.get(seg_id.as_bytes().as_slice())? else {
         return Ok(None);
     };
     let bytes = guard.value();
     let mut r = VlqReader::new(bytes);
-    let seg = read_segment(&mut r).map_err(|source| IndexerError::DbDecode {
+    let seg = read_persisted_segment(&mut r).map_err(|source| IndexerError::DbDecode {
         context: "segment",
         source,
     })?;
@@ -597,7 +709,7 @@ mod tests {
         let mut addr = fresh_addr(0x01);
         let mut staged = StagedSpills::new();
         for i in 0..100 {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i as i64, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i as i64, &mut staged).unwrap();
         }
         assert_eq!(addr.segment.boxes.len(), 100);
         assert_eq!(addr.segment.box_segment_count, 0);
@@ -609,7 +721,7 @@ mod tests {
         let mut addr = fresh_addr(0x02);
         let mut staged = StagedSpills::new();
         for i in 0..SEGMENT_THRESHOLD as i64 {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         assert_eq!(addr.segment.boxes.len(), SEGMENT_THRESHOLD);
         assert_eq!(addr.segment.box_segment_count, 0);
@@ -621,7 +733,7 @@ mod tests {
         let mut addr = fresh_addr(0x03);
         let mut staged = StagedSpills::new();
         for i in 0..(SEGMENT_THRESHOLD as i64 + 1) {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         // Head retains the newest one; spill 0 carries 0..512.
         assert_eq!(addr.segment.boxes, vec![SEGMENT_THRESHOLD as i64]);
@@ -641,7 +753,7 @@ mod tests {
         // at 1025 (drain 512, head=[1024]).
         let total = SEGMENT_THRESHOLD as i64 * 2 + 1;
         for i in 0..total {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         assert_eq!(addr.segment.box_segment_count, 2);
         assert_eq!(addr.segment.boxes, vec![total - 1]);
@@ -660,7 +772,7 @@ mod tests {
         let mut addr = fresh_addr(0x05);
         let mut staged = StagedSpills::new();
         for i in 0..(SEGMENT_THRESHOLD as i64 + 1) {
-            append_tx_entry(&mut addr, i, &mut staged);
+            append_tx_entry(&mut addr, i, &mut staged).unwrap();
         }
         let tx_seg_id = tx_segment_id(&addr.tree_hash, 0);
         let box_seg_id = box_segment_id(&addr.tree_hash, 0);
@@ -682,7 +794,7 @@ mod tests {
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
         for i in 0..50_i64 {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         for i in (0..50_i64).rev() {
             let popped = pop_box_entry(
@@ -710,7 +822,7 @@ mod tests {
 
         // 513 appends: spill 0 holds 0..512, head holds [512].
         for i in 0..(SEGMENT_THRESHOLD as i64 + 1) {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         // Pop newest first.
         let popped = pop_box_entry(
@@ -749,7 +861,7 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged).unwrap();
         flip_box_segment_entry(
             &addr.tree_hash,
             &mut addr.segment,
@@ -781,7 +893,7 @@ mod tests {
 
         // Push 513 entries; spill 0 holds 0..512.
         for i in 0..(SEGMENT_THRESHOLD as i64 + 1) {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         // Flip an entry that lives in the spill (not the head).
         flip_box_segment_entry(
@@ -810,7 +922,7 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 7, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 7, &mut staged).unwrap();
         flip_box_segment_entry(
             &addr.tree_hash,
             &mut addr.segment,
@@ -845,7 +957,7 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 7, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 7, &mut staged).unwrap();
         let err = unflip_box_segment_entry(
             &addr.tree_hash,
             &mut addr.segment,
@@ -878,8 +990,8 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged);
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged).unwrap();
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged).unwrap();
         assert_eq!(addr.segment.boxes, vec![42, 42]);
 
         flip_box_segment_entry(
@@ -953,7 +1065,7 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 0, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 0, &mut staged).unwrap();
         flip_box_segment_entry(
             &addr.tree_hash,
             &mut addr.segment,
@@ -984,7 +1096,7 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 1, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 1, &mut staged).unwrap();
         let err = flip_box_segment_entry(
             &addr.tree_hash,
             &mut addr.segment,
@@ -1017,6 +1129,48 @@ mod tests {
     /// trailing-bytes guard the public `store::segment::read_spill_in`
     /// reader uses. Without it a malformed spill row would be silently
     /// normalised by mutation.
+    /// Apply and rollback load stored spills here; a row over 512 entries is
+    /// corruption that must halt rather than be mutated and rewritten.
+    #[test]
+    fn read_spill_from_table_refuses_rows_over_the_threshold() {
+        use crate::segment::write_segment;
+        use crate::store::tables::SEGMENTS;
+        use crate::IndexerError;
+        use ergo_primitives::reader::ReadError;
+        use ergo_primitives::writer::VlqWriter;
+        use redb::Database;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = Database::create(tmp.path().join("spill_bound.redb")).unwrap();
+        let seg_id = Digest32::from_bytes([0x78; 32]);
+        let mut w = VlqWriter::new();
+        write_segment(
+            &mut w,
+            &Segment {
+                txs: vec![],
+                boxes: (0..=SEGMENT_THRESHOLD as i64).collect(),
+                box_segment_count: 0,
+                tx_segment_count: 0,
+            },
+        );
+        let wtxn = db.begin_write().unwrap();
+        let mut table = wtxn.open_table(SEGMENTS).unwrap();
+        table
+            .insert(seg_id.as_bytes().as_slice(), w.result().as_slice())
+            .unwrap();
+        let result = read_spill_from_table(&table, &seg_id);
+        assert!(
+            matches!(
+                &result,
+                Err(IndexerError::DbDecode {
+                    source: ReadError::InvalidData(message),
+                    ..
+                }) if message.contains("exceeds 512")
+            ),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn read_spill_from_table_rejects_trailing_bytes() {
         use crate::segment::write_segment;

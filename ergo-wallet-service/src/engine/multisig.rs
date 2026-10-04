@@ -393,6 +393,7 @@ impl WalletEngine {
         &self,
         request: GenerateCommitmentsRequest,
     ) -> Result<GenerateCommitmentsResponse, WalletAdminError> {
+        self.require_valid_scan()?;
         super::multisig::generate_commitments_impl(
             &request,
             &self.storage,
@@ -405,6 +406,7 @@ impl WalletEngine {
         &self,
         request: HintExtractionRequest,
     ) -> Result<HintExtractionResponse, WalletAdminError> {
+        self.require_valid_scan()?;
         super::multisig::extract_hints_impl(&request, &self.storage, self.chain.as_ref())
     }
 }

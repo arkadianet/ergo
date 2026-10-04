@@ -2,7 +2,9 @@
 //! header and determines when a full block can be assembled.
 //!
 //! Per P2P protocol spec Section 9:
-//! - A full block in UTXO mode requires: Header + BlockTransactions + Extension
+//! - Completion requires transactions + extension and, when the caller
+//!   requires them for block application, ADProofs. Production UTXO and digest
+//!   backends both consume shipped ADProofs.
 //! - Sections are keyed by their computed modifier_id (not header_id)
 //! - Section ID = blake2b256_prefixed(type_id, header_id, section_digest)
 //! - Duplicate sections for the same modifier_id are ignored
@@ -33,13 +35,13 @@ pub struct AssemblyTracker {
 }
 
 struct SectionState {
+    expected: ExpectedSections,
     has_transactions: bool,
     has_extension: bool,
     has_ad_proofs: bool,
-    /// Digest-verifier (Mode 5) block application needs the ADProofs section to
-    /// verify the UTXO-set transition, so completion must wait for it. A UTXO
-    /// node stores the set itself and needs only transactions + extension, so
-    /// this is `false` and `has_ad_proofs` never gates completion.
+    /// Whether completion waits for ADProofs as well as transactions and
+    /// extension. Production UTXO and digest backends both consume them;
+    /// callers can opt out only when their application path does not.
     requires_ad_proofs: bool,
 }
 
@@ -82,6 +84,7 @@ impl AssemblyTracker {
         self.headers.insert(
             hid,
             SectionState {
+                expected,
                 has_transactions: false,
                 has_extension: false,
                 has_ad_proofs: false,
@@ -128,8 +131,11 @@ impl AssemblyTracker {
     /// Remove tracking for a header (after block assembled and applied).
     /// Also cleans up the reverse index.
     pub fn remove(&mut self, header_id: &[u8; 32]) {
-        self.headers.remove(header_id);
-        self.section_index.retain(|_, (_, hid)| hid != header_id);
+        if let Some(state) = self.headers.remove(header_id) {
+            self.section_index.remove(&state.expected.transactions_id);
+            self.section_index.remove(&state.expected.extension_id);
+            self.section_index.remove(&state.expected.ad_proofs_id);
+        }
     }
 
     /// Number of headers being tracked.
@@ -145,16 +151,12 @@ impl AssemblyTracker {
     /// Get the expected section IDs for a header (type_id, section_id pairs).
     /// Returns None if the header isn't tracked.
     pub fn expected_section_ids(&self, header_id: &[u8; 32]) -> Option<Vec<(u8, [u8; 32])>> {
-        if !self.headers.contains_key(header_id) {
-            return None;
-        }
-        let mut result = Vec::new();
-        for (section_id, (type_id, hid)) in &self.section_index {
-            if hid == header_id {
-                result.push((*type_id, *section_id));
-            }
-        }
-        Some(result)
+        let expected = &self.headers.get(header_id)?.expected;
+        Some(vec![
+            (TYPE_BLOCK_TRANSACTIONS, expected.transactions_id),
+            (TYPE_EXTENSION, expected.extension_id),
+            (TYPE_AD_PROOFS, expected.ad_proofs_id),
+        ])
     }
 }
 

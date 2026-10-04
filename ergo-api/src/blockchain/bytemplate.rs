@@ -46,8 +46,18 @@ pub async fn boxes_by_template_hash_handler(
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let boxes = state.indexer.template_boxes_paged(&template_hash, page);
-    let total = state.indexer.template_total_boxes(&template_hash) as i64;
+    let boxes = match state.indexer.template_boxes_paged(&template_hash, page) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
+    let total = match state.indexer.template_total_boxes(&template_hash) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    } as i64;
     let items = match boxes
         .iter()
         .map(|b| build_indexed_box_response(state.network, b))
@@ -106,9 +116,15 @@ fn render_unspent_by_template_hash(
     };
     let include_unconfirmed = q.include_unconfirmed.unwrap_or(false);
     let exclude_mempool_spent = q.exclude_mempool_spent.unwrap_or(false);
-    let mut confirmed = state
+    let mut confirmed = match state
         .indexer
-        .template_unspent_paged(template_hash, page, dir);
+        .template_unspent_paged(template_hash, page, dir)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
     if exclude_mempool_spent {
         // Mirror `Segment.scala:265` — `spentBoxesIdsInMempool` filter is
         // route-wide, applied to confirmed and unconfirmed slices alike.
@@ -142,10 +158,9 @@ fn render_unspent_by_template_hash(
 /// `IndexedErgoBox(0, None, None, None, _, 0)` sentinel as
 /// `pool_unspent_for_tree`.
 ///
-/// Soft-fork-wrapped trees (`TemplateHashError::Unparseable`) are
-/// skipped — Scala's `IndexedContractTemplate` only records template
-/// hashes for parseable trees, so a wrapped pool output can never match
-/// any queried template anyway.
+/// Soft-fork-wrapped trees match under the same Scala-cached template the
+/// indexer records for them (`IndexedContractTemplate.filterMempool` also
+/// applies `hashTreeTemplate`); only bytes that fail to parse are skipped.
 pub(crate) fn pool_unspent_for_template(
     mempool: &dyn MempoolView,
     template_hash: &TemplateHash,

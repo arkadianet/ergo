@@ -741,7 +741,7 @@ pub fn get_method(receiver: &SType, name: &str, tree_version: u8) -> Option<SMet
 /// The deviation is inert in practice because the types that gain containers in V6
 /// (`SUnsignedBigInt`, `SHeader` V6 additions) are unconstructable in pre-V6 trees
 /// — the typer never reaches a method-lookup for them at `tree_version < 3`.
-/// Ledger: `lib.rs` § "Known M2 deviations" D-T10.
+/// Ledger: `compiler-design-ledger.md` § "Known M2 deviations" D-T10.
 pub fn container_exists(receiver: &SType) -> bool {
     container_static_methods(receiver).is_some()
 }
@@ -772,7 +772,7 @@ pub fn global_method(name: &str, tree_version: u8) -> Option<SMethodDesc> {
 /// to the caller — the typer raises it as a `TypeMismatch`.  The stricter behaviour
 /// is correct for a frontend type-checker; the Scala leniency exists to preserve
 /// IR round-trips through the evaluator.
-/// Ledger: `lib.rs` § "Known M2 deviations" D-T9.
+/// Ledger: `compiler-design-ledger.md` § "Known M2 deviations" D-T9.
 pub fn specialize_for(
     desc: &SMethodDesc,
     obj_tpe: &SType,

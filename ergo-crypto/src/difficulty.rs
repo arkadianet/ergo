@@ -45,13 +45,17 @@ pub fn epoch_length_for_height(height: u32, config: &DifficultyParams) -> u32 {
 /// (child_height == 844_673 on mainnet) correctly takes the post-EIP-37
 /// epoch length.
 pub fn is_recalculation_height(child_height: u32, config: &DifficultyParams) -> bool {
-    let parent_height = child_height.saturating_sub(1);
+    let Some(parent_height) = child_height.checked_sub(1) else {
+        return false;
+    };
     let epoch_len = epoch_length_for_height(child_height, config);
-    parent_height.is_multiple_of(epoch_len)
+    epoch_len != 0 && parent_height.is_multiple_of(epoch_len)
 }
 
 /// Heights of previous headers needed for difficulty recalculation.
-/// Matches Scala `previousHeightsRequiredForRecalculation`.
+/// Matches Scala `previousHeightsRequiredForRecalculation` on valid inputs.
+/// Height zero or epoch length zero returns no usable heights; out-of-range
+/// older offsets are omitted using checked arithmetic.
 ///
 /// The `epoch_length == 1` arm below is the Scala-mirror degenerate-case
 /// path: when epoch length collapses to 1, every parent height is a
@@ -61,16 +65,23 @@ pub fn is_recalculation_height(child_height: u32, config: &DifficultyParams) -> 
 /// effectively unreachable in production but kept for byte-faithful
 /// parity with the Scala `previousHeightsRequiredForRecalculation` shape.
 pub fn previous_heights_for_recalculation(height: u32, epoch_length: u32) -> Vec<u32> {
-    let parent_height = height - 1;
+    let Some(parent_height) = height.checked_sub(1) else {
+        return Vec::new();
+    };
+    if epoch_length == 0 {
+        return Vec::new();
+    }
     if parent_height.is_multiple_of(epoch_length) && epoch_length > 1 {
         // Mainnet path: epoch_length >= 128, parent_height at an epoch boundary.
         let mut heights: Vec<u32> = (0..=USE_LAST_EPOCHS)
-            .filter_map(|i| parent_height.checked_sub(i * epoch_length))
+            .filter_map(|i| {
+                i.checked_mul(epoch_length)
+                    .and_then(|offset| parent_height.checked_sub(offset))
+            })
             .collect();
         heights.sort();
         heights
-    } else if parent_height.is_multiple_of(epoch_length)
-        && parent_height > epoch_length * USE_LAST_EPOCHS
+    } else if parent_height.is_multiple_of(epoch_length) && height > epoch_length * USE_LAST_EPOCHS
     {
         // Scala-parity branch for epoch_length <= 1 (degenerate; never on mainnet).
         let mut heights: Vec<u32> = (0..=USE_LAST_EPOCHS)
@@ -248,13 +259,20 @@ fn interpolate(data: &[(u32, BigUint)], epoch_length: u32) -> BigUint {
 ///
 /// Reads epoch length, EIP-37 activation, and v2 activation from the
 /// supplied [`DifficultyParams`]. Enforces `parent.height + 1 == child_height`
-/// and the EIP-37 window-size precondition.
+/// and the EIP-37 window-size precondition. Retarget windows must have
+/// increasing heights/timestamps and representable interpolation heights.
+/// The caller remains responsible for supplying the actual chain ancestors.
 ///
 /// Errors:
 /// - [`DifficultyError::MissingEpochHeaders`] — empty slice, or an EIP-37
 ///   recalculation height with fewer than 2 headers (the EIP-37 branch
 ///   needs at least the parent and the previous epoch boundary).
 /// - [`DifficultyError::HeightMismatch`] — `parent.height + 1 != child_height`.
+/// - [`DifficultyError::HeightOverflow`] — the child or interpolation height
+///   cannot be represented as u32.
+/// - [`DifficultyError::InvalidConfiguration`] — a used epoch/interval is zero.
+/// - [`DifficultyError::InvalidEpochWindow`] — retarget heights/times do not
+///   increase. Correct epoch selection and ancestry remain caller obligations.
 pub(crate) fn required_difficulty_checked(
     child_height: u32,
     epoch_headers: &[Header],
@@ -264,9 +282,15 @@ pub(crate) fn required_difficulty_checked(
         .last()
         .ok_or(DifficultyError::MissingEpochHeaders)?;
     let parent_height = parent.height;
-    if parent_height + 1 != child_height {
+    let expected_child = parent_height
+        .checked_add(1)
+        .ok_or(DifficultyError::HeightOverflow {
+            height: parent_height,
+            increment: 1,
+        })?;
+    if expected_child != child_height {
         return Err(DifficultyError::HeightMismatch {
-            expected: parent_height + 1,
+            expected: expected_child,
             actual: child_height,
         });
     }
@@ -278,7 +302,7 @@ pub(crate) fn required_difficulty_checked(
     // launches at Interpreter60Version block version) carry
     // `v2_activation = None` and skip the special case entirely.
     if let Some(v2) = &config.v2_activation {
-        if parent_height == v2.height || parent_height + 1 == v2.height {
+        if parent_height == v2.height || expected_child == v2.height {
             return Ok(BigUint::from_bytes_be(&v2.initial_difficulty));
         }
     }
@@ -292,9 +316,42 @@ pub(crate) fn required_difficulty_checked(
     } else {
         config.epoch_length
     };
+    if epoch_len == 0 {
+        return Err(DifficultyError::InvalidConfiguration {
+            field: "epoch length",
+        });
+    }
 
     if !parent_height.is_multiple_of(epoch_len) {
         return Ok(decode_compact_bits(parent.n_bits));
+    }
+
+    if config.desired_interval_ms == 0 {
+        return Err(DifficultyError::InvalidConfiguration {
+            field: "desired interval",
+        });
+    }
+    for (index, pair) in epoch_headers.windows(2).enumerate() {
+        if pair[1].height <= pair[0].height {
+            return Err(DifficultyError::InvalidEpochWindow {
+                index,
+                reason: "heights must increase",
+            });
+        }
+        if pair[1].timestamp <= pair[0].timestamp {
+            return Err(DifficultyError::InvalidEpochWindow {
+                index,
+                reason: "timestamps must increase",
+            });
+        }
+    }
+    if epoch_headers.len() > 2 {
+        parent_height
+            .checked_add(epoch_len)
+            .ok_or(DifficultyError::HeightOverflow {
+                height: parent_height,
+                increment: epoch_len,
+            })?;
     }
 
     if is_eip37 {
@@ -319,12 +376,12 @@ pub(crate) fn required_difficulty_checked(
 
 /// Compute the encoded `nBits` value a candidate block at
 /// `child_height` must use, given the same `epoch_headers` window the
-/// verifier reads. Wraps [`required_difficulty_checked`] +
+/// verifier reads. Wraps `required_difficulty_checked` +
 /// [`encode_compact_bits`] so mining can produce the right value
 /// without re-implementing the retarget logic.
 ///
 /// Returns the same `DifficultyError` variants as
-/// [`required_difficulty_checked`].
+/// `required_difficulty_checked`.
 pub fn next_n_bits(
     child_height: u32,
     epoch_headers: &[Header],
@@ -338,9 +395,9 @@ pub fn next_n_bits(
 /// the supplied [`DifficultyParams`]. Internal-only — downstream consumers go
 /// through [`crate::pow::verify_header_difficulty`].
 ///
-/// Surfaces [`DifficultyError`] for the three failure modes a caller can
-/// trigger: empty / undersized epoch window, child/parent height
-/// mismatch, or actual-vs-expected `nBits` mismatch.
+/// Surfaces [`DifficultyError`] for missing/invalid epoch context, arithmetic
+/// bounds/configuration, child/parent height mismatch or an actual-vs-expected
+/// `nBits` mismatch.
 pub(crate) fn verify_nbits(
     child_height: u32,
     epoch_headers: &[Header],
@@ -376,6 +433,97 @@ mod tests {
         let header_bytes = hex::decode(h["bytes"].as_str().unwrap()).unwrap();
         let mut r = ergo_primitives::reader::VlqReader::new(&header_bytes);
         ergo_ser::header::read_header(&mut r).unwrap()
+    }
+
+    #[test]
+    fn selectors_handle_invalid_and_large_context_without_arithmetic_panics() {
+        let mut cfg = DifficultyParams::mainnet();
+        assert!(!is_recalculation_height(0, &cfg));
+        assert_eq!(
+            previous_heights_for_recalculation(0, 1024),
+            Vec::<u32>::new()
+        );
+        cfg.epoch_length = 0;
+        assert!(!is_recalculation_height(1, &cfg));
+        assert_eq!(previous_heights_for_recalculation(1, 0), Vec::<u32>::new());
+        assert_eq!(
+            previous_heights_for_recalculation(u32::MAX, u32::MAX - 1),
+            vec![0, u32::MAX - 1]
+        );
+    }
+
+    #[test]
+    fn checked_difficulty_reports_invalid_caller_context() {
+        let base = load_header_at("../test-vectors/mainnet/headers_1_2000.json", 1024);
+        let mut parent = base.clone();
+        parent.height = u32::MAX;
+        assert!(matches!(
+            next_n_bits(0, &[parent], &DifficultyParams::mainnet()),
+            Err(DifficultyError::HeightOverflow {
+                height: u32::MAX,
+                increment: 1
+            })
+        ));
+        let mut cfg = DifficultyParams::mainnet();
+        cfg.epoch_length = 0;
+        assert!(matches!(
+            next_n_bits(1025, std::slice::from_ref(&base), &cfg),
+            Err(DifficultyError::InvalidConfiguration {
+                field: "epoch length"
+            })
+        ));
+        cfg.epoch_length = 1024;
+        cfg.desired_interval_ms = 0;
+        assert!(matches!(
+            next_n_bits(1025, std::slice::from_ref(&base), &cfg),
+            Err(DifficultyError::InvalidConfiguration {
+                field: "desired interval"
+            })
+        ));
+
+        cfg.desired_interval_ms = 120_000;
+        let make_header = |height, timestamp| {
+            let mut h = base.clone();
+            h.height = height;
+            h.timestamp = timestamp;
+            h
+        };
+        for last_time in [1000, 999] {
+            let window = [
+                make_header(0, 0),
+                make_header(1024, 1000),
+                make_header(2048, last_time),
+            ];
+            assert!(matches!(
+                next_n_bits(2049, &window, &cfg),
+                Err(DifficultyError::InvalidEpochWindow {
+                    index: 1,
+                    reason: "timestamps must increase"
+                })
+            ));
+        }
+        let duplicated = [
+            make_header(0, 0),
+            make_header(1024, 1000),
+            make_header(1024, 2000),
+        ];
+        assert!(matches!(
+            next_n_bits(1025, &duplicated, &cfg),
+            Err(DifficultyError::InvalidEpochWindow {
+                index: 1,
+                reason: "heights must increase"
+            })
+        ));
+        cfg.epoch_length = 2;
+        cfg.eip37_activation_height = None;
+        let window = [
+            make_header(u32::MAX - 5, 1000),
+            make_header(u32::MAX - 3, 2000),
+            make_header(u32::MAX - 1, 3000),
+        ];
+        assert!(
+            matches!(next_n_bits(u32::MAX, &window, &cfg), Err(DifficultyError::HeightOverflow { height, increment: 2 }) if height == u32::MAX - 1)
+        );
     }
 
     // ----- happy path -----
@@ -459,6 +607,16 @@ mod tests {
     fn interpolate_single_data_point_returns_input_value() {
         let data = vec![(1024u32, BigUint::from(100u32))];
         assert_eq!(interpolate(&data, 1024), BigUint::from(100u32));
+    }
+
+    #[test]
+    fn previous_heights_epoch_length_one_matches_scala_height_bound() {
+        // Scala: `(height - 1) % 1 == 0 && height > 1 * useLastEpochs`.
+        assert_eq!(
+            previous_heights_for_recalculation(9, 1),
+            (0..=8).collect::<Vec<u32>>()
+        );
+        assert_eq!(previous_heights_for_recalculation(8, 1), vec![7]);
     }
 
     #[test]

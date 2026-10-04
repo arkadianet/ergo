@@ -14,8 +14,9 @@
 //! `(DIGEST_HISTORY[prev_height], CHAIN_STATE_HISTORY[prev_height],
 //! STATE_META["root_digest"], CHAIN_STATE_META["chain_state"],
 //! CHAIN_INDEX[new_height], voted_params row if epoch boundary)`
-//! inside one redb `write_txn`. A crash mid-apply rolls the whole
-//! transition back; no half-applied state survives. Rollback is the
+//! inside one redb `write_txn`. Transaction commit publishes the transition
+//! atomically; power-loss survival also depends on the configured durability
+//! and the operating system/device synchronization contract. Rollback is the
 //! same shape in reverse: read the per-height history rows, restore
 //! `(root_digest, chain_state)`, truncate every height-indexed table
 //! (`DIGEST_HISTORY`, `CHAIN_STATE_HISTORY`, `CHAIN_INDEX`,
@@ -26,9 +27,9 @@
 //!   current AT that height. The rollback substrate, analogous to
 //!   the role `LDBVersionedStore` plays in Scala's `DigestState`.
 //! - `CHAIN_STATE_HISTORY[height: u64] -> ChainStateMeta` — full
-//!   chain-state snapshot at that height, so rollback restores
-//!   `best_header_*`, `best_full_block_*`, `header_availability`
-//!   atomically with the digest.
+//!   chain-state snapshot at that height. Rollback restores `best_full_block_*`
+//!   and `header_availability` atomically with the digest, preserving current
+//!   `best_header_*` selection.
 //! - `STATE_META["root_digest"] -> [u8; 33]` — current root digest.
 //!   Reuses the existing `STATE_META` table with a key distinct from
 //!   Mode 1's `"root"` so a misopened store cannot confuse the two.
@@ -55,22 +56,13 @@
 //! applied heights, voted-params key placement). The store embeds the
 //! shared `header_store::HeaderSectionTables`, so it persists headers
 //! and block sections and serves the read-side `StateBackend` traits
-//! (`ChainStateRead`, `HeaderSectionStore`). What remains deferred to
-//! a later layer is the apply-bridge that anchors the persisted digest
-//! to a header's `state_root`: that needs the ADProofs section, the
-//! boxChanges derivation, and a real-corpus oracle, none of which this
-//! read/persist layer owns.
-//!
-//! The seam is `pub(crate)` and the module is `#![allow(dead_code)]`:
-//! no in-crate caller reaches it yet. The boot dispatch and the
-//! shared `StateBackend` trait that consume it live in higher
-//! layers; this module persists the schema and the atomic-commit
-//! invariant on its own. Deferred to those layers (each needs state
-//! this schema-only sibling does not own): header-anchored digest
-//! validation, intermediate voted-params epoch-row continuity (the
-//! section/extension reconcile Mode 1 runs in `reconcile_voted_params`),
-//! bounded history retention, and reorg-abort rebuild-from-committed.
-#![allow(dead_code)]
+//! (`ChainStateRead`, `HeaderSectionStore`). The production Mode 5 sync
+//! orchestrator owns ADProofs verification, box-change derivation and full
+//! transaction validation before calling this store. Open checks persisted
+//! epoch-row placement and requires the genesis baseline; unlike the
+//! UTXO backend, it does not reconstruct missing intermediate rows from
+//! extensions. History retention remains unbounded and is distinct from the
+//! configured header-age gate.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -92,9 +84,8 @@ pub(crate) const DIGEST_HISTORY: TableDefinition<u64, &[u8]> =
     TableDefinition::new("digest_history");
 
 /// Per-height ledger of the full chain-state snapshot. Pairs with
-/// `DIGEST_HISTORY` so rollback restores `(root_digest,
-/// best_header_*, best_full_block_*, header_availability)`
-/// atomically.
+/// `DIGEST_HISTORY` so rollback restores `(root_digest, best_full_block_*,
+/// header_availability)` atomically, preserving current `best_header_*` selection.
 pub(crate) const CHAIN_STATE_HISTORY: TableDefinition<u64, &[u8]> =
     TableDefinition::new("chain_state_history");
 
@@ -140,9 +131,11 @@ pub(crate) const EMPTY_AVL_DIGEST: [u8; 33] = [0u8; 33];
 #[derive(Debug)]
 pub struct DigestStateStore {
     db: Arc<Database>,
+    redb_cache_bytes: usize,
     db_path: PathBuf,
     root_digest: [u8; 33],
     chain_state: ChainStateMeta,
+    keep_versions: u32,
     /// Network voting parameters (`voting_length` + soft-fork
     /// thresholds). The epoch-boundary guard reads `voting_length`;
     /// block validation reads the soft-fork thresholds. Holds the whole
@@ -182,6 +175,10 @@ mod voted_params;
 pub(crate) use voted_params::has_digest_verifier_markers;
 
 impl DigestStateStore {
+    /// Configure header admission independently of digest history retention.
+    pub fn set_keep_versions(&mut self, keep_versions: u32) {
+        self.keep_versions = keep_versions;
+    }
     pub fn database_path(&self) -> &Path {
         &self.db_path
     }
@@ -193,7 +190,7 @@ use voted_params::{
 
 impl DigestStateStore {
     /// A cloned `Arc` handle to the underlying redb `Database`. Mirrors
-    /// [`StateStore::db_arc`] so boot-time subsystems (the wallet writer
+    /// [`crate::store::StateStore::db_arc`] so boot-time subsystems (the wallet writer
     /// task) can open their own read transactions against the same file
     /// without a backend-typed branch. The digest db holds no box arena,
     /// so UTXO-dependent wallet reads see an empty set — wallet routes are
@@ -229,7 +226,7 @@ impl DigestStateStore {
     }
 
     /// Sparse-aware best-chain height lookup, mirroring
-    /// [`StateStore::lookup_header_at_height`]. The digest backend is
+    /// [`crate::store::StateStore::lookup_header_at_height`]. The digest backend is
     /// always `HeaderAvailability::Dense` (Mode 5 does not NiPoPoW-
     /// bootstrap), so a missing row at or below the header tip is store
     /// corruption rather than an expected sparse gap; the both-arms
@@ -397,9 +394,8 @@ fn genesis_chain_state() -> ChainStateMeta {
 
 /// Internal fork-choice invariants every `ChainStateMeta` the store
 /// accepts must satisfy, independent of any header store:
-/// - `best_header_height >= best_full_block_height` — headers are
-///   validated before the full blocks they cover, so the header tip
-///   can never trail the full-block tip.
+/// - A non-empty full chain needs a non-empty header chain. A heavier
+///   header branch may have a lower tip while its blocks are unavailable.
 /// - `best_header_score` is non-empty — even genesis carries `[0]`.
 ///
 /// Returns a static reason on violation so callers can route it to
@@ -408,9 +404,8 @@ fn genesis_chain_state() -> ChainStateMeta {
 /// persisted header rows — that needs header tables this sibling
 /// does not own.
 fn chain_state_internal_invariant(cs: &ChainStateMeta) -> Result<(), &'static str> {
-    if cs.best_header_height < cs.best_full_block_height {
-        return Err("chain state best_header_height < best_full_block_height \
-             (headers must lead or equal full blocks)");
+    if cs.best_header_height == 0 && cs.best_full_block_height > 0 {
+        return Err("chain state has full blocks without a best header");
     }
     if cs.best_header_score.is_empty() {
         return Err("chain state best_header_score is empty (must be non-empty)");

@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Ground truth from the Scala reference stack (sigma-state 6.0.2 + ergo-core 6.0.2,",
+    "Ground truth from the Scala reference stack (sigma-state 6.0.6 + ergo-core 6.0.6,",
     "the versions mainnet runs). Pins what ContextExtension.serializer.parse accepts as an",
     "entry value: r.getValue().asInstanceOf[EvaluatedValue[_ <: SType]] -- the FULL",
     "ValueSerializer, admitting every subclass of the sealed EvaluatedValue trait",
@@ -11,8 +11,8 @@
     "are the JVM's, never a Rust self-oracle."
   ],
   "source": {
-    "sigma_state": "6.0.2",
-    "ergo_core": "6.0.2",
+    "sigma_state": "6.0.6",
+    "ergo_core": "6.0.6",
     "activated_script_version": 3,
     "generator": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
   },
