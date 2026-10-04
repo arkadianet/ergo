@@ -239,7 +239,8 @@ pub(crate) struct InspectionQuery {
 
 /// Operator-only transaction and rent inventory of one frozen template.
 #[utoipa::path(
-    get, path = "/api/v1/mining/candidate-details", tag = "mining",
+    get, path = "/api/v1/mining/candidate-details",
+    operation_id = "v1_mining_candidate_details_get", tag = "mining",
     params(("msg" = Option<String>, Query, description = "32-byte hexadecimal work ID"), ("template_seq" = Option<u64>, Query, description = "Exact retained publish sequence")),
     responses((status = 200, description = "Frozen template inventory and miner proceeds", body = serde_json::Value), (status = 404, description = "Template was evicted or selectors do not match", body = V1Error), (status = 503, description = "No current template", body = V1Error)),
     security(("ApiKeyAuth" = [])),
@@ -263,7 +264,8 @@ pub(crate) async fn candidate_details(
 
 /// Bounded local template and solution history. Resets on restart.
 #[utoipa::path(
-    get, path = "/api/v1/mining/history", tag = "mining",
+    get, path = "/api/v1/mining/history",
+    operation_id = "v1_mining_history_get", tag = "mining",
     responses((status = 200, description = "Bounded operator mining history", body = serde_json::Value), (status = 503, description = "Mining history unavailable", body = V1Error)),
     security(("ApiKeyAuth" = [])),
 )]

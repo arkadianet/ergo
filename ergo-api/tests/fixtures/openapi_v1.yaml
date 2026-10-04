@@ -2525,7 +2525,7 @@ paths:
       tags:
       - mining
       summary: Operator-only transaction and rent inventory of one frozen template.
-      operationId: candidate_details
+      operationId: v1_mining_candidate_details_get
       parameters:
       - name: msg
         in: query
@@ -2585,7 +2585,7 @@ paths:
       tags:
       - mining
       summary: Bounded local template and solution history. Resets on restart.
-      operationId: history
+      operationId: v1_mining_history_get
       responses:
         '200':
           description: Bounded operator mining history
@@ -2648,7 +2648,7 @@ paths:
     get:
       tags:
       - mining
-      operationId: get
+      operationId: v1_mining_policy_get
       responses:
         '200':
           description: Active durable block assembly policy
@@ -2660,7 +2660,7 @@ paths:
     put:
       tags:
       - mining
-      operationId: set
+      operationId: v1_mining_policy_put
       requestBody:
         content:
           application/json:
