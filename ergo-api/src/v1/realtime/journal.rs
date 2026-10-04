@@ -13,7 +13,9 @@ use super::bus::{RealtimeEvent, RESUME_WINDOW};
 pub const JOURNAL_QUEUE_CAP: usize = 512;
 pub const JOURNAL_BYTES_CAP: usize = 64 * 1024 * 1024;
 pub const JOURNAL_EVENT_BYTES_CAP: usize = 1024 * 1024;
-const CURSOR_RESERVATION: u64 = 65_536;
+// One boot owns a trillion cursors even if every subsequent disk write fails.
+// Exhausting this epoch is a cursor-capacity limit, independent of disk health.
+const CURSOR_RESERVATION: u64 = 1 << 40;
 
 /// Owned, versioned storage/wire representation; no process-local references.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -202,21 +204,19 @@ impl EventJournal {
                     batch.push(ReplayEvent::from(event.as_ref()));
                 }
                 let last = batch.last().expect("nonempty batch").seq;
-                let reserved = shared.reserved_next.load(Ordering::Acquire);
-                let outcome = (|| {
-                    if last >= reserved.saturating_sub(CURSOR_RESERVATION / 2) {
-                        let next = reserved.checked_add(CURSOR_RESERVATION)
-                            .filter(|next| *next < u64::MAX - 1)
-                            .ok_or("realtime cursor exhausted")?;
-                        store.reserve_cursor(next)?;
-                        shared.reserved_next.store(next, Ordering::Release);
-                    }
-                    store.append_events(&batch)
-                })();
-                if let Err(error) = outcome {
+                if shared.failed.load(Ordering::Acquire) {
+                    shared.dropped.fetch_add(batch.len() as u64, Ordering::Relaxed);
+                    batch.clear();
+                    continue;
+                }
+                if let Err(error) = store.append_events(&batch) {
+                    // Keep consuming the queue so pending losses are accounted
+                    // for. Log once; live fanout owns its pre-reserved boot epoch.
                     shared.failed.store(true, Ordering::Release);
-                    tracing::error!(%error, "realtime persistence stopped; replay must reconcile from REST");
-                    return;
+                    shared.dropped.fetch_add(batch.len() as u64, Ordering::Relaxed);
+                    tracing::error!(%error, "realtime persistence stopped; live delivery continues; replay must reconcile from REST");
+                    batch.clear();
+                    continue;
                 }
                 shared.committed_seq.store(last, Ordering::Release);
                 let mut complete = shared.complete_through_seq.load(Ordering::Acquire);
@@ -229,6 +229,7 @@ impl EventJournal {
             }
             // All publishers are gone and the queue is drained. Releasing the
             // unused reservation avoids a restart gap on orderly shutdown.
+            if shared.failed.load(Ordering::Acquire) { return; }
             let next = shared.published_seq.load(Ordering::Acquire).saturating_add(1);
             if let Err(error) = store.reserve_cursor(next) {
                 shared.failed.store(true, Ordering::Release);
@@ -248,8 +249,8 @@ impl EventJournal {
     }
 
     pub fn can_publish(&self, seq: u64) -> bool {
-        // Keep the reserved range even after persistence fails. Once exhausted,
-        // stop observations rather than reuse uncertain cursors after restart.
+        // This boot epoch is reserved before publishing starts; no persistence
+        // error can reduce it. Closure and epoch exhaustion are lifecycle limits.
         !self.health.closed.load(Ordering::Acquire)
             && seq < self.health.reserved_next.load(Ordering::Acquire)
     }
@@ -258,6 +259,10 @@ impl EventJournal {
         self.health
             .published_seq
             .store(event.seq, Ordering::Release);
+        if self.health.failed.load(Ordering::Acquire) {
+            self.health.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let worker = self
             .worker
             .lock()
@@ -442,6 +447,30 @@ mod tests {
         drop(bus);
         assert_eq!(store.saved.lock().unwrap().next_seq, CURSOR_RESERVATION + 1);
         assert!(store.saved.lock().unwrap().events.is_empty());
+    }
+
+    #[test]
+    fn failed_journal_keeps_live_cursors_beyond_old_reservation_and_records_losses() {
+        let store = Arc::new(MemoryStore::default());
+        store.fail_append.store(true, Ordering::Release);
+        let bus = Arc::new(RealtimeBus::durable(classes(), store.clone(), 1).unwrap());
+        bus.publish(body(1));
+        wait_until(|| !bus.journal_status().unwrap().available);
+        for height in 2..=100_000 {
+            assert_eq!(bus.publish(body(height)), u64::from(height));
+        }
+        let mut subscriber = bus.subscribe();
+        subscriber.filter.write().unwrap().insert("blocks".into());
+        assert_eq!(bus.publish(body(100_001)), 100_001);
+        assert_eq!(subscriber.rx.try_recv().unwrap().seq, 100_001);
+        wait_until(|| bus.journal_status().unwrap().dropped_events == 100_001);
+        assert_eq!(bus.journal_status().unwrap().committed_seq, 0);
+        drop(subscriber);
+        drop(bus);
+        store.fail_append.store(false, Ordering::Release);
+        let restarted = RealtimeBus::durable(classes(), store, 1).unwrap();
+        assert!(restarted.publish(body(100_002)) > 100_001);
+        assert!(restarted.backfill(&filter(), 100_001, 10).gap);
     }
 
     #[test]

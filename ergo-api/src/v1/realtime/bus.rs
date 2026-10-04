@@ -301,7 +301,9 @@ impl RealtimeBus {
             .as_ref()
             .is_some_and(|journal| !journal.can_publish(seq))
         {
-            tracing::error!("realtime reserved cursor range exhausted; observation dropped");
+            tracing::error!(
+                "realtime bus closed or boot cursor epoch exhausted; observation dropped"
+            );
             return seq - 1;
         }
         let Some(next_seq) = g.next_seq.checked_add(1) else {
