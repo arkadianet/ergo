@@ -74,8 +74,10 @@ balance or a complete record of blocks found by other nodes using the same key.
 
 A history-write failure does not invalidate an already applied block. The endpoint
 reports `journal_error` and retains the observation in memory for the operator to
-inspect. An invalid existing journal fails startup rather than silently resetting
-stored accounting.
+inspect. An unreadable or invalid journal does not stop the node: it is moved aside
+as `mining-history.json.corrupt-<unix ms>`, a new history starts, and
+`journal_error` names where the old file went for as long as the node runs. If it
+cannot be moved, that run keeps history in memory only rather than overwrite it.
 
 Candidate inventories and signed private transaction bytes remain behind the
 operator gate. Public status and public mempool/explorer endpoints do not publish

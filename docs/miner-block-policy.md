@@ -12,8 +12,10 @@ Writes validate the entire policy before changing it, persist it to
 templates. An invalid policy answers 400; a storage failure answers 500 and
 changes neither the saved nor the active policy. In-flight builds with an
 older policy revision or operator queue generation cannot publish. The saved
-policy overrides the TOML boot default on restart. A malformed saved file
-refuses startup rather than silently mining with different preferences.
+policy overrides the TOML boot default on restart, and the node logs a
+warning at startup when the two differ; remove the saved file to use the
+TOML policy again. A malformed saved file refuses startup rather than
+silently mining with different preferences.
 Temporary files a crash leaves beside it are removed at startup.
 
 An example policy:

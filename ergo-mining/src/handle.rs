@@ -561,11 +561,11 @@ impl MiningHandle {
             });
     }
 
-    /// Hydrate durable local submission history at boot; corrupt files fail
-    /// closed so the operator does not unknowingly lose accounting history.
-    pub fn with_outcome_journal(self, path: &std::path::Path) -> Result<Self, MiningError> {
-        let mut journal = crate::outcome_journal::OutcomeJournal::open(path)
-            .map_err(MiningError::InvalidConfig)?;
+    /// Hydrate durable local submission history at boot. A file that cannot
+    /// be read is moved aside rather than refusing startup, and
+    /// [`MiningHandle::outcome_journal_status`] reports where it went.
+    pub fn with_outcome_journal(self, path: &std::path::Path) -> Self {
+        let mut journal = crate::outcome_journal::OutcomeJournal::open(path);
         for accounting in journal
             .events
             .iter_mut()
@@ -574,7 +574,7 @@ impl MiningHandle {
             accounting.split_legacy_emission(self.reemission_ref());
         }
         *self.outcomes.lock().expect("outcomes poisoned") = journal;
-        Ok(self)
+        self
     }
 
     pub fn mining_outcomes(&self) -> Vec<crate::inspection::MiningOutcome> {
@@ -588,9 +588,11 @@ impl MiningHandle {
             .collect()
     }
 
+    /// Whether history persists, and its latest persistence failure or
+    /// startup recovery.
     pub fn outcome_journal_status(&self) -> (bool, Option<String>) {
         let journal = self.outcomes.lock().expect("outcomes poisoned");
-        (journal.persistent(), journal.last_error.clone())
+        (journal.persistent(), journal.error())
     }
 
     /// Record the suspect ids from a just-published Full build.
