@@ -1455,17 +1455,7 @@ impl Mempool {
             cost_cap,
         );
         let mut actions = Vec::new();
-        if !removed.is_empty() {
-            actions.push(MempoolAction::RevokeBroadcast {
-                tx_ids: removed.clone(),
-            });
-            actions.push(MempoolAction::Observe {
-                event: ObservedEvent::Evicted {
-                    tx_ids: removed,
-                    reason: EvictionReason::DependencyRemoved,
-                },
-            });
-        }
+        push_evictions(&mut actions, removed, EvictionReason::DependencyRemoved);
         if pending_before == 0 {
             emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
             return actions;
@@ -1567,8 +1557,10 @@ impl Mempool {
     /// frontier, which is retained by the pool and swept by
     /// `Self::drain_orphan_evictions` under this pass's cost budget, carrying
     /// the deeper frontier forward until the whole invalid subtree is gone. Only
-    /// evicting cascades feed that queue, so a transient `UnresolvedInput`
-    /// (demoted-parent) tx is never swept.
+    /// bounded removals (evicting cascades, replacement, capacity and
+    /// input-conflict evictions) feed that queue, so a transient
+    /// `UnresolvedInput` (demoted-parent) tx is never swept. Swept descendants
+    /// are reported as `DependencyRemoved`, whatever queued them.
     ///
     /// `now` is injected and stamps all per-tx bookkeeping (the rotation clock),
     /// so the pass is deterministic and unit-testable; the only wall-clock read
@@ -1662,31 +1654,32 @@ impl Mempool {
             )));
         }
 
-        // Dependency-evict any descendants orphaned by this pass's hard-invalid
-        // cascades that the depth cap left pooled (bounded by the remaining
-        // budget; leftovers carry to the next pass).
+        // Dependency-evict queued descendants the depth cap left pooled, from
+        // this pass's hard-invalid cascades or earlier admission/reorg removals
+        // (bounded by the remaining budget; leftovers carry to the next pass).
+        // They are dependency removals, reported apart from tip verdicts.
+        let mut dependency_removed = Vec::new();
         self.drain_orphan_evictions(
             max_family_depth,
             bounds,
             max_tx_cost,
             &mut pool_outputs,
-            &mut removed_for_actions,
+            &mut dependency_removed,
             &mut cost_acc,
             cost_cap,
         );
 
-        let evicted = removed_for_actions.len();
-        if !removed_for_actions.is_empty() {
-            actions.push(MempoolAction::RevokeBroadcast {
-                tx_ids: removed_for_actions.clone(),
-            });
-            actions.push(MempoolAction::Observe {
-                event: ObservedEvent::Evicted {
-                    tx_ids: removed_for_actions,
-                    reason: EvictionReason::TipInvalid,
-                },
-            });
-        }
+        let evicted = removed_for_actions.len() + dependency_removed.len();
+        push_evictions(
+            &mut actions,
+            removed_for_actions,
+            EvictionReason::TipInvalid,
+        );
+        push_evictions(
+            &mut actions,
+            dependency_removed,
+            EvictionReason::DependencyRemoved,
+        );
 
         // Re-broadcast half of Scala `MempoolAuditor.rebroadcastTransactions`:
         // after the eviction pass, re-advertise up to `rebroadcast_count`
@@ -1956,28 +1949,28 @@ impl Mempool {
         }
 
         // Same orphan-cascade drain as the full pass (see `recheck_and_evict`).
+        let mut dependency_removed = Vec::new();
         self.drain_orphan_evictions(
             max_family_depth,
             bounds,
             max_tx_cost,
             &mut pool_outputs,
-            &mut removed_for_actions,
+            &mut dependency_removed,
             &mut cost_acc,
             cost_cap,
         );
 
-        let evicted = removed_for_actions.len();
-        if !removed_for_actions.is_empty() {
-            actions.push(MempoolAction::RevokeBroadcast {
-                tx_ids: removed_for_actions.clone(),
-            });
-            actions.push(MempoolAction::Observe {
-                event: ObservedEvent::Evicted {
-                    tx_ids: removed_for_actions,
-                    reason: EvictionReason::TipInvalid,
-                },
-            });
-        }
+        let evicted = removed_for_actions.len() + dependency_removed.len();
+        push_evictions(
+            &mut actions,
+            removed_for_actions,
+            EvictionReason::TipInvalid,
+        );
+        push_evictions(
+            &mut actions,
+            dependency_removed,
+            EvictionReason::DependencyRemoved,
+        );
         emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
         info!(
             event = "mempool_suspect_recheck_completed",
@@ -2077,6 +2070,19 @@ impl Mempool {
     pub fn weight_fn(&self) -> &dyn WeightFunction {
         &*self.weight_fn
     }
+}
+
+/// Revoke relay of removed txs and report them under `reason`.
+fn push_evictions(actions: &mut Vec<MempoolAction>, tx_ids: Vec<TxId>, reason: EvictionReason) {
+    if tx_ids.is_empty() {
+        return;
+    }
+    actions.push(MempoolAction::RevokeBroadcast {
+        tx_ids: tx_ids.clone(),
+    });
+    actions.push(MempoolAction::Observe {
+        event: ObservedEvent::Evicted { tx_ids, reason },
+    });
 }
 
 #[cfg(test)]

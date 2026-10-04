@@ -206,19 +206,22 @@ fn no_evictions(actions: &[MempoolAction]) -> bool {
 }
 
 fn evicted_ids(actions: &[MempoolAction]) -> Vec<TxId> {
-    actions
+    evicted_for(actions, EvictionReason::TipInvalid)
+}
+
+/// Ids reported under `wanted`, sorted.
+fn evicted_for(actions: &[MempoolAction], wanted: EvictionReason) -> Vec<TxId> {
+    let mut ids = actions
         .iter()
         .find_map(|a| match a {
             MempoolAction::Observe {
-                event:
-                    ObservedEvent::Evicted {
-                        tx_ids,
-                        reason: EvictionReason::TipInvalid,
-                    },
-            } => Some(tx_ids.clone()),
+                event: ObservedEvent::Evicted { tx_ids, reason },
+            } if *reason == wanted => Some(tx_ids.clone()),
             _ => None,
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    ids
 }
 
 // ----- happy path: still-valid txs are kept -----
@@ -518,11 +521,62 @@ fn recheck_hard_invalid_cascade_evicts_full_subtree_past_depth_cap() {
         );
     }
     assert_eq!(
-        evicted_ids(&actions).len(),
-        5,
-        "all five ids reported evicted"
+        evicted_for(&actions, EvictionReason::TipInvalid),
+        vec![d(1), d(2)],
+        "the failed root and its same-op cascade carry the tip verdict"
+    );
+    assert_eq!(
+        evicted_for(&actions, EvictionReason::DependencyRemoved),
+        vec![d(3), d(4), d(5)],
+        "the deferred frontier is a dependency removal"
     );
     mp.pool().check_invariants();
+}
+
+#[test]
+fn queued_dependency_removals_keep_their_label_in_tip_recheck_passes() {
+    // A block spends tx 1's input. The reorg cascade evicts {1, 2} as input
+    // conflicts and queues the frontier; the same tick's recheck (full pass or
+    // suspects) drains it. Those txs got no tip verdict on their scripts.
+    for suspects in [false, true] {
+        let mut mp = mempool_with(MempoolConfig {
+            max_family_depth: 2,
+            ..MempoolConfig::default()
+        });
+        for b in 1..=5 {
+            seed(
+                &mut mp,
+                b,
+                0x10 + b - 1,
+                0x10 + b,
+                100,
+                if b == 1 { vec![] } else { vec![d(b - 1)] },
+            );
+        }
+        let utxo = FakeUtxo::empty();
+        let tip = TestTip::new();
+        mp.on_tip_change(&crate::types::TxDiff {
+            new_tip: tip.view(&utxo).tip,
+            applied: vec![],
+            demoted: vec![],
+            applied_spent_inputs: std::collections::HashSet::from([d(0x10)]),
+        });
+        assert_eq!(mp.orphan_eviction_pending(), 1);
+        let v = validator((3..=5).map(|b| ok_plan(b, 10_000)).collect());
+        let now = Instant::now();
+        let actions = if suspects {
+            mp.recheck_ids(now, &tip.view(&utxo), &v, &[d(3)])
+        } else {
+            mp.recheck_and_evict(now, &tip.view(&utxo), &v)
+        };
+        assert!(evicted_ids(&actions).is_empty(), "{actions:?}");
+        assert_eq!(
+            evicted_for(&actions, EvictionReason::DependencyRemoved),
+            vec![d(3), d(4), d(5)]
+        );
+        assert!((3..=5).all(|b| !mp.contains(&d(b))));
+        mp.pool().check_invariants();
+    }
 }
 
 #[test]
