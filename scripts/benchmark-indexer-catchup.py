@@ -28,6 +28,20 @@ def invoke(executable, test, environment, log):
     return log.read_text()
 
 
+def parse_sample(output):
+    records = [line.partition("BENCH ")[2] for line in output.splitlines() if "BENCH " in line]
+    if len(records) != 1:
+        raise ValueError("expected exactly one BENCH record")
+    sample = json.loads(records[0])
+    for phase in ["load", "apply", "commit"]:
+        prefix = f"{phase.upper()}_SECONDS "
+        values = [line.partition(prefix)[2] for line in output.splitlines() if prefix in line]
+        if len(values) != 1:
+            raise ValueError(f"expected exactly one {phase} timing")
+        sample[f"{phase}_seconds"] = float(values[0])
+    return sample
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--executable", type=Path, required=True)
@@ -36,7 +50,7 @@ def main():
     parser.add_argument("--end", type=int, required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--rounds", type=int, default=3)
-    parser.add_argument("--modes", nargs="+", choices=["single", "legacy", "adaptive", "prefetch"], default=["legacy", "adaptive", "prefetch"])
+    parser.add_argument("--modes", nargs="+", choices=["single", "legacy", "adaptive", "prefetch", "cached"], default=["legacy", "adaptive", "prefetch"])
     args = parser.parse_args()
     if not args.name or args.name in {".", ".."} or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_." for c in args.name):
         parser.error("name must be a single directory name")
@@ -63,11 +77,8 @@ def main():
                 subprocess.run(["cp", "--reflink=auto", "--sparse=always", str(args.base), str(index)], check=True)
             log = directory / f"{iteration}-{mode}.log"
             output = invoke(args.executable, REPLAY, {**environment, "INDEXER_BENCH_INDEX": str(index), "INDEXER_BENCH_MODE": mode}, log)
-            sample = json.loads(next(line[6:] for line in output.splitlines() if line.startswith("BENCH ")))
+            sample = parse_sample(output)
             sample["iteration"] = iteration
-            sample["load_seconds"] = float(next(line.split()[1] for line in output.splitlines() if line.startswith("LOAD_SECONDS ")))
-            for phase in ["apply", "commit"]:
-                sample[f"{phase}_seconds"] = float(next(line.split()[1] for line in output.splitlines() if line.startswith(f"{phase.upper()}_SECONDS ")))
             print(json.dumps(sample), flush=True)
             if iteration:
                 samples.append(sample)
