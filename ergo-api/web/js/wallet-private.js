@@ -51,7 +51,8 @@ export function createPrivateMiningQueue(host, { api, active = () => true }) {
       card.append(node('strong', entry.label || entry.state.replaceAll('_', ' ')),
         node('code', entry.tx_id, { class: 'wb-address' }),
         node('p', `${entry.state.replaceAll('_', ' ')} · ${decimal(entry.fee_nano_erg)} ERG fee · ${entry.size_bytes} bytes`, { class: 'wb-note' }),
-        node('p', `${entry.input_ids.length} input${entry.input_ids.length === 1 ? '' : 's'}${['queued', 'in_candidate', 'conflicted'].includes(entry.state) ? ' reserved' : ''} · expiry: ${time(entry.expires_at_ms)}${entry.expires_at_height ? ` · last height ${entry.expires_at_height}` : ''} · priority ${entry.priority}`, { class: 'wb-note' }));
+        // Finished entries keep no input ids, so they show no input count.
+        node('p', `${entry.input_ids.length ? `${entry.input_ids.length} input${entry.input_ids.length === 1 ? '' : 's'}${['queued', 'in_candidate', 'conflicted', 'mined'].includes(entry.state) ? ' reserved' : ''} · ` : ''}expiry: ${time(entry.expires_at_ms)}${entry.expires_at_height ? ` · last height ${entry.expires_at_height}` : ''} · priority ${entry.priority}`, { class: 'wb-note' }));
       if (entry.reason) card.append(node('p', entry.reason, { class: 'wb-note' }));
       if (entry.mined_height !== null) card.append(node('p', `Mined at height ${entry.mined_height}`, { class: 'wb-note' }));
       if (['queued', 'in_candidate', 'conflicted'].includes(entry.state)) {

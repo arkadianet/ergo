@@ -71,17 +71,6 @@ pub(super) async fn action_loop(
     mut shutdown_rx: oneshot::Receiver<()>,
     mempool_tick_ms: u64,
 ) -> Result<(), NodeError> {
-    if let Some(wiring) = mining.as_ref() {
-        for entry in wiring.handle.private_queue().list() {
-            if let Ok(raw) = hex::decode(&entry.tx_id) {
-                if let Ok(id) = <[u8; 32]>::try_from(raw) {
-                    state.mempool.register_private_transaction(
-                        ergo_primitives::digest::Digest32::from_bytes(id),
-                    );
-                }
-            }
-        }
-    }
     // Tick every 5s so cold-start fills the outbound pool quickly.
     // The slow-mode gate inside `try_dial_peers` enforces the
     // original 30s cadence once the deficit is small (see
@@ -146,6 +135,13 @@ pub(super) async fn action_loop(
     let mut operator_generation = mining
         .as_ref()
         .map(|w| w.handle.operator_generation())
+        .unwrap_or(0);
+    // Private queue revision the last signalled build reflected. A change on
+    // the same tip (admission, cancellation, expiry) asks for a rebuild that
+    // includes or drops the transaction; current templates keep serving.
+    let mut private_revision = mining
+        .as_ref()
+        .map(|w| w.handle.private_queue().revision())
         .unwrap_or(0);
     // Startup priming publishes the persisted BestTip. Normal online mining
     // still waits for a freshly applied, recent block to open its startup
@@ -299,17 +295,10 @@ pub(super) async fn action_loop(
         // the select keeps the wiring in a single place rather than threaded
         // through events.rs / sync_tick.rs.
         if let Some(wiring) = mining.as_ref() {
-            if let Err(error) = super::private_mining::expire(&state, &wiring.handle) {
-                tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
-            }
-            if let Err(error) = super::private_mining::reconcile(&state, &wiring.handle) {
-                tracing::warn!(%error, "private mining queue waits for confirmation history");
-            }
-            // A rollback can make a mined transaction pending again. Apply
-            // its deadline before selecting the next build snapshot.
-            if let Err(error) = super::private_mining::expire(&state, &wiring.handle) {
-                tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
-            }
+            // Confirmations first, then deadlines (a rollback can also make
+            // a mined transaction pending again), before the next build
+            // snapshot is selected.
+            super::private_mining::run_lifecycle(&mut state, &wiring.handle);
             let generation_now = wiring.handle.operator_generation();
             let operator_changed = generation_now != operator_generation;
             let now = tokio::time::Instant::now().into_std();
@@ -348,10 +337,13 @@ pub(super) async fn action_loop(
                     refresh_debounce: wiring.refresh_debounce,
                 },
             );
+            let private_now = wiring.handle.private_queue().revision();
             let signal = decided
+                .or((private_now != private_revision).then_some(BuildReason::PrivateQueue))
                 .or(operator_changed.then_some(BuildReason::MempoolRefresh))
                 .or(mining_votes_dirty.then_some(BuildReason::VotesChanged));
             operator_generation = generation_now;
+            private_revision = private_now;
             mining_votes_dirty = false;
             if let Some(reason) = signal {
                 let prev = mining_last_tip.best_full_id();
@@ -373,9 +365,11 @@ pub(super) async fn action_loop(
                     }
                     // A same-parent refresh: advance the pool tracker to the
                     // revision we just rebuilt against and stamp the debounce.
-                    // `VotesChanged` is the same shape — a forced same-tip
-                    // rebuild against the current pool.
-                    BuildReason::MempoolRefresh | BuildReason::VotesChanged => {
+                    // `VotesChanged` and `PrivateQueue` are the same shape — a
+                    // forced same-tip rebuild against the current pool.
+                    BuildReason::MempoolRefresh
+                    | BuildReason::VotesChanged
+                    | BuildReason::PrivateQueue => {
                         mining_last_revision = revision_now;
                         mining_last_mempool_signal = Some(now);
                     }
@@ -446,7 +440,7 @@ pub(super) async fn action_loop(
     shutdown_result.map_err(|e| Box::new(e) as NodeError)
 }
 
-fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandle>) {
+pub(super) fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandle>) {
     if !state.mempool.config().enabled {
         return;
     }
@@ -476,7 +470,14 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
     let outcome = state.mempool_notifier.poll(utxo);
     let tip_changed = match outcome {
         PollOutcome::Initialized(_) | PollOutcome::NoChange => false,
-        PollOutcome::Emit(state_diff) => {
+        PollOutcome::Emit(mut state_diff) => {
+            // Private mining transactions never return to the public mempool:
+            // the rollback neither replays them nor reports them as returned.
+            state_diff.demoted.retain(|tx| {
+                !state.mempool.is_private_transaction(
+                    &ergo_primitives::digest::Digest32::from_bytes(tx.tx_id),
+                )
+            });
             // Workstream C: a rollback (non-empty `demoted`) captures its
             // enrichment HERE — the only place the returned-tx set and the
             // winning tip meet — for the event differ to attach by tip id.
@@ -497,10 +498,7 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
                         .map(|f| f.peer.to_string()),
                 });
             }
-            let mut mempool_diff: ergo_mempool::types::TxDiff = state_diff.into();
-            mempool_diff
-                .demoted
-                .retain(|tx| !state.mempool.is_private_transaction(&tx.tx_id));
+            let mempool_diff: ergo_mempool::types::TxDiff = state_diff.into();
             let mempool_actions = state.mempool.on_tip_change(&mempool_diff);
             let routed = route_mempool_actions(state, mempool_actions);
             flush_actions(state, routed);

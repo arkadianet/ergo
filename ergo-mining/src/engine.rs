@@ -62,6 +62,9 @@ pub enum BuildReason {
     /// builds again on the next candidate request; the eager rebuild is this
     /// node's choice, so a miner polling for work is not left without it.
     SolvedBlockFailed,
+    /// The private mining queue changed on the same tip: an admission, a
+    /// cancellation, an expiry, or a confirmation found while catching up.
+    PrivateQueue,
 }
 
 /// How far the header tip may lead the applied full-block tip while mining
@@ -164,6 +167,21 @@ pub struct Template {
     pub candidate: Candidate,
     pub work: WorkMessage,
     pub identity: TemplateIdentity,
+}
+
+impl Template {
+    /// Ids of the operator-private transactions this template includes. Only
+    /// transactions the build categorized as private are hashed.
+    pub fn private_transaction_ids(&self) -> Vec<Digest32> {
+        self.candidate
+            .transactions
+            .iter()
+            .zip(&self.candidate.observation.transactions)
+            .filter(|(_, observation)| observation.category == "private")
+            .filter_map(|(tx, _)| ergo_ser::transaction::transaction_id(tx).ok())
+            .map(|id| Digest32::from_bytes(*id.as_bytes()))
+            .collect()
+    }
 }
 
 /// Result of a single [`build_and_publish`] attempt. The async driver uses

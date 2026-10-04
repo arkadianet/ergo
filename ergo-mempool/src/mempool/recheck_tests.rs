@@ -9,6 +9,7 @@
 use super::*;
 use crate::admission::{MockPlan, MockValidator, PeekedTx, Validated, ValidationErr};
 use crate::pool::Entry;
+use crate::types::DemotedTx;
 use crate::weight::ByCost;
 use ergo_primitives::cost::JitCost;
 use ergo_primitives::digest::{Digest32, ModifierId};
@@ -1584,7 +1585,7 @@ fn demote_all_then_tick_revalidation_restores_pool() {
 fn private_ids_never_enter_public_admission_or_relay_on_reorg_replay() {
     let mut mp = mempool_with(MempoolConfig::default());
     mp.register_private_transaction(d(1));
-    let v = validator(vec![ok_plan(1, 100)]);
+    let v = validator(vec![ok_plan(1, 100), ok_plan(2, 100)]);
     let utxo = FakeUtxo::empty();
     let tip = TestTip::new();
     for source in [TxSource::Wallet, TxSource::Api, TxSource::DemotedFromBlock] {
@@ -1602,7 +1603,54 @@ fn private_ids_never_enter_public_admission_or_relay_on_reorg_replay() {
         );
         assert_eq!(mp.staging_len(), 0);
     }
+
+    // A rollback returns the private transaction alongside a public one. The
+    // real replay path (tip change, then the revalidation drain) re-admits
+    // only the public one and never names the private id.
+    let rollback = TxDiff {
+        new_tip: TipPointer {
+            height: 999,
+            header_id: d(0xEE),
+        },
+        applied: vec![],
+        demoted: [1, 2]
+            .into_iter()
+            .map(|b| DemotedTx {
+                tx_id: d(b),
+                bytes: Arc::from(tx_bytes(b).into_boxed_slice()),
+            })
+            .collect(),
+        applied_spent_inputs: Default::default(),
+    };
+    let mut actions = mp.on_tip_change(&rollback);
+    assert_eq!(mp.revalidation_pending(), 2);
+    actions.extend(mp.tick_revalidation(Instant::now(), &tip.view(&utxo), &v));
+    assert_eq!(mp.revalidation_pending(), 0, "both replayed");
+    assert!(mp.contains(&d(2)), "the public transaction returns");
+    assert!(!mp.contains(&d(1)), "the private one never enters the pool");
+    assert!(mp.get_bytes(&d(1)).is_none());
+    let named: Vec<TxId> = actions
+        .iter()
+        .flat_map(|action| match action {
+            MempoolAction::BroadcastInv { tx_id, .. } => vec![*tx_id],
+            MempoolAction::RevokeBroadcast { tx_ids } => tx_ids.clone(),
+            MempoolAction::Observe {
+                event: ObservedEvent::Admitted { tx_id, .. },
+            } => vec![*tx_id],
+            MempoolAction::Observe {
+                event: ObservedEvent::Evicted { tx_ids, .. },
+            } => tx_ids.clone(),
+            _ => vec![],
+        })
+        .collect();
+    assert!(named.contains(&d(2)));
+    assert!(!named.contains(&d(1)), "no action names the private id");
+    assert_eq!(mp.staging_len(), 0);
     assert!(mp
         .recheck_and_evict(Instant::now(), &tip.view(&utxo), &v)
-        .is_empty());
+        .iter()
+        .all(
+            |action| !matches!(action, MempoolAction::BroadcastInv { tx_id, .. } if *tx_id == d(1))
+        ));
+    mp.pool().check_invariants();
 }

@@ -68,9 +68,16 @@ pub struct MiningAssetJson {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RewardBreakdownJson {
+    /// Emission the miner keeps: the reward box value minus the obligation.
     pub emission_nano_erg: String,
+    /// Emission reward box value, as the payout box holds it.
+    pub emission_gross_nano_erg: String,
+    /// nanoERG owed to the EIP-27 re-emission contract when the reward box
+    /// is spent (one per re-emission token it holds).
+    pub reemission_obligation_nano_erg: String,
     pub fees_nano_erg: String,
     pub rent_nano_erg: String,
+    /// Kept emission plus fees and rent.
     pub total_nano_erg: String,
     pub outputs: Vec<MinerProceedsJson>,
 }
@@ -170,7 +177,14 @@ pub struct MiningFreshnessJson {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MiningAccountingJson {
     pub height: u32,
+    /// Emission the miner keeps after the EIP-27 re-emission obligation.
     pub emission_nano_erg: String,
+    /// Emission reward box value; absent only if it was never recorded.
+    #[serde(default)]
+    pub emission_gross_nano_erg: Option<String>,
+    /// nanoERG owed to re-emission when the reward box is spent.
+    #[serde(default)]
+    pub reemission_obligation_nano_erg: Option<String>,
     pub fees_nano_erg: String,
     pub rent_nano_erg: String,
     pub recovered_tokens: Vec<MiningAssetJson>,

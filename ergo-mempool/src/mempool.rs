@@ -80,8 +80,6 @@ pub struct Mempool {
     /// A side effect of `process` alone — `check` (`/check`) never touches
     /// it — and it never gossips. See [`crate::staging`].
     staging: StagingPool,
-    /// Operator transaction ids excluded from all public admission paths.
-    private_only_ids: std::collections::HashSet<TxId>,
 }
 
 impl Mempool {
@@ -113,7 +111,6 @@ impl Mempool {
             revalidation,
             observer: None,
             staging,
-            private_only_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -165,13 +162,33 @@ impl Mempool {
         self.pool.iter_prioritized()
     }
 
-    /// Register private mining identities without retaining their bytes.
+    /// Register a private mining identity without retaining its bytes. Every
+    /// public admission path declines it afterwards (see
+    /// [`OrderedPool::register_private_only`]).
     pub fn register_private_transaction(&mut self, id: TxId) {
-        self.private_only_ids.insert(id);
+        self.pool.register_private_only(id);
+    }
+
+    /// Release a private identity once the operator's queue no longer holds
+    /// the transaction for this miner (cancelled or expired), so it can be
+    /// broadcast publicly through this node.
+    pub fn unregister_private_transaction(&mut self, id: &TxId) {
+        self.pool.unregister_private_only(id);
     }
 
     pub fn is_private_transaction(&self, id: &TxId) -> bool {
-        self.private_only_ids.contains(id)
+        self.pool.is_private_only(id)
+    }
+
+    /// Whether a pooled transaction creates the box `box_id`.
+    pub fn creates_output(&self, box_id: &Digest32) -> bool {
+        self.pool.parent_for_output(box_id).is_some()
+    }
+
+    /// Whether staging holds `tx_id` (an orphan or a held parent). Staged
+    /// bytes came through public admission and may later be promoted.
+    pub fn is_staged(&self, tx_id: &TxId) -> bool {
+        self.staging.contains(tx_id)
     }
 
     pub fn contains(&self, tx_id: &TxId) -> bool {
@@ -316,23 +333,6 @@ impl Mempool {
                 self.tip,
             );
             return (outcome, Vec::new());
-        }
-        if !self.private_only_ids.is_empty()
-            && tx_bytes.len() <= self.config.max_tx_size_bytes
-            && validator
-                .peek_fee(tx_bytes)
-                .is_ok_and(|tx| self.is_private_transaction(&tx.tx_id))
-        {
-            return (
-                AdmissionOutcome::Rejected {
-                    reason: RejectReason::ValidationFailed {
-                        kind: admission::ValidationErr::Other(
-                            "transaction is reserved for private mining".into(),
-                        ),
-                    },
-                },
-                Vec::new(),
-            );
         }
         let mut held_out: Option<admission::HeldCandidate> = None;
         let (mut outcome, mut actions) = {

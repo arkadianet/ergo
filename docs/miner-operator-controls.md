@@ -7,12 +7,21 @@ including recently superseded templates while the node retains them.
 The report lists transactions in block order with their origin, fee, measured
 validation cost, serialized size, inputs, outputs, scripts, token amounts and
 canonical signed bytes. An export button saves the same frozen JSON report.
+Exclusions name the transactions the build considered and left out, with the
+reason. A reason starting with `required_` marks a block-policy requirement
+that this template does not satisfy; the panel lists those first and work is
+published without them (see [miner-block-policy.md](miner-block-policy.md)).
 Header votes and extension fields show the commitments actually present in that
 template. All ERG and token quantities in the inspection API are decimal strings;
 browser clients must keep them as strings or use `BigInt`.
 
 Miner proceeds distinguish emission, collected transaction fees and storage rent,
-with the actual payout boxes and their spendable heights. Rent collection can
+with the actual payout boxes and their spendable heights. Since EIP-27 an emission
+reward box also holds re-emission tokens, and the spend that unlocks it must pay
+1 nanoERG per token to the re-emission contract. The report shows the reward box
+value, that obligation and the emission kept; only the kept emission counts in the
+totals and the submission history, and re-emission tokens are never reported as
+received. Rent collection can
 produce several payout boxes; the report includes every miner payout and excludes
 recreated owner outputs, even when their owner is also the miner. Tokens held in
 recreated boxes are not miner income. Recovered and burned token amounts come from
@@ -32,9 +41,10 @@ Send the configured `api_key` header to all inventory and history endpoints:
 
 - `GET /api/v1/mining/candidate-details?msg=<64-hex>&template_seq=<sequence>`
   matches both selectors against one retained template. Omitting both selects
-  current offered work. An evicted or mismatched historical selector returns 404;
-  missing current work returns 503. Status distinguishes `current`, `superseded`,
-  `stale_parent` and `withdrawn`.
+  current offered work. An evicted or mismatched historical selector returns 404
+  with reason `template_not_found`; missing current work returns 503 with
+  `candidate_unavailable`. Both use the v1 error envelope. Status distinguishes
+  `current`, `superseded`, `stale_parent` and `withdrawn`.
 - `GET /api/v1/mining/history` returns the most recent 16 retained templates plus
   at most 128 local solution outcomes. Template retention resets on restart.
 - `GET /api/v1/mining/status` is public and reports real current-template age,
@@ -64,8 +74,10 @@ balance or a complete record of blocks found by other nodes using the same key.
 
 A history-write failure does not invalidate an already applied block. The endpoint
 reports `journal_error` and retains the observation in memory for the operator to
-inspect. An invalid existing journal fails startup rather than silently resetting
-stored accounting.
+inspect. An unreadable or invalid journal does not stop the node: it is moved aside
+as `mining-history.json.corrupt-<unix ms>`, a new history starts, and
+`journal_error` names where the old file went for as long as the node runs. If it
+cannot be moved, that run keeps history in memory only rather than overwrite it.
 
 Candidate inventories and signed private transaction bytes remain behind the
 operator gate. Public status and public mempool/explorer endpoints do not publish

@@ -486,16 +486,17 @@ pub(super) fn signal_mining_engine(
         RewardKeyResolution::Pending | RewardKeyResolution::Corrupt => return now,
     };
     let mempool = ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool);
+    // Elapsed private deadlines are filtered here even while their durable
+    // expiry is still being retried.
+    let (operator_generation, private_transactions) = handle.operator_snapshot(|queue| {
+        queue.selection_entries_at(crate::snapshot::unix_now_ms(), now.best_full_height)
+    });
     let intent = BuildIntent {
         expected_parent: now.best_full_id,
         expected_height: now.best_full_height,
         mempool: Arc::new(mempool),
-        private_transactions: Arc::new(
-            handle
-                .private_queue()
-                .selection_entries_at(crate::snapshot::unix_now_ms(), now.best_full_height),
-        ),
-        operator_generation: handle.operator_generation(),
+        private_transactions: Arc::new(private_transactions),
+        operator_generation,
         miner_pk,
         reason,
     };
@@ -558,53 +559,29 @@ pub(super) fn handle_mining_request(
         }
     };
 
-    if let Err(error) = super::private_mining::expire(state, handle) {
-        tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
-        // A solution must not be accepted when its private queue deadlines
-        // cannot be established durably against the applied parent.
-        if matches!(
-            &req,
-            crate::mining_bridge::MiningRequest::SubmitSolution { .. }
-        ) {
-            handle.invalidate_operator_generation();
-            if let crate::mining_bridge::MiningRequest::SubmitSolution { reply, .. } = req {
-                let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(format!(
-                    "private mining deadline check failed: {error}"
-                ))));
-            }
-            return true;
-        }
-    }
+    // Apply private deadlines before serving or accepting work (constant time
+    // unless one is due). Templates that include elapsed work are withdrawn
+    // even when the durable expiry has to be retried, so a solution for any
+    // other template is still accepted.
+    super::private_mining::expire(state, handle);
     let req = match req {
         crate::mining_bridge::MiningRequest::ListPrivateTransactions { reply } => {
-            let items = handle
-                .private_queue()
-                .list()
-                .into_iter()
-                .map(super::private_mining::api_entry)
-                .collect();
-            let _ = reply.send(Ok(items));
+            let _ = reply.send(Ok(super::private_mining::list(handle)));
             return false;
         }
+        // Queue changes advance the queue revision; the action loop answers
+        // that with a `PrivateQueue` rebuild on the current tip.
         crate::mining_bridge::MiningRequest::SubmitPrivateTransaction {
             bytes,
             options,
             reply,
         } => {
-            let result = super::private_mining::admit(state, handle, &bytes, options);
-            let changed = result.is_ok();
-            let _ = reply.send(result);
-            return changed;
+            let _ = reply.send(super::private_mining::admit(state, handle, &bytes, options));
+            return false;
         }
         crate::mining_bridge::MiningRequest::CancelPrivateTransaction { tx_id, reply } => {
-            handle.invalidate_operator_generation();
-            let result = handle
-                .private_queue()
-                .cancel(&tx_id)
-                .map(super::private_mining::api_entry)
-                .map_err(ergo_api::MiningApiError::BadRequest);
-            let _ = reply.send(result);
-            return true;
+            let _ = reply.send(super::private_mining::cancel(state, handle, &tx_id));
+            return false;
         }
         other => other,
     };

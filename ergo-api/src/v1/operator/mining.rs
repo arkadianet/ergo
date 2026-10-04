@@ -256,8 +256,16 @@ pub(crate) async fn candidate_details(
     let historical = q.msg.is_some() || q.template_seq.is_some();
     match mining.candidate_details(q.msg, q.template_seq).await {
         Ok(Some(details)) => Json(details).into_response(),
-        Ok(None) if historical => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":404,"reason":"template_not_retained","detail":"No retained template matches both selectors; re-fetch current work."}))).into_response(),
-        Ok(None) => v1_error(Reason::CandidateUnavailable, "no current template", "retry once mining work is available"),
+        Ok(None) if historical => v1_error(
+            Reason::TemplateNotFound,
+            "no retained template matches both selectors",
+            "re-fetch current work; templates are retained briefly and reset on restart",
+        ),
+        Ok(None) => v1_error(
+            Reason::CandidateUnavailable,
+            "no current template",
+            "retry once mining work is available",
+        ),
         Err(e) => map_mining_error(e, Reason::CandidateUnavailable),
     }
 }

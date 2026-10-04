@@ -9,10 +9,14 @@ network-voted block size and cost limits.
 `PUT /api/v1/mining/policy` replaces it. Both require the operator API key.
 Writes validate the entire policy before changing it, persist it to
 `mining-policy.json` in the node data directory, and retire previously offered
-templates. In-flight builds with an older policy revision or operator queue
-generation cannot publish. The saved policy overrides the TOML boot default
-on restart. A malformed saved file refuses startup rather than silently
-mining with different preferences.
+templates. An invalid policy answers 400; a storage failure answers 500 and
+changes neither the saved nor the active policy. In-flight builds with an
+older policy revision or operator queue generation cannot publish. The saved
+policy overrides the TOML boot default on restart, and the node logs a
+warning at startup when the two differ; remove the saved file to use the
+TOML policy again. A malformed saved file refuses startup rather than
+silently mining with different preferences.
+Temporary files a crash leaves beside it are removed at startup.
 
 An example policy:
 
@@ -38,37 +42,59 @@ The emission transaction and mandatory framing/cost margin are deducted
 first. The rent ceiling is the lower of:
 
 - The configured rent share of the voted block limit, minus overhead.
-- The available budget after reserving the configured private share when
-  private transactions are waiting.
+- The available budget after leaving room for operator work: the configured
+  private share while private or required transactions are waiting, and never
+  less than the measured serialized size and admission cost of the available
+  required transactions and their ancestors.
 
-Reservations keep rent from crowding out private work. They are not hard caps
-on the private lane: after the rent prefix, private transactions and their
-available ancestors are selected before ordinary public transactions. Public
-transactions can fill the remaining budget. A zero reservation disables that
-additional protection; it does not exclude private transactions. Rent claims
-also avoid inputs reserved by private or required transactions.
+Reservations keep rent from crowding out private and required work. They are
+not hard caps on those lanes: after the rent prefix, required transactions,
+then private transactions, and their available ancestors are selected before
+ordinary public transactions. Public transactions can fill the remaining
+budget. A zero reservation disables the private share; it does not exclude
+private transactions, and required work is still measured. Selection
+revalidates every transaction, so a requirement whose cost grew since
+admission can still miss the budget and be reported. Rent claims also avoid
+inputs reserved by private or required transactions.
 
 The final fee-collection transaction is measured and validated too. Assembly
-may trim optional transactions from the tail until the complete section fits.
-An included required transaction cannot be trimmed to make room for fees.
-Candidate details contain exact retained categories, sizes, costs and exclusion
-reasons from that template rather than estimates from the live mempool.
+may trim transactions from the tail until the complete section fits. Required
+transactions are selected first, so they are trimmed only after every
+optional transaction. Candidate details contain exact retained categories,
+sizes, costs and exclusion reasons from that template rather than estimates
+from the live mempool.
 
 ## Required and excluded transactions
 
-Required IDs and every ID listed in a mandatory bundle must appear together
-in a valid final candidate. Available parents are included before children;
-listed bundle order is used when no dependency requires a different order.
-Requirements can refer to public or private transactions. Missing IDs,
-excluded ancestors, conflicts, failed validation or a budget that cannot fit
-the whole requirement withhold a candidate. Initial emission-only templates
-are disabled while requirements are present.
+Required IDs, including every ID listed in a bundle, get priority inclusion
+and never withhold work. Each requirement and its available ancestors are
+selected before private and public transactions, and rent claims avoid their
+inputs. Available parents are included before children; listed bundle order
+is used when no dependency requires a different order. Requirements can refer
+to public or private transactions.
 
-Requirements remain operator policy until cleared. Clear completed or stale
-requirements to resume ordinary mining after those transactions confirm or
-are replaced. The UI explains this behavior before saving. Use the ordinary
-private queue for transactions that may wait across candidate rebuilds without
-requiring the whole miner to wait.
+A requirement that cannot be included is left out of that candidate, which is
+still published. Candidate details list it among the exclusions with a reason
+that starts with `required_`:
+
+- `required_unavailable`: the ID is in neither the mempool nor the private
+  queue, for example because it was mined, replaced or expired.
+- `required_excluded_ancestor`: it depends on an excluded transaction.
+- `required_` followed by an ordinary selection reason, such as
+  `required_input_unavailable`, `required_input_conflict`,
+  `required_consensus_validation_failed` or `required_cost_budget`: selection
+  could not include it or one of its ancestors.
+- `required_final_fee_or_section_budget`: it was trimmed, after every
+  optional transaction, so that the fee transaction and section fit.
+
+Bundles set an order; they are not atomic. Each member is included or
+reported on its own. Initial emission-only templates are published as usual,
+and requirements arrive with the enriched refresh.
+
+Requirements remain operator policy until cleared. A requirement that has
+confirmed keeps being reported, as `required_input_unavailable` while the
+mempool still holds it and then as `required_unavailable`, until you remove
+it from the policy.
 
 Excluded IDs are never selected. Requirements and exclusions are compared by
 decoded transaction ID, so hexadecimal case cannot bypass a contradiction.

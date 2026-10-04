@@ -21,8 +21,9 @@ pub enum RentTokenPolicy {
 
 /// Bounded configuration for miner-selected block contents. Basis points are
 /// hundredths of one percent (10,000 means 100%). Private reservations keep
-/// rent from consuming that budget when private transactions are waiting;
-/// public transactions may use whatever remains after private selection.
+/// rent from consuming that budget when private or required transactions are
+/// waiting; public transactions may use whatever remains after private
+/// selection.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BlockPolicy {
@@ -30,13 +31,15 @@ pub struct BlockPolicy {
     pub rent_max_size_basis_points: u16,
     pub private_reserved_cost_basis_points: u16,
     pub private_reserved_size_basis_points: u16,
-    /// Every required transaction and its available ancestors must be present
-    /// in the final candidate. Missing, conflicting or oversized requirements
-    /// stop candidate publication until the operator changes the policy.
+    /// Required transactions and their available ancestors are selected
+    /// before private and public transactions. One that is missing, blocked
+    /// or does not fit is left out and reported as a `required_` exclusion;
+    /// it never withholds the candidate and stays here until cleared.
     pub required_tx_ids: Vec<String>,
     pub excluded_tx_ids: Vec<String>,
-    /// Each list is an ordered mandatory bundle. Transaction dependencies are
-    /// still ordered before children; every listed transaction is required.
+    /// Each list is an ordered bundle of required transactions. Dependencies
+    /// are still ordered before children. Bundles order requirements; they
+    /// are not atomic, so each member is included or reported on its own.
     pub required_bundles: Vec<Vec<String>>,
     pub rent_token_policy: RentTokenPolicy,
 }
@@ -126,23 +129,27 @@ impl BlockPolicy {
         self.excluded_tx_ids.iter().map(|id| parse_id(id)).collect()
     }
 
-    /// A rent ceiling after protecting the private reservation and mandatory
-    /// emission/framing overhead. Saturation makes tiny voted blocks safe.
+    /// A rent ceiling after mandatory emission/framing overhead and the room
+    /// operator work needs: the private reservation while private or required
+    /// transactions are waiting, and never less than `required`, the measured
+    /// amount of the available required transactions and their ancestors.
+    /// Saturation makes tiny voted blocks safe.
     pub fn rent_ceiling(
         total: u64,
         overhead: u64,
         maximum: u16,
         private_reserve: u16,
-        private_waiting: bool,
+        operator_work_waiting: bool,
+        required: u64,
     ) -> u64 {
         let usable = total.saturating_sub(overhead);
         let rent = (total.saturating_mul(u64::from(maximum)) / 10_000).saturating_sub(overhead);
-        let private = if private_waiting {
+        let private = if operator_work_waiting {
             total.saturating_mul(u64::from(private_reserve)) / 10_000
         } else {
             0
         };
-        rent.min(usable.saturating_sub(private))
+        rent.min(usable.saturating_sub(private.max(required)))
     }
 }
 
@@ -165,14 +172,32 @@ mod tests {
     #[test]
     fn rent_ceiling_protects_private_budget_and_emission() {
         assert_eq!(
-            BlockPolicy::rent_ceiling(10_000, 500, 9_375, 1_000, true),
+            BlockPolicy::rent_ceiling(10_000, 500, 9_375, 1_000, true, 0),
             8_500
         );
         assert_eq!(
-            BlockPolicy::rent_ceiling(10_000, 500, 9_375, 1_000, false),
+            BlockPolicy::rent_ceiling(10_000, 500, 9_375, 1_000, false, 0),
             8_875
         );
-        assert_eq!(BlockPolicy::rent_ceiling(10, 100, 9_375, 1_000, true), 0);
+        assert_eq!(BlockPolicy::rent_ceiling(10, 100, 9_375, 1_000, true, 0), 0);
+    }
+
+    #[test]
+    fn rent_ceiling_leaves_measured_required_work_beyond_the_reservation() {
+        // Even a zero reservation and a full rent share leave the measured
+        // requirement; a larger reservation still wins.
+        assert_eq!(
+            BlockPolicy::rent_ceiling(10_000, 500, 10_000, 0, true, 2_000),
+            7_500
+        );
+        assert_eq!(
+            BlockPolicy::rent_ceiling(10_000, 500, 9_375, 1_000, true, 400),
+            8_500
+        );
+        assert_eq!(
+            BlockPolicy::rent_ceiling(10_000, 500, 9_375, 1_000, true, u64::MAX),
+            0
+        );
     }
 
     // ----- round-trips -----

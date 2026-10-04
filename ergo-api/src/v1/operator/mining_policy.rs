@@ -9,7 +9,7 @@ use axum::{
 use serde_json::Value;
 
 use super::OperatorState;
-use crate::v1::error::Reason;
+use crate::v1::error::{Reason, V1Error};
 
 #[utoipa::path(
     get, path = "/api/v1/mining/policy",
@@ -35,6 +35,7 @@ pub(crate) async fn get(State(state): State<OperatorState>) -> Response {
     responses(
         (status = 200, description = "Saved policy; previously offered templates retired", body = Value),
         (status = 400, description = "Malformed or contradictory policy"),
+        (status = 500, description = "The policy could not be saved; the active policy is unchanged", body = V1Error),
     ),
     security(("ApiKeyAuth" = [])),
 )]
