@@ -398,6 +398,10 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
 
     // Heavy reads — full-block payloads, paginated / scan / range surfaces.
     let heavy: Router<V1State> = Router::new()
+        .route(
+            "/api/v1/events/replay",
+            get(crate::v1::realtime::history::replay),
+        )
         // ----- chain/blocks -----
         .route("/api/v1/chain/blocks", get(chain::list_blocks))
         .route("/api/v1/chain/blocks/by-ids", post(chain::blocks_by_ids))

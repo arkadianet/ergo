@@ -33,11 +33,57 @@ impl ApiServices {
     /// The fresh bus is seeded above recovered obligations before any publisher
     /// or worker starts, so delivery dedupe keys cannot alias after restart.
     pub fn with_webhooks(engine: Option<Arc<WebhookEngine>>) -> Self {
-        let realtime = RealtimeHandle::blocks_and_mempool();
+        Self::with_realtime(engine, RealtimeHandle::blocks_and_mempool())
+    }
+
+    /// Keep ordinary API services available when notification cursors cannot
+    /// be restored safely. The inert bus never hands out fallback cursors.
+    pub fn without_notifications() -> Self {
+        let mut realtime = RealtimeHandle::blocks_and_mempool();
+        realtime.bus = Arc::new(crate::v1::RealtimeBus::disabled());
+        Self::with_realtime(None, realtime)
+    }
+
+    /// Restore bounded realtime replay independently of the webhook registry.
+    /// Construction reserves cursors and must run on the boot blocking lane.
+    pub fn with_durable_realtime(
+        engine: Option<Arc<WebhookEngine>>,
+        store: Arc<dyn crate::v1::realtime::journal::RealtimeStore>,
+    ) -> Result<Self, String> {
+        let minimum_next = engine
+            .as_ref()
+            .map(|engine| {
+                engine
+                    .highest_event_seq()
+                    .max(engine.replay_seq())
+                    .saturating_add(1)
+            })
+            .unwrap_or(1);
+        let mut realtime = RealtimeHandle::blocks_and_mempool();
+        let classes = [
+            crate::v1::realtime::ChannelClass::Blocks,
+            crate::v1::realtime::ChannelClass::Mempool,
+            crate::v1::realtime::ChannelClass::Peers,
+            crate::v1::realtime::ChannelClass::Tx,
+        ]
+        .into_iter()
+        .collect();
+        realtime.bus = Arc::new(crate::v1::RealtimeBus::durable(
+            classes,
+            store,
+            minimum_next,
+        )?);
+        Ok(Self::with_realtime(engine, realtime))
+    }
+
+    fn with_realtime(engine: Option<Arc<WebhookEngine>>, realtime: RealtimeHandle) -> Self {
         if let Some(engine) = &engine {
-            realtime
-                .bus
-                .advance_cursor_to(engine.highest_event_seq().saturating_add(1));
+            realtime.bus.advance_cursor_to(
+                engine
+                    .highest_event_seq()
+                    .max(engine.replay_seq())
+                    .saturating_add(1),
+            );
         }
         let (webhooks, sink) = match engine.map(|engine| (engine, ReqwestSink::new())) {
             Some((engine, Ok(sink))) => (
@@ -99,6 +145,7 @@ impl ApiServices {
             // shared lane owned until all accepted persistence jobs complete.
             webhooks.executor.shutdown().await;
         }
+        self.realtime.bus.shutdown_journal().await;
     }
 
     pub(super) fn start(&self, read: Arc<dyn NodeReadState>) -> Option<BackgroundTasks> {
@@ -106,18 +153,18 @@ impl ApiServices {
         if tasks.is_some() {
             return None;
         }
-        let handles = vec![
-            crate::v1::spawn_depth_sampler(
-                read.clone(),
-                self.mempool_depth.clone(),
-                crate::v1::DEFAULT_SAMPLE_INTERVAL,
-            ),
-            crate::v1::spawn_event_bridge(
+        let mut handles = vec![crate::v1::spawn_depth_sampler(
+            read.clone(),
+            self.mempool_depth.clone(),
+            crate::v1::DEFAULT_SAMPLE_INTERVAL,
+        )];
+        if self.realtime.bus.is_enabled() {
+            handles.push(crate::v1::spawn_event_bridge(
                 read,
                 self.realtime.bus.clone(),
                 crate::v1::realtime::DEFAULT_BRIDGE_INTERVAL,
-            ),
-        ];
+            ));
+        }
         let (webhook, webhook_shutdown) =
             if let (Some(webhooks), Some(sink)) = (&self.webhooks, &self.sink) {
                 let (shutdown, signal) = tokio::sync::oneshot::channel();

@@ -148,3 +148,70 @@ async fn cancelling_shutdown_preserves_anchor_and_mining_task_cleanup() {
             .unwrap();
     }
 }
+
+#[derive(Default)]
+struct ShutdownReplayStore {
+    events: std::sync::Mutex<Vec<ergo_api::v1::realtime::journal::ReplayEvent>>,
+    reservations: std::sync::atomic::AtomicUsize,
+    finalized: tokio::sync::Notify,
+}
+impl ergo_api::v1::realtime::journal::RealtimeStore for ShutdownReplayStore {
+    fn load_events(&self) -> Result<ergo_api::v1::realtime::journal::JournalRecovery, String> {
+        Ok(Default::default())
+    }
+    fn reserve_cursor(&self, _: u64) -> Result<(), String> {
+        if self.reservations.fetch_add(1, Ordering::SeqCst) > 0 {
+            self.finalized.notify_one();
+        }
+        Ok(())
+    }
+    fn append_events(
+        &self,
+        events: &[ergo_api::v1::realtime::journal::ReplayEvent],
+    ) -> Result<(), String> {
+        self.events.lock().unwrap().extend_from_slice(events);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn shutdown_persists_final_publisher_event_before_closing_journal() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut handle = test_node(directory.path()).await;
+    handle.drain_wallet().await.unwrap();
+    let real_loop = retain_loop_for_test(&mut handle);
+    let store = Arc::new(ShutdownReplayStore::default());
+    let services =
+        Arc::new(ergo_api::ApiServices::with_durable_realtime(None, store.clone()).unwrap());
+    handle.api_services = Some(services.clone());
+    let bus = services.realtime.bus.clone();
+    let (finish_tx, finish_rx) = oneshot::channel();
+    handle.loop_handle = tokio::spawn(async move {
+        finish_rx.await.unwrap();
+        bus.publish(ergo_api::v1::realtime::RealtimeEventBody::block_applied(
+            1,
+            "final".into(),
+            1,
+            1,
+            100,
+        ));
+        Ok(())
+    });
+    let shutdown = tokio::spawn(handle.shutdown());
+    // The old order closes the journal while this final producer is parked.
+    // The correct order waits for the producer; release it after that wait.
+    let _ = tokio::time::timeout(Duration::from_millis(200), store.finalized.notified()).await;
+    finish_tx.send(()).unwrap();
+    shutdown.await.unwrap().unwrap();
+    real_loop.await.unwrap().unwrap();
+    assert_eq!(store.events.lock().unwrap().len(), 1);
+    assert_eq!(
+        services
+            .realtime
+            .bus
+            .journal_status()
+            .unwrap()
+            .committed_seq,
+        1
+    );
+}

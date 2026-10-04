@@ -38,6 +38,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::mpsc;
 
+use super::journal::{EventJournal, JournalStatus, RealtimeStore};
 use super::model::{ChannelClass, RealtimeEventBody};
 
 /// Bounded per-subscriber send queue (256 frames). Overflow evicts the
@@ -50,7 +51,7 @@ pub const RESUME_WINDOW: usize = 8192;
 
 /// A published event with its assigned global `seq`. Cheap to `Arc`-clone into
 /// every matching subscriber queue.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RealtimeEvent {
     /// The single global monotonic cursor (starts at 1, never reused).
     pub seq: u64,
@@ -86,11 +87,17 @@ pub struct BackfillPage {
     /// `true` when `since` predates the retained window — the client must treat
     /// its state as cold and re-read via REST.
     pub gap: bool,
+    /// First missing source cursor after `since`, even beyond this page.
+    pub first_missing_seq: Option<u64>,
+    /// Inclusive end of that first missing interval.
+    pub missing_through_seq: Option<u64>,
     /// `true` when more matching events remain beyond the request limit — the
     /// page is NOT the full catch-up and the caller must not treat it as one.
     pub truncated: bool,
     /// The current global cursor at the time of the read.
     pub latest_seq: u64,
+    /// Oldest retained observation, when any exists.
+    pub oldest_seq: Option<u64>,
 }
 
 struct SubEntry {
@@ -108,8 +115,10 @@ struct Inner {
 
 /// The fan-out hub. `Arc`-shared between the feed task(s) and every socket.
 pub struct RealtimeBus {
+    enabled: bool,
     inner: Mutex<Inner>,
     live_classes: RwLock<HashSet<ChannelClass>>,
+    journal: Option<EventJournal>,
 }
 
 /// A live subscription handle held by one socket task. Dropping it deregisters
@@ -141,6 +150,7 @@ impl RealtimeBus {
     /// A bus that feeds the given channel classes live.
     pub fn new(live_classes: HashSet<ChannelClass>) -> Self {
         RealtimeBus {
+            enabled: true,
             inner: Mutex::new(Inner {
                 next_seq: 1,
                 next_sub_id: 1,
@@ -148,6 +158,67 @@ impl RealtimeBus {
                 backfill: VecDeque::with_capacity(RESUME_WINDOW.min(1024)),
             }),
             live_classes: RwLock::new(live_classes),
+            journal: None,
+        }
+    }
+
+    /// An unavailable source which cannot issue cursors, including when a
+    /// durable store failed to initialize. Other API services can remain live.
+    pub fn disabled() -> Self {
+        let mut bus = Self::new(HashSet::new());
+        bus.enabled = false;
+        bus
+    }
+
+    /// Whether this bus can issue observations and expose a live feed.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Restore bounded history and reserve fresh cursor space before exposing
+    /// the bus to publishers. Live delivery remains asynchronous to disk;
+    /// `journal_status` identifies the confirmed committed watermark.
+    pub fn durable(
+        live_classes: HashSet<ChannelClass>,
+        store: Arc<dyn RealtimeStore>,
+        minimum_next: u64,
+    ) -> Result<Self, String> {
+        let (journal, recovery) = EventJournal::open(store, minimum_next)?;
+        let mut bus = Self::new(live_classes);
+        let inner = bus.inner.get_mut().unwrap_or_else(|e| e.into_inner());
+        inner.next_seq = recovery.next_seq;
+        for event in recovery.events {
+            inner.backfill.push_back(Arc::new(event.into_event()?));
+        }
+        bus.journal = Some(journal);
+        Ok(bus)
+    }
+
+    pub fn journal_status(&self) -> Option<JournalStatus> {
+        self.journal.as_ref().map(EventJournal::status)
+    }
+
+    /// Stop journal admission and join its confirmed writes off the reactor.
+    /// The short bus lock closes the publisher race; disk draining holds none.
+    pub async fn shutdown_journal(self: &Arc<Self>) {
+        if self.journal.is_none() {
+            return;
+        }
+        let bus = self.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            let thread = {
+                let _inner = bus.inner.lock().unwrap_or_else(|error| error.into_inner());
+                bus.journal.as_ref().and_then(EventJournal::close)
+            };
+            if let Some(thread) = thread {
+                if thread.join().is_err() {
+                    tracing::error!("realtime persistence thread panicked during shutdown");
+                }
+            }
+        })
+        .await
+        {
+            tracing::error!(%error, "realtime persistence shutdown failed");
         }
     }
 
@@ -190,6 +261,9 @@ impl RealtimeBus {
     /// Enable classes only after their real upstream observer is installed.
     /// Merely mounting an indexer query API does not provide an event source.
     pub fn enable_classes(&self, classes: impl IntoIterator<Item = ChannelClass>) {
+        if !self.enabled {
+            return;
+        }
         self.live_classes
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -242,11 +316,28 @@ impl RealtimeBus {
     /// never-block drop policy. Returns the assigned `seq`. If the u64 cursor
     /// is exhausted, drops the event and returns the last assigned cursor.
     pub fn publish(&self, body: RealtimeEventBody) -> u64 {
+        self.try_publish(body).unwrap_or_else(|| self.latest_seq())
+    }
+
+    /// Publish and return only a cursor assigned to this observation. Sources
+    /// retaining inverse links must not remember a rejected observation.
+    pub fn try_publish(&self, body: RealtimeEventBody) -> Option<u64> {
+        if !self.enabled {
+            return None;
+        }
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let seq = g.next_seq;
+        if let Some(journal) = &self.journal {
+            if !journal.can_publish(seq) {
+                if !journal.is_closed() {
+                    tracing::error!("realtime boot cursor epoch exhausted; observation dropped");
+                }
+                return None;
+            }
+        }
         let Some(next_seq) = g.next_seq.checked_add(1) else {
             tracing::error!("realtime cursor exhausted; event dropped");
-            return g.next_seq - 1;
+            return None;
         };
         g.next_seq = next_seq;
         let event = Arc::new(RealtimeEvent {
@@ -263,6 +354,9 @@ impl RealtimeBus {
             g.backfill.pop_front();
         }
         g.backfill.push_back(event.clone());
+        if let Some(journal) = &self.journal {
+            journal.enqueue(event.clone());
+        }
 
         let mut reap: Vec<u64> = Vec::new();
         for (id, sub) in g.subs.iter() {
@@ -285,30 +379,52 @@ impl RealtimeBus {
         for id in reap {
             g.subs.remove(&id);
         }
-        seq
+        Some(seq)
     }
 
     /// Bounded resume backfill: events with `seq > since` matching
     /// `filter`, oldest-first, capped at `limit`. `gap = true` when `since`
     /// predates the retained window.
     pub fn backfill(&self, filter: &HashSet<String>, since: u64, limit: usize) -> BackfillPage {
+        self.backfill_filtered(Some(filter), since, limit)
+    }
+
+    /// Worker catch-up must inspect every source event. A registry/filter
+    /// change during a page must not skip newly selected channel observations.
+    pub(crate) fn backfill_all(&self, since: u64, limit: usize) -> BackfillPage {
+        self.backfill_filtered(None, since, limit)
+    }
+
+    fn backfill_filtered(
+        &self,
+        filter: Option<&HashSet<String>>,
+        since: u64,
+        limit: usize,
+    ) -> BackfillPage {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let latest_seq = g.next_seq - 1;
-        let gap = match g.backfill.front() {
-            // Oldest retained event is newer than the first event the client
-            // still needs → the window rolled past `since`. Saturating: the
-            // client controls `since`, so `u64::MAX` must not overflow.
-            Some(front) => front.seq > since.saturating_add(1),
-            // Nothing retained but the cursor has advanced past `since`.
-            None => latest_seq > since,
-        };
+        let mut first_missing_seq = None;
+        let mut missing_through_seq = None;
+        let mut expected = since.saturating_add(1);
+        for event in g.backfill.iter().filter(|event| event.seq > since) {
+            if event.seq != expected && first_missing_seq.is_none() {
+                first_missing_seq = Some(expected);
+                missing_through_seq = Some(event.seq - 1);
+            }
+            expected = event.seq.saturating_add(1);
+        }
+        if latest_seq >= expected && first_missing_seq.is_none() {
+            first_missing_seq = Some(expected);
+            missing_through_seq = Some(latest_seq);
+        }
+        let gap = first_missing_seq.is_some();
         // Overfetch by one so a page that exactly fills the limit is
         // distinguishable from one that was cut off.
         let mut events: Vec<_> = g
             .backfill
             .iter()
-            .filter(|e| e.seq > since && e.matches(filter))
-            .take(limit + 1)
+            .filter(|e| e.seq > since && filter.is_none_or(|filter| e.matches(filter)))
+            .take(limit.saturating_add(1))
             .cloned()
             .collect();
         let truncated = events.len() > limit;
@@ -318,8 +434,11 @@ impl RealtimeBus {
         BackfillPage {
             events,
             gap,
+            first_missing_seq,
+            missing_through_seq,
             truncated,
             latest_seq,
+            oldest_seq: g.backfill.front().map(|event| event.seq),
         }
     }
 

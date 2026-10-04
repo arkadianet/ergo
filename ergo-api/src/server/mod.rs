@@ -917,7 +917,11 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     // governor is one per node, so later route groups reuse the same per-IP
     // budget.
     let v1_mempool_depth = services.mempool_depth.clone();
-    let v1_realtime = services.realtime.clone();
+    let v1_realtime = services
+        .realtime
+        .bus
+        .is_enabled()
+        .then(|| services.realtime.clone());
     let v1_webhooks_state = crate::v1::WebhooksState {
         handle: services.webhooks.clone(),
         network,
@@ -935,7 +939,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         mempool: v1_mempool,
         mempool_depth: v1_mempool_depth,
         emission: v1_emission,
-        realtime: Some(v1_realtime),
+        realtime: v1_realtime,
         network,
     };
     let v1_governor = operator_governor.unwrap_or_else(|| {
