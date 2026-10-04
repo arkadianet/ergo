@@ -375,7 +375,7 @@ pub(super) async fn action_loop(
                     }
                     // Startup primes above; requested builds use their own
                     // off-loop request channel. Neither is signalled here.
-                    BuildReason::Startup | BuildReason::RequiredTransactions => {}
+                    BuildReason::Startup => {}
                 }
             } else {
                 // Header-only transitions do not regenerate an unchanged
