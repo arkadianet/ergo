@@ -232,8 +232,11 @@ pub(crate) fn transaction_sign_impl_with_snapshot(
         .collect::<Result<_, _>>()?;
 
     let hints_bag: ergo_wallet::proving::hints::TransactionHintsBag = match hints {
-        Some(dto) => tx_hints_bag_from_dto(dto)
-            .map_err(|e| WalletAdminError::Internal(format!("decode hints: {e:?}")))?,
+        // A custody rejection is the caller's error; keep it a client error.
+        Some(dto) => tx_hints_bag_from_dto(dto).map_err(|e| match e {
+            WalletAdminError::BadRequest(_) => e,
+            other => WalletAdminError::Internal(format!("decode hints: {other:?}")),
+        })?,
         None => ergo_wallet::proving::hints::TransactionHintsBag::empty(),
     };
 
