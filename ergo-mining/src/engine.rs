@@ -166,6 +166,21 @@ pub struct Template {
     pub identity: TemplateIdentity,
 }
 
+impl Template {
+    /// Ids of the operator-private transactions this template includes. Only
+    /// transactions the build categorized as private are hashed.
+    pub fn private_transaction_ids(&self) -> Vec<Digest32> {
+        self.candidate
+            .transactions
+            .iter()
+            .zip(&self.candidate.observation.transactions)
+            .filter(|(_, observation)| observation.category == "private")
+            .filter_map(|(tx, _)| ergo_ser::transaction::transaction_id(tx).ok())
+            .map(|id| Digest32::from_bytes(*id.as_bytes()))
+            .collect()
+    }
+}
+
 /// Result of a single [`build_and_publish`] attempt. The async driver uses
 /// this to decide whether to retry (commit-visibility), drop, or move on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

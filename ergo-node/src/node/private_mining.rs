@@ -1,6 +1,6 @@
 //! Private transaction admission and chain lifecycle, owned by the action loop.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use ergo_api::mining::{MiningApiError, PrivateTransactionOptions};
@@ -11,17 +11,37 @@ use ergo_mining::handle::MiningHandle;
 use ergo_mining::private_queue::{PrivateTransactionState, Reconciled};
 use ergo_primitives::cost::{CostAccumulator, JitCost};
 use ergo_primitives::digest::Digest32;
-use ergo_state::HeaderSectionStore;
+use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_validation::{TxValidationCtx, TxValidationRules};
 
 use super::{tip_context::build_tip_context, NodeState};
 
+/// Event-driven lifecycle of the private queue, owned by the action loop.
+/// Applied history is reconciled when the applied tip changes (or while a
+/// bounded catch-up is unfinished) and deadlines are applied when one is due,
+/// so an unchanged chain costs the loop nothing. Candidate membership is not
+/// tracked here; it is derived from the served template when listing.
+#[derive(Debug, Default)]
+pub(crate) struct PrivateLifecycle {
+    /// Applied tip the queue was last reconciled at.
+    reconciled_tip: Option<(u32, [u8; 32])>,
+    /// The last pass stopped short of that tip: a bounded batch, or a
+    /// committed tip still trailing the applied one.
+    catching_up: bool,
+    /// Reconciliation passes run, for tests of the event triggers.
+    #[cfg(test)]
+    reconcile_passes: usize,
+}
+
 pub(super) fn api_entry(
     entry: ergo_mining::private_queue::PrivateTransactionEntry,
+    in_candidate: bool,
 ) -> ergo_api::mining::PrivateTransactionEntry {
     let state = match entry.state {
-        PrivateTransactionState::Queued => "queued",
-        PrivateTransactionState::InCandidate => "in_candidate",
+        PrivateTransactionState::Queued | PrivateTransactionState::InCandidate if in_candidate => {
+            "in_candidate"
+        }
+        PrivateTransactionState::Queued | PrivateTransactionState::InCandidate => "queued",
         PrivateTransactionState::Mined => "mined",
         PrivateTransactionState::Conflicted => "conflicted",
         PrivateTransactionState::Cancelled => "cancelled",
@@ -43,6 +63,45 @@ pub(super) fn api_entry(
         mined_block_id: entry.mined_block_id,
         mined_height: entry.mined_height,
     }
+}
+
+/// Private ids in the template currently served for the applied tip.
+fn served_private_ids(handle: &MiningHandle) -> HashSet<String> {
+    handle
+        .inspect_template(None, None)
+        .map(|snapshot| {
+            snapshot
+                .template
+                .private_transaction_ids()
+                .iter()
+                .map(|id| hex::encode(id.as_bytes()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The queue as the operator sees it, with candidate membership read from
+/// the served template at request time.
+pub(super) fn list(handle: &MiningHandle) -> Vec<ergo_api::mining::PrivateTransactionEntry> {
+    let served = served_private_ids(handle);
+    handle
+        .private_queue()
+        .list()
+        .into_iter()
+        .map(|entry| {
+            let in_candidate = entry.state.is_active() && served.contains(&entry.tx_id);
+            api_entry(entry, in_candidate)
+        })
+        .collect()
+}
+
+/// One entry as [`list`] would show it.
+pub(super) fn view(
+    handle: &MiningHandle,
+    entry: ergo_mining::private_queue::PrivateTransactionEntry,
+) -> ergo_api::mining::PrivateTransactionEntry {
+    let in_candidate = entry.state.is_active() && served_private_ids(handle).contains(&entry.tx_id);
+    api_entry(entry, in_candidate)
 }
 
 /// Decline the queue's transactions on every public admission path. Called at
@@ -93,7 +152,7 @@ pub(super) fn admit(
     // validated again and queued as a fresh item.
     if let Some(existing) = queue.entry(&id) {
         if existing.state.is_pending() || existing.state == PrivateTransactionState::Mined {
-            return Ok(api_entry(existing));
+            return Ok(view(handle, existing));
         }
     }
     // Staged orphans and held parents came through public admission and can
@@ -204,16 +263,37 @@ pub(super) fn admit(
         .map_err(MiningApiError::BadRequest)?;
     state.mempool.register_private_transaction(entry.tx_id);
     handle.invalidate_operator_generation();
-    Ok(api_entry(result))
+    Ok(view(handle, result))
 }
 
-/// Reconcile applied history first, then apply deadlines, so a transaction
-/// confirmed in its last eligible block is recorded as mined, not expired.
+/// Run after every action-loop arm. Reconciles applied history first, then
+/// applies deadlines, so a transaction confirmed in its last eligible block is
+/// recorded as mined, not expired. Work happens only when the applied tip
+/// changed, a bounded catch-up is unfinished, or a deadline is due.
 pub(super) fn run_lifecycle(state: &mut NodeState, handle: &MiningHandle) {
-    match reconcile(state, handle) {
-        Ok(outcome) => release_withdrawn(&mut state.mempool, &outcome.released),
-        Err(error) => {
-            tracing::warn!(%error, "private mining queue waits for confirmation history");
+    let queue = handle.private_queue();
+    if queue.is_empty() {
+        return;
+    }
+    let applied = state.store.chain_state_meta();
+    let tip = (applied.best_full_block_height, applied.best_full_block_id);
+    if state.private_mining.reconciled_tip != Some(tip) || state.private_mining.catching_up {
+        state.private_mining.reconciled_tip = Some(tip);
+        #[cfg(test)]
+        {
+            state.private_mining.reconcile_passes += 1;
+        }
+        match reconcile(state, handle) {
+            Ok(outcome) => {
+                release_withdrawn(&mut state.mempool, &outcome.released);
+                state.private_mining.catching_up =
+                    queue.observation_cursor() != (tip.0, Some(hex::encode(tip.1)));
+            }
+            Err(error) => {
+                // Retried when the applied tip next changes.
+                state.private_mining.catching_up = false;
+                tracing::warn!(%error, "private mining queue waits for confirmation history");
+            }
         }
     }
     if let Err(error) = expire(state, handle) {
@@ -221,27 +301,17 @@ pub(super) fn run_lifecycle(state: &mut NodeState, handle: &MiningHandle) {
     }
 }
 
-/// Called before every solution request as well as on ordinary loop ticks.
-/// Height deadlines are judged against the reconciled height, never the
-/// applied tip, so a deadline cannot expire a transaction that a not yet
-/// reconciled block confirmed. A time deadline racing such a block is
-/// corrected when reconciliation finds the confirmation.
+/// Called before every mining request as well as after loop arms; constant
+/// time unless a deadline is due. Height deadlines are judged against the
+/// reconciled height, never the applied tip, so a deadline cannot expire a
+/// transaction that a not yet reconciled block confirmed. A time deadline
+/// racing such a block is corrected when reconciliation finds the
+/// confirmation.
 pub(super) fn expire(state: &mut NodeState, handle: &MiningHandle) -> Result<bool, String> {
     let now = crate::snapshot::unix_now_ms();
     let queue = handle.private_queue();
-    if queue.list().is_empty() {
-        return Ok(false);
-    }
-    let height = queue.observation_cursor().0;
-    if !queue.list().iter().any(|entry| {
-        matches!(
-            entry.state,
-            PrivateTransactionState::Queued
-                | PrivateTransactionState::InCandidate
-                | PrivateTransactionState::Conflicted
-        ) && (entry.expires_at_ms.is_some_and(|d| d <= now)
-            || entry.expires_at_height.is_some_and(|d| d <= height))
-    }) {
+    let height = queue.observed_height();
+    if !queue.deadline_due(now, height) {
         return Ok(false);
     }
     // Retire offered templates and in-flight build generations before inputs
@@ -253,52 +323,42 @@ pub(super) fn expire(state: &mut NodeState, handle: &MiningHandle) -> Result<boo
 }
 
 /// Incrementally inspect applied history, including after an offline interval.
-/// At most 32 blocks are decoded on an iteration. Confirmation classification
-/// waits until catch-up has reached the applied tip.
+/// At most 32 blocks are decoded on a call. Recorded confirmations are checked
+/// against the applied chain only when the observed branch left it, and input
+/// availability only once catch-up has reached the committed tip.
 pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<Reconciled, String> {
     let queue = handle.private_queue();
-    if queue.list().is_empty() {
-        return Ok(Reconciled::default());
-    }
     let reader = state.store.reader_handle();
     let Some((height, tip)) = reader.committed_tip().map_err(|e| e.to_string())? else {
         return Ok(Reconciled::default());
     };
-    let mut rolled_back = BTreeSet::new();
-    for entry in queue
-        .list()
-        .into_iter()
-        .filter(|e| e.state == PrivateTransactionState::Mined)
-    {
-        if let Some((mined_height, mined_id)) =
-            entry.mined_height.zip(entry.mined_block_id.as_deref())
-        {
-            let definitely_orphaned = mined_height > height
-                || reader
-                    .applied_header_id_at_height(mined_height)
-                    .map_err(|e| e.to_string())?
-                    .is_some_and(|id| hex::encode(id) != mined_id);
-            if definitely_orphaned {
-                rolled_back.insert(entry.tx_id);
-            }
-        }
-    }
-    if !rolled_back.is_empty() {
-        handle.invalidate_operator_generation();
-        queue.reopen_rolled_back(&rolled_back)?;
-    }
     let (mut cursor, previous_tip) = queue.observation_cursor();
-    let mut previous_id = previous_tip
-        .and_then(|id| hex::decode(id).ok())
-        .and_then(|id| <[u8; 32]>::try_from(id).ok());
+    let mut previous_id = previous_tip.as_deref().and_then(decode_hash);
+    if cursor == height && previous_id == Some(tip) {
+        return Ok(Reconciled::default());
+    }
     if previous_id.is_some()
         && reader
             .applied_header_id_at_height(cursor)
             .map_err(|e| e.to_string())?
             != previous_id
     {
+        // The observed branch left the applied chain. Reopen confirmations in
+        // blocks that are no longer applied before bounded ancestry work.
+        let mut orphaned = BTreeSet::new();
+        for (tx_id, mined_height, mined_id) in queue.confirmations() {
+            let definitely_orphaned = mined_height > height
+                || reader
+                    .applied_header_id_at_height(mined_height)
+                    .map_err(|e| e.to_string())?
+                    .is_some_and(|id| hex::encode(id) != mined_id);
+            if definitely_orphaned {
+                orphaned.insert(tx_id);
+            }
+        }
+        queue.reopen_rolled_back(&orphaned)?;
         // Walk the old branch backwards to the applied common ancestor. Keep
-        // bounded work; a deep rollback progresses over subsequent iterations.
+        // bounded work; a deep rollback progresses over subsequent passes.
         for _ in 0..32 {
             if cursor == 0
                 || reader
@@ -331,16 +391,15 @@ pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<Reco
         }
     }
     let mut applied = BTreeMap::new();
-    let ids: BTreeSet<_> = queue.list().into_iter().map(|entry| entry.tx_id).collect();
+    let ids = queue.record_ids();
     let db = state.store.db_arc();
     let mut scanned = cursor.min(height);
     let end = cursor.saturating_add(32).min(height);
     for h in cursor.saturating_add(1)..=end {
         match ergo_state::store::block_txs_for_wallet_at_height(&db, h).map_err(|e| e.to_string())? {
             Some((block_id, txs)) => {
-                for tx in txs {
-                    let id = hex::encode(tx.tx_id);
-                    if ids.contains(&id) { applied.insert(id, (h, hex::encode(block_id))); }
+                for tx in txs.iter().filter(|tx| ids.contains(&tx.tx_id)) {
+                    applied.insert(hex::encode(tx.tx_id), (h, hex::encode(block_id)));
                 }
             }
             None => return Err("private queue confirmation history is unavailable; waiting for retained applied blocks".into()),
@@ -348,28 +407,6 @@ pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<Reco
         scanned = h;
     }
     let caught_up = scanned == height;
-    let private_outputs: HashMap<_, _> = queue
-        .selection_entries()
-        .into_iter()
-        .flat_map(|entry| entry.outputs.into_iter().zip(entry.output_boxes))
-        .collect();
-    let candidate_ids: BTreeSet<String> = handle
-        .inspect_template(None, None)
-        .map(|snapshot| {
-            snapshot
-                .template
-                .candidate
-                .transactions
-                .iter()
-                .filter_map(|tx| {
-                    ergo_ser::transaction::transaction_id(tx)
-                        .ok()
-                        .map(|id| hex::encode(id.as_bytes()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let before = queue.reserved_inputs();
     let scanned_tip = if caught_up {
         Some(tip)
     } else {
@@ -377,34 +414,23 @@ pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<Reco
             .applied_header_id_at_height(scanned)
             .map_err(|e| e.to_string())?
     };
-    let outcome = queue.reconcile(
+    queue.reconcile(
         scanned,
         scanned_tip.map(hex::encode).unwrap_or_default(),
         &applied,
-        |h, id| {
-            reader
-                .applied_header_id_at_height(h)
-                .ok()
-                .flatten()
-                .is_some_and(|raw| hex::encode(raw) == id)
-        },
-        |id| {
-            !caught_up
-                || reader.lookup_box(id).ok().flatten().is_some()
-                || private_outputs.contains_key(&Digest32::from_bytes(*id))
-        },
-        &candidate_ids,
+        caught_up,
+        |id| reader.lookup_box(id).ok().flatten().is_some(),
         // Mined entries keep their signed bytes while this node could still
         // roll their block back.
         state
             .store
             .max_rollback_depth()
             .unwrap_or(ergo_state::store::ROLLBACK_WINDOW),
-    )?;
-    if before != queue.reserved_inputs() {
-        handle.invalidate_operator_generation();
-    }
-    Ok(outcome)
+    )
+}
+
+fn decode_hash(hex_id: &str) -> Option<[u8; 32]> {
+    <[u8; 32]>::try_from(hex::decode(hex_id).ok()?).ok()
 }
 
 #[cfg(test)]

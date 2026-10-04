@@ -577,13 +577,7 @@ pub(super) fn handle_mining_request(
     }
     let req = match req {
         crate::mining_bridge::MiningRequest::ListPrivateTransactions { reply } => {
-            let items = handle
-                .private_queue()
-                .list()
-                .into_iter()
-                .map(super::private_mining::api_entry)
-                .collect();
-            let _ = reply.send(Ok(items));
+            let _ = reply.send(Ok(super::private_mining::list(handle)));
             return false;
         }
         crate::mining_bridge::MiningRequest::SubmitPrivateTransaction {
@@ -610,7 +604,7 @@ pub(super) fn handle_mining_request(
                     );
                 }
             }
-            let _ = reply.send(result.map(super::private_mining::api_entry));
+            let _ = reply.send(result.map(|entry| super::private_mining::view(handle, entry)));
             return true;
         }
         other => other,

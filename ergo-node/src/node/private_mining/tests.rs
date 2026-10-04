@@ -9,7 +9,6 @@ use ergo_ser::ergo_tree::read_ergo_tree;
 use ergo_ser::input::{ContextExtension, Input, SpendingProof};
 use ergo_ser::register::AdditionalRegisters;
 use ergo_ser::transaction::{transaction_id, write_transaction, Transaction};
-use ergo_state::ChainStateRead;
 
 // ----- helpers -----
 
@@ -89,7 +88,22 @@ fn append_block(state: &mut NodeState, txs: Vec<Transaction>, fork: u8) -> [u8; 
     let (bytes, id) = ergo_ser::header::serialize_header(&header).unwrap();
     let id = *id.as_bytes();
     let store = state.store.as_utxo_mut().unwrap();
-    store.store_header(&id, &bytes).unwrap();
+    // Later forks score higher, so a competing branch becomes the best chain.
+    let score = vec![u8::try_from(height * 2).unwrap() + fork];
+    store
+        .store_validated_header(
+            &id,
+            &bytes,
+            &ergo_state::chain::HeaderMeta {
+                parent_id: tip.best_full_block_id,
+                height,
+                cumulative_score: score.clone(),
+                pow_validity: 1,
+                timestamp: header.timestamp,
+            },
+            Some((height, score)),
+        )
+        .unwrap();
     let mut writer = VlqWriter::new();
     write_block_transactions(
         &mut writer,
@@ -115,6 +129,100 @@ fn append_block(state: &mut NodeState, txs: Vec<Transaction>, fork: u8) -> [u8; 
 
 fn tip_id(state: &NodeState) -> String {
     hex::encode(state.store.chain_state_meta().best_full_block_id)
+}
+
+/// Publish a template on the applied tip whose user transactions are `txs`,
+/// all built as private ones, identified by `msg`.
+fn serve(handle: &MiningHandle, state: &NodeState, txs: Vec<Transaction>, msg: [u8; 32]) {
+    use ergo_primitives::digest::ADDigest;
+    use ergo_validation::pre_header::{
+        build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
+    };
+    let tip = state.store.chain_state_meta();
+    let parent = tip.best_full_block_id;
+    let height = tip.best_full_block_height + 1;
+    let n_bits = 0x0101_0000;
+    handle.set_best_tip(ergo_mining::engine::BestTip {
+        parent_id: parent,
+        chain_seq: 1,
+        synced: true,
+    });
+    let header = ergo_ser::header::Header {
+        version: 2,
+        parent_id: ergo_primitives::digest::ModifierId::from_bytes(parent),
+        ad_proofs_root: Digest32::from_bytes([0; 32]),
+        transactions_root: Digest32::from_bytes(msg),
+        state_root: ADDigest::from_bytes([0; 33]),
+        timestamp: 1_000_000 + u64::from(height),
+        extension_root: Digest32::from_bytes([0; 32]),
+        n_bits,
+        height,
+        votes: [0; 3],
+        unparsed_bytes: Vec::new(),
+        solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+            pk: ergo_primitives::group_element::GroupElement::from([2; 33]),
+            nonce: [0; 8],
+        },
+    };
+    let observation = ergo_mining::inspection::CandidateObservation {
+        transactions: txs
+            .iter()
+            .map(|_| ergo_mining::inspection::TransactionObservation {
+                category: "private",
+                ..Default::default()
+            })
+            .collect(),
+        operator_generation: handle.operator_generation(),
+        ..Default::default()
+    };
+    let target = ergo_crypto::difficulty::get_target(n_bits);
+    let candidate = ergo_mining::candidate::Candidate {
+        header,
+        validation_ctx: CandidateValidationContext {
+            pre_header: CandidatePreHeader {
+                version: 2,
+                parent_id: parent,
+                height,
+                timestamp: 1_000_000 + u64::from(height),
+                n_bits,
+                votes: [0; 3],
+                miner_pubkey: [2; 33],
+            },
+            activated_script_version: 2,
+            last_headers: Vec::new(),
+            last_block_utxo_root: build_last_block_utxo_root(ADDigest::from_bytes([0; 33])),
+        },
+        transactions: txs,
+        ad_proof_bytes: Vec::new(),
+        extension_fields: Vec::new(),
+        msg,
+        target: target.clone(),
+        parent_id: parent,
+        observation,
+    };
+    let work = ergo_mining::work_message::WorkMessage {
+        msg,
+        target,
+        height,
+        pk: [2; 33],
+        metrics: Default::default(),
+    };
+    handle
+        .publish_if_current(
+            candidate,
+            work,
+            &parent,
+            || 0,
+            ergo_mining::engine::BuildReason::MempoolRefresh,
+        )
+        .expect("publishes on the applied tip");
+}
+
+/// A mining handle whose queue persists at `path`.
+fn persisted_handle(path: &std::path::Path) -> MiningHandle {
+    mining_handle().with_private_queue(Arc::new(
+        ergo_mining::private_queue::PrivateTransactionQueue::open(path).unwrap(),
+    ))
 }
 
 /// The queue entry for [`signed_tx`], as admission builds it.
@@ -422,4 +530,111 @@ fn an_unconfirmed_transaction_expires_once_its_last_height_is_reconciled() {
         handle.private_queue().entry(&tx_id).unwrap().state,
         PrivateTransactionState::Expired
     );
+}
+
+// ----- event-driven lifecycle -----
+
+#[test]
+fn the_lifecycle_works_only_when_the_applied_tip_changes() {
+    let (dir, mut state) = chain(4);
+    let path = dir.path().join("queue.json");
+    let handle = persisted_handle(&path);
+    queue_until(&state, &handle, 1, 100);
+    run_lifecycle(&mut state, &handle);
+    let passes = state.private_mining.reconcile_passes;
+    let written = std::fs::read(&path).unwrap();
+    // Peer batches, mempool and sync ticks, and API requests all end in a
+    // lifecycle pass; none of them may reconcile or rewrite an unchanged queue.
+    for _ in 0..100 {
+        run_lifecycle(&mut state, &handle);
+    }
+    assert_eq!(state.private_mining.reconcile_passes, passes);
+    assert_eq!(std::fs::read(&path).unwrap(), written, "no rewrite");
+    append_block(&mut state, vec![], 0);
+    run_lifecycle(&mut state, &handle);
+    assert_eq!(state.private_mining.reconcile_passes, passes + 1);
+}
+
+#[test]
+fn candidate_membership_is_read_from_the_served_template_without_a_write() {
+    let (dir, mut state) = chain(4);
+    let path = dir.path().join("queue.json");
+    let handle = persisted_handle(&path);
+    queue_until(&state, &handle, 1, 100);
+    run_lifecycle(&mut state, &handle);
+    let revision = handle.private_queue().revision();
+    let written = std::fs::read(&path).unwrap();
+
+    serve(&handle, &state, vec![tx(1)], [0x51; 32]);
+    run_lifecycle(&mut state, &handle);
+    assert_eq!(list(&handle)[0].state, "in_candidate");
+    serve(&handle, &state, vec![], [0x52; 32]);
+    run_lifecycle(&mut state, &handle);
+    assert_eq!(list(&handle)[0].state, "queued");
+
+    assert_eq!(handle.private_queue().revision(), revision);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        written,
+        "membership is never stored"
+    );
+}
+
+#[test]
+fn a_rollback_reopens_an_orphaned_confirmation_and_rescans_the_new_branch() {
+    let (_dir, mut state) = chain(4);
+    let handle = mining_handle();
+    let tx_id = queue_until(&state, &handle, 1, 100);
+    append_block(&mut state, vec![tx(1)], 0);
+    run_lifecycle(&mut state, &handle);
+    assert_eq!(
+        handle.private_queue().entry(&tx_id).unwrap().mined_height,
+        Some(5)
+    );
+    // A competing branch replaces block 5 and does not contain it.
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .rollback_to(4, None, None)
+        .unwrap();
+    append_block(&mut state, vec![], 1);
+    append_block(&mut state, vec![], 1);
+    run_lifecycle(&mut state, &handle);
+    let item = handle.private_queue().entry(&tx_id).unwrap();
+    assert_ne!(item.state, PrivateTransactionState::Mined, "orphaned");
+    assert_eq!(item.mined_height, None);
+    assert_eq!(
+        handle.private_queue().observation_cursor(),
+        (6, Some(tip_id(&state))),
+        "the cursor follows the new branch"
+    );
+    // The same transaction confirmed again on the new branch.
+    append_block(&mut state, vec![tx(1)], 1);
+    run_lifecycle(&mut state, &handle);
+    let item = handle.private_queue().entry(&tx_id).unwrap();
+    assert_eq!(item.state, PrivateTransactionState::Mined);
+    assert_eq!(item.mined_height, Some(7));
+}
+
+#[test]
+fn a_long_offline_interval_is_reconciled_in_bounded_steps() {
+    let (_dir, mut state) = chain(4);
+    let handle = mining_handle();
+    let tx_id = queue_until(&state, &handle, 1, 1_000);
+    for _ in 0..40 {
+        append_block(&mut state, vec![], 0);
+    }
+    append_block(&mut state, vec![tx(1)], 0);
+    run_lifecycle(&mut state, &handle);
+    assert_eq!(
+        handle.private_queue().observed_height(),
+        4 + 32,
+        "one batch"
+    );
+    // Catch-up continues on later passes without a new block.
+    run_lifecycle(&mut state, &handle);
+    let item = handle.private_queue().entry(&tx_id).unwrap();
+    assert_eq!(item.state, PrivateTransactionState::Mined);
+    assert_eq!(item.mined_height, Some(45));
 }

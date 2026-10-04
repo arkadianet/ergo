@@ -77,15 +77,7 @@ fn restart_recovers_private_bytes_and_reservations_without_public_pool() {
     let reopened = PrivateTransactionQueue::open(&path).unwrap();
     assert!(reopened.reserved_inputs().is_empty());
     reopened
-        .reconcile(
-            99,
-            "fork".into(),
-            &BTreeMap::new(),
-            |_, _| false,
-            |_| true,
-            &BTreeSet::new(),
-            WINDOW,
-        )
+        .reconcile(99, "fork".into(), &BTreeMap::new(), true, |_| true, WINDOW)
         .unwrap();
     assert_eq!(
         reopened.entry(&item.tx_id).unwrap().state,
@@ -100,65 +92,35 @@ fn mined_and_conflicted_items_recover_after_rollback() {
     let item = queue
         .admit(&entry(1), PrivateTransactionOptions::default(), 10, 100)
         .unwrap();
-    let candidate = BTreeSet::from([item.tx_id.clone()]);
-    queue
-        .reconcile(
-            100,
-            "parent".into(),
-            &BTreeMap::new(),
-            |_, _| false,
-            |_| true,
-            &candidate,
-            WINDOW,
-        )
-        .unwrap();
+    let observe = |height: u32, tip: &str, applied: &BTreeMap<String, (u32, String)>, inputs| {
+        queue
+            .reconcile(height, tip.into(), applied, true, |_| inputs, WINDOW)
+            .unwrap()
+    };
+    // Candidate membership is derived when listing, never stored.
+    assert!(!observe(100, "parent", &BTreeMap::new(), true).changed);
     assert_eq!(
         queue.entry(&item.tx_id).unwrap().state,
-        PrivateTransactionState::InCandidate
+        PrivateTransactionState::Queued
     );
     let mined = BTreeMap::from([(item.tx_id.clone(), (101, "block".into()))]);
-    queue
-        .reconcile(
-            101,
-            "block".into(),
-            &mined,
-            |_, _| true,
-            |_| false,
-            &BTreeSet::new(),
-            WINDOW,
-        )
-        .unwrap();
+    observe(101, "block", &mined, false);
     assert_eq!(
         queue.entry(&item.tx_id).unwrap().state,
         PrivateTransactionState::Mined
     );
     assert_eq!(queue.reserved_inputs(), BTreeSet::from([[1; 32]]));
+    // A recorded confirmation is only re-checked after a rollback.
+    assert!(!observe(101, "block", &BTreeMap::new(), false).changed);
     queue
-        .reconcile(
-            101,
-            "fork".into(),
-            &BTreeMap::new(),
-            |_, _| false,
-            |_| false,
-            &BTreeSet::new(),
-            WINDOW,
-        )
+        .reopen_rolled_back(&BTreeSet::from([item.tx_id.clone()]))
         .unwrap();
+    observe(101, "fork", &BTreeMap::new(), false);
     assert_eq!(
         queue.entry(&item.tx_id).unwrap().state,
         PrivateTransactionState::Conflicted
     );
-    queue
-        .reconcile(
-            100,
-            "parent".into(),
-            &BTreeMap::new(),
-            |_, _| false,
-            |_| true,
-            &BTreeSet::new(),
-            WINDOW,
-        )
-        .unwrap();
+    observe(100, "parent", &BTreeMap::new(), true);
     assert_eq!(
         queue.entry(&item.tx_id).unwrap().state,
         PrivateTransactionState::Queued
@@ -180,15 +142,7 @@ fn height_and_time_deadlines_filter_builds_and_never_reactivate() {
     assert!(queue.selection_entries_at(20, 101).is_empty());
     assert_eq!(queue.expire(19, 102).unwrap(), vec![item.tx_id.clone()]);
     queue
-        .reconcile(
-            99,
-            "fork".into(),
-            &BTreeMap::new(),
-            |_, _| false,
-            |_| true,
-            &BTreeSet::new(),
-            WINDOW,
-        )
+        .reconcile(99, "fork".into(), &BTreeMap::new(), true, |_| true, WINDOW)
         .unwrap();
     assert_eq!(
         queue.entry(&item.tx_id).unwrap().state,
@@ -279,15 +233,7 @@ fn confirmation_overrides_an_expiry_or_cancellation_that_raced_its_block() {
         (cancelled.tx_id.clone(), (101, "block".into())),
     ]);
     queue
-        .reconcile(
-            101,
-            "block".into(),
-            &applied,
-            |_, _| true,
-            |_| false,
-            &BTreeSet::new(),
-            WINDOW,
-        )
+        .reconcile(101, "block".into(), &applied, true, |_| false, WINDOW)
         .unwrap();
     for id in [&expiring.tx_id, &cancelled.tx_id] {
         let item = queue.entry(id).unwrap();
@@ -329,9 +275,8 @@ fn cancelling_a_conflict_prevents_reactivation_after_rollback() {
             101,
             "competing-spend".into(),
             &BTreeMap::new(),
-            |_, _| false,
+            true,
             |_| false,
-            &BTreeSet::new(),
             WINDOW,
         )
         .unwrap();
@@ -344,15 +289,7 @@ fn cancelling_a_conflict_prevents_reactivation_after_rollback() {
         PrivateTransactionState::Cancelled
     );
     queue
-        .reconcile(
-            100,
-            "fork".into(),
-            &BTreeMap::new(),
-            |_, _| false,
-            |_| true,
-            &BTreeSet::new(),
-            WINDOW,
-        )
+        .reconcile(100, "fork".into(), &BTreeMap::new(), true, |_| true, WINDOW)
         .unwrap();
     assert_eq!(
         queue.entry(&item.tx_id).unwrap().state,
@@ -389,15 +326,7 @@ fn mined_and_conflicted_inputs_remain_reserved_before_history_catchup() {
         .unwrap();
     let applied = BTreeMap::from([(item.tx_id.clone(), (101, "old-block".into()))]);
     queue
-        .reconcile(
-            101,
-            "old-block".into(),
-            &applied,
-            |_, _| true,
-            |_| false,
-            &BTreeSet::new(),
-            WINDOW,
-        )
+        .reconcile(101, "old-block".into(), &applied, true, |_| false, WINDOW)
         .unwrap();
     let restarted = PrivateTransactionQueue::open(&path).unwrap();
     // This reservation is already present if chain state restores the input,
@@ -417,9 +346,8 @@ fn mined_and_conflicted_inputs_remain_reserved_before_history_catchup() {
             101,
             "competing-block".into(),
             &BTreeMap::new(),
-            |_, _| false,
+            true,
             |_| false,
-            &BTreeSet::new(),
             WINDOW,
         )
         .unwrap();
@@ -579,9 +507,8 @@ fn mined_bytes_stay_recoverable_through_the_rollback_window_only() {
                 height,
                 format!("tip-{height}"),
                 applied,
-                |h, id| h == 101 && id == "block",
+                true,
                 |_| false,
-                &BTreeSet::new(),
                 10,
             )
             .unwrap()
@@ -660,9 +587,8 @@ fn cursor_only_progress_is_written_in_bounded_steps() {
                 height,
                 format!("tip-{height}"),
                 &BTreeMap::new(),
-                |_, _| false,
+                true,
                 |_| true,
-                &BTreeSet::new(),
                 WINDOW,
             )
             .unwrap()

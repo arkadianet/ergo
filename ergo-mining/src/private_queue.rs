@@ -4,7 +4,7 @@
 //! mempool projections, or mempool revalidation. Admission and candidate
 //! assembly still validate them against the normal consensus context.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -117,8 +117,9 @@ struct Record {
     entry: PrivateTransactionEntry,
     /// Hex signed bytes while this node may still mine the transaction:
     /// pending, or mined within the rollback window. `None` for a tombstone.
-    #[serde(default)]
-    signed_bytes: Option<String>,
+    /// Shared, so copying the store for an update copies only metadata.
+    #[serde(default, with = "shared_hex")]
+    signed_bytes: Option<Arc<str>>,
     /// Cancelled or Expired state a confirmation overrode. A rollback of that
     /// confirmation restores it instead of queueing withdrawn work again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,6 +166,32 @@ impl Record {
     }
 }
 
+fn min_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Serde for `Option<Arc<str>>` without the `rc` feature.
+mod shared_hex {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<Arc<str>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_deref().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Arc<str>>, D::Error> {
+        Ok(Option::<String>::deserialize(deserializer)?.map(Arc::from))
+    }
+}
+
 fn withdrawal_reason(state: PrivateTransactionState) -> &'static str {
     if state == PrivateTransactionState::Cancelled {
         "cancelled by operator"
@@ -187,6 +214,10 @@ struct Store {
     /// Cursor height last written to disk (runtime only).
     #[serde(skip)]
     persisted_height: u32,
+    /// Earliest unfinished time and height deadlines (runtime only), so the
+    /// lifecycle can tell in O(1) that nothing is due.
+    #[serde(skip)]
+    next_deadline: (Option<u64>, Option<u32>),
 }
 
 impl Default for Store {
@@ -199,11 +230,22 @@ impl Default for Store {
             observed_tip: None,
             finished_seq: 0,
             persisted_height: 0,
+            next_deadline: (None, None),
         }
     }
 }
 
 impl Store {
+    fn refresh_deadlines(&mut self) {
+        let pending = self.records.values().filter(|r| r.entry.state.is_pending());
+        self.next_deadline = pending.fold((None, None), |(ms, height), r| {
+            (
+                min_some(ms, r.entry.expires_at_ms),
+                min_some(height, r.entry.expires_at_height),
+            )
+        });
+    }
+
     /// Withdraw pending work: it keeps no signed bytes or input reservation.
     fn finish(&mut self, tx_id: &str, state: PrivateTransactionState) {
         self.finished_seq += 1;
@@ -219,6 +261,19 @@ impl Store {
     /// window, then of the oldest confirmations beyond the recoverable
     /// bounds. Returns the released ids.
     fn release_settled(&mut self, height: u32, rollback_window: u32) -> Vec<String> {
+        let released = self.settled(height, rollback_window);
+        for tx_id in &released {
+            self.finished_seq += 1;
+            let finished_seq = self.finished_seq;
+            if let Some(record) = self.records.get_mut(tx_id) {
+                record.release(finished_seq);
+            }
+        }
+        released
+    }
+
+    /// Ids [`Self::release_settled`] would release.
+    fn settled(&self, height: u32, rollback_window: u32) -> Vec<String> {
         let mut mined: Vec<(u32, String, usize)> = self
             .records
             .values()
@@ -238,13 +293,6 @@ impl Store {
             if settled || kept >= MAX_RECOVERABLE_MINED || kept_bytes > MAX_RECOVERABLE_MINED_BYTES
             {
                 released.push(tx_id);
-            }
-        }
-        for tx_id in &released {
-            self.finished_seq += 1;
-            let finished_seq = self.finished_seq;
-            if let Some(record) = self.records.get_mut(tx_id) {
-                record.release(finished_seq);
             }
         }
         released
@@ -293,14 +341,20 @@ impl PrivateTransactionQueue {
                 {
                     return Err("private queue version or record count is unsupported".into());
                 }
-                for record in store.records.values() {
+                for record in store.records.values_mut() {
                     if record.signed_bytes.is_some() {
                         materialize(record)?;
                     } else if record.entry.state.is_pending() {
                         return Err("private queue pending record has no signed bytes".into());
                     }
+                    // Candidate membership is derived when listing; an older
+                    // file may have stored it.
+                    if record.entry.state == PrivateTransactionState::InCandidate {
+                        record.entry.state = PrivateTransactionState::Queued;
+                    }
                 }
                 store.persisted_height = store.observed_height;
+                store.refresh_deadlines();
                 store
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::default(),
@@ -314,6 +368,42 @@ impl PrivateTransactionQueue {
 
     pub fn revision(&self) -> u64 {
         self.lock().revision
+    }
+
+    /// No record at all: nothing to reconcile or expire.
+    pub fn is_empty(&self) -> bool {
+        self.lock().records.is_empty()
+    }
+
+    /// Whether an unfinished deadline may have elapsed at `now_ms` or at the
+    /// reconciled `height`. Constant time, so every lifecycle pass and mining
+    /// request can ask before doing any expiry work.
+    pub fn deadline_due(&self, now_ms: u64, height: u32) -> bool {
+        let (ms, last_height) = self.lock().next_deadline;
+        ms.is_some_and(|d| d <= now_ms) || last_height.is_some_and(|d| d <= height)
+    }
+
+    /// `(tx_id, mined_height, mined_block_id)` of every recorded confirmation,
+    /// checked against the applied chain only after a rollback.
+    pub fn confirmations(&self) -> Vec<(String, u32, String)> {
+        self.lock()
+            .records
+            .values()
+            .filter(|r| r.entry.state == PrivateTransactionState::Mined)
+            .filter_map(|r| {
+                let e = &r.entry;
+                Some((e.tx_id.clone(), e.mined_height?, e.mined_block_id.clone()?))
+            })
+            .collect()
+    }
+
+    /// Every tracked id, to recognize confirmations while scanning blocks.
+    pub fn record_ids(&self) -> std::collections::HashSet<[u8; 32]> {
+        self.lock()
+            .records
+            .keys()
+            .filter_map(|id| decode_id(id).ok())
+            .collect()
     }
 
     pub fn list(&self) -> Vec<PrivateTransactionEntry> {
@@ -477,7 +567,7 @@ impl PrivateTransactionQueue {
             tx_id,
             Record {
                 entry: result.clone(),
-                signed_bytes: Some(hex::encode(&entry.bytes)),
+                signed_bytes: Some(Arc::from(hex::encode(&entry.bytes))),
                 withdrawn: None,
                 finished_seq: 0,
             },
@@ -540,6 +630,11 @@ impl PrivateTransactionQueue {
         (store.observed_height, store.observed_tip.clone())
     }
 
+    /// Height through which applied history has been reconciled.
+    pub fn observed_height(&self) -> u32 {
+        self.lock().observed_height
+    }
+
     /// Reopen definitely orphaned confirmations before bounded ancestry work.
     /// The cursor is untouched so exact applied confirmations still catch up.
     pub fn reopen_rolled_back(&self, tx_ids: &BTreeSet<String>) -> Result<bool, String> {
@@ -575,112 +670,80 @@ impl PrivateTransactionQueue {
         store.observed_tip = tip;
     }
 
-    /// Reconcile exact applied transactions and canonical mined-block identity.
-    /// Missing inputs can recover after a rollback; cancellation/expiry cannot.
-    /// Confirmations deeper than `rollback_window` release their signed bytes.
-    #[allow(clippy::too_many_arguments)]
+    /// Apply one step of applied history scanned through `height`: a
+    /// transaction found in those blocks becomes Mined whatever its local
+    /// state, and once the scan has caught up with the committed tip
+    /// (`caught_up`) pending work is classified by input availability. Its
+    /// own queued outputs count as available. Recorded confirmations are not
+    /// re-checked here; after a rollback [`Self::reopen_rolled_back`] undoes
+    /// the orphaned ones. Confirmations deeper than `rollback_window` release
+    /// their signed bytes. The store is copied and written only when a record
+    /// changes; cursor-only progress is written in bounded steps.
     pub fn reconcile(
         &self,
         height: u32,
         tip_id: String,
         applied: &BTreeMap<String, (u32, String)>,
-        canonical: impl Fn(u32, &str) -> bool,
+        caught_up: bool,
         input_available: impl Fn(&[u8; 32]) -> bool,
-        candidate_ids: &BTreeSet<String>,
         rollback_window: u32,
     ) -> Result<Reconciled, String> {
         let mut store = self.lock();
-        let mut updated = store.clone();
-        let mut changed = false;
-        for record in updated.records.values_mut() {
-            let previous = record.entry.state;
-            if let Some((h, id)) = applied.get(&record.entry.tx_id) {
-                // A confirmation wins over any local state: a deadline or a
-                // cancellation that raced the block must not hide that the
-                // transaction was mined.
-                if matches!(
-                    previous,
-                    PrivateTransactionState::Cancelled | PrivateTransactionState::Expired
-                ) {
-                    record.withdrawn = Some(previous);
-                }
-                let e = &mut record.entry;
-                changed |= e.mined_height != Some(*h) || e.mined_block_id.as_ref() != Some(id);
-                e.state = PrivateTransactionState::Mined;
-                e.mined_height = Some(*h);
-                e.mined_block_id = Some(id.clone());
-                e.reason = None;
-                changed |= previous != e.state;
-                continue;
-            }
-            if matches!(
-                previous,
-                PrivateTransactionState::Cancelled | PrivateTransactionState::Expired
-            ) {
-                continue;
-            }
-            let e = &mut record.entry;
-            if e.mined_height
-                .zip(e.mined_block_id.as_deref())
-                .is_some_and(|(h, id)| canonical(h, id))
+        let queued_outputs: HashSet<[u8; 32]> = if caught_up {
+            store
+                .records
+                .values()
+                .filter(|r| r.entry.state.is_active())
+                .filter_map(|r| materialize(r).ok())
+                .flat_map(|entry| entry.outputs)
+                .map(|id| *id.as_bytes())
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let available = |id: &[u8; 32]| input_available(id) || queued_outputs.contains(id);
+        let available: Option<InputCheck<'_>> = caught_up.then_some(&available);
+        let updates: Vec<Record> = store
+            .records
+            .values()
+            .filter_map(|record| reconciled(record, applied, available))
+            .collect();
+        if updates.is_empty() && store.settled(height, rollback_window).is_empty() {
+            store.observed_height = height;
+            store.observed_tip = Some(tip_id);
+            // Between writes a restart re-reads at most this many blocks.
+            if height
+                >= store
+                    .persisted_height
+                    .saturating_add(CURSOR_PERSIST_INTERVAL)
             {
-                e.state = PrivateTransactionState::Mined;
-            } else if record.withdrawn.is_some() || record.signed_bytes.is_none() {
-                // Its confirmation left the applied chain, but this node will
-                // not mine it again.
-                record.unconfirm();
-            } else {
-                e.mined_height = None;
-                e.mined_block_id = None;
-                let available = e
-                    .input_ids
-                    .iter()
-                    .all(|id| decode_id(id).is_ok_and(|id| input_available(&id)));
-                if !available {
-                    e.state = PrivateTransactionState::Conflicted;
-                    e.reason =
-                        Some("one or more inputs are unavailable on the applied chain".into());
-                } else {
-                    e.state = if candidate_ids.contains(&e.tx_id) {
-                        PrivateTransactionState::InCandidate
-                    } else {
-                        PrivateTransactionState::Queued
-                    };
-                    e.reason = None;
-                }
+                self.persist(&store)?;
+                store.persisted_height = height;
             }
-            changed |= previous != record.entry.state;
+            return Ok(Reconciled::default());
+        }
+        let mut updated = store.clone();
+        for record in updates {
+            updated.records.insert(record.entry.tx_id.clone(), record);
         }
         let released = updated.release_settled(height, rollback_window);
         if !released.is_empty() {
             updated.forget_oldest_finished();
-            changed = true;
         }
         updated.observed_height = height;
         updated.observed_tip = Some(tip_id);
-        if changed {
-            self.commit(&mut store, updated)?;
-        } else if height
-            >= store
-                .persisted_height
-                .saturating_add(CURSOR_PERSIST_INTERVAL)
-        {
-            // Cursor-only progress is written in bounded steps; between them
-            // a restart re-reads at most CURSOR_PERSIST_INTERVAL blocks.
-            self.persist(&updated)?;
-            updated.persisted_height = height;
-            *store = updated;
-        } else {
-            store.observed_height = updated.observed_height;
-            store.observed_tip = updated.observed_tip;
-        }
-        Ok(Reconciled { changed, released })
+        self.commit(&mut store, updated)?;
+        Ok(Reconciled {
+            changed: true,
+            released,
+        })
     }
 
     /// Persist a changed store, then make it current. On failure nothing
     /// changes, so reservations and pending work survive a failed write.
     fn commit(&self, store: &mut Store, mut updated: Store) -> Result<(), String> {
         updated.revision = updated.revision.wrapping_add(1);
+        updated.refresh_deadlines();
         self.persist(&updated)?;
         updated.persisted_height = updated.observed_height;
         *store = updated;
@@ -777,6 +840,68 @@ fn sweep_temporaries(path: &Path) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// Whether an input box can be spent on the applied chain.
+type InputCheck<'a> = &'a dyn Fn(&[u8; 32]) -> bool;
+
+/// `record` after one reconciliation step, or `None` when it is unchanged.
+/// `available` judges inputs; `None` while applied history is still being
+/// caught up, when availability is not classified.
+fn reconciled(
+    record: &Record,
+    applied: &BTreeMap<String, (u32, String)>,
+    available: Option<InputCheck<'_>>,
+) -> Option<Record> {
+    let previous = record.entry.state;
+    if let Some((height, block_id)) = applied.get(&record.entry.tx_id) {
+        let e = &record.entry;
+        if previous == PrivateTransactionState::Mined
+            && e.mined_height == Some(*height)
+            && e.mined_block_id.as_ref() == Some(block_id)
+        {
+            return None;
+        }
+        // A confirmation wins over any local state: a deadline or a
+        // cancellation that raced the block must not hide that the
+        // transaction was mined.
+        let mut next = record.clone();
+        if matches!(
+            previous,
+            PrivateTransactionState::Cancelled | PrivateTransactionState::Expired
+        ) {
+            next.withdrawn = Some(previous);
+        }
+        next.entry.state = PrivateTransactionState::Mined;
+        next.entry.mined_height = Some(*height);
+        next.entry.mined_block_id = Some(block_id.clone());
+        next.entry.reason = None;
+        return Some(next);
+    }
+    let available = available?;
+    if !previous.is_pending() {
+        return None;
+    }
+    let unavailable = record
+        .entry
+        .input_ids
+        .iter()
+        .any(|id| decode_id(id).map_or(true, |id| !available(&id)));
+    let (state, reason) = if unavailable {
+        (
+            PrivateTransactionState::Conflicted,
+            Some("one or more inputs are unavailable on the applied chain"),
+        )
+    } else {
+        (PrivateTransactionState::Queued, None)
+    };
+    if previous == state && record.entry.reason.as_deref() == reason {
+        return None;
+    }
+    let mut next = record.clone();
+    next.entry.state = state;
+    next.entry.reason = reason.map(Into::into);
+    Some(next)
 }
 
 fn decode_id(id: &str) -> Result<[u8; 32], String> {

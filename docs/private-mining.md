@@ -41,9 +41,12 @@ including for ordinary public sends and other private jobs. Automatic input
 selection and "Retrieve rewards" skip reserved boxes; naming a reserved box as an
 explicit input is refused. Wallet balances still include reserved boxes. Queue entries report
 `queued`, `in_candidate`, `mined`, `conflicted`, `cancelled`, or `expired`.
-Candidate membership describes the currently served template; it does not imply
-a block will be found. Private ordering prefers larger integer priorities, then
-submission order, subject to dependency order and candidate policy budgets.
+`in_candidate` is read from the template currently served when the queue is
+listed and is never stored; it does not imply a block will be found. The node
+reconciles the queue with applied blocks when the applied tip changes and
+applies deadlines when one is due, not on every event it handles. Private
+ordering prefers larger integer priorities, then submission order, subject to
+dependency order and candidate policy budgets.
 
 Optional deadlines use either Unix milliseconds (`expires_at_ms`) or the last
 eligible block height (`expires_at_height`). A height-bounded item is never
