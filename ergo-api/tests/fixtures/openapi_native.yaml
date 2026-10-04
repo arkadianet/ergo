@@ -4734,6 +4734,7 @@ components:
         creationHeight:
           type: integer
           format: int32
+          description: Height of the block that included the creating transaction.
           minimum: 0
         creationOutputIndex:
           type: integer
@@ -4741,6 +4742,15 @@ components:
           minimum: 0
         creationTxId:
           type: string
+        declaredCreationHeight:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: |-
+            Creation height the unspent box itself declares, from which storage rent
+            is counted; it can precede `creationHeight`. `null` once spent.
+          minimum: 0
         provenance:
           $ref: '#/components/schemas/BoxProvenanceDto'
         status:

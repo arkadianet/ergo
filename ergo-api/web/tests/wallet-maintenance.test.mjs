@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canCancelMaintenance, describeMaintenanceJob, earliestStart, eligibleFor, makeMaintenanceRequest, pendingMaintenance, recipientLines, summarizeBoxes } from '../js/wallet-maintenance.js';
+import { canCancelMaintenance, describeMaintenanceJob, earliestStart, eligibleFor, makeMaintenanceRequest, pendingMaintenance, recipientLines, rentAge, summarizeBoxes } from '../js/wallet-maintenance.js';
 const owned = { boxId: 'aa'.repeat(32), value: '9007199254740993', assets: [{ tokenId: 'bb'.repeat(32), amount: '9007199254740993' }], status: { type: 'confirmed' }, provenance: { type: 'owned' } };
 const reward = { ...owned, boxId: 'cc'.repeat(32), status: { type: 'immature', maturesAtHeight: 720 }, provenance: { type: 'minerReward' } };
 test('maintenance pins the reviewed boxes and preserves amounts beyond JS safe integers', () => {
@@ -46,4 +46,9 @@ test('pending review counts jobs that can still sign and singles out payments', 
   assert.deepEqual(pending.map(item => item.state), ['waiting', 'waitingForWallet', 'queued']);
   assert.deepEqual(payments.map(item => item.state), ['waiting', 'queued']);
   assert.deepEqual(pendingMaintenance(undefined), { pending: [], payments: [] });
+});
+test('renewal age and rent height follow the declared creation height, not inclusion', () => {
+  const box = { ...owned, creationHeight: 1_200_000, declaredCreationHeight: 100_000 };
+  assert.equal(rentAge(box, 1_100_000), 'declared creation height 100000 · age 1000000 blocks · storage rent from height 1151200');
+  assert.equal(rentAge({ ...box, declaredCreationHeight: null }, 1_100_000), 'declared creation height unknown');
 });

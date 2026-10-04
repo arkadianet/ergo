@@ -10,9 +10,13 @@ renewal of selected owned boxes, and retrieval of selected mining rewards after
 they mature. The authenticated API also accepts a fixed payment `TxIntent` with
 explicit `boxIds`, zero miner fee, no issuance, and no intentional token burn.
 Renewal preserves each recipient, value, tokens, and registers and updates its
-creation height. Consolidation preserves all token units and refuses a selection
-that cannot fit a single output. Reward retrieval still pays required EIP-27
-re-emission obligations; a zero miner fee does not waive those obligations.
+creation height. Wallet → Maintenance shows each renewal candidate's declared
+creation height, its age and the height from which storage rent applies. Rent
+counts from that declared height, which can precede the block that included
+the box (`declaredCreationHeight` in `GET /api/v1/wallet/boxes`). Consolidation
+preserves all token units and refuses a selection that cannot fit a single
+output. Reward retrieval still pays required EIP-27 re-emission obligations; a
+zero miner fee does not waive those obligations.
 
 Approval builds the job's unsigned transaction and checks it against consensus
 structure and the configured transaction size limit, so an operation that could

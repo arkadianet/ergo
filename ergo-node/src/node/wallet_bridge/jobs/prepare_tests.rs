@@ -810,3 +810,33 @@ async fn approval_refuses_operations_that_could_never_sign() {
     let payment = funded.job(external_payment(source, ERG / 2, serde_json::json!([])));
     create_owned(&funded.context(), payment).await.unwrap();
 }
+
+#[tokio::test]
+async fn wallet_boxes_report_the_declared_creation_height_rent_counts_from() {
+    let mut funded = Funded::new();
+    let renewable = funded.owned(ERG, &[], &[0]);
+    let spent = funded.owned(ERG, &[], &[0]);
+    let box_ids = funded.fund(vec![renewable, spent]);
+    funded.set_status(
+        &box_ids[1],
+        BoxStatus::Spent {
+            spent_in_tx: [0x77; 32],
+            spent_at: TIP,
+        },
+    );
+    let (reply, page) = tokio::sync::oneshot::channel();
+    crate::node::wallet_bridge::commands::admin::native_boxes(&funded.context(), 0, 10, reply)
+        .await;
+    let page = page.await.unwrap().unwrap();
+    let declared: BTreeMap<_, _> = page
+        .items
+        .iter()
+        .map(|item| {
+            // The fixture includes its genesis boxes at height 1.
+            assert_eq!(item.creation_height, 1);
+            (item.box_id.clone(), item.declared_creation_height)
+        })
+        .collect();
+    assert_eq!(declared[&box_ids[0]], Some(0));
+    assert_eq!(declared[&box_ids[1]], None);
+}

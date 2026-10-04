@@ -50,6 +50,14 @@ export function pendingMaintenance(jobs) {
   const pending = (jobs || []).filter(job => !terminal.has(job.state) && job.state !== 'conflicted');
   return { pending, payments: pending.filter(job => job.request.task.type === 'send') };
 }
+// Storage rent counts from the creation height a box declares, which can be
+// lower than the height of the block that included it.
+const STORAGE_PERIOD = 1_051_200;
+export function rentAge(box, height) {
+  const declared = box.declaredCreationHeight;
+  if (!Number.isSafeInteger(declared)) return 'declared creation height unknown';
+  return `declared creation height ${declared} · age ${Math.max(0, height - declared)} blocks · storage rent from height ${declared + STORAGE_PERIOD}`;
+}
 export function summarizeBoxes(boxes) {
   const tokens = new Map(); let nanoErg = 0n;
   for (const box of boxes) { nanoErg += BigInt(box.value); for (const asset of box.assets || []) tokens.set(asset.tokenId, (tokens.get(asset.tokenId) || 0n) + BigInt(asset.amount)); }
@@ -80,7 +88,8 @@ export function createWalletMaintenance(root, { onJobs } = {}) {
         if (Number(start.value) < maturity) { start.value = String(maturity); if (Number(expiry.value) <= maturity) expiry.value = String(maturity + 720); }
         invalidate();
       });
-      const row = el('label', null, 'wb-check'); row.append(input, el('span', `${decimal(box.value)} ERG · ${(box.assets || []).length} tokens · ${box.boxId} · ${box.status.type === 'immature' ? 'matures at ' + box.status.maturesAtHeight : 'confirmed'}`)); boxes.append(row);
+      const state = kind.value === 'renew' ? rentAge(box, status?.walletHeight || 0) : box.status.type === 'immature' ? 'matures at ' + box.status.maturesAtHeight : 'confirmed';
+      const row = el('label', null, 'wb-check'); row.append(input, el('span', `${decimal(box.value)} ERG · ${(box.assets || []).length} tokens · ${box.boxId} · ${state}`)); boxes.append(row);
     }
     if (!boxes.children.length) boxes.append(el('p', 'No eligible boxes on this page.', 'wb-note'));
     pageInfo.textContent = `Boxes ${offset + 1}–${offset + currentBoxes.length}`;
@@ -105,6 +114,7 @@ export function createWalletMaintenance(root, { onJobs } = {}) {
       const totals = summarizeBoxes([...selected.values()]); preview.replaceChildren(el('p', `${kinds[kind.value]}: ${selected.size} pinned inputs, ${decimal(totals.nanoErg)} ERG, ${totals.tokens.length} token types. Start ${request.notBeforeHeight}; expiry ${request.expiresAtHeight}; maximum ${request.maxAttempts} attempts. No public broadcast.`));
       for (const asset of totals.tokens) preview.append(el('p', `${asset.tokenId}: ${asset.amount} units`, 'wb-note'));
       preview.append(el('p', kind.value === 'renew' ? 'Every output retains its wallet recipient, ERG, tokens and registers with a new creation height.' : `Destination: ${request.task.destination}. Mining reward retrieval still pays any required re-emission obligation.`));
+      if (kind.value === 'renew') for (const box of selected.values()) preview.append(el('p', `${box.boxId}: ${rentAge(box, status?.walletHeight || 0)}`, 'wb-note'));
       const approve = el('button', 'Approve private operation', 'btn btn--primary'); approve.type = 'button'; approve.addEventListener('click', async () => {
         if (busy || !request) return; busy = true; approve.disabled = true;
         const approved = structuredClone(request); const result = await api.wallet.createMiningJob(approved);
