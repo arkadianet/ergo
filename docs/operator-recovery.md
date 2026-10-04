@@ -82,7 +82,9 @@ Current UTXOs cannot reconstruct historical transactions, already-spent boxes,
 or their inclusion heights. Discovery records `historyComplete: false`; native
 wallet status includes `discovery.anchorHeight` and `anchorHeaderId`. Native box
 summaries expose `inclusionHeightKnown: false`; their `creationHeight` is the
-first-observed height. Legacy confirmation filters use that conservative height.
+first-observed height. Legacy wallet and reserved scan entries return null inclusion height and
+confirmation count for discovered boxes, and skip those filters when inclusion
+is unknown.
 The original serialized box retains its script creation height; reward maturity
 uses that script height plus the canonical 720-block delay. Ordinary live wallet
 apply/rollback continues after restart. A reorg below the anchor invalidates the
