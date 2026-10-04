@@ -7,6 +7,7 @@ files stay under target; the archive is opened only by redb::ReadOnlyDatabase.
 
 import argparse
 import json
+import hashlib
 from pathlib import Path
 import statistics
 import subprocess
@@ -42,15 +43,23 @@ def parse_sample(output):
     return sample
 
 
+def copy_base(base, index):
+    subprocess.run(["cp", "--reflink=auto", "--sparse=always", str(base), str(index)], check=True)
+    # Keep dirty copy pages out of the first timed Immediate commit.
+    with index.open("rb") as copied:
+        os.fsync(copied.fileno())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--executable", type=Path, required=True)
+    parser.add_argument("--compare-executable", type=Path)
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--base", type=Path)
     parser.add_argument("--end", type=int, required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--rounds", type=int, default=3)
-    parser.add_argument("--modes", nargs="+", choices=["single", "legacy", "adaptive", "prefetch", "cached"], default=["legacy", "adaptive", "prefetch"])
+    parser.add_argument("--modes", nargs="+", choices=["single", "legacy", "adaptive", "prefetch", "cached", "cached-short", "cached-large-cache", "cached-probes", "cached-probes-short", "cached-probes-prefetch", "cached-probes-short-prefetch"], default=["legacy", "adaptive", "prefetch"])
     args = parser.parse_args()
     if not args.name or args.name in {".", ".."} or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_." for c in args.name):
         parser.error("name must be a single directory name")
@@ -66,15 +75,32 @@ def main():
     if not directory.is_relative_to(TARGET.resolve()):
         parser.error("output must be inside target")
     environment = {"INDEXER_BENCH_STATE": str(args.state.resolve()), "INDEXER_BENCH_END": str(args.end)}
+    with args.executable.open("rb") as executable:
+        executable_hash = hashlib.file_digest(executable, "sha256").hexdigest()
+    compare_executable = args.compare_executable or args.executable
+    with compare_executable.open("rb") as executable:
+        comparison_hash = hashlib.file_digest(executable, "sha256").hexdigest()
+    metadata = {
+        "comparison_executable_sha256": comparison_hash,
+        "executable_sha256": executable_hash,
+        "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "state": str(args.state.resolve()),
+        "base": str(args.base.resolve()) if args.base else None,
+        "end": args.end,
+        "rounds": args.rounds,
+        "modes": args.modes,
+    }
+    (directory / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     samples = []
     for iteration in range(args.rounds + 1):
         # Rotate order to reduce bias from concurrent builds and cache warmth.
-        modes = args.modes[iteration % len(args.modes):] + args.modes[:iteration % len(args.modes)]
+        offset = (iteration * max(1, len(args.modes) // 3)) % len(args.modes)
+        modes = args.modes[offset:] + args.modes[:offset]
         for mode in modes:
             index = directory / f"{mode}.redb"
             index.unlink(missing_ok=True)
             if args.base:
-                subprocess.run(["cp", "--reflink=auto", "--sparse=always", str(args.base), str(index)], check=True)
+                copy_base(args.base, index)
             log = directory / f"{iteration}-{mode}.log"
             output = invoke(args.executable, REPLAY, {**environment, "INDEXER_BENCH_INDEX": str(index), "INDEXER_BENCH_MODE": mode}, log)
             sample = parse_sample(output)
@@ -85,7 +111,7 @@ def main():
             (directory / "samples.json").write_text(json.dumps(samples, indent=2) + "\n")
     reference = directory / f"{args.modes[0]}.redb"
     for mode in args.modes[1:]:
-        invoke(args.executable, COMPARE, {"INDEXER_BENCH_INDEX": str(directory / f"{mode}.redb"), "INDEXER_BENCH_REFERENCE": str(reference)}, directory / f"equivalence-{mode}.log")
+        invoke(args.compare_executable or args.executable, COMPARE, {"INDEXER_BENCH_INDEX": str(directory / f"{mode}.redb"), "INDEXER_BENCH_REFERENCE": str(reference)}, directory / f"equivalence-{mode}.log")
     summary = {}
     for mode in args.modes:
         rows = [row for row in samples if row["mode"] == mode]
