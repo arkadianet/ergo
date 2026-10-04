@@ -176,7 +176,7 @@ fn encode(record: &Record) -> Result<Vec<u8>, WalletAdminError> {
 
 fn save(db: &redb::Database, job_id: u64, record: &Record) -> Result<(), WalletAdminError> {
     let bytes = encode(record)?;
-    let write = db.begin_write().map_err(internal)?;
+    let write = ergo_state::begin_write_qr(db).map_err(internal)?;
     write
         .open_table(JOBS)
         .map_err(internal)?
@@ -339,7 +339,7 @@ pub(super) fn create(
     } else {
         None
     };
-    let write = db.begin_write().map_err(internal)?;
+    let write = ergo_state::begin_write_qr(db).map_err(internal)?;
     let job_id = {
         let mut meta = write.open_table(META).map_err(internal)?;
         let next = meta
