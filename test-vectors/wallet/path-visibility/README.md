@@ -1,7 +1,7 @@
 # Wallet path and visibility reference
 
-`WalletPaths.scala` executes the published Sigma SDK6.0.6 under Scala2.12.20
-using public BIP32 vector1. It captures actual `isMaster`, `isEip3`, `nextPath`,
+`WalletPaths.scala` executes the published Sigma SDK 6.0.6 under Scala 2.12.20
+using public BIP32 vector 1. It captures actual `isMaster`, `isEip3`, `nextPath`,
 public keys and mainnet addresses for six small tracked-key shapes.
 Run: `scala-cli run WalletPaths.scala --server=false --jvm system`.
 The capture is an SDK path/address oracle; it does not execute the node's

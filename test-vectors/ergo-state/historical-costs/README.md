@@ -1,6 +1,6 @@
 These fixed mainnet triplets replace the audit-era activation cost stubs with
 43 observed transactions. Every input was evaluated once per reference run;
-all302 input observations and43 totals reconciled with production
+all 302 input observations and 43 totals reconciled with production
 `ErgoTransaction.validateStateful` using its cumulative block budget.
 
 | Window | Block versions | Transactions | Initial external boxes | Block costs |
@@ -8,11 +8,11 @@ all302 input observations and43 totals reconciled with production
 | 417791 /417792 /417793 | 1 /2 /2 | 7 /1 /1 | 4 | 98942 /12344 /12344 |
 | 844671 /844672 /844673 | 2 /2 /2 | 8 /23 /3 | 249 | 427117 /435936 /300052 |
 
-The first window crosses Autolykos1→2. The second crosses the EIP37 difficulty
-activation. It does **not** represent JIT activation or rule409 deactivation:
-the captured full cumulative settings are initial (`0000`), and215/409 remain
+The first window crosses Autolykos 1→2. The second crosses the EIP37 difficulty
+activation. It does **not** represent JIT activation or rule 409 deactivation:
+the captured full cumulative settings are initial (`0000`), and 215/409 remain
 active. The pinned mainnet configuration identifies their deactivation with
-the later6.0 protocol update. The old stub's EIP37 governance association was
+the later 6.0 protocol update. The old stub's EIP37 governance association was
 stale.
 
 The native consumer starts from only the immutable external input/data-input
@@ -33,14 +33,14 @@ captures and selected previously committed header fixtures. Their per-file
 SHA-256 hashes, including each archived box, are in `provenance.json`.
 Public operator software versions differ from the offline oracle version;
 operator JSON is input data, not an independent reference verdict. The
-reference evaluates the SHA-256 pinned official6.0.5 release assembly
-(82,384,324 bytes); the binary itself is not committed. Exact6.0.5 source and
+reference evaluates the SHA-256 pinned official 6.0.5 release assembly
+(82,384,324 bytes); the binary itself is not committed. Exact 6.0.5 source and
 configuration snapshots are included under `reference`, with source hashes
-and tag commit in the manifest. The current live producer's6.0.5 operator
+and tag commit in the manifest. The current live producer's 6.0.5 operator
 gate remains unchanged.
 
 To reproduce offline, obtain the assembly from the manifest URL and the
-Scala2.12.20 compiler, reflect and library jars. Supply absolute paths and a
+Scala 2.12.20 compiler, reflect and library jars. Supply absolute paths and a
 new disposable output directory:
 
 ```bash
@@ -66,6 +66,6 @@ native consumer runs in normal tests:
 cargo test --locked -p ergo-state --test it historical_activation_costs
 ```
 
-The optional700000..700200 legacy corpus harness remains `NOT_RUN` without
+The optional 700000..700200 legacy corpus harness remains `NOT_RUN` without
 its missing files. These six bodies do not establish a historical JIT/6.0
 rule activation, a full global UTXO snapshot, or crash/power-loss behavior.

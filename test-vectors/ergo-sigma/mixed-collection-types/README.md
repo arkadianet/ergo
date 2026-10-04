@@ -22,6 +22,6 @@ scala-cli run Capture.scala ../collection-types/ErgoSerdeOracle.scala \
 ```
 
 `ergo-core` must first be locally published as described in the oracle source.
-The capture used Scala CLI1.12.1 and Scala2.12.21; see `cases.json` for the exact
+The capture used Scala CLI 1.12.1 and Scala 2.12.21; see `cases.json` for the exact
 published sigma-state and locally built ergo-core JAR hashes. These finite
 comparisons do not establish full transaction validity or chain occurrence.

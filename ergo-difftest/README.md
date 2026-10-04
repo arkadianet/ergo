@@ -192,7 +192,7 @@ structured/mutation mode. The guard uses a fresh, gitignored
 existing output is never cleared. Each invocation preserves separate logs.
 `QUEUE.md` is a derived view of immutable pending records. If shrinking fails, the original
 input/verdicts are saved with `minimized: false` and `processing_error`; that
-failure still returns harness exit3. A failed file write also returns3.
+failure still returns harness exit 3. A failed file write also returns 3.
 
 | exit | meaning |
 |---|---|
