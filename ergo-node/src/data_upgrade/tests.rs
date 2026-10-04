@@ -121,8 +121,9 @@ fn current_schema_v2_indexer_is_migrated_and_probe_does_not_write() {
     let bytes = indexer(&path, ergo_indexer::store::INDEXER_SCHEMA_VERSION);
     let (schema, probe_lock) = legacy_indexer_schema(&path, &mut |_| {}).unwrap();
     assert_eq!(schema, ergo_indexer::store::INDEXER_SCHEMA_VERSION);
-    assert_eq!(fs::read(&path).unwrap(), bytes);
+    // Windows byte-range locks are mandatory: read only after releasing the probe.
     drop(probe_lock);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
     assert_eq!(run(&lock, dir.path(), false).migrated, 1);
     assert_current(&path);
     assert_eq!(fs::read(sibling(&path, ".redb2-backup")).unwrap(), bytes);
@@ -1034,7 +1035,8 @@ fn filesystem_space_provider_accepts_files_and_directories() {
         assert!(available_space(path).unwrap() > 0);
     }
     assert!(available_space(&dir.path().join("missing")).is_err());
-    #[cfg(unix)]
+    // Non-UTF-8 names: Linux filesystems accept them; macOS APFS rejects them.
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::ffi::OsStringExt;
         let path = dir
@@ -1100,8 +1102,9 @@ fn unclean_legacy_indexer_is_stale_without_repair_and_honors_explicit_retention(
         let (schema, probe_lock) =
             legacy_indexer_schema(&idx, &mut |message| warnings.push(message.to_owned())).unwrap();
         assert_eq!(schema, 0);
-        assert_eq!(fs::read(&idx).unwrap(), bytes);
+        // Windows byte-range locks are mandatory: read only after releasing the probe.
         drop(probe_lock);
+        assert_eq!(fs::read(&idx).unwrap(), bytes);
         let report = upgrade_data(
             &lock,
             dir.path(),

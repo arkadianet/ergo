@@ -597,6 +597,8 @@ pub fn upgrade_data(
             )));
         }
         let stage = sibling(path, ".redb-upgrade");
+        // Only Unix needs `mut`, to set the owner-only mode.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {
