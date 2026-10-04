@@ -2680,7 +2680,7 @@ paths:
     get:
       tags:
       - mining
-      operationId: list
+      operationId: v1_mining_private_transactions_get
       responses:
         '200':
           description: Owner-only private queue
@@ -2689,7 +2689,7 @@ paths:
     post:
       tags:
       - mining
-      operationId: submit
+      operationId: v1_mining_private_transactions_post
       requestBody:
         content:
           application/json:
@@ -2709,7 +2709,7 @@ paths:
     post:
       tags:
       - mining
-      operationId: cancel
+      operationId: v1_mining_private_transaction_cancel_post
       parameters:
       - name: tx_id
         in: path
