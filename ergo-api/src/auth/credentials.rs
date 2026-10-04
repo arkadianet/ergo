@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
@@ -30,6 +30,8 @@ pub struct ScopedCredentialConfig {
     pub id: String,
     pub hash: String,
     pub scopes: Vec<CredentialScope>,
+    #[serde(default)]
+    pub revoked: bool,
 }
 
 impl std::fmt::Debug for ScopedCredentialConfig {
@@ -38,6 +40,7 @@ impl std::fmt::Debug for ScopedCredentialConfig {
             .field("id", &self.id)
             .field("hash", &"[redacted]")
             .field("scopes", &self.scopes)
+            .field("revoked", &self.revoked)
             .finish()
     }
 }
@@ -54,6 +57,7 @@ pub(super) struct CredentialRegistry {
     keys: Vec<ScopedCredentialConfig>,
     revoked: RwLock<BTreeSet<String>>,
     path: PathBuf,
+    writer: Mutex<()>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -116,13 +120,17 @@ impl CredentialRegistry {
                 }
                 ledger.revoked
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(path = %path.display(), "scoped credential revocation ledger is absent; lost or restored data can re-enable runtime-revoked keys; set revoked = true in config for durable denial");
+                BTreeSet::new()
+            },
             Err(e) => return Err(e.to_string()),
         };
         Ok(Self {
             keys,
             revoked: RwLock::new(revoked),
             path,
+            writer: Mutex::new(()),
         })
     }
 
@@ -136,6 +144,7 @@ impl CredentialRegistry {
         for key in &self.keys {
             let matches = bool::from(hash.as_bytes().ct_eq(key.hash.as_bytes()));
             allowed |= matches
+                && !key.revoked
                 && !revoked.contains(&key.id)
                 && (key.scopes.contains(&CredentialScope::Admin) || key.scopes.contains(&required));
         }
@@ -152,7 +161,7 @@ impl CredentialRegistry {
             .map(|key| CredentialInfo {
                 id: key.id.clone(),
                 scopes: key.scopes.clone(),
-                revoked: revoked.contains(&key.id),
+                revoked: key.revoked || revoked.contains(&key.id),
             })
             .collect()
     }
@@ -161,10 +170,19 @@ impl CredentialRegistry {
         &self,
         id: &str,
     ) -> Result<(), crate::operator_control::OperatorControlError> {
+        self.revoke_with(id, persist)
+    }
+
+    fn revoke_with(
+        &self,
+        id: &str,
+        write: impl FnOnce(&Path, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), crate::operator_control::OperatorControlError> {
         use crate::operator_control::OperatorControlError as Error;
         if !self.keys.iter().any(|key| key.id == id) {
             return Err(Error::NotFound("credential id is not configured".into()));
         }
+        let _writer = self.writer.lock().expect("credential writer poisoned");
         let mut revoked = self
             .revoked
             .write()
@@ -175,12 +193,14 @@ impl CredentialRegistry {
         // Fail closed in this process even if persistence fails. A failure is
         // never acknowledged as a durable revocation; retries persist the same set.
         revoked.insert(id.to_owned());
+        let snapshot = revoked.clone();
+        drop(revoked);
         let bytes = serde_json::to_vec(&Ledger {
             version: 1,
-            revoked: revoked.clone(),
+            revoked: snapshot,
         })
         .map_err(|e| Error::Storage(e.to_string()))?;
-        persist(&self.path, &bytes).map_err(|e| {
+        write(&self.path, &bytes).map_err(|e| {
             Error::Storage(format!(
                 "credential revoked in memory; ledger persistence failed: {e}"
             ))
@@ -261,6 +281,7 @@ mod tests {
             id: "pool".into(),
             hash: ApiSecurity::hash_key(b"pool-key"),
             scopes: vec![CredentialScope::Mining],
+            revoked: false,
         }];
         let security = ApiSecurity::new(master.clone())
             .unwrap()
@@ -285,11 +306,58 @@ mod tests {
     }
 
     #[test]
+    fn no_scoped_keys_ignore_corrupt_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revoked.json");
+        std::fs::write(&path, b"corrupt").unwrap();
+        let security = ApiSecurity::new(ApiSecurity::hash_key(b"master")).unwrap()
+            .with_credentials(vec![], path.clone()).unwrap();
+        assert!(security.authorize(b"master", "/node/shutdown", true));
+        let key = ScopedCredentialConfig { id: "pool".into(), hash: ApiSecurity::hash_key(b"pool-key"), scopes: vec![CredentialScope::Mining], revoked: false };
+        assert!(ApiSecurity::new(ApiSecurity::hash_key(b"master")).unwrap().with_credentials(vec![key], path).is_err());
+    }
+
+    #[test]
+    fn config_revocation_survives_missing_or_old_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revoked.json");
+        let key = ScopedCredentialConfig {
+            id: "pool".into(),
+            hash: ApiSecurity::hash_key(b"pool-key"),
+            scopes: vec![CredentialScope::Mining],
+            revoked: true,
+        };
+        for old_backup in [false, true] {
+            if old_backup {
+                persist(&path, br#"{"version":1,"revoked":[]}"#).unwrap();
+            }
+            let registry = CredentialRegistry::load(vec![key.clone()], path.clone()).unwrap();
+            assert!(!registry.authorize(&key.hash, CredentialScope::Mining));
+            assert!(registry.list()[0].revoked);
+        }
+    }
+
+    #[test]
+    fn revocation_writer_does_not_block_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = CredentialRegistry::load(vec![ScopedCredentialConfig {
+            id: "pool".into(), hash: ApiSecurity::hash_key(b"pool-key"),
+            scopes: vec![CredentialScope::Mining], revoked: false,
+        }], dir.path().join("revoked.json")).unwrap();
+        registry.revoke_with("pool", |path, bytes| {
+            assert!(registry.revoked.try_read().is_ok(), "persistence must not hold the authorization lock");
+            assert!(!registry.authorize(&ApiSecurity::hash_key(b"pool-key"), CredentialScope::Mining));
+            persist(path, bytes)
+        }).unwrap();
+    }
+
+    #[test]
     fn invalid_keys_and_duplicate_ids_fail_before_boot() {
         let mut key = ScopedCredentialConfig {
             id: "pool".into(),
             hash: ApiSecurity::hash_key(b"pool-key"),
             scopes: vec![CredentialScope::Mining],
+            revoked: false,
         };
         assert!(validate_credentials(&[key.clone()], None).is_err());
         assert!(validate_credentials(&[key.clone(), key.clone()], Some("master")).is_err());
@@ -306,6 +374,7 @@ mod tests {
             id: "pool".into(),
             hash: ApiSecurity::hash_key(b"pool-key"),
             scopes: vec![CredentialScope::Mining],
+            revoked: false,
         };
         let security = ApiSecurity::new(ApiSecurity::hash_key(b"master"))
             .unwrap()

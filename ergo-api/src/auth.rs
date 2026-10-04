@@ -113,6 +113,9 @@ impl ApiSecurity {
         ledger: std::path::PathBuf,
     ) -> Result<Self, String> {
         validate_credentials(&keys, Some(&self.api_key_hash_hex))?;
+        if keys.is_empty() {
+            return Ok(self);
+        }
         self.credentials = Some(Arc::new(credentials::CredentialRegistry::load(
             keys, ledger,
         )?));

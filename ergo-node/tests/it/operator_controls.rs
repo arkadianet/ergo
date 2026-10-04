@@ -12,11 +12,13 @@ fn config(path: &std::path::Path) -> ergo_node::config::NodeConfig {
             id: "observer".into(),
             hash: ApiSecurity::hash_key(b"observer-key"),
             scopes: vec![CredentialScope::Operator],
+            revoked: false,
         },
         ScopedCredentialConfig {
             id: "pool".into(),
             hash: ApiSecurity::hash_key(b"pool-key"),
             scopes: vec![CredentialScope::Mining],
+            revoked: false,
         },
     ];
     config.peer_details.auto_download = false;

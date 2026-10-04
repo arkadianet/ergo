@@ -101,6 +101,7 @@ scopes = ["mining"]
 id = "operator-agent"
 hash = "<another Blake2b256 hash: 64 lowercase hex characters>"
 scopes = ["operator"]
+revoked = false # set true to revoke durably in configuration
 ```
 
 Scopes are `mining`, `wallet`, `operator` and `admin`. Admin permits all gated
@@ -116,14 +117,18 @@ Admin callers can inspect `GET /api/v1/node/credentials` (IDs, scopes and revoke
 flags only) and revoke a named key with
 `DELETE /api/v1/node/credentials/{id}`. HTTP 204 means the revocation ledger was
 persisted. Revocation survives restart in `credentials-revoked.json` under the
-data directory; include this file in backups. On storage failure the key is
+data directory; include this file in backups. For durable revocation across a
+data wipe or an old backup restore, set `revoked = true` on the credential in
+TOML (or remove it) and restart. The API cannot rewrite configuration. A missing
+ledger with scoped keys logs a warning naming the re-enablement risk. On storage failure the key is
 still denied in the current process, but the endpoint returns 503 because
 durability was not confirmed. Retry to persist the denial.
 
 Revoked IDs remain revoked even if their configured hash changes. Rotate by
 using a new ID. The master key cannot be revoked through this endpoint: rotate
-its hash in TOML and restart. A malformed/unreadable ledger refuses API startup
-so previously revoked keys are never silently reenabled.
+its hash in TOML and restart. A malformed/unreadable ledger refuses API startup when scoped keys exist.
+With no scoped keys the ledger is ignored. Config-revoked keys stay denied even
+if the ledger is missing or restored from an old backup.
 
 ## Manual peer administration
 
