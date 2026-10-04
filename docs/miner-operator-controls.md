@@ -41,9 +41,10 @@ Send the configured `api_key` header to all inventory and history endpoints:
 
 - `GET /api/v1/mining/candidate-details?msg=<64-hex>&template_seq=<sequence>`
   matches both selectors against one retained template. Omitting both selects
-  current offered work. An evicted or mismatched historical selector returns 404;
-  missing current work returns 503. Status distinguishes `current`, `superseded`,
-  `stale_parent` and `withdrawn`.
+  current offered work. An evicted or mismatched historical selector returns 404
+  with reason `template_not_found`; missing current work returns 503 with
+  `candidate_unavailable`. Both use the v1 error envelope. Status distinguishes
+  `current`, `superseded`, `stale_parent` and `withdrawn`.
 - `GET /api/v1/mining/history` returns the most recent 16 retained templates plus
   at most 128 local solution outcomes. Template retention resets on restart.
 - `GET /api/v1/mining/status` is public and reports real current-template age,

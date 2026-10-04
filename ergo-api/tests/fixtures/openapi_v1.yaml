@@ -9823,6 +9823,7 @@ components:
       - tx_not_in_block
       - not_blacklisted
       - not_a_singleton_protocol
+      - template_not_found
       - bad_request
       - invalid_address
       - invalid_ergo_tree

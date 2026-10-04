@@ -454,6 +454,15 @@ impl NodeMining for StubMining {
     ) -> Result<Option<WorkMessageJson>, MiningApiError> {
         Ok(Some(fixed_work()))
     }
+    async fn candidate_details(
+        &self,
+        _msg: Option<String>,
+        _template_seq: Option<u64>,
+    ) -> Result<Option<ergo_rest_json::mining_inspection::CandidateDetailsJson>, MiningApiError>
+    {
+        // Nothing is retained.
+        Ok(None)
+    }
     async fn submit_solution(&self, _: AutolykosSolutionJson) -> Result<(), MiningApiError> {
         Ok(())
     }
@@ -808,6 +817,47 @@ async fn mining_candidate_t1_accepts_valid_key() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["msg"], "ab".repeat(32));
     assert_eq!(v["template_seq"], 7);
+}
+
+#[tokio::test]
+async fn mining_candidate_details_unretained_selector_is_v1_template_not_found() {
+    let uri = format!(
+        "/api/v1/mining/candidate-details?msg={}&template_seq=3",
+        "ab".repeat(32)
+    );
+    let (status, v) = send(
+        app_full(default_auth()),
+        req(
+            Method::GET,
+            &uri,
+            Some("operator-secret"),
+            Some(REMOTE),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(v["error"]["reason"], "template_not_found");
+    assert!(v["error"]["message"].is_string() && v["error"]["detail"].is_string());
+    assert!(
+        v.get("reason").is_none(),
+        "the v1 envelope nests the reason"
+    );
+
+    // Without selectors there is simply no current work.
+    let (status, v) = send(
+        app_full(default_auth()),
+        req(
+            Method::GET,
+            "/api/v1/mining/candidate-details",
+            Some("operator-secret"),
+            Some(REMOTE),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(v["error"]["reason"], "candidate_unavailable");
 }
 
 #[tokio::test]
