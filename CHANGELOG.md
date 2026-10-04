@@ -54,18 +54,18 @@ infrastructure.
   list stored in the earlier insertion order.
 - `POST /transactions/unconfirmed/byTransactionIds` returns Scala's shape: the
   requested IDs that are pooled, in pool order, instead of full transactions.
-- Upgrade normal storage to redb 4.3. Legacy redb 2.6 file-format v2 databases
-  require the copy-only `ergo-node migrate-redb SOURCE DESTINATION` command
-  before startup. Originals remain intact; the offline converter locks the
-  source, upgrades only a temporary copy, verifies schemas and contents, and
-  publishes without replacing an existing destination. See the migration,
-  backup, recovery and rollback instructions in [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases).
+- Upgrade normal storage to redb 4.3 and automatically convert 0.11 redb 2.6
+  data directories before opening storage. Verified, journaled swaps retain
+  `*.redb2-backup` originals and recover after interruption. Stale indexers are
+  moved aside first for a schema-3 rebuild. `ergo-node upgrade-data DATA_DIR
+  --indexer-db NAME` runs offline; `--discard-backups` trades local rollback
+  copies for space. `[store] auto_upgrade_legacy` defaults to true. See
+  [space, recovery and rollback instructions](docs/operating.md#migrating-legacy-redb-databases).
 - Indexer apply and repair commits now use synchronous `Immediate` durability
   instead of `Eventual`, preserving durable guarantees across platforms with
-  possible additional flush latency. Unsupported peer database formats
-  fail node startup. Live-file locks and I/O failures preserve the database
-  and keep the existing best-effort peer fallback; automatic quarantine is
-  limited to an explicit corruption error.
+  possible additional flush latency. The startup upgrade inventory fails
+  closed on unsupported formats, corruption and access errors, preserving
+  database files before normal storage opens.
 - Indexer schema 3: on first start an existing indexer database is deleted
   and rebuilt from genesis, and `/blockchain/*` answers `503 indexer-syncing`
   until it catches up. The rebuild applies two Scala-parity corrections to

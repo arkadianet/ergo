@@ -68,6 +68,10 @@ peer_details.reverse_dns = false
 # [api.security]
 # api_key_hash = "<64 lowercase hex characters>"
 
+[store]
+# Convert legacy 0.11 redb files before opening storage; retains .redb2-backup originals.
+auto_upgrade_legacy = true
+
 [indexer]
 enabled = true                   # /blockchain/* extra-index (boxes, tokens,
                                  # addresses). Builds indexer.redb under data_dir

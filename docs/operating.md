@@ -311,8 +311,8 @@ digest backup only into a digest-configured node.
 2. Stop the node gracefully (see [Graceful shutdown](#graceful-shutdown)) so
    the final state commit and a clean redb close complete.
 3. Back up `data_dir` (see above) before any cross-minor upgrade.
-4. For a redb 2.6 → 4 upgrade, complete the [offline database migration](#migrating-legacy-redb-databases)
-   below before starting the new binary. Other upgrades follow their release notes.
+4. For a redb 2.6 → 4 upgrade, review the [automatic database upgrade](#migrating-legacy-redb-databases)
+   and space requirements below. Other upgrades follow their release notes.
 5. Swap in the new binary and restart against the verified config and
    `data_dir`.
 
@@ -340,74 +340,135 @@ Notes:
 
 ## Migrating legacy redb databases
 
-The redb 4 storage upgrade cannot open the file-format v2 databases normally
-created by redb 2.6. Normal startup fails closed with `UpgradeRequired(2)`;
-the peer address book also preserves unsupported files rather than quarantining
-them as corruption. The offline command below upgrades **a new copy**, preserves
-the original, and verifies table schemas and every key/value row with both the
-legacy and current readers. It applies to UTXO and digest `state.redb`, the
-embedded wallet tables, the peer book, and optional indexer and webhook databases.
-It does not change application schemas, consensus bytes, or encrypted seeds.
+Version 0.12 upgrades redb 2.6 file-format v2 databases **automatically on
+startup**, before opening node storage or starting networking. Stop 0.11
+cleanly, disable its automatic restart, and keep a complete external backup of
+the stopped data directory (including `wallet/` and config). Install the new
+binary and start with the same configuration. A large archival database can
+take a long time to copy and verify; progress reports the path, file size,
+elapsed time, copy bytes, verification tables and rows every five seconds.
 
-1. Stop the old node gracefully and disable its automatic restart. Keep its
-   binary and config for rollback. Back up the **whole stopped data directory**,
-   including `wallet/`, with permissions intact; a set of databases copied at
-   different running-node heights is not a consistent backup.
-2. Create a separate destination directory. Copy config and `wallet/` into it
-   with their permissions intact, but do not copy database files into the
-   destination paths: publication refuses existing files, directories and even
-   dangling symlinks. Ensure disk space for the complete backup, migrated files,
-   and one temporary database copy with upgrade/repair overhead. Run as the
-   same account that owns the data and wallet files.
-3. Using the **new** binary, migrate each database from the same stopped source
-   directory. The destination parent must already exist. Adjust the indexer
-   filename if `[indexer] db_filename` overrides the default; omit that command
-   when no indexer database exists. Migrate `webhooks.redb` too if it was created
-   by a legacy binary; omit that command when the file does not exist.
+The inventory is `state.redb` (UTXO/digest and all embedded wallet tables),
+`peers.redb`, `webhooks.redb`, and `[indexer] db_filename` (default
+`indexer.redb`). Encrypted wallet secrets, the private mining queue, mining
+policy/history and maintenance journals are files/JSON, not separate redb
+databases. Missing databases are left for normal startup to create; current
+files are skipped. The schema-2 indexer is moved aside **first**, without
+copying it, because schema 3 needs a rebuild from genesis anyway. A legacy
+indexer already at schema 3 is migrated and retained.
+
+To perform the upgrade separately from startup, using the new binary:
+
+```bash
+./ergo-node upgrade-data ./ergo-data
+# Use exactly your [indexer] db_filename if it differs from the default:
+./ergo-node upgrade-data ./ergo-data --indexer-db archive-index.redb
+```
+
+This command does not load configuration or start networking. Supply the same
+data directory and indexer path that normal startup will use. Names ending in
+`.redb2-backup` and directories ending in `.redb-upgrade` are reserved artifacts. Both paths share
+the startup implementation and an exclusive `.ergo-node.lock` held throughout
+upgrade; startup keeps that lock until shutdown. Never remove the lock file.
+Legacy database writer locks also reject a running 0.11 node. A completed
+`upgrade-data` run reports a no-op on repetition.
+
+Automatic conversion can be disabled:
+
+```toml
+[store]
+auto_upgrade_legacy = false
+```
+
+It defaults to `true`. With conversion disabled, startup checks the inventory
+without writing database files and fails with `ergo-node upgrade-data` guidance
+when legacy files or an unfinished upgrade exist.
+
+**Space and backups.** Before each copied database, the upgrader requires free
+bytes on that filesystem equal to its file size plus the larger of **10% or
+256 MiB**. Conversion may still fail if other processes consume that space;
+originals remain recoverable. Each original becomes `<filename>.redb2-backup`
+after its replacement passes both readers' integrity and typed row verification.
+The verified file and the rename directories are synced. Renaming a stale
+indexer avoids allocating another index copy but does **not** free its space
+while its backup is retained. For a 41 GB state and 42 GB stale index, allow
+about 45.1 GB additional free space with the default retained backups.
+
+If space is limited, free space or explicitly discard rollback copies:
+
+```bash
+./ergo-node upgrade-data ./ergo-data --discard-backups
+# Add --indexer-db archive-index.redb if configured.
+```
+
+This deletes the stale indexer before copying state, and deletes each other
+legacy backup immediately after the verified replacement is durable. The
+command logs that **rollback to 0.11 then requires an external backup**. It also removes retained backups from earlier attempts when their current database
+opens read-only, or when the only indexer copy is a stale schema-2 backup. It
+refuses to delete the only surviving copy of any other database. The same
+per-file space check still applies. Startup always keeps backups; discarding
+them requires this explicit command.
+
+For another disk, the existing copy-only converter remains available:
+
+```bash
+mkdir ./ergo-data-redb4
+./ergo-node migrate-redb ./ergo-data/state.redb ./ergo-data-redb4/state.redb
+```
+
+Stop the node first; migrate each required legacy database to the other disk,
+copy current databases, config and `wallet/` with permissions intact, then
+switch `data_dir` only after all files succeed. Omit a stale indexer to let the
+new node rebuild it. The destination must not exist. Unknown table types,
+multimaps, persistent savepoints, unsupported formats and malformed metadata
+fail closed; the converter never replaces the source or an existing destination.
+
+**Interruption and recovery.** SIGINT/SIGTERM cancels copying or verification,
+cleans private temporaries and retains originals. If a signal arrives during
+the short journaled rename sequence, that sequence finishes before interruption
+is reported. Any failure exits non-zero with its reason. A kill or crash can
+leave `<filename>.redb-upgrade/`; rerun `upgrade-data` or start with automatic
+conversion enabled. The journal discards an unverified copy while retaining
+its original, or finishes installing a durably verified copy while retaining
+its backup. Existing rollback backups are never replaced. Do not manually
+delete upgrade journals or copies between the two renames. An unclean legacy
+indexer requiring repair cannot be schema-probed without writing; cleanly shut
+down 0.11 first, or use `migrate-redb` to repair and verify a private copy on
+another disk. Windows shares the converter's portable directory-sync limit;
+use an external stopped-directory backup for power-loss recovery there.
+
+**Rollback to 0.11.** Version 0.11 cannot open upgraded files. Blocks and wallet
+observations recorded only by 0.12 must be downloaded/scanned again.
+
+1. Stop the new node, disable automatic restart, and keep the new directory
+   separately if you want to preserve its later history. Finish any interrupted
+   upgrade with `upgrade-data` before following the completed-upgrade commands
+   below. Alternatively restore the entire external pre-upgrade backup.
+2. Restore **every** retained legacy database over its current file, including
+   a stale indexer backup. For the default filenames:
 
    ```bash
-   mkdir ./ergo-data-redb4
-   # Copy your config and, when present, wallet/ into ergo-data-redb4 first.
-   ./ergo-node migrate-redb ./ergo-data/state.redb ./ergo-data-redb4/state.redb
-   ./ergo-node migrate-redb ./ergo-data/peers.redb ./ergo-data-redb4/peers.redb
-   ./ergo-node migrate-redb ./ergo-data/indexer.redb ./ergo-data-redb4/indexer.redb
-   ./ergo-node migrate-redb ./ergo-data/webhooks.redb ./ergo-data-redb4/webhooks.redb
+   cd ./ergo-data
+   for file in state.redb peers.redb indexer.redb webhooks.redb; do
+     if [ -f "$file.redb2-backup" ]; then
+       mv -f -- "$file.redb2-backup" "$file"
+     fi
+   done
    ```
 
-   This command never loads node configuration or starts networking. It takes
-   a nonblocking exclusive lock compatible with the old writer on the source;
-   a live/open database fails immediately. It opens only a private copy for
-   recovery, upgrade and integrity checks. Unknown table types, multimaps,
-   persistent savepoints and unsupported file versions fail closed. A database
-   already readable by redb 4 reports that no legacy migration is needed and
-   creates no destination. For a mixed stopped v2/v3 set, copy already-current
-   files with permissions intact into the new directory instead.
-4. Start only after **all** required database copies succeed. Update the config's
-   data directory to use the new directory, or supply
-   `--data-dir ./ergo-data-redb4`. The wallet path is always `wallet/` inside that
-   directory; ensure it was copied there. Check any independently configured
-   absolute paths. Validate the resumed
-   state mode, chain tip/root, wallet scan/balances, indexer progress and webhook
-   registrations before restoring automatic restart. Keep the original directory
-   and backup.
-
-**Failure and recovery.** Failure before publication removes the temporary
-copy and leaves source bytes unchanged, including on malformed input or repair
-failure. Fix the reported cause and retry to a new destination. An interrupted
-process can leave `.ergo-redb-migrate-*` files in the destination directory;
-normal startup never uses them. Remove those temporary files only while all
-migration processes are stopped. A parent-directory sync failure on Unix or a
-permission-restoration failure on Windows can report an error **after** the
-verified destination was published. Keep it for inspection; retrying will
-refuse to replace it. The source is still preserved. The file is synced before
-publication and Unix also syncs its parent directory; Windows has no portable
-parent-directory sync and restores the source's readonly attribute after publish.
-
-**Rollback.** Stop the new node completely, then restore the old binary and its
-config against the original stopped directory or the full pre-upgrade backup.
-Do not point redb 2.6 at a directory subsequently written by redb 4. Do not mix
-old and new state, wallet or indexer files. Blocks received only by the new node
-must be downloaded again by the old node; confirm the resumed tip and wallet.
+   Replace `indexer.redb` with the configured indexer filename/path. This is an
+   offline rollback action; never run it while either binary is running.
+3. Remove redb 4 databases that the new binary created where no legacy file
+   existed before the upgrade. In particular, if the indexer, peer or webhook
+   database had no pre-upgrade file/backup, remove that newly created file:
+   `rm -- indexer.redb`, `rm -- peers.redb`, or `rm -- webhooks.redb`, as applicable.
+   Do not delete `state.redb` if its backup is unavailable: restore the external
+   backup instead. With `--discard-backups`, restore the **whole** external
+   stopped-directory backup; there are no local originals to roll back to.
+4. Restore the 0.11 binary and configuration. Restore the pre-upgrade `wallet/`
+   too if its secrets/configuration changed after upgrading. Start 0.11 against
+   the restored directory, then confirm the tip and wallet balances. Keep all
+   database files from the same stopped-node snapshot.
 
 The indexer now uses `Durability::Immediate` for every apply and repair commit.
 This replaces redb 2.6's `Eventual`: commits have a synchronous durability
