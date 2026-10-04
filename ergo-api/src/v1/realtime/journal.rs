@@ -246,7 +246,6 @@ impl EventJournal {
             }
             // All publishers are gone and the queue is drained. Releasing the
             // unused reservation avoids a restart gap on orderly shutdown.
-            if shared.failed.load(Ordering::Acquire) { return; }
             let next = shared.published_seq.load(Ordering::Acquire).saturating_add(1);
             if let Err(error) = store.reserve_cursor(next) {
                 shared.failed.store(true, Ordering::Release);
@@ -469,8 +468,13 @@ mod tests {
         assert_eq!(subscriber.rx.try_recv().unwrap().seq, 1);
         drop(subscriber);
         drop(bus);
-        assert_eq!(store.saved.lock().unwrap().next_seq, CURSOR_RESERVATION + 1);
+        assert_eq!(store.saved.lock().unwrap().next_seq, 2);
         assert!(store.saved.lock().unwrap().events.is_empty());
+        store.fail_append.store(false, Ordering::Release);
+        let restarted = RealtimeBus::durable(classes(), store, 1).unwrap();
+        assert!(restarted.backfill(&filter(), 0, 10).gap);
+        assert!(!restarted.backfill(&filter(), 1, 10).gap);
+        assert_eq!(restarted.publish(body(2)), 2);
     }
 
     #[test]
@@ -494,7 +498,8 @@ mod tests {
         store.fail_append.store(false, Ordering::Release);
         let restarted = RealtimeBus::durable(classes(), store, 1).unwrap();
         assert!(restarted.publish(body(100_002)) > 100_001);
-        assert!(restarted.backfill(&filter(), 100_001, 10).gap);
+        assert!(!restarted.backfill(&filter(), 100_001, 10).gap);
+        assert!(restarted.backfill(&filter(), 0, 10).gap);
     }
 
     #[test]

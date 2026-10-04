@@ -146,7 +146,10 @@ decimal text. Compare and store cursors without floating-point conversion.
   entries and subsequent observations are counted as losses. Live delivery
   continues within the boot epoch reserved before publishers start: **2^40**
   cursors (about 1.1 trillion). That capacity limit is independent of disk health.
-  A failed epoch stays reserved across shutdown, exposing a restart gap.
+  An orderly shutdown attempts to release even a failed epoch to the exact
+  published boundary plus one. A successful release preserves the true missing
+  interval without inventing a gap after consumers already caught up. If that
+  final write fails, the reserved boundary remains and replay reports a gap.
 - Durable history retains at most **8192** events and **64 MiB** of encoded
   records, evicting oldest first. A single encoded record over **1 MiB** stops
   journal persistence rather than growing the store without a bound. The live
@@ -212,7 +215,8 @@ retry deadlines across restart; receivers must deduplicate the delivery ID
 because an unknown HTTP acknowledgement can still be retried. Admission is
 atomic for all hooks matching an event, and a catch-up page commits once.
 Unmatched observations advance the admission cursor in memory; active hooks
-checkpoint skips after at most 1024 observations or five seconds. No active
+checkpoint skips after at most 1024 observations or five seconds, and flush
+any remaining cursor on orderly worker shutdown. No active
 hooks means no catch-up checkpoint write.
 
 Before downgrading to a binary predating persistent operator replay, reconcile

@@ -374,6 +374,11 @@ impl WebhookEngine {
         });
     }
 
+    /// Save any lazy admission cursor before the worker releases its store.
+    pub(crate) fn flush_replay(&self) -> Result<(), String> {
+        self.mutate_locked(&mut self.lock(), true, |_| {})
+    }
+
     /// Do not silently continue after losing source history. Open obligations
     /// stay retained; subscriptions visibly pause until the operator reconciles
     /// from REST and explicitly re-enables them.

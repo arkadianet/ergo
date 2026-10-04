@@ -188,6 +188,11 @@ fn spawn_worker(
                 }
             }
         }
+        match executor.run_worker(|engine| engine.flush_replay()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!(%error, "webhook cursor flush failed"),
+            Err(error) => tracing::error!(%error, "webhook cursor flush could not run"),
+        }
         // Dropping cancelled attempts only enqueues their reserved completion
         // jobs. Observe those writes before returning or releasing the store.
         if owns_executor {
@@ -614,6 +619,49 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn orderly_worker_shutdown_flushes_a_lazy_skip_cursor() {
+        let store = Arc::new(CountingStore::default());
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+        register_blocks(&engine);
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        bus.publish(block(1));
+        assert!(engine.admit_page(&bus.backfill_all(0, 1).events, 1, now_unix_ms()));
+        let request = engine.take_due(now_unix_ms()).remove(0);
+        engine.record_result(
+            &request.delivery_id,
+            DeliveryOutcome::Success(204),
+            now_unix_ms(),
+        );
+        let mut skipped = block(2);
+        skipped.routes = vec!["peers".into()];
+        bus.publish(skipped);
+        assert!(engine.admit_page(&bus.backfill_all(1, 1).events, 2, now_unix_ms()));
+        let saved: serde_json::Value =
+            serde_json::from_slice(store.snapshot.lock().unwrap().as_ref().unwrap()).unwrap();
+        assert_eq!(saved["replay_seq"], 1);
+        let (stop, signal) = tokio::sync::oneshot::channel();
+        let worker = spawn_webhook_worker_with_shutdown(
+            bus.clone(),
+            engine.clone(),
+            FakeSink::new(DeliveryOutcome::Success(204)),
+            Duration::from_secs(3600),
+            signal,
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while bus.subscriber_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send(()).unwrap();
+        worker.await.unwrap();
+        drop(engine);
+        let recovered = WebhookEngine::durable(Default::default(), store).unwrap();
+        assert_eq!(recovered.replay_seq(), 2);
     }
 
     #[tokio::test]
