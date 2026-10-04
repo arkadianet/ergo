@@ -97,18 +97,46 @@ impl MinerSolution {
                     field: "pk",
                     source,
                 })?;
-                Some(
+                let key: [u8; 33] =
                     raw.as_slice()
                         .try_into()
                         .map_err(|_| MiningError::WrongLength {
                             field: "pk",
                             expected: 33,
                             got: raw.len(),
-                        })?,
-                )
+                        })?;
+                (key[0] != 0).then_some(key)
             }
             None => None,
         };
         Ok(Self { nonce, pk })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_solution_key_uses_operator_default() {
+        for key in [[0; 33], {
+            let mut key = [7; 33];
+            key[0] = 0;
+            key
+        }] {
+            assert_eq!(
+                MinerSolution::from_hex("0000000000000000", Some(&hex::encode(key)))
+                    .unwrap()
+                    .pk,
+                None
+            );
+        }
+        assert_eq!(
+            MinerSolution::from_hex("0000000000000000", Some(&hex::encode([2; 33])))
+                .unwrap()
+                .pk,
+            Some([2; 33])
+        );
+        assert!(MinerSolution::from_hex("0000000000000000", Some("00")).is_err());
     }
 }
