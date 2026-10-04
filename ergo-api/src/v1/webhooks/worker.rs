@@ -229,21 +229,15 @@ async fn catch_up(
         );
         return Ok(());
     }
-    for event in page.events {
-        let now = now_unix_ms();
-        let complete = executor
-            .run_worker(move |engine| engine.admit_matches(&event, now).1)
-            .await?;
-        if !complete {
-            return Ok(());
-        }
-    }
-    if !page.truncated {
-        let latest = page.latest_seq;
-        executor
-            .run_worker(move |engine| engine.checkpoint_replay(latest))
-            .await?;
-    }
+    let through = if page.truncated {
+        page.events.last().map(|event| event.seq).unwrap_or(since)
+    } else {
+        page.latest_seq
+    };
+    executor
+        .run_worker(move |engine| engine.admit_page(&page.events, through, now_unix_ms()))
+        .await?;
+
     Ok(())
 }
 
@@ -582,6 +576,80 @@ mod tests {
             1,
             100,
         )
+    }
+
+    #[derive(Default)]
+    struct CountingStore {
+        snapshot: Mutex<Option<Vec<u8>>>,
+        commits: std::sync::atomic::AtomicUsize,
+    }
+    impl super::super::engine::WebhookStore for CountingStore {
+        fn load(&self) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.snapshot.lock().unwrap().clone())
+        }
+        fn commit(&self, snapshot: &[u8]) -> Result<(), String> {
+            *self.snapshot.lock().unwrap() = Some(snapshot.to_vec());
+            self.commits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn catch_up_batches_snapshots_and_bounds_skip_checkpoints() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let store = Arc::new(CountingStore::default());
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        engine.attach_filter(filter.clone());
+        let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+        for height in 1..=128 {
+            bus.publish(block(height));
+        }
+        let idle = store.commits.load(SeqCst);
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(
+            store.commits.load(SeqCst),
+            idle,
+            "no hooks need a checkpoint"
+        );
+        register_blocks(&engine);
+        let before = store.commits.load(SeqCst);
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(
+            store.commits.load(SeqCst),
+            before + 1,
+            "one commit per page"
+        );
+        assert_eq!(engine.replay_seq(), 128);
+        for height in 129..=1152 {
+            let mut event = block(height);
+            event.routes = vec!["peers".into()];
+            bus.publish(event);
+        }
+        for _ in 0..7 {
+            catch_up(&bus, &filter, &executor).await.unwrap();
+        }
+        assert_eq!(
+            store.commits.load(SeqCst),
+            before + 1,
+            "skip-only pages stay in RAM"
+        );
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(
+            store.commits.load(SeqCst),
+            before + 2,
+            "bounded lazy checkpoint"
+        );
+        for _ in 0..3 {
+            catch_up(&bus, &filter, &executor).await.unwrap();
+        }
+        assert_eq!(store.commits.load(SeqCst), before + 2);
+        executor.shutdown().await;
+        drop(engine);
+        let recovered = WebhookEngine::durable(Default::default(), store).unwrap();
+        assert_eq!(recovered.replay_seq(), 1152);
     }
 
     #[tokio::test]
