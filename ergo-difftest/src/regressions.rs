@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::oracle::{Divergence, DivergenceKind, Oracle, SurfaceSpec, Verdict};
+use crate::oracle::{Divergence, DivergenceKind, Verdict};
 
 pub(crate) mod storage;
 
@@ -111,25 +111,6 @@ impl Triage {
     pub fn is_pending(&self) -> bool {
         matches!(self, Triage::Pending)
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Classification
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Keep an unexplained divergence pending for human review.
-///
-/// The parameters are retained for API compatibility with earlier callers.
-/// This function makes no additional oracle query: agreement in a fixed dummy
-/// context, including rejection by both sides, does not identify a benign
-/// normalization reason. Only an explicit reviewed disposition may produce
-/// [`Triage::KnownArtifact`].
-pub fn classify(
-    _spec: &SurfaceSpec,
-    _minimized_input: &[u8],
-    _oracle: &mut Oracle,
-) -> io::Result<Triage> {
-    Ok(Triage::Pending)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -229,27 +210,4 @@ pub fn record_after_minimization(
 /// their original evidence. This is diagnostic integrity, not a power-loss proof.
 pub fn auto_file(record: &DivergenceRecord, regressions_dir: &Path) -> io::Result<PathBuf> {
     storage::file(record, regressions_dir)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Convenience: classify-and-file pipeline (used by the CLI)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One-stop pipeline: classify `divergence`, build the record, and file it.
-///
-/// Returns `(path, triage)` so the caller can update its counters.
-pub fn classify_and_file(
-    divergence: &Divergence,
-    spec: &SurfaceSpec,
-    oracle: &mut Oracle,
-    seed: Option<SeedInfo>,
-    provenance: &str,
-    regressions_dir: &Path,
-) -> io::Result<(PathBuf, Triage)> {
-    let input = crate::from_hex(&divergence.input_hex)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad input_hex in divergence"))?;
-    let triage = classify(spec, &input, oracle)?;
-    let record = build_record(divergence, triage.clone(), seed, provenance);
-    let path = auto_file(&record, regressions_dir)?;
-    Ok((path, triage))
 }
