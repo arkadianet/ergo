@@ -1323,7 +1323,7 @@ fn block_transactions_section_size(
     Ok(w.result().len())
 }
 
-fn validate_block_transactions_roundtrip(
+pub(crate) fn validate_block_transactions_roundtrip(
     txs: &[Transaction],
     block_version: u8,
 ) -> Result<(), MiningError> {
@@ -1333,17 +1333,24 @@ fn validate_block_transactions_roundtrip(
     };
     let mut writer = VlqWriter::new();
     write_block_transactions_with_version(&mut writer, &section, block_version).map_err(
-        |error| MiningError::InvalidRequest(format!("block transactions serialize: {error:?}")),
+        |error| MiningError::IdComputation {
+            op: "block_transactions_roundtrip",
+            reason: format!("serialize: {error:?}"),
+        },
     )?;
     let bytes = writer.result();
     let mut reader = VlqReader::new(&bytes);
     ergo_ser::block_transactions::read_block_transactions(&mut reader).map_err(|error| {
-        MiningError::InvalidRequest(format!("block transactions parse: {error:?}"))
+        MiningError::IdComputation {
+            op: "block_transactions_roundtrip",
+            reason: format!("parse: {error:?}"),
+        }
     })?;
     if !reader.is_empty() {
-        return Err(MiningError::InvalidRequest(
-            "trailing bytes after block transactions".into(),
-        ));
+        return Err(MiningError::IdComputation {
+            op: "block_transactions_roundtrip",
+            reason: "trailing bytes after block transactions".into(),
+        });
     }
     Ok(())
 }
@@ -2391,12 +2398,15 @@ mod tests {
         assert!(validate_block_transactions_roundtrip(std::slice::from_ref(&tx), 3).is_ok());
         assert!(matches!(
             validate_block_transactions_roundtrip(&[tx], 4),
-            Err(MiningError::InvalidRequest(_))
+            Err(MiningError::IdComputation {
+                op: "block_transactions_roundtrip",
+                ..
+            })
         ));
     }
 
     #[test]
-    fn candidate_backstop_refuses_a_rent_output_newer_than_the_v4_chain() {
+    fn candidate_skips_a_rent_output_newer_than_the_v4_chain() {
         let mut header = crate::genesis::parent_header();
         header.height = 1_100_005;
         header.version = 4;
@@ -2441,8 +2451,8 @@ mod tests {
             &|| false,
         );
         assert!(
-            matches!(result, Err(MiningError::InvalidRequest(ref reason)) if reason.contains("block transactions parse")),
-            "{result:?}"
+            matches!(result, Ok(None)),
+            "unparseable rent must be skipped: {result:?}"
         );
     }
 

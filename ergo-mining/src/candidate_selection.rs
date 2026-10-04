@@ -478,6 +478,15 @@ fn select_ordered_entries_cancellable(
                 continue;
             }
         };
+        if crate::candidate::validate_block_transactions_roundtrip(
+            std::slice::from_ref(&tx),
+            ctx.pre_header_version,
+        )
+        .is_err()
+        {
+            sel.exclude(entry.tx_id, "assembled_transaction_parse");
+            continue;
+        }
         check_build_cancelled(should_cancel)?;
 
         // The structural part of compute_tx_init_cost is a candidate-context
@@ -997,6 +1006,48 @@ mod tests {
             pre_header_n_bits: 0,
             pre_header_votes: [0u8; 3],
         }
+    }
+
+    #[test]
+    fn selection_excludes_an_unparseable_assembled_transaction_and_keeps_later_work() {
+        let first = box_at(1_000_000_000, HEIGHT, 1);
+        let second = box_at(1_000_000_000, HEIGHT, 2);
+        let mut bad = spend_tx(&first, 1_000_000_000, HEIGHT);
+        let mut tree = bad.output_candidates[0].ergo_tree().clone();
+        tree.version = 5;
+        bad.output_candidates[0] = ErgoBoxCandidate::new(
+            1_000_000_000,
+            tree,
+            HEIGHT,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        let good = spend_tx(&second, 1_000_000_000, HEIGHT);
+        let snapshot = MempoolReadSnapshot::from_entries(vec![
+            wire_entry(&bad, 0, 1),
+            wire_entry(&good, 0, 2),
+        ]);
+        let mut context = ctx();
+        context.pre_header_version = 4;
+        context.activated_script_version = 1;
+        let utxo = MapUtxo::new(&[first.clone(), second]);
+        let mut overlay = CandidateOverlay::new(&utxo);
+        let selected = select_user_txs(
+            &mut overlay,
+            &snapshot,
+            &context,
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        assert_eq!(selected.checked.len(), 1);
+        assert_eq!(selected.checked[0].0.transaction(), &good);
+        assert!(!overlay.is_spent(&first.box_id().unwrap()));
+        assert_eq!(selected.excluded[0].reason, "assembled_transaction_parse");
     }
 
     // ----- happy path -----
