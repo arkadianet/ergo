@@ -407,12 +407,22 @@ pub fn select_required_txs_cancellable(
     let mut expanded = HashSet::new();
     while cursor < pending.len() {
         check_build_cancelled(should_cancel)?;
-        let dependencies: Vec<_> = pending[cursor]
-            .1
+        // A snapshot can briefly retain a confirmed parent. Its outputs are
+        // already available from the committed view, so only unresolved inputs
+        // need an implicit ancestor. Data inputs keep their separate resolution
+        // rule (they may reference a box spent earlier in this candidate).
+        let tx = &pending[cursor].1;
+        let dependencies: Vec<_> = tx
             .inputs
             .iter()
-            .map(|i| i.box_id)
-            .chain(pending[cursor].1.data_inputs.iter().map(|i| i.box_id))
+            .filter(|input| overlay.resolve_input(&input.box_id).is_none())
+            .map(|input| input.box_id)
+            .chain(
+                tx.data_inputs
+                    .iter()
+                    .filter(|input| overlay.resolve_data_input(&input.box_id).is_none())
+                    .map(|input| input.box_id),
+            )
             .collect();
         for id in dependencies {
             if let Some(entry) = owners.get(&id) {
@@ -659,6 +669,45 @@ mod tests {
             );
             assert!(utxo.get_box(&input.box_id().unwrap()).is_some());
         }
+    }
+
+    #[test]
+    fn required_transactions_do_not_reinclude_confirmed_pool_ancestors() {
+        let input = box_at(1_000_000_000, HEIGHT, 44);
+        let parent = spend_tx(&input, 1_000_000_000, HEIGHT);
+        let parent_id = transaction_id(&parent).unwrap();
+        let output = ErgoBox {
+            candidate: parent.output_candidates[0].clone(),
+            transaction_id: parent_id,
+            index: 0,
+        };
+        // Parent was confirmed, but an earlier pool snapshot still contains it.
+        let utxo = MapUtxo::new(std::slice::from_ref(&output));
+        let child = spend_tx(&output, 1_000_000_000, HEIGHT);
+        let mut entry = wire_entry(&parent, 0, 1);
+        entry.tx_id = Digest32::from_bytes(*parent_id.as_bytes());
+        entry.outputs = vec![output.box_id().unwrap()];
+        let snapshot = MempoolReadSnapshot::from_entries(vec![entry]);
+        let selected = select_required_txs_cancellable(
+            &mut CandidateOverlay::new(&utxo),
+            &[std::sync::Arc::from(tx_bytes(&child))],
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(selected.checked.len(), 1);
+        assert_eq!(
+            *selected.checked[0].0.tx_id(),
+            *transaction_id(&child).unwrap().as_bytes()
+        );
+        assert_eq!(snapshot.len(), 1);
+        assert!(utxo.get_box(&output.box_id().unwrap()).is_some());
     }
 
     #[test]
