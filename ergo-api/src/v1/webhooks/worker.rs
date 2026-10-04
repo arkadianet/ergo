@@ -198,7 +198,9 @@ fn spawn_worker(
     })
 }
 
-/// A small bounded page preserves scheduler fairness. A full durable delivery
+/// Drain up to one retained window per wakeup, in small pages that let other
+/// persistence operations run between admissions. The page budget preserves
+/// scheduler fairness during a sustained burst. A full durable delivery
 /// ring leaves this event uncheckpointed; the next tick retries admission after
 /// delivery acknowledgements free space. Subscriber queue overflow is harmless
 /// while the replay window still covers this checkpoint.
@@ -218,31 +220,43 @@ async fn catch_up(
     if filter.read().unwrap_or_else(|e| e.into_inner()).is_empty() {
         return Ok(());
     }
-    let mut page = bus.backfill_all(since, 128);
-    let mut through = if page.truncated {
-        page.events.last().map(|event| event.seq).unwrap_or(since)
-    } else {
-        page.latest_seq
-    };
-    if let Some(missing) = page.first_missing_seq {
-        through = through.min(missing - 1);
-        page.events.retain(|event| event.seq < missing);
-    }
-    let missing = page.first_missing_seq;
-    let gap_end = page.missing_through_seq;
-    let complete = executor
-        .run_worker(move |engine| engine.admit_page(&page.events, through, now_unix_ms()))
-        .await?;
-    if complete && missing.is_some_and(|missing| through >= missing - 1) {
-        let gap_end = gap_end.expect("missing interval has an end");
-        executor
-            .run_worker(move |engine| engine.record_source_gap(gap_end))
+    let mut since = since;
+    for _ in 0..64 {
+        let mut page = bus.backfill_all(since, 128);
+        let truncated = page.truncated;
+        let mut through = if truncated {
+            page.events.last().map(|event| event.seq).unwrap_or(since)
+        } else {
+            page.latest_seq
+        };
+        if let Some(missing) = page.first_missing_seq {
+            through = through.min(missing - 1);
+            page.events.retain(|event| event.seq < missing);
+        }
+        let missing = page.first_missing_seq;
+        let gap_end = page.missing_through_seq;
+        let complete = executor
+            .run_worker(move |engine| engine.admit_page(&page.events, through, now_unix_ms()))
             .await?;
-        tracing::error!(
-            since,
-            gap_end,
-            "webhook source gap; affected subscriptions paused pending REST reconciliation"
-        );
+        if !complete {
+            break;
+        }
+        if missing.is_some_and(|missing| through >= missing - 1) {
+            let gap_end = gap_end.expect("missing interval has an end");
+            executor
+                .run_worker(move |engine| engine.record_source_gap(gap_end))
+                .await?;
+            tracing::error!(
+                since,
+                gap_end,
+                "webhook source gap; affected subscriptions paused pending REST reconciliation"
+            );
+            break;
+        }
+        if !truncated {
+            break;
+        }
+        since = through;
     }
 
     Ok(())
@@ -692,19 +706,22 @@ mod tests {
             "one commit per page"
         );
         assert_eq!(engine.replay_seq(), 128);
-        for height in 129..=1152 {
+        for height in 129..=1024 {
             let mut event = block(height);
             event.routes = vec!["peers".into()];
             bus.publish(event);
         }
-        for _ in 0..7 {
-            catch_up(&bus, &filter, &executor).await.unwrap();
-        }
+        catch_up(&bus, &filter, &executor).await.unwrap();
         assert_eq!(
             store.commits.load(SeqCst),
             before + 1,
             "skip-only pages stay in RAM"
         );
+        for height in 1025..=1152 {
+            let mut event = block(height);
+            event.routes = vec!["peers".into()];
+            bus.publish(event);
+        }
         catch_up(&bus, &filter, &executor).await.unwrap();
         assert_eq!(
             store.commits.load(SeqCst),
@@ -752,6 +769,33 @@ mod tests {
                 .len(),
             1000
         );
+        executor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn nonmatching_bursts_drain_before_the_next_wakeup_expires_history() {
+        let store = Arc::new(CountingStore::default());
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store).unwrap());
+        register_blocks(&engine);
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        engine.attach_filter(filter.clone());
+        let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+        for end in [6000, 12000] {
+            for height in end - 5999..=end {
+                let mut event = block(height);
+                event.routes = vec!["peers".into()];
+                bus.publish(event);
+            }
+            catch_up(&bus, &filter, &executor).await.unwrap();
+            assert_eq!(engine.replay_seq(), u64::from(end));
+            assert!(engine.list(0, 1)[0].active);
+        }
+        bus.publish(block(12001));
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        let id = engine.list(0, 1).remove(0).webhook_id;
+        assert_eq!(engine.deliveries_for(&id, 0, 10).len(), 1);
+        assert_eq!(engine.replay_seq(), 12001);
         executor.shutdown().await;
     }
 
@@ -819,12 +863,7 @@ mod tests {
         engine.attach_filter(filter.clone());
         let executor = Arc::new(WebhookExecutor::new(engine.clone()));
         catch_up(&bus, &filter, &executor).await.unwrap();
-        assert_eq!(engine.replay_seq(), 133);
-        assert!(
-            engine.get(&old).unwrap().active,
-            "gap beyond page must wait"
-        );
-        catch_up(&bus, &filter, &executor).await.unwrap();
+
         assert_eq!(engine.replay_seq(), 999);
         assert_eq!(engine.deliveries_for(&old, 0, 300).len(), 260);
         assert!(!engine.get(&old).unwrap().active);
