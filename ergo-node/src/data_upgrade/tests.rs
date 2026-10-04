@@ -784,7 +784,7 @@ fn constrained_drive_deletes_stale_index_before_state_copy_and_warns_about_rebui
                 free_space: &|path| {
                     let retained_index = idx.exists() || sibling(&idx, ".redb2-backup").exists();
                     let free = initial_free + if retained_index { 0 } else { idx_size };
-                    assert!(path == state || path == dir.path());
+                    assert!(path == idx || path == state || path == dir.path());
                     let copied_state = sibling(&state, ".redb2-backup").exists();
                     // Model a copy using its full preflight budget, including
                     // page-growth headroom; the retained source frees nothing.
@@ -1019,10 +1019,16 @@ fn unknown_free_space_warns_and_proceeds_including_the_index_rebuild_check() {
             .iter()
             .filter(|message| message.contains("cannot determine available bytes"))
             .collect();
-        assert_eq!(space_warnings.len(), if indexer_enabled { 2 } else { 1 });
-        assert!(space_warnings.iter().all(|message| message
-            .contains("injected filesystem query failure")
-            && message.contains("proceeding without")));
+        assert_eq!(space_warnings.len(), if indexer_enabled { 3 } else { 2 });
+        assert!(space_warnings
+            .iter()
+            .all(|message| message.contains("injected filesystem query failure")));
+        assert!(space_warnings
+            .iter()
+            .any(|message| message.contains("deleting schema-2 indexer")));
+        assert!(space_warnings
+            .iter()
+            .any(|message| message.contains("proceeding without")));
     }
 }
 
@@ -1210,4 +1216,258 @@ fn malformed_clean_indexer_schema_remains_an_error_without_mutation() {
     assert_eq!(fs::read(&path).unwrap(), bytes);
     assert!(!sibling(&path, ".redb2-backup").exists());
     assert!(!sibling(&path, ".redb-upgrade").exists());
+}
+
+fn complete_schema_two_indexer(path: &Path) -> Vec<u8> {
+    use ergo_primitives::{digest::Digest32, reader::VlqReader, writer::VlqWriter};
+    use ergo_ser::ergo_box::ErgoBoxCandidate;
+    use ergo_ser::ergo_tree::{read_ergo_tree, template_hash_from_bytes};
+    use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+    use ergo_ser::register::{AdditionalRegisters, RegisterValue};
+    use ergo_ser::sigma_type::SigmaType;
+    use ergo_ser::sigma_value::{CollValue, SigmaValue};
+    use ergo_ser::token::Token;
+    use ergo_ser::transaction::Transaction;
+    use redb::{ReadableTable, TableHandle};
+
+    // Build the complete primary index, then retain the historical v2
+    // projections in the legacy-format fixture. Apply-time v2 derivation is
+    // independently exercised by ergo-indexer's every-table equivalence test.
+    let current_path = path.with_extension("fixture.redb");
+    let (store, _) = ergo_indexer::IndexerStore::open(&current_path).unwrap();
+    let regs = AdditionalRegisters {
+        registers: ["eda080", "eda080", "efbc99"]
+            .into_iter()
+            .map(|hex| RegisterValue {
+                tpe: SigmaType::SColl(Box::new(SigmaType::SByte)),
+                value: SigmaValue::Coll(CollValue::Bytes(hex::decode(hex).unwrap())),
+            })
+            .collect(),
+    };
+    let id = Digest32::from_bytes([77; 32]);
+    let normal_tree = read_ergo_tree(&mut VlqReader::new(&hex::decode("0008d3").unwrap())).unwrap();
+    let wrapped_bytes = hex::decode("092f0204a00b08cd021dde34603426402615658f1d970cfa7c7bd92ac81a8b16ee20427901040404040004020504040402").unwrap();
+    let wrapped_tree = read_ergo_tree(&mut VlqReader::new(&wrapped_bytes)).unwrap();
+    let tx = Transaction {
+        inputs: vec![Input {
+            box_id: id,
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![
+            ErgoBoxCandidate::new(
+                1_000_000,
+                normal_tree,
+                1,
+                vec![Token {
+                    token_id: id,
+                    amount: 100,
+                }],
+                regs,
+            )
+            .unwrap(),
+            ErgoBoxCandidate::new(
+                1_000_000,
+                wrapped_tree,
+                1,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+        ],
+    };
+    ergo_indexer::apply_block(
+        &store,
+        &store.read_meta().unwrap(),
+        &ergo_indexer::IndexerBlock {
+            height: 1,
+            header_id: id,
+            transactions: &[tx],
+        },
+    )
+    .unwrap();
+    drop(store);
+    let source = redb::Database::open(&current_path).unwrap();
+    let write = source.begin_write().unwrap();
+    {
+        let mut tokens = write
+            .open_table(TableDefinition::<&[u8], &[u8]>::new("indexed_token"))
+            .unwrap();
+        let key = ergo_indexer::segment_id::token_unique_id(&id);
+        let mut token = {
+            let row = tokens.get(key.as_bytes().as_slice()).unwrap().unwrap();
+            ergo_indexer::token::read_indexed_token(&mut VlqReader::new(row.value())).unwrap()
+        };
+        token.name = Some(String::from_utf8_lossy(&hex::decode("eda080").unwrap()).into_owned());
+        token.description = token.name.clone();
+        token.decimals = Some(0);
+        let mut writer = VlqWriter::new();
+        ergo_indexer::token::write_indexed_token(&mut writer, &token);
+        tokens
+            .insert(key.as_bytes().as_slice(), writer.as_slice())
+            .unwrap();
+    }
+    write
+        .open_table(TableDefinition::<&[u8], &[u8]>::new("indexed_template"))
+        .unwrap()
+        .remove(template_hash_from_bytes(&wrapped_bytes).unwrap().as_slice())
+        .unwrap();
+    write
+        .open_table(TableDefinition::<&str, &[u8]>::new("indexer_meta"))
+        .unwrap()
+        .insert("schema_version", 2u32.to_be_bytes().as_slice())
+        .unwrap();
+    write.commit().unwrap();
+    let read = source.begin_read().unwrap();
+    let legacy = redb_legacy::Database::create(path).unwrap();
+    let write = legacy.begin_write().unwrap();
+    for handle in read.list_tables().unwrap() {
+        let name = handle.name();
+        match name {
+            "indexer_meta" => {
+                let mut target = write
+                    .open_table(redb_legacy::TableDefinition::<&str, &[u8]>::new(name))
+                    .unwrap();
+                for row in read
+                    .open_table(TableDefinition::<&str, &[u8]>::new(name))
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                {
+                    let (k, v) = row.unwrap();
+                    target.insert(k.value(), v.value()).unwrap();
+                }
+            }
+            "indexer_undo" => {
+                let mut target = write
+                    .open_table(redb_legacy::TableDefinition::<u64, &[u8]>::new(name))
+                    .unwrap();
+                for row in read
+                    .open_table(TableDefinition::<u64, &[u8]>::new(name))
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                {
+                    let (k, v) = row.unwrap();
+                    target.insert(k.value(), v.value()).unwrap();
+                }
+            }
+            "unspent_by_creation_height" => {
+                let mut target = write
+                    .open_table(redb_legacy::TableDefinition::<(u32, i64), &[u8]>::new(name))
+                    .unwrap();
+                for row in read
+                    .open_table(TableDefinition::<(u32, i64), &[u8]>::new(name))
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                {
+                    let (k, v) = row.unwrap();
+                    target.insert(k.value(), v.value()).unwrap();
+                }
+            }
+            _ => {
+                let mut target = write
+                    .open_table(redb_legacy::TableDefinition::<&[u8], &[u8]>::new(name))
+                    .unwrap();
+                for row in read
+                    .open_table(TableDefinition::<&[u8], &[u8]>::new(name))
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                {
+                    let (k, v) = row.unwrap();
+                    target.insert(k.value(), v.value()).unwrap();
+                }
+            }
+        }
+    }
+    write.commit().unwrap();
+    drop(legacy);
+    drop(read);
+    drop(source);
+    fs::remove_file(current_path).unwrap();
+    fs::read(path).unwrap()
+}
+
+#[test]
+fn schema_two_indexer_is_converted_and_migrated_only_with_combined_headroom() {
+    for enough_space in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+        let idx = dir.path().join("custom-index.redb");
+        let original = complete_schema_two_indexer(&idx);
+        let state = dir.path().join("state.redb");
+        let state_bytes = legacy(&state);
+        let state_needed = required_space(state_bytes.len() as u64);
+        let combined = state_needed + required_space(original.len() as u64);
+        let mut warnings = Vec::new();
+        let report = upgrade_data(
+            &lock,
+            dir.path(),
+            Path::new("custom-index.redb"),
+            &mut UpgradeOptions {
+                discard_backups: false,
+                keep_stale_indexer: false,
+                indexer_enabled: true,
+                warning: &mut |s| warnings.push(s.to_owned()),
+                free_space: &|_| {
+                    Ok(if enough_space { combined } else { combined - 1 }
+                        - if sibling(&idx, ".redb2-backup").exists() {
+                            required_space(original.len() as u64)
+                        } else {
+                            0
+                        })
+                },
+                cancelled: &|| false,
+                progress: &mut |_, _, _, _| {},
+                step: &mut |_| Ok(()),
+            },
+        )
+        .unwrap();
+        assert_current(&state);
+        assert_eq!(
+            fs::read(sibling(&state, ".redb2-backup")).unwrap(),
+            state_bytes
+        );
+        if enough_space {
+            assert_eq!(report.migrated, 2);
+            assert_eq!(report.stale_indexers, 0);
+            assert_eq!(fs::read(sibling(&idx, ".redb2-backup")).unwrap(), original);
+            let (store, outcome) = ergo_indexer::IndexerStore::open(&idx).unwrap();
+            assert_eq!(
+                outcome,
+                ergo_indexer::OpenOutcome::Migrated {
+                    previous_version: 2
+                }
+            );
+            assert_eq!(store.read_meta().unwrap().indexed_height, 1);
+            assert_eq!(store.read_meta().unwrap().global_box_index, 2);
+            let token = store
+                .read_token(&ergo_primitives::digest::Digest32::from_bytes([77; 32]))
+                .unwrap()
+                .unwrap();
+            assert_eq!(token.name.as_deref(), Some("\u{fffd}"));
+            assert_eq!(token.description.as_deref(), Some("\u{fffd}"));
+            assert_eq!(token.decimals, Some(9));
+            let wrapped = ergo_primitives::digest::Digest32::from_bytes(
+                hex::decode("c7f899c5518eddc86a5052a932551fd54706cd8d12641150b160c25cdbd4befd")
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            );
+            assert_eq!(
+                store.read_template_box_entries(&wrapped).unwrap(),
+                Some(vec![1])
+            );
+        } else {
+            assert_eq!(report.migrated, 1);
+            assert_eq!(report.stale_indexers, 1);
+            assert!(!idx.exists());
+            assert!(!sibling(&idx, ".redb2-backup").exists());
+            assert!(warnings
+                .iter()
+                .any(|s| s.contains("state upgrade has priority")));
+        }
+    }
 }
