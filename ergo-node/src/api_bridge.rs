@@ -376,8 +376,8 @@ impl NodeReadState for SnapshotReadState {
         self.runtime_control.as_ref().map(|control| {
             // Overlay live starvation/storage alarms onto the immutable snapshot
             // report, so readiness can fail even while snapshot publication froze.
-            let mut probes = control.probes(&self.handle.load());
             let status = self.status();
+            let mut probes = control.probes(&self.handle.load(), &status);
             if status.apply_wedged || status.last_storage_error.is_some() {
                 probes.readiness.ready = false;
                 if !probes

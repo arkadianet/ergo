@@ -7,7 +7,7 @@ The existing `/api/v1/node/health` and Scala-compatible routes retain their beha
 ## Startup, liveness and readiness
 
 All three probes return a JSON report with `ready`, machine-readable `reasons`,
-heartbeat/snapshot/tip ages and available dependency heights. Success is HTTP 200;
+heartbeat/snapshot/tip ages and heights only for required dependencies. Success is HTTP 200;
 a failed check is HTTP 503. They are public and exempt from the request governor, so shared proxy budgets
 cannot turn supervision probes into HTTP 429 responses.
 
@@ -19,16 +19,18 @@ cannot turn supervision probes into HTTP 429 responses.
 
 Use startup for startup probes, liveness for process supervision and readiness
 for removing a node from a load balancer during sync or stale-state conditions.
-A long synchronous block apply can stop the heartbeat; allow enough time before
-restarting an otherwise progressing node. Headers-only nodes check the header tip
+Applies and snapshot rebuild/install operations below the 600-second stuck
+threshold remain live even with an old heartbeat. Idle stale loops and stuck
+applies fail liveness. Readiness tolerates two blocks behind the header tip and
+uses a two-hour default tip-age limit to accommodate normal mainnet block gaps. Headers-only nodes check the header tip
 without requiring a full-block tip. Readiness requires an actual chain tip, so an
 empty devnet is live but unready until it produces blocks.
 
 ```toml
 [api.readiness]
-heartbeat_max_age_ms = 60000
+heartbeat_max_age_ms = 600000
 snapshot_max_age_ms = 30000
-tip_max_age_ms = 1200000
+tip_max_age_ms = 7200000
 require_indexer = false
 require_wallet = false
 ```

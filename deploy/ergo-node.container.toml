@@ -14,9 +14,9 @@ public_bind = true
 # api_key_hash = "<64 lowercase hex chars of Blake2b256(random secret)>"
 
 [api.readiness]
-heartbeat_max_age_ms = 60000
+heartbeat_max_age_ms = 600000
 snapshot_max_age_ms = 30000
-tip_max_age_ms = 1200000
+tip_max_age_ms = 7200000
 
 [logging]
 default_level = "info"

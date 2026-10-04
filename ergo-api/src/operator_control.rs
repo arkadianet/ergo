@@ -85,9 +85,9 @@ pub struct ProbePolicy {
 impl Default for ProbePolicy {
     fn default() -> Self {
         Self {
-            heartbeat_max_age_ms: 60_000,
+            heartbeat_max_age_ms: 600_000,
             snapshot_max_age_ms: 30_000,
-            tip_max_age_ms: 20 * 60 * 1000,
+            tip_max_age_ms: 2 * 60 * 60 * 1000,
             require_indexer: false,
             require_wallet: false,
         }

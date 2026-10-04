@@ -984,6 +984,8 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
     let Some(reconstructed) = state.reconstructed_tree.take() else {
         return;
     };
+    let phase = state.executor.apply_phase_metrics();
+    let _apply = phase.begin();
 
     // Pull snapshot_height from the bootstrap state.
     let (snapshot_height, manifest_id) = match state.snapshot_bootstrap.state() {
@@ -1263,6 +1265,8 @@ fn maybe_rebuild_serve_snapshot(state: &mut NodeState) {
     if state.snapshot_state.cached_height() == Some(tip) {
         return;
     }
+    let phase = state.executor.apply_phase_metrics();
+    let _apply = phase.begin();
     match state
         .store
         .as_utxo()
@@ -1871,6 +1875,14 @@ mod tests {
         assert!(
             state.reconstructed_tree.is_none(),
             "install must consume the restored tree once the gap resolves",
+        );
+        assert!(
+            state
+                .executor
+                .apply_phase_metrics()
+                .last_apply_age_ms()
+                .is_some(),
+            "snapshot installation must be visible to live apply telemetry"
         );
     }
 

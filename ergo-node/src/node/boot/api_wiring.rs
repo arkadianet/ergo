@@ -228,26 +228,33 @@ pub(super) async fn bind(
     let db_arc = store.db_arc();
     let indexer_probe = indexer_handle.clone();
     let wallet_probe_db = db_arc.clone();
-    runtime_control.set_dependencies(Arc::new(move || {
+    runtime_control.set_dependencies(Arc::new(move |require_indexer, require_wallet| {
         use ergo_indexer::IndexerQuery;
-        let indexer_height = indexer_probe.as_ref().map(|handle| handle.indexed_height());
-        let indexer_healthy = indexer_probe
-            .as_ref()
-            .is_some_and(|handle| handle.is_caught_up());
-        let (wallet_height, wallet_healthy) = wallet_probe_db
-            .begin_read()
-            .ok()
-            .and_then(|txn| {
-                let cursor = ergo_state::wallet::reader::WalletReader::new(&txn)
-                    .scan_cursor()
-                    .ok()??;
-                let tip = ergo_state::reader::committed_tip_in(&txn).ok()??;
-                Some((
-                    Some(cursor.height),
-                    cursor.height == tip.0 && cursor.header_id == Some(tip.1),
-                ))
-            })
-            .unwrap_or((None, false));
+        let indexer_height = require_indexer
+            .then(|| indexer_probe.as_ref().map(|handle| handle.indexed_height()))
+            .flatten();
+        let indexer_healthy = require_indexer
+            && indexer_probe
+                .as_ref()
+                .is_some_and(|handle| handle.is_caught_up());
+        let (wallet_height, wallet_healthy) = if require_wallet {
+            wallet_probe_db
+                .begin_read()
+                .ok()
+                .and_then(|txn| {
+                    let cursor = ergo_state::wallet::reader::WalletReader::new(&txn)
+                        .scan_cursor()
+                        .ok()??;
+                    let tip = ergo_state::reader::committed_tip_in(&txn).ok()??;
+                    Some((
+                        Some(cursor.height),
+                        cursor.height == tip.0 && cursor.header_id == Some(tip.1),
+                    ))
+                })
+                .unwrap_or((None, false))
+        } else {
+            (None, false)
+        };
         crate::runtime_control::Dependencies {
             indexer_height,
             indexer_healthy,

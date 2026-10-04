@@ -26,7 +26,7 @@ pub struct PeerControlRequest {
     pub reply: tokio::sync::oneshot::Sender<Result<(), OperatorControlError>>,
 }
 
-type DependencyReader = Arc<dyn Fn() -> Dependencies + Send + Sync>;
+type DependencyReader = Arc<dyn Fn(bool, bool) -> Dependencies + Send + Sync>;
 
 struct LiveConfig {
     revision: u64,
@@ -198,11 +198,31 @@ impl RuntimeControl {
         Ok(self.view(&live))
     }
 
-    pub(crate) fn probes(&self, snapshot: &NodeSnapshot) -> NodeProbes {
-        self.probes_at(snapshot, Instant::now(), crate::snapshot::unix_now_ms())
+    pub(crate) fn probes(
+        &self,
+        snapshot: &NodeSnapshot,
+        status: &ergo_api::types::ApiStatus,
+    ) -> NodeProbes {
+        self.probes_with_status_at(
+            snapshot,
+            status,
+            Instant::now(),
+            crate::snapshot::unix_now_ms(),
+        )
     }
 
+    #[cfg(test)]
     fn probes_at(&self, snapshot: &NodeSnapshot, now: Instant, unix_ms: u64) -> NodeProbes {
+        self.probes_with_status_at(snapshot, &snapshot.status, now, unix_ms)
+    }
+
+    fn probes_with_status_at(
+        &self,
+        snapshot: &NodeSnapshot,
+        status: &ergo_api::types::ApiStatus,
+        now: Instant,
+        unix_ms: u64,
+    ) -> NodeProbes {
         let live = self.config.read().expect("runtime config poisoned");
         let heartbeat = self.heartbeat.load(Ordering::Acquire);
         let elapsed = now.saturating_duration_since(self.started_at).as_millis() as u64;
@@ -216,21 +236,32 @@ impl RuntimeControl {
             &snapshot.tip.best_full_block.timestamp_unix_ms
         };
         let tip_age_ms = (*tip > 0).then(|| unix_ms.saturating_sub(*tip));
-        let deps = self
-            .dependencies
-            .read()
-            .expect("probe dependencies poisoned")
-            .as_ref()
-            .map(|reader| reader())
-            .unwrap_or_default();
+        let deps = if live.policy.require_indexer || live.policy.require_wallet {
+            self.dependencies
+                .read()
+                .expect("probe dependencies poisoned")
+                .as_ref()
+                .map(|reader| reader(live.policy.require_indexer, live.policy.require_wallet))
+                .unwrap_or_default()
+        } else {
+            Dependencies::default()
+        };
         let report = ProbeReport {
             ready: false,
             reasons: Vec::new(),
             heartbeat_age_ms,
             snapshot_age_ms,
             tip_age_ms,
-            indexer_height: deps.indexer_height,
-            wallet_height: deps.wallet_height,
+            indexer_height: live
+                .policy
+                .require_indexer
+                .then_some(deps.indexer_height)
+                .flatten(),
+            wallet_height: live
+                .policy
+                .require_wallet
+                .then_some(deps.wallet_height)
+                .flatten(),
         };
         let mut startup = report.clone();
         if heartbeat == 0 {
@@ -241,7 +272,15 @@ impl RuntimeControl {
         }
         startup.ready = startup.reasons.is_empty();
         let mut liveness = startup.clone();
-        if heartbeat_age_ms.is_some_and(|age| age > live.policy.heartbeat_max_age_ms) {
+        let apply_progressing = status.apply_age_ms.is_some_and(|age| {
+            age >= 0 && age < crate::node::telemetry::APPLY_WEDGED_THRESHOLD.as_millis() as i64
+        }) && !status.apply_wedged;
+        if status.apply_wedged {
+            liveness.reasons.push("runtime_apply_stuck".into());
+        }
+        if heartbeat_age_ms.is_some_and(|age| age > live.policy.heartbeat_max_age_ms)
+            && !apply_progressing
+        {
             liveness.reasons.push("runtime_heartbeat_stale".into());
         }
         liveness.ready = liveness.reasons.is_empty();
@@ -258,7 +297,7 @@ impl RuntimeControl {
         if !self.headers_only && !snapshot.sync.recovery_done {
             readiness.reasons.push("state_recovery_in_progress".into());
         }
-        if !self.headers_only && snapshot.sync.gap > 0 {
+        if !self.headers_only && snapshot.sync.gap > crate::snapshot::AT_TIP_GAP {
             readiness.reasons.push("blocks_syncing".into());
         }
         if snapshot.health.status != ergo_api::types::HealthStatus::Ok {
@@ -287,7 +326,7 @@ impl RuntimeControl {
             }
             _ => {}
         }
-        if snapshot.status.apply_wedged || snapshot.status.last_storage_error.is_some() {
+        if status.apply_wedged || status.last_storage_error.is_some() {
             readiness.reasons.push("runtime_or_storage_fault".into());
         }
         let height = if self.headers_only {
@@ -404,7 +443,7 @@ mod tests {
         snapshot.health.status = HealthStatus::Ok;
         snapshot.tip.best_full_block.timestamp_unix_ms = 100_000;
         snapshot.sync.headers_chain_synced = true;
-        snapshot.sync.gap = 2;
+        snapshot.sync.gap = 3;
         let probes = control.probes_at(&snapshot, now, 100_000);
         assert!(probes.startup.ready);
         assert!(probes.liveness.ready);
@@ -413,10 +452,109 @@ mod tests {
         snapshot.sync.gap = 0;
         snapshot.sync.recovery_done = true;
         assert!(control.probes_at(&snapshot, now, 100_000).readiness.ready);
-        let later = now + std::time::Duration::from_secs(61);
+        let later = now + std::time::Duration::from_secs(601);
         assert!(!control.probes_at(&snapshot, later, 161_000).liveness.ready);
         control.stop();
         assert!(!control.probes_at(&snapshot, now, 100_000).startup.ready);
+    }
+
+    #[test]
+    fn bounded_apply_keeps_stale_heartbeat_live_but_idle_or_wedged_does_not() {
+        let mut config = config();
+        config.api_readiness.heartbeat_max_age_ms = 60_000;
+        let control = RuntimeControl::new(&config).unwrap();
+        control.beat();
+        let mut snapshot = probe_snapshot();
+        let now = Instant::now() + std::time::Duration::from_secs(180);
+        assert!(!control.probes_at(&snapshot, now, 0).liveness.ready);
+        snapshot.status.apply_age_ms = Some(180_000);
+        assert!(control.probes_at(&snapshot, now, 0).liveness.ready);
+        snapshot.status.apply_age_ms = Some(600_000);
+        assert!(!control.probes_at(&snapshot, now, 0).liveness.ready);
+        snapshot.status.apply_age_ms = Some(180_000);
+        snapshot.status.apply_wedged = true;
+        assert!(!control.probes_at(&snapshot, now, 0).liveness.ready);
+        control.stop();
+        snapshot.status.apply_wedged = false;
+        assert!(!control.probes_at(&snapshot, now, 0).liveness.ready);
+        assert_eq!(ProbePolicy::default().heartbeat_max_age_ms, 600_000);
+    }
+
+    fn probe_snapshot() -> NodeSnapshot {
+        NodeSnapshot::empty(
+            ergo_api::types::ApiInfo {
+                agent_name: "test".into(),
+                node_name: "test".into(),
+                network: "devnet".into(),
+                version: "test".into(),
+                started_at_unix_ms: 0,
+                uptime_seconds: 0,
+                target_block_interval_ms: 120_000,
+            },
+            ergo_api::types::ApiWeightFunction::Cost,
+        )
+    }
+
+    #[test]
+    fn readiness_tolerates_at_tip_gap_and_long_network_block_interval() {
+        let control = RuntimeControl::new(&config()).unwrap();
+        control.beat();
+        let mut snapshot = probe_snapshot();
+        snapshot.health.status = HealthStatus::Ok;
+        snapshot.sync.headers_chain_synced = true;
+        snapshot.sync.recovery_done = true;
+        snapshot.tip.best_full_block.timestamp_unix_ms = 1_000_000;
+        for gap in 0..=crate::snapshot::AT_TIP_GAP {
+            snapshot.sync.gap = gap;
+            assert!(
+                control
+                    .probes_at(&snapshot, Instant::now(), 2_800_000)
+                    .readiness
+                    .ready
+            );
+        }
+        snapshot.sync.gap = crate::snapshot::AT_TIP_GAP + 1;
+        assert!(
+            !control
+                .probes_at(&snapshot, Instant::now(), 2_800_000)
+                .readiness
+                .ready
+        );
+        snapshot.sync.gap = 0;
+        assert!(
+            !control
+                .probes_at(&snapshot, Instant::now(), 8_200_001)
+                .readiness
+                .ready
+        );
+    }
+
+    #[test]
+    fn probes_only_read_and_disclose_required_dependencies() {
+        let control = RuntimeControl::new(&config()).unwrap();
+        control.beat();
+        control.set_dependencies(Arc::new(|_, _| {
+            panic!("optional dependencies must not be read")
+        }));
+        let snapshot = probe_snapshot();
+        let report = control.probes_at(&snapshot, Instant::now(), 0).readiness;
+        assert!(report.indexer_height.is_none());
+        assert!(report.wallet_height.is_none());
+        control
+            .patch(serde_json::from_value(json!({"readiness":{"require_indexer":true}})).unwrap())
+            .unwrap();
+        control.set_dependencies(Arc::new(|indexer, wallet| {
+            assert!(indexer);
+            assert!(!wallet);
+            Dependencies {
+                indexer_height: Some(10),
+                wallet_height: Some(12),
+                ..Default::default()
+            }
+        }));
+        let report = control.probes_at(&snapshot, Instant::now(), 0).readiness;
+        assert_eq!(report.indexer_height, Some(10));
+        assert!(report.wallet_height.is_none());
     }
 
     #[test]
@@ -424,7 +562,7 @@ mod tests {
         let control = RuntimeControl::new(&config()).unwrap();
         let dependency = Arc::new(());
         let weak = Arc::downgrade(&dependency);
-        control.set_dependencies(Arc::new(move || {
+        control.set_dependencies(Arc::new(move |_, _| {
             let _keep_alive = &dependency;
             Dependencies::default()
         }));
@@ -458,7 +596,7 @@ mod tests {
         snapshot.sync.recovery_done = true;
         snapshot.tip.best_full_block.height = 10;
         snapshot.tip.best_full_block.timestamp_unix_ms = 2_000_000;
-        control.set_dependencies(Arc::new(|| Dependencies {
+        control.set_dependencies(Arc::new(|_, _| Dependencies {
             indexer_height: Some(9),
             indexer_healthy: true,
             wallet_height: Some(10),
@@ -468,7 +606,7 @@ mod tests {
         assert!(report.reasons.contains(&"indexer_not_ready".into()));
         assert!(report.reasons.contains(&"wallet_not_ready".into()));
         assert!(control.probes_at(&snapshot, now, 2_000_000).liveness.ready);
-        control.set_dependencies(Arc::new(|| Dependencies {
+        control.set_dependencies(Arc::new(|_, _| Dependencies {
             indexer_height: Some(10),
             indexer_healthy: true,
             wallet_height: Some(10),
@@ -477,7 +615,7 @@ mod tests {
         assert!(control.probes_at(&snapshot, now, 2_000_000).readiness.ready);
         snapshot.tip.best_full_block.timestamp_unix_ms = 1;
         assert!(control
-            .probes_at(&snapshot, now, 2_000_000)
+            .probes_at(&snapshot, now, 8_000_000)
             .readiness
             .reasons
             .contains(&"chain_tip_stale".into()));

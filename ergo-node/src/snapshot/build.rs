@@ -20,7 +20,7 @@ const STALL_THRESHOLD_SECS: u64 = 120;
 
 /// Tolerance for declaring "at tip": full-block tip within this many
 /// blocks of the best known header tip.
-const AT_TIP_GAP: u32 = 2;
+pub(crate) const AT_TIP_GAP: u32 = 2;
 
 pub(super) fn build_snapshot(
     p: SnapshotParts<'_>,
