@@ -201,7 +201,7 @@ impl TxSubmitter for NodeSubmitAdapter {
             .stored_queue
             .as_ref()
             .ok_or_else(private_mining_unavailable)?;
-        queue.cancel(&tx_id).map(|_| ()).map_err(|error| {
+        let cancelled = queue.cancel(&tx_id).map(|_| ()).map_err(|error| {
             let reason = match error {
                 ergo_mining::private_queue::PrivateQueueError::Rejected(_) => {
                     "private_transaction_rejected"
@@ -212,7 +212,10 @@ impl TxSubmitter for NodeSubmitAdapter {
                 reason: reason.into(),
                 detail: Some(error.to_string()),
             }
-        })
+        });
+        // No action-loop lifecycle runs while mining is disabled to log it.
+        super::private_mining::log_unsynced(queue);
+        cancelled
     }
 }
 
