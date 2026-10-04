@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 
 use super::bus::{RealtimeEvent, RESUME_WINDOW};
 
-pub const JOURNAL_QUEUE_CAP: usize = 512;
+pub const JOURNAL_QUEUE_CAP: usize = RESUME_WINDOW;
 pub const JOURNAL_BYTES_CAP: usize = 64 * 1024 * 1024;
 pub const JOURNAL_EVENT_BYTES_CAP: usize = 1024 * 1024;
 // One boot owns a trillion cursors even if every subsequent disk write fails.
@@ -197,10 +197,10 @@ impl EventJournal {
         let (sender, receiver) = mpsc::sync_channel::<Arc<RealtimeEvent>>(JOURNAL_QUEUE_CAP);
         let thread = std::thread::Builder::new().name("realtime-journal".into()).spawn(move || {
             let _failure_guard = ThreadFailureGuard(shared.clone());
-            let mut batch = Vec::with_capacity(128);
+            let mut batch = Vec::with_capacity(JOURNAL_QUEUE_CAP + 1);
             while let Ok(first) = receiver.recv() {
                 batch.push(ReplayEvent::from(first.as_ref()));
-                for event in receiver.try_iter().take(127) {
+                for event in receiver.try_iter().take(JOURNAL_QUEUE_CAP) {
                     batch.push(ReplayEvent::from(event.as_ref()));
                 }
                 let last = batch.last().expect("nonempty batch").seq;
@@ -516,6 +516,34 @@ mod tests {
     }
 
     #[test]
+    fn burst_within_resume_window_is_fully_persisted_in_one_drain() {
+        let store = Arc::new(GatedStore {
+            memory: Default::default(),
+            gate: (Mutex::new(false), std::sync::Condvar::new()),
+            entered: AtomicBool::new(false),
+        });
+        let bus = RealtimeBus::durable(classes(), store.clone(), 1).unwrap();
+        bus.publish(body(1));
+        wait_until(|| store.entered.load(Ordering::Acquire));
+        for height in 2..=2000 {
+            bus.publish(body(height));
+        }
+        let dropped = bus.journal_status().unwrap().dropped_events;
+        *store.gate.0.lock().unwrap() = true;
+        store.gate.1.notify_all();
+        drop(bus); // always release the gate, including a negative control
+        assert_eq!(dropped, 0);
+        let saved = store.memory.load_events().unwrap();
+        assert_eq!(saved.events.len(), 2000);
+        let restored = RealtimeBus::durable(classes(), store, 1).unwrap();
+        assert!(!restored.backfill(&filter(), 0, 2000).gap);
+        assert_eq!(
+            restored.journal_status().unwrap().complete_through_seq,
+            2000
+        );
+    }
+
+    #[test]
     fn saturated_journal_never_blocks_publish_and_restart_exposes_missing_tail() {
         let store = Arc::new(GatedStore {
             memory: Default::default(),
@@ -530,7 +558,7 @@ mod tests {
         }
         assert_eq!(bus.journal_status().unwrap().dropped_events, 2);
         assert_eq!(bus.journal_status().unwrap().committed_seq, 0);
-        assert!(!bus.backfill(&filter(), 0, 1000).gap); // live records still present
+        assert!(!bus.backfill(&filter(), 4, 1000).gap); // retained live suffix is contiguous
         *store.gate.0.lock().unwrap() = true;
         store.gate.1.notify_all();
         drop(bus);
