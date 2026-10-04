@@ -743,7 +743,7 @@ fn exclude_from_scala_openapi(path: &str) -> bool {
 }
 
 pub(super) fn mining_policy_openapi_yaml(source: &'static str) -> String {
-    let mut document: serde_json::Value =
+    let mut document: serde_norway::Value =
         serde_norway::from_str(source).expect("OpenAPI document parses");
     for (path, method) in [
         ("/mining/candidate", "get"),
@@ -751,7 +751,18 @@ pub(super) fn mining_policy_openapi_yaml(source: &'static str) -> String {
         ("/mining/rewardAddress", "get"),
         ("/mining/rewardPublicKey", "get"),
     ] {
-        document["paths"][path][method]["security"] = serde_json::json!([]);
+        let operation = document
+            .get_mut("paths")
+            .and_then(|paths| paths.get_mut(path))
+            .and_then(|item| item.get_mut(method))
+            .and_then(serde_norway::Value::as_mapping_mut)
+            .unwrap_or_else(|| {
+                panic!("OpenAPI legacy mining operation is missing or invalid: {method} {path}")
+            });
+        operation.insert(
+            serde_norway::Value::String("security".into()),
+            serde_norway::Value::Sequence(Vec::new()),
+        );
     }
     serde_norway::to_string(&document).expect("OpenAPI document serializes")
 }
@@ -852,6 +863,26 @@ pub fn native_openapi_yaml() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(
+        expected = "OpenAPI legacy mining operation is missing or invalid: get /mining/rewardPublicKey"
+    )]
+    fn mining_policy_openapi_rejects_missing_path() {
+        mining_policy_openapi_yaml(
+            "paths:\n  /mining/candidate:\n    get: {}\n  /mining/solution:\n    post: {}\n  /mining/rewardAddress:\n    get: {}\n",
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "OpenAPI legacy mining operation is missing or invalid: get /mining/rewardPublicKey"
+    )]
+    fn mining_policy_openapi_rejects_missing_method() {
+        mining_policy_openapi_yaml(
+            "paths:\n  /mining/candidate:\n    get: {}\n  /mining/solution:\n    post: {}\n  /mining/rewardAddress:\n    get: {}\n  /mining/rewardPublicKey:\n    post: {}\n",
+        );
+    }
 
     // ----- happy path -----
 

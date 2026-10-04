@@ -217,6 +217,54 @@ async fn transaction_candidates_always_require_key_and_reach_handler_with_key() 
 }
 
 #[tokio::test]
+async fn legacy_mining_openapi_preserves_numbers_and_only_changes_legacy_security() {
+    let flag_off = app_with_legacy(false);
+    let flag_on = app_with_legacy(true);
+    for endpoint in ["/api-docs/openapi.yaml", "/api-docs/openapi-scala.yaml"] {
+        let mut documents = Vec::new();
+        for router in [&flag_off, &flag_on] {
+            let response = router.clone().oneshot(get(endpoint)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let yaml = std::str::from_utf8(&bytes).unwrap();
+            assert!(
+                !yaml.contains("serde_json::private"),
+                "{endpoint} must preserve YAML numbers"
+            );
+            documents.push(serde_norway::from_str::<serde_norway::Value>(yaml).unwrap());
+        }
+        let mut enabled = documents.pop().unwrap();
+        let baseline = documents.pop().unwrap();
+        for (path, method) in [
+            ("/mining/candidate", "get"),
+            ("/mining/solution", "post"),
+            ("/mining/rewardAddress", "get"),
+            ("/mining/rewardPublicKey", "get"),
+        ] {
+            let security = &baseline["paths"][path][method]["security"];
+            assert!(!security.as_sequence().unwrap().is_empty());
+            assert_eq!(
+                enabled["paths"][path][method]["security"],
+                serde_norway::Value::Sequence(Vec::new()),
+                "{endpoint}: {method} {path} must allow legacy mining"
+            );
+            enabled["paths"][path][method]["security"] = security.clone();
+        }
+        for path in ["/mining/candidateWithTxs", "/mining/candidateWithTxsAndPk"] {
+            let security = &enabled["paths"][path]["post"]["security"];
+            assert!(!security.as_sequence().unwrap().is_empty());
+            assert_eq!(security, &baseline["paths"][path]["post"]["security"]);
+        }
+        assert_eq!(
+            enabled, baseline,
+            "{endpoint} must change only the four legacy security fields"
+        );
+    }
+}
+
+#[tokio::test]
 async fn legacy_opt_in_opens_existing_routes_and_updates_served_docs() {
     for request in [
         get("/mining/candidate"),
