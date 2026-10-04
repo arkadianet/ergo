@@ -353,21 +353,26 @@ The inventory is `state.redb` (UTXO/digest and all embedded wallet tables),
 `indexer.redb`). Encrypted wallet secrets, the private mining queue, mining
 policy/history and maintenance journals are files/JSON, not separate redb
 databases. Missing databases are left for normal startup to create; current
-files are skipped. A clean legacy schema-2 indexer is converted and kept when
-free space covers both its conversion and the remaining database conversions,
-using the same file-size-plus-headroom rule for each. Schema 2 is migrated to
-schema 3 on the background indexer worker in one atomic transaction: token metadata is recomputed
-from issuing boxes and wrapped-script template entries are added, preserving
-indexed height and rollback history. Node startup returns a `migrating` handle
-without exposing the store; indexed data routes return 503 `indexer-migrating`
-and rent self-claims pause quietly while API, P2P and mining run. On shutdown,
-uncommitted conversion is aborted and schema 2 remains available for the next
-boot. Conversion failures rebuild in the background. Progress logs report scanned boxes,
-changed tokens, affected boxes/templates and elapsed time every ten seconds.
-If space is insufficient or unknown, the indexer is deleted **first**, through
-the crash-safe journal, so the state upgrade has priority. Older schemas and
-failed schema migrations rebuild from genesis. Rolling back to 0.11 rebuilds a
-deleted index. A legacy indexer already at schema 3 is converted and kept.
+files are skipped. A stale 0.11 (redb 2.6) indexer, with schema below current,
+is deleted **first** through the crash-safe journal, freeing space for the state
+upgrade even when ample space and a registered schema migration path exist.
+After the state upgrade it rebuilds from genesis in the background while the
+node mines. Rolling back to 0.11 also rebuilds a deleted index. A legacy indexer
+already at the current schema is converted and kept.
+
+Indexes already using redb 4 migrate in place in the background when their
+schema has a registered path. Schema 2 migrates to schema 3 in one atomic
+transaction: token metadata is recomputed from issuing boxes and wrapped-script
+template entries are added, preserving indexed height and rollback history.
+Node startup returns a `migrating` handle without exposing the store; indexed
+data routes return 503 `indexer-migrating` and rent self-claims pause quietly
+while API, P2P and mining run. On shutdown, uncommitted schema migration is
+aborted and schema 2 remains available for the next boot. Unsupported versions
+and failed schema migrations rebuild in the background. Progress logs report
+scanned boxes, changed tokens, affected boxes/templates and elapsed time every
+ten seconds. The [developer reference measurement](dev/indexer-schema-migrations.md#011-upgrade-policy-and-reference-measurement)
+explains why stale 0.11 indexes rebuild instead of undergoing synchronous
+file-format conversion.
 
 To retain stale derived data explicitly, pass `--keep-stale-indexer` to the
 offline command, or set `[store] auto_upgrade_keep_stale_indexer = true` for
@@ -467,8 +472,8 @@ are never replaced. Do not manually
 delete upgrade journals or copies between the two renames. An unclean legacy
 indexer whose schema cannot be read without repair is treated as stale with a
 warning, and deleted by default (or retained on explicit request), without
-repairing the source. Clean schema-2 indexes are preserved when space allows;
-current-schema legacy indexes are always converted.
+repairing the source. Clean legacy indexes below the current schema follow the
+same rebuild policy; current-schema legacy indexes are always converted.
 State, peers and webhooks still require verified conversion; recovery happens
 only in the converter's private copy. Windows shares the converter's portable directory-sync limit;
 use an external stopped-directory backup for power-loss recovery there.

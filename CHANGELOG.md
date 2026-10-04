@@ -62,9 +62,10 @@ infrastructure.
   requested IDs that are pooled, in pool order, instead of full transactions.
 - Upgrade normal storage to redb 4.3 and automatically convert 0.11 redb 2.6
   data directories before opening storage. Verified, journaled swaps retain
-  `*.redb2-backup` originals and recover after interruption. Unsupported or
-  space-constrained legacy indexers are deleted first to reclaim space for the
-  state copy; both the new node and a rollback to 0.11 rebuild the deleted index. `--keep-stale-indexer`
+  `*.redb2-backup` originals and recover after interruption. Legacy indexers
+  below the current schema are deleted first to reclaim space for the state
+  copy, even with ample space or a registered schema migration path; both the
+  new node and a rollback to 0.11 rebuild the deleted index. `--keep-stale-indexer`
   or `[store] auto_upgrade_keep_stale_indexer = true` explicitly retains it.
   `ergo-node upgrade-data DATA_DIR --indexer-db NAME` runs offline; `--discard-backups` trades local rollback
   copies for space. Every startup warns with retained backup paths, sizes and
@@ -83,11 +84,11 @@ infrastructure.
   possible additional flush latency. The startup upgrade inventory fails
   closed on unsupported formats, corruption and access errors, preserving
   database files before normal storage opens.
-- Indexer schema 3: schema-2 indexes migrate in place atomically, preserving
-  indexed history and rollback. Legacy 0.11 indexes are converted and kept
-  when space covers both indexer and state conversions; on tight disks the
-  indexer is deleted first so state can upgrade. Older schemas or failed
-  migrations rebuild from genesis, with `/blockchain/*` answering
+- Indexer schema 3: redb-4 schema-2 indexes migrate in place atomically in the
+  background, preserving indexed history and rollback. Stale 0.11 (redb 2.6)
+  indexes rebuild in the background after the state upgrade while the node
+  mines. Older schemas or failed migrations rebuild from genesis, with
+  `/blockchain/*` answering
   `503 indexer-syncing` until caught up. The migration applies two Scala-parity
   corrections to already-indexed history: EIP-4 token names, descriptions and decimals use
   the JVM text and digit projections, and outputs with soft-fork-wrapped
@@ -98,9 +99,14 @@ infrastructure.
 
 - Indexer schema upgrades now follow an ordered registry, committing each step
   separately and resuming from the last completed version after shutdown. The
-  existing 2 → 3 migration and its space requirements are unchanged. The 0.11
-  file-format upgrade preserves indexes with a registered path when conversion
-  headroom permits; unsupported versions and failed steps rebuild from genesis.
+  registry applies to redb-4 indexes with a registered path; these migrate in
+  place in the background and boot never waits. Stale 0.11 (redb 2.6) indexes
+  rebuild in the background after the state upgrade while the node mines,
+  avoiding synchronous indexer file-format conversion. They are deleted first
+  by default or retained as legacy rollback backups with `--keep-stale-indexer`
+  or `[store] auto_upgrade_keep_stale_indexer = true`. Unsupported versions and
+  failed steps rebuild from genesis. See the
+  [reference measurements and developer workflow](docs/dev/indexer-schema-migrations.md).
 
 ### Removed
 
