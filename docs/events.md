@@ -139,9 +139,12 @@ decimal text. Compare and store cursors without floating-point conversion.
   **not** acknowledge durable persistence. Reconcile after a gap and discard
   an old cursor if it is ahead of this data directory's latest cursor.
 - The journal queue holds **8192** observations as shared references. A
-  dedicated thread drains everything available, bounded to the queue size plus
-  its first observation, per commit. Publishing and indexer commits never wait
-  for disk. Overflow or a storage error can lose restart history. A write error
+  dedicated thread drains available observations up to **64 MiB** of encoded
+  records per commit (also bounded to the queue size plus its first observation).
+  It measures shared observations before cloning their payloads; a record that
+  would exceed the batch budget stays pending for the next commit. The store
+  also rejects batches above this byte budget before opening a write transaction.
+  Publishing and indexer commits never wait for disk. Overflow or a storage error can lose restart history. A write error
   is logged once and stops persistence until restart; failed batches, pending
   entries and subsequent observations are counted as losses. Live delivery
   continues within the boot epoch reserved before publishers start: **2^40**

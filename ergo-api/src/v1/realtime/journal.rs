@@ -147,6 +147,22 @@ impl Drop for ThreadFailureGuard {
     }
 }
 
+fn encoded_len(event: &impl Serialize) -> Result<usize, serde_json::Error> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, event)?;
+    Ok(counter.0)
+}
+
 impl EventJournal {
     pub fn open(
         store: Arc<dyn RealtimeStore>,
@@ -213,10 +229,39 @@ impl EventJournal {
         let thread = std::thread::Builder::new().name("realtime-journal".into()).spawn(move || {
             let _failure_guard = ThreadFailureGuard(shared.clone());
             let mut batch = Vec::with_capacity(JOURNAL_QUEUE_CAP + 1);
-            while let Ok(first) = receiver.recv() {
-                batch.push(ReplayEvent::from(first.as_ref()));
-                for event in receiver.try_iter().take(JOURNAL_QUEUE_CAP) {
+            let mut pending = None;
+            while let Some(first) = pending.take().or_else(|| receiver.recv().ok()) {
+                if shared.failed.load(Ordering::Acquire) {
+                    shared.dropped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let mut bytes = 0;
+                let mut event = first;
+                loop {
+                    let size = encoded_len(event.as_ref()).unwrap_or(usize::MAX);
+                    if size > JOURNAL_EVENT_BYTES_CAP {
+                        shared.failed.store(true, Ordering::Release);
+                        shared.dropped.fetch_add(batch.len() as u64 + 1, Ordering::Relaxed);
+                        tracing::error!("realtime event exceeds byte limit; persistence stopped; replay must reconcile from REST");
+                        batch.clear();
+                        break;
+                    }
+                    if bytes + size > JOURNAL_BYTES_CAP {
+                        pending = Some(event);
+                        break;
+                    }
+                    bytes += size;
                     batch.push(ReplayEvent::from(event.as_ref()));
+                    if batch.len() == JOURNAL_QUEUE_CAP + 1 {
+                        break;
+                    }
+                    match receiver.try_recv() {
+                        Ok(next) => event = next,
+                        Err(_) => break,
+                    }
+                }
+                if batch.is_empty() {
+                    continue;
                 }
                 let last = batch.last().expect("nonempty batch").seq;
                 if shared.failed.load(Ordering::Acquire) {
@@ -560,6 +605,7 @@ mod tests {
         memory: MemoryStore,
         gate: (Mutex<bool>, std::sync::Condvar),
         entered: AtomicBool,
+        largest_batch: std::sync::atomic::AtomicUsize,
     }
     impl RealtimeStore for GatedStore {
         fn load_events(&self) -> Result<JournalRecovery, String> {
@@ -569,6 +615,10 @@ mod tests {
             self.memory.reserve_cursor(next)
         }
         fn append_events(&self, events: &[ReplayEvent]) -> Result<(), String> {
+            self.largest_batch.fetch_max(
+                events.iter().map(|event| encoded_len(event).unwrap()).sum(),
+                Ordering::Relaxed,
+            );
             self.entered.store(true, Ordering::Release);
             let mut open = self.gate.0.lock().unwrap();
             while !*open {
@@ -579,11 +629,40 @@ mod tests {
     }
 
     #[test]
+    fn stalled_writer_drains_large_events_in_byte_bounded_batches() {
+        let store = Arc::new(GatedStore {
+            memory: Default::default(),
+            gate: (Mutex::new(false), std::sync::Condvar::new()),
+            entered: AtomicBool::new(false),
+            largest_batch: Default::default(),
+        });
+        let bus = RealtimeBus::durable(classes(), store.clone(), 1).unwrap();
+        bus.publish(body(1));
+        wait_until(|| store.entered.load(Ordering::Acquire));
+        for height in 2..=140 {
+            let mut event = body(height);
+            event.data = serde_json::json!({"large": "x".repeat(512 * 1024)});
+            bus.publish(event);
+        }
+        let dropped = bus.journal_status().unwrap().dropped_events;
+        *store.gate.0.lock().unwrap() = true;
+        store.gate.1.notify_all();
+        drop(bus);
+        assert_eq!(dropped, 0);
+        assert!(store.largest_batch.load(Ordering::Relaxed) <= JOURNAL_BYTES_CAP);
+        let saved = store.memory.load_events().unwrap();
+        assert_eq!(saved.events.len(), 140);
+        assert_eq!(saved.next_seq, 141);
+        assert_eq!(saved.events.last().unwrap().seq, 140);
+    }
+
+    #[test]
     fn burst_within_resume_window_is_fully_persisted_in_one_drain() {
         let store = Arc::new(GatedStore {
             memory: Default::default(),
             gate: (Mutex::new(false), std::sync::Condvar::new()),
             entered: AtomicBool::new(false),
+            largest_batch: Default::default(),
         });
         let bus = RealtimeBus::durable(classes(), store.clone(), 1).unwrap();
         bus.publish(body(1));
@@ -612,6 +691,7 @@ mod tests {
             memory: Default::default(),
             gate: (Mutex::new(false), std::sync::Condvar::new()),
             entered: AtomicBool::new(false),
+            largest_batch: Default::default(),
         });
         let bus = RealtimeBus::durable(classes(), store.clone(), 1).unwrap();
         bus.publish(body(1));
@@ -637,6 +717,7 @@ mod tests {
             memory: Default::default(),
             gate: (Mutex::new(false), std::sync::Condvar::new()),
             entered: AtomicBool::new(false),
+            largest_batch: Default::default(),
         });
         let bus = Arc::new(RealtimeBus::durable(classes(), store.clone(), 1).unwrap());
         bus.publish(body(1));

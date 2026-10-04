@@ -272,12 +272,17 @@ impl ergo_api::v1::realtime::journal::RealtimeStore for RedbWebhookStore {
         events: &[ergo_api::v1::realtime::journal::ReplayEvent],
     ) -> Result<(), String> {
         use ergo_api::v1::realtime::journal::{JOURNAL_BYTES_CAP, JOURNAL_EVENT_BYTES_CAP};
+        let mut batch_bytes = 0;
         let encoded = events
             .iter()
             .map(|event| {
                 let bytes = serde_json::to_vec(event).map_err(|e| e.to_string())?;
                 if bytes.len() > JOURNAL_EVENT_BYTES_CAP {
                     return Err("realtime event exceeds byte limit".into());
+                }
+                batch_bytes += bytes.len();
+                if batch_bytes > JOURNAL_BYTES_CAP {
+                    return Err("realtime batch exceeds byte limit".into());
                 }
                 Ok((event.seq, bytes))
             })
@@ -405,6 +410,27 @@ mod tests {
             .append_events(&[ReplayEvent::from(&event(1)), oversized])
             .is_err());
         assert!(store.load_events().unwrap().events.is_empty());
+    }
+
+    #[test]
+    fn oversized_realtime_batch_rolls_back_before_writing() {
+        use ergo_api::v1::realtime::journal::{RealtimeStore, ReplayEvent};
+        let directory = tempfile::tempdir().unwrap();
+        let store = RedbWebhookStore::open(&directory.path().join("webhooks.redb")).unwrap();
+        store.reserve_cursor(1000).unwrap();
+        let events = (1..=140)
+            .map(|seq| {
+                let mut event = ReplayEvent::from(&event(seq));
+                event.data = serde_json::json!({"large": "x".repeat(512 * 1024)});
+                event
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            store.append_events(&events).unwrap_err(),
+            "realtime batch exceeds byte limit"
+        );
+        assert!(store.load_events().unwrap().events.is_empty());
+        assert_eq!(store.load_events().unwrap().next_seq, 1000);
     }
 
     #[tokio::test]

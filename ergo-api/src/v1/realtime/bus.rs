@@ -51,7 +51,7 @@ pub const RESUME_WINDOW: usize = 8192;
 
 /// A published event with its assigned global `seq`. Cheap to `Arc`-clone into
 /// every matching subscriber queue.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RealtimeEvent {
     /// The single global monotonic cursor (starts at 1, never reused).
     pub seq: u64,
