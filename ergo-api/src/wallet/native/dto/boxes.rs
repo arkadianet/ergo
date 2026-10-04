@@ -47,11 +47,15 @@ pub struct WalletBoxSummary {
     pub assets: Vec<WalletAssetDto>,
     pub creation_tx_id: String,
     pub creation_output_index: u16,
+    /// Height of the block that included the creating transaction.
     pub creation_height: u32,
     /// False after UTXO discovery: creationHeight is first observed height,
     /// so confirmation filters remain conservative.
     #[serde(default = "known", skip_serializing_if = "is_known")]
     pub inclusion_height_known: bool,
+    /// Creation height the unspent box itself declares, from which storage rent
+    /// is counted; it can precede `creationHeight`. `null` once spent.
+    pub declared_creation_height: Option<u32>,
     pub status: BoxStatusDto,
     pub provenance: BoxProvenanceDto,
 }
@@ -123,6 +127,7 @@ mod tests {
             creation_output_index: 2,
             creation_height: 5,
             inclusion_height_known: true,
+            declared_creation_height: Some(4),
             status: BoxStatusDto::Confirmed,
             provenance: BoxProvenanceDto::Owned,
         };

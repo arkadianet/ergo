@@ -1294,7 +1294,7 @@ pub(crate) async fn native_boxes(
             .into_iter()
             .skip(offset as usize)
             .take(limit as usize)
-            .map(|wb| box_to_summary_at(&read_txn, wb))
+            .map(|wb| box_to_summary_at(ctx, &read_txn, wb))
             .collect::<Result<Vec<_>, WalletAdminError>>()?;
         Ok(BoxPage {
             items,
@@ -1323,7 +1323,8 @@ pub(crate) async fn native_box_by_id(
         let wb = reader
             .box_by_id(&box_id)
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        wb.map(|wb| box_to_summary_at(&read_txn, wb)).transpose()
+        wb.map(|wb| box_to_summary_at(ctx, &read_txn, wb))
+            .transpose()
     })();
     let _ = reply.send(result);
 }
@@ -1410,12 +1411,22 @@ fn decode_hex32(s: &str) -> Result<[u8; 32], WalletAdminError> {
 /// scan id that does not fit `u16` is corrupt storage, surfaced as `internal`
 /// rather than silently truncated to `65535`.
 fn box_to_summary(
+    ctx: &WriterContext<'_>,
     wb: ergo_state::wallet::types::WalletBox,
 ) -> Result<ergo_api::wallet::native::dto::WalletBoxSummary, WalletAdminError> {
     use ergo_api::wallet::native::dto::{
         BoxProvenanceDto, BoxStatusDto, WalletAssetDto, WalletBoxSummary,
     };
     use ergo_state::wallet::types::{BoxProvenance, BoxStatus};
+    // Storage rent counts from the height the box declares, not from the
+    // block that included it; only the unspent box itself carries it.
+    let declared_creation_height = match wb.status {
+        BoxStatus::Spent { .. } => None,
+        _ => ctx
+            .chain
+            .lookup_utxo(&wb.box_id)
+            .map(|ergo_box| ergo_box.candidate.creation_height),
+    };
     let status = match wb.status {
         BoxStatus::Confirmed => BoxStatusDto::Confirmed,
         BoxStatus::Immature { matures_at } => BoxStatusDto::Immature {
@@ -1456,18 +1467,20 @@ fn box_to_summary(
         creation_output_index: wb.creation_output_index,
         creation_height: wb.creation_height,
         inclusion_height_known: true,
+        declared_creation_height,
         status,
         provenance,
     })
 }
 
 fn box_to_summary_at(
+    ctx: &WriterContext<'_>,
     txn: &redb::ReadTransaction,
     wb: ergo_state::wallet::types::WalletBox,
 ) -> Result<ergo_api::wallet::native::dto::WalletBoxSummary, WalletAdminError> {
     let known = ergo_state::wallet::utxo_scan::inclusion_height_known(txn, wb.box_id)
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    let mut summary = box_to_summary(wb)?;
+    let mut summary = box_to_summary(ctx, wb)?;
     summary.inclusion_height_known = known;
     Ok(summary)
 }

@@ -119,6 +119,7 @@ fn solved_block(
             last_headers: Vec::new(),
             last_block_utxo_root: build_last_block_utxo_root(state_root),
         },
+        observation: Default::default(),
         transactions,
         ad_proof_bytes,
         extension_fields: Vec::new(),
@@ -363,6 +364,14 @@ fn assert_announced_ids_served(state: &mut NodeState, announced: &[(u8, Vec<[u8;
 /// store, executor and mining handle on the devnet chain spec, as boot
 /// wires them.
 fn devnet_node(dir: &Path) -> (NodeState, MiningHandle) {
+    devnet_node_with_boxes(dir, &[])
+}
+
+/// [`devnet_node`] whose genesis state also holds `extra` boxes.
+fn devnet_node_with_boxes(
+    dir: &Path,
+    extra: &[ergo_ser::ergo_box::ErgoBox],
+) -> (NodeState, MiningHandle) {
     let spec = ergo_chain_spec::ChainSpec::devnet();
     let mut store = StateStore::open_with_cache_launch_voting(
         &dir.join("state.redb"),
@@ -372,9 +381,14 @@ fn devnet_node(dir: &Path) -> (NodeState, MiningHandle) {
     )
     .unwrap();
     store.set_difficulty_params(spec.difficulty.clone());
-    store
-        .initialize_genesis(&crate::genesis::genesis_boxes_for(spec.network))
-        .unwrap();
+    let mut genesis = crate::genesis::genesis_boxes_for(spec.network);
+    genesis.extend(extra.iter().map(|b| {
+        (
+            *b.box_id().unwrap().as_bytes(),
+            ergo_ser::ergo_box::serialize_ergo_box(b).unwrap(),
+        )
+    }));
+    store.initialize_genesis(&genesis).unwrap();
     let mut state = make_state_with_store(store);
     state.executor = SyncExecutor::new(ProtocolParams::mainnet_default(), spec.difficulty.clone());
     let handle = MiningHandle::new(
@@ -406,6 +420,8 @@ fn publish_candidate(state: &NodeState, handle: &MiningHandle) {
     use ergo_mining::engine::{build_and_publish, BuildIntent, BuildOutcome};
     let (parent, height) = sync_handle_to_tip(state, handle);
     let intent = BuildIntent {
+        private_transactions: std::sync::Arc::new(Vec::new()),
+        operator_generation: handle.operator_generation(),
         expected_parent: parent,
         expected_height: height,
         mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool)),

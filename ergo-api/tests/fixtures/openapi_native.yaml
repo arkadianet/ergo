@@ -694,6 +694,84 @@ paths:
                 $ref: '#/components/schemas/NativeWalletError'
       security:
       - ApiKeyAuth: []
+  /api/v1/wallet/mining-jobs:
+    get:
+      tags:
+      - wallet
+      operationId: list
+      responses:
+        '200':
+          description: Private wallet maintenance jobs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletJobs'
+      security:
+      - ApiKeyAuth: []
+    post:
+      tags:
+      - wallet
+      operationId: create
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WalletJobRequest'
+        required: true
+      responses:
+        '200':
+          description: One approved, finite private maintenance job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletJob'
+        '400':
+          description: Invalid schedule, operation or pinned inputs, or a transaction consensus or the size limit would reject
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '404':
+          description: A pinned input is not an unspent wallet box
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: The wallet is locked or its scan is invalidated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '422':
+          description: The pinned inputs cannot fund or sign the operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/mining-jobs/{job_id}/cancel:
+    post:
+      tags:
+      - wallet
+      operationId: cancel
+      parameters:
+      - name: job_id
+        in: path
+        description: Durable decimal job ID
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Cancelled job. Queued private work is withdrawn; a signed transaction stays valid until one of its inputs is spent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletJob'
+      security:
+      - ApiKeyAuth: []
   /api/v1/wallet/mnemonic/verify:
     post:
       tags:
@@ -3986,6 +4064,30 @@ components:
         dense R4..R9 registers; mint emits one token with EIP-4 metadata, and burn
         destroys an explicit quantity with `allowTokenBurn`. Manual Deserialize
         rejects unknown sibling fields and cross-variant field leakage.
+    PrivateTransactionOptions:
+      type: object
+      description: Queue policy. A deadline is local policy, not a transaction script expiry.
+      properties:
+        expires_at_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        expires_at_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        label:
+          type:
+          - string
+          - 'null'
+        priority:
+          type: integer
+          format: int32
+      additionalProperties: false
     RawTransactionBytes:
       type: string
       format: binary
@@ -4297,9 +4399,15 @@ components:
         - intent
         - type
         properties:
+          delivery:
+            $ref: '#/components/schemas/TxDelivery'
           intent:
             $ref: '#/components/schemas/TxIntent'
             description: The transaction intent.
+          privateOptions:
+            oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/PrivateTransactionOptions'
           type:
             type: string
             enum:
@@ -4310,6 +4418,12 @@ components:
         - signedTransaction
         - type
         properties:
+          delivery:
+            $ref: '#/components/schemas/TxDelivery'
+          privateOptions:
+            oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/PrivateTransactionOptions'
           signedTransaction:
             $ref: '#/components/schemas/TxRepr'
             description: The signed transaction.
@@ -4404,6 +4518,12 @@ components:
       - syncing
       - at_tip
       - stalled
+    TxDelivery:
+      type: string
+      description: Delivery controls who can include the transaction before confirmation.
+      enum:
+      - broadcast
+      - mine_private
     TxIntent:
       type: object
       description: |-
@@ -4629,6 +4749,7 @@ components:
         creationHeight:
           type: integer
           format: int32
+          description: Height of the block that included the creating transaction.
           minimum: 0
         creationOutputIndex:
           type: integer
@@ -4636,6 +4757,15 @@ components:
           minimum: 0
         creationTxId:
           type: string
+        declaredCreationHeight:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: |-
+            Creation height the unspent box itself declares, from which storage rent
+            is counted; it can precede `creationHeight`. `null` once spent.
+          minimum: 0
         inclusionHeightKnown:
           type: boolean
           description: |-
@@ -4648,6 +4778,184 @@ components:
         value:
           type: string
           description: Box value in nanoErg (decimal string).
+    WalletJob:
+      type: object
+      description: |-
+        Owner-only job status. Signed transaction bytes stay in the durable journal;
+        the job API exposes its transaction ID, never its secret signing material.
+      required:
+      - id
+      - request
+      - state
+      - createdAtMs
+      - updatedAtMs
+      - attempts
+      properties:
+        attempts:
+          type: integer
+          format: int32
+          minimum: 0
+        createdAtMs:
+          type: integer
+          format: int64
+          minimum: 0
+        detail:
+          type:
+          - string
+          - 'null'
+        id:
+          type: string
+          description: Monotonic durable ID, represented as a decimal string.
+        request:
+          $ref: '#/components/schemas/WalletJobRequest'
+        state:
+          $ref: '#/components/schemas/WalletJobState'
+        txId:
+          type:
+          - string
+          - 'null'
+        updatedAtMs:
+          type: integer
+          format: int64
+          minimum: 0
+    WalletJobRequest:
+      type: object
+      description: |-
+        Schedule one approved operation. Approval requires an unlocked wallet,
+        because the node later signs the job with the wallet key. A job prepares at
+        most one signed transaction: retries resubmit its durable bytes, never send
+        a second payment.
+      required:
+      - label
+      - task
+      - notBeforeHeight
+      - expiresAtHeight
+      - maxAttempts
+      properties:
+        expiresAtHeight:
+          type: integer
+          format: int32
+          description: |-
+            Stop trying after this height and retire any unpublished private work.
+            At most 21,600 blocks (about 30 days) above the chain tip at approval.
+          minimum: 0
+        label:
+          type: string
+        maxAttempts:
+          type: integer
+          format: int32
+          description: |-
+            Maximum preparation/submission attempts (1..=100). Waiting for an
+            unlock, a valid wallet scan, reward maturity or an available private
+            queue does not count as an attempt.
+          minimum: 0
+        notBeforeHeight:
+          type: integer
+          format: int32
+          description: |-
+            Earliest applied block height at which preparation may begin; for
+            immature rewards, at least their maturity height.
+          minimum: 0
+        task:
+          $ref: '#/components/schemas/WalletJobTask'
+      additionalProperties: false
+    WalletJobState:
+      type: string
+      enum:
+      - waiting
+      - waitingForWallet
+      - preparing
+      - prepared
+      - queued
+      - inCandidate
+      - mined
+      - conflicted
+      - cancelled
+      - expired
+      - failed
+    WalletJobTask:
+      oneOf:
+      - type: object
+        description: A fixed payment or token transfer using the ordinary intent builder.
+        required:
+        - intent
+        - type
+        properties:
+          intent:
+            $ref: '#/components/schemas/TxIntent'
+          type:
+            type: string
+            enum:
+            - send
+      - type: object
+        description: Move selected owned boxes into one tracked wallet output, preserving tokens.
+        required:
+        - boxIds
+        - destination
+        - type
+        properties:
+          boxIds:
+            type: array
+            items:
+              type: string
+          destination:
+            type: string
+          type:
+            type: string
+            enum:
+            - consolidate
+      - type: object
+        description: |-
+          Recreate selected owned boxes, preserving their recipients, value,
+          tokens and registers while advancing their creation height.
+        required:
+        - boxIds
+        - type
+        properties:
+          boxIds:
+            type: array
+            items:
+              type: string
+          type:
+            type: string
+            enum:
+            - renew
+      - type: object
+        description: |-
+          Retrieve an approved set of mining rewards after they mature. Required
+          re-emission obligations remain paid even with a zero miner fee.
+        required:
+        - boxIds
+        - destination
+        - type
+        properties:
+          boxIds:
+            type: array
+            items:
+              type: string
+          destination:
+            type: string
+          type:
+            type: string
+            enum:
+            - rewards
+      description: |-
+        The exact operation approved by the wallet owner. Input lists are pinned;
+        maintenance never silently expands to newly received wallet funds.
+    WalletJobs:
+      type: object
+      required:
+      - items
+      - maxJobs
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletJob'
+        maxJobs:
+          type: integer
+          format: int32
+          minimum: 0
     WalletStatusDto:
       type: object
       description: '`GET /api/v1/wallet/status` — wallet state snapshot.'

@@ -36,7 +36,10 @@ pub(super) fn gate(command: WalletCommand, store: &dyn WalletStore) -> Option<Wa
                         }
                     }
                 },)+
-                command @ (WalletCommand::Status { .. }
+                command @ (WalletCommand::MiningJobs { .. }
+                    | WalletCommand::CreateMiningJob { .. }
+                    | WalletCommand::CancelMiningJob { .. }
+                    | WalletCommand::Status { .. }
                     | WalletCommand::NativeStatus { .. }
                     | WalletCommand::Init { .. }
                     | WalletCommand::Restore { .. }

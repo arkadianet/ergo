@@ -26,6 +26,16 @@ export function createWalletBuilder(host, { api, active, onBusy, onSent }) {
   const rows = el('div', { class: 'wb-recipients' });
   const review = el('aside', { class: 'wb-review', 'aria-label': 'Transaction review', tabindex: '-1' });
   const fee = el('input', { class: 'input', inputmode: 'decimal', value: '0.001', required: true });
+  const delivery = el('select', { class: 'input' }, el('option', { value: 'broadcast', text: 'Broadcast to the network' }), el('option', { value: 'mine_private', text: 'Include only in a block I mine' }));
+  const deadline = el('input', { class: 'input', type: 'datetime-local', 'aria-label': 'Mining-only expiry' });
+  const deadlineHeight = el('input', { class: 'input', type: 'number', min: '1', max: '4294967295', step: '1', 'aria-label': 'Last eligible mining height' });
+  const privateOptions = el('div', { hidden: true }, label('Stop waiting at · optional', deadline), label('Last eligible block height · optional', deadlineHeight), note('The transaction waits for your own block. Its inputs remain reserved while waiting and it becomes public when your block is published. Expiry withdraws local work.'));
+  delivery.addEventListener('change', () => {
+    privateOptions.hidden = delivery.value !== 'mine_private';
+    if (delivery.value === 'mine_private') fee.value = '0';
+    else if (/^0+(?:\.0+)?$/.test(fee.value)) fee.value = '0.001';
+    invalidate();
+  });
   const rewards = el('input', { type: 'checkbox' });
   const build = button('Build unsigned transaction', buildDraft, 'btn--primary');
   const fields = el('fieldset', { class: 'wb-fields' });
@@ -34,12 +44,13 @@ export function createWalletBuilder(host, { api, active, onBusy, onSent }) {
   fields.append(
     el('div', { class: 'wb-heading' }, el('h3', { text: 'Where should it go?' }), available), rows,
     button('+ Add recipient', () => { addRecipient(); invalidate(); }),
+    label('Transaction delivery', delivery), privateOptions,
     el('div', { class: 'wb-options' }, label('Network fee · ERG', fee), note('The node selects inputs and calculates change. Any dust added to the fee is shown in the review.')),
     el('details', { class: 'wb-advanced' }, el('summary', { text: 'Change & mining rewards' }),
       note('Change returns to this tracked address:'), change,
       el('label', { class: 'wb-check' }, rewards, el('span', { text: 'Allow spending mining reward boxes, including their required re-emission payment.' }))),
     error, el('div', { class: 'wb-actions' }, build, button('Clear draft', () => {
-      if (dirty && !window.confirm(session.signed ? 'A signed transaction may already be in the network. Check its ID before starting another payment. Clear this draft?' : 'Clear all recipients and this unsigned preview?')) return;
+      if (dirty && !window.confirm(session.signed ? (session.delivery === 'mine_private' ? 'This transaction may already be in your private queue. Check its ID before starting another payment. Clear this draft?' : 'A signed transaction may already be in the network. Check its ID before starting another payment. Clear this draft?') : 'Clear all recipients and this unsigned preview?')) return;
       reset();
     })), note('Building does not sign or send. You will review the actual plan before a separate confirmation.'),
   );
@@ -116,7 +127,7 @@ export function createWalletBuilder(host, { api, active, onBusy, onSent }) {
     return recipient;
   }
   function renumber() { recipients.forEach((r, i) => { r.heading.textContent = `Recipient ${String(i + 1).padStart(2, '0')}`; }); }
-  function reset() { if (session.busy) return; session.invalidate(); fields.disabled = !status?.isUnlocked; rows.replaceChildren(); recipients.length = 0; fee.value = '0.001'; rewards.checked = false; error.hidden = true; addRecipient(); dirty = false; emptyReview(); }
+  function reset() { if (session.busy) return; session.invalidate(); fields.disabled = !status?.isUnlocked; rows.replaceChildren(); recipients.length = 0; fee.value = '0.001'; delivery.value = 'broadcast'; deadline.value = ''; deadlineHeight.value = ''; privateOptions.hidden = true; rewards.checked = false; error.hidden = true; addRecipient(); dirty = false; emptyReview(); }
   async function buildDraft() {
     if (!status?.isUnlocked || session.busy) return;
     error.hidden = true;
@@ -124,7 +135,11 @@ export function createWalletBuilder(host, { api, active, onBusy, onSent }) {
       const intent = makeIntent(recipients.map(r => ({ address: r.address.value, erg: r.value.value, tokens: r.tokens.map(t => ({ ...t, amount: t.input.value })) })), fee.value, balance, status.changeAddress, rewards.checked);
       setBusy(true);
       emptyReview();
-      await session.build(intent);
+      const expires = deadline.value ? new Date(deadline.value).getTime() : null;
+      if (expires !== null && (!Number.isSafeInteger(expires) || expires <= Date.now())) throw new Error('Choose an expiry time in the future.');
+      const height = deadlineHeight.value ? Number(deadlineHeight.value) : null;
+      if (height !== null && (!Number.isSafeInteger(height) || height < 1 || height > 4294967295)) throw new Error('Choose a valid last eligible block height.');
+      await session.build(intent, delivery.value, delivery.value === 'mine_private' ? { expires_at_ms: expires, expires_at_height: height, priority: 0, label: null } : null);
       if (disposed) return;
       renderReview(); review.focus();
     } catch (e) { if (!disposed) showError(e); }
@@ -137,7 +152,8 @@ export function createWalletBuilder(host, { api, active, onBusy, onSent }) {
     const burn = p.reemissionBurn?.nanoErgRouted || '0';
     const total = paymentTotal + integer(p.fee) + integer(burn);
     const confirmed = el('input', { type: 'checkbox' });
-    const final = button('Sign & broadcast', confirm, 'btn--primary'); final.disabled = true;
+    const privateSend = session.delivery === 'mine_private';
+    const final = button(privateSend ? 'Sign & queue for my miner' : 'Sign & broadcast', confirm, 'btn--primary'); final.disabled = true;
     const feedback = el('div', { role: 'status', class: 'wb-note' });
     confirmed.addEventListener('change', () => { final.disabled = !confirmed.checked; });
     review.replaceChildren(el('div', { class: 'wb-eyebrow', text: '02 / REVIEW · UNSIGNED' }),
@@ -151,6 +167,10 @@ export function createWalletBuilder(host, { api, active, onBusy, onSent }) {
           return el('div', {}, line(tokenLabel(a.tokenId), precision ? decimal(a.amount, precision) : raw),
             ...(precision ? [note(raw)] : []), el('code', { class: 'wb-address', text: a.tokenId }));
         }))),
+      line('Delivery', privateSend ? 'Only in a block this node mines' : 'Broadcast to the network'),
+      ...(privateSend ? [note('This payment waits for your own block and is visible on-chain after publication. Inputs remain reserved until mined or cancelled.')] : []),
+      ...(privateSend && session.privateOptions?.expires_at_ms ? [line('Stop waiting at', new Date(session.privateOptions.expires_at_ms).toLocaleString())] : []),
+      ...(privateSend && session.privateOptions?.expires_at_height ? [line('Last eligible block height', String(session.privateOptions.expires_at_height))] : []),
       line('Actual network fee', money(p.fee)),
       ...(p.fee !== intent.fee ? [note('The node added dust change to your requested fee. Review the actual amount above.')] : []),
       ...(p.reemissionBurn ? [line('Required re-emission payment', money(burn)), note(`${p.reemissionBurn.tokensBurned} re-emission token units will be burned.`)] : []),
@@ -171,23 +191,23 @@ export function createWalletBuilder(host, { api, active, onBusy, onSent }) {
     async function confirm() {
       if (!confirmed.checked || session.busy) return;
       setBusy(true); final.disabled = true; confirmed.disabled = true;
-      feedback.textContent = session.signed ? 'Retrying the same signed transaction…' : 'Signing the reviewed transaction, then broadcasting…';
+      feedback.textContent = session.signed ? 'Retrying the same signed transaction…' : (privateSend ? 'Signing the reviewed transaction, then saving it for your miner…' : 'Signing the reviewed transaction, then broadcasting…');
       try {
         const sent = await session.confirm();
         if (disposed) return;
         dirty = false;
         review.replaceChildren(el('div', { class: 'wb-eyebrow', text: 'SUBMITTED TO YOUR NODE' }), el('h3', { text: 'Waiting for confirmation' }),
-          note('Accepted by the node. Inclusion in a block is still pending.'),
+          note(privateSend ? 'Saved privately for this node’s miner. Manage it in the private mining queue.' : 'Accepted by the node. Inclusion in a block is still pending.'),
           el('a', { class: 'wb-address', href: `#explorer/tx/${sent.txId}`, text: sent.txId }), button('New transaction', reset));
         fields.disabled = true; onSent();
       } catch (e) {
         if (disposed) return;
-        feedback.textContent = session.signed ? `${e.message} Check transaction ${session.txId} in the explorer. Retrying resubmits only these same signed bytes.` : e.message;
-        final.textContent = session.signed ? 'Retry same transaction' : 'Sign & broadcast';
+        feedback.textContent = session.signed ? `${e.message} Check transaction ${session.txId} ${privateSend ? 'in your private queue' : 'in the explorer'}. Retrying resubmits only these same signed bytes.` : e.message;
+        final.textContent = session.signed ? 'Retry same transaction' : (privateSend ? 'Sign & queue for my miner' : 'Sign & broadcast');
         confirmed.checked = false; confirmed.disabled = false;
         if (session.signed && !review.querySelector('[data-abandon]')) {
           const abandon = button('Discard local draft', () => {
-            if (window.confirm('The transaction may already be in the network. Check its ID before making another payment. Discard this local draft?')) reset();
+            if (window.confirm(privateSend ? 'This transaction may already be in your private queue. Check its ID before making another payment. Discard this local draft?' : 'The transaction may already be in the network. Check its ID before making another payment. Discard this local draft?')) reset();
           }, 'btn--sm');
           abandon.setAttribute('data-abandon', ''); review.append(abandon);
         }

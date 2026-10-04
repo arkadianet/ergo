@@ -244,13 +244,18 @@ pub(crate) async fn retrieve_rewards_impl(
     let pool_spent = |b: &ergo_state::wallet::types::WalletBox| {
         mempool.is_spent_by_pool(&ergo_primitives::digest::Digest32::from_bytes(b.box_id))
     };
+    // Inputs of transactions waiting in the private mining queue, and the
+    // approved inputs of pending maintenance jobs, stay reserved for them; the
+    // builder refuses them as explicit inputs.
+    let reserved = chain.reserved_wallet_inputs()?;
 
     // Select the input set. PINNED (`Some`): spend exactly the caller's ids (the
     // set a preview returned) — pool-spent pins are KEPT so a lost-response retry
-    // reaches the idempotent/duplicate submit. AUTO (`None`): take the oldest
-    // not-yet-pending boxes up to `MAX_SWEEP_INPUTS` (bounding tx size + cost under
-    // the mempool limits), excluding boxes a prior sweep already spent so a
-    // follow-up batch advances instead of re-picking them.
+    // reaches the idempotent/duplicate submit, and a reserved pin is refused by
+    // the builder. AUTO (`None`): take the oldest not-yet-pending, unreserved
+    // boxes up to `MAX_SWEEP_INPUTS` (bounding tx size + cost under the mempool
+    // limits), excluding boxes a prior sweep already spent so a follow-up batch
+    // advances instead of re-picking them.
     let (reward_boxes, remaining): (Vec<ergo_state::wallet::types::WalletBox>, u32) =
         match box_ids_override {
             Some(ids) => {
@@ -278,12 +283,27 @@ pub(crate) async fn retrieve_rewards_impl(
                         selected.len()
                     )));
                 }
-                // Remaining = matured boxes neither pinned nor already pending.
-                let remaining = rest.iter().filter(|b| !pool_spent(b)).count() as u32;
+                // Remaining = matured boxes neither pinned, pending, nor reserved.
+                let remaining = rest
+                    .iter()
+                    .filter(|b| !pool_spent(b) && !reserved.contains(&b.box_id))
+                    .count() as u32;
                 (selected, remaining)
             }
             None => {
-                let available: Vec<_> = matured.into_iter().filter(|b| !pool_spent(b)).collect();
+                let unreserved: Vec<_> = matured
+                    .into_iter()
+                    .filter(|b| !reserved.contains(&b.box_id))
+                    .collect();
+                if unreserved.is_empty() {
+                    return Err(WalletAdminError::BadRequest(
+                        "all matured reward boxes are reserved by private mining \
+                         transactions or pending maintenance jobs; wait for them to \
+                         finish or cancel them"
+                            .into(),
+                    ));
+                }
+                let available: Vec<_> = unreserved.into_iter().filter(|b| !pool_spent(b)).collect();
                 if available.is_empty() {
                     return Err(WalletAdminError::BadRequest(
                         "all matured reward boxes are already being swept by a pending \
@@ -649,6 +669,136 @@ mod tests {
             !b.other_tokens.contains_key(&REEM),
             "re-emission token never carried to an output"
         );
+    }
+
+    /// A one-snapshot chain whose UTXO lookup and private reservations are
+    /// fixed by the test.
+    struct ReservingSweepChain {
+        snapshot: std::sync::Mutex<Option<ChainSnapshot>>,
+        boxes: std::collections::BTreeMap<[u8; 32], ergo_ser::ergo_box::ErgoBox>,
+        reserved: std::collections::BTreeSet<[u8; 32]>,
+    }
+
+    impl ChainStateAccessor for ReservingSweepChain {
+        fn reserved_wallet_inputs(
+            &self,
+        ) -> Result<std::collections::BTreeSet<[u8; 32]>, WalletAdminError> {
+            Ok(self.reserved.clone())
+        }
+        fn wallet_scan_height(&self) -> Result<u32, StateError> {
+            Ok(1)
+        }
+        fn tip_height(&self) -> Result<u32, StateError> {
+            Ok(1)
+        }
+        fn is_pruned(&self) -> bool {
+            false
+        }
+        fn read_block_at(
+            &self,
+            _: u32,
+        ) -> Result<
+            Option<ergo_state::wallet::scan::RescanBlock>,
+            ergo_state::wallet::scan::RescanReadError,
+        > {
+            Ok(None)
+        }
+        fn lookup_utxo(&self, id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
+            self.boxes.get(id).cloned()
+        }
+        fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
+            Ok(self
+                .snapshot
+                .lock()
+                .unwrap()
+                .take()
+                .expect("one sweep snapshot"))
+        }
+    }
+
+    // ----- private reservations -----
+
+    #[tokio::test]
+    async fn sweep_auto_selection_skips_a_reserved_oldest_reward() {
+        use ergo_ser::address::NetworkPrefix;
+        use ergo_state::wallet::tables::WALLET_BOXES;
+        use ergo_wallet::{state::WalletState, storage::SecretStorage};
+        let dir = tempfile::tempdir().unwrap();
+        let store = snapshot_store(&dir.path().join("chain.redb"), 1, false);
+        let snapshot = ChainStateAccessorImpl::new(store.db_arc(), false, None)
+            .chain_snapshot()
+            .unwrap();
+        let txs: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../../../test-vectors/mainnet/transactions_1_10.json"
+        ))
+        .unwrap();
+        let bytes = hex::decode(txs[0]["bytes"].as_str().unwrap()).unwrap();
+        let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
+        // Two reward boxes; the reserved one is the oldest, so it would be
+        // picked first by the oldest-first selection.
+        let mut boxes = std::collections::BTreeMap::new();
+        let mut rewards = Vec::new();
+        for (creator, height) in [(0x41u8, 1u32), (0x42, 2)] {
+            let output = ergo_ser::ergo_box::ErgoBox {
+                candidate: tx.output_candidates[1].clone(),
+                transaction_id: ModifierId::from_bytes([creator; 32]),
+                index: 1,
+            };
+            let mut wallet_box = reward_box(output.candidate.value, vec![]);
+            wallet_box.box_id = *output.box_id().unwrap().as_bytes();
+            wallet_box.creation_height = height;
+            boxes.insert(wallet_box.box_id, output);
+            rewards.push(wallet_box);
+        }
+        let chain = ReservingSweepChain {
+            snapshot: std::sync::Mutex::new(Some(snapshot)),
+            boxes,
+            reserved: std::collections::BTreeSet::from([rewards[0].box_id]),
+        };
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let mut storage = SecretStorage::open(dir.path().join("secrets"));
+        storage
+            .init(ergo_wallet::mnemonic::MnemonicStrength::Words12, "test", "")
+            .unwrap();
+        let mut state = WalletState::empty(false);
+        crate::wallet_boot::WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut state,
+            &db,
+            NetworkPrefix::Mainnet,
+            "test",
+        )
+        .unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(WALLET_BOXES).unwrap();
+            for reward in &rewards {
+                table
+                    .insert(reward.box_id, bincode::serialize(reward).unwrap())
+                    .unwrap();
+            }
+        }
+        write.commit().unwrap();
+
+        let outcome = retrieve_rewards_impl(
+            None,
+            None,
+            MIN_FEE,
+            100_000,
+            None,
+            true,
+            &RwLock::new(storage),
+            &RwLock::new(state),
+            &db,
+            &chain,
+            &NoSubmit,
+            &ergo_api::NoopMempoolView::new(),
+            NetworkPrefix::Mainnet,
+        )
+        .await
+        .expect("the unreserved reward is still retrievable");
+        assert_eq!(outcome.box_ids, vec![hex::encode(rewards[1].box_id)]);
+        assert_eq!(outcome.remaining, 0, "a reserved box is not left to sweep");
     }
 
     // ----- error paths -----
