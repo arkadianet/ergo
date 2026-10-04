@@ -224,6 +224,7 @@ fn migrated_peers_preserve_records_bans_schema_and_reject_unsupported_recovery()
             until: SystemTime::now(),
             count: 7,
             permanent: true,
+            operator: true,
         })
         .unwrap();
     }
@@ -335,6 +336,7 @@ async fn node_boot_refuses_mixed_current_state_and_unsupported_peer_formats() {
                 until: SystemTime::now(),
                 count: 7,
                 permanent: true,
+                operator: true,
             })
             .unwrap();
         }

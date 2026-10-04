@@ -48,16 +48,11 @@ use known_peer::{backoff_for, known_peer_keep_priority};
 
 // ---- PeerManager ----
 
-/// Hard cap on the ban list, in memory and mirrored to the persisted BANS
-/// table. Without it, an adversary holding an IPv6 /64 can mint unlimited
-/// source addresses and each handshake-reject (1-year "permanent" ban)
-/// adds a resident entry plus a durable redb row — slow-burn memory/disk
-/// exhaustion across restarts (audit M-6). 10k entries at ~100 B/row is a
-/// few MB of state; genuine ban pressure on honest deployments sits
-/// orders of magnitude below this. Eviction order: soonest-expiring first
-/// (temporary bans before permanent), so the least-valuable entries leave
-/// first and the cap degrades gracefully instead of refusing new bans.
+/// Bound live ban memory under handshake/penalty pressure. Automatic bans are
+/// process-local and use at most 8976 entries; operators have reserved capacity
+/// and can reclaim automatic slots up to this total limit.
 pub(crate) const MAX_BANS: usize = 10_000;
+const OPERATOR_BAN_RESERVE: usize = 1024;
 
 /// Cadence for the expired-ban sweep. Expired entries stop being enforced
 /// immediately (`is_banned` checks `until`), but without a sweep they stay
@@ -130,6 +125,7 @@ pub struct PeerManager {
 struct BanEntry {
     until: Instant,
     count: u32,
+    operator: bool,
 }
 
 impl PeerManager {
@@ -800,7 +796,11 @@ impl PeerManager {
                 entry.until = entry.until.max(until);
                 entry.count = entry.count.max(count);
             })
-            .or_insert(BanEntry { until, count });
+            .or_insert(BanEntry {
+                until,
+                count,
+                operator: true,
+            });
     }
 
     /// Record a dial failure against a known address. Increments the
@@ -1123,6 +1123,9 @@ impl PeerManager {
         // Bans are IP-wide, including other ports and pending handshakes.
         self.peers
             .retain(|addr, _| crate::peer::canonical_ip(addr.ip()) != ip);
+        if self.bans.get(&ip).is_some_and(|entry| entry.operator) {
+            return;
+        }
         let existing_count = self.bans.get(&ip).map(|e| e.count).unwrap_or(0);
         let duration = if permanent {
             Duration::from_secs(365 * 24 * 60 * 60)
@@ -1140,31 +1143,31 @@ impl PeerManager {
             BanEntry {
                 until: now + duration,
                 count,
+                operator: false,
             },
         );
-        self.persist_ban(ip, duration, count, permanent);
-        self.enforce_ban_cap_to(MAX_BANS);
+        let operators = self.bans.values().filter(|entry| entry.operator).count();
+        self.enforce_ban_cap_to(
+            (MAX_BANS - OPERATOR_BAN_RESERVE).min(MAX_BANS.saturating_sub(operators)),
+        );
     }
 
-    /// Keep the ban list within `max`, evicting soonest-expiring entries
-    /// first (temporary before permanent — `permanent` bans carry a 1-year
-    /// `until`, so pure expiry ordering already deprioritizes them).
-    /// Evicted IPs are dropped from the persisted table too, so both
-    /// representations stay within cap. Production passes [`MAX_BANS`];
+    /// Limit automatic entries, reserving capacity for operator bans. Automatic
+    /// pressure never evicts an operator entry. Production reserves 1024 slots;
     /// tests pass a smaller bound to exercise the eviction path without
     /// ten thousand redb writes.
     fn enforce_ban_cap_to(&mut self, max: usize) {
-        while self.bans.len() > max {
+        while self.bans.values().filter(|entry| !entry.operator).count() > max {
             let Some(victim) = self
                 .bans
                 .iter()
+                .filter(|(_, entry)| !entry.operator)
                 .min_by_key(|(_, entry)| entry.until)
                 .map(|(ip, _)| *ip)
             else {
                 break;
             };
             self.bans.remove(&victim);
-            self.unban_persisted(victim);
         }
     }
 
@@ -1188,8 +1191,9 @@ impl PeerManager {
             .map(|(ip, _)| *ip)
             .collect();
         for ip in &expired {
-            self.bans.remove(ip);
-            self.unban_persisted(*ip);
+            if self.bans.remove(ip).is_some_and(|entry| entry.operator) {
+                self.unban_persisted(*ip);
+            }
         }
         expired.len()
     }

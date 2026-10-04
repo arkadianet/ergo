@@ -224,11 +224,12 @@ pub(super) fn decode_persisted_peer(
 // ---- Ban codec ----
 
 pub(super) fn encode_ban(b: &BanRecord) -> Vec<u8> {
-    let mut out = Vec::with_capacity(14);
+    let mut out = Vec::with_capacity(15);
     out.push(SCHEMA_TAG_BAN);
     out.extend_from_slice(&unix_secs(Some(b.until)).to_be_bytes());
     out.extend_from_slice(&b.count.to_be_bytes());
     out.push(if b.permanent { 1 } else { 0 });
+    out.push(u8::from(b.operator));
     out
 }
 
@@ -248,6 +249,8 @@ pub(super) fn decode_ban(ip: IpAddr, bytes: &[u8]) -> Result<BanRecord, DecodeEr
             .ok_or(DecodeError)?,
         count,
         permanent: permanent_byte != 0,
+        // Older rows have no origin marker; do not promote automatic bans.
+        operator: r.read_u8().unwrap_or(0) != 0,
     })
 }
 
@@ -348,6 +351,7 @@ mod tests {
             until: UNIX_EPOCH,
             count: 1,
             permanent: false,
+            operator: true,
         };
         let mut bytes = encode_ban(&ban);
         bytes[1..9].copy_from_slice(&u64::MAX.to_be_bytes());

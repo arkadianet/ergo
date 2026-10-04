@@ -46,6 +46,12 @@ pub(super) fn setup(config: &NodeConfig) -> Result<(i64, PeerManager), NodeError
                         });
                     }
                     for b in &state.bans {
+                        if !b.operator {
+                            if let Err(error) = book.unban(b.ip) {
+                                tracing::warn!(%error, "failed to discard legacy automatic ban");
+                            }
+                            continue;
+                        }
                         peer_manager.restore_ban(
                             b.ip,
                             ban_expiry_to_instant(b.until, mono_now, wall_now),

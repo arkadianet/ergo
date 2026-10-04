@@ -184,6 +184,7 @@ pub struct BanRecord {
     pub until: SystemTime,
     pub count: u32,
     pub permanent: bool,
+    pub operator: bool,
 }
 
 /// What `load_all` returns. The caller wires this into `PeerManager`.
@@ -1177,6 +1178,7 @@ mod tests {
             until,
             count: 3,
             permanent: false,
+            operator: true,
         };
         let bytes = encode_ban(&b);
         let decoded = decode_ban(ip, &bytes).expect("decode");
@@ -1194,6 +1196,7 @@ mod tests {
             until: UNIX_EPOCH + Duration::from_secs(99_999_999_999),
             count: 1,
             permanent: true,
+            operator: true,
         };
         let decoded = decode_ban(ip, &encode_ban(&b)).expect("decode");
         assert!(decoded.permanent);

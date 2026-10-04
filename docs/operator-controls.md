@@ -157,3 +157,9 @@ the persistent peer address book and make no live change if persistence fails.
 Expiry is checked during admission/dial selection, independently of cleanup.
 Configured seeds can reappear after removing saved metadata and restarting;
 use a ban if the node must not reconnect to an IP.
+
+Automatic peer bans are process-local and cannot evict or extend manual bans.
+The live table reserves 1,024 of its 10,000 entries for operators; manual bans
+may also replace automatic entries. Persisted rows include their operator origin.
+Legacy rows without an origin marker are discarded at boot because their origin
+cannot be established.

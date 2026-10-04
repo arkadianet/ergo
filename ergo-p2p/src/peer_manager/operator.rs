@@ -23,7 +23,9 @@ impl PeerManager {
             ));
         }
         let ip = canonical_ip(ip);
-        if !self.bans.contains_key(&ip) && self.bans.len() >= MAX_BANS {
+        if !self.bans.get(&ip).is_some_and(|entry| entry.operator)
+            && self.bans.values().filter(|entry| entry.operator).count() >= MAX_BANS
+        {
             return Err(AddressBookError::Db(
                 "ban list is full; remove an entry before adding a manual ban".into(),
             ));
@@ -43,12 +45,25 @@ impl PeerManager {
             until: SystemTime::now() + duration,
             count,
             permanent: false,
+            operator: true,
         })?;
+        if self.bans.len() >= MAX_BANS && !self.bans.contains_key(&ip) {
+            if let Some(victim) = self
+                .bans
+                .iter()
+                .filter(|(_, entry)| !entry.operator)
+                .min_by_key(|(_, entry)| entry.until)
+                .map(|(ip, _)| *ip)
+            {
+                self.bans.remove(&victim);
+            }
+        }
         self.bans.insert(
             ip,
             BanEntry {
                 until: now + duration,
                 count,
+                operator: true,
             },
         );
         self.peers.retain(|addr, _| canonical_ip(addr.ip()) != ip);
@@ -104,6 +119,51 @@ mod tests {
         assert_eq!(book.load_all(false).unwrap().bans.len(), 1);
         manager.operator_unban(addr.ip()).unwrap();
         assert!(!manager.is_banned(&addr, now));
+        assert!(book.load_all(false).unwrap().bans.is_empty());
+    }
+
+    #[test]
+    fn automatic_pressure_cannot_evict_or_persist_over_operator_bans() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = Arc::new(
+            crate::address_book::AddressBook::open_at(&dir.path().join("peers.redb")).unwrap(),
+        );
+        let mut manager = PeerManager::new(1);
+        manager.set_address_book(book.clone());
+        let now = Instant::now();
+        let owner: IpAddr = "203.0.113.8".parse().unwrap();
+        manager
+            .operator_ban(owner, Duration::from_secs(60), now)
+            .unwrap();
+        for i in 0..MAX_BANS + 1 {
+            manager.record_ban(
+                IpAddr::V6(std::net::Ipv6Addr::from(i as u128 + 1)),
+                now,
+                true,
+            );
+        }
+        assert!(manager.is_banned(&SocketAddr::new(owner, 9030), now));
+        assert!(manager.bans.len() <= MAX_BANS - super::super::OPERATOR_BAN_RESERVE + 1);
+        let rows = book.load_all(false).unwrap().bans;
+        assert_eq!(rows.len(), 1, "automatic bans must not be persisted");
+        assert!(rows[0].operator);
+        // A later automatic penalty cannot extend or replace an operator ban.
+        manager.record_ban(owner, now, true);
+        assert!(!manager.is_banned(&SocketAddr::new(owner, 9030), now + Duration::from_secs(61)));
+        manager
+            .operator_ban("203.0.113.9".parse().unwrap(), Duration::from_secs(60), now)
+            .unwrap();
+    }
+
+    #[test]
+    fn automatic_bans_are_not_written_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = Arc::new(
+            crate::address_book::AddressBook::open_at(&dir.path().join("peers.redb")).unwrap(),
+        );
+        let mut manager = PeerManager::new(1);
+        manager.set_address_book(book.clone());
+        manager.record_ban("203.0.113.8".parse().unwrap(), Instant::now(), true);
         assert!(book.load_all(false).unwrap().bans.is_empty());
     }
 
