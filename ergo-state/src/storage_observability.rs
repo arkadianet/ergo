@@ -27,6 +27,7 @@ static INDEXER_STORAGE_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static LAST_STORAGE_ERRORS: Mutex<StorageFaults> = Mutex::new(StorageFaults {
     state: None,
     indexer: None,
+    latest_is_indexer: false,
 });
 
 const ACTIVE_STORAGE_FAULT_MS: u64 = 60_000;
@@ -34,9 +35,28 @@ const ACTIVE_STORAGE_FAULT_MS: u64 = 60_000;
 struct StorageFaults {
     state: Option<(u64, String)>,
     indexer: Option<(u64, String)>,
+    latest_is_indexer: bool,
 }
 
 impl StorageFaults {
+    fn note(&mut self, store: &str, now_ms: u64, message: String) {
+        self.latest_is_indexer = store == "indexer";
+        let slot = if self.latest_is_indexer {
+            &mut self.indexer
+        } else {
+            &mut self.state
+        };
+        *slot = Some((now_ms, message));
+    }
+
+    fn latest(&self) -> Option<&(u64, String)> {
+        if self.latest_is_indexer {
+            self.indexer.as_ref()
+        } else {
+            self.state.as_ref()
+        }
+    }
+
     fn active(&self, now_ms: u64, require_indexer: bool) -> bool {
         [
             &self.state,
@@ -91,11 +111,7 @@ pub fn last_storage_error() -> Option<(u64, String)> {
     let faults = LAST_STORAGE_ERRORS
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    [&faults.state, &faults.indexer]
-        .into_iter()
-        .flatten()
-        .max_by_key(|(ts, _)| *ts)
-        .cloned()
+    faults.latest().cloned()
 }
 
 /// Record one storage-error occurrence for the counter + last-error status
@@ -119,12 +135,7 @@ fn note_storage_error(context: &StorageFailureContext<'_>, error: &(dyn Error + 
     let mut faults = LAST_STORAGE_ERRORS
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let slot = if store == "indexer" {
-        &mut faults.indexer
-    } else {
-        &mut faults.state
-    };
-    *slot = Some((now_ms, message));
+    faults.note(store, now_ms, message);
 }
 
 #[cfg(test)]
@@ -132,10 +143,26 @@ mod readiness_tests {
     use super::*;
 
     #[test]
+    fn latest_storage_diagnostic_preserves_observation_order_on_timestamp_ties() {
+        let mut faults = StorageFaults {
+            state: None,
+            indexer: None,
+            latest_is_indexer: false,
+        };
+        faults.note("indexer", 1_000, "indexer: first".into());
+        faults.note("state", 1_000, "state: second".into());
+        assert_eq!(faults.latest().unwrap().1, "state: second");
+        faults.note("indexer", 1_000, "indexer: third".into());
+        assert_eq!(faults.latest().unwrap().1, "indexer: third");
+        assert!(faults.active(1_000, false));
+    }
+
+    #[test]
     fn readiness_storage_faults_expire_and_respect_required_stores() {
         let mut faults = StorageFaults {
             state: None,
             indexer: Some((1_000, "indexer: full".into())),
+            latest_is_indexer: true,
         };
         assert!(!faults.active(1_000, false));
         assert!(faults.active(1_000, true));
