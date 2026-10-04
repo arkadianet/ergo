@@ -32,6 +32,16 @@ infrastructure.
   serving misread lookups. Keep the old database and bootstrap from a
   verified snapshot into a fresh data directory; stores synced from genesis
   and snapshots installed by this release are unaffected.
+- Wallet unlock checks every persisted tracked key against the unlocked
+  secret before deriving, signing or exporting keys. Pre-1627 wallets that an
+  earlier release restored from a master beginning with a zero byte keep the
+  earlier Rust derivation for signing, `/wallet/getPrivateKey` and new keys
+  (their addresses differ from Scala's for the same secret file) and log a
+  warning; any other mismatch refuses the unlock with `TrackedKeyMismatch`.
+- `/wallet/addresses` follows Scala's key storage order; an unlock rewrites a
+  list stored in the earlier insertion order.
+- `POST /transactions/unconfirmed/byTransactionIds` returns Scala's shape: the
+  requested IDs that are pooled, in pool order, instead of full transactions.
 - Upgrade normal storage to redb 4.3. Legacy redb 2.6 file-format v2 databases
   require the copy-only `ergo-node migrate-redb SOURCE DESTINATION` command
   before startup. Originals remain intact; the offline converter locks the
