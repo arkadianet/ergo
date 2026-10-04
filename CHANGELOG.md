@@ -94,6 +94,14 @@ infrastructure.
   scripts are listed under the template hash Scala records for them (for
   example the mainnet block 1,702,686 output).
 
+### Upgrading
+
+- Indexer schema upgrades now follow an ordered registry, committing each step
+  separately and resuming from the last completed version after shutdown. The
+  existing 2 → 3 migration and its space requirements are unchanged. The 0.11
+  file-format upgrade preserves indexes with a registered path when conversion
+  headroom permits; unsupported versions and failed steps rebuild from genesis.
+
 ### Removed
 
 - The unused Mode 3 header-flip seed:

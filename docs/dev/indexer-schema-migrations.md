@@ -1,0 +1,45 @@
+# Shipping an indexer schema change
+
+The ordered registry in `ergo-indexer/src/store/migration_registry.rs` is shared
+by indexer open and the 0.11 file-format upgrader. Boot reports `MigrationPending`
+when the persisted version has a complete path to `INDEXER_SCHEMA_VERSION`; the
+dedicated indexer worker runs those steps in order. Unsupported versions rebuild
+from genesis. Synchronous `IndexerStore::open` uses the same registry.
+
+1. Bump `INDEXER_SCHEMA_VERSION` and append one named `MigrationStep` from the
+   previous version to the new version. Keep existing steps and their fixed
+   destination versions. The registry test requires unique `from` versions,
+   adjacent `n → n + 1` steps, a contiguous chain and the current final version.
+2. Implement the step with one atomic redb transaction. Check cancellation
+   throughout long scans and immediately before commit. Write that step's
+   fixed `to` version last, in the same transaction as its rows. A shutdown or
+   crash leaves either the old version or the completed step; a subsequent
+   boot resumes from the last committed version. A step failure triggers the
+   background rebuild. The registry logs each step's name, versions and timing.
+3. Add a regression test proving equivalence with a from-scratch index over
+   the same blocks: compare rows byte-for-byte in **every table**, including
+   metadata and undo, then roll back both indexes and compare again. Include
+   relevant historical derivations, boundary cases and an injected failure
+   proving atomicity. Show that the regression fails without the fix.
+4. Run the real-data harness on a copy of an offline index, updating its
+   source-version expectations for the new step. Keep source data untouched.
+5. Add an **Upgrading** note to `CHANGELOG.md` describing supported versions,
+   preservation, fallback and any space requirements. Run the repository gates.
+
+## Real-data copy harness
+
+For the existing 2 → 3 step, use an offline schema-2 index already converted to
+redb 4. The ignored benchmark copies the source under the repository's `target/`,
+migrates only that copy and reports copy/open, token, parallel box scan/merge,
+template, undo and commit timings with final counts. It retains the migrated
+copy for inspection. Never point other node commands at the source directory.
+
+```sh
+ERGO_INDEXER_MIGRATION_SOURCE=/path/to/offline/indexer-schema2.redb \
+  cargo test --locked -p ergo-indexer --lib schema_two_real_data_copy_benchmark -- --ignored --nocapture
+```
+
+This benchmark checks checkpoint preservation and measures the existing step;
+it does not replace the row-for-row equivalence and rollback tests above. The
+non-ignored `schema_two_copy_harness_never_changes_source` test checks
+the copy-only contract on a generated fixture.

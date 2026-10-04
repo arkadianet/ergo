@@ -368,15 +368,6 @@ If space is insufficient or unknown, the indexer is deleted **first**, through
 the crash-safe journal, so the state upgrade has priority. Older schemas and
 failed schema migrations rebuild from genesis. Rolling back to 0.11 rebuilds a
 deleted index. A legacy indexer already at schema 3 is converted and kept.
-For an offline schema-2 index already converted to redb 4, the ignored benchmark
-copies the source under this worktree's `target/`, migrates only that copy, and
-reports copy/open, token, parallel box scan/merge, template, undo and commit
-timings with final counts. It retains the migrated copy for inspection:
-
-```sh
-ERGO_INDEXER_MIGRATION_SOURCE=/path/to/offline/indexer-schema2.redb \
-  cargo test --locked -p ergo-indexer --lib schema_two_real_data_copy_benchmark -- --ignored --nocapture
-```
 
 To retain stale derived data explicitly, pass `--keep-stale-indexer` to the
 offline command, or set `[store] auto_upgrade_keep_stale_indexer = true` for
