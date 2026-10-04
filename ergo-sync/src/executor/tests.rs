@@ -2270,3 +2270,108 @@ fn sparse_store_header_fork_repair_never_walks_into_the_proof_prefix() {
     );
     assert_eq!(attached.header_index_len(), 7);
 }
+
+/// Mainnet header 1 as the stored best header. A nonzero `timestamp_skew`
+/// makes its metadata contradict its bytes: local corruption, not peer data.
+fn store_with_header_1(
+    headers: &[(Vec<u8>, Header)],
+    timestamp_skew: u64,
+) -> ergo_state::StateBackendKind {
+    let mut store = open_initialized_store();
+    let (bytes, header) = &headers[0];
+    let id = *blake2b256(bytes).as_bytes();
+    store.store_header(&id, bytes).unwrap();
+    store
+        .store_header_meta(
+            &id,
+            &ergo_state::chain::HeaderMeta {
+                parent_id: *header.parent_id.as_bytes(),
+                height: header.height,
+                cumulative_score: vec![1],
+                pow_validity: 1,
+                timestamp: header.timestamp + timestamp_skew,
+            },
+        )
+        .unwrap();
+    store
+        .test_force_set_best_header_unsafe(id, header.height, vec![1])
+        .unwrap();
+    ergo_state::StateBackendKind::Utxo(store)
+}
+
+// Local failures must stop processing rather than penalize the peer that
+// delivered a valid header (the `Penalize` these paths would otherwise send).
+
+#[test]
+#[should_panic(expected = "local header processing failure is fatal: stored header")]
+fn local_header_failure_stops_single_header_validation() {
+    let headers = mainnet_headers_1_10();
+    let mut store = store_with_header_1(&headers, 1);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    executor.execute(
+        validate_header_action(&headers, 2),
+        &mut store,
+        &mut SyncCoordinator::new(0),
+        Instant::now(),
+        None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "local header processing failure is fatal: stored header")]
+fn local_header_failure_stops_batch_validation() {
+    let headers = mainnet_headers_1_10();
+    let mut store = store_with_header_1(&headers, 1);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    executor.execute_all(
+        vec![
+            validate_header_action(&headers, 2),
+            validate_header_action(&headers, 3),
+        ],
+        &mut store,
+        &mut SyncCoordinator::new(0),
+        Instant::now(),
+        None,
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "local header processing failure is fatal: header finalization bytes do not match"
+)]
+fn local_header_failure_stops_orphan_drain() {
+    let headers = mainnet_headers_1_10();
+    let mut store = store_with_header_1(&headers, 0);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut coordinator = SyncCoordinator::new(0);
+    // A buffered orphan whose retained bytes no longer match its PoW-checked
+    // header: the retained-byte contract is local, whoever sent it.
+    let pre = header_proc::pre_validate_header(&headers[2].0).unwrap();
+    let orphan_id = *pre.header_id();
+    assert!(executor.buffer_or_defer_orphan_header(
+        peer(9030),
+        pre,
+        headers[3].0.clone(),
+        orphan_id,
+        3,
+        &store,
+        &mut coordinator,
+    ));
+    // Installing the orphan's parent retries it in the orphan drain.
+    executor.execute(
+        validate_header_action(&headers, 2),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+}
