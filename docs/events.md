@@ -118,6 +118,18 @@ produce these box/token observations.
 
 ## Sequence + resume semantics
 
+All realtime and webhook cursors (`seq`, `previous_seq`, `event_seq`, `since`,
+`next_seq`, `oldest_seq`, `latest_seq`, `last_seq`, and persistence watermarks)
+are unsigned 64-bit integers. The JSON wire representation is an integer,
+not a quoted string. Crash reservations can take cursors above **2^53−1**;
+clients must preserve their full precision. JavaScript `Number` and ordinary
+`JSON.parse` cannot do this: converting an already rounded number to `BigInt`
+does not repair it. Use a lossless JSON parser that returns these integers as
+`BigInt` or exact decimal strings, and a serializer that writes the exact
+integer token for WebSocket messages. Send REST `since` parameters as exact
+decimal text. Compare and store cursors without floating-point conversion.
+
+
 - Every bus event has a global, monotonically increasing `seq`. Production
   restores retained realtime records from `webhooks.redb` before activating
   publishers. Orderly shutdown drains the journal and releases unused cursor

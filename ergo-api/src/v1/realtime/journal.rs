@@ -20,6 +20,7 @@ const CURSOR_RESERVATION: u64 = 1 << 40;
 /// Owned, versioned storage/wire representation; no process-local references.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReplayEvent {
+    /// Unsigned 64-bit cursor; preserve with lossless JSON parsing, never JavaScript Number.
     pub seq: u64,
     pub emitted_at_unix_ms: u64,
     pub routes: Vec<String>,

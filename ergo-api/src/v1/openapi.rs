@@ -46,7 +46,11 @@ operator diagnostics, webhooks, real-time WebSocket subscriptions, the scan/acco
 operator controls. The canonical complete document is served at `/api-docs/openapi-rust.yaml`. \
 Every error from these routes follows the nested error envelope \
 (`error.reason`/`error.message`/`error.detail`); `reason` is the stable machine-readable field to switch on. Query \
-`GET /api/v1/node/health` to confirm a running node's state."
+`GET /api/v1/node/health` to confirm a running node's state. Realtime and webhook cursors \
+(`seq`, `previous_seq`, `event_seq`, `since`, `next_seq`, `oldest_seq`, `latest_seq`, `last_seq` and persistence \
+watermarks) are unsigned 64-bit JSON integers and can exceed 2^53-1 after crash reservations. Clients must \
+preserve them exactly with a lossless JSON parser; JavaScript Number and ordinary JSON.parse are unsafe. \
+Use BigInt with a lossless parser and send cursor query parameters as decimal text."
     ),
     paths(
         crate::v1::accounts::scan::register,

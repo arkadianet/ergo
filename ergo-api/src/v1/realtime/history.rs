@@ -26,9 +26,12 @@ pub(crate) struct ReplayQuery {
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ReplayPage {
     events: Vec<ReplayEvent>,
+    /// Unsigned 64-bit cursor; use lossless JSON parsing, never JavaScript Number.
     latest_seq: u64,
+    /// Unsigned 64-bit cursor; use lossless JSON parsing, never JavaScript Number.
     oldest_seq: Option<u64>,
-    /// Pass this cursor as `since` on the next page, including empty pages.
+    /// Pass this unsigned 64-bit cursor as `since` on the next page, including
+    /// empty pages. Preserve it with lossless JSON parsing, never JavaScript Number.
     next_seq: u64,
     has_more: bool,
     /// Missing source observations, retention expiry or an uncertain crash
@@ -43,7 +46,7 @@ pub(crate) struct ReplayPage {
     get, path = "/api/v1/events/replay", operation_id = "v1_events_replay", tag = "realtime",
     params(
         ("channels" = String, Query, description = "Comma-separated WebSocket channel keys; at most 64"),
-        ("since" = Option<u64>, Query, description = "Exclusive shared realtime cursor; default 0"),
+        ("since" = Option<u64>, Query, description = "Exclusive unsigned 64-bit realtime cursor as decimal text; default 0; preserve exactly, never JavaScript Number"),
         ("limit" = Option<usize>, Query, minimum = 1, maximum = 1024, description = "Page size, 1..1024; default 100"),
     ),
     responses(

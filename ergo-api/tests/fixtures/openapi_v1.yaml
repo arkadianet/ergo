@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ergo Rust Node — RUST API
-  description: 'Compatibility fragment for RUST API product routes under `/api/v1/*`: chain/boxes/tokens/addresses/mempool/transactions reads, tx-intelligence (build/simulate/fee-estimate/status), the ErgoScript playground (`script/*`), semantic decode (`protocols/*`, `boxes/decode`), light-client trustless-sync proofs (`light/*`), time-series analytics (`stats/*`), operator diagnostics, webhooks, real-time WebSocket subscriptions, the scan/accounts surface, and node/network/mining/voting operator controls. The canonical complete document is served at `/api-docs/openapi-rust.yaml`. Every error from these routes follows the nested error envelope (`error.reason`/`error.message`/`error.detail`); `reason` is the stable machine-readable field to switch on. Query `GET /api/v1/node/health` to confirm a running node''s state.'
+  description: 'Compatibility fragment for RUST API product routes under `/api/v1/*`: chain/boxes/tokens/addresses/mempool/transactions reads, tx-intelligence (build/simulate/fee-estimate/status), the ErgoScript playground (`script/*`), semantic decode (`protocols/*`, `boxes/decode`), light-client trustless-sync proofs (`light/*`), time-series analytics (`stats/*`), operator diagnostics, webhooks, real-time WebSocket subscriptions, the scan/accounts surface, and node/network/mining/voting operator controls. The canonical complete document is served at `/api-docs/openapi-rust.yaml`. Every error from these routes follows the nested error envelope (`error.reason`/`error.message`/`error.detail`); `reason` is the stable machine-readable field to switch on. Query `GET /api/v1/node/health` to confirm a running node''s state. Realtime and webhook cursors (`seq`, `previous_seq`, `event_seq`, `since`, `next_seq`, `oldest_seq`, `latest_seq`, `last_seq` and persistence watermarks) are unsigned 64-bit JSON integers and can exceed 2^53-1 after crash reservations. Clients must preserve them exactly with a lossless JSON parser; JavaScript Number and ordinary JSON.parse are unsafe. Use BigInt with a lossless parser and send cursor query parameters as decimal text.'
   license:
     name: MIT OR Apache-2.0
     identifier: MIT OR Apache-2.0
@@ -1934,7 +1934,7 @@ paths:
           type: string
       - name: since
         in: query
-        description: Exclusive shared realtime cursor; default 0
+        description: Exclusive unsigned 64-bit realtime cursor as decimal text; default 0; preserve exactly, never JavaScript Number
         required: false
         schema:
           type: integer
@@ -10222,6 +10222,7 @@ components:
         seq:
           type: integer
           format: int64
+          description: Unsigned 64-bit cursor; preserve with lossless JSON parsing, never JavaScript Number.
           minimum: 0
     ReplayPage:
       type: object
@@ -10246,17 +10247,21 @@ components:
         latest_seq:
           type: integer
           format: int64
+          description: Unsigned 64-bit cursor; use lossless JSON parsing, never JavaScript Number.
           minimum: 0
         next_seq:
           type: integer
           format: int64
-          description: Pass this cursor as `since` on the next page, including empty pages.
+          description: |-
+            Pass this unsigned 64-bit cursor as `since` on the next page, including
+            empty pages. Preserve it with lossless JSON parsing, never JavaScript Number.
           minimum: 0
         oldest_seq:
           type:
           - integer
           - 'null'
           format: int64
+          description: Unsigned 64-bit cursor; use lossless JSON parsing, never JavaScript Number.
           minimum: 0
         persistence:
           oneOf:
