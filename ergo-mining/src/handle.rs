@@ -1100,6 +1100,17 @@ impl MiningHandle {
         ids: &[Digest32],
         now_ms: u64,
     ) -> Option<(WorkMessage, TemplateIdentity)> {
+        self.cached_requested_package_with_ownership(pk, ids, now_ms, None)
+    }
+
+    /// Worker reuse must agree with the ownership frozen for this request.
+    pub fn cached_requested_package_with_ownership(
+        &self,
+        pk: Option<[u8; 33]>,
+        ids: &[Digest32],
+        now_ms: u64,
+        operator_owned: Option<bool>,
+    ) -> Option<(WorkMessage, TemplateIdentity)> {
         let mut cache = self.cache.write().expect("cache poisoned");
         if !cache.best_tip.synced {
             return None;
@@ -1115,6 +1126,8 @@ impl MiningHandle {
                     && t.identity.reason == BuildReason::Requested
                     && t.candidate.parent_id == parent
                     && pk.map_or(t.candidate.observation.operator_owned, |pk| t.work.pk == pk)
+                    && operator_owned
+                        .is_none_or(|owned| t.candidate.observation.operator_owned == owned)
                     && t.candidate.observation.requested_ids == ids
                     && now_ms.saturating_sub(t.identity.built_at_ms)
                         < REQUESTED_GENERATION_INTERVAL_MS

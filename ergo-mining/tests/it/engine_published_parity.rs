@@ -2644,3 +2644,47 @@ fn requested_parse_cancellation_is_a_stale_build() {
     assert_eq!(outcome, BuildOutcome::DroppedStale);
     assert!(handle.inspect_history().is_empty());
 }
+
+#[test]
+fn requested_worker_reuse_matches_frozen_ownership() {
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+    let mut intent = build_intent(tip, regime.parent_height);
+    intent.reason = BuildReason::Requested;
+    let mut sequences = Vec::new();
+    for operator_owned in [false, true, false, true] {
+        intent.operator_owned = operator_owned;
+        let outcome = ergo_mining::engine::build_requested_and_publish_cached(
+            &store.reader_handle(),
+            &handle,
+            &intent,
+            &[],
+            &[],
+            &|| false,
+            None,
+            &mut ergo_mining::state_view::CandidateProofCache::default(),
+            || BUILT_AT_MS,
+            |_, _| vec![],
+            &mut None,
+        )
+        .unwrap();
+        let BuildOutcome::Published { template_seq, .. } = outcome else {
+            panic!("{outcome:?}")
+        };
+        let job = handle.inspect_template(None, Some(template_seq)).unwrap();
+        assert_eq!(
+            job.template.candidate.observation.operator_owned,
+            operator_owned
+        );
+        sequences.push(template_seq);
+    }
+    assert_ne!(sequences[0], sequences[1]);
+    assert_eq!(sequences[0], sequences[2]);
+    assert_eq!(sequences[1], sequences[3]);
+}

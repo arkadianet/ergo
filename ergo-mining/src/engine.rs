@@ -474,9 +474,12 @@ fn build_and_publish_inner(
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| MiningError::InvalidRequest(format!("requested ID: {e:?}")))?;
-        if let Some((_, identity)) =
-            handle.cached_requested_package(Some(intent.miner_pk), &ids, now_ms())
-        {
+        if let Some((_, identity)) = handle.cached_requested_package_with_ownership(
+            Some(intent.miner_pk),
+            &ids,
+            now_ms(),
+            Some(intent.operator_owned),
+        ) {
             return Ok(BuildOutcome::Published {
                 timings: crate::candidate::PhaseTimings::default(),
                 template_seq: identity.template_seq,
