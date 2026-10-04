@@ -251,11 +251,33 @@ fn inventory(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn database_access_error(
+    name: &str,
+    error: redb::DatabaseError,
+    windows: bool,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    match &error {
+        redb::DatabaseError::RepairAborted => fail(format!("{name} requires recovery after an unclean shutdown; start the node with this data directory to complete redb recovery, then shut it down cleanly before retrying; this command never repairs storage")),
+        redb::DatabaseError::DatabaseAlreadyOpen => fail(format!("cannot lock {name} read-only; stop the node first: {error}")),
+        // Windows can reject the header probe or database open before redb reports a lock conflict.
+        redb::DatabaseError::Storage(redb::StorageError::Io(io))
+            if windows && matches!(io.raw_os_error(), Some(5 | 32 | 33)) =>
+        {
+            fail(format!("cannot lock {name} read-only; stop the node first: {error}"))
+        }
+        _ => fail(format!("cannot open {name} read-only: {error}")),
+    }
+}
+
 fn lock_databases(root: &Path, files: &[PathBuf]) -> Result<BTreeMap<String, ReadOnlyDatabase>> {
     let mut databases = BTreeMap::new();
     for file in files {
         let mut header = [0; 9];
-        let n = File::open(root.join(file))?.read(&mut header)?;
+        let n = File::open(root.join(file))
+            .and_then(|mut input| input.read(&mut header))
+            .map_err(|error| {
+                database_access_error(&file.display().to_string(), error.into(), cfg!(windows))
+            })?;
         let redb_magic = [b'r', b'e', b'd', b'b', 0x1a, 0x0a, 0xa9, 0x0d, 0x0a];
         if !file.extension().is_some_and(|ext| ext == "redb") && (n != 9 || header != redb_magic) {
             continue;
@@ -265,11 +287,8 @@ fn lock_databases(root: &Path, files: &[PathBuf]) -> Result<BTreeMap<String, Rea
             .ok_or_else(|| fail("non-UTF8 database filename"))?;
         databases.insert(
             name.to_string(),
-            ReadOnlyDatabase::open(root.join(file)).map_err(|error| match error {
-                redb::DatabaseError::RepairAborted => fail(format!("{name} requires recovery after an unclean shutdown; start the node with this data directory to complete redb recovery, then shut it down cleanly before retrying; this command never repairs storage")),
-                redb::DatabaseError::DatabaseAlreadyOpen => fail(format!("cannot lock {name} read-only; stop the node first: {error}")),
-                _ => fail(format!("cannot open {name} read-only: {error}")),
-            })?,
+            ReadOnlyDatabase::open(root.join(file))
+                .map_err(|error| database_access_error(name, error, cfg!(windows)))?,
         );
     }
     if !databases.contains_key("state.redb") {
@@ -919,6 +938,41 @@ mod tests {
         assert!(backup(data.path(), &destination).is_err());
         assert_eq!(fs::read(destination.join("keep")).unwrap(), b"existing");
         assert!(backup(data.path(), &data.path().join("nested")).is_err());
+    }
+
+    #[test]
+    fn windows_database_access_errors_preserve_operator_guidance() {
+        for windows in [false, true] {
+            for code in [5, 32, 33, 2, 13] {
+                let error = database_access_error(
+                    "state.redb",
+                    std::io::Error::from_raw_os_error(code).into(),
+                    windows,
+                )
+                .to_string();
+                assert!(error.contains("state.redb"));
+                assert!(error.contains(&format!("os error {code}")), "{error}");
+                assert_eq!(
+                    error.contains("stop the node first"),
+                    windows && matches!(code, 5 | 32 | 33),
+                    "{error}"
+                );
+                assert!(!error.contains("unclean shutdown"));
+            }
+            let live = database_access_error(
+                "state.redb",
+                redb::DatabaseError::DatabaseAlreadyOpen,
+                windows,
+            )
+            .to_string();
+            assert!(live.contains("stop the node first"));
+            let unclean =
+                database_access_error("state.redb", redb::DatabaseError::RepairAborted, windows)
+                    .to_string();
+            assert!(unclean.contains("unclean shutdown"));
+            assert!(unclean.contains("shut it down cleanly"));
+            assert!(!unclean.contains("stop the node first"));
+        }
     }
 
     #[test]
