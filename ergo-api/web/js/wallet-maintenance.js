@@ -5,6 +5,7 @@ const terminal = new Set(['mined', 'cancelled', 'expired', 'failed']);
 // Conflicted private transactions can become eligible again after a rollback.
 export function canCancelMaintenance(state) { return !terminal.has(state); }
 const kinds = { consolidate: 'Consolidate selected boxes', renew: 'Renew selected boxes', rewards: 'Retrieve selected mining rewards' };
+const jobKinds = { ...kinds, send: 'Fixed payment' };
 function el(tag, text, className) { const n = document.createElement(tag); if (text != null) n.textContent = text; if (className) n.className = className; return n; }
 function field(title, control) { const label = el('label', null, 'w-field'); label.append(el('span', title, 'w-label'), control); return label; }
 
@@ -22,15 +23,37 @@ export function makeMaintenanceRequest(task, boxes, destination, start, expiry, 
   if (task !== 'renew' && !destination) throw Error('Choose a receiving address from this wallet.');
   return { label, task: { type: task, boxIds, ...(task === 'renew' ? {} : { destination }) }, notBeforeHeight: Number(start), expiresAtHeight: Number(expiry), maxAttempts: Number(attempts) };
 }
+// What an approved job signs when due, so the owner can review it before and
+// after unlocking. Consolidation and reward retrieval send every selected unit.
+export function describeMaintenanceJob(job) {
+  const { task, notBeforeHeight, expiresAtHeight } = job.request;
+  const inputs = task.type === 'send' ? task.intent?.inputs?.boxIds : task.boxIds;
+  const recipients = task.type === 'send'
+    ? (task.intent?.outputs || []).map(output => ({ address: output.address, nanoErg: output.value, assets: output.assets || [] }))
+    : task.type === 'renew' ? [] : [{ address: task.destination, nanoErg: null, assets: [] }];
+  return { kind: jobKinds[task.type] || task.type, payment: task.type === 'send', inputs: inputs?.length || 0, recipients, start: notBeforeHeight, expiry: expiresAtHeight };
+}
+export function recipientLines(description) {
+  if (!description.recipients.length) return ['Each box returns to its current wallet recipient.'];
+  return description.recipients.map(({ address, nanoErg, assets }) => nanoErg == null
+    ? `All selected ERG and tokens go to ${address}.`
+    : `Pays ${decimal(nanoErg)} ERG${assets.length ? ' and ' + assets.map(asset => `${asset.amount} units of ${asset.tokenId}`).join(', ') : ''} to ${address}.`);
+}
+// Jobs that can still sign or submit. Conflicted work waits on a rollback.
+export function pendingMaintenance(jobs) {
+  const pending = (jobs || []).filter(job => !terminal.has(job.state) && job.state !== 'conflicted');
+  return { pending, payments: pending.filter(job => job.request.task.type === 'send') };
+}
 export function summarizeBoxes(boxes) {
   const tokens = new Map(); let nanoErg = 0n;
   for (const box of boxes) { nanoErg += BigInt(box.value); for (const asset of box.assets || []) tokens.set(asset.tokenId, (tokens.get(asset.tokenId) || 0n) + BigInt(asset.amount)); }
   return { nanoErg: String(nanoErg), tokens: [...tokens].map(([tokenId, amount]) => ({ tokenId, amount: String(amount) })) };
 }
 
-export function createWalletMaintenance(root) {
-  let disposed = false, busy = false, epoch = 0, offset = 0, selected = new Map(), currentBoxes = [], request = null, status = null;
-  const intro = el('p', 'Approve one finite operation for a block mined by this node. Selected inputs stay reserved; unlocking lets the node sign when the start height is reached. Miner fee: 0 ERG.');
+export function createWalletMaintenance(root, { onJobs } = {}) {
+  let disposed = false, busy = false, epoch = 0, offset = 0, selected = new Map(), currentBoxes = [], request = null, status = null, unlocked = false;
+  const intro = el('p', 'Approve one finite operation for a block mined by this node. Selected inputs stay reserved; the node signs while unlocked once the start height is reached. Miner fee: 0 ERG.');
+  const lockedNote = el('p', 'Unlock the wallet to approve operations. Pending operations below sign automatically when due after you unlock; cancel any you do not recognize.', 'wb-note');
   const form = el('form', null, 'w-form'), kind = el('select'), destination = el('select'), label = el('input'), start = el('input'), expiry = el('input'), attempts = el('input');
   for (const [value, title] of Object.entries(kinds)) { const option = el('option', title); option.value = value; kind.append(option); }
   label.value = 'Wallet maintenance'; start.type = expiry.type = attempts.type = 'number'; start.min = '0'; expiry.min = '1'; attempts.min = '1'; attempts.max = '100'; attempts.value = '10';
@@ -38,7 +61,7 @@ export function createWalletMaintenance(root) {
   for (const input of [kind, destination, label, start, expiry, attempts]) input.className = 'input';
   const boxes = el('div'), controls = el('div', null, 'wb-actions'), prev = el('button', 'Previous', 'btn btn--sm'), next = el('button', 'Next', 'btn btn--sm'), pageInfo = el('span'), review = el('button', 'Review selected operation', 'btn btn--primary');
   prev.type = next.type = 'button'; review.type = 'submit'; controls.append(prev, pageInfo, next, review); form.append(boxes, controls);
-  const note = el('p', '', 'wb-note'), preview = el('div'), history = el('div'); root.replaceChildren(intro, form, note, preview, history);
+  const note = el('p', '', 'wb-note'), preview = el('div'), history = el('div'); root.replaceChildren(intro, lockedNote, form, note, preview, history);
   function invalidate() { request = null; preview.replaceChildren(); }
   form.addEventListener('input', invalidate);
   function renderBoxes() {
@@ -53,8 +76,9 @@ export function createWalletMaintenance(root) {
     prev.disabled = busy || offset === 0; next.disabled = busy || currentBoxes.length < 100;
   }
   async function loadBoxes() {
+    if (!unlocked) return;
     const token = ++epoch; const [boxPage, addresses] = await Promise.all([api.wallet.boxes(offset, 100), api.wallet.addresses()]);
-    if (disposed || token !== epoch) return;
+    if (disposed || token !== epoch || !unlocked) return;
     if (!boxPage.ok) { note.textContent = boxPage.reason || 'Boxes unavailable.'; return; }
     currentBoxes = boxPage.data.items || []; const oldDestination = destination.value;
     destination.replaceChildren(); for (const address of addresses.ok && Array.isArray(addresses.data) ? addresses.data : []) { const option = el('option', address); option.value = address; destination.append(option); }
@@ -83,13 +107,25 @@ export function createWalletMaintenance(root) {
     const token = epoch; const result = await api.wallet.miningJobs(); if (disposed || token !== epoch) return;
     history.replaceChildren(el('h3', 'Approved operations'));
     if (!result.ok) { history.append(el('p', result.reason || 'Jobs unavailable.', 'wb-note')); return; }
+    onJobs?.(result.data.items || []);
     for (const job of result.data.items || []) {
-      const row = el('div', null, 'wb-review'); row.append(el('strong', `${job.request.label} · ${job.state}`), el('p', `${job.request.task.boxIds?.length || job.request.task.intent?.inputs?.boxIds?.length || 0} inputs · attempts ${job.attempts}/${job.request.maxAttempts} · expires at ${job.request.expiresAtHeight}${job.txId ? ' · ' + job.txId : ''}`));
+      const description = describeMaintenanceJob(job);
+      const row = el('div', null, 'wb-review'); row.append(el('strong', `${job.request.label} · ${job.state}`), el('p', `${description.kind} · ${description.inputs} pinned inputs · start ${description.start} · expires at ${description.expiry} · attempts ${job.attempts}/${job.request.maxAttempts}`));
+      for (const line of recipientLines(description)) row.append(el('p', line, 'wb-note'));
+      if (job.txId) row.append(el('p', `Transaction ${job.txId}`, 'wb-note'));
       if (job.detail) row.append(el('p', job.detail, 'wb-note'));
       if (canCancelMaintenance(job.state)) { const cancel = el('button', 'Cancel operation', 'btn btn--sm'); cancel.type = 'button'; cancel.addEventListener('click', async () => { if (busy) return; busy = true; cancel.disabled = true; const result = await api.wallet.cancelMiningJob(job.id); busy = false; if (disposed) return; note.textContent = result.ok ? 'Operation cancelled.' : result.reason || 'Cancellation failed.'; await refresh(); }); row.append(cancel); }
       history.append(row);
     }
     if (!(result.data.items || []).length) history.append(el('p', 'No approved operations.', 'wb-note'));
   }
-  return { update(nextStatus) { status = nextStatus; if (!start.value) { start.value = String(status.walletHeight || 0); expiry.value = String((status.walletHeight || 0) + 720); } }, load() { return Promise.all([loadBoxes(), refresh()]); }, refresh, isBusy() { return busy; }, dispose() { disposed = true; epoch++; selected.clear(); request = null; root.replaceChildren(); } };
+  // Returns true when the wallet became unlocked and the box list must load.
+  function update(nextStatus) {
+    status = nextStatus; const wasUnlocked = unlocked; unlocked = Boolean(status?.isUnlocked);
+    form.hidden = !unlocked; lockedNote.hidden = unlocked;
+    if (wasUnlocked && !unlocked) { epoch++; selected.clear(); currentBoxes = []; invalidate(); boxes.replaceChildren(); }
+    if (!start.value) { start.value = String(status?.walletHeight || 0); expiry.value = String((status?.walletHeight || 0) + 720); }
+    return unlocked && !wasUnlocked;
+  }
+  return { update, load() { return Promise.all([loadBoxes(), refresh()]); }, refresh, isBusy() { return busy; }, dispose() { disposed = true; epoch++; selected.clear(); request = null; root.replaceChildren(); } };
 }

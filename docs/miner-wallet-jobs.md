@@ -14,11 +14,20 @@ creation height. Consolidation preserves all token units and refuses a selection
 that cannot fit a single output. Reward retrieval still pays required EIP-27
 re-emission obligations; a zero miner fee does not waive those obligations.
 
-Jobs require an initialized, validly scanned wallet. Approved inputs are
-reserved from other wallet builds and jobs. The wallet must be unlocked when
-preparing the transaction. Locked wallets wait without spending their retry
-allowance. The scheduler shares the existing wallet writer: preparation, signing,
-lock, cancellation, and shutdown remain serialized.
+Approving a job requires an initialized, validly scanned and unlocked wallet,
+like an intent send: the node later signs the job with the wallet key. The
+expiry height may be at most 21,600 blocks (about 30 days) above the chain tip
+at approval. Approved inputs are reserved from other wallet builds and jobs.
+The wallet must also be unlocked when the job prepares its transaction; a locked
+wallet waits without spending the retry allowance. The scheduler shares the
+existing wallet writer: preparation, signing, lock, cancellation, and shutdown
+remain serialized.
+
+Wallet → Maintenance lists each job's operation, schedule, and every payment
+recipient and amount, also while the wallet is locked, so pending jobs can be
+reviewed or cancelled before unlocking. A due job signs as soon as the wallet
+is unlocked, so the wallet status panel lists pending operations and their
+payment recipients whenever the lock state changes.
 
 Each approved job prepares at most one signed transaction. The redb journal
 commits its exact signed bytes before private admission. After a crash or an

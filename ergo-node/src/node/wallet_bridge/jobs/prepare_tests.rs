@@ -500,3 +500,45 @@ async fn payment_returns_change_to_the_wallet_without_a_miner_fee() {
     assert_eq!(change.tokens, tokens(&[(TOKEN_A, 6)]));
     assert_eq!(funded.admit(&transaction), 0);
 }
+
+// ----- round-trips -----
+#[tokio::test]
+async fn approval_reserves_pinned_inputs_until_cancelled() {
+    let mut funded = Funded::new();
+    let source = funded.owned(ERG, &[(TOKEN_A, 42)], &[0]);
+    let box_ids = funded.fund(vec![source]);
+    let request = funded.job(WalletJobTask::Renew { box_ids });
+    let job = create_owned(&funded.context(), request.clone()).unwrap();
+    assert_eq!(job.state, WalletJobState::Waiting);
+    assert_eq!(job.attempts, 0);
+    assert!(create_owned(&funded.context(), request.clone()).is_err());
+    assert_eq!(list(&funded.db).unwrap().items[0].request, request);
+    for _ in 0..2 {
+        let cancelled = cancel(&funded.context(), &job.id).await.unwrap();
+        assert_eq!(cancelled.state, WalletJobState::Cancelled);
+    }
+    create_owned(&funded.context(), request).unwrap();
+}
+
+// ----- error paths -----
+#[tokio::test]
+async fn approval_requires_an_unlocked_wallet_and_a_bounded_deadline() {
+    let mut funded = Funded::new();
+    let source = funded.owned(ERG, &[], &[0]);
+    let box_ids = funded.fund(vec![source]);
+    let mut request = funded.job(WalletJobTask::Renew { box_ids });
+    funded.storage.write().lock();
+    assert!(matches!(
+        create_owned(&funded.context(), request.clone()),
+        Err(WalletAdminError::Locked)
+    ));
+    assert!(list(&funded.db).unwrap().items.is_empty());
+    funded.storage.write().unlock("test").unwrap();
+    request.expires_at_height = TIP + MAX_SCHEDULE_BLOCKS + 1;
+    assert!(matches!(
+        create_owned(&funded.context(), request.clone()),
+        Err(WalletAdminError::BadRequest(_))
+    ));
+    request.expires_at_height -= 1;
+    create_owned(&funded.context(), request).unwrap();
+}

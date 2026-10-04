@@ -31,8 +31,10 @@ pub enum WalletJobTask {
     },
 }
 
-/// Schedule one approved operation. A job prepares at most one signed
-/// transaction: retries resubmit its durable bytes, never send a second payment.
+/// Schedule one approved operation. Approval requires an unlocked wallet,
+/// because the node later signs the job with the wallet key. A job prepares at
+/// most one signed transaction: retries resubmit its durable bytes, never send
+/// a second payment.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WalletJobRequest {
@@ -41,6 +43,7 @@ pub struct WalletJobRequest {
     /// Earliest applied block height at which preparation may begin.
     pub not_before_height: u32,
     /// Stop trying after this height and retire any unpublished private work.
+    /// At most 21,600 blocks (about 30 days) above the chain tip at approval.
     pub expires_at_height: u32,
     /// Maximum preparation/submission attempts (1..=100).
     pub max_attempts: u32,

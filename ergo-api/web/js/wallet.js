@@ -18,7 +18,7 @@ import { copyBtn } from './table.js';
 import { fetchTokenMeta, tokenName, getTokenMeta } from './token-meta.js';
 import { createWalletBuilder } from './wallet-builder.js';
 import { createPrivateMiningQueue } from './wallet-private.js';
-import { createWalletMaintenance } from './wallet-maintenance.js';
+import { createWalletMaintenance, describeMaintenanceJob, pendingMaintenance, recipientLines } from './wallet-maintenance.js';
 import { decimal } from './wallet-transaction.js';
 
 let root = null;
@@ -40,6 +40,8 @@ let unlockRendered = false;
 let myAssets = [];
 let privateQueue = null;
 let maintenance = null;
+// Lock state the pending-operations notice was last loaded for.
+let jobNoticeFor = null;
 let builder = null, walletBalance = null, walletStatus = null;
 let activeTab = 'assets', assetPage = 0, activityPage = 0, generation = 0, refreshing = false;
 let assetsRendered = false;
@@ -118,6 +120,7 @@ export function mount(el_) {
         <div class="wallet-hero__status">
           <div class="wb-heading"><h2>Wallet access</h2><div data-status-right></div></div>
           <div data-status-body></div>
+          <div data-jobs-notice></div>
         </div>
       </section>
       <div class="wallet-tabs" role="tablist" aria-label="Wallet sections" data-wallet-tabs></div>
@@ -242,6 +245,7 @@ function scrubSecrets() {
   privateQueue?.dispose(); privateQueue = null;
   builder?.dispose(); builder = null;
   maintenance?.dispose(); maintenance = null;
+  jobNoticeFor = null; q('[data-jobs-notice]')?.replaceChildren();
   walletBalance = walletStatus = null; assetsRendered = false;
   q('[data-wallet-amount]').textContent = '—';
   q('[data-wallet-breakdown]').replaceChildren();
@@ -366,7 +370,6 @@ function renderScanBanner(s) {
 // ── reads: balances + addresses ──────────────────────────────────────────────
 function lockedNotes() {
   builder?.dispose(); builder = null;
-  maintenance?.dispose(); maintenance = null;
   walletBalance = null; myAssets = []; assetsRendered = false;
   q('[data-wallet-amount]').textContent = '—';
   q('[data-wallet-breakdown]').replaceChildren();
@@ -387,7 +390,7 @@ function selectTab(id, focus = false) {
   for (const panel of root.querySelectorAll('[data-wallet-view]')) panel.hidden = panel.dataset.walletView !== id;
   if (id === 'activity' && walletStatus?.isUnlocked) refreshActivity();
   if (id === 'private') showPrivateQueue();
-  if (id === 'maintenance' && walletStatus?.isUnlocked) showMaintenance();
+  if (id === 'maintenance' && walletStatus?.isInitialized) showMaintenance();
 }
 
 async function refreshBalances(epoch = generation) {
@@ -841,9 +844,35 @@ function showPrivateQueue() {
     active: () => epoch === generation && key === getApiKey() && !q('[data-wallet-app]').hidden });
 }
 
+// Pending operations stay reviewable and cancellable while locked; approving
+// new ones needs an unlocked wallet.
 function showMaintenance() {
-  if (!maintenance) { maintenance = createWalletMaintenance(q('[data-maintenance-body]')); maintenance.update(walletStatus); maintenance.load(); }
-  else { maintenance.update(walletStatus); maintenance.refresh(); }
+  if (!maintenance) { maintenance = createWalletMaintenance(q('[data-maintenance-body]'), { onJobs: renderJobNotice }); maintenance.update(walletStatus); maintenance.load(); }
+  else if (maintenance.update(walletStatus)) maintenance.load();
+  else maintenance.refresh();
+}
+
+// Approved jobs sign when due while the wallet is unlocked, so every lock-state
+// change surfaces pending operations and their payment recipients for review.
+async function refreshJobNotice(epoch) {
+  const res = await api.wallet.miningJobs();
+  if (epoch !== generation) return;
+  if (!res.ok) { jobNoticeFor = null; return; }
+  renderJobNotice(res.data?.items || []);
+}
+
+function renderJobNotice(items) {
+  const box = q('[data-jobs-notice]');
+  if (!box) return;
+  const { pending, payments } = pendingMaintenance(items);
+  if (!pending.length) { box.replaceChildren(); return; }
+  const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+  const banner = el('div', { class: 'banner banner--warn' }, el('p', { text: `${count(pending.length, 'approved maintenance operation')} pending${payments.length ? ', including ' + count(payments.length, 'payment') : ''}. ` +
+    (walletStatus?.isUnlocked ? 'They sign automatically when due while the wallet is unlocked.' : 'They sign automatically when due after you unlock.') }));
+  for (const job of payments.slice(0, 5)) for (const line of recipientLines(describeMaintenanceJob(job))) banner.append(el('p', { class: 'wb-note', text: `${job.request.label}: ${line}` }));
+  if (payments.length > 5) banner.append(el('p', { class: 'wb-note', text: `${count(payments.length - 5, 'more payment')} pending.` }));
+  banner.append(el('button', { class: 'btn btn--sm', type: 'button', text: 'Review operations', onclick: () => selectTab('maintenance') }));
+  box.replaceChildren(banner);
 }
 
 // ── refresh ──────────────────────────────────────────────────────────────────
@@ -864,9 +893,10 @@ async function refresh() {
     if (activeTab === 'private') showPrivateQueue();
     if (!walletStatus.isInitialized) { setOnboarding(true); showOnboard(); return; }
     setOnboarding(false); renderStatusPanel(walletStatus);
+    if (jobNoticeFor !== walletStatus.isUnlocked) { jobNoticeFor = walletStatus.isUnlocked; refreshJobNotice(epoch); }
+    if (activeTab === 'maintenance') showMaintenance();
     if (walletStatus.isUnlocked) {
       showSendPanel(); showKeysPanel(); builder.update(walletBalance, walletStatus);
-      if (activeTab === 'maintenance') showMaintenance();
       await Promise.all([refreshBalances(epoch), refreshAddresses(epoch), ...(activeTab === 'activity' ? [refreshActivity(epoch)] : [])]);
     } else {
       lockedNotes();

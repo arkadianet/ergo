@@ -731,6 +731,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: The wallet is locked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
       security:
       - ApiKeyAuth: []
   /api/v1/wallet/mining-jobs/{job_id}/cancel:
@@ -4773,8 +4779,10 @@ components:
     WalletJobRequest:
       type: object
       description: |-
-        Schedule one approved operation. A job prepares at most one signed
-        transaction: retries resubmit its durable bytes, never send a second payment.
+        Schedule one approved operation. Approval requires an unlocked wallet,
+        because the node later signs the job with the wallet key. A job prepares at
+        most one signed transaction: retries resubmit its durable bytes, never send
+        a second payment.
       required:
       - label
       - task
@@ -4785,7 +4793,9 @@ components:
         expiresAtHeight:
           type: integer
           format: int32
-          description: Stop trying after this height and retire any unpublished private work.
+          description: |-
+            Stop trying after this height and retire any unpublished private work.
+            At most 21,600 blocks (about 30 days) above the chain tip at approval.
           minimum: 0
         label:
           type: string

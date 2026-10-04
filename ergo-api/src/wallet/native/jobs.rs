@@ -24,6 +24,7 @@ pub(crate) async fn list(
     responses(
         (status = 200, description = "One approved, finite private maintenance job", body = dto::WalletJob),
         (status = 400, description = "Invalid schedule, operation or pinned inputs", body = error::NativeWalletError),
+        (status = 409, description = "The wallet is locked", body = error::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]

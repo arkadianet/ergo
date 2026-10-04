@@ -24,6 +24,9 @@ const META: TableDefinition<&str, u64> = TableDefinition::new("wallet_mining_job
 const MAX_JOBS: usize = 256;
 const MAX_BOXES: usize = 100;
 const MAX_RECORD_BYTES: usize = 512 * 1024;
+/// Furthest deadline an approval may set, in blocks above the chain tip
+/// (about 30 days at the two-minute block target).
+const MAX_SCHEDULE_BLOCKS: u32 = 21_600;
 const BACKGROUND_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 async fn bounded_rpc<T>(
@@ -230,12 +233,22 @@ pub(super) fn create_owned(
     request: WalletJobRequest,
 ) -> Result<WalletJob, WalletAdminError> {
     validate_request(&request)?;
+    // Approval authorizes a later signature with the wallet key, so it has the
+    // precondition of an intent send: the owner has unlocked the wallet.
+    if ctx.storage.read().unlocked().is_none() {
+        return Err(WalletAdminError::Locked);
+    }
     super::scan_guard::require_valid_scan(ctx.store.as_ref())?;
     let height = ctx.chain.tip_height().map_err(internal)?;
     if request.expires_at_height <= height {
         return Err(WalletAdminError::BadRequest(
             "job deadline has already passed".into(),
         ));
+    }
+    if request.expires_at_height - height > MAX_SCHEDULE_BLOCKS {
+        return Err(WalletAdminError::BadRequest(format!(
+            "job deadline may be at most {MAX_SCHEDULE_BLOCKS} blocks after the current height {height}"
+        )));
     }
     let mut reserved = ctx.chain.reserved_wallet_inputs()?;
     reserved.extend(reserved_inputs(ctx.db)?);
