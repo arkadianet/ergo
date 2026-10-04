@@ -2467,3 +2467,29 @@ scopes = ["mining"]
         assert!(NodeConfig::load(minimal_cli(Some(&path))).is_err(), "{source}");
     }
 }
+
+#[test]
+fn container_configuration_enables_dns_rebinding_guard() {
+    let source: toml::Value =
+        toml::from_str(include_str!("../../../deploy/ergo-node.container.toml")).unwrap();
+    let hosts = source["api"]["allowed_hosts"].as_array().unwrap();
+    assert_eq!(
+        hosts,
+        &vec![
+            toml::Value::String("localhost".into()),
+            toml::Value::String("127.0.0.1".into()),
+            toml::Value::String("node".into())
+        ]
+    );
+}
+
+#[test]
+fn container_configuration_and_build_context_protect_secrets() {
+    let docker = include_str!("../../../Dockerfile");
+    assert!(docker.contains("install -d -o root -g root -m 0755 /etc/ergo"));
+    assert!(docker.contains("RUN chmod 0444 /etc/ergo/node.toml"));
+    let ignore = include_str!("../../../.dockerignore");
+    for pattern in ["**/.claude", "**/keystore", "**/keystores", "**/*.keystore"] {
+        assert!(ignore.lines().any(|line| line == pattern));
+    }
+}

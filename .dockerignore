@@ -10,3 +10,8 @@ ergo-data
 **/node_modules
 **/__pycache__
 .codex
+
+**/.claude
+**/keystore
+**/keystores
+**/*.keystore

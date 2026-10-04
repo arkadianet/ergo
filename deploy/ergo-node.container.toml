@@ -5,6 +5,7 @@ data_dir = "/var/lib/ergo"
 bind_addr = "0.0.0.0:9030"
 
 [api]
+allowed_hosts = ["localhost", "127.0.0.1", "node"]
 bind = "0.0.0.0:9099"
 public_bind = true
 # The Compose host mapping restricts HTTP to host loopback. Supply a hash
