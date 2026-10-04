@@ -74,6 +74,15 @@ struct HeaderVec {
     bytes: String,
 }
 
+/// Parameters in force for a historical mainnet block: the snapshot values
+/// with that block's protocol version, which an honest block's header carries.
+fn params_for(base: &ProtocolParams, header: &Header) -> ProtocolParams {
+    ProtocolParams {
+        block_version: header.version,
+        ..base.clone()
+    }
+}
+
 fn load_blocks(path: &str) -> Vec<BlockJson> {
     let data = std::fs::read_to_string(path).unwrap();
     serde_json::from_str(&data).unwrap()
@@ -269,7 +278,7 @@ fn block_validate_full_block_700k_v2_pipeline() {
         let block_ctx = BlockValidationContext {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
-            params: &params,
+            params: &params_for(&params, header),
             rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
@@ -332,7 +341,7 @@ fn run_validate_full_block_range(blocks_path: &str, headers_path: &str, label: &
         let block_ctx = BlockValidationContext {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
-            params: &params,
+            params: &params_for(&params, header),
             rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
@@ -426,7 +435,7 @@ fn validate_full_block_eip37_activation() {
         let block_ctx = BlockValidationContext {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
-            params: &params,
+            params: &params_for(&params, header),
             rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
@@ -493,7 +502,7 @@ fn parallel_equivalent_to_sequential_on_mainnet_700k() {
         let ctx_seq = BlockValidationContext {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
-            params: &params,
+            params: &params_for(&params, header),
             rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
@@ -506,7 +515,7 @@ fn parallel_equivalent_to_sequential_on_mainnet_700k() {
         let ctx_par = BlockValidationContext {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
-            params: &params,
+            params: &params_for(&params, header),
             rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
@@ -609,7 +618,7 @@ fn checkpoint_mismatch_at_pinned_height_hard_fails() {
     let ctx = BlockValidationContext {
         parent: &checked_parent,
         utxo: &EmptyUtxo,
-        params: &params,
+        params: &params_for(&params, header),
         rule_306_max_block_size: params.max_block_size,
         voting_length: 1024,
         votes_unknown_rule_disabled: false,
@@ -666,7 +675,7 @@ fn checkpoint_match_at_pinned_height_passes_through() {
     let ctx = BlockValidationContext {
         parent: &checked_parent,
         utxo: &EmptyUtxo,
-        params: &params,
+        params: &params_for(&params, header),
         rule_306_max_block_size: params.max_block_size,
         voting_length: 1024,
         votes_unknown_rule_disabled: false,
@@ -736,7 +745,7 @@ fn rule_306_rejection_parity_across_sequential_and_parallel_paths() {
     let ctx_seq = BlockValidationContext {
         parent: &checked_parent,
         utxo: &EmptyUtxo,
-        params: &params,
+        params: &params_for(&params, header),
         rule_306_max_block_size: params.max_block_size,
         voting_length: 1024,
         votes_unknown_rule_disabled: false,
@@ -749,7 +758,7 @@ fn rule_306_rejection_parity_across_sequential_and_parallel_paths() {
     let ctx_par = BlockValidationContext {
         parent: &checked_parent,
         utxo: &EmptyUtxo,
-        params: &params,
+        params: &params_for(&params, header),
         rule_306_max_block_size: params.max_block_size,
         voting_length: 1024,
         votes_unknown_rule_disabled: false,
@@ -837,7 +846,7 @@ fn rule_306_uses_previous_cap_at_epoch_boundary() {
         let ctx = BlockValidationContext {
             parent: &checked_parent,
             utxo,
-            params: &params,
+            params: &params_for(&params, header),
             rule_306_max_block_size: previous_cap,
             voting_length: 2,
             votes_unknown_rule_disabled: false,
@@ -932,7 +941,7 @@ fn parallel_equivalent_to_sequential_on_committed_multitx_blocks() {
         let ctx_seq = BlockValidationContext {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
-            params: &params,
+            params: &params_for(&params, header),
             rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
@@ -945,7 +954,7 @@ fn parallel_equivalent_to_sequential_on_committed_multitx_blocks() {
         let ctx_par = BlockValidationContext {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
-            params: &params,
+            params: &params_for(&params, header),
             rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
@@ -1105,7 +1114,7 @@ fn rule_215_gated_at_full_block_call_sites() {
         let ctx = BlockValidationContext {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
-            params: &params,
+            params: &params_for(&params, &header),
             rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: disabled,

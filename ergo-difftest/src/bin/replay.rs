@@ -698,8 +698,12 @@ fn main() {
     // For simplicity we pass `parent_extension: None` (matches Scala's
     // `exIlUnableToValidate` path when no parent extension is available).
     // This is safe because the first 200 blocks predate meaningful interlink
-    // enforcement; the extension-root merkle check still runs.
-    let params = ProtocolParams::mainnet_default();
+    // enforcement; the extension-root merkle check still runs. Heights
+    // 1..=MAX_SUPPORTED_HEIGHT ran under the launch parameters' block version 1.
+    let params = ProtocolParams {
+        block_version: 1,
+        ..ProtocolParams::mainnet_default()
+    };
 
     // Sliding window of last ~10 checked headers for CONTEXT.headers in script eval.
     // Fixed-size ring; prepend newest so index 0 = most recent.

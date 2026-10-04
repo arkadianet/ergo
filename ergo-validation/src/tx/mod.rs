@@ -178,7 +178,7 @@ pub fn validate_transaction(
     // (output token amounts only), so it runs here, ahead of the height loop.
     monetary::check_positive_assets(&tx)?;
     heights::validate_output_heights(&tx, cx.ctx)?;
-    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.pre_header_version)?;
+    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
 
     // Stage 5: monetary
     monetary::validate_monetary(&tx, &resolved_inputs)?;
@@ -300,7 +300,7 @@ pub fn validate_transaction_parsed_with_group_elements(
     monetary::check_positive_assets(&tx)?;
     // Per-output height constraints (Scala rules 112 + 124)
     heights::validate_output_heights(&tx, cx.ctx)?;
-    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.pre_header_version)?;
+    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
 
     // Monetary
     monetary::validate_monetary(&tx, &resolved_inputs)?;

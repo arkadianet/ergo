@@ -6,6 +6,7 @@ mod cost_sweeps;
 mod l4_manifest;
 
 mod batch_merkle_oracle;
+mod block_version_source;
 mod bridge_type_invariants;
 mod chain_spec_parity;
 mod context_headers_window_parity;
@@ -31,6 +32,7 @@ mod same_block_data_inputs;
 mod santa_nipopow_chain;
 mod scala_full_block_pow_verify;
 mod scala_rejection_parity;
+mod synthetic_block;
 mod testnet_launch_oracle;
 mod tree_version_oracle_parity;
 mod tx_triage_700000;

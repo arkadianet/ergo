@@ -55,24 +55,6 @@ pub(super) fn build_tip_context(state: &NodeState) -> Option<OwnedTipContext> {
     let tip_header_id = *ctx_headers[0].header_id();
     let tip_height = state.store.chain_state_meta().best_full_block_height;
     let tip_height_next = tip_height.saturating_add(1);
-    let tx_context = ergo_validation::TransactionContext {
-        height: tip_height_next,
-        miner_pubkey: *tip_header.solution.pk().as_bytes(),
-        pre_header_timestamp: tip_header.timestamp,
-        // Scala reads `stateContext.blockVersion` = the VOTED parameters'
-        // `blockVersion` (`ErgoStateContext.scala:109`, `ErgoMemPool.scala:258`);
-        // `exBlockVersion` (`ErgoStateContext.scala:222`) requires that value to
-        // equal `header.version` for every accepted block, so the header is an
-        // equivalent source.
-        activated_script_version: tip_header.version.saturating_sub(1),
-        pre_header_version: tip_header.version,
-        pre_header_parent_id: *tip_header.parent_id.as_bytes(),
-        pre_header_n_bits: tip_header.n_bits as u64,
-        pre_header_votes: tip_header.votes,
-    };
-    let last_headers: Vec<ergo_ser::header::Header> =
-        ctx_headers.iter().map(|ch| ch.header().clone()).collect();
-    let best_header_height = state.store.chain_state_meta().best_header_height;
     // Mempool admission reads the active protocol parameters
     // (per-epoch voted set) instead of the network-wide defaults. The
     // cache is updated synchronously with chain_state in apply_block /
@@ -82,6 +64,24 @@ pub(super) fn build_tip_context(state: &NodeState) -> Option<OwnedTipContext> {
         state.store.active_params(),
         state.store.validation_settings(),
     );
+    let tx_context = ergo_validation::TransactionContext {
+        height: tip_height_next,
+        miner_pubkey: *tip_header.solution.pk().as_bytes(),
+        pre_header_timestamp: tip_header.timestamp,
+        // Scala's mempool context (`ErgoStateContext.simplifiedUpcoming`) takes
+        // `blockVersion` from the active parameters and the pre-header version
+        // from the last header; a mid-epoch header's version need not match.
+        activated_script_version: ergo_validation::derive_activated_script_version(
+            params.block_version,
+        ),
+        pre_header_version: tip_header.version,
+        pre_header_parent_id: *tip_header.parent_id.as_bytes(),
+        pre_header_n_bits: tip_header.n_bits as u64,
+        pre_header_votes: tip_header.votes,
+    };
+    let last_headers: Vec<ergo_ser::header::Header> =
+        ctx_headers.iter().map(|ch| ch.header().clone()).collect();
+    let best_header_height = state.store.chain_state_meta().best_header_height;
     // Same EIP-27 rule inputs the block validator uses (installed on the
     // executor at boot); `None` on networks without re-emission.
     let reemission = state.executor.reemission_rules().cloned();

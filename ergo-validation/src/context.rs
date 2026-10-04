@@ -34,6 +34,13 @@ pub struct ProtocolParams {
     pub storage_fee_factor: i32,
     /// Storage period in blocks (4 years). Default: 1,051,200.
     pub storage_period: u32,
+    /// Protocol block version (voted parameter 123, Scala
+    /// `Parameters.blockVersion`). Scala's `stateContext.blockVersion`:
+    /// transaction rules and the activated script version (`blockVersion - 1`,
+    /// `ErgoContext.activatedScriptVersion`) derive from it, not from the
+    /// validated header's own version byte, which only rule 410 ties to it at
+    /// epoch starts.
+    pub block_version: u8,
 }
 
 impl ProtocolParams {
@@ -85,6 +92,10 @@ impl ProtocolParams {
             token_access_cost: 100,
             storage_fee_factor: 1_250_000,
             storage_period: 1_051_200,
+            // Block version 2 (Hardening) in force with the votable values above
+            // (e.g. mainnet height 700,000). Contexts for other heights must set
+            // the version that was active there.
+            block_version: 2,
         }
     }
 
@@ -150,6 +161,7 @@ impl ProtocolParams {
             token_access_cost: active.token_access_cost as u64,
             storage_fee_factor: active.storage_fee_factor,
             storage_period: 1_051_200,
+            block_version: active.block_version,
         }
     }
 }
@@ -217,10 +229,13 @@ pub struct TransactionContext {
     pub miner_pubkey: [u8; 33],
     /// Block timestamp (milliseconds since epoch) from the pre-header.
     pub pre_header_timestamp: u64,
-    /// Activated script version = header.version - 1.
-    /// Controls consensus-preserving behavior (e.g., selfBoxIndex bug in v4.x).
+    /// Activated script version = protocol block version - 1 (Scala
+    /// `ErgoContext.activatedScriptVersion = stateContext.blockVersion - 1`).
+    /// Controls consensus-preserving behavior (e.g., selfBoxIndex bug in v4.x)
+    /// and, through [`Self::block_version`], the version-gated transaction rules.
     pub activated_script_version: u8,
-    /// Block version byte (from header).
+    /// Pre-header version byte, script-visible as `CONTEXT.preHeader.version`
+    /// (the validated header's own version for a block).
     pub pre_header_version: u8,
     /// Parent block header ID (32 bytes).
     pub pre_header_parent_id: [u8; 32],
@@ -228,6 +243,16 @@ pub struct TransactionContext {
     pub pre_header_n_bits: u64,
     /// Miner votes (3 bytes from header).
     pub pre_header_votes: [u8; 3],
+}
+
+impl TransactionContext {
+    /// Protocol block version gating transaction rules (Scala
+    /// `stateContext.blockVersion`), recovered from
+    /// [`Self::activated_script_version`], which Scala derives as
+    /// `blockVersion - 1`. Never the pre-header's version byte.
+    pub fn block_version(&self) -> u8 {
+        self.activated_script_version.saturating_add(1)
+    }
 }
 
 #[cfg(test)]
