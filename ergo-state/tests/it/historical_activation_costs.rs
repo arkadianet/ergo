@@ -19,7 +19,7 @@ use ergo_ser::{
     transaction::read_transaction,
 };
 use ergo_validation::{
-    active_params::parse_active_params,
+    active_params::{active_params_to_extension_fields, parse_active_params},
     block::{validate_full_block_parallel_with_costs, BlockValidationContext, SoftForkState},
     header::CheckedHeader,
     voting::validation_settings::{
@@ -171,9 +171,28 @@ fn check_fixture(raw: &str, heights: [u32; 3], transaction_count: usize, box_cou
             .expect("parent epoch")
             .1
              .0;
+        // Every voted numeric parameter the reference records, by name. Ids 5
+        // (token access) and 7 (data input) are both 100 in each captured
+        // epoch, so no check on these fixtures can tell those two apart.
+        assert_eq!(params.storage_fee_factor, observation["storage_fee_factor"]);
+        assert_eq!(params.min_value_per_byte, observation["min_value_per_byte"]);
+        assert_eq!(params.max_block_size, observation["max_block_size"]);
         assert_eq!(params.max_block_cost, observation["max_block_cost"]);
+        assert_eq!(params.token_access_cost, observation["token_access_cost"]);
         assert_eq!(params.input_cost, observation["input_cost"]);
+        assert_eq!(params.data_input_cost, observation["data_input_cost"]);
         assert_eq!(params.output_cost, observation["output_cost"]);
+        // The whole table, including block version and soft-fork state.
+        let table: BTreeMap<String, i32> = active_params_to_extension_fields(active)
+            .expect("parsed parameters serialize")
+            .into_iter()
+            .filter(|(key, _)| key[1] != 124)
+            .map(|(key, value)| {
+                let value = value.try_into().expect("numeric parameter");
+                (key[1].to_string(), i32::from_be_bytes(value))
+            })
+            .collect();
+        assert_eq!(serde_json::json!(table), observation["parameter_table"]);
         let ctx_record = &fixture["contexts"][height.to_string()];
         assert_eq!(
             ctx_record["header_heights"],

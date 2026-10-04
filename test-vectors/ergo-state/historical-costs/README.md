@@ -19,8 +19,11 @@ The native consumer starts from only the immutable external input/data-input
 subset, validates every complete block's transactions with all nine immediate
 script-visible parents, and carries actual spends and outputs forward. It
 checks full decoding, raw box/transaction identity, recorded parent roots,
-epoch extension roots, voted numeric parameters and cumulative settings,
-plus every transaction position and cost. It parses each recorded voted row rather than using `mainnet_default()`
+epoch extension roots, all eight voted numeric parameters by name, the full
+parameter table and cumulative settings, plus every transaction position and
+cost. Token access and data input costs are both 100 in every captured epoch,
+so these fixtures cannot detect an exchange of those two parameter ids.
+It parses each recorded voted row rather than using `mainnet_default()`
 and fails on missing prerequisites. It checks target PoW, but this sparse history
 is not a complete retarget/governance or peer-admission proof. It does not
 reconstruct a global historical UTXO database or certify persisted reopen.
