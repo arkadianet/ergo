@@ -1,7 +1,7 @@
 [Unit]
 Description=Ergo Rust node
 Documentation=https://github.com/arkadianet/ergo
-After=network-online.target
+After=network-online.target time-sync.target
 Wants=network-online.target
 
 [Service]
