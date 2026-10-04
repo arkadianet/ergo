@@ -1112,3 +1112,42 @@ async fn voting_candidate_t0_seam_deferred_route_unavailable() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(v["error"]["reason"], "route_unavailable");
 }
+
+#[tokio::test]
+async fn probes_survive_exhausted_public_ip_budget() {
+    let app = app_full(default_auth());
+    for _ in 0..45 {
+        send(
+            app.clone(),
+            req(Method::GET, "/api/v1/node/info", None, Some(REMOTE), None),
+        )
+        .await;
+    }
+    assert_eq!(
+        send(
+            app.clone(),
+            req(Method::GET, "/api/v1/node/info", None, Some(REMOTE), None)
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    for name in ["startup", "liveness", "readiness"] {
+        let (status, _) = send(
+            app.clone(),
+            req(
+                Method::GET,
+                &format!("/api/v1/node/{name}"),
+                None,
+                Some(REMOTE),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stub probe should report unavailable, not exhaust the public budget"
+        );
+    }
+}

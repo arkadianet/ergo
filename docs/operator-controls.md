@@ -8,7 +8,8 @@ The existing `/api/v1/node/health` and Scala-compatible routes retain their beha
 
 All three probes return a JSON report with `ready`, machine-readable `reasons`,
 heartbeat/snapshot/tip ages and available dependency heights. Success is HTTP 200;
-a failed check is HTTP 503. They are public and use the shared request governor.
+a failed check is HTTP 503. They are public and exempt from the request governor, so shared proxy budgets
+cannot turn supervision probes into HTTP 429 responses.
 
 | Endpoint | Meaning |
 | --- | --- |

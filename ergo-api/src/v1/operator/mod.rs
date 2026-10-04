@@ -234,9 +234,6 @@ pub fn operator_router(
         .route("/api/v1/node/tip", get(node::tip))
         .route("/api/v1/node/identity", get(node::identity))
         .route("/api/v1/node/health", get(node::health))
-        .route("/api/v1/node/startup", get(node::startup))
-        .route("/api/v1/node/liveness", get(node::liveness))
-        .route("/api/v1/node/readiness", get(node::readiness))
         .route("/api/v1/node/version", get(node::version))
         .route("/api/v1/node/host", get(node::host))
         // network/*
@@ -256,6 +253,11 @@ pub fn operator_router(
             governor.state(RouteClass::CheapRead),
             governor_mw,
         ));
+
+    let probes: Router<OperatorState> = Router::new()
+        .route("/api/v1/node/startup", get(node::startup))
+        .route("/api/v1/node/liveness", get(node::liveness))
+        .route("/api/v1/node/readiness", get(node::readiness));
 
     // ----- T1: operator (api_key) controls -----
     let t1: Router<OperatorState> = Router::new()
@@ -335,7 +337,7 @@ pub fn operator_router(
             require_tier,
         ));
 
-    t0.merge(t1).merge(t2).with_state(state)
+    t0.merge(probes).merge(t1).merge(t2).with_state(state)
 }
 
 fn control_error(error: crate::operator_control::OperatorControlError) -> Response {
