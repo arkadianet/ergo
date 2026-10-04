@@ -9,10 +9,12 @@ network-voted block size and cost limits.
 `PUT /api/v1/mining/policy` replaces it. Both require the operator API key.
 Writes validate the entire policy before changing it, persist it to
 `mining-policy.json` in the node data directory, and retire previously offered
-templates. In-flight builds with an older policy revision or operator queue
-generation cannot publish. The saved policy overrides the TOML boot default
-on restart. A malformed saved file refuses startup rather than silently
-mining with different preferences.
+templates. An invalid policy answers 400; a storage failure answers 500 and
+changes neither the saved nor the active policy. In-flight builds with an
+older policy revision or operator queue generation cannot publish. The saved
+policy overrides the TOML boot default on restart. A malformed saved file
+refuses startup rather than silently mining with different preferences.
+Temporary files a crash leaves beside it are removed at startup.
 
 An example policy:
 

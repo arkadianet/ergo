@@ -230,6 +230,8 @@ pub struct MiningHandle {
     serve_notify: Arc<tokio::sync::watch::Sender<u64>>,
     private_queue: Arc<crate::private_queue::PrivateTransactionQueue>,
     policy: Arc<RwLock<(u64, crate::policy::BlockPolicy)>>,
+    /// Serializes policy edits across their file I/O; see `set_policy`.
+    policy_edit: Arc<Mutex<()>>,
     policy_store: Option<Arc<std::path::PathBuf>>,
     outcomes: Arc<Mutex<crate::outcome_journal::OutcomeJournal>>,
     reward_key: RewardKeySource,
@@ -318,6 +320,7 @@ impl MiningHandle {
             serve_notify: Arc::new(tokio::sync::watch::channel(0u64).0),
             private_queue: Arc::new(crate::private_queue::PrivateTransactionQueue::default()),
             policy: Arc::new(RwLock::new((0, crate::policy::BlockPolicy::default()))),
+            policy_edit: Arc::new(Mutex::new(())),
             policy_store: None,
             outcomes: Arc::new(Mutex::new(crate::outcome_journal::OutcomeJournal::default())),
             reward_key,
@@ -389,15 +392,30 @@ impl MiningHandle {
 
     /// Retire old templates atomically with a policy edit. The publish guard
     /// rejects builds carrying the prior revision, including in-flight builds.
-    pub fn set_policy(&self, policy: crate::policy::BlockPolicy) -> Result<(), MiningError> {
+    ///
+    /// Blocking: saving syncs the policy file to disk, so async callers must
+    /// run this off their executor. An invalid policy is
+    /// [`MiningError::InvalidConfig`]; any other error is a storage failure
+    /// that leaves both the saved and the active policy unchanged.
+    /// `Ok(Some(warning))`: the policy is saved and active, but its directory
+    /// entry could not be synced.
+    pub fn set_policy(
+        &self,
+        policy: crate::policy::BlockPolicy,
+    ) -> Result<Option<String>, MiningError> {
         policy.validate()?;
+        // One edit at a time, so the saved file and the active policy change
+        // in the same order. The file I/O runs before the policy lock is
+        // taken: builds and publishes only ever wait for the swap below.
+        let _edit = self.policy_edit.lock().expect("policy edit poisoned");
+        if self.policy.read().expect("policy poisoned").1 == policy {
+            return Ok(None);
+        }
+        let warning = match &self.policy_store {
+            Some(path) => crate::policy_store::save(path, &policy)?,
+            None => None,
+        };
         let mut slot = self.policy.write().expect("policy poisoned");
-        if slot.1 == policy {
-            return Ok(());
-        }
-        if let Some(path) = &self.policy_store {
-            crate::policy_store::save(path, &policy)?;
-        }
         let mut cache = self.cache.write().expect("cache poisoned");
         slot.0 = slot
             .0
@@ -414,7 +432,7 @@ impl MiningHandle {
         drop(cache);
         drop(slot);
         self.serve_notify.send_modify(|v| *v = v.wrapping_add(1));
-        Ok(())
+        Ok(warning)
     }
 
     /// Generation frozen by a build before it reads operator queue contents.
@@ -2514,6 +2532,50 @@ mod tests {
         assert!(handle
             .publish_if_current(candidate, work, &parent, || 100, BuildReason::Tip)
             .is_none());
+    }
+
+    #[test]
+    fn policy_save_waits_on_disk_without_holding_the_policy_or_cache_locks() {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = base_handle()
+            .with_policy_store(directory.path().join("mining-policy.json"))
+            .unwrap();
+        let observer = handle.clone();
+        let unlocked = std::rc::Rc::new(std::cell::Cell::new(None));
+        let seen = unlocked.clone();
+        crate::policy_store::hooks::BEFORE_REPLACE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                seen.set(Some(
+                    observer.policy.try_read().is_ok() && observer.cache.try_write().is_ok(),
+                ));
+            }));
+        });
+        let mut policy = handle.policy();
+        policy.rent_max_cost_basis_points = 0;
+        let saved = handle.set_policy(policy.clone());
+        crate::policy_store::hooks::BEFORE_REPLACE.with(|hook| hook.borrow_mut().take());
+        assert_eq!(saved.unwrap(), None);
+        assert_eq!(
+            unlocked.get(),
+            Some(true),
+            "builds and publishes must not wait for the disk sync"
+        );
+        assert_eq!(handle.policy_snapshot(), (1, policy));
+    }
+
+    #[test]
+    fn policy_replaced_on_disk_is_active_even_if_its_directory_sync_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mining-policy.json");
+        let handle = base_handle().with_policy_store(&path).unwrap();
+        let mut policy = handle.policy();
+        policy.rent_max_size_basis_points = 0;
+        crate::policy_store::hooks::FAIL_DIRECTORY_SYNC.with(|fail| fail.set(true));
+        let saved = handle.set_policy(policy.clone());
+        crate::policy_store::hooks::FAIL_DIRECTORY_SYNC.with(|fail| fail.set(false));
+        assert!(saved.unwrap().is_some(), "the caller is warned");
+        assert_eq!(handle.policy_snapshot(), (1, policy.clone()));
+        assert_eq!(crate::policy_store::load(&path).unwrap(), Some(policy));
     }
 
     #[test]
