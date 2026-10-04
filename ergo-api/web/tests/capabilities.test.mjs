@@ -7,7 +7,11 @@ test('configured disabled, enabled empty and unknown mempool states remain disti
   assert.equal(disabled.disabled, true);
   assert.match(disabled.title, /disabled/i);
   assert.doesNotMatch(disabled.copy, /will appear/);
-  assert.match(disabled.copy, /\[mempool\]/);
+  // `[mempool]` rejects unknown keys; its switch is `disabled`.
+  assert.match(disabled.copy, /disabled = false in the \[mempool\]/);
+  assert.doesNotMatch(disabled.copy, /enabled = true/);
+  assert.match(disabled.copy, /--mempool-disabled/);
+  assert.match(disabled.copy, /state_type = "digest" or verify_transactions = false/);
   assert.match(mempoolView({ mempool_enabled: true }, 'at_tip').copy, /will appear/);
   assert.match(mempoolView({ mempool_enabled: true }, 'syncing').copy, /historical/);
   assert.match(mempoolView({}, 'at_tip').copy, /unconfirmed/);
