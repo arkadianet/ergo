@@ -36,6 +36,18 @@ impl MempoolReadSnapshot {
         }
     }
 
+    /// Copy matching entries in their captured relay-priority order.
+    pub fn filtered(&self, keep: impl Fn(&Entry) -> bool) -> Self {
+        Self {
+            entries: self
+                .entries
+                .iter()
+                .filter(|entry| keep(entry))
+                .cloned()
+                .collect(),
+        }
+    }
+
     /// Build a snapshot from an explicit set of entries. Used by
     /// tests that bypass the pool plumbing.
     #[cfg(any(test, feature = "test-support"))]

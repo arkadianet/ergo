@@ -814,9 +814,7 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
             let pending_entry =
                 |entry: &&Entry| !included.contains(&hex::encode(entry.tx_id.as_bytes()));
             (
-                MempoolReadSnapshot::from_entries(
-                    mempool.iter().filter(pending_entry).cloned().collect(),
-                ),
+                mempool.filtered(|entry| pending_entry(&entry)),
                 private_transactions
                     .iter()
                     .filter(pending_entry)
