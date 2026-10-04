@@ -12,7 +12,10 @@ def detected(kind, surface, exit_code, output):
         return False
     surface = re.escape(surface)
     if kind == "canonical":
-        return surface == "ergo_tree" and "[CANONICAL-GATE] FAIL: re-encoded != expected" in output
+        # A writer failure after a complete decode also misses the expected bytes.
+        return surface == "ergo_tree" and any(
+            marker in output for marker in ("[CANONICAL-GATE] FAIL: re-encoded != expected",
+                                            "[CANONICAL-GATE] FAIL: re-encode failed"))
     if kind == "panic":
         return re.search(rf"\[BUG\]\s+{surface}:.*PANIC", output) is not None
     if kind == "accept-reject":

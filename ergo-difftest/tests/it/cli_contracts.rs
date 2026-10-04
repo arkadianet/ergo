@@ -25,6 +25,23 @@ fn canonical_rejection_or_trailing_bytes_is_incomplete() {
 }
 
 #[test]
+fn canonical_writer_failure_after_a_complete_decode_is_a_finding() {
+    // A FunDef whose STypeVar names are 255 invalid UTF-8 bytes decodes
+    // completely (lossily, as the JVM does), but each name re-encodes to 765
+    // bytes, past the one-byte length field. The comparison ran and missed.
+    let name = "ff".repeat(255);
+    let tree = format!("1001040ad801d7010167ff{name}d9010267ff{name}72027300");
+    let output = run(&["--repro", &tree, "--check-canonical", &tree]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[CANONICAL-GATE] FAIL: re-encode failed"),
+        "{stdout}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("HARNESS ERROR"));
+}
+
+#[test]
 fn coverage_thresholds_and_modes_are_validated() {
     for threshold in ["NaN", "inf", "-0.1", "1.1"] {
         let output = run(&["--structured", "--min-coverage", threshold]);

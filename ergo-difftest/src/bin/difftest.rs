@@ -234,7 +234,8 @@ fn main() -> ExitCode {
         // --check-canonical <expected_hex>: hermetic known-bug re-injection gate.
         // Decodes the input as an ErgoTree, re-encodes it, and compares the result
         // to the pinned expected canonical bytes.  Exit 0 = bytes match (no bug);
-        // exit 1 = mismatch (bug detected).  Hermetic: no JVM required.
+        // exit 1 = mismatch or re-encode failure (bug detected).  Hermetic: no
+        // JVM required.
         if let Some(ref expected_hex) = check_canonical {
             return run_check_canonical(&bytes, expected_hex);
         }
@@ -385,10 +386,14 @@ fn run_check_canonical(input: &[u8], expected_hex: &str) -> ExitCode {
         eprintln!("[CANONICAL-GATE] HARNESS ERROR: trailing input bytes");
         return exit_harness_error();
     }
+    // The whole input decoded, so the comparison is complete: a writer that
+    // cannot re-encode the tree fails to reproduce the expected bytes.
     let mut w = VlqWriter::new();
     if let Err(e) = write_ergo_tree(&mut w, &tree) {
-        eprintln!("[CANONICAL-GATE] HARNESS ERROR: write_ergo_tree failed: {e:?}");
-        return exit_harness_error();
+        println!(
+            "[CANONICAL-GATE] FAIL: re-encode failed after a complete decode: {e:?}\n  expected: {expected_hex}"
+        );
+        return ExitCode::FAILURE;
     }
     let actual_hex = ergo_difftest::to_hex(&w.result());
 

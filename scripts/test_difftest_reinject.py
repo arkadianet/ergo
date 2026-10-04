@@ -21,6 +21,14 @@ class SavedResultTests(unittest.TestCase):
         self.assertTrue(RESULT.detected("canonical", "ergo_tree", 1, output))
         self.assertFalse(RESULT.detected("canonical", "transaction", 1, output))
 
+    def test_canonical_writer_failure_after_a_complete_decode_is_detected(self):
+        # unparsed-tree-canonical's injected bug surfaces only as a writer error.
+        output = "[CANONICAL-GATE] FAIL: re-encode failed after a complete decode: InvalidData"
+        self.assertTrue(RESULT.detected("canonical", "ergo_tree", 1, output))
+        self.assertFalse(RESULT.detected("canonical", "ergo_tree", 3, output))
+        self.assertFalse(RESULT.detected("canonical", "ergo_tree", 3,
+                                         "[CANONICAL-GATE] HARNESS ERROR: trailing input bytes"))
+
     def test_accept_reject_requires_the_declared_surface_and_class(self):
         self.assertTrue(RESULT.detected("accept-reject", "ergo_tree", 1, "  [AcceptReject] ergo_tree\n"))
         self.assertFalse(RESULT.detected("accept-reject", "header", 1, "  [AcceptReject] ergo_tree\n"))

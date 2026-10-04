@@ -157,8 +157,9 @@ protocols have no matching structured generator and are refused before a JVM
 starts; use existing explicit requests with `--repro` for those surfaces.
 
 `--check-canonical` requires a completely parsed ErgoTree and valid expected
-hex. A rejection, trailing input or writer error returns harness exit 3 because
-no complete comparison occurred; a byte mismatch returns 1. `catch_unwind`
+hex. A rejection or trailing input returns harness exit 3 because no complete
+tree was compared. A byte mismatch returns 1, and so does a writer error after
+a complete decode, which re-encodes nothing that could match. `catch_unwind`
 reports unwind panics as `Bug` while preserving the caller's process-wide panic
 hook. It does not catch aborts, allocation failure or stack overflow.
 
