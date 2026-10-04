@@ -251,7 +251,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // Lift in the eviction follow-up commit.
     validate_runtime_mode_support(&config)?;
     let db_path = config.data_dir.join("state.redb");
-    std::fs::create_dir_all(&config.data_dir)?;
+    let data_directory_lock = crate::data_upgrade::prepare_startup(&config).await?;
     crate::incidents::set_incident_dir(config.data_dir.join("incidents"));
 
     // 1. Open store
@@ -384,6 +384,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
             db_path,
             ergo_state::StateBackendKind::Digest(store),
             boot_sentinel,
+            data_directory_lock,
         )
         .await;
     }
@@ -677,6 +678,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         db_path,
         ergo_state::StateBackendKind::Utxo(store),
         boot_sentinel,
+        data_directory_lock,
     )
     .await
 }
@@ -697,6 +699,7 @@ async fn run_inner_with_backend(
     db_path: std::path::PathBuf,
     mut store: ergo_state::StateBackendKind,
     boot_sentinel: u32,
+    data_directory_lock: std::sync::Arc<crate::data_upgrade::DataDirectoryLock>,
 ) -> Result<RunHandle, NodeError> {
     // Phase 1: peer manager + address book + known-peer seeding.
     let (session_id, peer_manager) = peers::setup(&config)?;
@@ -1108,19 +1111,24 @@ async fn run_inner_with_backend(
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let mempool_tick_ms = config.mempool_config.notifier_poll_ms;
 
-    let loop_handle = tokio::spawn(action_loop(
-        state,
-        event_rx,
-        submit_rx,
-        mining_submit_rx,
-        peer_connect_rx,
-        peer_control_rx,
-        scaffold.runtime_control.clone(),
-        votes_changed_rx,
-        mining_engine.wiring,
-        shutdown_rx,
-        mempool_tick_ms,
-    ));
+    let loop_lock = data_directory_lock.clone();
+    let loop_handle = tokio::spawn(async move {
+        let _directory_lock = loop_lock;
+        action_loop(
+            state,
+            event_rx,
+            submit_rx,
+            mining_submit_rx,
+            peer_connect_rx,
+            peer_control_rx,
+            scaffold.runtime_control.clone(),
+            votes_changed_rx,
+            mining_engine.wiring,
+            shutdown_rx,
+            mempool_tick_ms,
+        )
+        .await
+    });
 
     // Always expose the submit bridge — Scala-parity always-on
     // submission posture. The Option<_> wrapper stays so future
@@ -1129,6 +1137,7 @@ async fn run_inner_with_backend(
     let submit = Some(scaffold.submit_bridge);
 
     Ok(RunHandle {
+        data_directory_lock: Some(data_directory_lock),
         api_addr,
         submit,
         read: scaffold.read_state,

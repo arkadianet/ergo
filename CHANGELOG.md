@@ -54,18 +54,29 @@ infrastructure.
   list stored in the earlier insertion order.
 - `POST /transactions/unconfirmed/byTransactionIds` returns Scala's shape: the
   requested IDs that are pooled, in pool order, instead of full transactions.
-- Upgrade normal storage to redb 4.3. Legacy redb 2.6 file-format v2 databases
-  require the copy-only `ergo-node migrate-redb SOURCE DESTINATION` command
-  before startup. Originals remain intact; the offline converter locks the
-  source, upgrades only a temporary copy, verifies schemas and contents, and
-  publishes without replacing an existing destination. See the migration,
-  backup, recovery and rollback instructions in [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases).
+- Upgrade normal storage to redb 4.3 and automatically convert 0.11 redb 2.6
+  data directories before opening storage. Verified, journaled swaps retain
+  `*.redb2-backup` originals and recover after interruption. Stale legacy
+  indexers are deleted first to reclaim space for the state copy; both the new
+  node and a rollback to 0.11 rebuild the derived index. `--keep-stale-indexer`
+  or `[store] auto_upgrade_keep_stale_indexer = true` explicitly retains it.
+  `ergo-node upgrade-data DATA_DIR --indexer-db NAME` runs offline; `--discard-backups` trades local rollback
+  copies for space. Every startup warns with retained backup paths, sizes and
+  removal instructions; enabled indexers also warn when the rebuild needs
+  more free space than remains after upgrading. Backups are plain files the
+  node never opens and can be deleted while it runs once satisfied, or removed
+  with the offline command after stopping. `[store] auto_upgrade_legacy`
+  defaults to true. Free-space checks query the path's own filesystem and
+  warn and proceed if unavailable, so container overlay mounts do not block
+  startup. Unclean legacy indexers requiring repair to inspect their schema
+  are treated as stale with a warning; clean current-schema indexes are still
+  migrated, and other databases retain strict verified private-copy recovery. See
+  [space, recovery and rollback instructions](docs/operating.md#migrating-legacy-redb-databases).
 - Indexer apply and repair commits now use synchronous `Immediate` durability
   instead of `Eventual`, preserving durable guarantees across platforms with
-  possible additional flush latency. Unsupported peer database formats
-  fail node startup. Live-file locks and I/O failures preserve the database
-  and keep the existing best-effort peer fallback; automatic quarantine is
-  limited to an explicit corruption error.
+  possible additional flush latency. The startup upgrade inventory fails
+  closed on unsupported formats, corruption and access errors, preserving
+  database files before normal storage opens.
 - Indexer schema 3: on first start an existing indexer database is deleted
   and rebuilt from genesis, and `/blockchain/*` answers `503 indexer-syncing`
   until it catches up. The rebuild applies two Scala-parity corrections to

@@ -9,6 +9,7 @@ pub mod anchor_map;
 pub mod anchor_scheduler;
 pub mod api_bridge;
 pub mod config;
+pub mod data_upgrade;
 pub mod decode_stack;
 pub mod genesis;
 pub mod incidents;

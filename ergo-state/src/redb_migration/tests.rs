@@ -150,20 +150,20 @@ fn live_legacy_and_current_writers_are_rejected_without_waiting_or_mutating() {
     let destination = dir.path().join("destination.redb");
     fixture(&source);
     let live = redb_legacy::Database::open(&source).unwrap();
-    let expected = legacy_inventory(&live).unwrap();
+    let expected = legacy_inventory(&live, &mut |_| Ok(())).unwrap();
     assert!(matches!(
         migrate_database(&source, &destination),
         Err(MigrationError::Legacy { .. })
     ));
     assert!(!destination.exists());
-    assert_eq!(legacy_inventory(&live).unwrap(), expected);
+    assert_eq!(legacy_inventory(&live, &mut |_| Ok(())).unwrap(), expected);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     drop(live);
     migrate_database(&source, &destination).unwrap();
     let live = redb::Database::open(&destination).unwrap();
-    let expected = current_inventory(&live).unwrap();
+    let expected = current_inventory(&live, &mut |_| Ok(())).unwrap();
     assert!(migrate_database(&destination, &dir.path().join("another.redb")).is_err());
-    assert_eq!(current_inventory(&live).unwrap(), expected);
+    assert_eq!(current_inventory(&live, &mut |_| Ok(())).unwrap(), expected);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
 }
 

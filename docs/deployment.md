@@ -70,6 +70,26 @@ Keep application data outside the build context. The `.dockerignore` excludes
 common data/secret artifacts, but a custom secret configuration file should
 only be mounted at runtime.
 
+When updating a 0.11 data volume, stop the old container before using the new
+image. Run the offline upgrade before the first start (use the configured
+indexer filename if different):
+
+```sh
+docker compose -f deploy/compose.yml run --rm --no-deps node \
+  upgrade-data /var/lib/ergo --indexer-db indexer.redb
+```
+
+Check the volume path in your Compose configuration; the command and normal
+node must use the same data directory. For Kubernetes, run `ergo-node
+upgrade-data DATA_DIR --indexer-db NAME` in an init container with the same
+volume, UID and image as the node. Alternatively let startup upgrade
+automatically and increase `startupProbe.failureThreshold * periodSeconds`
+(and the container health-check start period) to cover copying and verifying a
+large database. HTTP is unavailable during the upgrade; the example ten-minute
+probe budget below may be too short for a 41 GB state. Do not let a probe/restart
+loop repeatedly kill the migration. Check free-space and rollback requirements
+in [Operating](operating.md#migrating-legacy-redb-databases).
+
 Kubernetes can use the pod IP directly; no `httpHeaders` Host override is needed:
 
 ```yaml

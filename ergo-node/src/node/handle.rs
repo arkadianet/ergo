@@ -36,6 +36,7 @@ use super::NodeError;
 ///   to learn the loop's terminal status. [`RunHandle::shutdown`] does
 ///   both in one call.
 pub struct RunHandle {
+    pub(super) data_directory_lock: Option<Arc<crate::data_upgrade::DataDirectoryLock>>,
     pub api_addr: Option<SocketAddr>,
     pub submit: Option<Arc<dyn ergo_api::NodeSubmit>>,
     pub read: Arc<dyn ergo_api::NodeReadState>,
@@ -296,6 +297,9 @@ impl RunHandle {
         // Final indexer and action-loop observations must reach the journal
         // before API services close and release its unused cursor reservation.
         self.drain_api_and_inbound().await;
+        // Awaited shutdown releases the lock before returning, including on
+        // a current-thread runtime where Drop supervision has not been polled.
+        self.data_directory_lock.take();
         let result = wallet_result.and(result);
         let elapsed_ms = shutdown_started.elapsed().as_millis() as u64;
         match &result {
@@ -432,9 +436,11 @@ impl Drop for RunHandle {
         let loop_shutdown = self.shutdown_tx.take();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let rescan = self.wallet_rescan.clone();
+            let directory_lock = self.data_directory_lock.clone();
             // This fallback offers no completion signal, but preserves the
             // wallet-before-store ordering when Drop runs on a live runtime.
             runtime.spawn(async move {
+                let _directory_lock = directory_lock;
                 if let Some(handle) = wallet_handle {
                     match handle.await {
                         Ok(Ok(())) => {}

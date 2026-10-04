@@ -243,8 +243,10 @@ A `409 webhooks_disabled` or `realtime_disabled` response means notification
 services are unavailable; inspect the boot log for the specific open, version,
 permission, cursor reservation or commit error. If the database cannot open or
 its realtime cursor cannot initialize, live WebSocket delivery, durable replay
-and webhooks are all disabled. If only the webhook snapshot cannot load, replay
-and live realtime can still operate.
+and webhooks are all disabled. Startup's data-directory upgrade inventory now
+fails before opening any storage if the redb file itself is invalid; restore a
+compatible backup before restarting in that case. If only the webhook snapshot
+cannot load, replay and live realtime can still operate.
 
 1. Stop the node and wait for shutdown to finish before touching
    `<data_dir>/webhooks.redb`. Preserve a copy of the failed file and its boot
@@ -258,7 +260,8 @@ and live realtime can still operate.
 3. For corruption, restore a known-good, compatible backup while the node is
    stopped, retaining private permissions. Keep the failed original. If no
    compatible backup is available, leave notifications disabled and recover
-   the database offline; the node and ordinary API can continue operating.
+   the database offline; when the redb file passes the startup inventory check,
+   the node and ordinary API can continue operating with notifications disabled.
    Do not delete or truncate the file to bypass initialization errors: that
    loses registrations, secrets and admitted delivery obligations, and resets
    the cursor namespace.

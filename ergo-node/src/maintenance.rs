@@ -41,7 +41,7 @@ fn check_interrupted() -> Result<()> {
 fn requires_interruption_cleanup(command: &crate::config::Command) -> bool {
     use crate::config::Command;
     match command {
-        Command::Backup { .. } | Command::Restore { .. } => true,
+        Command::Backup { .. } | Command::Restore { .. } | Command::UpgradeData { .. } => true,
         Command::MigrateRedb { .. }
         | Command::VerifyBackup { .. }
         | Command::Doctor { .. }
@@ -57,16 +57,24 @@ pub async fn run_interruptible(command: &crate::config::Command) -> Result<Strin
         let command = command.clone();
         return tokio::task::spawn_blocking(move || run(&command)).await?;
     }
+    let command = command.clone();
+    run_cancellable(move |_| run(&command)).await
+}
+
+/// Keep handlers installed until a blocking cleanup worker has released storage.
+/// Startup upgrades share this mechanism with offline maintenance commands.
+pub(crate) async fn run_cancellable<T: Send + 'static>(
+    work: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
+) -> Result<T> {
     #[cfg(unix)]
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let cancellation = Arc::new(AtomicBool::new(false));
     let worker_flag = cancellation.clone();
-    let command = command.clone();
     let mut worker = tokio::task::spawn_blocking(move || {
-        CANCELLED.with(|flag| *flag.borrow_mut() = Some(worker_flag));
-        let result = run(&command);
+        CANCELLED.with(|flag| *flag.borrow_mut() = Some(worker_flag.clone()));
+        let result = work(worker_flag);
         CANCELLED.with(|flag| *flag.borrow_mut() = None);
         result
     });
@@ -80,7 +88,8 @@ pub async fn run_interruptible(command: &crate::config::Command) -> Result<Strin
         result = &mut worker => result?,
         _ = signal => {
             cancellation.store(true, Ordering::Relaxed);
-            worker.await?
+            let result = worker.await?;
+            result.and_then(|_| Err(fail("operator command interrupted; any staging copy cleaned up")))
         }
     }
 }
@@ -133,54 +142,94 @@ const MANIFEST: &str = "ergo-backup.json";
 
 pub fn run(command: &crate::config::Command) -> Result<String> {
     use crate::config::Command;
-    let value =
-        match command {
-            Command::MigrateRedb {
-                source,
-                destination,
-            } => {
-                let report = ergo_state::redb_migration::migrate_database(source, destination)?;
-                return Ok(format!(
-                    "verified migration: {} -> {} ({} tables); original preserved",
-                    source.display(),
-                    destination.display(),
-                    report.tables
-                ));
-            }
-            Command::Backup {
-                data_dir,
-                destination,
-            } => serde_json::to_value(backup(data_dir, destination)?)?,
-            Command::VerifyBackup { directory } => serde_json::to_value(verify_backup(directory)?)?,
-            Command::Restore {
-                directory,
-                destination,
-                keep_pending_work,
-            } => serde_json::to_value(restore_with_options(
-                directory,
-                destination,
-                *keep_pending_work,
-            )?)?,
-            Command::Doctor { data_dir } => serde_json::to_value(doctor(data_dir)?)?,
-            Command::UtxoStats { data_dir } => serde_json::to_value(
-                doctor(data_dir)?
-                    .utxo
-                    .ok_or_else(|| fail("logical UTXO statistics require a UTXO backend"))?,
-            )?,
-            Command::WalletScanUtxo { data_dir, restart } => {
-                match fs::symlink_metadata(data_dir.join(MANIFEST)) {
-                    Ok(_) => return Err(fail(
-                        "directory contains a backup manifest; restore it before wallet discovery",
-                    )),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
+    let value = match command {
+        Command::MigrateRedb {
+            source,
+            destination,
+        } => {
+            let report = ergo_state::redb_migration::migrate_database(source, destination)?;
+            return Ok(format!(
+                "verified migration: {} -> {} ({} tables); original preserved",
+                source.display(),
+                destination.display(),
+                report.tables
+            ));
+        }
+        Command::UpgradeData {
+            data_dir,
+            indexer_db,
+            discard_backups,
+            keep_stale_indexer,
+        } => {
+            // Startup may create a fresh data directory; this command must not,
+            // or a mistyped path would report a no-op upgrade of a new empty one.
+            match fs::metadata(data_dir) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    return Err(fail(format!(
+                        "data directory is not a directory: {}",
+                        data_dir.display()
+                    )))
                 }
-                let database = redb::Database::open(data_dir.join("state.redb"))?;
-                serde_json::to_value(ergo_state::wallet::utxo_scan::discover(
-                    &database, *restart,
-                )?)?
+                Err(error) => {
+                    return Err(fail(format!(
+                        "cannot use data directory {}: {error}",
+                        data_dir.display()
+                    )))
+                }
             }
-        };
+            let lock = crate::data_upgrade::DataDirectoryLock::acquire(data_dir)?;
+            let report = crate::data_upgrade::upgrade_with_logging(
+                &lock,
+                data_dir,
+                indexer_db,
+                *discard_backups,
+                *keep_stale_indexer,
+                false,
+                &|| check_interrupted().is_err(),
+            )?;
+            return Ok(if report.is_noop() {
+                "upgrade-data: no-op; no legacy databases or unfinished upgrades".into()
+            } else {
+                format!("upgrade-data: {} databases migrated, {} stale indexers handled, {} interrupted upgrades recovered, {} retained backups discarded", report.migrated, report.stale_indexers, report.recovered, report.discarded_existing_backups)
+            });
+        }
+        Command::Backup {
+            data_dir,
+            destination,
+        } => serde_json::to_value(backup(data_dir, destination)?)?,
+        Command::VerifyBackup { directory } => serde_json::to_value(verify_backup(directory)?)?,
+        Command::Restore {
+            directory,
+            destination,
+            keep_pending_work,
+        } => serde_json::to_value(restore_with_options(
+            directory,
+            destination,
+            *keep_pending_work,
+        )?)?,
+        Command::Doctor { data_dir } => serde_json::to_value(doctor(data_dir)?)?,
+        Command::UtxoStats { data_dir } => serde_json::to_value(
+            doctor(data_dir)?
+                .utxo
+                .ok_or_else(|| fail("logical UTXO statistics require a UTXO backend"))?,
+        )?,
+        Command::WalletScanUtxo { data_dir, restart } => {
+            match fs::symlink_metadata(data_dir.join(MANIFEST)) {
+                Ok(_) => {
+                    return Err(fail(
+                        "directory contains a backup manifest; restore it before wallet discovery",
+                    ))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let database = redb::Database::open(data_dir.join("state.redb"))?;
+            serde_json::to_value(ergo_state::wallet::utxo_scan::discover(
+                &database, *restart,
+            )?)?
+        }
+    };
     Ok(serde_json::to_string_pretty(&value)?)
 }
 
@@ -293,6 +342,14 @@ fn database_access_error(
 fn lock_databases(root: &Path, files: &[PathBuf]) -> Result<BTreeMap<String, ReadOnlyDatabase>> {
     let mut databases = BTreeMap::new();
     for file in files {
+        // Retained originals are rollback artifacts, not active databases. They
+        // stay in the checksummed file inventory and the complete backup copy.
+        if file
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".redb2-backup"))
+        {
+            continue;
+        }
         let mut header = [0; 9];
         let n = File::open(root.join(file))
             .and_then(|mut input| input.read(&mut header))
@@ -703,6 +760,7 @@ mod tests {
         for (args, expected) in [
             (vec!["ergo-node", "migrate-redb", "/old", "/new"], false),
             (vec!["ergo-node", "backup", "/data", "/backup"], true),
+            (vec!["ergo-node", "upgrade-data", "/data"], true),
             (vec!["ergo-node", "verify-backup", "/backup"], false),
             (vec!["ergo-node", "restore", "/backup", "/restored"], true),
             (vec!["ergo-node", "doctor", "/data"], false),
@@ -1310,5 +1368,31 @@ mod tests {
                 .command
                 .is_some());
         }
+    }
+
+    #[test]
+    fn upgrade_data_refuses_missing_or_non_directory_data_dir_without_creating_it() {
+        let parent = tempfile::tempdir().unwrap();
+        let file = parent.path().join("not-a-directory");
+        fs::write(&file, b"keep").unwrap();
+        for (data_dir, expected) in [
+            (
+                parent.path().join("mistyped/ergo-data"),
+                "cannot use data directory",
+            ),
+            (file.clone(), "data directory is not a directory"),
+        ] {
+            let error = run(&crate::config::Command::UpgradeData {
+                data_dir: data_dir.clone(),
+                indexer_db: "indexer.redb".into(),
+                discard_backups: false,
+                keep_stale_indexer: false,
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        assert!(!parent.path().join("mistyped").exists());
+        assert_eq!(fs::read(&file).unwrap(), b"keep");
     }
 }
