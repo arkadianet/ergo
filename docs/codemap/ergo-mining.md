@@ -128,7 +128,10 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
 ## Invariants & contracts
 
 - Historical epoch/difficulty height reads use the applied `CHAIN_INDEX`,
-  while the separate best-header API retains `HEADER_CHAIN_INDEX`. Snapshot
+  while the separate best-header API retains `HEADER_CHAIN_INDEX`. Below a
+  UTXO-snapshot anchor, where `CHAIN_INDEX` starts, they fall back to
+  `HEADER_CHAIN_INDEX` only while it still selects the applied tip (Scala's
+  `isInBestChain(parent)` in `requiredDifficultyAfter`). Snapshot
   and cached snapshot builds keep those ancestry reads in one held transaction;
   the live-store caller must drain accepted persistence and hold the writer.
 - Complete candidate extensions must fit the 32 KiB serialized section cap,

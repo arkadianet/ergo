@@ -1354,6 +1354,113 @@ mod tests {
         }
     }
 
+    /// Ancestry from a real store after a UTXO-snapshot install; every other
+    /// input is the exhausted-emission stub, so a build that clears the
+    /// difficulty recalculation returns `None`.
+    struct InstalledSnapshotView<'a> {
+        snapshot: &'a ergo_state::store::CommittedSnapshot,
+        stub: ExhaustedView,
+    }
+
+    impl UtxoView for InstalledSnapshotView<'_> {
+        fn get_box(&self, _: &Digest32) -> Option<ErgoBox> {
+            None
+        }
+    }
+
+    impl CandidateStateView for InstalledSnapshotView<'_> {
+        fn emission_identity(
+            &self,
+            tip: &[u8; 32],
+        ) -> Result<Option<Option<Digest32>>, StateError> {
+            self.stub.emission_identity(tip)
+        }
+        fn best_full_block_id(&self) -> [u8; 32] {
+            CandidateStateView::best_full_block_id(self.snapshot)
+        }
+        fn best_full_block_height(&self) -> u32 {
+            CandidateStateView::best_full_block_height(self.snapshot)
+        }
+        fn get_header_bytes(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+            CandidateStateView::get_header_bytes(self.snapshot, id)
+        }
+        fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
+            CandidateStateView::header_id_at_height(self.snapshot, height)
+        }
+        fn block_section(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+            self.stub.block_section(id)
+        }
+        fn last_applied_chain_window_10(&self) -> Result<[Header; 10], StateError> {
+            self.stub.last_applied_chain_window_10()
+        }
+        fn tip_snapshot_params(
+            &self,
+        ) -> Result<
+            (
+                ActiveProtocolParameters,
+                ergo_validation::ErgoValidationSettings,
+            ),
+            StateError,
+        > {
+            self.stub.tip_snapshot_params()
+        }
+        fn candidate_dry_run(
+            &self,
+            checked: &[CheckedTransaction],
+        ) -> Result<(ergo_primitives::digest::ADDigest, Vec<u8>, [u8; 32]), StateError> {
+            self.stub.candidate_dry_run(checked)
+        }
+        fn mode2_trust_first_epoch_armed(&self) -> Result<bool, StateError> {
+            self.stub.mode2_trust_first_epoch_armed()
+        }
+    }
+
+    #[test]
+    fn candidate_retargets_from_ancestors_below_a_utxo_snapshot_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = crate::state_view::ancestry_tests::snapshot_installed_store(dir.path());
+        let snapshot = store.committed_snapshot().unwrap().unwrap();
+        let tip = CandidateStateView::best_full_block_id(&snapshot);
+        let bytes = CandidateStateView::get_header_bytes(&snapshot, &tip)
+            .unwrap()
+            .unwrap();
+        let view = InstalledSnapshotView {
+            snapshot: &snapshot,
+            stub: ExhaustedView {
+                header: read_header(&mut VlqReader::new(&bytes)).unwrap(),
+            },
+        };
+        // Two-block epochs make height 11 a recalculation height whose window
+        // reaches below the snapshot anchor at height 8.
+        let mut difficulty = DifficultyParams::mainnet();
+        difficulty.epoch_length = 2;
+        difficulty.eip37_epoch_length = None;
+        difficulty.eip37_activation_height = None;
+        difficulty.v2_activation = None;
+        assert_eq!(
+            previous_heights_for_recalculation(11, 2),
+            vec![0, 2, 4, 6, 8, 10]
+        );
+        let candidate = generate_candidate(
+            &view,
+            ergo_chain_spec::Network::Mainnet,
+            BuildMode::Minimal,
+            &MempoolReadSnapshot::empty(),
+            &[0x02; 33],
+            &MonetarySettings::mainnet(),
+            None,
+            None,
+            &difficulty,
+            &[],
+            &BTreeMap::new(),
+            &VotingSettings::mainnet(),
+            &[],
+            &mut vec![],
+        )
+        .unwrap();
+        assert!(candidate.is_none());
+    }
+
     // ----- round-trips -----
 
     #[test]
