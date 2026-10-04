@@ -301,6 +301,20 @@ pub(crate) fn check_capturing_held<V: Validator>(
         );
     }
 
+    // ── Step 8 — Duplicate, before any validation ────────────────────
+    // Scala `ErgoMemPool.process` declines a pooled id in `pool.canAccept`
+    // before `validateWithCost`, so a resubmission runs no scripts and
+    // consumes no budget. The id excludes proofs: other proof bytes for a
+    // pooled id are neither validated nor recorded against it.
+    if cx.pool.contains(&peek_fee_value.tx_id) {
+        return (
+            CheckOutcome::Rejected {
+                reason: RejectReason::Duplicate,
+            },
+            actions,
+        );
+    }
+
     // Scala #2577: reject the entire transaction, including mixed inputs,
     // before UTXO resolution/script evaluation. A policy decline earns no peer penalty.
     if cx.config.reject_storage_rent_txs && peek_fee_value.contains_storage_rent_claim {
@@ -384,8 +398,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
         }
     };
 
-    // Full validation spent this cost regardless of the later pool decision,
-    // including successful validation of an already-present transaction.
+    // Full validation spent this cost regardless of the later pool decision.
     if !budget_exempt {
         cx.budgets.charge(budget_source, validated.consumed_cost);
     }
@@ -403,16 +416,6 @@ pub(crate) fn check_capturing_held<V: Validator>(
     // the proof-malleability poisoning surface: a third party
     // mangling a victim tx's proofs can suppress our Inv fetch (as
     // on Scala) but cannot block direct (re)submission.
-
-    // ── Step 8 — Duplicate ───────────────────────────────────────────
-    if cx.pool.contains(&validated.tx_id) {
-        return (
-            CheckOutcome::Rejected {
-                reason: RejectReason::Duplicate,
-            },
-            actions,
-        );
-    }
 
     // ── Step 10 — Min-fee consistency assert ─────────────────────────
     // Step 3.5 already gated on `peek_fee`; reaching here means we

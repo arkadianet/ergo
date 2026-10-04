@@ -57,7 +57,9 @@ staging, and reorg maintenance. Consensus validation is delegated to
   membership. `process` may additionally admit a package from held ancestors,
   so a single-transaction unresolved verdict can become a committed admission.
   Package success returns the child's admission and traces each member's source.
-- Validation work is charged before later duplicate/conflict/capacity decisions.
+- A pooled id is declined as a duplicate before validation, as Scala's
+  `canAccept` does. Validation work is charged before later conflict/capacity
+  decisions.
   Each fresh package evaluation passes its original source budget first; temporary
   budget refusal preserves held ancestors. Demoted-source exemption is explicit.
 - Replacement uses weight rather than only absolute fee. Package replacement

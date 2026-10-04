@@ -669,12 +669,12 @@ fn duplicate_tx_rejected_idempotently() {
         }
     ));
     assert_eq!(pool.len(), 1);
-    assert_eq!(b.global_consumed(), 20_000);
-    assert_eq!(v.validate_call_count(), 2);
+    assert_eq!(b.global_consumed(), 10_000);
+    assert_eq!(v.validate_call_count(), 1);
 }
 
 #[test]
-fn successful_duplicates_exhaust_each_source_budget_before_more_validation() {
+fn pooled_ids_are_declined_before_validation_for_every_source() {
     for source in [
         TxSource::Peer(peer()),
         TxSource::PublicApi,
@@ -687,7 +687,16 @@ fn successful_duplicates_exhaust_each_source_budget_before_more_validation() {
         let mut budgets = CostBudgets::new(20_000, 20_000, 0);
         let cfg = default_config();
         let w = ByCost;
-        let validator = validator_accepting(b"bytes", id(1), 5_000_000);
+        // The same id with other proof bytes, which would fail its scripts.
+        let validator = validator_accepting(b"bytes", id(1), 5_000_000).plan(
+            b"other proof".to_vec(),
+            MockPlan {
+                result: Err(ValidationErr::ScriptFailed),
+                charge: 10_000,
+                peek_fee: Some(5_000_000),
+                peek_tx_id: Some(id(1)),
+            },
+        );
         let tip = c.view(&utxo);
         let mut cx = AdmissionCtx {
             tip_ctx: &tip,
@@ -706,28 +715,20 @@ fn successful_duplicates_exhaust_each_source_budget_before_more_validation() {
             &validator,
         );
         assert!(matches!(first, AdmissionOutcome::Admitted { .. }));
-        let (duplicate, _) = process(
-            b"bytes",
-            source.clone(),
-            Instant::now(),
-            &mut cx,
-            &validator,
-        );
-        assert_eq!(
-            duplicate,
-            AdmissionOutcome::Rejected {
-                reason: RejectReason::Duplicate
-            }
-        );
-        assert_eq!(cx.budgets.global_consumed(), 20_000);
-        let (exhausted, _) = process(b"bytes", source, Instant::now(), &mut cx, &validator);
-        assert!(matches!(
-            exhausted,
-            AdmissionOutcome::Rejected {
-                reason: RejectReason::GlobalBudgetExhausted
-            }
-        ));
-        assert_eq!(validator.validate_call_count(), 2);
+        for bytes in [&b"bytes"[..], b"bytes", b"other proof"] {
+            let (duplicate, actions) =
+                process(bytes, source.clone(), Instant::now(), &mut cx, &validator);
+            assert_eq!(
+                duplicate,
+                AdmissionOutcome::Rejected {
+                    reason: RejectReason::Duplicate
+                }
+            );
+            assert!(actions.is_empty(), "{actions:?}");
+        }
+        assert_eq!(validator.validate_call_count(), 1);
+        assert_eq!(cx.budgets.global_consumed(), 10_000);
+        assert!(!cx.invalidated.contains(&id(1)));
         assert_eq!(cx.pool.len(), 1);
     }
 }
