@@ -129,7 +129,12 @@ pub fn run(command: &crate::config::Command) -> Result<String> {
             Command::Restore {
                 directory,
                 destination,
-            } => serde_json::to_value(restore(directory, destination)?)?,
+                keep_pending_work,
+            } => serde_json::to_value(restore_with_options(
+                directory,
+                destination,
+                *keep_pending_work,
+            )?)?,
             Command::Doctor { data_dir } => serde_json::to_value(doctor(data_dir)?)?,
             Command::UtxoStats { data_dir } => serde_json::to_value(
                 doctor(data_dir)?
@@ -170,6 +175,16 @@ pub struct BackupFile {
     pub path: String,
     pub bytes: u64,
     pub sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RestoreReport {
+    pub backup: BackupManifest,
+    pub kept_pending_work: bool,
+    pub pending_private_transactions: Vec<ergo_mining::private_queue::PrivateTransactionEntry>,
+    pub pending_wallet_jobs: Vec<u64>,
+    pub private_queue_quarantine: Option<String>,
+    pub wallet_jobs_quarantined: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -530,7 +545,15 @@ pub fn verify_backup(directory: &Path) -> Result<BackupManifest> {
     Ok(manifest)
 }
 
-pub fn restore(directory: &Path, destination: &Path) -> Result<BackupManifest> {
+pub fn restore(directory: &Path, destination: &Path) -> Result<RestoreReport> {
+    restore_with_options(directory, destination, false)
+}
+
+fn restore_with_options(
+    directory: &Path,
+    destination: &Path,
+    keep_pending_work: bool,
+) -> Result<RestoreReport> {
     let parent = destination_parent(directory, destination)?;
     let manifest = verify_backup(directory)?;
     let files = inventory(directory)?;
@@ -549,9 +572,57 @@ pub fn restore(directory: &Path, destination: &Path) -> Result<BackupManifest> {
     if report.tip != manifest.tip || report.utxo != manifest.utxo {
         return Err(fail("restored metadata verification failed"));
     }
+    let queue_path = staging.path().join("private-mining-queue.json");
+    let queue_exists = queue_path.try_exists()?;
+    let pending_private_transactions = if queue_exists {
+        ergo_mining::private_queue::PrivateTransactionQueue::open(&queue_path)
+            .map_err(fail)?
+            .list()
+            .into_iter()
+            .filter(|entry| entry.state.is_pending())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let database = redb::Database::open(staging.path().join("state.redb"))?;
+    let pending_wallet_jobs =
+        ergo_state::wallet::mining_jobs::pending_jobs(&database.begin_read()?)?;
+    let wallet_jobs_quarantined = if keep_pending_work {
+        0
+    } else {
+        ergo_state::wallet::mining_jobs::quarantine(&database)?
+    };
+    drop(database);
+    let private_queue_quarantine = if queue_exists && !keep_pending_work {
+        let mut suffix = 0u64;
+        let name = loop {
+            let name = if suffix == 0 {
+                "private-mining-queue.restored-quarantine.json".to_string()
+            } else {
+                format!("private-mining-queue.restored-quarantine-{suffix}.json")
+            };
+            if !staging.path().join(&name).try_exists()? {
+                break name;
+            }
+            suffix = suffix
+                .checked_add(1)
+                .ok_or_else(|| fail("quarantine filename overflow"))?;
+        };
+        fs::rename(&queue_path, staging.path().join(&name))?;
+        Some(name)
+    } else {
+        None
+    };
     sync_directories(staging.path())?;
     publish(staging.path(), destination)?;
-    Ok(manifest)
+    Ok(RestoreReport {
+        backup: manifest,
+        kept_pending_work: keep_pending_work,
+        pending_private_transactions,
+        pending_wallet_jobs,
+        private_queue_quarantine,
+        wallet_jobs_quarantined,
+    })
 }
 
 #[cfg(test)]
@@ -645,6 +716,143 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    fn seed_private_work(data: &Path) -> (String, Vec<u8>) {
+        use ergo_primitives::{digest::Digest32, reader::VlqReader, writer::VlqWriter};
+        use ergo_ser::{
+            ergo_box::ErgoBoxCandidate,
+            input::{ContextExtension, Input, SpendingProof},
+            register::AdditionalRegisters,
+            transaction::{transaction_id, write_transaction, Transaction},
+        };
+        let tx = Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes([0x55; 32]),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate::new(
+                1_000_000,
+                ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&[0, 8, 0xd3])).unwrap(),
+                100,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        let id = transaction_id(&tx).unwrap();
+        let mut writer = VlqWriter::new();
+        write_transaction(&mut writer, &tx).unwrap();
+        let bytes = writer.result();
+        let entry = ergo_mempool::pool::Entry::new(
+            Digest32::from_bytes(*id.as_bytes()),
+            Arc::from(bytes.clone()),
+            vec![Digest32::from_bytes([0x55; 32])],
+            vec![],
+            vec![],
+            0,
+            0,
+            bytes.len() as u32,
+            100,
+            ergo_mempool::types::TxSource::Wallet,
+        );
+        let queue = ergo_mining::private_queue::PrivateTransactionQueue::open(
+            data.join("private-mining-queue.json"),
+        )
+        .unwrap();
+        let private = queue.admit(&entry, Default::default(), 10, 100).unwrap();
+        let record = serde_json::to_vec(&serde_json::json!({
+            "job": { "id": "1", "request": { "label": "restore-sensitive", "task": { "type": "renew", "boxIds": ["55".repeat(32)] }, "notBeforeHeight": 10, "expiresAtHeight": 100, "maxAttempts": 1 }, "state": "prepared", "createdAtMs": 10, "updatedAtMs": 10, "attempts": 1, "txId": private.tx_id, "detail": null },
+            "signed_hex": hex::encode(&bytes), "last_attempt_height": 10
+        })).unwrap();
+        let db = redb::Database::open(data.join("state.redb")).unwrap();
+        let txn = ergo_state::begin_write_qr(&db).unwrap();
+        txn.open_table(ergo_state::wallet::mining_jobs::JOURNAL)
+            .unwrap()
+            .insert(1, record.as_slice())
+            .unwrap();
+        txn.commit().unwrap();
+        (hex::encode(id.as_bytes()), record)
+    }
+
+    #[test]
+    fn restore_quarantines_private_work_unless_operator_explicitly_keeps_it() {
+        let data = seeded_directory();
+        let (tx_id, record) = seed_private_work(data.path());
+        let original_queue = fs::read(data.path().join("private-mining-queue.json")).unwrap();
+        fs::write(
+            data.path()
+                .join("private-mining-queue.restored-quarantine.json"),
+            b"earlier quarantine",
+        )
+        .unwrap();
+        fs::write(data.path().join("mining-history.json"), b"history fixture").unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let backup_dir = parent.path().join("backup");
+        backup(data.path(), &backup_dir).unwrap();
+        let dest = parent.path().join("safe-restore");
+        let report = restore(&backup_dir, &dest).unwrap();
+        assert!(!report.kept_pending_work);
+        assert_eq!(report.pending_private_transactions[0].tx_id, tx_id);
+        assert_eq!(report.pending_wallet_jobs, vec![1]);
+        assert_eq!(report.wallet_jobs_quarantined, 1);
+        assert_eq!(
+            report.private_queue_quarantine.as_deref(),
+            Some("private-mining-queue.restored-quarantine-1.json")
+        );
+        assert_eq!(
+            fs::read(dest.join("private-mining-queue.restored-quarantine.json")).unwrap(),
+            b"earlier quarantine"
+        );
+        assert!(!dest.join("private-mining-queue.json").exists());
+        assert_eq!(
+            fs::read(dest.join(report.private_queue_quarantine.unwrap())).unwrap(),
+            original_queue
+        );
+        assert_eq!(
+            fs::read(dest.join("mining-history.json")).unwrap(),
+            b"history fixture"
+        );
+        assert_eq!(
+            fs::read(dest.join("mining-policy.json")).unwrap(),
+            fs::read(data.path().join("mining-policy.json")).unwrap()
+        );
+        assert_eq!(doctor(&dest).unwrap().tip, report.backup.tip);
+        assert_eq!(doctor(&dest).unwrap().utxo, report.backup.utxo);
+        let db = redb::Database::open(dest.join("state.redb")).unwrap();
+        let read = db.begin_read().unwrap();
+        assert!(ergo_state::wallet::mining_jobs::pending_jobs(&read)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            read.open_table(ergo_state::wallet::mining_jobs::QUARANTINE)
+                .unwrap()
+                .get(1)
+                .unwrap()
+                .unwrap()
+                .value(),
+            record
+        );
+        drop(read);
+        drop(db);
+        let confirmed = parent.path().join("confirmed-restore");
+        let report = restore_with_options(&backup_dir, &confirmed, true).unwrap();
+        assert!(report.kept_pending_work);
+        assert_eq!(report.wallet_jobs_quarantined, 0);
+        assert!(report.private_queue_quarantine.is_none());
+        assert_eq!(
+            fs::read(confirmed.join("private-mining-queue.json")).unwrap(),
+            original_queue
+        );
+        assert_eq!(doctor(&confirmed).unwrap().tip, report.backup.tip);
+        assert_eq!(doctor(&confirmed).unwrap().utxo, report.backup.utxo);
+        let db = redb::Database::open(confirmed.join("state.redb")).unwrap();
+        assert_eq!(
+            ergo_state::wallet::mining_jobs::pending_jobs(&db.begin_read().unwrap()).unwrap(),
+            vec![1]
+        );
+        verify_backup(&backup_dir).unwrap();
     }
 
     #[test]

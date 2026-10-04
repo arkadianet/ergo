@@ -29,6 +29,9 @@ pub enum Command {
     Restore {
         directory: PathBuf,
         destination: PathBuf,
+        /// Confirm that private transactions and wallet jobs from this backup may run again.
+        #[arg(long)]
+        keep_pending_work: bool,
     },
     /// Inspect a stopped node without repairing or changing its databases.
     Doctor { data_dir: PathBuf },

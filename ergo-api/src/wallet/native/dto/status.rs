@@ -16,7 +16,7 @@ pub enum NetworkDto {
     Testnet,
 }
 
-/// Wallet rescan lifecycle phase. `required` means a full rescan is needed;
+/// Wallet rescan lifecycle phase. `required` means discovery or a full rescan is needed;
 /// `unavailable` means the backend cannot replay blocks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -63,7 +63,7 @@ pub struct WalletStatusDto {
     pub eip27_active: bool,
     /// Rescan lifecycle phase.
     pub rescan: RescanStateDto,
-    /// The wallet scan was invalidated; a full rescan (fromHeight=0) is required.
+    /// The wallet scan was invalidated; offline discovery or a full rescan is required.
     pub scan_invalidated: bool,
     /// Present after current-UTXO discovery; historical transactions before
     /// the anchor have not been reconstructed.

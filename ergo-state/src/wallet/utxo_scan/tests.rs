@@ -471,3 +471,86 @@ fn discovery_persists_key_coverage_and_flags_new_keys_until_rediscovery() {
     assert_eq!(discover(&db, false).unwrap().matched_boxes, 4);
     assert!(!requires_discovery(&db.begin_read().unwrap()).unwrap());
 }
+
+#[test]
+fn pending_wallet_jobs_refuse_discovery_without_erasing_history() {
+    use super::super::mining_jobs::JOURNAL;
+    let (_dir, db, _) = fixture(4);
+    discover(&db, false).unwrap();
+    let wt = super::super::types::WalletTransaction {
+        tx_id: [0x55; 32],
+        block_id: [0x66; 32],
+        block_height: 900,
+        wallet_inputs: vec![],
+        wallet_outputs: vec![],
+    };
+    let txn = crate::begin_write_qr(&db).unwrap();
+    txn.open_table(WALLET_TXS)
+        .unwrap()
+        .insert(
+            wallet_tx_key(900, &wt.tx_id),
+            bincode::serialize(&wt).unwrap(),
+        )
+        .unwrap();
+    txn.commit().unwrap();
+    let before = bincode::serialize(
+        &super::super::reader::WalletReader::new(&db.begin_read().unwrap())
+            .all_boxes()
+            .unwrap(),
+    )
+    .unwrap();
+    for state in [
+        "waiting",
+        "waitingForWallet",
+        "preparing",
+        "prepared",
+        "queued",
+        "inCandidate",
+    ] {
+        let bytes = serde_json::to_vec(&serde_json::json!({"job": {"state": state}})).unwrap();
+        let txn = crate::begin_write_qr(&db).unwrap();
+        txn.open_table(JOURNAL)
+            .unwrap()
+            .insert(1, bytes.as_slice())
+            .unwrap();
+        txn.commit().unwrap();
+        assert!(
+            matches!(discover(&db, true), Err(StateError::WalletDiscoveryUnavailable(reason)) if reason.contains("non-terminal"))
+        );
+        let read = db.begin_read().unwrap();
+        let reader = super::super::reader::WalletReader::new(&read);
+        assert_eq!(
+            bincode::serialize(&reader.all_boxes().unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(reader.all_transactions().unwrap().len(), 1);
+        assert_eq!(
+            read.open_table(JOURNAL)
+                .unwrap()
+                .get(1)
+                .unwrap()
+                .unwrap()
+                .value(),
+            bytes
+        );
+    }
+    let bytes = br#"{"job":{"state":"cancelled"}}"#;
+    let txn = crate::begin_write_qr(&db).unwrap();
+    txn.open_table(JOURNAL)
+        .unwrap()
+        .insert(1, bytes.as_slice())
+        .unwrap();
+    txn.commit().unwrap();
+    discover(&db, true).unwrap();
+    assert_eq!(
+        db.begin_read()
+            .unwrap()
+            .open_table(JOURNAL)
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .unwrap()
+            .value(),
+        bytes
+    );
+}

@@ -4230,7 +4230,7 @@ components:
             enum:
             - unavailable
       description: |-
-        Wallet rescan lifecycle phase. `required` means a full rescan is needed;
+        Wallet rescan lifecycle phase. `required` means discovery or a full rescan is needed;
         `unavailable` means the backend cannot replay blocks.
     RestoreRequest:
       type: object
@@ -5019,7 +5019,7 @@ components:
           minimum: 0
         scanInvalidated:
           type: boolean
-          description: The wallet scan was invalidated; a full rescan (fromHeight=0) is required.
+          description: The wallet scan was invalidated; offline discovery or a full rescan is required.
         tipHeight:
           type: integer
           format: int32

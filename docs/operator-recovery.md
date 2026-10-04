@@ -24,7 +24,7 @@ The versioned `ergo-backup.json` records file sizes and streaming SHA256 hashes,
 node version, committed full-block height/ID, state type/root, stored format
 versions, and verified logical UTXO statistics. SHA256 detects accidental
 corruption; it is not an authenticity signature. Protect the backup as carefully
-as the wallet. On Unix new backup/restore roots are 0700 and files are 0600.
+as the wallet. On Unix every created backup/restore directory is 0700 and files are 0600.
 
 Backup and restore refuse every existing destination, including empty
 directories, and require a destination outside the source directory. They build
@@ -54,9 +54,34 @@ Restore rolls external delivery and credential state back to the backup date.
 Webhook consumers should deduplicate event IDs; check revoked credentials and
 delivery cursors before restarting a restored node.
 
+Backups also include `private-mining-queue.json`, `mining-policy.json`,
+`mining-history.json`, and the wallet mining job journal in `state.redb`. Restoring
+an older backup can recover payments or jobs cancelled since that backup. By
+default restore reports pending private transaction metadata and wallet job IDs,
+moves the private queue to `private-mining-queue.restored-quarantine.json`, and
+moves all job records (including signed bytes) into the
+`wallet_mining_jobs_quarantined_v1` table in the restored database. The active
+queue and job journal are empty, so the restored node cannot execute this work.
+Policy and mining history are preserved. Copied checksums are verified before
+these deliberate quarantine changes; committed chain metadata and UTXOs stay
+unchanged.
+
+To explicitly confirm that the backup's private work may run again, restore it
+to a new destination with `--keep-pending-work`. This keeps the original queue and
+job records active. Review the pending work in the restore report before starting
+mining. The original backup is always preserved, so quarantined jobs can be
+recovered by restoring it again to another new destination with this flag. A
+stopped operator can also move the quarantined private queue back to its original
+filename after reviewing it. Keep job approvals and their signed transactions
+together; do not manually merge job journals. Existing quarantine files are preserved; subsequent copies get a numbered
+filename suffix. Restore refuses conflicting quarantined job IDs rather than
+replacing them.
+
 ## Wallet discovery without historical blocks
 
-Seed restore is available on pruned nodes. Restore/unlock the wallet and derive
+Seed restore is available on pruned nodes and marks the wallet incomplete.
+Status reports scan invalidation; balance and box reads return the recovery error
+until verified discovery publishes. Restore/unlock the wallet and derive
 every address you want to track, then stop the node:
 
 ```sh
@@ -70,7 +95,11 @@ the current UTXO state. It needs no archived blocks and no unlocked secrets;
 persisted tracked public keys are sufficient. It works after snapshot bootstrap
 and with block pruning enabled. It requires a UTXO backend. Custom scan
 registries currently require the existing historical rescan; discovery refuses
-to advance their cursor with incomplete coverage.
+to advance their cursor with incomplete coverage. Discovery also refuses while
+any non-terminal wallet mining jobs exist: finish or cancel them first. Their
+deadline fallback needs wallet transaction history, which discovery replaces.
+Pinned input reservations live in the job journal and are not stored in the box
+or transaction rows discovery rebuilds.
 
 The scan saves durable checkpoints every 1,024 boxes or 8 MiB of staged matched
 bytes. Interrupting it leaves the visible wallet unchanged. Rerunning verifies

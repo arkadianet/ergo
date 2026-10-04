@@ -521,7 +521,9 @@ pub enum WalletAdminError {
     #[error("rescan unavailable: {0}")]
     RescanUnavailable(String),
     /// Wallet history is incomplete; only a full replay can restore it.
-    #[error("wallet scan invalidated — run a full rescan (fromHeight=0)")]
+    #[error(
+        "wallet scan invalidated — run wallet-scan-utxo offline or a full rescan (fromHeight=0)"
+    )]
     ScanInvalidated,
     /// Sensitive op disabled by `[wallet] expose_private_keys = false`. Native 403.
     #[error("sensitive operation disabled")]

@@ -431,7 +431,7 @@ async fn pruned_restore_and_discovery_coverage_remain_visible_while_locked() {
     assert!(status.scan_invalidated);
     assert!(matches!(
         status.rescan,
-        ergo_api::wallet::native::dto::RescanStateDto::Required { .. }
+        ergo_api::wallet::native::dto::RescanStateDto::Required { ref detail } if detail.contains("wallet-scan-utxo")
     ));
     assert_eq!(
         admin.status().await.unwrap().error,

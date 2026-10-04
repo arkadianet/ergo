@@ -164,6 +164,11 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
         Err(redb::TableError::TableDoesNotExist(_)) => {}
         Err(e) => return Err(e.into()),
     }
+    if !super::mining_jobs::pending_jobs(&snapshot)?.is_empty() {
+        return Err(StateError::WalletDiscoveryUnavailable(
+            "non-terminal wallet mining jobs require wallet history; finish or cancel them before discovery".into(),
+        ));
+    }
     let key_strings: Vec<_> = pubkeys.iter().map(hex::encode).collect();
     let previous = match snapshot.open_table(JOB) {
         Ok(table) => table
