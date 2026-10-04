@@ -44,12 +44,12 @@ pub(crate) struct ReplayPage {
     params(
         ("channels" = String, Query, description = "Comma-separated WebSocket channel keys; at most 64"),
         ("since" = Option<u64>, Query, description = "Exclusive shared realtime cursor; default 0"),
-        ("limit" = Option<usize>, Query, description = "Page size, 1..1024; default 100"),
+        ("limit" = Option<usize>, Query, minimum = 1, maximum = 1024, description = "Page size, 1..1024; default 100"),
     ),
     responses(
         (status = 200, description = "Bounded realtime history with explicit retention/crash gap and confirmed persistence watermark", body = ReplayPage),
         (status = 400, description = "Invalid channel, limit or future cursor", body = crate::v1::V1Error),
-        (status = 503, description = "Realtime disabled", body = crate::v1::V1Error),
+        (status = 409, description = "Realtime disabled", body = crate::v1::V1Error),
     )
 )]
 pub(crate) async fn replay(
