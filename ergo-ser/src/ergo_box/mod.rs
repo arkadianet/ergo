@@ -385,14 +385,14 @@ impl ErgoBox {
     }
 
     fn remember_received_bytes(&mut self, bytes: &[u8]) {
-        let id = blake2b256(bytes);
         // Canonical boxes need no metadata; their existing structural equality
-        // and cheap candidate representation remain unchanged.
-        if serialize_ergo_box(self).is_ok_and(|canonical| blake2b256(&canonical) == id) {
+        // and cheap candidate representation remain unchanged. Equal bytes have
+        // equal IDs, so only a differing encoding is hashed.
+        if serialize_ergo_box(self).is_ok_and(|canonical| canonical == bytes) {
             return;
         }
         self.candidate.received_box_identity = Some(Box::new(ReceivedBoxIdentity {
-            id,
+            id: blake2b256(bytes),
             value: self.candidate.value,
             creation_height: self.candidate.creation_height,
             tokens: self.candidate.tokens.clone(),
