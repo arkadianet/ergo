@@ -377,22 +377,7 @@ impl NodeReadState for SnapshotReadState {
             // Overlay live starvation/storage alarms onto the immutable snapshot
             // report, so readiness can fail even while snapshot publication froze.
             let status = self.status();
-            let mut probes = control.probes(&self.handle.load(), &status);
-            if status.apply_wedged || status.last_storage_error.is_some() {
-                probes.readiness.ready = false;
-                if !probes
-                    .readiness
-                    .reasons
-                    .iter()
-                    .any(|reason| reason == "runtime_or_storage_fault")
-                {
-                    probes
-                        .readiness
-                        .reasons
-                        .push("runtime_or_storage_fault".into());
-                }
-            }
-            probes
+            control.probes(&self.handle.load(), &status)
         })
     }
 

@@ -25,6 +25,10 @@ applies fail liveness. Readiness tolerates two blocks behind the header tip and
 uses a two-hour default tip-age limit to accommodate normal mainnet block gaps. Headers-only nodes check the header tip
 without requiring a full-block tip. Readiness requires an actual chain tip, so an
 empty devnet is live but unready until it produces blocks.
+Storage faults affect readiness for 60 seconds after the latest state-store
+failure, or indexer failure when `require_indexer = true`. Repeated failures
+renew that window. Best-effort peer-store failures do not affect readiness.
+Historical errors remain visible in status and counters after the window expires.
 
 ```toml
 [api.readiness]

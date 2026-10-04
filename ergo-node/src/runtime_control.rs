@@ -329,7 +329,12 @@ impl RuntimeControl {
             }
             _ => {}
         }
-        if status.apply_wedged || status.last_storage_error.is_some() {
+        if status.apply_wedged
+            || ergo_state::storage_observability::active_storage_fault(
+                unix_ms,
+                live.policy.require_indexer,
+            )
+        {
             readiness.reasons.push("runtime_or_storage_fault".into());
         }
         let height = if self.headers_only {

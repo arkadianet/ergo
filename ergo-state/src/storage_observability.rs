@@ -24,7 +24,42 @@ const DEFAULT_FAILURE_CAPACITY: usize = 128;
 // aggregated at the node layer alongside these two.
 static STATE_STORAGE_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INDEXER_STORAGE_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
-static LAST_STORAGE_ERROR: Mutex<Option<(u64, String)>> = Mutex::new(None);
+static LAST_STORAGE_ERRORS: Mutex<StorageFaults> = Mutex::new(StorageFaults {
+    state: None,
+    indexer: None,
+});
+
+const ACTIVE_STORAGE_FAULT_MS: u64 = 60_000;
+
+struct StorageFaults {
+    state: Option<(u64, String)>,
+    indexer: Option<(u64, String)>,
+}
+
+impl StorageFaults {
+    fn active(&self, now_ms: u64, require_indexer: bool) -> bool {
+        [
+            &self.state,
+            if require_indexer {
+                &self.indexer
+            } else {
+                &None
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .any(|(ts, _)| now_ms.saturating_sub(*ts) < ACTIVE_STORAGE_FAULT_MS)
+    }
+}
+
+/// Readiness faults expire after a minute without another failure. Peer-store
+/// failures are best-effort diagnostics; indexer faults matter only if required.
+pub fn active_storage_fault(now_ms: u64, require_indexer: bool) -> bool {
+    LAST_STORAGE_ERRORS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .active(now_ms, require_indexer)
+}
 
 /// Bucket a caller's `subsystem` into the coarse `store` label surfaced on
 /// `ergo_node_storage_errors_*_total` and the `storage_error` event. Every
@@ -53,10 +88,14 @@ pub fn storage_error_totals() -> (u64, u64) {
 /// last-error timestamp at the node layer to pick the freshest for
 /// `ApiStatus.last_storage_error`.
 pub fn last_storage_error() -> Option<(u64, String)> {
-    LAST_STORAGE_ERROR
+    let faults = LAST_STORAGE_ERRORS
         .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone()
+        .unwrap_or_else(|poison| poison.into_inner());
+    [&faults.state, &faults.indexer]
+        .into_iter()
+        .flatten()
+        .max_by_key(|(ts, _)| *ts)
+        .cloned()
 }
 
 /// Record one storage-error occurrence for the counter + last-error status
@@ -77,10 +116,39 @@ fn note_storage_error(context: &StorageFailureContext<'_>, error: &(dyn Error + 
     };
     let now_ms = unix_ms(SystemTime::now());
     let message = format!("{store}: {error}");
-    let mut slot = LAST_STORAGE_ERROR
+    let mut faults = LAST_STORAGE_ERRORS
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
+    let slot = if store == "indexer" {
+        &mut faults.indexer
+    } else {
+        &mut faults.state
+    };
     *slot = Some((now_ms, message));
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn readiness_storage_faults_expire_and_respect_required_stores() {
+        let mut faults = StorageFaults {
+            state: None,
+            indexer: Some((1_000, "indexer: full".into())),
+        };
+        assert!(!faults.active(1_000, false));
+        assert!(faults.active(1_000, true));
+        assert!(!faults.active(61_000, true));
+        faults.state = Some((2_000, "state: full".into()));
+        assert!(faults.active(61_000, false));
+        // A newer optional error cannot mask a required state-store failure.
+        faults.indexer = Some((61_000, "indexer: full".into()));
+        assert!(faults.active(61_000, false));
+        assert!(!faults.active(62_000, false));
+        assert!(faults.active(62_000, true));
+        assert!(!faults.active(121_000, true));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
