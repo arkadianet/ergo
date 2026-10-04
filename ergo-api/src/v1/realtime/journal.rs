@@ -312,8 +312,15 @@ impl EventJournal {
     pub fn can_publish(&self, seq: u64) -> bool {
         // This boot epoch is reserved before publishing starts; no persistence
         // error can reduce it. Closure and epoch exhaustion are lifecycle limits.
-        !self.health.closed.load(Ordering::Acquire)
-            && seq < self.health.reserved_next.load(Ordering::Acquire)
+        if self.is_closed() {
+            self.health.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        seq < self.health.reserved_next.load(Ordering::Acquire)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.health.closed.load(Ordering::Acquire)
     }
 
     pub fn enqueue(&self, event: Arc<RealtimeEvent>) {
@@ -711,6 +718,41 @@ mod tests {
         assert_eq!(page.events[0].seq, JOURNAL_QUEUE_CAP as u64 + 1);
         assert_eq!(page.latest_seq, JOURNAL_QUEUE_CAP as u64 + 3);
     }
+    #[tokio::test]
+    async fn late_cleanup_observations_are_quiet_and_counted_after_close() {
+        struct LogWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let store = Arc::new(MemoryStore::default());
+        let bus = Arc::new(RealtimeBus::durable(classes(), store.clone(), 1).unwrap());
+        bus.publish(body(1));
+        bus.shutdown_journal().await;
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || LogWriter(writer.clone()))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for height in 2..=101 {
+                assert!(bus.try_publish(body(height)).is_none());
+            }
+        });
+        assert_eq!(bus.latest_seq(), 1);
+        assert_eq!(bus.journal_status().unwrap().dropped_events, 100);
+        assert!(output.lock().unwrap().is_empty());
+        assert_eq!(store.load_events().unwrap().next_seq, 2);
+        assert_eq!(store.load_events().unwrap().events.len(), 1);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn shutdown_joins_pending_commits_off_reactor_and_closes_publish_race() {
         let store = Arc::new(GatedStore {

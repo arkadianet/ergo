@@ -199,7 +199,9 @@ REST state even if the page contains useful records.
   boundary is committed. Equal boundaries describe an empty segment. This
   watermark continues advancing after a gap; inspect `gap` for older missing
   intervals and expired retention.
-- `dropped_events`: observations lost by journal admission or failed writes this session.
+- `dropped_events`: observations lost by journal admission or failed writes this session,
+  including late cleanup observations rejected after journal closure. Those
+  lifecycle rejections are counted quietly and receive no cursor.
 - `available`: whether journal persistence is currently operating.
 
 Records above the confirmed boundary can be live-only. When notification

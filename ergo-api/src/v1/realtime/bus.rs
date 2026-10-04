@@ -327,15 +327,13 @@ impl RealtimeBus {
         }
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let seq = g.next_seq;
-        if self
-            .journal
-            .as_ref()
-            .is_some_and(|journal| !journal.can_publish(seq))
-        {
-            tracing::error!(
-                "realtime bus closed or boot cursor epoch exhausted; observation dropped"
-            );
-            return None;
+        if let Some(journal) = &self.journal {
+            if !journal.can_publish(seq) {
+                if !journal.is_closed() {
+                    tracing::error!("realtime boot cursor epoch exhausted; observation dropped");
+                }
+                return None;
+            }
         }
         let Some(next_seq) = g.next_seq.checked_add(1) else {
             tracing::error!("realtime cursor exhausted; event dropped");
