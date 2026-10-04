@@ -97,6 +97,22 @@ fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
+/// Authority a comparison verdict depends on. Rust is identified by its
+/// compiled inputs and compiler configuration only: the full source snapshot,
+/// including the baseline that records keys, stays in the journal as evidence.
+fn comparison_contract(build: &Value, oracle: &Value, scala_cli: &Value) -> Value {
+    json!({
+        "schema": 2,
+        "rust": {
+            "compiled_source_sha256": build["compiled_source_sha256"], "rustc": build["rustc"],
+            "target": build["target"], "profile": build["profile"],
+            "features": build["features"], "encoded_rustflags": build["encoded_rustflags"],
+        },
+        "oracle": stable_oracle(oracle),
+        "scala_cli_sha256": scala_cli["sha256"],
+    })
+}
+
 impl ExecutionMetadata {
     /// Capture actual authority and publish one immutable journal per run.
     /// A failed runtime capture still archives sources with an explicit error.
@@ -116,16 +132,7 @@ impl ExecutionMetadata {
         )))
         .map_err(io::Error::other)?;
         let scala_cli = command_identity()?;
-        let contract = json!({
-            "schema": 1,
-            "rust": {
-                "source_sha256": build["source_sha256"], "rustc": build["rustc"],
-                "target": build["target"], "profile": build["profile"],
-                "features": build["features"], "encoded_rustflags": build["encoded_rustflags"],
-            },
-            "oracle": stable_oracle(&source),
-            "scala_cli_sha256": scala_cli["sha256"],
-        });
+        let contract = comparison_contract(&build, &source, &scala_cli);
         let metadata = storage::canonical(&json!({
             "schema": 1, "build": build,
             "executable": executable_identity(&std::env::current_exe()?)?,
@@ -237,6 +244,45 @@ mod tests {
         moved = first.clone();
         moved["source_sha256"] = "changed".into();
         assert_ne!(stable_oracle(&first), stable_oracle(&moved));
+    }
+
+    #[test]
+    fn baseline_key_binds_compiled_source_not_the_whole_snapshot() {
+        let record = DivergenceRecord {
+            surface: "reduce".into(),
+            kind: "Canonical".into(),
+            input_hex: "0008d3".into(),
+            rust: crate::regressions::VerdictInfo {
+                verdict: "Accept".into(),
+                detail: "fixture-a".into(),
+            },
+            jvm: crate::regressions::VerdictInfo {
+                verdict: "Accept".into(),
+                detail: "fixture-b".into(),
+            },
+            repro: String::new(),
+            seed: None,
+            minimized: true,
+            processing_error: None,
+            execution: None,
+            provenance: "structured-gen".into(),
+            triage: "PENDING".into(),
+        };
+        let build = json!({
+            "source_sha256": "snapshot", "compiled_source_sha256": "compiled",
+            "rustc": "fixture", "target": "fixture", "profile": "release",
+            "features": [], "encoded_rustflags": null,
+        });
+        let key = |build: &Value| {
+            let contract = comparison_contract(build, &json!({}), &json!({}));
+            baseline_key(&record, &contract).unwrap()
+        };
+        // Recording a key in the baseline changes the snapshot, not the key.
+        let mut edited = build.clone();
+        edited["source_sha256"] = "baseline recorded".into();
+        assert_eq!(key(&build), key(&edited));
+        edited["compiled_source_sha256"] = "compiled source changed".into();
+        assert_ne!(key(&build), key(&edited));
     }
 
     // ----- error paths -----

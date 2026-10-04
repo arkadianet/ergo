@@ -42,7 +42,7 @@ is excluded from root stable builds.
 | `minimize.rs` | Predicate-preserving shrinking and final re-verification |
 | `regressions.rs` | Original/minimized record construction; unexplained differences remain Pending |
 | `regressions/storage.rs` | Full-record SHA256 identity, immutable publication, filing lock and derived queue |
-| `execution_metadata.rs`, `build.rs` | Build-time source/compiler observation, running executable hash, exact reference source archive and immutable execution journal |
+| `execution_metadata.rs`, `build.rs`, `source_inventory.rs` | Build-time source/compiler observation (baseline keys bind compiled inputs only), running executable hash, exact reference source archive and immutable execution journal |
 | `fuzz.rs` | Stable codec `fuzz_one` wrapper; Bug becomes an outer panic |
 | `network_fuzz.rs` | Production P2P codecs and a bounded delivery-tracker model |
 | `execution_fuzz.rs` | Bounded compiler-source and evaluator checks |

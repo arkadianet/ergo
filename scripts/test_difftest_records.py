@@ -28,10 +28,14 @@ class RecordIntegrityTests(unittest.TestCase):
                       "properties": {"java.runtime.version": "unit-test", "java.vm.name": "fixture",
                                      "java.vendor": "fixture"},
                       "resolved_jars": [{"name": "fixture.jar", "sha256": "a" * 64}]}}
-        files = [{"path": "source.rs", "bytes": 1, "sha256": "b" * 64}]
-        build = {"files": files, "source_sha256": RECORDS.digest(files), "rustc": "fixture",
+        files = [{"path": "ergo-difftest/known_bugs/baseline.toml", "bytes": 1, "sha256": "a" * 64},
+                 {"path": "ergo-difftest/src/lib.rs", "bytes": 1, "sha256": "b" * 64}]
+        build = {"files": files, "source_sha256": RECORDS.digest(files),
+                 "compiled_source_sha256": RECORDS.digest(files[1:]), "rustc": "fixture",
                  "target": "fixture", "profile": "test", "features": [], "encoded_rustflags": None}
-        contract = {"schema": 1, "rust": {name: value for name, value in build.items() if name != "files"},
+        contract = {"schema": 2,
+                    "rust": {name: value for name, value in build.items()
+                             if name not in ("files", "source_sha256")},
                     "oracle": RECORDS.stable_oracle(oracle), "scala_cli_sha256": "c" * 64}
         self.journal = {"build": build, "oracle": oracle, "comparison_contract": contract,
                         "scala_cli_executable": {"sha256": "c" * 64},
@@ -85,6 +89,29 @@ class RecordIntegrityTests(unittest.TestCase):
         self.record["execution"]["comparison_contract"]["rust"]["profile"] = "release"
         with self.assertRaisesRegex(ValueError, "comparison contract mismatch"):
             RECORDS.validate_record(self.write_record(), self.root, "reduce")
+
+    def test_compiled_input_rule_matches_the_rust_case_table(self):
+        table = Path(__file__).resolve().parents[1] / "ergo-difftest/tests/compiled-inputs.json"
+        for path, compiled in json.loads(table.read_text()):
+            self.assertEqual(RECORDS.compiled_input(path), compiled, path)
+
+    def test_recording_a_baseline_entry_keeps_the_key_it_records(self):
+        key = RECORDS.validate_record(self.path, self.root, "reduce")
+        # Writing the key into baseline.toml changes the snapshot and journal.
+        build = self.journal["build"]
+        build["files"][0]["sha256"] = "d" * 64
+        build["source_sha256"] = RECORDS.digest(build["files"])
+        self.identity = RECORDS.digest(self.journal)
+        self.write_journal()
+        self.record["execution"]["metadata"] = f"runs/{self.identity}.json"
+        self.record["execution"]["metadata_sha256"] = self.identity
+        self.assertEqual(RECORDS.validate_record(self.write_record(), self.root, "reduce"), key)
+
+    def test_compiled_identity_must_cover_exactly_the_compiled_rows(self):
+        self.journal["build"]["compiled_source_sha256"] = self.journal["build"]["source_sha256"]
+        identity = RECORDS.digest(self.journal)
+        with self.assertRaisesRegex(ValueError, "compiled Rust input identity"):
+            RECORDS.validate_journal(self.journal, self.root, identity)
 
     def test_changed_journal_bytes_are_refused(self):
         self.journal["build"]["rustc"] = "changed"

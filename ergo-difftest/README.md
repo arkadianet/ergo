@@ -220,7 +220,11 @@ matching `(PR|issue) #<number>`. The semantic digest includes surface, kind,
 input, both verdicts, compiled-source/compiler configuration, archived oracle
 sources, executing JVM/JAR identities, and the surface/context policy. Seed,
 iteration and temporary paths remain in the evidence without changing this
-comparison key. Historical 16-character input keys remain visible as stale
+comparison key. Compiled source is the workspace manifest, lockfile and
+toolchain pin plus each crate's manifest, build script and `src/` tree. Editing
+this baseline, records, docs, scripts or test vectors keeps every key; any
+compiled-source change gives new keys. The journal still records the whole
+source snapshot. Historical 16-character input keys remain visible as stale
 entries and cannot mute a comparison under unbound authority.
 
 The separate record filename hashes the complete canonical JSON, so different

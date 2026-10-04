@@ -29,6 +29,16 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
 
 
+def compiled_input(path):
+    """Mirror `is_compiled_input` in ergo-difftest/src/source_inventory.rs."""
+    parts = path.split("/")
+    if len(parts) == 1:
+        return parts[0] in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
+    if not parts[0].startswith("ergo-"):
+        return False
+    return parts[1] == "src" or (len(parts) == 2 and parts[1] in ("Cargo.toml", "build.rs"))
+
+
 def stable_oracle(source):
     runtime = source.get("actual_runtime", {})
     properties = runtime.get("properties", {})
@@ -68,10 +78,13 @@ def validate_journal(journal, root, identity):
     build = journal["build"]
     if digest(build["files"]) != build["source_sha256"]:
         raise ValueError("compiled source snapshot identity mismatch")
+    # Keys bind compiled inputs only; the whole snapshot includes the baseline.
+    if digest([row for row in build["files"] if compiled_input(row["path"])]) != build["compiled_source_sha256"]:
+        raise ValueError("compiled Rust input identity mismatch")
     expected_contract = {
-        "schema": 1,
-        "rust": {name: build[name] for name in ("source_sha256", "rustc", "target", "profile",
-                                                "features", "encoded_rustflags")},
+        "schema": 2,
+        "rust": {name: build[name] for name in ("compiled_source_sha256", "rustc", "target",
+                                                "profile", "features", "encoded_rustflags")},
         "oracle": stable_oracle(journal["oracle"]),
         "scala_cli_sha256": journal["scala_cli_executable"].get("sha256"),
     }

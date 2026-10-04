@@ -30,6 +30,9 @@ pub mod network_fuzz;
 pub mod oracle;
 pub mod regressions;
 pub mod rng;
+// Compiled by build.rs; the crate builds it only to test that inventory.
+#[cfg(test)]
+mod source_inventory;
 pub mod surfaces;
 
 use rng::Rng;
