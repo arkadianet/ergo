@@ -107,7 +107,10 @@ The checked-in Scala 6.0.6 fixture contains genuinely signed, miner-key-sensitiv
 zero-fee transactions and a dependent child, rejection verdicts, original JSON,
 and upcoming-transaction proofs. The node HTTP test submits that package,
 verifies proof/preimage binding, mines and applies it, checks solo fallback and
-stale rejection, and repeats with the AVL base cache enabled. Appkit 6.0.1,
+stale rejection, and repeats with the AVL base cache enabled. A second HTTP
+test signs a spend with context-extension keys in order `5, 3, 8`, checks that
+sorting breaks its signature, and verifies the same order and proof bytes in
+the applied block with either cache mode. Appkit 6.0.1,
 matching the cloned Lithos client, independently unlocks Rust-generated and
 exported keystores. Reproduction tools are in
 [`scripts/jvm_mining_request_oracle`](../scripts/jvm_mining_request_oracle/README.md)

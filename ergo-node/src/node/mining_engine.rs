@@ -92,6 +92,14 @@ use ergo_validation::UtxoView;
 use tokio::sync::{oneshot, watch};
 use tracing::{debug, error, info, warn};
 
+#[cfg(test)]
+type RequestedCancelHook = Box<dyn FnMut([u8; 33])>;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static REQUESTED_CANCEL_HOOK: std::cell::RefCell<Option<RequestedCancelHook>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Storage-rent period in blocks (≈ 4 years). Non-votable protocol
 /// constant; mirrors `ergo-validation`'s `storage_period`. A box is
 /// rent-eligible at height `H` when its `creationHeight <= H - this`.
@@ -429,6 +437,14 @@ pub(super) fn run_build_worker(
         let mut attempts = 0;
         let result = loop {
             let caller_cancelled = || {
+                #[cfg(test)]
+                if matches!(&reply, BuildReply::Requested { .. }) {
+                    REQUESTED_CANCEL_HOOK.with_borrow_mut(|hook| {
+                        if let Some(hook) = hook {
+                            hook(intent.miner_pk);
+                        }
+                    });
+                }
                 matches!(&reply,
                 BuildReply::Requested { reply, .. } if reply.is_closed())
             };

@@ -291,3 +291,98 @@ async fn mined_requirement_does_not_stall_the_next_tip() {
         ["required_input_unavailable"]
     );
 }
+
+async fn check_requested_worker_disconnect(before_start: bool) {
+    use crate::node::mining_engine::{run_build_worker, BuildRequest, REQUESTED_CANCEL_HOOK};
+    use ergo_mining::engine::BuildIntent;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, handle) = devnet_node(dir.path());
+    let (parent, height) = sync_handle_to_tip(&state, &handle);
+    let intent = BuildIntent {
+        expected_parent: parent,
+        expected_height: height,
+        mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::empty()),
+        private_transactions: std::sync::Arc::new(vec![]),
+        operator_generation: handle.operator_generation(),
+        operator_owned: true,
+        miner_pk: MINER_PK,
+        reason: BuildReason::Requested,
+    };
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    request_tx
+        .send(BuildRequest::requested(
+            intent.clone(),
+            vec![],
+            vec![],
+            reply,
+            slots.clone().try_acquire_owned().unwrap(),
+        ))
+        .unwrap();
+    let mut response = Some(response);
+    if before_start {
+        response.take();
+    }
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let reader = state.store.as_utxo().unwrap().reader_handle();
+    let worker_handle = handle.clone();
+    let worker = std::thread::spawn(move || {
+        let mut first_check = true;
+        REQUESTED_CANCEL_HOOK.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move |pk| {
+                if pk == MINER_PK && first_check {
+                    first_check = false;
+                    assert!(
+                        !before_start,
+                        "disconnected queued work must not start building"
+                    );
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            }))
+        });
+        run_build_worker(reader, worker_handle, None, false, request_rx);
+    });
+    if !before_start {
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        response.take();
+        release_tx.send(()).unwrap();
+    }
+    // A different key prevents the follow-up from hiding an accidental publish
+    // behind a requested cache hit. Its reply is also a worker-drain barrier.
+    let mut follow_up = intent;
+    follow_up.miner_pk[0] = 3;
+    let (reply, response) = tokio::sync::oneshot::channel();
+    request_tx
+        .send(BuildRequest::requested(
+            follow_up,
+            vec![],
+            vec![],
+            reply,
+            slots.clone().try_acquire_owned().unwrap(),
+        ))
+        .unwrap();
+    drop(request_tx);
+    let result = tokio::time::timeout(Duration::from_secs(10), response)
+        .await
+        .unwrap()
+        .unwrap();
+    worker.join().unwrap();
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(slots.available_permits(), 2);
+    let history = handle.inspect_history();
+    assert_eq!(history.len(), 1, "abandoned work must never publish");
+    assert_ne!(history[0].template.work.pk, MINER_PK);
+}
+
+#[tokio::test]
+async fn requested_worker_disconnect_before_build_releases_permit_without_build() {
+    check_requested_worker_disconnect(true).await;
+}
+
+#[tokio::test]
+async fn requested_worker_disconnect_during_build_cancels_and_releases_permit() {
+    check_requested_worker_disconnect(false).await;
+}

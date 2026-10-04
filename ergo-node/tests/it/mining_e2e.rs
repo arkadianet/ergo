@@ -1732,3 +1732,129 @@ async fn requested_output_tree_versions_are_checked_against_the_v4_chain() {
         handle.shutdown().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn requested_signed_extensions_preserve_order_through_http_and_applied_block() {
+    use ergo_ser::{
+        sigma_type::SigmaType,
+        sigma_value::{SigmaBoolean, SigmaValue},
+    };
+    use ergo_wallet::proving::{
+        hints::HintsBag, node_position::NodePosition, randomness::OsRngBackend,
+        schnorr::prove_schnorr,
+    };
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
+    ))
+    .unwrap();
+    let input = ergo_ser::ergo_box::read_ergo_box(&mut VlqReader::new(
+        &hex::decode(fixture["independent_input_box"].as_str().unwrap()).unwrap(),
+    ))
+    .unwrap();
+    let mut tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(
+        &hex::decode(fixture["transactions"][3].as_str().unwrap()).unwrap(),
+    ))
+    .unwrap();
+    let original_proof = hex::encode(&tx.inputs[0].spending_proof.proof);
+    let mut extension = tx.inputs[0].spending_proof.extension().clone();
+    for key in [5, 3, 8] {
+        extension
+            .values
+            .insert(key, (SigmaType::SInt, SigmaValue::Int(key as i32)));
+    }
+    tx.inputs[0].spending_proof = SpendingProof::new(vec![], extension).unwrap();
+    let pk: [u8; 33] = hex::decode(fixture["miner_pk"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let proposition = SigmaBoolean::ProveDlog(pk.into());
+    let message = ergo_ser::transaction::bytes_to_sign(&tx).unwrap();
+    let proof = prove_schnorr(
+        &proposition,
+        &k256::Scalar::ONE,
+        &message,
+        &HintsBag::empty(),
+        NodePosition::crypto_tree_prefix(),
+        &mut OsRngBackend,
+    )
+    .unwrap();
+    tx.inputs[0].spending_proof.proof = proof.clone();
+    let mut sorted = tx.clone();
+    let mut sorted_extension = sorted.inputs[0].spending_proof.extension().clone();
+    sorted_extension.values.sort_keys();
+    sorted.inputs[0].spending_proof = SpendingProof::new(proof.clone(), sorted_extension).unwrap();
+    assert!(
+        !ergo_sigma::verify::verify_sigma_proof(
+            &proposition,
+            &proof,
+            &ergo_ser::transaction::bytes_to_sign(&sorted).unwrap()
+        )
+        .unwrap(),
+        "the signature discriminates sorted extensions"
+    );
+    let body = format!(
+        "[{}]",
+        fixture["transactions_json"][3]
+            .as_str()
+            .unwrap()
+            .replace(&original_proof, &hex::encode(&proof))
+            .replace(
+                "\"extension\":{}",
+                "\"extension\":{\"5\":\"040a\",\"3\":\"0406\",\"8\":\"0410\"}"
+            )
+    );
+    let id = ergo_ser::transaction::transaction_id(&tx).unwrap();
+    for cache_enabled in [false, true] {
+        let (_dir, handle, _) = boot_synced_mining_node_with_packages(
+            cache_enabled,
+            std::slice::from_ref(&input),
+            true,
+        )
+        .await;
+        let addr = handle.api_addr.unwrap();
+        poll_candidate(addr).await;
+        let response = http_request(addr, "POST", "/mining/candidateWithTxs", Some(&body)).await;
+        assert_eq!(response.status, 200, "{}", response.body);
+        let work: ergo_rest_json::mining::WorkMessageJson =
+            serde_json::from_str(&response.body).unwrap();
+        assert_eq!(
+            work.proof.as_ref().unwrap().tx_proofs[0].leaf,
+            hex::encode(id.as_bytes())
+        );
+        let nonce = solve(&msg_bytes(&work), CANDIDATE_HEIGHT, &work.b);
+        let solution = format!(r#"{{"n":"{}"}}"#, hex::encode(nonce));
+        let response = http_request(addr, "POST", "/mining/solution", Some(&solution)).await;
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert!(poll_best_full_height(&handle, CANDIDATE_HEIGHT).await);
+        let block_id = handle.read.tip().best_full_block.header_id;
+        let block = http_request(
+            addr,
+            "GET",
+            &format!("/blocks/{block_id}/transactions"),
+            None,
+        )
+        .await;
+        assert_eq!(block.status, 200, "{}", block.body);
+        let block: ergo_rest_json::ScalaBlockTransactions =
+            serde_json::from_str(&block.body).unwrap();
+        let included = block
+            .transactions
+            .iter()
+            .find(|tx| tx.id == hex::encode(id.as_bytes()))
+            .unwrap();
+        assert_eq!(
+            included.inputs[0]
+                .spending_proof
+                .extension
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["5", "3", "8"]
+        );
+        assert_eq!(
+            included.inputs[0].spending_proof.proof_bytes,
+            hex::encode(&proof)
+        );
+        handle.shutdown().await.unwrap();
+    }
+}

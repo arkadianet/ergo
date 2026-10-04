@@ -2212,12 +2212,13 @@ mod tests {
         header.version = 4;
         header.n_bits = 16_842_752;
         let spendable = genesis_era_box(u16::MAX);
+        let private_box = genesis_era_box(u16::MAX - 1);
         let view = RentView {
             stub: ExhaustedView { header },
-            utxo: std::collections::HashMap::from([(
-                spendable.box_id().unwrap(),
-                spendable.clone(),
-            )]),
+            utxo: std::collections::HashMap::from([
+                (spendable.box_id().unwrap(), spendable.clone()),
+                (private_box.box_id().unwrap(), private_box.clone()),
+            ]),
         };
         let parent = Transaction {
             inputs: vec![ergo_ser::input::Input {
@@ -2240,6 +2241,27 @@ mod tests {
         let mut child = parent.clone();
         child.inputs[0].box_id = created.box_id().unwrap();
         let child_id = ergo_ser::transaction::transaction_id(&child).unwrap();
+        let mut private_tx = parent.clone();
+        private_tx.inputs[0].box_id = private_box.box_id().unwrap();
+        private_tx.output_candidates = vec![private_box.candidate.clone()];
+        let private_id = Digest32::from_bytes(
+            *ergo_ser::transaction::transaction_id(&private_tx)
+                .unwrap()
+                .as_bytes(),
+        );
+        let private_bytes = serialize_tx(&private_tx, "test").unwrap();
+        let private_entry = ergo_mempool::pool::Entry::new(
+            private_id,
+            private_bytes.clone().into(),
+            vec![private_box.box_id().unwrap()],
+            vec![],
+            vec![],
+            0,
+            0,
+            private_bytes.len() as u32,
+            0,
+            ergo_mempool::types::TxSource::Api,
+        );
         let policy = BlockPolicy {
             rent_max_cost_basis_points: 10_000,
             rent_max_size_basis_points: 10_000,
@@ -2249,7 +2271,8 @@ mod tests {
         };
         let mut rent_boxes: Vec<_> = (0..600).map(genesis_era_box).collect();
         rent_boxes.insert(0, spendable);
-        let (candidate, work, _) = generate_candidate_with_transactions_cancellable(
+        rent_boxes.insert(0, private_box);
+        let (mut candidate, work, _) = generate_candidate_with_transactions_cancellable(
             &view,
             ergo_chain_spec::Network::Mainnet,
             BuildMode::Full,
@@ -2265,7 +2288,7 @@ mod tests {
             &VotingSettings::mainnet(),
             &[],
             &mut vec![],
-            &[],
+            &[private_entry],
             &policy,
             7,
             9,
@@ -2281,7 +2304,7 @@ mod tests {
                 .iter()
                 .map(|t| t.category)
                 .collect::<Vec<_>>(),
-            ["requested", "requested", "rent"]
+            ["requested", "requested", "rent", "private"]
         );
         assert!(
             candidate.observation.excluded.is_empty(),
@@ -2306,8 +2329,48 @@ mod tests {
         assert!(reader.is_empty());
         assert_eq!(candidate.header.version, 4);
         assert_eq!(parsed.transactions, candidate.transactions);
-        assert_eq!(work.proof.unwrap().tx_proofs.len(), 2);
-        assert_eq!(work.metrics.selected_transaction_count, 0);
+        assert_eq!(work.proof.as_ref().unwrap().tx_proofs.len(), 2);
+        assert_eq!(work.metrics.selected_transaction_count, 1);
+        assert_eq!(
+            candidate.observation.transactions.len(),
+            candidate.transactions.len()
+        );
+        // A missing requested observation shifts the private category onto rent,
+        // defeating the cancellation/expiry withdrawal guard.
+        candidate.observation.policy_revision = 0;
+        candidate.observation.operator_generation = 0;
+        candidate.observation.operator_owned = true;
+        let handle = crate::handle::MiningHandle::mainnet(RENT_MINER_PK);
+        let parent = candidate.parent_id;
+        handle.set_best_tip(crate::engine::BestTip {
+            parent_id: parent,
+            chain_seq: 1,
+            synced: true,
+        });
+        let identity = handle
+            .publish_if_current(
+                candidate,
+                work,
+                &parent,
+                || 1,
+                crate::engine::BuildReason::Requested,
+            )
+            .unwrap();
+        let retained = handle
+            .inspect_template(None, Some(identity.template_seq))
+            .unwrap();
+        assert_eq!(retained.template.private_transaction_ids(), [private_id]);
+        assert_eq!(
+            handle.withdraw_private_transactions(&HashSet::from([private_id]), true),
+            1
+        );
+        assert_eq!(
+            handle
+                .inspect_template(None, Some(identity.template_seq))
+                .unwrap()
+                .status,
+            "withdrawn"
+        );
     }
 
     #[test]
