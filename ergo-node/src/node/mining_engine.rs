@@ -533,7 +533,7 @@ pub(super) fn run_build_worker(
                 use ergo_api::MiningApiError;
                 let result = match result {
                     Ok(BuildOutcome::Published { template_seq, .. }) => handle
-                        .cached_requested_template_if_synced(template_seq)
+                        .cached_requested_template_if_synced(template_seq, now_ms())
                         .map(|(work, identity)| {
                             crate::mining_bridge::work_message_to_json(
                                 work,
