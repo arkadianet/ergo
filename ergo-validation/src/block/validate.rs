@@ -263,7 +263,7 @@ pub fn validate_full_block_with_costs(
         pre_header_votes: header.votes,
     };
 
-    let mut overlay = BlockUtxoOverlay::new(ctx.utxo);
+    let mut overlay = BlockUtxoOverlay::new(ctx.utxo, txs);
     let mut checked_txs = Vec::with_capacity(txs.len());
     let mut total_block_cost: u64 = 0;
 
@@ -296,9 +296,9 @@ pub fn validate_full_block_with_costs(
             .collect::<Result<_, _>>()?;
 
         // Resolve data inputs through `BlockUtxoOverlay::get_box_from_base`,
-        // which returns the union of pre-block UTXO + intra-block creates
-        // without filtering on `spent_in_block`. See the helper's rustdoc
-        // for the mainnet oracle evidence (blocks 290684 + 422179).
+        // which returns the union of pre-block UTXO + every output of the
+        // block without filtering on `spent_in_block`. See the helper's
+        // rustdoc for the Scala rule and mainnet oracle evidence.
         let resolved_data_inputs: Vec<ErgoBox> = tx
             .data_inputs
             .iter()
@@ -345,7 +345,7 @@ pub fn validate_full_block_with_costs(
 
         costs.push((i, cost.total_block_cost()));
         total_block_cost += cost.total_block_cost();
-        overlay.apply_tx(checked.transaction());
+        overlay.apply_tx(i, checked.transaction());
         checked_txs.push(checked);
     }
 
@@ -376,10 +376,13 @@ pub fn validate_full_block_with_costs(
 /// layer's script failures. Within the parallel validation results, the lowest
 /// failing index in the current layer wins. Double spends are rejected up front.
 ///
-/// This scheduling contract does not establish whole-block reference parity for
-/// forward dependencies. In particular the UTXO base and digest view expose
-/// different sets of same-block outputs; a forward data read needs independent
-/// whole-block compatibility evidence before acceptance semantics are changed.
+/// Data inputs resolve against every output of the block, independent of
+/// layering, as in the sequential path and Scala's `createdOutputs`; a data
+/// input naming a later transaction's output is valid. Regular inputs see
+/// only outputs committed by lower layers. A forward spend that resolves
+/// because its producer happens to sit in a lower layer is still rejected
+/// when the block's removals apply before that insertion, as in Scala's
+/// ordered `boxChanges`.
 fn validate_full_block_parallel_impl(
     checked_header: CheckedHeader,
     block_transactions: &BlockTransactions,
@@ -545,7 +548,7 @@ fn validate_full_block_parallel_impl(
         pre_header_votes: header.votes,
     };
 
-    let mut overlay = BlockUtxoOverlay::new(ctx.utxo);
+    let mut overlay = BlockUtxoOverlay::new(ctx.utxo, txs);
     let mut checked_slots: Vec<Option<CheckedTransaction>> = (0..txs.len()).map(|_| None).collect();
     let mut total_block_cost: u64 = 0;
 
@@ -677,7 +680,7 @@ fn validate_full_block_parallel_impl(
         // sequential path's commit order.
         for (i, checked, tx_cost) in successes {
             total_block_cost += tx_cost;
-            overlay.apply_tx(checked.transaction());
+            overlay.apply_tx(i, checked.transaction());
             checked_slots[i] = Some(checked);
             if let Some(ref mut v) = costs_out {
                 v.push((i, tx_cost));
