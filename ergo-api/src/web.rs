@@ -66,6 +66,7 @@ pub const JS_MEMPOOL: &str = include_str!("../web/js/mempool.js");
 pub const JS_VOTING: &str = include_str!("../web/js/voting.js");
 pub const JS_WALLET: &str = include_str!("../web/js/wallet.js");
 pub const JS_WALLET_PRIVATE: &str = include_str!("../web/js/wallet-private.js");
+pub const JS_WALLET_MAINTENANCE: &str = include_str!("../web/js/wallet-maintenance.js");
 pub const JS_WALLET_BUILDER: &str = include_str!("../web/js/wallet-builder.js");
 pub const JS_WALLET_TRANSACTION: &str = include_str!("../web/js/wallet-transaction.js");
 pub const JS_MINERS: &str = include_str!("../web/js/miners.js");

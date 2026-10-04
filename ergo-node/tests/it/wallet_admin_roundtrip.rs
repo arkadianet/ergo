@@ -1845,3 +1845,52 @@ async fn native_signed_private_delivery_preserves_bytes_without_wallet_unlock_or
     }
     assert_eq!(submitter.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+/// The real writer refuses to journal an approval while the wallet is locked:
+/// an approved job later signs with the wallet key, like an intent send. A node
+/// without private mining refuses it too, since the job could never run.
+#[tokio::test]
+async fn mining_job_approval_requires_an_unlocked_wallet_and_private_mining() {
+    use ergo_api::wallet::native::dto::{WalletJobRequest, WalletJobTask};
+    use ergo_state::wallet::tables::WALLET_BOXES;
+    use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
+    let (admin, db, _dir) = spawn_writer(Arc::new(StubTxSubmitter));
+    admin.init("pw".into(), String::new(), 24).await.unwrap();
+    let owned = WalletBox {
+        box_id: [0xA0; 32],
+        creation_tx_id: [0xB0; 32],
+        creation_output_index: 0,
+        creation_height: 100,
+        value: 1_000_000,
+        assets: vec![([0xC0; 32], 42)],
+        status: BoxStatus::Confirmed,
+        provenance: BoxProvenance::Owned,
+    };
+    let write = db.begin_write().unwrap();
+    write
+        .open_table(WALLET_BOXES)
+        .unwrap()
+        .insert(owned.box_id, bincode::serialize(&owned).unwrap())
+        .unwrap();
+    write.commit().unwrap();
+    let request = WalletJobRequest {
+        label: "approved renewal".into(),
+        task: WalletJobTask::Renew {
+            box_ids: vec![hex::encode(owned.box_id)],
+        },
+        not_before_height: 201,
+        expires_at_height: 921,
+        max_attempts: 2,
+    };
+    assert!(admin.native_status().await.unwrap().locked);
+    assert!(matches!(
+        admin.create_mining_job(request.clone()).await,
+        Err(WalletAdminError::Locked)
+    ));
+    admin.unlock("pw".into()).await.unwrap();
+    assert!(matches!(
+        admin.create_mining_job(request).await,
+        Err(WalletAdminError::BadRequest(detail)) if detail.contains("private mining")
+    ));
+    assert!(admin.mining_jobs().await.unwrap().items.is_empty());
+}

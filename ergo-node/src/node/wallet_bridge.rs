@@ -29,6 +29,7 @@ use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
 
 pub mod chain_snapshot;
+mod jobs;
 pub use chain_snapshot::{ChainSnapshot, ChainStateError, ChainTip};
 
 /// Abstracts the chain submit path so the wallet writer can submit a
@@ -47,6 +48,12 @@ pub trait TxSubmitter: Send + Sync {
         &self,
         tx_bytes: Vec<u8>,
     ) -> Result<String, ergo_api::types::SubmitError>;
+    /// Whether this node runs a private mining queue. `false` is definitive for
+    /// the process lifetime, unlike a queue that is temporarily unavailable.
+    fn private_mining_configured(&self) -> bool {
+        false
+    }
+
     /// Submit to the authenticated private mining queue, never public relay.
     async fn submit_private_transaction(
         &self,
@@ -59,15 +66,24 @@ pub trait TxSubmitter: Send + Sync {
         })
     }
 
-    async fn private_transaction_status(
+    /// Read one bounded metadata snapshot for all approved background jobs.
+    async fn private_transactions(
         &self,
-        _tx_id: String,
-    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
-    {
+    ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError> {
         Err(ergo_api::types::SubmitError {
             reason: "private_mining_unavailable".into(),
             detail: None,
         })
+    }
+
+    async fn private_transaction_status(
+        &self,
+        tx_id: String,
+    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
+    {
+        self.private_transactions()
+            .await
+            .map(|items| items.into_iter().find(|entry| entry.tx_id == tx_id))
     }
 
     async fn cancel_private_transaction(
@@ -85,6 +101,10 @@ pub trait TxSubmitter: Send + Sync {
 pub struct NodeSubmitAdapter {
     inner: Arc<dyn ergo_api::traits::NodeSubmit>,
     mining: Option<Arc<dyn ergo_api::NodeMining>>,
+    /// The private queue a node with mining disabled still loads from disk.
+    /// Nothing mines, reconciles or expires it then, so its records are read
+    /// and withdrawn here directly; with mining enabled the bridge owns it.
+    stored_queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
 }
 
 impl NodeSubmitAdapter {
@@ -92,10 +112,20 @@ impl NodeSubmitAdapter {
         Self {
             inner,
             mining: None,
+            stored_queue: None,
         }
     }
     pub fn with_private_mining(mut self, mining: Option<Arc<dyn ergo_api::NodeMining>>) -> Self {
         self.mining = mining;
+        self
+    }
+    /// The private queue loaded at boot, consulted only while mining is
+    /// disabled.
+    pub fn with_stored_private_queue(
+        mut self,
+        queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
+    ) -> Self {
+        self.stored_queue = queue;
         self
     }
 }
@@ -111,6 +141,9 @@ impl TxSubmitter for NodeSubmitAdapter {
         self.inner
             .submit_transaction(tx_bytes, SubmitMode::Broadcast)
             .await
+    }
+    fn private_mining_configured(&self) -> bool {
+        self.mining.is_some()
     }
     async fn submit_private_transaction(
         &self,
@@ -128,35 +161,61 @@ impl TxSubmitter for NodeSubmitAdapter {
             .map_err(private_mining_submit_error)
     }
 
-    async fn private_transaction_status(
+    async fn private_transactions(
         &self,
-        tx_id: String,
-    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
-    {
-        let mining = self
-            .mining
+    ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError> {
+        if let Some(mining) = &self.mining {
+            return mining
+                .private_transactions()
+                .await
+                .map_err(private_mining_submit_error);
+        }
+        // Mining is disabled, but a stored queue still holds work admitted
+        // earlier, which enabling mining would mine.
+        let queue = self
+            .stored_queue
             .as_ref()
             .ok_or_else(private_mining_unavailable)?;
-        mining
-            .private_transactions()
-            .await
-            .map(|items| items.into_iter().find(|entry| entry.tx_id == tx_id))
-            .map_err(private_mining_submit_error)
+        Ok(queue
+            .list()
+            .into_iter()
+            .map(|entry| super::private_mining::api_entry(entry, false))
+            .collect())
     }
 
     async fn cancel_private_transaction(
         &self,
         tx_id: String,
     ) -> Result<(), ergo_api::types::SubmitError> {
-        let mining = self
-            .mining
+        if let Some(mining) = &self.mining {
+            return mining
+                .cancel_private_transaction(tx_id)
+                .await
+                .map(|_| ())
+                .map_err(private_mining_submit_error);
+        }
+        // Nothing else changes the stored queue while mining is disabled, so
+        // the withdrawal is written there directly. Public admission keeps
+        // declining the id until the next start.
+        let queue = self
+            .stored_queue
             .as_ref()
             .ok_or_else(private_mining_unavailable)?;
-        mining
-            .cancel_private_transaction(tx_id)
-            .await
-            .map(|_| ())
-            .map_err(private_mining_submit_error)
+        let cancelled = queue.cancel(&tx_id).map(|_| ()).map_err(|error| {
+            let reason = match error {
+                ergo_mining::private_queue::PrivateQueueError::Rejected(_) => {
+                    "private_transaction_rejected"
+                }
+                ergo_mining::private_queue::PrivateQueueError::Storage(_) => "private_mining_error",
+            };
+            ergo_api::types::SubmitError {
+                reason: reason.into(),
+                detail: Some(error.to_string()),
+            }
+        });
+        // No action-loop lifecycle runs while mining is disabled to log it.
+        super::private_mining::log_unsynced(queue);
+        cancelled
     }
 }
 
@@ -182,6 +241,18 @@ fn private_mining_submit_error(error: ergo_api::MiningApiError) -> ergo_api::typ
 
 /// Command sent from the API task to the wallet writer task.
 pub enum WalletCommand {
+    MiningJobs {
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJobs, WalletAdminError>>,
+    },
+    CreateMiningJob {
+        request: ergo_api::wallet::native::dto::WalletJobRequest,
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError>>,
+    },
+    CancelMiningJob {
+        job_id: String,
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError>>,
+    },
+
     Status {
         reply: oneshot::Sender<Result<WalletStatus, WalletAdminError>>,
     },
@@ -476,6 +547,29 @@ impl NodeWalletAdmin {
 
 #[async_trait]
 impl WalletAdmin for NodeWalletAdmin {
+    async fn mining_jobs(
+        &self,
+    ) -> Result<ergo_api::wallet::native::dto::WalletJobs, WalletAdminError> {
+        self.send_cmd(|reply| WalletCommand::MiningJobs { reply })
+            .await
+    }
+
+    async fn create_mining_job(
+        &self,
+        request: ergo_api::wallet::native::dto::WalletJobRequest,
+    ) -> Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::CreateMiningJob { request, reply })
+            .await
+    }
+
+    async fn cancel_mining_job(
+        &self,
+        job_id: String,
+    ) -> Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::CancelMiningJob { job_id, reply })
+            .await
+    }
+
     async fn status(&self) -> Result<WalletStatus, WalletAdminError> {
         self.send_cmd(|reply| WalletCommand::Status { reply }).await
     }
@@ -886,8 +980,10 @@ impl WalletAdmin for NodeWalletAdmin {
 /// in `/wallet/restore`, (c) block fetch during `/wallet/rescan`,
 /// and (d) signing-context + UTXO lookup for send routes.
 pub trait ChainStateAccessor: Send + Sync {
-    fn reserved_wallet_inputs(&self) -> std::collections::BTreeSet<[u8; 32]> {
-        std::collections::BTreeSet::new()
+    fn reserved_wallet_inputs(
+        &self,
+    ) -> Result<std::collections::BTreeSet<[u8; 32]>, WalletAdminError> {
+        Ok(std::collections::BTreeSet::new())
     }
 
     /// Current `WALLET_SCAN_HEIGHT` — populates `walletHeight`.
@@ -1032,11 +1128,14 @@ impl ChainStateAccessorImpl {
 }
 
 impl ChainStateAccessor for ChainStateAccessorImpl {
-    fn reserved_wallet_inputs(&self) -> std::collections::BTreeSet<[u8; 32]> {
-        self.private_queue
-            .as_ref()
-            .map(|queue| queue.reserved_inputs())
-            .unwrap_or_default()
+    fn reserved_wallet_inputs(
+        &self,
+    ) -> Result<std::collections::BTreeSet<[u8; 32]>, WalletAdminError> {
+        let mut reserved = jobs::reserved_inputs(&self.db)?;
+        if let Some(queue) = &self.private_queue {
+            reserved.extend(queue.reserved_inputs());
+        }
+        Ok(reserved)
     }
 
     fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
@@ -1387,7 +1486,13 @@ pub async fn run_wallet_writer_supervised(
     // `commands::admin::AttemptLimiter`.
     let unlock_limiter = commands::admin::AttemptLimiter::new();
     let check_limiter = commands::admin::AttemptLimiter::new();
-    let mut failure = None;
+    let mut failure = jobs::recover_preparing(&db).err();
+    if failure.is_some() {
+        rescan.stop();
+        rx.close();
+    }
+    let mut jobs_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    jobs_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         if rescan.stopping() || *shutdown.borrow() {
             break;
@@ -1413,11 +1518,32 @@ pub async fn run_wallet_writer_supervised(
             biased;
             _ = shutdown.changed() => { rescan.stop(); rx.close(); break; },
             command = rx.recv() => match command { Some(command) => command, None => break },
+            // A failing job is recorded on that job; only a job journal that
+            // cannot be read or written stops the writer.
+            _ = jobs_tick.tick() => {
+                if let Err(error) = jobs::tick(&ctx).await {
+                    tracing::error!(%error, "wallet mining job journal failure");
+                    failure.get_or_insert(error);
+                    rescan.stop();
+                    rx.close();
+                    break;
+                }
+                continue;
+            },
         };
         let Some(cmd) = scan_guard::gate(cmd, store.as_ref()) else {
             continue;
         };
         match cmd {
+            WalletCommand::MiningJobs { reply } => {
+                let _ = reply.send(jobs::list(&db));
+            }
+            WalletCommand::CreateMiningJob { request, reply } => {
+                let _ = reply.send(jobs::create_owned(&ctx, request).await);
+            }
+            WalletCommand::CancelMiningJob { job_id, reply } => {
+                let _ = reply.send(jobs::cancel(&ctx, &job_id).await);
+            }
             WalletCommand::Status { reply } => commands::admin::status(&ctx, reply).await,
             WalletCommand::Init {
                 pass,
@@ -1694,5 +1820,130 @@ mod scan_invalidation_tests {
         let accessor = ChainStateAccessorImpl::new(db, false, None);
         assert!(accessor.tip_height().is_err());
         assert!(accessor.read_block_at(1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod stored_queue_tests {
+    use super::*;
+    use ergo_api::compat::types::ScalaTransactionInput;
+    use ergo_api::types::{SubmitError, SubmitMode};
+    use ergo_mining::private_queue::{PrivateTransactionQueue, PrivateTransactionState};
+    use ergo_primitives::digest::Digest32;
+
+    // ----- helpers -----
+
+    struct NoBroadcast;
+
+    #[async_trait]
+    impl ergo_api::traits::NodeSubmit for NoBroadcast {
+        async fn submit_transaction(
+            &self,
+            _: Vec<u8>,
+            _: SubmitMode,
+        ) -> Result<String, SubmitError> {
+            panic!("private queue access never broadcasts");
+        }
+        async fn submit_transaction_json(
+            &self,
+            _: ScalaTransactionInput,
+            _: SubmitMode,
+        ) -> Result<String, SubmitError> {
+            panic!("private queue access never broadcasts");
+        }
+    }
+
+    /// A queued one-input transaction spending box `[input; 32]`.
+    fn queued_entry(input: u8) -> ergo_mempool::pool::Entry {
+        use ergo_primitives::reader::VlqReader;
+        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+        let tx = ergo_ser::transaction::Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes([input; 32]),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                1_000_000,
+                ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&[0, 8, 0xd3])).unwrap(),
+                100,
+                vec![],
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        let mut writer = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::transaction::write_transaction(&mut writer, &tx).unwrap();
+        let bytes = writer.result();
+        let id = ergo_ser::transaction::transaction_id(&tx).unwrap();
+        ergo_mempool::pool::Entry::new(
+            Digest32::from_bytes(*id.as_bytes()),
+            Arc::from(bytes.clone()),
+            vec![Digest32::from_bytes([input; 32])],
+            vec![],
+            vec![],
+            0,
+            0,
+            bytes.len() as u32,
+            100,
+            ergo_mempool::types::TxSource::Wallet,
+        )
+    }
+
+    // ----- mining disabled -----
+
+    #[tokio::test]
+    async fn a_stored_queue_is_listed_and_withdrawn_while_mining_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private-mining-queue.json");
+        let queue = Arc::new(PrivateTransactionQueue::open(&path).unwrap());
+        let entry = queued_entry(7);
+        queue.admit(&entry, Default::default(), 10, 100).unwrap();
+        let tx_id = hex::encode(entry.tx_id.as_bytes());
+        let adapter = NodeSubmitAdapter::new(Arc::new(NoBroadcast))
+            .with_stored_private_queue(Some(queue.clone()));
+        assert!(
+            !adapter.private_mining_configured(),
+            "nothing new is admitted without mining"
+        );
+
+        let listed = adapter.private_transactions().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].tx_id, tx_id);
+        assert_eq!(listed[0].state, "queued");
+
+        adapter
+            .cancel_private_transaction(tx_id.clone())
+            .await
+            .unwrap();
+        assert!(queue.reserved_inputs().is_empty());
+        let reopened = PrivateTransactionQueue::open(&path).unwrap();
+        assert_eq!(
+            reopened.entry(&tx_id).unwrap().state,
+            PrivateTransactionState::Cancelled,
+            "the withdrawal is durable, so enabling mining cannot mine it"
+        );
+        let unknown = adapter
+            .cancel_private_transaction("ab".repeat(32))
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.reason, "private_transaction_rejected");
+    }
+
+    #[tokio::test]
+    async fn without_any_queue_private_calls_are_unavailable() {
+        let adapter = NodeSubmitAdapter::new(Arc::new(NoBroadcast));
+        assert_eq!(
+            adapter.private_transactions().await.unwrap_err().reason,
+            "private_mining_unavailable"
+        );
+        assert_eq!(
+            adapter
+                .cancel_private_transaction("ab".repeat(32))
+                .await
+                .unwrap_err()
+                .reason,
+            "private_mining_unavailable"
+        );
     }
 }

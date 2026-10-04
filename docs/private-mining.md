@@ -92,8 +92,9 @@ warning about missing confirmation history. Protect and back up
 this file alongside the node's wallet data because it contains signed bytes.
 If the node restarts with mining disabled while this file exists, the queue
 still loads: its inputs stay reserved and its transactions stay out of public
-admission. Nothing in it is mined, confirmed, expired, or cancellable until
-mining is enabled again.
+admission. Nothing in it is mined, confirmed, or expired until mining is
+enabled again, and the operator routes are unavailable; only cancelling a wallet
+maintenance job withdraws that job's transaction from the stored queue.
 
 The queue holds at most 1,024 unfinished (queued or conflicted) transactions
 and 16 MiB of their signed bytes. Finished entries never count against those

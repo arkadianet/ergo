@@ -178,7 +178,7 @@ async fn build_unsigned_tx_with_options(
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
     if let Some(ids) = override_inputs {
-        let reserved = chain.reserved_wallet_inputs();
+        let reserved = chain.reserved_wallet_inputs()?;
         if ids
             .iter()
             .filter_map(|id| hex::decode(id).ok())
@@ -528,7 +528,7 @@ async fn build_unsigned_tx_with_options(
                 .collect()
         };
 
-        let reserved = chain.reserved_wallet_inputs();
+        let reserved = chain.reserved_wallet_inputs()?;
         summaries.retain(|box_summary: &ergo_wallet::box_selector::BoxSummary| {
             !reserved.contains(&box_summary.box_id)
         });
@@ -874,7 +874,7 @@ fn selection_candidates(
     let tip = chain
         .tip_height()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    let reserved = chain.reserved_wallet_inputs();
+    let reserved = chain.reserved_wallet_inputs()?;
     let mut summaries: BTreeMap<[u8; 32], BoxSummary> = boxes
         .into_iter()
         .filter(|record| {

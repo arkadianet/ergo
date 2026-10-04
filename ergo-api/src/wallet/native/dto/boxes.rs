@@ -47,7 +47,11 @@ pub struct WalletBoxSummary {
     pub assets: Vec<WalletAssetDto>,
     pub creation_tx_id: String,
     pub creation_output_index: u16,
+    /// Height of the block that included the creating transaction.
     pub creation_height: u32,
+    /// Creation height the unspent box itself declares, from which storage rent
+    /// is counted; it can precede `creationHeight`. `null` once spent.
+    pub declared_creation_height: Option<u32>,
     pub status: BoxStatusDto,
     pub provenance: BoxProvenanceDto,
 }
@@ -111,6 +115,7 @@ mod tests {
             creation_tx_id: "bb".repeat(32),
             creation_output_index: 2,
             creation_height: 5,
+            declared_creation_height: Some(4),
             status: BoxStatusDto::Confirmed,
             provenance: BoxProvenanceDto::Owned,
         };

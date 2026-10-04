@@ -244,9 +244,10 @@ pub(crate) async fn retrieve_rewards_impl(
     let pool_spent = |b: &ergo_state::wallet::types::WalletBox| {
         mempool.is_spent_by_pool(&ergo_primitives::digest::Digest32::from_bytes(b.box_id))
     };
-    // Inputs of transactions waiting in the private mining queue stay
-    // reserved for them; the builder refuses them as explicit inputs.
-    let reserved = chain.reserved_wallet_inputs();
+    // Inputs of transactions waiting in the private mining queue, and the
+    // approved inputs of pending maintenance jobs, stay reserved for them; the
+    // builder refuses them as explicit inputs.
+    let reserved = chain.reserved_wallet_inputs()?;
 
     // Select the input set. PINNED (`Some`): spend exactly the caller's ids (the
     // set a preview returned) — pool-spent pins are KEPT so a lost-response retry
@@ -297,7 +298,8 @@ pub(crate) async fn retrieve_rewards_impl(
                 if unreserved.is_empty() {
                     return Err(WalletAdminError::BadRequest(
                         "all matured reward boxes are reserved by private mining \
-                         transactions; wait for them to be mined or cancel them"
+                         transactions or pending maintenance jobs; wait for them to \
+                         finish or cancel them"
                             .into(),
                     ));
                 }
@@ -678,8 +680,10 @@ mod tests {
     }
 
     impl ChainStateAccessor for ReservingSweepChain {
-        fn reserved_wallet_inputs(&self) -> std::collections::BTreeSet<[u8; 32]> {
-            self.reserved.clone()
+        fn reserved_wallet_inputs(
+            &self,
+        ) -> Result<std::collections::BTreeSet<[u8; 32]>, WalletAdminError> {
+            Ok(self.reserved.clone())
         }
         fn wallet_scan_height(&self) -> Result<u32, StateError> {
             Ok(1)
