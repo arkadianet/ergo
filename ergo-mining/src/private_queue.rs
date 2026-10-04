@@ -604,13 +604,7 @@ impl PrivateTransactionQueue {
         let expired: Vec<String> = store
             .records
             .values()
-            .filter(|r| {
-                r.entry.state.is_pending()
-                    && (r.entry.expires_at_ms.is_some_and(|d| d <= now_ms)
-                        || r.entry
-                            .expires_at_height
-                            .is_some_and(|d| d <= parent_height))
-            })
+            .filter(|r| deadline_elapsed(&r.entry, now_ms, parent_height))
             .map(|r| r.entry.tx_id.clone())
             .collect();
         if expired.is_empty() {
@@ -623,6 +617,17 @@ impl PrivateTransactionQueue {
         updated.forget_oldest_finished();
         self.commit(&mut store, updated)?;
         Ok(expired)
+    }
+
+    /// The unfinished records [`Self::expire`] would expire, with their
+    /// state, so their templates can be withdrawn before inputs are released.
+    pub fn due(&self, now_ms: u64, parent_height: u32) -> Vec<(String, PrivateTransactionState)> {
+        self.lock()
+            .records
+            .values()
+            .filter(|r| deadline_elapsed(&r.entry, now_ms, parent_height))
+            .map(|r| (r.entry.tx_id.clone(), r.entry.state))
+            .collect()
     }
 
     pub fn observation_cursor(&self) -> (u32, Option<String>) {
@@ -840,6 +845,12 @@ fn sweep_temporaries(path: &Path) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+fn deadline_elapsed(entry: &PrivateTransactionEntry, now_ms: u64, height: u32) -> bool {
+    entry.state.is_pending()
+        && (entry.expires_at_ms.is_some_and(|d| d <= now_ms)
+            || entry.expires_at_height.is_some_and(|d| d <= height))
 }
 
 /// Whether an input box can be spent on the applied chain.

@@ -580,32 +580,19 @@ pub(super) fn handle_mining_request(
             let _ = reply.send(Ok(super::private_mining::list(handle)));
             return false;
         }
+        // Queue changes advance the queue revision; the action loop answers
+        // that with a `PrivateQueue` rebuild on the current tip.
         crate::mining_bridge::MiningRequest::SubmitPrivateTransaction {
             bytes,
             options,
             reply,
         } => {
-            let result = super::private_mining::admit(state, handle, &bytes, options);
-            let changed = result.is_ok();
-            let _ = reply.send(result);
-            return changed;
+            let _ = reply.send(super::private_mining::admit(state, handle, &bytes, options));
+            return false;
         }
         crate::mining_bridge::MiningRequest::CancelPrivateTransaction { tx_id, reply } => {
-            handle.invalidate_operator_generation();
-            let result = handle
-                .private_queue()
-                .cancel(&tx_id)
-                .map_err(ergo_api::MiningApiError::BadRequest);
-            if let Ok(entry) = &result {
-                if entry.state == ergo_mining::private_queue::PrivateTransactionState::Cancelled {
-                    super::private_mining::release_withdrawn(
-                        &mut state.mempool,
-                        std::slice::from_ref(&entry.tx_id),
-                    );
-                }
-            }
-            let _ = reply.send(result.map(|entry| super::private_mining::view(handle, entry)));
-            return true;
+            let _ = reply.send(super::private_mining::cancel(state, handle, &tx_id));
+            return false;
         }
         other => other,
     };

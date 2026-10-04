@@ -136,6 +136,13 @@ pub(super) async fn action_loop(
         .as_ref()
         .map(|w| w.handle.operator_generation())
         .unwrap_or(0);
+    // Private queue revision the last signalled build reflected. A change on
+    // the same tip (admission, cancellation, expiry) asks for a rebuild that
+    // includes or drops the transaction; current templates keep serving.
+    let mut private_revision = mining
+        .as_ref()
+        .map(|w| w.handle.private_queue().revision())
+        .unwrap_or(0);
     // Startup priming publishes the persisted BestTip. Normal online mining
     // still waits for a freshly applied, recent block to open its startup
     // latch; offline generation and an empty devnet have explicit exceptions.
@@ -330,10 +337,13 @@ pub(super) async fn action_loop(
                     refresh_debounce: wiring.refresh_debounce,
                 },
             );
+            let private_now = wiring.handle.private_queue().revision();
             let signal = decided
+                .or((private_now != private_revision).then_some(BuildReason::PrivateQueue))
                 .or(operator_changed.then_some(BuildReason::MempoolRefresh))
                 .or(mining_votes_dirty.then_some(BuildReason::VotesChanged));
             operator_generation = generation_now;
+            private_revision = private_now;
             mining_votes_dirty = false;
             if let Some(reason) = signal {
                 let prev = mining_last_tip.best_full_id();
@@ -355,9 +365,11 @@ pub(super) async fn action_loop(
                     }
                     // A same-parent refresh: advance the pool tracker to the
                     // revision we just rebuilt against and stamp the debounce.
-                    // `VotesChanged` is the same shape — a forced same-tip
-                    // rebuild against the current pool.
-                    BuildReason::MempoolRefresh | BuildReason::VotesChanged => {
+                    // `VotesChanged` and `PrivateQueue` are the same shape — a
+                    // forced same-tip rebuild against the current pool.
+                    BuildReason::MempoolRefresh
+                    | BuildReason::VotesChanged
+                    | BuildReason::PrivateQueue => {
                         mining_last_revision = revision_now;
                         mining_last_mempool_signal = Some(now);
                     }

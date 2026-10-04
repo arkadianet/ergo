@@ -262,7 +262,9 @@ pub(super) fn admit(
         )
         .map_err(MiningApiError::BadRequest)?;
     state.mempool.register_private_transaction(entry.tx_id);
-    handle.invalidate_operator_generation();
+    // Nothing served becomes wrong by adding work: current templates keep
+    // serving and accepting solutions, and the queue revision change asks the
+    // action loop for a refresh that includes it.
     Ok(view(handle, result))
 }
 
@@ -314,12 +316,52 @@ pub(super) fn expire(state: &mut NodeState, handle: &MiningHandle) -> Result<boo
     if !queue.deadline_due(now, height) {
         return Ok(false);
     }
-    // Retire offered templates and in-flight build generations before inputs
-    // can be released by a durable expiry commit.
-    handle.invalidate_operator_generation();
+    // Before a durable expiry can release inputs, withdraw the templates that
+    // include elapsed work, and retire in-flight builds only when it was
+    // selectable; every other template keeps serving and accepting solutions.
+    let due = queue.due(now, height);
+    withdraw(
+        handle,
+        due.iter().map(|(id, _)| id.as_str()),
+        due.iter().any(|(_, state)| state.is_active()),
+    );
     let expired = queue.expire(now, height)?;
     release_withdrawn(&mut state.mempool, &expired);
     Ok(!expired.is_empty())
+}
+
+/// Withdraw pending work. The target is checked before any template is
+/// touched; repeating a cancellation is idempotent.
+pub(super) fn cancel(
+    state: &mut NodeState,
+    handle: &MiningHandle,
+    tx_id: &str,
+) -> Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError> {
+    let queue = handle.private_queue();
+    let entry = queue
+        .entry(tx_id)
+        .ok_or_else(|| MiningApiError::BadRequest("private transaction not found".into()))?;
+    if entry.state == PrivateTransactionState::Mined {
+        return Err(MiningApiError::BadRequest(
+            "a confirmed transaction cannot be cancelled".into(),
+        ));
+    }
+    if !entry.state.is_pending() {
+        return Ok(view(handle, entry));
+    }
+    // Only templates that include it stop serving, before its inputs are
+    // released; in-flight builds retire only if they could have selected it.
+    withdraw(handle, std::iter::once(tx_id), entry.state.is_active());
+    let cancelled = queue.cancel(tx_id).map_err(MiningApiError::BadRequest)?;
+    release_withdrawn(&mut state.mempool, std::slice::from_ref(&cancelled.tx_id));
+    Ok(view(handle, cancelled))
+}
+
+fn withdraw<'a>(handle: &MiningHandle, tx_ids: impl Iterator<Item = &'a str>, retire_builds: bool) {
+    let ids: HashSet<Digest32> = tx_ids.filter_map(decode_tx_id).collect();
+    if !ids.is_empty() {
+        handle.withdraw_private_transactions(&ids, retire_builds);
+    }
 }
 
 /// Incrementally inspect applied history, including after an offline interval.

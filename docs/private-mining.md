@@ -55,9 +55,14 @@ checked applied history through that height for its confirmation. The node
 reconciles applied blocks before applying deadlines, and a confirmation always
 wins: a transaction found in an applied block is reported `mined` even if its
 deadline or a cancellation was recorded first, and rolling that block back
-restores the cancelled or expired state. It checks expiry before solution acceptance, retires cached templates,
-and rejects publication of builds frozen before an operator change. Cancellation
-also retires templates before releasing inputs. These are local queue rules;
+restores the cancelled or expired state. Expiry is checked before every mining
+request, including solution submission. Before a cancellation or an expiry
+releases inputs, the node withdraws only the cached templates that include that
+transaction, so a solution for any other template is still accepted, and it
+stops builds started before the change from publishing it. Admitting a
+transaction withdraws nothing; it asks for a refreshed template that includes
+it. A cancel request for an unknown or already mined ID changes nothing. These
+are local queue rules;
 they do not make a previously signed transaction invalid elsewhere. Cancelled
 and expired transactions are no longer kept out of this node's public mempool:
 the node never broadcasts them itself, but you can now submit the same signed

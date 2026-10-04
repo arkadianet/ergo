@@ -218,6 +218,71 @@ fn serve(handle: &MiningHandle, state: &NodeState, txs: Vec<Transaction>, msg: [
         .expect("publishes on the applied tip");
 }
 
+/// A box guarded by a trivially true script, created at genesis.
+fn spendable_box(value: u64, creator: u8) -> ErgoBox {
+    ErgoBox {
+        candidate: ErgoBoxCandidate::new(
+            value,
+            read_ergo_tree(&mut VlqReader::new(&[0, 8, 0xd3])).unwrap(),
+            0,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap(),
+        transaction_id: ergo_primitives::digest::ModifierId::from_bytes([creator; 32]),
+        index: 0,
+    }
+}
+
+/// A node `blocks` deep whose UTXO set holds `boxes`, with the block context
+/// admission validates against.
+fn admitting_chain(blocks: u32, boxes: &[ErgoBox]) -> (tempfile::TempDir, NodeState) {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = crate::node::tests::make_state(&tmp.path().join("state.redb"));
+    let genesis: Vec<_> = boxes
+        .iter()
+        .map(|b| {
+            (
+                *b.box_id().unwrap().as_bytes(),
+                ergo_ser::ergo_box::serialize_ergo_box(b).unwrap(),
+            )
+        })
+        .collect();
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .initialize_genesis(&genesis)
+        .unwrap();
+    for _ in 0..blocks {
+        append_block(&mut state, vec![], 0);
+    }
+    state.executor.hydrate_block_context(&state.store).unwrap();
+    (tmp, state)
+}
+
+/// Zero-fee signed bytes moving `input` to one trivially true output.
+fn spend(input: &ErgoBox) -> Vec<u8> {
+    let tx = Transaction {
+        inputs: vec![Input {
+            box_id: input.box_id().unwrap(),
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![ErgoBoxCandidate::new(
+            input.candidate.value,
+            read_ergo_tree(&mut VlqReader::new(&[0, 8, 0xd3])).unwrap(),
+            1,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap()],
+    };
+    let mut writer = VlqWriter::new();
+    write_transaction(&mut writer, &tx).unwrap();
+    writer.result()
+}
+
 /// A mining handle whose queue persists at `path`.
 fn persisted_handle(path: &std::path::Path) -> MiningHandle {
     mining_handle().with_private_queue(Arc::new(
@@ -435,14 +500,29 @@ fn startup_registers_only_transactions_still_waiting_for_this_miner() {
 /// Queue input `input`'s transaction at the applied tip, eligible through
 /// `last_height`.
 fn queue_until(state: &NodeState, handle: &MiningHandle, input: u8, last_height: u32) -> String {
+    queue_at_tip(
+        state,
+        handle,
+        input,
+        ergo_mining::private_queue::PrivateTransactionOptions {
+            expires_at_height: Some(last_height),
+            ..Default::default()
+        },
+    )
+}
+
+/// Queue input `input`'s transaction at the applied tip.
+fn queue_at_tip(
+    state: &NodeState,
+    handle: &MiningHandle,
+    input: u8,
+    options: ergo_mining::private_queue::PrivateTransactionOptions,
+) -> String {
     handle
         .private_queue()
         .admit_at_tip(
             &queued_entry(input),
-            ergo_mining::private_queue::PrivateTransactionOptions {
-                expires_at_height: Some(last_height),
-                ..Default::default()
-            },
+            options,
             crate::snapshot::unix_now_ms(),
             state.store.chain_state_meta().best_full_block_height,
             Some(tip_id(state)),
@@ -637,4 +717,137 @@ fn a_long_offline_interval_is_reconciled_in_bounded_steps() {
     let item = handle.private_queue().entry(&tx_id).unwrap();
     assert_eq!(item.state, PrivateTransactionState::Mined);
     assert_eq!(item.mined_height, Some(45));
+}
+
+// ----- withdrawal scope -----
+
+/// Send a cancel request through the mining dispatcher.
+fn cancel_request(
+    state: &mut NodeState,
+    handle: &MiningHandle,
+    tx_id: &str,
+) -> Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError> {
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+    let rebuild = crate::node::mining_dispatch::handle_mining_request(
+        state,
+        Some(handle),
+        false,
+        crate::mining_bridge::MiningRequest::CancelPrivateTransaction {
+            tx_id: tx_id.into(),
+            reply,
+        },
+    );
+    assert!(!rebuild, "a queue change is not a failed mined block");
+    response.try_recv().unwrap()
+}
+
+#[test]
+fn admission_keeps_serving_current_templates_and_asks_for_a_refresh() {
+    let boxes = [spendable_box(1_000_000_000, 0x31)];
+    let (_dir, mut state) = admitting_chain(4, &boxes);
+    let handle = mining_handle();
+    serve(&handle, &state, vec![], [0x61; 32]);
+    let generation = handle.operator_generation();
+    let revision = handle.private_queue().revision();
+    let entry = admit(&mut state, &handle, &spend(&boxes[0]), Default::default())
+        .expect("a valid zero-fee transaction is queued");
+    assert_eq!(entry.state, "queued");
+    assert_eq!(
+        handle
+            .cached_template_if_synced()
+            .expect("still served")
+            .0
+            .msg,
+        [0x61; 32],
+        "adding work invalidates nothing"
+    );
+    assert_eq!(handle.operator_generation(), generation);
+    assert_ne!(
+        handle.private_queue().revision(),
+        revision,
+        "the action loop rebuilds on the revision change"
+    );
+}
+
+#[test]
+fn cancelling_withdraws_only_templates_that_include_the_transaction() {
+    let (_dir, mut state) = chain(4);
+    let handle = mining_handle();
+    let tx_id = queue_until(&state, &handle, 1, 100);
+    serve(&handle, &state, vec![tx(1)], [0x61; 32]);
+    serve(&handle, &state, vec![], [0x62; 32]);
+    let generation = handle.operator_generation();
+    assert_eq!(
+        cancel_request(&mut state, &handle, &tx_id).unwrap().state,
+        "cancelled"
+    );
+    assert_eq!(
+        handle
+            .inspect_template(Some([0x61; 32]), None)
+            .unwrap()
+            .status,
+        "withdrawn"
+    );
+    assert_eq!(
+        handle.cached_template_if_synced().expect("served").0.msg,
+        [0x62; 32],
+        "unrelated work keeps serving and accepting solutions"
+    );
+    assert_eq!(
+        handle.operator_generation(),
+        generation + 1,
+        "builds frozen before the cancel cannot publish it"
+    );
+}
+
+#[test]
+fn cancelling_an_unknown_or_confirmed_id_touches_no_template() {
+    let (_dir, mut state) = chain(4);
+    let handle = mining_handle();
+    let tx_id = queue_until(&state, &handle, 1, 100);
+    append_block(&mut state, vec![tx(1)], 0);
+    run_lifecycle(&mut state, &handle);
+    serve(&handle, &state, vec![], [0x61; 32]);
+    let generation = handle.operator_generation();
+    assert!(cancel_request(&mut state, &handle, &"ab".repeat(32)).is_err());
+    assert!(
+        cancel_request(&mut state, &handle, &tx_id).is_err(),
+        "a confirmed transaction cannot be cancelled"
+    );
+    assert_eq!(handle.operator_generation(), generation);
+    assert!(handle.cached_template_if_synced().is_some());
+}
+
+#[test]
+fn expiring_conflicted_work_retires_no_build_or_template() {
+    let (_dir, mut state) = chain(4);
+    let handle = mining_handle();
+    let deadline = crate::snapshot::unix_now_ms() + 1_000;
+    let tx_id = queue_at_tip(
+        &state,
+        &handle,
+        1,
+        ergo_mining::private_queue::PrivateTransactionOptions {
+            expires_at_ms: Some(deadline),
+            ..Default::default()
+        },
+    );
+    // Its input is not on the applied chain, so it cannot be selected.
+    append_block(&mut state, vec![], 0);
+    run_lifecycle(&mut state, &handle);
+    assert_eq!(
+        handle.private_queue().entry(&tx_id).unwrap().state,
+        PrivateTransactionState::Conflicted
+    );
+    serve(&handle, &state, vec![], [0x61; 32]);
+    let generation = handle.operator_generation();
+    let remaining = deadline.saturating_sub(crate::snapshot::unix_now_ms());
+    std::thread::sleep(std::time::Duration::from_millis(remaining + 10));
+    run_lifecycle(&mut state, &handle);
+    assert_eq!(
+        handle.private_queue().entry(&tx_id).unwrap().state,
+        PrivateTransactionState::Expired
+    );
+    assert_eq!(handle.operator_generation(), generation);
+    assert!(handle.cached_template_if_synced().is_some());
 }

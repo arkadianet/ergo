@@ -62,6 +62,9 @@ pub enum BuildReason {
     /// builds again on the next candidate request; the eager rebuild is this
     /// node's choice, so a miner polling for work is not left without it.
     SolvedBlockFailed,
+    /// The private mining queue changed on the same tip: an admission, a
+    /// cancellation, an expiry, or a confirmation found while catching up.
+    PrivateQueue,
 }
 
 /// How far the header tip may lead the applied full-block tip while mining
