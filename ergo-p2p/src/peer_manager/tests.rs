@@ -1736,11 +1736,11 @@ fn ban_cap_evicts_soonest_expiring_first_and_keeps_recent() {
     // One long-lived (permanent) ban among many short ones: under cap
     // pressure the short-lived entries must evict first.
     mgr.record_ban(addr_of([9, 9, 9, 9]), now, true);
-    for i in 0..MAX_BANS - 1 {
+    for i in 0..MAX_BANS - OPERATOR_BAN_RESERVE - 1 {
         let octets = [(i & 0xff) as u8, ((i >> 8) & 0xff) as u8, 1, 1];
         mgr.record_ban(addr_of(octets), now, false);
     }
-    assert_eq!(mgr.bans.len(), MAX_BANS);
+    assert_eq!(mgr.bans.len(), MAX_BANS - OPERATOR_BAN_RESERVE);
 
     // Five more: cap pressure evicts five soonest-expiring entries.
     for i in 0..5 {
@@ -1750,7 +1750,11 @@ fn ban_cap_evicts_soonest_expiring_first_and_keeps_recent() {
             now + Duration::from_secs(i as u64 * 60),
             false,
         );
-        assert_eq!(mgr.bans.len(), MAX_BANS, "cap must hold after insert {i}");
+        assert_eq!(
+            mgr.bans.len(),
+            MAX_BANS - OPERATOR_BAN_RESERVE,
+            "cap must hold after insert {i}"
+        );
         assert!(
             mgr.bans.contains_key(&IpAddr::from([9, 9, 9, 9])),
             "the farthest-expiring (permanent) ban must never be the eviction victim"

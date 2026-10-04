@@ -186,6 +186,8 @@ pub(super) struct TomlApi {
     /// routes stay closed; supplied hashes are validated at load.
     pub(super) security: Option<TomlApiSecurity>,
     pub(super) script: TomlApiScript,
+    pub(super) limits: ergo_api::operator_control::ApiLimits,
+    pub(super) readiness: ergo_api::operator_control::ProbePolicy,
 }
 
 /// `[api.security]` TOML subsection. Carries the operator's
@@ -197,6 +199,7 @@ pub(super) struct TomlApiSecurity {
     /// 64 chars. Generate a RANDOM secret first, then hash it, e.g.:
     /// `secret=$(openssl rand -hex 32); printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1`.
     pub(super) api_key_hash: Option<String>,
+    pub(super) keys: Vec<ergo_api::auth::ScopedCredentialConfig>,
 }
 
 /// Native script playground policy, validated before binding the API.

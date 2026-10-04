@@ -24,7 +24,62 @@ const DEFAULT_FAILURE_CAPACITY: usize = 128;
 // aggregated at the node layer alongside these two.
 static STATE_STORAGE_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INDEXER_STORAGE_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
-static LAST_STORAGE_ERROR: Mutex<Option<(u64, String)>> = Mutex::new(None);
+static LAST_STORAGE_ERRORS: Mutex<StorageFaults> = Mutex::new(StorageFaults {
+    state: None,
+    indexer: None,
+    latest_is_indexer: false,
+});
+
+const ACTIVE_STORAGE_FAULT_MS: u64 = 60_000;
+
+struct StorageFaults {
+    state: Option<(u64, String)>,
+    indexer: Option<(u64, String)>,
+    latest_is_indexer: bool,
+}
+
+impl StorageFaults {
+    fn note(&mut self, store: &str, now_ms: u64, message: String) {
+        self.latest_is_indexer = store == "indexer";
+        let slot = if self.latest_is_indexer {
+            &mut self.indexer
+        } else {
+            &mut self.state
+        };
+        *slot = Some((now_ms, message));
+    }
+
+    fn latest(&self) -> Option<&(u64, String)> {
+        if self.latest_is_indexer {
+            self.indexer.as_ref()
+        } else {
+            self.state.as_ref()
+        }
+    }
+
+    fn active(&self, now_ms: u64, require_indexer: bool) -> bool {
+        [
+            &self.state,
+            if require_indexer {
+                &self.indexer
+            } else {
+                &None
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .any(|(ts, _)| now_ms.saturating_sub(*ts) < ACTIVE_STORAGE_FAULT_MS)
+    }
+}
+
+/// Readiness faults expire after a minute without another failure. Peer-store
+/// failures are best-effort diagnostics; indexer faults matter only if required.
+pub fn active_storage_fault(now_ms: u64, require_indexer: bool) -> bool {
+    LAST_STORAGE_ERRORS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .active(now_ms, require_indexer)
+}
 
 /// Bucket a caller's `subsystem` into the coarse `store` label surfaced on
 /// `ergo_node_storage_errors_*_total` and the `storage_error` event. Every
@@ -53,10 +108,10 @@ pub fn storage_error_totals() -> (u64, u64) {
 /// last-error timestamp at the node layer to pick the freshest for
 /// `ApiStatus.last_storage_error`.
 pub fn last_storage_error() -> Option<(u64, String)> {
-    LAST_STORAGE_ERROR
+    let faults = LAST_STORAGE_ERRORS
         .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone()
+        .unwrap_or_else(|poison| poison.into_inner());
+    faults.latest().cloned()
 }
 
 /// Record one storage-error occurrence for the counter + last-error status
@@ -77,10 +132,50 @@ fn note_storage_error(context: &StorageFailureContext<'_>, error: &(dyn Error + 
     };
     let now_ms = unix_ms(SystemTime::now());
     let message = format!("{store}: {error}");
-    let mut slot = LAST_STORAGE_ERROR
+    let mut faults = LAST_STORAGE_ERRORS
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    *slot = Some((now_ms, message));
+    faults.note(store, now_ms, message);
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn latest_storage_diagnostic_preserves_observation_order_on_timestamp_ties() {
+        let mut faults = StorageFaults {
+            state: None,
+            indexer: None,
+            latest_is_indexer: false,
+        };
+        faults.note("indexer", 1_000, "indexer: first".into());
+        faults.note("state", 1_000, "state: second".into());
+        assert_eq!(faults.latest().unwrap().1, "state: second");
+        faults.note("indexer", 1_000, "indexer: third".into());
+        assert_eq!(faults.latest().unwrap().1, "indexer: third");
+        assert!(faults.active(1_000, false));
+    }
+
+    #[test]
+    fn readiness_storage_faults_expire_and_respect_required_stores() {
+        let mut faults = StorageFaults {
+            state: None,
+            indexer: Some((1_000, "indexer: full".into())),
+            latest_is_indexer: true,
+        };
+        assert!(!faults.active(1_000, false));
+        assert!(faults.active(1_000, true));
+        assert!(!faults.active(61_000, true));
+        faults.state = Some((2_000, "state: full".into()));
+        assert!(faults.active(61_000, false));
+        // A newer optional error cannot mask a required state-store failure.
+        faults.indexer = Some((61_000, "indexer: full".into()));
+        assert!(faults.active(61_000, false));
+        assert!(!faults.active(62_000, false));
+        assert!(faults.active(62_000, true));
+        assert!(!faults.active(121_000, true));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

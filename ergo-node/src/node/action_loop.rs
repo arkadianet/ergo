@@ -59,6 +59,8 @@ pub(super) async fn action_loop(
     mut mining_submit_rx: mpsc::Receiver<crate::mining_bridge::MiningRequest>,
     // Operator /peers/connect dial requests from the REST admin handle.
     mut peer_connect_rx: mpsc::Receiver<std::net::SocketAddr>,
+    mut peer_control_rx: mpsc::Receiver<crate::runtime_control::PeerControlRequest>,
+    runtime_control: std::sync::Arc<crate::runtime_control::RuntimeControl>,
     // Operator vote changes (POST /api/v1/votes) — each `()` forces an
     // immediate same-tip mining candidate rebuild so the new votes take effect.
     mut votes_changed_rx: mpsc::Receiver<()>,
@@ -71,6 +73,13 @@ pub(super) async fn action_loop(
     mut shutdown_rx: oneshot::Receiver<()>,
     mempool_tick_ms: u64,
 ) -> Result<(), NodeError> {
+    struct StopGuard(std::sync::Arc<crate::runtime_control::RuntimeControl>);
+    impl Drop for StopGuard {
+        fn drop(&mut self) {
+            self.0.stop();
+        }
+    }
+    let _stop_guard = StopGuard(runtime_control.clone());
     // Tick every 5s so cold-start fills the outbound pool quickly.
     // The slow-mode gate inside `try_dial_peers` enforces the
     // original 30s cadence once the deficit is small (see
@@ -159,6 +168,7 @@ pub(super) async fn action_loop(
     }
 
     loop {
+        runtime_control.beat();
         // Give queued control-plane work an explicit service opportunity before
         // a ready peer batch. Dispatch at most one request from each queue per
         // iteration; ordinary selection below still wakes immediately on a new
@@ -169,6 +179,9 @@ pub(super) async fn action_loop(
         ) {
             shutdown_log!("[node] shutdown requested, exiting loop...");
             break;
+        }
+        if let Ok(req) = peer_control_rx.try_recv() {
+            super::operator_control::dispatch(&mut state, req);
         }
         if let Ok(req) = submit_rx.try_recv() {
             reply_to_api_submission(&mut state, req);
@@ -199,6 +212,9 @@ pub(super) async fn action_loop(
                     }
                     _ = dial_tick.tick() => {
                         try_dial_peers(&mut state);
+                    }
+                    Some(request) = peer_control_rx.recv() => {
+                        super::operator_control::dispatch(&mut state, request);
                     }
                     Some(addr) = peer_connect_rx.recv() => {
                         connect_to_address(&mut state, addr);
@@ -412,6 +428,8 @@ pub(super) async fn action_loop(
     // below and eventually surface as `timeout`, which is the wrong
     // reason code for a stopping node. Defense in depth alongside
     // the abort-API-first ordering in `RunHandle::shutdown()`.
+    runtime_control.stop();
+    drop(peer_control_rx);
     drop(submit_rx);
     drop(mining_submit_rx);
     let cs_shutdown = state.store.chain_state_meta();

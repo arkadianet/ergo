@@ -1571,3 +1571,119 @@ async fn emission_scripts_unwired_is_404() {
         StatusCode::NOT_FOUND,
     );
 }
+
+#[tokio::test]
+async fn authenticated_route_scope_inventory() {
+    let mut ctx = fully_wired_ctx();
+    ctx.script_config.require_api_key = true;
+    let (app, inventory) = router_with_mempool_and_wallet_and_security_and_inventory(
+        ctx,
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        Some(security()),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let keys = [
+        ergo_api::auth::CredentialScope::Mining,
+        ergo_api::auth::CredentialScope::Wallet,
+        ergo_api::auth::CredentialScope::Operator,
+        ergo_api::auth::CredentialScope::Admin,
+    ];
+    let scoped = Arc::new(
+        ApiSecurity::new(ApiSecurity::hash_key(b"hello"))
+            .unwrap()
+            .with_credentials(
+                keys.iter()
+                    .map(|scope| ergo_api::auth::ScopedCredentialConfig {
+                        id: format!("{scope:?}"),
+                        hash: ApiSecurity::hash_key(format!("{scope:?}").as_bytes()),
+                        scopes: vec![*scope],
+                        revoked: false,
+                    })
+                    .collect(),
+                dir.path().join("revoked.json"),
+            )
+            .unwrap(),
+    );
+    let mut ctx = fully_wired_ctx();
+    ctx.script_config.require_api_key = true;
+    let scoped_app = router_with_mempool_and_wallet_and_security(
+        ctx,
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        Some(scoped),
+    );
+    let mut rows = Vec::new();
+    for op in inventory.rust.iter().chain(&inventory.scala) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(op.method.to_ascii_uppercase().as_str())
+                    .uri(probe_path(&op.path))
+                    .header("api_key", "invalid")
+                    .header("content-type", "application/json")
+                    .extension(axum::extract::ConnectInfo(
+                        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                    ))
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            let scope = ergo_api::auth::required_scope(&op.method.to_uppercase(), &op.path)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "unclassified authenticated operation: {} {}",
+                        op.method, op.path
+                    )
+                });
+            rows.push(format!(
+                "{} {} {}",
+                op.method.to_uppercase(),
+                op.path,
+                format!("{scope:?}").to_lowercase()
+            ));
+            for key in keys {
+                let response = scoped_app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(op.method.to_ascii_uppercase().as_str())
+                            .uri(probe_path(&op.path))
+                            .header("api_key", format!("{key:?}"))
+                            .header("content-type", "application/json")
+                            .extension(axum::extract::ConnectInfo(
+                                "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                            ))
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let denied = body["reason"] == "invalid.api-key"
+                    || body["error"]["reason"] == "unauthorized";
+                assert_eq!(
+                    denied,
+                    key != scope && key != ergo_api::auth::CredentialScope::Admin,
+                    "scope mismatch: {} {} with {key:?}: {}",
+                    op.method,
+                    op.path,
+                    status
+                );
+            }
+        }
+    }
+    rows.sort();
+    assert_eq!(
+        rows.join("\n") + "\n",
+        include_str!("../fixtures/authenticated_route_scopes.txt")
+    );
+}

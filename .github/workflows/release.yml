@@ -2,7 +2,8 @@ name: Release binaries
 
 # Triggered by pushing a tag of the form `v*` (e.g. `v0.3.0`), or manually via
 # workflow_dispatch with a `tag` input. Builds ergo-node + ergo-wallet for
-# Linux (glibc + static musl), macOS, and Windows on x86_64. For each platform
+# Linux (glibc + static musl), macOS, and Windows on x86_64, plus native
+# Linux glibc and macOS ARM64. For each platform
 # it publishes the bare binary, a `.tar.gz` / `.zip` archive (binary + README +
 # config + operating docs + licenses), and a `.sha256` for each, all uploaded to
 # the GitHub Release (created if it does not already exist).
@@ -71,6 +72,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
           - os: macos-latest
             target: x86_64-apple-darwin
           - os: windows-latest

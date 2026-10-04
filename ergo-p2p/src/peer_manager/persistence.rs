@@ -6,9 +6,9 @@
 //! session, the book is best-effort restore-on-restart.
 
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
-use crate::address_book::{AddressBookError, BanRecord, LastDirection};
+use crate::address_book::{AddressBookError, LastDirection};
 use crate::handshake::PeerSpec;
 use crate::peer::Direction;
 
@@ -125,8 +125,7 @@ impl PeerManager {
         }
     }
 
-    /// Best-effort delete of a ban's persisted row (cap eviction + expiry
-    /// sweep). Errors are logged, not surfaced — same contract as every
+    /// Best-effort delete of an expired operator ban's persisted row. Errors are logged, not surfaced — same contract as every
     /// other write-through hook.
     pub(super) fn unban_persisted(&self, ip: IpAddr) {
         let Some(book) = self.book.as_ref() else {
@@ -134,22 +133,6 @@ impl PeerManager {
         };
         if let Err(e) = book.unban(ip) {
             self.record_storage_error("unban", &ip, &e);
-        }
-    }
-
-    pub(super) fn persist_ban(&self, ip: IpAddr, duration: Duration, count: u32, permanent: bool) {
-        let Some(book) = self.book.as_ref() else {
-            return;
-        };
-        let until = SystemTime::now() + duration;
-        let record = BanRecord {
-            ip,
-            until,
-            count,
-            permanent,
-        };
-        if let Err(e) = book.record_ban(&record) {
-            self.record_storage_error("record_ban", &ip, &e);
         }
     }
 }

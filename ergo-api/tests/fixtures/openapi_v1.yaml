@@ -2901,14 +2901,24 @@ paths:
     post:
       tags:
       - network
-      summary: |-
-        `POST /api/v1/network/blacklist` — T1, seam-deferred. No manual-ban write
-        path exists on the peer manager yet, so this answers the honest
-        `route_unavailable` rather than pretending to ban.
       operationId: blacklist_add
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BanRequest'
+        required: true
       responses:
+        '204':
+          description: IP-wide timed ban persisted and sessions disconnected
+        '400':
+          description: Invalid address or duration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Manual peer blacklisting not wired on this node
+          description: Persistence or runtime unavailable
           content:
             application/json:
               schema:
@@ -2919,20 +2929,19 @@ paths:
     delete:
       tags:
       - network
-      summary: |-
-        `DELETE /api/v1/network/blacklist/{addr}` — T1, seam-deferred (same gap as
-        [`blacklist_add`]).
       operationId: blacklist_remove
       parameters:
       - name: addr
         in: path
-        description: Peer address to un-blacklist
+        description: IP or socket address to unban, including IPv6
         required: true
         schema:
           type: string
       responses:
-        '503':
-          description: Manual peer un-blacklisting not wired on this node
+        '204':
+          description: Unban persisted
+        '400':
+          description: Invalid address
           content:
             application/json:
               schema:
@@ -3060,6 +3069,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/network/disconnect:
+    post:
+      tags:
+      - network
+      operationId: disconnect
+      requestBody:
+        content:
+          text/plain:
+            schema:
+              type: string
+        required: true
+      responses:
+        '200':
+          description: Reports whether a session was closed; future dialing remains enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerControlResult'
+      security:
+      - ApiKeyAuth: []
   /api/v1/network/peers:
     get:
       tags:
@@ -3096,6 +3125,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/network/peers/{addr}:
+    delete:
+      tags:
+      - network
+      operationId: remove
+      parameters:
+      - name: addr
+        in: path
+        description: Socket address to remove from saved peers
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Saved dial metadata removed; reports whether a session was closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerControlResult'
+      security:
+      - ApiKeyAuth: []
   /api/v1/network/sync-info:
     get:
       tags:
@@ -3163,15 +3213,13 @@ paths:
     get:
       tags:
       - node
-      summary: |-
-        `GET /api/v1/node/config` — T1. No `NodeConfigView` seam exists on the node
-        yet, so this answers the honest
-        `route_unavailable` (503) rather than fabricating or half-projecting a config
-        tree. Gated at `Tier::Operator` so the closed shape is still auth-bounded.
+      summary: '`GET /api/v1/node/config` — authenticated allowlisted effective settings.'
       operationId: config_get
       responses:
+        '200':
+          description: Redacted boot and live operational settings
         '503':
-          description: Effective-config read not wired on this node
+          description: Control bridge unavailable
           content:
             application/json:
               schema:
@@ -3181,15 +3229,70 @@ paths:
     patch:
       tags:
       - node
-      summary: |-
-        `PATCH /api/v1/node/config` — T2. Config mutation is the more dangerous half
-        of `node/config`, so it sits at `Tier::Admin` (loopback-preferred). No
-        `apply_config_patch` seam exists yet, so it answers `route_unavailable`
-        rather than exposing a mutation that isn't safely backed.
+      summary: '`PATCH /api/v1/node/config` — validate all members before applying any.'
       operationId: config_patch
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuntimeConfigPatch'
+        required: true
       responses:
+        '200':
+          description: Updated live operational settings
+        '400':
+          description: Invalid or restart-only setting
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Revision conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/node/credentials:
+    get:
+      tags:
+      - node
+      operationId: credentials
+      responses:
+        '200':
+          description: Named credential scopes and revocation flags; no hashes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CredentialInfo'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/node/credentials/{id}:
+    delete:
+      tags:
+      - node
+      operationId: revoke_credential
+      parameters:
+      - name: id
+        in: path
+        description: Named credential id; master key is not revocable through this endpoint
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Credential revoked durably
+        '404':
+          description: Unknown credential id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Config mutation not wired on this node
+          description: Ledger could not be persisted
           content:
             application/json:
               schema:
@@ -3259,6 +3362,60 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiInfo'
+  /api/v1/node/liveness:
+    get:
+      tags:
+      - node
+      operationId: liveness
+      responses:
+        '200':
+          description: Runtime heartbeat fresh
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
+        '503':
+          description: Runtime stopped or heartbeat stale
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
+  /api/v1/node/readiness:
+    get:
+      tags:
+      - node
+      operationId: readiness
+      responses:
+        '200':
+          description: Chain service ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
+        '503':
+          description: Sync, freshness or dependency checks failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
+  /api/v1/node/startup:
+    get:
+      tags:
+      - node
+      operationId: startup
+      responses:
+        '200':
+          description: Runtime started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
+        '503':
+          description: Runtime not started or stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeReport'
   /api/v1/node/status:
     get:
       tags:
@@ -6341,6 +6498,42 @@ components:
           minimum: 0
         version:
           type: string
+    ApiLimits:
+      type: object
+      description: |-
+        Request budgets which may be changed without rebuilding the API router.
+        Proxy trust and loopback exemptions are intentionally restart-only.
+      properties:
+        burst:
+          type: number
+          format: double
+          default: 40.0
+        cheap_weight:
+          type: number
+          format: double
+          default: 1.0
+        compute_weight:
+          type: number
+          format: double
+          default: 10.0
+        heavy_weight:
+          type: number
+          format: double
+          default: 4.0
+        idle_prune_after_secs:
+          type: integer
+          format: int64
+          default: 600
+          minimum: 0
+        max_tracked_ips:
+          type: integer
+          default: 65536
+          minimum: 0
+        refill_per_sec:
+          type: number
+          format: double
+          default: 20.0
+      additionalProperties: false
     ApiMinerStat:
       type: object
       description: One miner's aggregate over the `minerStats` window.
@@ -7345,6 +7538,18 @@ components:
       - box
       properties:
         box: {}
+      additionalProperties: false
+    BanRequest:
+      type: object
+      required:
+      - addr
+      properties:
+        addr:
+          type: string
+        duration_secs:
+          type: integer
+          format: int64
+          minimum: 0
       additionalProperties: false
     BatchItemRequest:
       type: object
@@ -8554,6 +8759,28 @@ components:
           minimum: 0
         within_block_limit:
           type: boolean
+    CredentialInfo:
+      type: object
+      required:
+      - id
+      - scopes
+      - revoked
+      properties:
+        id:
+          type: string
+        revoked:
+          type: boolean
+        scopes:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialScope'
+    CredentialScope:
+      type: string
+      enum:
+      - mining
+      - wallet
+      - operator
+      - admin
     DataInputsDto:
       oneOf:
       - type: object
@@ -9556,6 +9783,14 @@ components:
       properties:
         active:
           type: boolean
+    PeerControlResult:
+      type: object
+      properties:
+        session_closed:
+          type:
+          - boolean
+          - 'null'
+          description: 'Present for disconnect/remove: whether an active session was closed.'
     PeerQuality:
       type: object
       required:
@@ -9934,6 +10169,72 @@ components:
         signed_transaction_hex:
           type: string
       additionalProperties: false
+    ProbePolicy:
+      type: object
+      properties:
+        heartbeat_max_age_ms:
+          type: integer
+          format: int64
+          default: 600000
+          minimum: 0
+        require_indexer:
+          type: boolean
+          default: false
+        require_wallet:
+          type: boolean
+          default: false
+        snapshot_max_age_ms:
+          type: integer
+          format: int64
+          default: 30000
+          minimum: 0
+        tip_max_age_ms:
+          type: integer
+          format: int64
+          default: 7200000
+          minimum: 0
+      additionalProperties: false
+    ProbeReport:
+      type: object
+      required:
+      - ready
+      - reasons
+      - snapshot_age_ms
+      properties:
+        heartbeat_age_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        indexer_height:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        ready:
+          type: boolean
+        reasons:
+          type: array
+          items:
+            type: string
+        snapshot_age_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        tip_age_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        wallet_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
     ProtocolDetail:
       type: object
       description: '`GET /api/v1/protocols/{id}` detail body.'
@@ -10105,6 +10406,7 @@ components:
       - protocol_not_found
       - webhook_not_found
       - account_not_found
+      - credential_not_found
       - address_not_watched
       - tx_not_in_block
       - not_blacklisted
@@ -10209,6 +10511,7 @@ components:
       - slow_consumer
       - idle_timeout
       - already_blacklisted
+      - config_conflict
       - internal_error
     RegisterRequest:
       type: object
@@ -10252,6 +10555,17 @@ components:
       properties:
         reward_pubkey:
           type: string
+    RuntimeConfigPatch:
+      type: object
+      description: PATCH members merge into the live settings; unknown members are rejected.
+      properties:
+        api_limits: {}
+        expected_revision:
+          type:
+          - string
+          - 'null'
+        readiness: {}
+      additionalProperties: false
     ScanBoxView:
       type: object
       description: |-
