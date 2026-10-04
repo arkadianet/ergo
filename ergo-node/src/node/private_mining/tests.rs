@@ -840,6 +840,34 @@ fn cancelling_an_unknown_or_confirmed_id_touches_no_template() {
 }
 
 #[test]
+fn a_cancel_that_cannot_be_saved_withdraws_nothing() {
+    let (dir, mut state) = chain(4);
+    let path = dir.path().join("queue.json");
+    let handle = persisted_handle(&path);
+    let tx_id = queue_until(&state, &handle, 1, 100);
+    serve(&handle, &state, vec![tx(1)], [0x61; 32]);
+    let generation = handle.operator_generation();
+    // Every later write of the queue fails.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    assert!(matches!(
+        cancel_request(&mut state, &handle, &tx_id),
+        Err(MiningApiError::Internal(_))
+    ));
+    assert_eq!(
+        handle.cached_template_if_synced().expect("served").0.msg,
+        [0x61; 32],
+        "the transaction is still queued, so its template keeps serving"
+    );
+    assert_eq!(handle.operator_generation(), generation);
+    assert_eq!(
+        handle.private_queue().entry(&tx_id).unwrap().state,
+        PrivateTransactionState::Queued
+    );
+}
+
+#[test]
 fn expiring_conflicted_work_retires_no_build_or_template() {
     let (_dir, mut state) = chain(4);
     let handle = mining_handle();

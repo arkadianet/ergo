@@ -443,10 +443,12 @@ impl MiningHandle {
 
     /// Withdraw only the retained templates that include one of `tx_ids`, so a
     /// solution found for unrelated work is still accepted. With
-    /// `retire_builds`, also advance the operator generation first, so a
-    /// build frozen before the change can never publish one of them; callers
-    /// pass it for transactions that builds may still select. Returns how many
-    /// templates were withdrawn.
+    /// `retire_builds`, also advance the operator generation, so a build frozen
+    /// before the change can never publish one of them; callers pass it for
+    /// transactions that builds may still select. Call it after the queue no
+    /// longer offers them (a cancellation), or once selection filters them
+    /// (an elapsed deadline): a build that reads the new generation then
+    /// cannot see them either. Returns how many templates were withdrawn.
     pub fn withdraw_private_transactions(
         &self,
         tx_ids: &std::collections::HashSet<Digest32>,
@@ -468,8 +470,8 @@ impl MiningHandle {
                 .collect()
         };
         // Hash outside the lock. Nothing published from here on can include
-        // the transactions: older builds fail the generation check, and the
-        // caller changes the queue before any new build is requested.
+        // the transactions: older builds fail the generation check, and newer
+        // ones no longer select them.
         let affected: std::collections::HashSet<u64> = offered
             .iter()
             .filter(|(_, template)| {

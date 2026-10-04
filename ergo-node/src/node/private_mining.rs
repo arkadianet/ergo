@@ -457,10 +457,14 @@ pub(super) fn cancel(
     if !entry.state.is_pending() {
         return Ok(view(handle, entry));
     }
-    // Only templates that include it stop serving, before its inputs are
-    // released; in-flight builds retire only if they could have selected it.
-    withdraw(handle, std::iter::once(tx_id), entry.state.is_active());
+    // Change the queue first, then retire what was built from it: a build
+    // reads the operator generation before the queue, so one that saw the
+    // transaction holds the older generation and cannot publish. Only
+    // templates that include it stop serving; solutions are judged on this
+    // loop, after the withdrawal. In-flight builds retire only if they could
+    // have selected it. A failed write changes nothing.
     let cancelled = queue.cancel(tx_id).map_err(queue_error)?;
+    withdraw(handle, std::iter::once(tx_id), entry.state.is_active());
     release_withdrawn(&mut state.mempool, std::slice::from_ref(&cancelled.tx_id));
     Ok(view(handle, cancelled))
 }
