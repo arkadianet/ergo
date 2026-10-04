@@ -431,6 +431,31 @@ pub trait WalletAdmin: Send + Sync {
         ))
     }
 
+    /// Owner-approved finite maintenance jobs, always delivered to private mining.
+    async fn mining_jobs(&self) -> Result<native::dto::WalletJobs, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "wallet mining jobs not implemented".into(),
+        ))
+    }
+
+    async fn create_mining_job(
+        &self,
+        _request: native::dto::WalletJobRequest,
+    ) -> Result<native::dto::WalletJob, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "wallet mining jobs not implemented".into(),
+        ))
+    }
+
+    async fn cancel_mining_job(
+        &self,
+        _job_id: String,
+    ) -> Result<native::dto::WalletJob, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "wallet mining jobs not implemented".into(),
+        ))
+    }
+
     /// Native `transactions/send`: build+sign+submit an intent (needs unlock) or
     /// submit a caller-supplied signed tx. txId-first idempotency; a duplicate is
     /// an idempotent accept.

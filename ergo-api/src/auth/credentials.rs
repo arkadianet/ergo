@@ -228,6 +228,11 @@ pub(super) fn required_scope(path: &str, admin: bool) -> CredentialScope {
     {
         return CredentialScope::Admin;
     }
+    if path == "/api/v1/mining/policy"
+        || path.starts_with("/api/v1/mining/private-transactions")
+    {
+        return CredentialScope::Operator;
+    }
     let path = path.strip_prefix("/api/v1").unwrap_or(path);
     if path.starts_with("/wallet")
         || path.starts_with("/scan")

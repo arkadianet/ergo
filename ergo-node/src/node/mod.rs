@@ -41,6 +41,7 @@ mod mining_dispatch;
 mod mining_engine;
 mod operator_control;
 mod peer_actions;
+mod private_mining;
 mod prune_activation;
 mod reorg_history;
 mod section_serving;

@@ -61,6 +61,8 @@ pub enum Reason {
     TxNotInBlock,
     NotBlacklisted,
     NotASingletonProtocol,
+    /// No retained mining template matches the inspection selectors.
+    TemplateNotFound,
 
     // ----- invalid input (400) -----
     BadRequest,
@@ -217,7 +219,8 @@ impl Reason {
             | AddressNotWatched
             | TxNotInBlock
             | NotBlacklisted
-            | NotASingletonProtocol => StatusCode::NOT_FOUND,
+            | NotASingletonProtocol
+            | TemplateNotFound => StatusCode::NOT_FOUND,
 
             // 400 — invalid input + the frozen submit-domain bare verbs
             // (`map_submit_error` maps every submit verb except the transient
@@ -442,6 +445,7 @@ mod tests {
             (TxNotInBlock, "tx_not_in_block", nf),
             (NotBlacklisted, "not_blacklisted", nf),
             (NotASingletonProtocol, "not_a_singleton_protocol", nf),
+            (TemplateNotFound, "template_not_found", nf),
             // invalid input (400)
             (BadRequest, "bad_request", br),
             (InvalidAddress, "invalid_address", br),
@@ -615,11 +619,11 @@ mod tests {
     }
 
     #[test]
-    fn contract_covers_exactly_one_hundred_fifteen_reasons_no_duplicates() {
+    fn contract_covers_exactly_one_hundred_sixteen_reasons_no_duplicates() {
         use std::collections::BTreeSet;
         let rows = contract();
-        assert_eq!(rows.len(), 115, "expected 115 canonical reasons");
+        assert_eq!(rows.len(), 116, "expected 116 canonical reasons");
         let wires: BTreeSet<&str> = rows.iter().map(|(_, w, _)| *w).collect();
-        assert_eq!(wires.len(), 115, "wire strings must be unique");
+        assert_eq!(wires.len(), 116, "wire strings must be unique");
     }
 }

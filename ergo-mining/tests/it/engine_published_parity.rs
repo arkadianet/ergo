@@ -457,6 +457,8 @@ const BUILT_AT_MS: u64 = 1_700_000_000_000;
 
 fn build_intent(parent: [u8; 32], parent_height: u32) -> BuildIntent {
     BuildIntent {
+        private_transactions: Arc::new(Vec::new()),
+        operator_generation: 0,
         expected_parent: parent,
         expected_height: parent_height,
         mempool: Arc::new(MempoolReadSnapshot::empty()),
@@ -649,6 +651,166 @@ fn candidate_metrics_describe_retained_transactions_and_collected_fees() {
     );
     assert!(w.metrics.validation_cost > empty_w.metrics.validation_cost + 1);
     assert!(w.metrics.transactions_size_bytes > empty_w.metrics.transactions_size_bytes);
+}
+
+/// A required transaction that fits selection but not together with the fee
+/// transaction it creates is trimmed last and reported; the candidate is
+/// still built.
+#[test]
+fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() {
+    use ergo_mempool::{pool::Entry, types::TxSource};
+    use ergo_mining::candidate::generate_candidate_with_policy_cancellable;
+    use ergo_ser::{
+        ergo_tree::ErgoTree,
+        opcode::Expr,
+        sigma_type::SigmaType,
+        sigma_value::{SigmaBoolean, SigmaValue},
+    };
+    const FEE: u64 = 1_100_000;
+    let regime = Regime::pre_eip27();
+    let tree = ErgoTree {
+        version: 0,
+        has_size: true,
+        constant_segregation: false,
+        reserved_header_bits: 0,
+        constants: vec![],
+        body: Expr::Const {
+            tpe: SigmaType::SSigmaProp,
+            val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+        },
+    };
+    let inputs: Vec<_> = (0..500u16)
+        .map(|seed| {
+            let mut id = [0xCE; 32];
+            id[..2].copy_from_slice(&seed.to_be_bytes());
+            ErgoBox {
+                candidate: ErgoBoxCandidate::new(
+                    100_000_000,
+                    tree.clone(),
+                    0,
+                    vec![],
+                    AdditionalRegisters::empty(),
+                )
+                .unwrap(),
+                transaction_id: ModifierId::from_bytes(id),
+                index: 0,
+            }
+        })
+        .collect();
+    let (_dir, store, _tip) = synced_store_with_inputs(&regime, &inputs, |tip| {
+        pack_interlinks(&[ModifierId::from_bytes(*tip)])
+    });
+    let fee_tree = read_ergo_tree(&mut VlqReader::new(
+        ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES,
+    ))
+    .unwrap();
+    // Spend the first `n` boxes, paying FEE to the fee proposition.
+    let spend = |n: usize| {
+        let tx = Transaction {
+            inputs: inputs[..n]
+                .iter()
+                .map(|b| Input {
+                    box_id: b.box_id().unwrap(),
+                    spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+                })
+                .collect(),
+            data_inputs: vec![],
+            output_candidates: vec![
+                ErgoBoxCandidate::new(
+                    n as u64 * 100_000_000 - FEE,
+                    tree.clone(),
+                    regime.parent_height + 1,
+                    vec![],
+                    AdditionalRegisters::empty(),
+                )
+                .unwrap(),
+                ErgoBoxCandidate::new(
+                    FEE,
+                    fee_tree.clone(),
+                    regime.parent_height + 1,
+                    vec![],
+                    AdditionalRegisters::empty(),
+                )
+                .unwrap(),
+            ],
+        };
+        let raw = serialize_txs(std::slice::from_ref(&tx)).pop().unwrap();
+        let id = ergo_ser::transaction::transaction_id(&tx).unwrap();
+        let entry = Entry {
+            tx_id: Digest32::from_bytes(*id.as_bytes()),
+            size_bytes: raw.len() as u32,
+            bytes: Arc::from(raw.into_boxed_slice()),
+            inputs: tx.inputs.iter().map(|i| i.box_id).collect(),
+            outputs: vec![],
+            parents_in_pool: vec![],
+            output_boxes: vec![],
+            fee: FEE,
+            weight: FEE,
+            cost: 0,
+            source: TxSource::Api,
+            created_at: std::time::Instant::now(),
+            last_checked_at: std::time::Instant::now(),
+        };
+        let policy = ergo_mining::policy::BlockPolicy {
+            required_tx_ids: vec![hex::encode(id.as_bytes())],
+            ..Default::default()
+        };
+        generate_candidate_with_policy_cancellable(
+            &store,
+            ergo_chain_spec::Network::Mainnet,
+            BuildMode::Full,
+            &MempoolReadSnapshot::from_entries(vec![entry]),
+            &MINER_PK,
+            &MonetarySettings::mainnet(),
+            None,
+            None,
+            &DifficultyParams::mainnet(),
+            &[],
+            &std::collections::BTreeMap::new(),
+            &ergo_validation::VotingSettings::mainnet(),
+            &[],
+            &mut Vec::new(),
+            &[],
+            &policy,
+            0,
+            0,
+            &|| false,
+        )
+        .map(|built| (built.map(|(candidate, _, _)| candidate), id))
+    };
+    // Measure the emission, per-input and fee-transaction costs.
+    let costs = |n: usize| {
+        let candidate = spend(n).unwrap().0.unwrap();
+        let cost = |category: &str| {
+            candidate
+                .observation
+                .transactions
+                .iter()
+                .find(|t| t.category == category)
+                .unwrap()
+                .validation_cost
+        };
+        (cost("emission"), cost("public"), cost("fees"))
+    };
+    let (emission, one, fees) = costs(1);
+    let per_input = costs(2).1 - one;
+    // The largest requirement selection admits (launch cost limit minus the
+    // safety gap and emission) leaves no room for its fee transaction.
+    let budget = 1_000_000 - 150_000 - emission;
+    let n = 1 + ((budget - one) / per_input) as usize;
+    assert!(per_input < fees && n < inputs.len());
+
+    let (candidate, id) = spend(n).expect("an unmet requirement never fails the build");
+    let candidate = candidate.expect("the emission-only candidate is published");
+    assert_eq!(candidate.transactions.len(), 1, "only the emission remains");
+    let reasons: Vec<_> = candidate
+        .observation
+        .excluded
+        .iter()
+        .filter(|e| e.tx_id.as_bytes() == id.as_bytes())
+        .map(|e| e.reason.as_str())
+        .collect();
+    assert_eq!(reasons, ["required_final_fee_or_section_budget"]);
 }
 
 // ----- happy path -----

@@ -4,7 +4,7 @@
 //! are maintained in lockstep — every mutation preserves the
 //! invariants asserted in [`OrderedPool::check_invariants`].
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -175,6 +175,11 @@ pub enum PoolError {
     /// the same box. See [`OrderedPool::insert`].
     #[error("input box_id already spent by a pooled tx: {0:?}")]
     InputCollision(Digest32),
+    /// The id belongs to an operator-private transaction. Admission rejects
+    /// these before validation; this is the backstop for package commits and
+    /// any other path that seats entries directly.
+    #[error("tx is reserved for private mining: {0:?}")]
+    PrivateOnly(TxId),
 }
 
 /// The ordered pool. Single-writer; all mutations through `&mut self`.
@@ -206,6 +211,11 @@ pub struct OrderedPool {
     /// spurious *extra* one. (`detach_parent` mutates only `parents_in_pool`,
     /// which is not candidate-visible, so it deliberately does not bump.)
     revision: u64,
+    /// Operator-private transaction ids that may never be seated here, by any
+    /// admission path. Kept with the pool so every path that reaches it
+    /// (relay, API, rollback revalidation, orphan and package promotion)
+    /// shares one deny-list, including the transactional staging clones.
+    private_only: HashSet<TxId>,
 }
 
 impl OrderedPool {
@@ -219,6 +229,7 @@ impl OrderedPool {
             pending_orphan_eviction: BTreeSet::new(),
             total_bytes: 0,
             revision: 0,
+            private_only: HashSet::new(),
         }
     }
 
@@ -237,6 +248,7 @@ impl OrderedPool {
             pending_orphan_eviction: self.pending_orphan_eviction.clone(),
             total_bytes: self.total_bytes,
             revision: self.revision,
+            private_only: self.private_only.clone(),
         }
     }
 
@@ -260,6 +272,21 @@ impl OrderedPool {
 
     pub fn contains(&self, tx_id: &TxId) -> bool {
         self.by_tx_id.contains_key(tx_id)
+    }
+
+    /// Refuse `tx_id` on every admission path. The caller registers an id
+    /// only while it is absent from the pool.
+    pub fn register_private_only(&mut self, tx_id: TxId) {
+        self.private_only.insert(tx_id);
+    }
+
+    /// Let `tx_id` through public admission again.
+    pub fn unregister_private_only(&mut self, tx_id: &TxId) {
+        self.private_only.remove(tx_id);
+    }
+
+    pub fn is_private_only(&self, tx_id: &TxId) -> bool {
+        self.private_only.contains(tx_id)
     }
 
     pub(crate) fn orphan_eviction_pending(&self) -> usize {
@@ -313,6 +340,9 @@ impl OrderedPool {
     pub fn insert(&mut self, entry: Entry) -> Result<(), PoolError> {
         if self.by_tx_id.contains_key(&entry.tx_id) {
             return Err(PoolError::Duplicate(entry.tx_id));
+        }
+        if self.private_only.contains(&entry.tx_id) {
+            return Err(PoolError::PrivateOnly(entry.tx_id));
         }
         for out in &entry.outputs {
             if self.by_output.contains_key(out) {
