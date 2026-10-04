@@ -30,15 +30,25 @@ Backup and restore refuse every existing destination, including empty
 directories, and require a destination outside the source directory. They build
 and verify a temporary copy before publishing the entire directory with one
 rename. Staging names are derived from the destination: `.NAME.ergo-backup-staging`
-or `.NAME.ergo-restore-staging` in its parent directory. SIGINT (Ctrl-C) and
-SIGTERM request cancellation; the command closes its files and removes staging
-before exiting. A crash, SIGKILL, or power loss can leave a staging copy containing
+or `.NAME.ergo-restore-staging` in its parent directory. For backup and restore,
+SIGINT (Ctrl-C) and SIGTERM request cancellation; the command closes its files
+and removes any staging copy before exiting. UTXO inspection also checks for
+cancellation, including verification before staging exists.
+A crash, SIGKILL, or power loss can leave a staging copy containing
 wallet secrets, or an empty destination reservation. The next run refuses a stale
 staging path and reports its location. Confirm no copy is running, remove the
 stale copy and any empty reservation, then retry. A partial restore is never
 published as a bootable destination. Restore checks the source,
 copied checksums, and copied committed metadata/root before publication. Source
 databases and existing destinations are never repaired or replaced.
+
+The other commands use the default SIGINT/SIGTERM action and can be interrupted
+at any time. `doctor`, `utxo-stats`, and `verify-backup` are read-only.
+`wallet-scan-utxo` uses durable checkpoints and atomic wallet publication, so an
+interruption preserves the previous visible wallet or the fully published result.
+`migrate-redb` preserves its source and publishes only a verified copy; interruption
+may leave an unpublished temporary file beside the destination. Confirm no
+migration is running before removing that file and retrying.
 
 `doctor` traverses storage pages, checks committed metadata, and, on a UTXO
 backend, visits only leaves reachable from the committed AVL root. It recomputes
@@ -102,10 +112,11 @@ Pinned input reservations live in the job journal and are not stored in the box
 or transaction rows discovery rebuilds.
 
 The scan saves durable checkpoints every 1,024 boxes or 8 MiB of staged matched
-bytes. Interrupting it leaves the visible wallet unchanged. Rerunning verifies
-the entire root and resumes staging at the checkpoint; changed tips/keys require
-`--restart`. Publication replaces wallet holdings/history and sets the wallet
-cursor to the anchor in one transaction only after full verification.
+bytes. Interrupting it before publication leaves the visible wallet unchanged.
+Rerunning verifies the entire root and resumes staging at the checkpoint;
+changed tips/keys require `--restart`. Publication replaces wallet holdings/history
+and sets the wallet cursor to the anchor in one transaction only after full
+verification.
 
 Current UTXOs cannot reconstruct historical transactions, already-spent boxes,
 or their inclusion heights. Discovery records `historyComplete: false`; native
