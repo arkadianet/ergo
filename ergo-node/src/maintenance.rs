@@ -171,7 +171,7 @@ pub fn run(command: &crate::config::Command) -> Result<String> {
             return Ok(if report.is_noop() {
                 "upgrade-data: no-op; no legacy databases or unfinished upgrades".into()
             } else {
-                format!("upgrade-data: {} databases migrated, {} stale indexers moved aside, {} interrupted upgrades recovered", report.migrated, report.stale_indexers, report.recovered)
+                format!("upgrade-data: {} databases migrated, {} stale indexers moved aside, {} interrupted upgrades recovered, {} retained backups discarded", report.migrated, report.stale_indexers, report.recovered, report.discarded_existing_backups)
             });
         }
         Command::Backup {

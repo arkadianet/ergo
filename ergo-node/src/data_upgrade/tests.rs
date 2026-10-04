@@ -97,7 +97,8 @@ fn real_v2_directory_preserves_rows_wallet_and_backups_then_is_noop() {
         UpgradeReport {
             migrated: 3,
             stale_indexers: 1,
-            recovered: 0
+            recovered: 0,
+            discarded_existing_backups: 0,
         }
     );
     for (path, bytes) in originals {
@@ -582,7 +583,8 @@ fn missing_verified_copy_restores_original_before_retrying() {
         UpgradeReport {
             migrated: 1,
             stale_indexers: 0,
-            recovered: 1
+            recovered: 1,
+            discarded_existing_backups: 0,
         }
     );
     assert_current(&path);
@@ -606,4 +608,106 @@ fn configured_indexer_cannot_consume_a_retained_rollback_backup() {
     .to_string();
     assert!(error.contains("reserved upgrade artifact"), "{error}");
     assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn discard_retry_reclaims_stale_backup_before_checking_state_space() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+    let idx = dir.path().join("custom-index.redb");
+    indexer(&idx, 2);
+    let state = dir.path().join("state.redb");
+    let bytes = legacy(&state);
+    let mut options = UpgradeOptions {
+        discard_backups: false,
+        free_space: &|path| {
+            assert_eq!(path, state);
+            Ok(0)
+        },
+        cancelled: &|| false,
+        progress: &mut |_, _, _, _| {},
+        step: &mut |_| Ok(()),
+    };
+    assert!(upgrade_data(
+        &lock,
+        dir.path(),
+        Path::new("custom-index.redb"),
+        &mut options
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("insufficient space"));
+    assert!(!idx.exists());
+    assert!(sibling(&idx, ".redb2-backup").exists());
+    assert_eq!(fs::read(&state).unwrap(), bytes);
+    options.discard_backups = true;
+    let reclaimed_space = |path: &Path| {
+        assert_eq!(path, state);
+        assert!(
+            !sibling(&idx, ".redb2-backup").exists(),
+            "discard must reclaim the earlier indexer backup first"
+        );
+        Ok(u64::MAX)
+    };
+    options.free_space = &reclaimed_space;
+    let report = upgrade_data(
+        &lock,
+        dir.path(),
+        Path::new("custom-index.redb"),
+        &mut options,
+    )
+    .unwrap();
+    assert_eq!(report.migrated, 1);
+    assert_eq!(report.discarded_existing_backups, 1);
+    assert_current(&state);
+    assert!(!sibling(&state, ".redb2-backup").exists());
+}
+
+#[test]
+fn discard_completed_upgrade_removes_retained_backups_then_is_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+    for name in ["state.redb", "peers.redb", "webhooks.redb"] {
+        legacy(&dir.path().join(name));
+    }
+    indexer(&dir.path().join("custom-index.redb"), 2);
+    run(&lock, dir.path(), false);
+    let report = run(&lock, dir.path(), true);
+    assert_eq!(report.migrated, 0);
+    assert_eq!(report.discarded_existing_backups, 4);
+    for name in ["state.redb", "peers.redb", "webhooks.redb"] {
+        assert_current(&dir.path().join(name));
+        assert!(!sibling(&dir.path().join(name), ".redb2-backup").exists());
+    }
+    assert!(run(&lock, dir.path(), true).is_noop());
+}
+
+#[test]
+fn discard_refuses_to_delete_a_sole_state_or_current_schema_indexer_backup() {
+    for name in ["state.redb", "custom-index.redb"] {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+        let path = dir.path().join(name);
+        let bytes = if name == "state.redb" {
+            legacy(&path)
+        } else {
+            indexer(&path, ergo_indexer::store::INDEXER_SCHEMA_VERSION)
+        };
+        let backup = sibling(&path, ".redb2-backup");
+        fs::rename(&path, &backup).unwrap();
+        let error = upgrade_with_logging(
+            &lock,
+            dir.path(),
+            Path::new("custom-index.redb"),
+            true,
+            &|| false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("missing") && error.contains("only copy"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&backup).unwrap(), bytes);
+    }
 }

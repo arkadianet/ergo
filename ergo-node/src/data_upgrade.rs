@@ -74,6 +74,7 @@ pub struct UpgradeReport {
     pub migrated: usize,
     pub stale_indexers: usize,
     pub recovered: usize,
+    pub discarded_existing_backups: usize,
 }
 
 impl UpgradeReport {
@@ -394,6 +395,74 @@ fn recover(path: &Path, options: &mut UpgradeOptions<'_>) -> Result<bool> {
     Ok(true)
 }
 
+// A space-limited automatic attempt may have already retained the stale index.
+// Explicit discard must reclaim that copy on retry, before the state space
+// check. Current databases must open read-only before their rollback file is
+// removed. A missing non-stale original is never permission to delete its only
+// surviving copy. Hold the legacy writer lock until deletion completes.
+fn discard_existing_backup(path: &Path, indexer: bool) -> Result<bool> {
+    let backup = sibling(path, ".redb2-backup");
+    if !regular(&backup)? {
+        return Ok(false);
+    }
+    if classify(&backup)? != FileFormat::LegacyV2 {
+        return Err(fail(format!(
+            "rollback artifact is not legacy v2; retain {}",
+            backup.display()
+        )));
+    }
+    let current_reader;
+    let backup_lock;
+    if regular(path)? {
+        if classify(path)? != FileFormat::Current {
+            return Ok(false);
+        }
+        current_reader = Some(
+            redb::Database::builder()
+                .set_cache_size(8 * 1024 * 1024)
+                .open_read_only(path)
+                .map_err(|e| {
+                    fail(format!(
+                        "cannot discard rollback backup until {} opens read-only: {e}",
+                        path.display()
+                    ))
+                })?,
+        );
+        backup_lock = Arc::new(redb_legacy::backends::FileBackend::new(File::open(
+            &backup,
+        )?)?);
+    } else if indexer {
+        let (schema, lock) = legacy_indexer_schema(&backup)?;
+        if schema >= ergo_indexer::store::INDEXER_SCHEMA_VERSION {
+            return Err(fail(format!(
+                "current-schema indexer is missing; retain its only copy at {}",
+                backup.display()
+            )));
+        }
+        current_reader = None;
+        backup_lock = lock;
+    } else {
+        return Err(fail(format!(
+            "database {} is missing; retain its only copy at {}",
+            path.display(),
+            backup.display()
+        )));
+    }
+    let bytes = fs::metadata(&backup)?.len();
+    fs::remove_file(&backup)?;
+    sync_directory(
+        path.parent()
+            .ok_or_else(|| fail("database needs a parent"))?,
+    )?;
+    drop(backup_lock);
+    drop(current_reader);
+    eprintln!(
+        "upgrade-data: discarded retained legacy backup {} ({bytes} bytes)",
+        backup.display()
+    );
+    Ok(true)
+}
+
 /// Caller must retain this lock across subsequent database opens at startup.
 pub fn upgrade_data(
     _lock: &DataDirectoryLock,
@@ -410,6 +479,9 @@ pub fn upgrade_data(
         }
         if recover(path, options)? {
             report.recovered += 1;
+        }
+        if options.discard_backups && discard_existing_backup(path, position == 0)? {
+            report.discarded_existing_backups += 1;
         }
         if !regular(path)? || classify(path)? == FileFormat::Current {
             continue;
