@@ -284,14 +284,21 @@ to retries and cannot be bypassed by alternate routing.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `api_key_hash` | string (hex) | none | Lowercase Base16 of `Blake2b256(<secret>)`. Optional; privileged routes fail closed when absent. Must be exactly 64 lowercase hex characters (`0-9`, `a-f`); uppercase or mixed case is rejected for canonical-form parity. Supplied hashes are validated even when the API is disabled. |
+| `keys` | array of tables | `[]` | Named scoped credentials; use `[[api.security.keys]]` as described below. Requires a master `api_key_hash`. |
 | `allow_unauthenticated_legacy_mining` | bool | `false` | Explicit Scala/Lithos compatibility: permits unauthenticated `GET /mining/candidate`, `POST /mining/solution`, and reward address/public-key reads. Requires `api_key_hash` when the API is enabled. Supplied-transaction candidate endpoints and all v1 operator routes remain authenticated. |
-
-### `[api.security.keys]`, `[api.limits]` and `[api.readiness]`
 
 `[[api.security.keys]]` defines named credentials with `id`, `hash`, `scopes`
 (`mining`, `wallet`, `operator`, `admin`) and `revoked` (default `false`). Scoped
 keys require a master hash. Set `revoked = true` for denial that survives a data
 wipe or old backup restore; API revocations use a data-directory ledger.
+Scoped `mining` keys authorize `POST /mining/candidateWithTxs`,
+`POST /mining/candidateWithTxsAndPk` and
+`POST /api/v1/mining/candidate-with-txs`. These supplied-transaction routes
+require a key even when `allow_unauthenticated_legacy_mining = true`. The flag
+is boot-only; runtime `PATCH /api/v1/node/config` changes only `api_limits`
+and `readiness`.
+
+### `[api.limits]` and `[api.readiness]`
 
 | Limit key | Default | Meaning |
 |---|---|---|

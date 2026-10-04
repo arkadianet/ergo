@@ -334,6 +334,12 @@ const SCOPES: &[(&str, &str, CredentialScope)] = &[
     ("POST", "/api/v1/wallet/unlock", CredentialScope::Wallet),
     ("POST", "/api/v1/webhooks", CredentialScope::Operator),
     ("POST", "/blocks", CredentialScope::Operator),
+    ("POST", "/mining/candidateWithTxs", CredentialScope::Mining),
+    (
+        "POST",
+        "/mining/candidateWithTxsAndPk",
+        CredentialScope::Mining,
+    ),
     ("POST", "/mining/solution", CredentialScope::Mining),
     ("POST", "/node/shutdown", CredentialScope::Admin),
     ("POST", "/peers/connect", CredentialScope::Operator),

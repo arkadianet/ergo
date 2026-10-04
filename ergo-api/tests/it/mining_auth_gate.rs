@@ -73,6 +73,20 @@ fn app() -> axum::Router {
 }
 
 fn app_with_legacy(allow: bool) -> axum::Router {
+    app_with_mining_and_security(
+        Arc::new(NoopNodeMining),
+        Arc::new(
+            ApiSecurity::new(SCALA_HELLO_HASH.to_string())
+                .unwrap()
+                .with_unauthenticated_legacy_mining(allow),
+        ),
+    )
+}
+
+fn app_with_mining_and_security(
+    mining: Arc<dyn ergo_api::mining::NodeMining>,
+    security: Arc<ApiSecurity>,
+) -> axum::Router {
     let ctx = ServerCtx {
         read: Arc::new(UnusedReadState),
         compat: None,
@@ -81,7 +95,7 @@ fn app_with_legacy(allow: bool) -> axum::Router {
         mempool: Arc::new(NoopMempoolView::new()),
         network: NetworkPrefix::Mainnet,
         chain_params: None,
-        mining: Some(Arc::new(NoopNodeMining)),
+        mining: Some(mining),
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
@@ -93,11 +107,7 @@ fn app_with_legacy(allow: bool) -> axum::Router {
         ctx,
         None,
         Arc::new(NoopWalletAdmin),
-        Some(Arc::new(
-            ApiSecurity::new(SCALA_HELLO_HASH.to_string())
-                .expect("valid hex hash")
-                .with_unauthenticated_legacy_mining(allow),
-        )),
+        Some(security),
     )
 }
 
@@ -409,5 +419,164 @@ async fn legacy_opt_in_keeps_native_mining_operator_routes_authenticated() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+}
+
+// A working backend makes HTTP 200 prove that scoped admission reaches the
+// handler, including JSON decoding on the supplied-transaction routes.
+struct WorkingMining;
+
+const MINER_PK: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+#[async_trait::async_trait]
+impl ergo_api::mining::NodeMining for WorkingMining {
+    async fn candidate(
+        &self,
+        _: Option<String>,
+    ) -> Result<Option<ergo_rest_json::mining::WorkMessageJson>, ergo_api::mining::MiningApiError>
+    {
+        Ok(Some(ergo_rest_json::mining::WorkMessageJson {
+            msg: "00".repeat(32),
+            b: 1u8.into(),
+            h: Some(1),
+            pk: MINER_PK.into(),
+            proof: None,
+            template_seq: 1,
+            clean_jobs: true,
+            metrics: None,
+        }))
+    }
+
+    async fn candidate_with_txs(
+        &self,
+        txs: Vec<ergo_rest_json::ScalaTransactionInput>,
+        pk: Option<String>,
+    ) -> Result<Option<ergo_rest_json::mining::WorkMessageJson>, ergo_api::mining::MiningApiError>
+    {
+        assert!(txs.is_empty());
+        assert!(pk.is_none_or(|pk| pk == MINER_PK));
+        self.candidate(None).await
+    }
+
+    async fn submit_solution(
+        &self,
+        _: ergo_rest_json::mining::AutolykosSolutionJson,
+    ) -> Result<(), ergo_api::mining::MiningApiError> {
+        Ok(())
+    }
+
+    async fn reward_address(&self) -> Result<String, ergo_api::mining::MiningApiError> {
+        Ok("reward-address".into())
+    }
+
+    async fn reward_pubkey(&self) -> Result<String, ergo_api::mining::MiningApiError> {
+        Ok(MINER_PK.into())
+    }
+}
+
+#[tokio::test]
+async fn scoped_transaction_candidates_preserve_legacy_bypass_and_revocation() {
+    use ergo_api::auth::{CredentialScope, ScopedCredentialConfig};
+
+    for allow in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let security = Arc::new(
+            ApiSecurity::new(SCALA_HELLO_HASH.into())
+                .unwrap()
+                .with_credentials(
+                    [
+                        ("miner", CredentialScope::Mining),
+                        ("wallet", CredentialScope::Wallet),
+                    ]
+                    .into_iter()
+                    .map(|(id, scope)| ScopedCredentialConfig {
+                        id: id.into(),
+                        hash: ApiSecurity::hash_key(id.as_bytes()),
+                        scopes: vec![scope],
+                        revoked: false,
+                    })
+                    .collect(),
+                    dir.path().join("revoked.json"),
+                )
+                .unwrap()
+                .with_unauthenticated_legacy_mining(allow),
+        );
+        let app = app_with_mining_and_security(Arc::new(WorkingMining), security.clone());
+        for request in [
+            get("/mining/candidate"),
+            get("/mining/rewardAddress"),
+            get("/mining/rewardPublicKey"),
+            post_json("/mining/solution", r#"{"n":"0001020304050607"}"#),
+        ] {
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                if allow {
+                    StatusCode::OK
+                } else {
+                    StatusCode::FORBIDDEN
+                },
+            );
+        }
+        let with_pk = format!(r#"{{"txs":[],"pk":"{MINER_PK}"}}"#);
+        for (path, body, refused) in [
+            ("/mining/candidateWithTxs", "[]", StatusCode::FORBIDDEN),
+            (
+                "/mining/candidateWithTxsAndPk",
+                with_pk.as_str(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "/api/v1/mining/candidate-with-txs",
+                "[]",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "/api/v1/mining/candidate-with-txs",
+                with_pk.as_str(),
+                StatusCode::UNAUTHORIZED,
+            ),
+        ] {
+            for (key, status) in [
+                (None, refused),
+                (Some("wallet"), refused),
+                (Some("miner"), StatusCode::OK),
+            ] {
+                let mut request = post_json(path, body);
+                if let Some(key) = key {
+                    request
+                        .headers_mut()
+                        .insert(API_KEY_HEADER, key.parse().unwrap());
+                }
+                assert_eq!(
+                    app.clone().oneshot(request).await.unwrap().status(),
+                    status,
+                    "{path}: {key:?}, legacy={allow}"
+                );
+            }
+        }
+        security.revoke_credential("miner").unwrap();
+        for (path, body, refused) in [
+            ("/mining/candidateWithTxs", "[]", StatusCode::FORBIDDEN),
+            (
+                "/mining/candidateWithTxsAndPk",
+                with_pk.as_str(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "/api/v1/mining/candidate-with-txs",
+                "[]",
+                StatusCode::UNAUTHORIZED,
+            ),
+        ] {
+            let mut request = post_json(path, body);
+            request
+                .headers_mut()
+                .insert(API_KEY_HEADER, "miner".parse().unwrap());
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                refused,
+                "revoked key: {path}, legacy={allow}"
+            );
+        }
     }
 }
