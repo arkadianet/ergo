@@ -645,3 +645,27 @@ async fn boot_hook_precedes_sentinel_peek_and_refuses_a_second_directory_owner()
     drop(lock);
 }
 
+#[tokio::test]
+async fn upgraded_directory_retained_backups_support_doctor_backup_verify_and_restore() {
+    let data = tempfile::tempdir().unwrap();
+    let destinations = tempfile::tempdir().unwrap();
+    let originals = directory_upgrade_fixture(data.path(), 2);
+    let mut config = super::common::make_test_config(data.path().to_path_buf());
+    config.indexer_config.db_filename = "archive-index.redb".into();
+    let lock = ergo_node::data_upgrade::prepare_startup(&config)
+        .await
+        .unwrap();
+    drop(lock);
+    let inspected = ergo_node::maintenance::doctor(data.path()).unwrap();
+    assert!(inspected.databases.contains_key("state.redb"));
+    assert!(!inspected
+        .databases
+        .keys()
+        .any(|name| name.ends_with(".redb2-backup")));
+    let backup = destinations.path().join("backup");
+    ergo_node::maintenance::backup(data.path(), &backup).unwrap();
+    ergo_node::maintenance::verify_backup(&backup).unwrap();
+    let restored = destinations.path().join("restored");
+    ergo_node::maintenance::restore(&backup, &restored).unwrap();
+    assert_upgraded_directory(&restored, &originals, true, false);
+}

@@ -128,6 +128,17 @@ pub fn classify(path: &Path) -> Result<FileFormat> {
 
 fn database_paths(directory: &Path, indexer_filename: &Path) -> Result<Vec<PathBuf>> {
     let indexer = directory.join(indexer_filename);
+    if indexer.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        name.ends_with(".redb-upgrade")
+    }) || indexer
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(".redb2-backup"))
+    {
+        return Err(fail(
+            "indexer db_filename uses a reserved upgrade artifact name",
+        ));
+    }
     // The config permits nested and absolute paths. Resolve the parent to catch
     // aliases before ever treating a consensus/peer/webhook file as an indexer.
     fn identity(path: &Path) -> Result<PathBuf> {

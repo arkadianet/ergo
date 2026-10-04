@@ -589,3 +589,21 @@ fn missing_verified_copy_restores_original_before_retrying() {
     assert_eq!(fs::read(sibling(&path, ".redb2-backup")).unwrap(), bytes);
 }
 
+#[test]
+fn configured_indexer_cannot_consume_a_retained_rollback_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+    let path = dir.path().join("state.redb.redb2-backup");
+    let bytes = indexer(&path, 2);
+    let error = upgrade_with_logging(
+        &lock,
+        dir.path(),
+        Path::new("state.redb.redb2-backup"),
+        true,
+        &|| false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("reserved upgrade artifact"), "{error}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}

@@ -322,6 +322,14 @@ fn database_access_error(
 fn lock_databases(root: &Path, files: &[PathBuf]) -> Result<BTreeMap<String, ReadOnlyDatabase>> {
     let mut databases = BTreeMap::new();
     for file in files {
+        // Retained originals are rollback artifacts, not active databases. They
+        // stay in the checksummed file inventory and the complete backup copy.
+        if file
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".redb2-backup"))
+        {
+            continue;
+        }
         let mut header = [0; 9];
         let n = File::open(root.join(file))
             .and_then(|mut input| input.read(&mut header))
