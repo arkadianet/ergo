@@ -119,7 +119,7 @@ run_tests() {
     echo "==> $label"
     # `set -o pipefail` is what makes a `cargo test` failure survive the pipe;
     # without it `tee`'s status would mask it and the run would look green.
-    if ! cargo test "${TEST_TARGET[@]}" "$@" 2>&1 | tee "$log"; then
+    if ! cargo test --locked "${TEST_TARGET[@]}" "$@" 2>&1 | tee "$log"; then
         echo "error: '$label' failed; full output: $log" >&2
         return 1
     fi
