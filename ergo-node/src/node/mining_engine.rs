@@ -145,6 +145,12 @@ fn resolve_eligible_rent_boxes(
     if should_cancel() {
         return Vec::new();
     }
+    if indexer.is_some_and(|h| {
+        use ergo_indexer::IndexerQuery;
+        matches!(h.status(), ergo_indexer::IndexerStatus::Migrating)
+    }) {
+        return Vec::new();
+    }
     let Some(store_idx) = indexer.and_then(|h| h.store()) else {
         // Boot-time config validation requires the indexer when rent claiming
         // is enabled, so an absent store here means the indexer halted —
@@ -867,6 +873,39 @@ mod tests {
             transaction_id: ModifierId::from_bytes([seed; 32]),
             index: 0,
         }
+    }
+
+    #[test]
+    fn rent_claims_pause_quietly_while_index_migrates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state =
+            ergo_state::store::StateStore::open(&tmp.path().join("state.redb")).unwrap();
+        state.initialize_genesis(&[([1; 32], vec![1; 40])]).unwrap();
+        let snapshot = state.committed_snapshot().unwrap().unwrap();
+        let indexer = ergo_indexer::IndexerHandle::syncing(123);
+        indexer.set_status(ergo_indexer::IndexerStatus::Migrating);
+        let log_path = tmp.path().join("rent.log");
+        let log = std::fs::File::create(&log_path).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || log.try_clone().unwrap())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..3 {
+                assert!(resolve_eligible_rent_boxes(
+                    Some(&indexer),
+                    &snapshot,
+                    STORAGE_PERIOD_BLOCKS + 1,
+                    4,
+                    &|| false
+                )
+                .is_empty());
+            }
+        });
+        assert!(
+            std::fs::read_to_string(log_path).unwrap().is_empty(),
+            "normal migration must not warn on each candidate build"
+        );
     }
 
     /// One eligible-id row naming the box with the given `seed`. The other

@@ -48,6 +48,8 @@ pub enum OpenOutcome {
     /// File present and `schema_version` matched — resumed from
     /// persisted meta.
     Resumed,
+    /// Schema 2 awaits conversion on the dedicated indexer worker.
+    MigrationPending,
     /// Schema 2 projections migrated atomically, preserving the checkpoint.
     Migrated { previous_version: u32 },
     /// File present but `schema_version` mismatched — file deleted and
@@ -150,6 +152,21 @@ impl IndexerStore {
         cache_bytes: usize,
         migrate: fn(&Database) -> Result<(), IndexerError>,
     ) -> Result<(Self, OpenOutcome), IndexerError> {
+        Self::open_inner(path, cache_bytes, Some(migrate))
+    }
+
+    pub(crate) fn open_for_boot(
+        path: &Path,
+        cache_bytes: usize,
+    ) -> Result<(Self, OpenOutcome), IndexerError> {
+        Self::open_inner(path, cache_bytes, None)
+    }
+
+    fn open_inner(
+        path: &Path,
+        cache_bytes: usize,
+        migrate: Option<fn(&Database) -> Result<(), IndexerError>>,
+    ) -> Result<(Self, OpenOutcome), IndexerError> {
         if !path.exists() {
             return Self::create_fresh(path, cache_bytes).map(|s| (s, OpenOutcome::CreatedFresh));
         }
@@ -200,6 +217,18 @@ impl IndexerStore {
             Some(previous_version) => {
                 drop(read_txn);
                 if previous_version == 2 {
+                    let Some(migrate) = migrate else {
+                        return Ok((
+                            Self {
+                                db: Arc::new(db),
+                                repair_running: Arc::new(AtomicBool::new(false)),
+                                path: path.to_path_buf(),
+                                redb_cache_bytes: cache_bytes,
+                                rollback_window: ROLLBACK_WINDOW,
+                            },
+                            OpenOutcome::MigrationPending,
+                        ));
+                    };
                     match migrate(&db) {
                         Ok(()) => {
                             return Ok((
@@ -232,6 +261,37 @@ impl IndexerStore {
                 })?;
                 let store = Self::create_fresh(path, cache_bytes)?;
                 Ok((store, OpenOutcome::WipedAndRecreated { previous_version }))
+            }
+        }
+    }
+
+    pub(crate) fn finish_migration(self, cancel: &AtomicBool) -> Result<Self, IndexerError> {
+        self.finish_migration_with(cancel, |db| migration::migrate_cancellable(db, cancel))
+    }
+
+    pub(crate) fn finish_migration_with(
+        self,
+        cancel: &AtomicBool,
+        migrate: impl FnOnce(&Database) -> Result<(), IndexerError>,
+    ) -> Result<Self, IndexerError> {
+        match migrate(&self.db) {
+            Ok(()) => Ok(self),
+            Err(error) if cancel.load(Ordering::Acquire) => Err(error),
+            Err(error) => {
+                tracing::warn!(event = "indexer_schema_migration_failed", %error,
+                    "schema-2 migration aborted; rebuilding index from genesis");
+                let path = self.path.clone();
+                let cache_bytes = self.redb_cache_bytes;
+                let rollback_window = self.rollback_window;
+                // Release the sole database owner before deleting/recreating it.
+                drop(self);
+                std::fs::remove_file(&path).map_err(|source| IndexerError::FsIo {
+                    context: "remove_file schema-wipe",
+                    source,
+                })?;
+                let mut store = Self::create_fresh(&path, cache_bytes)?;
+                store.set_rollback_window(rollback_window);
+                Ok(store)
             }
         }
     }

@@ -346,3 +346,190 @@ fn schema_two_missing_or_undecodable_issuing_box_rebuilds() {
         assert_eq!(rebuilt.read_meta().unwrap(), IndexerMeta::empty());
     }
 }
+
+fn boot_legacy(path: &std::path::Path) -> crate::IndexerHandle {
+    let start = Instant::now();
+    let handle = crate::IndexerHandle::boot(
+        &crate::IndexerConfig {
+            enabled: true,
+            ..crate::IndexerConfig::default()
+        },
+        path,
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "boot performed conversion"
+    );
+    let handle = handle.unwrap();
+    use ergo_indexer_types::IndexerQuery;
+    assert_eq!(
+        handle.status(),
+        ergo_indexer_types::IndexerStatus::Migrating
+    );
+    assert!(handle.store().is_none());
+    assert_eq!(handle.health().unwrap().global_boxes, 0);
+    handle
+}
+
+struct MigrationChain;
+impl crate::IndexerChainSource for MigrationChain {
+    fn committed_tip(&self) -> Result<crate::ChainTip, IndexerError> {
+        Ok(crate::ChainTip {
+            height: 4,
+            header_id: Digest32::from_bytes([4; 32]),
+        })
+    }
+    fn header_id_at(&self, height: u32) -> Result<Option<Digest32>, IndexerError> {
+        Ok((1..=4)
+            .contains(&height)
+            .then(|| Digest32::from_bytes([height as u8; 32])))
+    }
+    fn best_header_id_at(&self, height: u32) -> Result<Option<Digest32>, IndexerError> {
+        self.header_id_at(height)
+    }
+    fn full_block(&self, id: &Digest32) -> Result<Option<crate::IndexerFullBlock>, IndexerError> {
+        Ok(Some(crate::IndexerFullBlock {
+            height: i32::from(id.as_bytes()[0]),
+            header_id: *id,
+            transactions: vec![],
+        }))
+    }
+}
+
+fn wait_ready(handle: &crate::IndexerHandle) {
+    use ergo_indexer_types::{IndexerQuery, IndexerStatus};
+    let start = Instant::now();
+    while handle.status() != IndexerStatus::CaughtUp {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "worker failed to become ready: {:?}",
+            handle.status()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(handle.indexed_height(), 4);
+}
+
+#[test]
+fn schema_two_boot_defers_migration_then_worker_preserves_and_advances() {
+    use ergo_indexer_types::IndexerQuery;
+    use std::sync::{atomic::AtomicBool, Arc};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("indexer.redb");
+    let legacy = build(&path, &blocks(), true);
+    let box_count = legacy.read_meta().unwrap().global_box_index;
+    drop(legacy);
+    let handle = boot_legacy(tmp.path());
+    assert_eq!(handle.indexed_height(), 3);
+    let worker = crate::IndexerTask::new(handle.clone(), Arc::new(MigrationChain))
+        .spawn(Arc::new(AtomicBool::new(false)), Duration::from_millis(50))
+        .unwrap();
+    wait_ready(&handle);
+    assert_eq!(
+        handle
+            .store()
+            .unwrap()
+            .read_meta()
+            .unwrap()
+            .global_box_index,
+        box_count
+    );
+    worker.join().unwrap();
+}
+
+#[test]
+fn schema_two_boot_failure_rebuilds_on_worker_without_blocking_boot() {
+    use std::sync::{atomic::AtomicBool, Arc};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("indexer.redb");
+    let legacy = build(&path, &blocks(), true);
+    let write = legacy.begin_write().unwrap();
+    write
+        .open_table(INDEXED_TOKEN)
+        .unwrap()
+        .insert([0; 32].as_slice(), [0xff].as_slice())
+        .unwrap();
+    write.commit().unwrap();
+    drop(legacy);
+    let handle = boot_legacy(tmp.path());
+    let worker = crate::IndexerTask::new(handle.clone(), Arc::new(MigrationChain))
+        .spawn(Arc::new(AtomicBool::new(false)), Duration::from_millis(50))
+        .unwrap();
+    wait_ready(&handle);
+    assert_eq!(
+        handle
+            .store()
+            .unwrap()
+            .read_meta()
+            .unwrap()
+            .global_box_index,
+        0,
+        "fallback rebuilt from genesis"
+    );
+    worker.join().unwrap();
+}
+
+#[test]
+fn schema_two_shutdown_aborts_staged_writes_and_next_boot_migrates() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("indexer.redb");
+    let legacy = build(&path, &blocks(), true);
+    let before = snapshot(&legacy);
+    drop(legacy);
+    let handle = boot_legacy(tmp.path());
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker_handle = handle.clone();
+    let worker_cancel = cancel.clone();
+    let (staged_tx, staged_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        worker_handle.finish_boot_with(&worker_cancel, |store| {
+            store.finish_migration_with(&worker_cancel, |db| {
+                let mut first = true;
+                migrate_cancellable_observed(db, &worker_cancel, &mut || {
+                    if first {
+                        first = false;
+                        staged_tx.send(()).unwrap();
+                        resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    }
+                    Ok(())
+                })
+            })
+        })
+    });
+    staged_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let shutdown_start = Instant::now();
+    cancel.store(true, Ordering::Release);
+    resume_tx.send(()).unwrap();
+    assert!(matches!(
+        thread.join().unwrap(),
+        Err(IndexerError::MigrationCancelled)
+    ));
+    assert!(shutdown_start.elapsed() < Duration::from_secs(1));
+    assert!(handle.store().is_none());
+    // Read without invoking the normal open policy (which would convert).
+    let db = redb::Database::open(&path).unwrap();
+    assert_eq!(
+        meta::read_schema_version(&db.begin_read().unwrap()).unwrap(),
+        Some(2)
+    );
+    let store = IndexerStore {
+        db: Arc::new(db),
+        repair_running: Arc::new(AtomicBool::new(false)),
+        path: path.clone(),
+        redb_cache_bytes: 1024 * 1024,
+        rollback_window: super::super::ROLLBACK_WINDOW,
+    };
+    assert_eq!(snapshot(&store), before);
+    drop(store);
+    let handle = boot_legacy(tmp.path());
+    let worker = crate::IndexerTask::new(handle.clone(), Arc::new(MigrationChain))
+        .spawn(Arc::new(AtomicBool::new(false)), Duration::from_millis(50))
+        .unwrap();
+    wait_ready(&handle);
+    worker.join().unwrap();
+}

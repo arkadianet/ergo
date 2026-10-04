@@ -149,6 +149,7 @@ pub struct IndexedHeightResponse {
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum IndexerStatusLabel {
+    Migrating,
     Syncing,
     CaughtUp,
     Halted,
@@ -157,6 +158,7 @@ pub enum IndexerStatusLabel {
 impl IndexerStatusLabel {
     fn from_status(status: &IndexerStatus) -> Self {
         match status {
+            IndexerStatus::Migrating => Self::Migrating,
             IndexerStatus::Syncing => Self::Syncing,
             IndexerStatus::CaughtUp => Self::CaughtUp,
             IndexerStatus::Halted(_) => Self::Halted,
@@ -220,6 +222,7 @@ pub async fn indexer_status_handler(State(state): State<BlockchainState>) -> Res
     };
     let body = crate::types::ApiIndexerStatus {
         status: match &status {
+            IndexerStatus::Migrating => "migrating".to_string(),
             IndexerStatus::Syncing => "syncing".to_string(),
             IndexerStatus::CaughtUp => "caughtUp".to_string(),
             IndexerStatus::Halted(_) => "halted".to_string(),
@@ -272,6 +275,15 @@ pub async fn enforce_status_gate(
 ) -> Response {
     match state.indexer.status() {
         IndexerStatus::CaughtUp => next.run(req).await,
+        IndexerStatus::Migrating => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorEnvelope {
+                error: 503,
+                reason: "indexer-migrating",
+                detail: "indexer schema migration in progress".to_string(),
+            }),
+        )
+            .into_response(),
         IndexerStatus::Syncing => syncing_envelope(&state),
         IndexerStatus::Halted(reason) => halted_envelope(reason),
     }

@@ -382,6 +382,7 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         let indexer_status = state.indexer_handle.as_ref().map(|h| {
             use ergo_indexer::{IndexerQuery, IndexerStatus};
             match h.status() {
+                IndexerStatus::Migrating => ("migrating".to_string(), None),
                 IndexerStatus::Syncing => ("syncing".to_string(), None),
                 IndexerStatus::CaughtUp => ("caughtUp".to_string(), None),
                 IndexerStatus::Halted(r) => {

@@ -355,10 +355,14 @@ policy/history and maintenance journals are files/JSON, not separate redb
 databases. Missing databases are left for normal startup to create; current
 files are skipped. A clean legacy schema-2 indexer is converted and kept when
 free space covers both its conversion and the remaining database conversions,
-using the same file-size-plus-headroom rule for each. On indexer open, schema 2
-is migrated to schema 3 in one atomic transaction: token metadata is recomputed
+using the same file-size-plus-headroom rule for each. Schema 2 is migrated to
+schema 3 on the background indexer worker in one atomic transaction: token metadata is recomputed
 from issuing boxes and wrapped-script template entries are added, preserving
-indexed height and rollback history. Progress logs report scanned boxes,
+indexed height and rollback history. Node startup returns a `migrating` handle
+without exposing the store; indexed data routes return 503 `indexer-migrating`
+and rent self-claims pause quietly while API, P2P and mining run. On shutdown,
+uncommitted conversion is aborted and schema 2 remains available for the next
+boot. Conversion failures rebuild in the background. Progress logs report scanned boxes,
 changed tokens, affected boxes/templates and elapsed time every ten seconds.
 If space is insufficient or unknown, the indexer is deleted **first**, through
 the crash-safe journal, so the state upgrade has priority. Older schemas and

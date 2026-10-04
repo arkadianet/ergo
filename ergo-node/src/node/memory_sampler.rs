@@ -55,6 +55,7 @@ pub(super) fn sample_memory(
                 let height = ergo_indexer::IndexerQuery::indexed_height(h);
                 let lag = (bf as u64).saturating_sub(height);
                 let status = match ergo_indexer::IndexerQuery::status(h) {
+                    ergo_indexer::IndexerStatus::Migrating => "Migrating",
                     ergo_indexer::IndexerStatus::Syncing => "Syncing",
                     ergo_indexer::IndexerStatus::CaughtUp => "CaughtUp",
                     ergo_indexer::IndexerStatus::Halted(_) => "Halted",

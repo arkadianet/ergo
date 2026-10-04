@@ -27,15 +27,50 @@ fn invalid(detail: impl Into<String>) -> IndexerError {
     }
 }
 
-pub(super) fn migrate_schema_2_to_3(db: &redb::Database) -> Result<(), IndexerError> {
-    migrate_observed(db, &mut || Ok(()))
+pub(crate) fn migrate_cancellable(
+    db: &redb::Database,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(), IndexerError> {
+    migrate_cancellable_observed(db, cancel, &mut || Ok(()))
 }
 
-// The observer permits deterministic failure injection after actual writes.
+fn migrate_cancellable_observed(
+    db: &redb::Database,
+    cancel: &std::sync::atomic::AtomicBool,
+    observer: &mut impl FnMut() -> Result<(), IndexerError>,
+) -> Result<(), IndexerError> {
+    migrate_controlled(
+        db,
+        &|| {
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                Err(IndexerError::MigrationCancelled)
+            } else {
+                Ok(())
+            }
+        },
+        observer,
+    )
+}
+
+pub(super) fn migrate_schema_2_to_3(db: &redb::Database) -> Result<(), IndexerError> {
+    migrate_controlled(db, &|| Ok(()), &mut || Ok(()))
+}
+
+#[cfg(test)]
 fn migrate_observed(
     db: &redb::Database,
     observer: &mut impl FnMut() -> Result<(), IndexerError>,
 ) -> Result<(), IndexerError> {
+    migrate_controlled(db, &|| Ok(()), observer)
+}
+
+// Checks run throughout the transaction; the observer injects faults after writes.
+fn migrate_controlled(
+    db: &redb::Database,
+    check: &(impl Fn() -> Result<(), IndexerError> + Sync),
+    observer: &mut impl FnMut() -> Result<(), IndexerError>,
+) -> Result<(), IndexerError> {
+    check()?;
     let start = Instant::now();
     let mut last_log = start;
     let mut write = ergo_state::begin_write_qr(db)?;
@@ -56,6 +91,7 @@ fn migrate_observed(
         let mut tokens = write.open_table(INDEXED_TOKEN)?;
         let mut writer = VlqWriter::new();
         for row in old_tokens.iter()? {
+            check()?;
             let (key, value) = row?;
             let mut reader = VlqReader::new(value.value());
             let mut token =
@@ -126,6 +162,7 @@ fn migrate_observed(
             return Err(invalid("box counts differ from checkpoint"));
         }
         for gi in 0..checkpoint.global_box_index {
+            check()?;
             let box_id = read_box_id(&numeric, gi)?
                 .ok_or_else(|| invalid(format!("missing global box index {gi}")))?;
             let record = read_box(&boxes, &box_id, gi)?;
@@ -181,6 +218,7 @@ fn migrate_observed(
             let mut new = new_entries.into_iter().peekable();
             let mut previous = None;
             for spill in 0..=old.segment.box_segment_count {
+                check()?;
                 let entries = if spill == old.segment.box_segment_count {
                     old.segment.boxes.clone()
                 } else {
@@ -225,6 +263,7 @@ fn migrate_observed(
                 }
             }
             for entry in new {
+                check()?;
                 append_signed(&mut rebuilt, entry, &mut staged, &segments)?;
                 if !staged.is_empty() {
                     flush_staged_spills(&mut segments, &mut writer, &staged, &deleted)?;
@@ -246,11 +285,13 @@ fn migrate_observed(
     // historical chain blocks is needed (including wrapped outputs in-window).
     let undo = read.open_table(INDEXER_UNDO)?;
     for row in undo.iter()? {
+        check()?;
         super::UndoEntry::decode(row?.1.value())?;
     }
     observer()?;
     let undo_entries = undo.len()?;
     meta::write_schema_version(&write, INDEXER_SCHEMA_VERSION)?;
+    check()?;
     write.commit()?;
     tracing::info!(
         event = "indexer_schema_migration_complete",

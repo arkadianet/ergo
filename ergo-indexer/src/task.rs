@@ -555,6 +555,22 @@ impl<C: IndexerChainSource> IndexerTask<C> {
         // Share the driver's cancel flag with `step` so an in-progress
         // secondary-index rebuild can drain promptly on shutdown.
         self.cancel = cancel.clone();
+        if let Err(error) = self.handle.finish_boot(&cancel) {
+            if !cancel.load(Ordering::Acquire) {
+                if error.is_storage_error() {
+                    crate::handle::report_indexer_storage_failure(
+                        None,
+                        "indexer_finish_boot",
+                        None,
+                        &error,
+                    );
+                }
+                tracing::error!(%error, "indexer background boot failed");
+                self.handle
+                    .set_status(IndexerStatus::Halted(error.halt_reason()));
+            }
+            return;
+        }
         let poll_idle = poll_idle.max(MIN_POLL_DELAY);
         let mut section_retry_count: u32 = 0;
         loop {
