@@ -46,18 +46,36 @@ pub(super) fn api_entry(
 }
 
 /// Decline the queue's transactions on every public admission path. Called at
-/// startup, whether or not mining is enabled.
+/// startup, whether or not mining is enabled. Cancelled and expired entries
+/// are no longer this miner's work, so they stay publicly admissible.
 pub(super) fn register_queued(
     mempool: &mut ergo_mempool::Mempool,
     queue: &ergo_mining::private_queue::PrivateTransactionQueue,
 ) {
     for entry in queue.list() {
-        if let Ok(raw) = hex::decode(&entry.tx_id) {
-            if let Ok(id) = <[u8; 32]>::try_from(raw) {
-                mempool.register_private_transaction(Digest32::from_bytes(id));
-            }
+        if matches!(
+            entry.state,
+            PrivateTransactionState::Cancelled | PrivateTransactionState::Expired
+        ) {
+            continue;
+        }
+        if let Some(id) = decode_tx_id(&entry.tx_id) {
+            mempool.register_private_transaction(id);
         }
     }
+}
+
+/// Let a withdrawn (cancelled or expired) transaction through public
+/// admission again; the operator may now broadcast it through this node.
+pub(super) fn release_withdrawn(mempool: &mut ergo_mempool::Mempool, tx_ids: &[String]) {
+    for id in tx_ids.iter().filter_map(|id| decode_tx_id(id)) {
+        mempool.unregister_private_transaction(&id);
+    }
+}
+
+fn decode_tx_id(tx_id: &str) -> Option<Digest32> {
+    let raw = hex::decode(tx_id).ok()?;
+    Some(Digest32::from_bytes(<[u8; 32]>::try_from(raw).ok()?))
 }
 
 pub(super) fn admit(
@@ -197,7 +215,7 @@ pub(super) fn admit(
 }
 
 /// Called before every solution request as well as on ordinary loop ticks.
-pub(super) fn expire(state: &NodeState, handle: &MiningHandle) -> Result<bool, String> {
+pub(super) fn expire(state: &mut NodeState, handle: &MiningHandle) -> Result<bool, String> {
     let now = crate::snapshot::unix_now_ms();
     let queue = handle.private_queue();
     if queue.list().is_empty() {
@@ -223,7 +241,9 @@ pub(super) fn expire(state: &NodeState, handle: &MiningHandle) -> Result<bool, S
     // Retire offered templates and in-flight build generations before inputs
     // can be released by a durable expiry commit.
     handle.invalidate_operator_generation();
-    queue.expire(now, height)
+    let expired = queue.expire(now, height)?;
+    release_withdrawn(&mut state.mempool, &expired);
+    Ok(!expired.is_empty())
 }
 
 /// Incrementally inspect applied history, including after an offline interval.

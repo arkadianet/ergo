@@ -159,7 +159,7 @@ fn height_and_time_deadlines_filter_builds_and_never_reactivate() {
     assert_eq!(queue.selection_entries_at(19, 101).len(), 1);
     assert!(queue.selection_entries_at(19, 102).is_empty());
     assert!(queue.selection_entries_at(20, 101).is_empty());
-    assert!(queue.expire(19, 102).unwrap());
+    assert_eq!(queue.expire(19, 102).unwrap(), vec![item.tx_id.clone()]);
     queue
         .reconcile(
             99,

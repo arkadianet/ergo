@@ -288,7 +288,7 @@ pub(super) async fn action_loop(
         // the select keeps the wiring in a single place rather than threaded
         // through events.rs / sync_tick.rs.
         if let Some(wiring) = mining.as_ref() {
-            if let Err(error) = super::private_mining::expire(&state, &wiring.handle) {
+            if let Err(error) = super::private_mining::expire(&mut state, &wiring.handle) {
                 tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
             }
             if let Err(error) = super::private_mining::reconcile(&state, &wiring.handle) {
@@ -296,7 +296,7 @@ pub(super) async fn action_loop(
             }
             // A rollback can make a mined transaction pending again. Apply
             // its deadline before selecting the next build snapshot.
-            if let Err(error) = super::private_mining::expire(&state, &wiring.handle) {
+            if let Err(error) = super::private_mining::expire(&mut state, &wiring.handle) {
                 tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
             }
             let generation_now = wiring.handle.operator_generation();

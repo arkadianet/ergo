@@ -169,6 +169,13 @@ impl Mempool {
         self.pool.register_private_only(id);
     }
 
+    /// Release a private identity once the operator's queue no longer holds
+    /// the transaction for this miner (cancelled or expired), so it can be
+    /// broadcast publicly through this node.
+    pub fn unregister_private_transaction(&mut self, id: &TxId) {
+        self.pool.unregister_private_only(id);
+    }
+
     pub fn is_private_transaction(&self, id: &TxId) -> bool {
         self.pool.is_private_only(id)
     }

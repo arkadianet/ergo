@@ -280,6 +280,11 @@ impl OrderedPool {
         self.private_only.insert(tx_id);
     }
 
+    /// Let `tx_id` through public admission again.
+    pub fn unregister_private_only(&mut self, tx_id: &TxId) {
+        self.private_only.remove(tx_id);
+    }
+
     pub fn is_private_only(&self, tx_id: &TxId) -> bool {
         self.private_only.contains(tx_id)
     }

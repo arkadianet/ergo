@@ -36,6 +36,40 @@ fn signed_tx(input: u8) -> (Vec<u8>, Digest32) {
     (writer.result(), Digest32::from_bytes(*id.as_bytes()))
 }
 
+/// The queue entry for [`signed_tx`], as admission builds it.
+fn queued_entry(input: u8) -> Entry {
+    let (bytes, id) = signed_tx(input);
+    Entry::new(
+        id,
+        Arc::from(bytes.clone()),
+        vec![Digest32::from_bytes([input; 32])],
+        vec![],
+        vec![],
+        0,
+        0,
+        bytes.len() as u32,
+        100,
+        TxSource::Wallet,
+    )
+}
+
+/// Queue `input`'s transaction directly and register it the way admission
+/// does, bypassing chain validation.
+fn queue_directly(
+    state: &mut NodeState,
+    handle: &MiningHandle,
+    input: u8,
+    options: ergo_mining::private_queue::PrivateTransactionOptions,
+) -> String {
+    let entry = queued_entry(input);
+    let item = handle
+        .private_queue()
+        .admit(&entry, options, crate::snapshot::unix_now_ms(), 100)
+        .unwrap();
+    state.mempool.register_private_transaction(entry.tx_id);
+    item.tx_id
+}
+
 fn mining_handle() -> MiningHandle {
     MiningHandle::new(
         [0x02; 33],
@@ -136,4 +170,73 @@ fn admission_rejects_a_transaction_staged_by_public_admission() {
     );
     assert!(handle.private_queue().list().is_empty());
     assert!(!state.mempool.is_private_transaction(&id));
+}
+
+// ----- withdrawal releases the public-admission guard -----
+
+#[test]
+fn cancelling_lets_the_transaction_through_public_admission_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = crate::node::tests::make_state(&tmp.path().join("state.redb"));
+    let handle = mining_handle();
+    let tx_id = queue_directly(&mut state, &handle, 1, Default::default());
+    let id = queued_entry(1).tx_id;
+    assert!(state.mempool.is_private_transaction(&id));
+
+    let (reply, mut response) = tokio::sync::oneshot::channel();
+    let _ = crate::node::mining_dispatch::handle_mining_request(
+        &mut state,
+        Some(&handle),
+        false,
+        crate::mining_bridge::MiningRequest::CancelPrivateTransaction {
+            tx_id: tx_id.clone(),
+            reply,
+        },
+    );
+    assert_eq!(response.try_recv().unwrap().unwrap().state, "cancelled");
+    assert!(
+        !state.mempool.is_private_transaction(&id),
+        "the operator may now broadcast it through this node"
+    );
+}
+
+#[test]
+fn expiry_lets_the_transaction_through_public_admission_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = crate::node::tests::make_state(&tmp.path().join("state.redb"));
+    let handle = mining_handle();
+    let tx_id = queue_directly(
+        &mut state,
+        &handle,
+        1,
+        ergo_mining::private_queue::PrivateTransactionOptions {
+            expires_at_ms: Some(crate::snapshot::unix_now_ms() + 5),
+            ..Default::default()
+        },
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert!(expire(&mut state, &handle).unwrap());
+    assert_eq!(
+        handle.private_queue().entry(&tx_id).unwrap().state,
+        PrivateTransactionState::Expired
+    );
+    assert!(!state.mempool.is_private_transaction(&queued_entry(1).tx_id));
+}
+
+#[test]
+fn startup_registers_only_transactions_still_waiting_for_this_miner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = crate::node::tests::make_state(&tmp.path().join("state.redb"));
+    let handle = mining_handle();
+    queue_directly(&mut state, &handle, 1, Default::default());
+    let cancelled = queue_directly(&mut state, &handle, 2, Default::default());
+    handle.private_queue().cancel(&cancelled).unwrap();
+
+    let mut restarted = Mempool::new(
+        MempoolConfig::default(),
+        weight::from_config("cost").unwrap(),
+    );
+    register_queued(&mut restarted, &handle.private_queue());
+    assert!(restarted.is_private_transaction(&queued_entry(1).tx_id));
+    assert!(!restarted.is_private_transaction(&queued_entry(2).tx_id));
 }

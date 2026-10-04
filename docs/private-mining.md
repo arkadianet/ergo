@@ -51,7 +51,10 @@ item when the applied parent reaches that height, so it cannot enter the next
 block. It checks expiry before solution acceptance, retires cached templates,
 and rejects publication of builds frozen before an operator change. Cancellation
 also retires templates before releasing inputs. These are local queue rules;
-they do not make a previously signed transaction invalid elsewhere.
+they do not make a previously signed transaction invalid elsewhere. Cancelled
+and expired transactions are no longer kept out of this node's public mempool:
+the node never broadcasts them itself, but you can now submit the same signed
+bytes for public relay through this node.
 
 The queue survives restart in `private-mining-queue.json` under the node data
 directory. New files use owner-only permissions on Unix. Atomic durable writes

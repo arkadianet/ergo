@@ -601,9 +601,16 @@ pub(super) fn handle_mining_request(
             let result = handle
                 .private_queue()
                 .cancel(&tx_id)
-                .map(super::private_mining::api_entry)
                 .map_err(ergo_api::MiningApiError::BadRequest);
-            let _ = reply.send(result);
+            if let Ok(entry) = &result {
+                if entry.state == ergo_mining::private_queue::PrivateTransactionState::Cancelled {
+                    super::private_mining::release_withdrawn(
+                        &mut state.mempool,
+                        std::slice::from_ref(&entry.tx_id),
+                    );
+                }
+            }
+            let _ = reply.send(result.map(super::private_mining::api_entry));
             return true;
         }
         other => other,

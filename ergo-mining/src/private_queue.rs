@@ -321,10 +321,11 @@ impl PrivateTransactionQueue {
     }
 
     /// Deadlines withdraw pending work; they never broadcast the transaction.
-    pub fn expire(&self, now_ms: u64, parent_height: u32) -> Result<bool, String> {
+    /// Returns the ids that expired.
+    pub fn expire(&self, now_ms: u64, parent_height: u32) -> Result<Vec<String>, String> {
         let mut store = self.lock();
         let mut updated = store.clone();
-        let mut changed = false;
+        let mut expired = Vec::new();
         for r in updated.records.values_mut() {
             if matches!(
                 r.entry.state,
@@ -338,15 +339,15 @@ impl PrivateTransactionQueue {
             {
                 r.entry.state = PrivateTransactionState::Expired;
                 r.entry.reason = Some("local mining deadline elapsed".into());
-                changed = true;
+                expired.push(r.entry.tx_id.clone());
             }
         }
-        if changed {
+        if !expired.is_empty() {
             updated.revision = updated.revision.wrapping_add(1);
             self.persist(&updated)?;
             *store = updated;
         }
-        Ok(changed)
+        Ok(expired)
     }
 
     pub fn observation_cursor(&self) -> (u32, Option<String>) {
