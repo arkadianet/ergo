@@ -70,7 +70,9 @@ pub(super) fn admit(
             "this private transaction is already cancelled, expired, or conflicted".into(),
         ));
     }
-    if state.mempool.contains(&peek.tx_id) {
+    // Staged orphans and held parents came through public admission and can
+    // still be promoted and relayed, like a pooled transaction.
+    if state.mempool.contains(&peek.tx_id) || state.mempool.is_staged(&peek.tx_id) {
         return Err(MiningApiError::BadRequest("transaction is already in the public mempool; private delivery cannot undo a broadcast".into()));
     }
     let mut owned = build_tip_context(state)
@@ -357,3 +359,6 @@ pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<bool
     }
     Ok(changed)
 }
+
+#[cfg(test)]
+mod tests;

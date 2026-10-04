@@ -15,9 +15,12 @@ signed transaction hex from an Android wallet or another external signer.
 The private queue does not broadcast inventory, populate public mempool views,
 serve transaction bytes to peers, or use public mempool revalidation. Once your
 block is published, its transactions are visible on-chain. Transactions already
-in this node's public mempool cannot be made private by resubmitting them; the
-queue rejects that case. A wallet or other node can still disclose bytes it
-already has, so configure the external signing wallet to avoid broadcasting.
+in this node's public mempool, including ones held in its staging area waiting
+for a parent, cannot be made private by resubmitting them; the queue rejects
+that case. Once queued, every public admission path on this node declines the
+transaction: peer relay, API submission, replay after a rollback, and orphan or
+package promotion. A wallet or other node can still disclose bytes it already
+has, so configure the external signing wallet to avoid broadcasting.
 
 ## Zero miner fees
 
