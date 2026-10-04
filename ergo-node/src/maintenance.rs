@@ -107,41 +107,49 @@ const MANIFEST: &str = "ergo-backup.json";
 
 pub fn run(command: &crate::config::Command) -> Result<String> {
     use crate::config::Command;
-    let value = match command {
-        Command::MigrateRedb {
-            source,
-            destination,
-        } => {
-            let report = ergo_state::redb_migration::migrate_database(source, destination)?;
-            return Ok(format!(
-                "verified migration: {} -> {} ({} tables); original preserved",
-                source.display(),
-                destination.display(),
-                report.tables
-            ));
-        }
-        Command::Backup {
-            data_dir,
-            destination,
-        } => serde_json::to_value(backup(data_dir, destination)?)?,
-        Command::VerifyBackup { directory } => serde_json::to_value(verify_backup(directory)?)?,
-        Command::Restore {
-            directory,
-            destination,
-        } => serde_json::to_value(restore(directory, destination)?)?,
-        Command::Doctor { data_dir } => serde_json::to_value(doctor(data_dir)?)?,
-        Command::UtxoStats { data_dir } => serde_json::to_value(
-            doctor(data_dir)?
-                .utxo
-                .ok_or_else(|| fail("logical UTXO statistics require a UTXO backend"))?,
-        )?,
-        Command::WalletScanUtxo { data_dir, restart } => {
-            let database = redb::Database::open(data_dir.join("state.redb"))?;
-            serde_json::to_value(ergo_state::wallet::utxo_scan::discover(
-                &database, *restart,
-            )?)?
-        }
-    };
+    let value =
+        match command {
+            Command::MigrateRedb {
+                source,
+                destination,
+            } => {
+                let report = ergo_state::redb_migration::migrate_database(source, destination)?;
+                return Ok(format!(
+                    "verified migration: {} -> {} ({} tables); original preserved",
+                    source.display(),
+                    destination.display(),
+                    report.tables
+                ));
+            }
+            Command::Backup {
+                data_dir,
+                destination,
+            } => serde_json::to_value(backup(data_dir, destination)?)?,
+            Command::VerifyBackup { directory } => serde_json::to_value(verify_backup(directory)?)?,
+            Command::Restore {
+                directory,
+                destination,
+            } => serde_json::to_value(restore(directory, destination)?)?,
+            Command::Doctor { data_dir } => serde_json::to_value(doctor(data_dir)?)?,
+            Command::UtxoStats { data_dir } => serde_json::to_value(
+                doctor(data_dir)?
+                    .utxo
+                    .ok_or_else(|| fail("logical UTXO statistics require a UTXO backend"))?,
+            )?,
+            Command::WalletScanUtxo { data_dir, restart } => {
+                match fs::symlink_metadata(data_dir.join(MANIFEST)) {
+                    Ok(_) => return Err(fail(
+                        "directory contains a backup manifest; restore it before wallet discovery",
+                    )),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+                let database = redb::Database::open(data_dir.join("state.redb"))?;
+                serde_json::to_value(ergo_state::wallet::utxo_scan::discover(
+                    &database, *restart,
+                )?)?
+            }
+        };
     Ok(serde_json::to_string_pretty(&value)?)
 }
 
@@ -237,10 +245,10 @@ fn lock_databases(root: &Path, files: &[PathBuf]) -> Result<BTreeMap<String, Rea
             .ok_or_else(|| fail("non-UTF8 database filename"))?;
         databases.insert(
             name.to_string(),
-            ReadOnlyDatabase::open(root.join(file)).map_err(|e| {
-                fail(format!(
-                    "cannot lock {name} read-only; stop the node first: {e}"
-                ))
+            ReadOnlyDatabase::open(root.join(file)).map_err(|error| match error {
+                redb::DatabaseError::RepairAborted => fail(format!("{name} requires recovery after an unclean shutdown; start the node with this data directory to complete redb recovery, then shut it down cleanly before retrying; this command never repairs storage")),
+                redb::DatabaseError::DatabaseAlreadyOpen => fail(format!("cannot lock {name} read-only; stop the node first: {error}")),
+                _ => fail(format!("cannot open {name} read-only: {error}")),
             })?,
         );
     }
@@ -310,20 +318,20 @@ fn digest_file(path: &Path) -> Result<(u64, String)> {
     Ok((bytes, hex::encode(hasher.finalize())))
 }
 
-fn private_dir(path: &Path) -> Result<()> {
-    fs::create_dir(path)?;
-    secure_directory(path)
-}
-
-fn secure_directory(path: &Path) -> Result<()> {
+fn private_directories(path: &Path, recursive: bool) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(recursive);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
     }
-    #[cfg(not(unix))]
-    let _ = path;
+    builder.create(path)?;
     Ok(())
+}
+
+fn private_dir(path: &Path) -> Result<()> {
+    private_directories(path, false)
 }
 
 fn private_file(path: &Path) -> Result<File> {
@@ -361,7 +369,7 @@ fn sync_directories(path: &Path) -> Result<()> {
 
 fn copy_checked(source: &Path, destination: &Path) -> Result<BackupFile> {
     if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
+        private_directories(parent, true)?;
     }
     let before = fs::metadata(source)?;
     let mut input = File::open(source)?;
@@ -477,7 +485,13 @@ pub fn backup(data_dir: &Path, destination: &Path) -> Result<BackupManifest> {
 
 pub fn verify_backup(directory: &Path) -> Result<BackupManifest> {
     let manifest_path = directory.join(MANIFEST);
-    if fs::metadata(&manifest_path)?.len() > 16 * 1024 * 1024 {
+    let metadata = fs::symlink_metadata(&manifest_path)?;
+    if !metadata.file_type().is_file() {
+        return Err(fail(
+            "backup manifest must be a regular file, not a symlink or special file",
+        ));
+    }
+    if metadata.len() > 16 * 1024 * 1024 {
         return Err(fail("backup manifest is too large"));
     }
     let manifest: BackupManifest = serde_json::from_reader(File::open(manifest_path)?)?;
@@ -559,8 +573,8 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            dir.path().join("credentials-revoked.json"),
-            b"{\"version\":1,\"ids\":[\"retired\"]}",
+            dir.path().join("mining-policy.json"),
+            serde_json::to_vec(&ergo_mining::policy::BlockPolicy::default()).unwrap(),
         )
         .unwrap();
         // Operators can configure a non-.redb indexer filename.
@@ -592,7 +606,7 @@ mod tests {
         assert!(manifest
             .files
             .iter()
-            .any(|f| f.path == "credentials-revoked.json"));
+            .any(|f| f.path == "mining-policy.json"));
         assert_eq!(verify_backup(&dest).unwrap().tip, manifest.tip);
         let restored = parent.path().join("restored");
         restore(&dest, &restored).unwrap();
@@ -612,6 +626,16 @@ mod tests {
                 fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
                 0o700
             );
+            for root in [&dest, &restored] {
+                assert_eq!(
+                    fs::metadata(root.join("wallet"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o700
+                );
+            }
             assert_eq!(
                 fs::metadata(restored.join("wallet/encrypted-seed"))
                     .unwrap()
@@ -745,6 +769,85 @@ mod tests {
             .path()
             .join(".cancelled.ergo-backup-staging")
             .exists());
+    }
+
+    #[test]
+    fn discovery_refuses_backup_without_opening_database() {
+        let data = seeded_directory();
+        let parent = tempfile::tempdir().unwrap();
+        let dest = parent.path().join("backup");
+        backup(data.path(), &dest).unwrap();
+        let before = digest_file(&dest.join("state.redb")).unwrap();
+        let error = run(&crate::config::Command::WalletScanUtxo {
+            data_dir: dest.clone(),
+            restart: false,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("backup manifest"));
+        assert_eq!(digest_file(&dest.join("state.redb")).unwrap(), before);
+        verify_backup(&dest).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_manifest_is_refused_before_reading() {
+        let data = seeded_directory();
+        let parent = tempfile::tempdir().unwrap();
+        let dest = parent.path().join("backup");
+        backup(data.path(), &dest).unwrap();
+        fs::rename(dest.join(MANIFEST), parent.path().join("manifest")).unwrap();
+        std::os::unix::fs::symlink(parent.path().join("manifest"), dest.join(MANIFEST)).unwrap();
+        assert!(verify_backup(&dest)
+            .unwrap_err()
+            .to_string()
+            .contains("manifest must be a regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_manifest_is_refused_before_opening() {
+        let parent = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(parent.path().join(MANIFEST))
+            .status()
+            .unwrap()
+            .success());
+        assert!(verify_backup(parent.path())
+            .unwrap_err()
+            .to_string()
+            .contains("manifest must be a regular file"));
+    }
+
+    #[test]
+    fn unclean_database_requires_clean_restart_without_read_only_repair() {
+        const CHILD_PATH: &str = "ERGO_TEST_UNCLEAN_DATABASE_PATH";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let db = redb::Database::open(path).unwrap();
+            let txn = ergo_state::begin_write_qr(&db).unwrap();
+            txn.open_table(redb::TableDefinition::<u32, u32>::new("unclean"))
+                .unwrap()
+                .insert(1, 1)
+                .unwrap();
+            txn.commit().unwrap();
+            // Deliberately bypass Database::drop in this disposable child.
+            std::process::exit(0);
+        }
+        let data = seeded_directory();
+        assert!(std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact", "maintenance::tests::unclean_database_requires_clean_restart_without_read_only_repair"]).env(CHILD_PATH, data.path().join("state.redb")).status().unwrap().success());
+        let before = digest_file(&data.path().join("state.redb")).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        for error in [
+            doctor(data.path()).unwrap_err(),
+            backup(data.path(), &parent.path().join("backup")).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("unclean shutdown"), "{error}");
+            assert!(error.to_string().contains("shut it down cleanly"));
+            assert!(!error.to_string().contains("stop the node first"));
+        }
+        assert_eq!(
+            digest_file(&data.path().join("state.redb")).unwrap(),
+            before
+        );
     }
 
     #[test]
