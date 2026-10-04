@@ -84,7 +84,7 @@ fn seed_checkpoint(db: &Database, prefix: &[([u8; 32], Vec<u8>)]) {
 }
 
 #[test]
-fn discovers_pruned_holdings_without_fabricating_history() {
+fn discovers_current_holdings_without_fabricating_history() {
     let (_dir, db, boxes) = fixture(5);
     let result = discover(&db, false).unwrap();
     assert_eq!(result.matched_boxes, 4);
@@ -222,15 +222,17 @@ fn unsupported_partial_rescan_leaves_discovered_wallet_valid() {
 }
 
 #[test]
-fn custom_scan_table_errors_fail_before_wallet_changes() {
+fn registered_custom_scans_fail_before_wallet_changes() {
     let (_dir, db, _) = fixture(4);
     let txn = crate::begin_write_qr(&db).unwrap();
-    txn.open_table(TableDefinition::<u16, u32>::new("wallet_scans"))
+    txn.open_table(WALLET_SCANS)
         .unwrap()
-        .insert(11, 5)
+        .insert(11, vec![5])
         .unwrap();
     txn.commit().unwrap();
-    assert!(discover(&db, false).is_err());
+    assert!(
+        matches!(discover(&db, false), Err(StateError::WalletDiscoveryUnavailable(reason)) if reason.contains("registered custom scans"))
+    );
     assert!(coverage(&db.begin_read().unwrap()).unwrap().is_none());
     assert!(
         super::super::reader::WalletReader::new(&db.begin_read().unwrap())
@@ -347,4 +349,64 @@ fn discovery_preconditions_have_operator_errors() {
         discover(&db, false),
         Err(StateError::WalletDiscoveryUnavailable(_))
     ));
+}
+
+#[test]
+fn wrong_custom_scan_table_type_fails_before_wallet_changes() {
+    let (_dir, db, _) = fixture(4);
+    let txn = crate::begin_write_qr(&db).unwrap();
+    txn.open_table(TableDefinition::<u16, u32>::new("wallet_scans"))
+        .unwrap()
+        .insert(11, 5)
+        .unwrap();
+    txn.commit().unwrap();
+    assert!(matches!(
+        discover(&db, false),
+        Err(StateError::TableError(_))
+    ));
+    assert!(coverage(&db.begin_read().unwrap()).unwrap().is_none());
+}
+
+#[test]
+fn discovered_immature_rewards_promote_and_unpromote_using_script_height() {
+    let (_dir, db, _) = fixture_at(4, 720);
+    discover(&db, false).unwrap();
+    let reward = super::super::reader::WalletReader::new(&db.begin_read().unwrap())
+        .all_boxes()
+        .unwrap()
+        .into_iter()
+        .find(|b| matches!(b.provenance, BoxProvenance::MinerReward))
+        .unwrap();
+    assert_eq!(reward.status, BoxStatus::Immature { matures_at: 721 });
+    let txn = crate::begin_write_qr(&db).unwrap();
+    assert_eq!(
+        super::super::maturity::promote_matured_boxes(&txn, 721).unwrap(),
+        1
+    );
+    assert_eq!(
+        super::super::maturity::unpromote_matured_boxes(&txn, 720).unwrap(),
+        1
+    );
+    txn.commit().unwrap();
+    assert_eq!(
+        super::super::reader::WalletReader::new(&db.begin_read().unwrap())
+            .box_by_id(&reward.box_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        BoxStatus::Immature { matures_at: 721 }
+    );
+}
+
+#[test]
+fn wallet_rollback_below_discovery_anchor_invalidates_atomically() {
+    use super::super::store::WalletStore;
+    let (_dir, db, _) = fixture(4);
+    discover(&db, false).unwrap();
+    let store = super::super::store::RedbWalletStore::new(db.clone());
+    let mut txn = store.begin_write().unwrap();
+    txn.rollback_block(999, &[], false).unwrap();
+    assert!(!store.begin_read().unwrap().scan_invalidated().unwrap());
+    txn.commit().unwrap();
+    assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
 }
