@@ -47,285 +47,285 @@
           "runtime_wrapper_snapshot": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f/DirectProbeRuntime.scala",
           "runtime_wrapper_sha256": "9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f",
           "actual_runtime": {
-            "java.class.path": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/.scala-build/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93_7f53bd78c5-7d3c04de48/classes/main:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-library/2.12.21/scala-library-2.12.21.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/sigma-state_2.12/6.0.6/sigma-state_2.12-6.0.6.jar:/home/arkadias/.ivy2/local/org.ergoplatform/ergo-core_2.12/6.0.6/jars/ergo-core_2.12.jar:/home/arkadias/.ivy2/local/org.ergoplatform/ergo-wallet_2.12/6.0.6/jars/ergo-wallet_2.12.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-reflect/2.12.21/scala-reflect-2.12.21.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/debox_2.12/0.10.0/debox_2.12-0.10.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/modules/scala-collection-compat_2.12/2.7.0/scala-collection-compat_2.12-2.7.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scorex-util_2.12/0.2.2/scorex-util_2.12-0.2.2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/bouncycastle/bcprov-jdk15to18/1.85.1/bcprov-jdk15to18-1.85.1.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/fastparse_2.12/2.3.3/fastparse_2.12-2.3.3.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-core_2.12/0.14.15/circe-core_2.12-0.14.15.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-generic_2.12/0.14.15/circe-generic_2.12-0.14.15.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-parser_2.12/0.14.15/circe-parser_2.12-0.14.15.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scrypto_2.12/3.1.1/scrypto_2.12-3.1.1.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scodec/scodec-bits_2.12/1.1.34/scodec-bits_2.12-1.1.34.jar:/home/arkadias/.ivy2/local/org.ergoplatform/avldb_2.12/6.0.6/jars/avldb_2.12.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/iheart/ficus_2.12/1.4.7/ficus_2.12-1.4.7.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-macros_2.12/0.17.0-M1/spire-macros_2.12-0.17.0-M1.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/scala-logging/scala-logging_2.12/3.9.5/scala-logging_2.12-3.9.5.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/rudogma/supertagged_2.12/2.0-RC2/supertagged_2.12-2.0-RC2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/sourcecode_2.12/0.2.3/sourcecode_2.12-0.2.3.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/geny_2.12/0.6.10/geny_2.12-0.6.10.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-numbers_2.12/0.14.15/circe-numbers_2.12-0.14.15.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-core_2.12/2.13.0/cats-core_2.12-2.13.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/chuusai/shapeless_2.12/2.3.13/shapeless_2.12-2.3.13.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-jawn_2.12/0.14.15/circe-jawn_2.12-0.14.15.jar:/home/arkadias/.cache/coursier/v1/https/gitlab.com/api/v4/projects/61211221/packages/maven/org/ethereum/leveldbjni-all/1.18.3/leveldbjni-all-1.18.3.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb/0.12/leveldb-0.12.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-classic/1.2.13/logback-classic-1.2.13.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/guava/guava/23.0/guava-23.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire_2.12/0.16.2/spire_2.12-0.16.2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/config/1.3.4/config-1.3.4.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/macro-compat_2.12/1.1.1/macro-compat_2.12-1.1.1.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/machinist_2.12/0.6.8/machinist_2.12-0.6.8.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/algebra_2.12/2.0.0-M2/algebra_2.12-2.0.0-M2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-kernel_2.12/2.13.0/cats-kernel_2.12-2.13.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/jawn-parser_2.12/1.6.0/jawn-parser_2.12-1.6.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb-api/0.12/leveldb-api-0.12.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-core/1.2.13/logback-core-1.2.13.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.0.18/error_prone_annotations-2.0.18.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/j2objc/j2objc-annotations/1.1/j2objc-annotations-1.1.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/codehaus/mojo/animal-sniffer-annotations/1.14/animal-sniffer-annotations-1.14.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-platform_2.12/0.16.2/spire-platform_2.12-0.16.2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-util_2.12/0.16.2/spire-util_2.12-0.16.2.jar",
+            "java.class.path": "$HOME/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/.scala-build/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93_7f53bd78c5-7d3c04de48/classes/main:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-library/2.12.21/scala-library-2.12.21.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/sigma-state_2.12/6.0.6/sigma-state_2.12-6.0.6.jar:$HOME/.ivy2/local/org.ergoplatform/ergo-core_2.12/6.0.6/jars/ergo-core_2.12.jar:$HOME/.ivy2/local/org.ergoplatform/ergo-wallet_2.12/6.0.6/jars/ergo-wallet_2.12.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-reflect/2.12.21/scala-reflect-2.12.21.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/debox_2.12/0.10.0/debox_2.12-0.10.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/modules/scala-collection-compat_2.12/2.7.0/scala-collection-compat_2.12-2.7.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scorex-util_2.12/0.2.2/scorex-util_2.12-0.2.2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/bouncycastle/bcprov-jdk15to18/1.85.1/bcprov-jdk15to18-1.85.1.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/fastparse_2.12/2.3.3/fastparse_2.12-2.3.3.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-core_2.12/0.14.15/circe-core_2.12-0.14.15.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-generic_2.12/0.14.15/circe-generic_2.12-0.14.15.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-parser_2.12/0.14.15/circe-parser_2.12-0.14.15.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scrypto_2.12/3.1.1/scrypto_2.12-3.1.1.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scodec/scodec-bits_2.12/1.1.34/scodec-bits_2.12-1.1.34.jar:$HOME/.ivy2/local/org.ergoplatform/avldb_2.12/6.0.6/jars/avldb_2.12.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/iheart/ficus_2.12/1.4.7/ficus_2.12-1.4.7.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-macros_2.12/0.17.0-M1/spire-macros_2.12-0.17.0-M1.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/scala-logging/scala-logging_2.12/3.9.5/scala-logging_2.12-3.9.5.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/rudogma/supertagged_2.12/2.0-RC2/supertagged_2.12-2.0-RC2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/sourcecode_2.12/0.2.3/sourcecode_2.12-0.2.3.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/geny_2.12/0.6.10/geny_2.12-0.6.10.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-numbers_2.12/0.14.15/circe-numbers_2.12-0.14.15.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-core_2.12/2.13.0/cats-core_2.12-2.13.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/chuusai/shapeless_2.12/2.3.13/shapeless_2.12-2.3.13.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-jawn_2.12/0.14.15/circe-jawn_2.12-0.14.15.jar:$HOME/.cache/coursier/v1/https/gitlab.com/api/v4/projects/61211221/packages/maven/org/ethereum/leveldbjni-all/1.18.3/leveldbjni-all-1.18.3.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb/0.12/leveldb-0.12.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-classic/1.2.13/logback-classic-1.2.13.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/guava/guava/23.0/guava-23.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire_2.12/0.16.2/spire_2.12-0.16.2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/config/1.3.4/config-1.3.4.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/macro-compat_2.12/1.1.1/macro-compat_2.12-1.1.1.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/machinist_2.12/0.6.8/machinist_2.12-0.6.8.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/algebra_2.12/2.0.0-M2/algebra_2.12-2.0.0-M2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-kernel_2.12/2.13.0/cats-kernel_2.12-2.13.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/jawn-parser_2.12/1.6.0/jawn-parser_2.12-1.6.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb-api/0.12/leveldb-api-0.12.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-core/1.2.13/logback-core-1.2.13.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.0.18/error_prone_annotations-2.0.18.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/j2objc/j2objc-annotations/1.1/j2objc-annotations-1.1.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/codehaus/mojo/animal-sniffer-annotations/1.14/animal-sniffer-annotations-1.14.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-platform_2.12/0.16.2/spire-platform_2.12-0.16.2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-util_2.12/0.16.2/spire-util_2.12-0.16.2.jar",
             "java.runtime.version": "17.0.17+10-LTS",
             "java.vm.name": "OpenJDK 64-Bit Server VM",
             "java.vendor": "Amazon.com Inc.",
-            "java.home": "/home/arkadias/.local/kdex-toolchain/amazon-corretto-17.0.17.10.1-linux-x64",
+            "java.home": "$HOME/.local/kdex-toolchain/amazon-corretto-17.0.17.10.1-linux-x64",
             "resolved_jars": [
               {
                 "name": "scala-library-2.12.21.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-library/2.12.21/scala-library-2.12.21.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-library/2.12.21/scala-library-2.12.21.jar",
                 "sha256": "e2f4040c95cc4dd1cfeaae38bdde596e4b36933632451efa7d8564c6a359510c",
                 "bytes": 5437467
               },
               {
                 "name": "sigma-state_2.12-6.0.6.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/sigma-state_2.12/6.0.6/sigma-state_2.12-6.0.6.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/sigma-state_2.12/6.0.6/sigma-state_2.12-6.0.6.jar",
                 "sha256": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898",
                 "bytes": 6251429
               },
               {
                 "name": "ergo-core_2.12.jar",
-                "path": "/home/arkadias/.ivy2/local/org.ergoplatform/ergo-core_2.12/6.0.6/jars/ergo-core_2.12.jar",
+                "path": "$HOME/.ivy2/local/org.ergoplatform/ergo-core_2.12/6.0.6/jars/ergo-core_2.12.jar",
                 "sha256": "382da71e318f662da713dc7a6542b0e4527e7d035aaa65aea97545d85f9ece9f",
                 "bytes": 989547
               },
               {
                 "name": "ergo-wallet_2.12.jar",
-                "path": "/home/arkadias/.ivy2/local/org.ergoplatform/ergo-wallet_2.12/6.0.6/jars/ergo-wallet_2.12.jar",
+                "path": "$HOME/.ivy2/local/org.ergoplatform/ergo-wallet_2.12/6.0.6/jars/ergo-wallet_2.12.jar",
                 "sha256": "99e9746f137bbcf9c771195e09be1387dc15820816a11d47658d1aa215c929fd",
                 "bytes": 270672
               },
               {
                 "name": "scala-reflect-2.12.21.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-reflect/2.12.21/scala-reflect-2.12.21.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-reflect/2.12.21/scala-reflect-2.12.21.jar",
                 "sha256": "8b91a08ba69a0564689793e732f06768d0914ec9e90fa8c3d1b55c5bf4600c14",
                 "bytes": 3672084
               },
               {
                 "name": "debox_2.12-0.10.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/debox_2.12/0.10.0/debox_2.12-0.10.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/debox_2.12/0.10.0/debox_2.12-0.10.0.jar",
                 "sha256": "7e1a47b430e6ad9bb7943b384805f99140554e4fe53aa787721dc4e49a7932e9",
                 "bytes": 694772
               },
               {
                 "name": "scala-collection-compat_2.12-2.7.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/modules/scala-collection-compat_2.12/2.7.0/scala-collection-compat_2.12-2.7.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/modules/scala-collection-compat_2.12/2.7.0/scala-collection-compat_2.12-2.7.0.jar",
                 "sha256": "fb68864a0248af0979d45921869eb1230b5926aa61e5c0a8737c3f73ae582e92",
                 "bytes": 247466
               },
               {
                 "name": "scorex-util_2.12-0.2.2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scorex-util_2.12/0.2.2/scorex-util_2.12-0.2.2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scorex-util_2.12/0.2.2/scorex-util_2.12-0.2.2.jar",
                 "sha256": "4e3b0422a747b02fc83a7fd7659fc4453abc813c7b95ab858d13f63832bdd80e",
                 "bytes": 63462
               },
               {
                 "name": "bcprov-jdk15to18-1.85.1.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/bouncycastle/bcprov-jdk15to18/1.85.1/bcprov-jdk15to18-1.85.1.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/bouncycastle/bcprov-jdk15to18/1.85.1/bcprov-jdk15to18-1.85.1.jar",
                 "sha256": "ffd4186dab3cb1663572f493814c4ecdfdc6c950783b566072907c6d32dc10bc",
                 "bytes": 8402522
               },
               {
                 "name": "fastparse_2.12-2.3.3.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/fastparse_2.12/2.3.3/fastparse_2.12-2.3.3.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/fastparse_2.12/2.3.3/fastparse_2.12-2.3.3.jar",
                 "sha256": "99ebdabb902a79b9fedd90d6f2b459eff6982849ecd0a80f958218bad9175120",
                 "bytes": 315556
               },
               {
                 "name": "circe-core_2.12-0.14.15.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-core_2.12/0.14.15/circe-core_2.12-0.14.15.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-core_2.12/0.14.15/circe-core_2.12-0.14.15.jar",
                 "sha256": "1bb842f33a9f9e6540669a2926468500c7d8f782f417c15c76ca77eca26125b1",
                 "bytes": 1432622
               },
               {
                 "name": "circe-generic_2.12-0.14.15.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-generic_2.12/0.14.15/circe-generic_2.12-0.14.15.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-generic_2.12/0.14.15/circe-generic_2.12-0.14.15.jar",
                 "sha256": "08da76041a9f216ef91e8d2fc2973672d45471e3127aea81fb9c971002714596",
                 "bytes": 173275
               },
               {
                 "name": "circe-parser_2.12-0.14.15.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-parser_2.12/0.14.15/circe-parser_2.12-0.14.15.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-parser_2.12/0.14.15/circe-parser_2.12-0.14.15.jar",
                 "sha256": "2d3542ebb5cc6a30518a11e54c3055c588ce19e8e10813134064ac6761cc590f",
                 "bytes": 2774
               },
               {
                 "name": "scrypto_2.12-3.1.1.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scrypto_2.12/3.1.1/scrypto_2.12-3.1.1.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scrypto_2.12/3.1.1/scrypto_2.12-3.1.1.jar",
                 "sha256": "a9b44951038cd4049b997cebfb24c64b3b664a2427ac550be09030ad4119830a",
                 "bytes": 518165
               },
               {
                 "name": "scodec-bits_2.12-1.1.34.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scodec/scodec-bits_2.12/1.1.34/scodec-bits_2.12-1.1.34.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scodec/scodec-bits_2.12/1.1.34/scodec-bits_2.12-1.1.34.jar",
                 "sha256": "3754e6ed81d25c872dee8383e27830eac474f77251af0bf5d06ec5bc78bcfb3d",
                 "bytes": 295399
               },
               {
                 "name": "avldb_2.12.jar",
-                "path": "/home/arkadias/.ivy2/local/org.ergoplatform/avldb_2.12/6.0.6/jars/avldb_2.12.jar",
+                "path": "$HOME/.ivy2/local/org.ergoplatform/avldb_2.12/6.0.6/jars/avldb_2.12.jar",
                 "sha256": "3889f9f300067ce9c692eefb9d6ee4440ca89cea5a7fc0357a4d1bf17daad320",
                 "bytes": 101447
               },
               {
                 "name": "ficus_2.12-1.4.7.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/iheart/ficus_2.12/1.4.7/ficus_2.12-1.4.7.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/iheart/ficus_2.12/1.4.7/ficus_2.12-1.4.7.jar",
                 "sha256": "ae0834b6d7ed386c0c8aa3c4eeca33d1b4932b6562f0ce047a5a52eb0343ca22",
                 "bytes": 142861
               },
               {
                 "name": "spire-macros_2.12-0.17.0-M1.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-macros_2.12/0.17.0-M1/spire-macros_2.12-0.17.0-M1.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-macros_2.12/0.17.0-M1/spire-macros_2.12-0.17.0-M1.jar",
                 "sha256": "8d687fc799a295a7c99751062bca24d8ce857bedaadbf7d0bdc98a819cce3316",
                 "bytes": 79588
               },
               {
                 "name": "scala-logging_2.12-3.9.5.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/scala-logging/scala-logging_2.12/3.9.5/scala-logging_2.12-3.9.5.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/scala-logging/scala-logging_2.12/3.9.5/scala-logging_2.12-3.9.5.jar",
                 "sha256": "392979e5525856737a6f2398e25789d0b2057c8e3c55045a6e8d9704c21de7a6",
                 "bytes": 61160
               },
               {
                 "name": "supertagged_2.12-2.0-RC2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/rudogma/supertagged_2.12/2.0-RC2/supertagged_2.12-2.0-RC2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/rudogma/supertagged_2.12/2.0-RC2/supertagged_2.12-2.0-RC2.jar",
                 "sha256": "a14e9782f09d747323dacac7adcdefa9aa105012c5c42017971868c5c663a7b7",
                 "bytes": 46890
               },
               {
                 "name": "sourcecode_2.12-0.2.3.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/sourcecode_2.12/0.2.3/sourcecode_2.12-0.2.3.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/sourcecode_2.12/0.2.3/sourcecode_2.12-0.2.3.jar",
                 "sha256": "f686fc27121eace778250557d391cbbfe46843ab91fe107a8600564a492c83d2",
                 "bytes": 116733
               },
               {
                 "name": "geny_2.12-0.6.10.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/geny_2.12/0.6.10/geny_2.12-0.6.10.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/geny_2.12/0.6.10/geny_2.12-0.6.10.jar",
                 "sha256": "07be2815eae87b0f0397f4ea628c4002d744b7be43a04b73fc62429e67ff6915",
                 "bytes": 85338
               },
               {
                 "name": "circe-numbers_2.12-0.14.15.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-numbers_2.12/0.14.15/circe-numbers_2.12-0.14.15.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-numbers_2.12/0.14.15/circe-numbers_2.12-0.14.15.jar",
                 "sha256": "a7bd4db65baa06d3f50b7488ec572cf1f49beab06e850b4012885b730e5a93c8",
                 "bytes": 12788
               },
               {
                 "name": "cats-core_2.12-2.13.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-core_2.12/2.13.0/cats-core_2.12-2.13.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-core_2.12/2.13.0/cats-core_2.12-2.13.0.jar",
                 "sha256": "4b92d574b01cf448018707de8bf20a2c37d0f6c6bd657a0f3c1be762761a310e",
                 "bytes": 6143455
               },
               {
                 "name": "shapeless_2.12-2.3.13.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/chuusai/shapeless_2.12/2.3.13/shapeless_2.12-2.3.13.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/chuusai/shapeless_2.12/2.3.13/shapeless_2.12-2.3.13.jar",
                 "sha256": "b5e71ed111548ebff93272d710402a6c40fbcc6b50c2d2d6f164b0e3c315c001",
                 "bytes": 3203785
               },
               {
                 "name": "circe-jawn_2.12-0.14.15.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-jawn_2.12/0.14.15/circe-jawn_2.12-0.14.15.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-jawn_2.12/0.14.15/circe-jawn_2.12-0.14.15.jar",
                 "sha256": "82744fca9206db561a81090715d79efaeb6c720d1bea753cc579f34eb1a82cc3",
                 "bytes": 30690
               },
               {
                 "name": "leveldbjni-all-1.18.3.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/gitlab.com/api/v4/projects/61211221/packages/maven/org/ethereum/leveldbjni-all/1.18.3/leveldbjni-all-1.18.3.jar",
+                "path": "$HOME/.cache/coursier/v1/https/gitlab.com/api/v4/projects/61211221/packages/maven/org/ethereum/leveldbjni-all/1.18.3/leveldbjni-all-1.18.3.jar",
                 "sha256": "18da00444c77080d4422b16c9d4750c4addabda350b702b4a6d628b86658e585",
                 "bytes": 1295004
               },
               {
                 "name": "leveldb-0.12.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb/0.12/leveldb-0.12.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb/0.12/leveldb-0.12.jar",
                 "sha256": "3c12eafb8bff359f97aec4d7574480cfc06e83f44704de020a1c0627651ba4b6",
                 "bytes": 228975
               },
               {
                 "name": "logback-classic-1.2.13.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-classic/1.2.13/logback-classic-1.2.13.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-classic/1.2.13/logback-classic-1.2.13.jar",
                 "sha256": "937afb220b91d8a394d78befdbf587c71aeed289d582e2a91e72a7d92172371d",
                 "bytes": 232073
               },
               {
                 "name": "guava-23.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/guava/guava/23.0/guava-23.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/guava/guava/23.0/guava-23.0.jar",
                 "sha256": "7baa80df284117e5b945b19b98d367a85ea7b7801bd358ff657946c3bd1b6596",
                 "bytes": 2614708
               },
               {
                 "name": "spire_2.12-0.16.2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire_2.12/0.16.2/spire_2.12-0.16.2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire_2.12/0.16.2/spire_2.12-0.16.2.jar",
                 "sha256": "113ad947fcdb0c387e96384be9193f624d8513b6e554441b8b86dcc9bbf189a5",
                 "bytes": 7182868
               },
               {
                 "name": "config-1.3.4.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/config/1.3.4/config-1.3.4.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/config/1.3.4/config-1.3.4.jar",
                 "sha256": "8aa8931d8143154f86d393d4a85cfa207a884f16469cdf314dc8d6abba3f1438",
                 "bytes": 292739
               },
               {
                 "name": "macro-compat_2.12-1.1.1.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/macro-compat_2.12/1.1.1/macro-compat_2.12-1.1.1.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/macro-compat_2.12/1.1.1/macro-compat_2.12-1.1.1.jar",
                 "sha256": "8b1514ec99ac9c7eded284367b6c9f8f17a097198a44e6f24488706d66bbd2b8",
                 "bytes": 3180
               },
               {
                 "name": "machinist_2.12-0.6.8.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/machinist_2.12/0.6.8/machinist_2.12-0.6.8.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/machinist_2.12/0.6.8/machinist_2.12-0.6.8.jar",
                 "sha256": "570aede4e5e88f4f881aa6a49d958b76af3457aa3662bd590d254eb7d64c08e0",
                 "bytes": 33786
               },
               {
                 "name": "algebra_2.12-2.0.0-M2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/algebra_2.12/2.0.0-M2/algebra_2.12-2.0.0-M2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/algebra_2.12/2.0.0-M2/algebra_2.12-2.0.0-M2.jar",
                 "sha256": "461acb40d654f78288908cfb298600b9ee60f77c9e74f9e883c7b2f9a21fe0a5",
                 "bytes": 1168113
               },
               {
                 "name": "slf4j-api-1.7.36.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar",
                 "sha256": "d3ef575e3e4979678dc01bf1dcce51021493b4d11fb7f1be8ad982877c16a1c0",
                 "bytes": 41125
               },
               {
                 "name": "cats-kernel_2.12-2.13.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-kernel_2.12/2.13.0/cats-kernel_2.12-2.13.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-kernel_2.12/2.13.0/cats-kernel_2.12-2.13.0.jar",
                 "sha256": "daeb592b533bd9d6400aac1397d780ff22ca672e98f4dc69c08fd0ceba3fa0ed",
                 "bytes": 3311646
               },
               {
                 "name": "jawn-parser_2.12-1.6.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/jawn-parser_2.12/1.6.0/jawn-parser_2.12-1.6.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/jawn-parser_2.12/1.6.0/jawn-parser_2.12-1.6.0.jar",
                 "sha256": "3ac478a24fd55caed61c2ccb10dda337549409684decc1279a2e71b45da3ea2f",
                 "bytes": 89393
               },
               {
                 "name": "leveldb-api-0.12.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb-api/0.12/leveldb-api-0.12.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb-api/0.12/leveldb-api-0.12.jar",
                 "sha256": "3af7f350ab81cba9a35cbf874e64c9086fdbc5464643fdac00a908bbf6f5bfed",
                 "bytes": 9938
               },
               {
                 "name": "logback-core-1.2.13.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-core/1.2.13/logback-core-1.2.13.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-core/1.2.13/logback-core-1.2.13.jar",
                 "sha256": "07b1586faf220c05821d0f3ed8e2e417e214c83f40641f76e8a90b134c31ff6b",
                 "bytes": 449638
               },
               {
                 "name": "jsr305-3.0.2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar",
                 "sha256": "766ad2a0783f2687962c8ad74ceecc38a28b9f72a2d085ee438b7813e928d0c7",
                 "bytes": 19936
               },
               {
                 "name": "error_prone_annotations-2.0.18.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.0.18/error_prone_annotations-2.0.18.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.0.18/error_prone_annotations-2.0.18.jar",
                 "sha256": "cb4cfad870bf563a07199f3ebea5763f0dec440fcda0b318640b1feaa788656b",
                 "bytes": 12078
               },
               {
                 "name": "j2objc-annotations-1.1.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/j2objc/j2objc-annotations/1.1/j2objc-annotations-1.1.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/j2objc/j2objc-annotations/1.1/j2objc-annotations-1.1.jar",
                 "sha256": "2994a7eb78f2710bd3d3bfb639b2c94e219cedac0d4d084d516e78c16dddecf6",
                 "bytes": 8782
               },
               {
                 "name": "animal-sniffer-annotations-1.14.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/codehaus/mojo/animal-sniffer-annotations/1.14/animal-sniffer-annotations-1.14.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/codehaus/mojo/animal-sniffer-annotations/1.14/animal-sniffer-annotations-1.14.jar",
                 "sha256": "2068320bd6bad744c3673ab048f67e30bef8f518996fa380033556600669905d",
                 "bytes": 3482
               },
               {
                 "name": "spire-platform_2.12-0.16.2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-platform_2.12/0.16.2/spire-platform_2.12-0.16.2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-platform_2.12/0.16.2/spire-platform_2.12-0.16.2.jar",
                 "sha256": "38fb668da6b6e3f1c71347868c2360f934352e656acc7c92489e444f28434e97",
                 "bytes": 8260
               },
               {
                 "name": "spire-util_2.12-0.16.2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-util_2.12/0.16.2/spire-util_2.12-0.16.2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-util_2.12/0.16.2/spire-util_2.12-0.16.2.jar",
                 "sha256": "0a6cbe2ce91ba32f699fbc96188af1f9583091e2dda00b98f5e088a9dc2eeb1d",
                 "bytes": 34600
               }
@@ -344,8 +344,8 @@
             "scala-cli",
             "--skip-cli-updates",
             "run",
-            "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/EvaluatedValueOracle.scala",
-            "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f/DirectProbeRuntime.scala",
+            "$HOME/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/EvaluatedValueOracle.scala",
+            "$HOME/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f/DirectProbeRuntime.scala",
             "--server=false",
             "--main-class",
             "DirectProbeRuntime",
@@ -414,285 +414,285 @@
           "runtime_wrapper_snapshot": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f/DirectProbeRuntime.scala",
           "runtime_wrapper_sha256": "9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f",
           "actual_runtime": {
-            "java.class.path": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/.scala-build/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93_7f53bd78c5-7d3c04de48/classes/main:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-library/2.12.21/scala-library-2.12.21.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/sigma-state_2.12/6.0.6/sigma-state_2.12-6.0.6.jar:/home/arkadias/.ivy2/local/org.ergoplatform/ergo-core_2.12/6.0.6/jars/ergo-core_2.12.jar:/home/arkadias/.ivy2/local/org.ergoplatform/ergo-wallet_2.12/6.0.6/jars/ergo-wallet_2.12.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-reflect/2.12.21/scala-reflect-2.12.21.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/debox_2.12/0.10.0/debox_2.12-0.10.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/modules/scala-collection-compat_2.12/2.7.0/scala-collection-compat_2.12-2.7.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scorex-util_2.12/0.2.2/scorex-util_2.12-0.2.2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/bouncycastle/bcprov-jdk15to18/1.85.1/bcprov-jdk15to18-1.85.1.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/fastparse_2.12/2.3.3/fastparse_2.12-2.3.3.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-core_2.12/0.14.15/circe-core_2.12-0.14.15.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-generic_2.12/0.14.15/circe-generic_2.12-0.14.15.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-parser_2.12/0.14.15/circe-parser_2.12-0.14.15.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scrypto_2.12/3.1.1/scrypto_2.12-3.1.1.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scodec/scodec-bits_2.12/1.1.34/scodec-bits_2.12-1.1.34.jar:/home/arkadias/.ivy2/local/org.ergoplatform/avldb_2.12/6.0.6/jars/avldb_2.12.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/iheart/ficus_2.12/1.4.7/ficus_2.12-1.4.7.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-macros_2.12/0.17.0-M1/spire-macros_2.12-0.17.0-M1.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/scala-logging/scala-logging_2.12/3.9.5/scala-logging_2.12-3.9.5.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/rudogma/supertagged_2.12/2.0-RC2/supertagged_2.12-2.0-RC2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/sourcecode_2.12/0.2.3/sourcecode_2.12-0.2.3.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/geny_2.12/0.6.10/geny_2.12-0.6.10.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-numbers_2.12/0.14.15/circe-numbers_2.12-0.14.15.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-core_2.12/2.13.0/cats-core_2.12-2.13.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/chuusai/shapeless_2.12/2.3.13/shapeless_2.12-2.3.13.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-jawn_2.12/0.14.15/circe-jawn_2.12-0.14.15.jar:/home/arkadias/.cache/coursier/v1/https/gitlab.com/api/v4/projects/61211221/packages/maven/org/ethereum/leveldbjni-all/1.18.3/leveldbjni-all-1.18.3.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb/0.12/leveldb-0.12.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-classic/1.2.13/logback-classic-1.2.13.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/guava/guava/23.0/guava-23.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire_2.12/0.16.2/spire_2.12-0.16.2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/config/1.3.4/config-1.3.4.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/macro-compat_2.12/1.1.1/macro-compat_2.12-1.1.1.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/machinist_2.12/0.6.8/machinist_2.12-0.6.8.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/algebra_2.12/2.0.0-M2/algebra_2.12-2.0.0-M2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-kernel_2.12/2.13.0/cats-kernel_2.12-2.13.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/jawn-parser_2.12/1.6.0/jawn-parser_2.12-1.6.0.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb-api/0.12/leveldb-api-0.12.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-core/1.2.13/logback-core-1.2.13.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.0.18/error_prone_annotations-2.0.18.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/j2objc/j2objc-annotations/1.1/j2objc-annotations-1.1.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/codehaus/mojo/animal-sniffer-annotations/1.14/animal-sniffer-annotations-1.14.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-platform_2.12/0.16.2/spire-platform_2.12-0.16.2.jar:/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-util_2.12/0.16.2/spire-util_2.12-0.16.2.jar",
+            "java.class.path": "$HOME/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/.scala-build/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93_7f53bd78c5-7d3c04de48/classes/main:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-library/2.12.21/scala-library-2.12.21.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/sigma-state_2.12/6.0.6/sigma-state_2.12-6.0.6.jar:$HOME/.ivy2/local/org.ergoplatform/ergo-core_2.12/6.0.6/jars/ergo-core_2.12.jar:$HOME/.ivy2/local/org.ergoplatform/ergo-wallet_2.12/6.0.6/jars/ergo-wallet_2.12.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-reflect/2.12.21/scala-reflect-2.12.21.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/debox_2.12/0.10.0/debox_2.12-0.10.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/modules/scala-collection-compat_2.12/2.7.0/scala-collection-compat_2.12-2.7.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scorex-util_2.12/0.2.2/scorex-util_2.12-0.2.2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/bouncycastle/bcprov-jdk15to18/1.85.1/bcprov-jdk15to18-1.85.1.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/fastparse_2.12/2.3.3/fastparse_2.12-2.3.3.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-core_2.12/0.14.15/circe-core_2.12-0.14.15.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-generic_2.12/0.14.15/circe-generic_2.12-0.14.15.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-parser_2.12/0.14.15/circe-parser_2.12-0.14.15.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scrypto_2.12/3.1.1/scrypto_2.12-3.1.1.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scodec/scodec-bits_2.12/1.1.34/scodec-bits_2.12-1.1.34.jar:$HOME/.ivy2/local/org.ergoplatform/avldb_2.12/6.0.6/jars/avldb_2.12.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/iheart/ficus_2.12/1.4.7/ficus_2.12-1.4.7.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-macros_2.12/0.17.0-M1/spire-macros_2.12-0.17.0-M1.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/scala-logging/scala-logging_2.12/3.9.5/scala-logging_2.12-3.9.5.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/rudogma/supertagged_2.12/2.0-RC2/supertagged_2.12-2.0-RC2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/sourcecode_2.12/0.2.3/sourcecode_2.12-0.2.3.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/geny_2.12/0.6.10/geny_2.12-0.6.10.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-numbers_2.12/0.14.15/circe-numbers_2.12-0.14.15.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-core_2.12/2.13.0/cats-core_2.12-2.13.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/chuusai/shapeless_2.12/2.3.13/shapeless_2.12-2.3.13.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-jawn_2.12/0.14.15/circe-jawn_2.12-0.14.15.jar:$HOME/.cache/coursier/v1/https/gitlab.com/api/v4/projects/61211221/packages/maven/org/ethereum/leveldbjni-all/1.18.3/leveldbjni-all-1.18.3.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb/0.12/leveldb-0.12.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-classic/1.2.13/logback-classic-1.2.13.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/guava/guava/23.0/guava-23.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire_2.12/0.16.2/spire_2.12-0.16.2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/config/1.3.4/config-1.3.4.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/macro-compat_2.12/1.1.1/macro-compat_2.12-1.1.1.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/machinist_2.12/0.6.8/machinist_2.12-0.6.8.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/algebra_2.12/2.0.0-M2/algebra_2.12-2.0.0-M2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-kernel_2.12/2.13.0/cats-kernel_2.12-2.13.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/jawn-parser_2.12/1.6.0/jawn-parser_2.12-1.6.0.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb-api/0.12/leveldb-api-0.12.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-core/1.2.13/logback-core-1.2.13.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.0.18/error_prone_annotations-2.0.18.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/j2objc/j2objc-annotations/1.1/j2objc-annotations-1.1.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/codehaus/mojo/animal-sniffer-annotations/1.14/animal-sniffer-annotations-1.14.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-platform_2.12/0.16.2/spire-platform_2.12-0.16.2.jar:$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-util_2.12/0.16.2/spire-util_2.12-0.16.2.jar",
             "java.runtime.version": "17.0.17+10-LTS",
             "java.vm.name": "OpenJDK 64-Bit Server VM",
             "java.vendor": "Amazon.com Inc.",
-            "java.home": "/home/arkadias/.local/kdex-toolchain/amazon-corretto-17.0.17.10.1-linux-x64",
+            "java.home": "$HOME/.local/kdex-toolchain/amazon-corretto-17.0.17.10.1-linux-x64",
             "resolved_jars": [
               {
                 "name": "scala-library-2.12.21.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-library/2.12.21/scala-library-2.12.21.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-library/2.12.21/scala-library-2.12.21.jar",
                 "sha256": "e2f4040c95cc4dd1cfeaae38bdde596e4b36933632451efa7d8564c6a359510c",
                 "bytes": 5437467
               },
               {
                 "name": "sigma-state_2.12-6.0.6.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/sigma-state_2.12/6.0.6/sigma-state_2.12-6.0.6.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/sigma-state_2.12/6.0.6/sigma-state_2.12-6.0.6.jar",
                 "sha256": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898",
                 "bytes": 6251429
               },
               {
                 "name": "ergo-core_2.12.jar",
-                "path": "/home/arkadias/.ivy2/local/org.ergoplatform/ergo-core_2.12/6.0.6/jars/ergo-core_2.12.jar",
+                "path": "$HOME/.ivy2/local/org.ergoplatform/ergo-core_2.12/6.0.6/jars/ergo-core_2.12.jar",
                 "sha256": "382da71e318f662da713dc7a6542b0e4527e7d035aaa65aea97545d85f9ece9f",
                 "bytes": 989547
               },
               {
                 "name": "ergo-wallet_2.12.jar",
-                "path": "/home/arkadias/.ivy2/local/org.ergoplatform/ergo-wallet_2.12/6.0.6/jars/ergo-wallet_2.12.jar",
+                "path": "$HOME/.ivy2/local/org.ergoplatform/ergo-wallet_2.12/6.0.6/jars/ergo-wallet_2.12.jar",
                 "sha256": "99e9746f137bbcf9c771195e09be1387dc15820816a11d47658d1aa215c929fd",
                 "bytes": 270672
               },
               {
                 "name": "scala-reflect-2.12.21.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-reflect/2.12.21/scala-reflect-2.12.21.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/scala-reflect/2.12.21/scala-reflect-2.12.21.jar",
                 "sha256": "8b91a08ba69a0564689793e732f06768d0914ec9e90fa8c3d1b55c5bf4600c14",
                 "bytes": 3672084
               },
               {
                 "name": "debox_2.12-0.10.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/debox_2.12/0.10.0/debox_2.12-0.10.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/debox_2.12/0.10.0/debox_2.12-0.10.0.jar",
                 "sha256": "7e1a47b430e6ad9bb7943b384805f99140554e4fe53aa787721dc4e49a7932e9",
                 "bytes": 694772
               },
               {
                 "name": "scala-collection-compat_2.12-2.7.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/modules/scala-collection-compat_2.12/2.7.0/scala-collection-compat_2.12-2.7.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scala-lang/modules/scala-collection-compat_2.12/2.7.0/scala-collection-compat_2.12-2.7.0.jar",
                 "sha256": "fb68864a0248af0979d45921869eb1230b5926aa61e5c0a8737c3f73ae582e92",
                 "bytes": 247466
               },
               {
                 "name": "scorex-util_2.12-0.2.2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scorex-util_2.12/0.2.2/scorex-util_2.12-0.2.2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scorex-util_2.12/0.2.2/scorex-util_2.12-0.2.2.jar",
                 "sha256": "4e3b0422a747b02fc83a7fd7659fc4453abc813c7b95ab858d13f63832bdd80e",
                 "bytes": 63462
               },
               {
                 "name": "bcprov-jdk15to18-1.85.1.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/bouncycastle/bcprov-jdk15to18/1.85.1/bcprov-jdk15to18-1.85.1.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/bouncycastle/bcprov-jdk15to18/1.85.1/bcprov-jdk15to18-1.85.1.jar",
                 "sha256": "ffd4186dab3cb1663572f493814c4ecdfdc6c950783b566072907c6d32dc10bc",
                 "bytes": 8402522
               },
               {
                 "name": "fastparse_2.12-2.3.3.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/fastparse_2.12/2.3.3/fastparse_2.12-2.3.3.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/fastparse_2.12/2.3.3/fastparse_2.12-2.3.3.jar",
                 "sha256": "99ebdabb902a79b9fedd90d6f2b459eff6982849ecd0a80f958218bad9175120",
                 "bytes": 315556
               },
               {
                 "name": "circe-core_2.12-0.14.15.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-core_2.12/0.14.15/circe-core_2.12-0.14.15.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-core_2.12/0.14.15/circe-core_2.12-0.14.15.jar",
                 "sha256": "1bb842f33a9f9e6540669a2926468500c7d8f782f417c15c76ca77eca26125b1",
                 "bytes": 1432622
               },
               {
                 "name": "circe-generic_2.12-0.14.15.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-generic_2.12/0.14.15/circe-generic_2.12-0.14.15.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-generic_2.12/0.14.15/circe-generic_2.12-0.14.15.jar",
                 "sha256": "08da76041a9f216ef91e8d2fc2973672d45471e3127aea81fb9c971002714596",
                 "bytes": 173275
               },
               {
                 "name": "circe-parser_2.12-0.14.15.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-parser_2.12/0.14.15/circe-parser_2.12-0.14.15.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-parser_2.12/0.14.15/circe-parser_2.12-0.14.15.jar",
                 "sha256": "2d3542ebb5cc6a30518a11e54c3055c588ce19e8e10813134064ac6761cc590f",
                 "bytes": 2774
               },
               {
                 "name": "scrypto_2.12-3.1.1.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scrypto_2.12/3.1.1/scrypto_2.12-3.1.1.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scorexfoundation/scrypto_2.12/3.1.1/scrypto_2.12-3.1.1.jar",
                 "sha256": "a9b44951038cd4049b997cebfb24c64b3b664a2427ac550be09030ad4119830a",
                 "bytes": 518165
               },
               {
                 "name": "scodec-bits_2.12-1.1.34.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scodec/scodec-bits_2.12/1.1.34/scodec-bits_2.12-1.1.34.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/scodec/scodec-bits_2.12/1.1.34/scodec-bits_2.12-1.1.34.jar",
                 "sha256": "3754e6ed81d25c872dee8383e27830eac474f77251af0bf5d06ec5bc78bcfb3d",
                 "bytes": 295399
               },
               {
                 "name": "avldb_2.12.jar",
-                "path": "/home/arkadias/.ivy2/local/org.ergoplatform/avldb_2.12/6.0.6/jars/avldb_2.12.jar",
+                "path": "$HOME/.ivy2/local/org.ergoplatform/avldb_2.12/6.0.6/jars/avldb_2.12.jar",
                 "sha256": "3889f9f300067ce9c692eefb9d6ee4440ca89cea5a7fc0357a4d1bf17daad320",
                 "bytes": 101447
               },
               {
                 "name": "ficus_2.12-1.4.7.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/iheart/ficus_2.12/1.4.7/ficus_2.12-1.4.7.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/iheart/ficus_2.12/1.4.7/ficus_2.12-1.4.7.jar",
                 "sha256": "ae0834b6d7ed386c0c8aa3c4eeca33d1b4932b6562f0ce047a5a52eb0343ca22",
                 "bytes": 142861
               },
               {
                 "name": "spire-macros_2.12-0.17.0-M1.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-macros_2.12/0.17.0-M1/spire-macros_2.12-0.17.0-M1.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-macros_2.12/0.17.0-M1/spire-macros_2.12-0.17.0-M1.jar",
                 "sha256": "8d687fc799a295a7c99751062bca24d8ce857bedaadbf7d0bdc98a819cce3316",
                 "bytes": 79588
               },
               {
                 "name": "scala-logging_2.12-3.9.5.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/scala-logging/scala-logging_2.12/3.9.5/scala-logging_2.12-3.9.5.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/scala-logging/scala-logging_2.12/3.9.5/scala-logging_2.12-3.9.5.jar",
                 "sha256": "392979e5525856737a6f2398e25789d0b2057c8e3c55045a6e8d9704c21de7a6",
                 "bytes": 61160
               },
               {
                 "name": "supertagged_2.12-2.0-RC2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/rudogma/supertagged_2.12/2.0-RC2/supertagged_2.12-2.0-RC2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/rudogma/supertagged_2.12/2.0-RC2/supertagged_2.12-2.0-RC2.jar",
                 "sha256": "a14e9782f09d747323dacac7adcdefa9aa105012c5c42017971868c5c663a7b7",
                 "bytes": 46890
               },
               {
                 "name": "sourcecode_2.12-0.2.3.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/sourcecode_2.12/0.2.3/sourcecode_2.12-0.2.3.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/sourcecode_2.12/0.2.3/sourcecode_2.12-0.2.3.jar",
                 "sha256": "f686fc27121eace778250557d391cbbfe46843ab91fe107a8600564a492c83d2",
                 "bytes": 116733
               },
               {
                 "name": "geny_2.12-0.6.10.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/geny_2.12/0.6.10/geny_2.12-0.6.10.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/lihaoyi/geny_2.12/0.6.10/geny_2.12-0.6.10.jar",
                 "sha256": "07be2815eae87b0f0397f4ea628c4002d744b7be43a04b73fc62429e67ff6915",
                 "bytes": 85338
               },
               {
                 "name": "circe-numbers_2.12-0.14.15.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-numbers_2.12/0.14.15/circe-numbers_2.12-0.14.15.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-numbers_2.12/0.14.15/circe-numbers_2.12-0.14.15.jar",
                 "sha256": "a7bd4db65baa06d3f50b7488ec572cf1f49beab06e850b4012885b730e5a93c8",
                 "bytes": 12788
               },
               {
                 "name": "cats-core_2.12-2.13.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-core_2.12/2.13.0/cats-core_2.12-2.13.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-core_2.12/2.13.0/cats-core_2.12-2.13.0.jar",
                 "sha256": "4b92d574b01cf448018707de8bf20a2c37d0f6c6bd657a0f3c1be762761a310e",
                 "bytes": 6143455
               },
               {
                 "name": "shapeless_2.12-2.3.13.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/chuusai/shapeless_2.12/2.3.13/shapeless_2.12-2.3.13.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/chuusai/shapeless_2.12/2.3.13/shapeless_2.12-2.3.13.jar",
                 "sha256": "b5e71ed111548ebff93272d710402a6c40fbcc6b50c2d2d6f164b0e3c315c001",
                 "bytes": 3203785
               },
               {
                 "name": "circe-jawn_2.12-0.14.15.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-jawn_2.12/0.14.15/circe-jawn_2.12-0.14.15.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/io/circe/circe-jawn_2.12/0.14.15/circe-jawn_2.12-0.14.15.jar",
                 "sha256": "82744fca9206db561a81090715d79efaeb6c720d1bea753cc579f34eb1a82cc3",
                 "bytes": 30690
               },
               {
                 "name": "leveldbjni-all-1.18.3.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/gitlab.com/api/v4/projects/61211221/packages/maven/org/ethereum/leveldbjni-all/1.18.3/leveldbjni-all-1.18.3.jar",
+                "path": "$HOME/.cache/coursier/v1/https/gitlab.com/api/v4/projects/61211221/packages/maven/org/ethereum/leveldbjni-all/1.18.3/leveldbjni-all-1.18.3.jar",
                 "sha256": "18da00444c77080d4422b16c9d4750c4addabda350b702b4a6d628b86658e585",
                 "bytes": 1295004
               },
               {
                 "name": "leveldb-0.12.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb/0.12/leveldb-0.12.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb/0.12/leveldb-0.12.jar",
                 "sha256": "3c12eafb8bff359f97aec4d7574480cfc06e83f44704de020a1c0627651ba4b6",
                 "bytes": 228975
               },
               {
                 "name": "logback-classic-1.2.13.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-classic/1.2.13/logback-classic-1.2.13.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-classic/1.2.13/logback-classic-1.2.13.jar",
                 "sha256": "937afb220b91d8a394d78befdbf587c71aeed289d582e2a91e72a7d92172371d",
                 "bytes": 232073
               },
               {
                 "name": "guava-23.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/guava/guava/23.0/guava-23.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/guava/guava/23.0/guava-23.0.jar",
                 "sha256": "7baa80df284117e5b945b19b98d367a85ea7b7801bd358ff657946c3bd1b6596",
                 "bytes": 2614708
               },
               {
                 "name": "spire_2.12-0.16.2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire_2.12/0.16.2/spire_2.12-0.16.2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire_2.12/0.16.2/spire_2.12-0.16.2.jar",
                 "sha256": "113ad947fcdb0c387e96384be9193f624d8513b6e554441b8b86dcc9bbf189a5",
                 "bytes": 7182868
               },
               {
                 "name": "config-1.3.4.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/config/1.3.4/config-1.3.4.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/typesafe/config/1.3.4/config-1.3.4.jar",
                 "sha256": "8aa8931d8143154f86d393d4a85cfa207a884f16469cdf314dc8d6abba3f1438",
                 "bytes": 292739
               },
               {
                 "name": "macro-compat_2.12-1.1.1.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/macro-compat_2.12/1.1.1/macro-compat_2.12-1.1.1.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/macro-compat_2.12/1.1.1/macro-compat_2.12-1.1.1.jar",
                 "sha256": "8b1514ec99ac9c7eded284367b6c9f8f17a097198a44e6f24488706d66bbd2b8",
                 "bytes": 3180
               },
               {
                 "name": "machinist_2.12-0.6.8.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/machinist_2.12/0.6.8/machinist_2.12-0.6.8.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/machinist_2.12/0.6.8/machinist_2.12-0.6.8.jar",
                 "sha256": "570aede4e5e88f4f881aa6a49d958b76af3457aa3662bd590d254eb7d64c08e0",
                 "bytes": 33786
               },
               {
                 "name": "algebra_2.12-2.0.0-M2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/algebra_2.12/2.0.0-M2/algebra_2.12-2.0.0-M2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/algebra_2.12/2.0.0-M2/algebra_2.12-2.0.0-M2.jar",
                 "sha256": "461acb40d654f78288908cfb298600b9ee60f77c9e74f9e883c7b2f9a21fe0a5",
                 "bytes": 1168113
               },
               {
                 "name": "slf4j-api-1.7.36.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar",
                 "sha256": "d3ef575e3e4979678dc01bf1dcce51021493b4d11fb7f1be8ad982877c16a1c0",
                 "bytes": 41125
               },
               {
                 "name": "cats-kernel_2.12-2.13.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-kernel_2.12/2.13.0/cats-kernel_2.12-2.13.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/cats-kernel_2.12/2.13.0/cats-kernel_2.12-2.13.0.jar",
                 "sha256": "daeb592b533bd9d6400aac1397d780ff22ca672e98f4dc69c08fd0ceba3fa0ed",
                 "bytes": 3311646
               },
               {
                 "name": "jawn-parser_2.12-1.6.0.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/jawn-parser_2.12/1.6.0/jawn-parser_2.12-1.6.0.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/jawn-parser_2.12/1.6.0/jawn-parser_2.12-1.6.0.jar",
                 "sha256": "3ac478a24fd55caed61c2ccb10dda337549409684decc1279a2e71b45da3ea2f",
                 "bytes": 89393
               },
               {
                 "name": "leveldb-api-0.12.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb-api/0.12/leveldb-api-0.12.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/iq80/leveldb/leveldb-api/0.12/leveldb-api-0.12.jar",
                 "sha256": "3af7f350ab81cba9a35cbf874e64c9086fdbc5464643fdac00a908bbf6f5bfed",
                 "bytes": 9938
               },
               {
                 "name": "logback-core-1.2.13.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-core/1.2.13/logback-core-1.2.13.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/ch/qos/logback/logback-core/1.2.13/logback-core-1.2.13.jar",
                 "sha256": "07b1586faf220c05821d0f3ed8e2e417e214c83f40641f76e8a90b134c31ff6b",
                 "bytes": 449638
               },
               {
                 "name": "jsr305-3.0.2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar",
                 "sha256": "766ad2a0783f2687962c8ad74ceecc38a28b9f72a2d085ee438b7813e928d0c7",
                 "bytes": 19936
               },
               {
                 "name": "error_prone_annotations-2.0.18.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.0.18/error_prone_annotations-2.0.18.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.0.18/error_prone_annotations-2.0.18.jar",
                 "sha256": "cb4cfad870bf563a07199f3ebea5763f0dec440fcda0b318640b1feaa788656b",
                 "bytes": 12078
               },
               {
                 "name": "j2objc-annotations-1.1.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/j2objc/j2objc-annotations/1.1/j2objc-annotations-1.1.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/com/google/j2objc/j2objc-annotations/1.1/j2objc-annotations-1.1.jar",
                 "sha256": "2994a7eb78f2710bd3d3bfb639b2c94e219cedac0d4d084d516e78c16dddecf6",
                 "bytes": 8782
               },
               {
                 "name": "animal-sniffer-annotations-1.14.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/codehaus/mojo/animal-sniffer-annotations/1.14/animal-sniffer-annotations-1.14.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/codehaus/mojo/animal-sniffer-annotations/1.14/animal-sniffer-annotations-1.14.jar",
                 "sha256": "2068320bd6bad744c3673ab048f67e30bef8f518996fa380033556600669905d",
                 "bytes": 3482
               },
               {
                 "name": "spire-platform_2.12-0.16.2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-platform_2.12/0.16.2/spire-platform_2.12-0.16.2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-platform_2.12/0.16.2/spire-platform_2.12-0.16.2.jar",
                 "sha256": "38fb668da6b6e3f1c71347868c2360f934352e656acc7c92489e444f28434e97",
                 "bytes": 8260
               },
               {
                 "name": "spire-util_2.12-0.16.2.jar",
-                "path": "/home/arkadias/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-util_2.12/0.16.2/spire-util_2.12-0.16.2.jar",
+                "path": "$HOME/.cache/coursier/v1/https/repo.maven.apache.org/maven2/org/typelevel/spire-util_2.12/0.16.2/spire-util_2.12-0.16.2.jar",
                 "sha256": "0a6cbe2ce91ba32f699fbc96188af1f9583091e2dda00b98f5e088a9dc2eeb1d",
                 "bytes": 34600
               }
@@ -711,8 +711,8 @@
             "scala-cli",
             "--skip-cli-updates",
             "run",
-            "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/EvaluatedValueOracle.scala",
-            "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f/DirectProbeRuntime.scala",
+            "$HOME/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/EvaluatedValueOracle.scala",
+            "$HOME/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f/DirectProbeRuntime.scala",
             "--server=false",
             "--main-class",
             "DirectProbeRuntime",

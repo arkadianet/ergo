@@ -1,4 +1,4 @@
 TOKEN_TEXT_RUNTIME java.runtime.version=17.0.17+10-LTS
 TOKEN_TEXT_RUNTIME java.vendor=Amazon.com Inc.
-TOKEN_TEXT_RUNTIME java.class.path=/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/token-text-oracle/.scala-build/token-text-oracle_4cbaf03b62-cc1b44a3e7/classes/main:/home/arkadias/.cache/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala-library/2.12.20/scala-library-2.12.20.jar
+TOKEN_TEXT_RUNTIME java.class.path=$HOME/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/token-text-oracle/.scala-build/token-text-oracle_4cbaf03b62-cc1b44a3e7/classes/main:$HOME/.cache/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala-library/2.12.20/scala-library-2.12.20.jar
 TOKEN_TEXT_RUNTIME file.encoding=UTF-8

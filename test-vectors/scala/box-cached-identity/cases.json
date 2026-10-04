@@ -23,9 +23,9 @@
     "tag_source_hash_matches_worktree": true
   },
   "original_capture_command": [
-    "/home/arkadias/.local/kdex-toolchain/bin/scala-cli",
+    "$HOME/.local/kdex-toolchain/bin/scala-cli",
     "run",
-    "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/shared-evidence/box-reference/AuditBoxReference.scala",
+    "$HOME/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/shared-evidence/box-reference/AuditBoxReference.scala",
     "--server=false"
   ],
   "recorded_at": "2026-10-03T12:03:06.543091+00:00",

@@ -1,4 +1,4 @@
-{"command": ["scala-cli", "run", "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser-evidence/probe/AuditTreeProbe.scala", "--server=false"], "env": {"PATH_prefix": "/home/arkadias/.local/kdex-toolchain/bin", "COURSIER_CACHE": "/home/arkadias/.cache/ergo-test-tmp/coursier"}, "started": "2026-10-03T09:57:06.444363+00:00", "revision": "5d62fd5851e74fcb965b4aba50e1b423127f46f1"}
+{"command": ["scala-cli", "run", "$HOME/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser-evidence/probe/AuditTreeProbe.scala", "--server=false"], "env": {"PATH_prefix": "$HOME/.local/kdex-toolchain/bin", "COURSIER_CACHE": "$HOME/.cache/ergo-test-tmp/coursier"}, "started": "2026-10-03T09:57:06.444363+00:00", "revision": "5d62fd5851e74fcb965b4aba50e1b423127f46f1"}
 [[33mhint[0m] ./audit/reports/20261003T085740Z-5d62fd58/ergo-ser-evidence/probe/AuditTreeProbe.scala:2:15
 [[33mhint[0m] "sigma-state is outdated, update to 6.0.7"
 [[33mhint[0m]      sigma-state 6.0.6 -> org.scorexfoundation::sigma-state:6.0.7

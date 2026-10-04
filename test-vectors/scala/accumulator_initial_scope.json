@@ -135,7 +135,7 @@
     },
     "source_reconciliation": {
       "recapture": "test-vectors/scala/direct-cost-recapture.json",
-      "recapture_sha256": "33ed143700c7a90a45850ba90736ac55322766b8cdb0d8b5440ee111ab81af24",
+      "recapture_sha256": "89a5d061bf1baf8be1b19078d3b6cd97dcaf9f87f93ca80ae1d96c8d152cd498",
       "cases_equal": true,
       "response_hash_equal": true,
       "note": "Original case outcomes and timestamps are preserved. Fresh execution of the archived exact source independently reproduces them; no historical checkout state is inferred."
