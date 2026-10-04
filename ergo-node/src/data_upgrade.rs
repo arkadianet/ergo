@@ -130,16 +130,22 @@ fn database_paths(directory: &Path, indexer_filename: &Path) -> Result<Vec<PathB
     let indexer = directory.join(indexer_filename);
     // The config permits nested and absolute paths. Resolve the parent to catch
     // aliases before ever treating a consensus/peer/webhook file as an indexer.
-    let identity = |path: &Path| -> Result<PathBuf> {
-        Ok(fs::canonicalize(
-            path.parent()
-                .ok_or_else(|| fail("database needs a parent"))?,
-        )?
-        .join(
-            path.file_name()
-                .ok_or_else(|| fail("database needs a filename"))?,
-        ))
-    };
+    fn identity(path: &Path) -> Result<PathBuf> {
+        match fs::canonicalize(path) {
+            Ok(path) => Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+                Ok(identity(parent)?.join(
+                    path.file_name()
+                        .ok_or_else(|| fail("database needs a filename"))?,
+                ))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
     let mut paths = vec![indexer];
     for filename in ["state.redb", "peers.redb", "webhooks.redb"] {
         let path = directory.join(filename);
@@ -189,6 +195,7 @@ pub enum UpgradeStep {
     StageCreated,
     Copied,
     Verified,
+    CopyPublished,
     Ready,
     OriginalRenamed,
     Installed,
@@ -237,6 +244,8 @@ fn write_intent(stage: &Path, intent: &Intent) -> Result<()> {
 //    backup is the original, so failed publication always has a rollback source.
 // 5. ready + original + backup, no copy: installation complete. Sync parent,
 //    optionally delete backup, sync again, remove stage and sync parent.
+//    If both current and copy are absent but backup survives, restore backup
+//    and retry conversion.
 // 6. ready + current original, no backup/copy: discard already completed;
 //    finish stage cleanup. Stale+discard may instead have neither database.
 // We never delete the only copy of migrated data, or replace an existing backup.
@@ -299,6 +308,15 @@ fn finish_swap(
             fs::rename(&copy, path)?;
             (options.step)(UpgradeStep::Installed)?;
         }
+    } else if !original_exists && backup_exists {
+        // If the verified copy's directory entry is unavailable after a power
+        // loss, restore the retained original. The outer loop can migrate it
+        // again; never strand a directory with only a renamed original.
+        fs::rename(&backup, path)?;
+        sync_directory(parent)?;
+        fs::remove_dir_all(stage)?;
+        sync_directory(parent)?;
+        return Ok(());
     } else if !original_exists
         || classify(path)? != FileFormat::Current
         || (!backup_exists && !intent.discard_backup)
@@ -331,6 +349,7 @@ fn recover(path: &Path, options: &mut UpgradeOptions<'_>) -> Result<bool> {
         }
         Ok(_) => {}
     }
+    eprintln!("upgrade-data: recovering journal for {}", path.display());
     if regular(&stage.join("ready"))? {
         let intent: Intent = serde_json::from_slice(&fs::read(stage.join("ready"))?)?;
         // Retain the legacy writer lock across recovery's renames too.
@@ -457,6 +476,7 @@ pub fn upgrade_data(
                     }
                     if let MigrationProgress::Published(_) = event {
                         (|| -> Result<()> {
+                            (options.step)(UpgradeStep::CopyPublished)?;
                             write_intent(&stage, &intent)?;
                             (options.step)(UpgradeStep::Ready)?;
                             // The converter still owns the source lock. It also
@@ -594,6 +614,29 @@ fn legacy_indexer_schema(path: &Path) -> Result<(u32, Arc<redb_legacy::backends:
         }
     })).map_err(|_| fail("malformed legacy indexer metadata"))??;
     Ok((schema, source))
+}
+
+/// Boot hook: runs after config load, before sentinel reads or database opens.
+/// Returns the directory lock for the caller to retain throughout node lifetime.
+pub async fn prepare_startup(config: &crate::config::NodeConfig) -> Result<Arc<DataDirectoryLock>> {
+    let directory = config.data_dir.clone();
+    let indexer = PathBuf::from(&config.indexer_config.db_filename);
+    let automatic = config.auto_upgrade_legacy;
+    crate::maintenance::run_cancellable(move |cancelled| {
+        let lock = Arc::new(DataDirectoryLock::acquire(&directory)?);
+        if automatic {
+            let report = upgrade_with_logging(&lock, &directory, &indexer, false, &|| {
+                cancelled.load(std::sync::atomic::Ordering::Relaxed)
+            })?;
+            if report.is_noop() {
+                tracing::info!("data-directory upgrade: no-op; no legacy databases");
+            }
+        } else {
+            require_current_data(&lock, &directory, &indexer)?;
+        }
+        Ok(lock)
+    })
+    .await
 }
 
 /// Human-readable progress also works before CLI tracing is initialized.

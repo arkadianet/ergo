@@ -54,6 +54,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         sync_interval: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL,
         sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
         cache_bytes: None,
+        auto_upgrade_legacy: true,
         redb_cache_budgets: Default::default(),
         script_validation_checkpoint: chain_spec.bootstrap.checkpoint,
         // No header-level anchor in tests: Scala's default is

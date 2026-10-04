@@ -131,6 +131,7 @@ fn every_swap_step_can_be_retried_without_losing_original_data() {
             UpgradeStep::StageCreated,
             UpgradeStep::Copied,
             UpgradeStep::Verified,
+            UpgradeStep::CopyPublished,
             UpgradeStep::Ready,
             UpgradeStep::OriginalRenamed,
             UpgradeStep::Installed,
@@ -410,6 +411,7 @@ fn process_death_leaves_staging_that_a_new_process_recovers() {
         UpgradeStep::StageCreated,
         UpgradeStep::Copied,
         UpgradeStep::Verified,
+        UpgradeStep::CopyPublished,
         UpgradeStep::Ready,
         UpgradeStep::OriginalRenamed,
         UpgradeStep::Installed,
@@ -437,3 +439,153 @@ fn process_death_leaves_staging_that_a_new_process_recovers() {
         assert!(!sibling(&path, ".redb-upgrade").exists());
     }
 }
+
+#[tokio::test]
+async fn signal_copy_worker() {
+    let Ok(directory) = std::env::var("ERGO_UPGRADE_SIGNAL_DIRECTORY") else {
+        return;
+    };
+    let result = crate::maintenance::run_cancellable(move |cancelled| {
+        let directory = Path::new(&directory);
+        let lock = DataDirectoryLock::acquire(directory)?;
+        upgrade_data(
+            &lock,
+            directory,
+            Path::new("custom-index.redb"),
+            &mut UpgradeOptions {
+                discard_backups: false,
+                free_space: &|_| Ok(u64::MAX),
+                cancelled: &|| cancelled.load(std::sync::atomic::Ordering::Relaxed),
+                progress: &mut |_, _, _, event| {
+                    if matches!(event, MigrationProgress::Copy { .. }) {
+                        fs::write(directory.join("worker-copying"), []).unwrap();
+                        let deadline = Instant::now() + Duration::from_secs(10);
+                        while !cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                            && Instant::now() < deadline
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                },
+                step: &mut |_| Ok(()),
+            },
+        )
+    })
+    .await;
+    assert!(result.unwrap_err().to_string().contains("interrupted"));
+}
+
+#[cfg(unix)]
+#[test]
+fn sigint_and_sigterm_mid_copy_release_lock_and_remove_temporaries() {
+    for signal in ["-INT", "-TERM"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.redb");
+        let bytes = legacy(&path);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "data_upgrade::tests::signal_copy_worker"])
+            .env("ERGO_UPGRADE_SIGNAL_DIRECTORY", dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !dir.path().join("worker-copying").exists() {
+            if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("worker did not reach copy phase");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(std::process::Command::new("kill")
+            .args([signal, &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success());
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "{signal}: {status}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("signal cleanup worker did not exit");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(!sibling(&path, ".redb-upgrade").exists());
+        assert!(!sibling(&path, ".redb2-backup").exists());
+        drop(lock);
+    }
+}
+
+#[test]
+fn missing_indexer_parent_is_skipped_and_lock_must_cover_requested_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+    let mut options = UpgradeOptions {
+        discard_backups: false,
+        free_space: &|_| panic!("no database to migrate"),
+        cancelled: &|| false,
+        progress: &mut |_, _, _, _| {},
+        step: &mut |_| Ok(()),
+    };
+    assert!(upgrade_data(
+        &lock,
+        dir.path(),
+        Path::new("absent/index.redb"),
+        &mut options
+    )
+    .unwrap()
+    .is_noop());
+    assert!(!dir.path().join("absent").exists());
+    let other = tempfile::tempdir().unwrap();
+    assert!(
+        upgrade_data(&lock, other.path(), Path::new("indexer.redb"), &mut options)
+            .unwrap_err()
+            .to_string()
+            .contains("lock does not cover")
+    );
+}
+
+#[test]
+fn missing_verified_copy_restores_original_before_retrying() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+    let path = dir.path().join("state.redb");
+    let bytes = legacy(&path);
+    assert!(upgrade_data(
+        &lock,
+        dir.path(),
+        Path::new("custom-index.redb"),
+        &mut UpgradeOptions {
+            discard_backups: false,
+            free_space: &|_| Ok(u64::MAX),
+            cancelled: &|| false,
+            progress: &mut |_, _, _, _| {},
+            step: &mut |step| if step == UpgradeStep::OriginalRenamed {
+                Err(fail("injected crash"))
+            } else {
+                Ok(())
+            },
+        }
+    )
+    .is_err());
+    assert!(!path.exists());
+    fs::remove_file(sibling(&path, ".redb-upgrade").join("copy.redb")).unwrap();
+    assert_eq!(
+        run(&lock, dir.path(), false),
+        UpgradeReport {
+            migrated: 1,
+            stale_indexers: 0,
+            recovered: 1
+        }
+    );
+    assert_current(&path);
+    assert_eq!(fs::read(sibling(&path, ".redb2-backup")).unwrap(), bytes);
+}
+

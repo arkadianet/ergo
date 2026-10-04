@@ -46,6 +46,7 @@ fn cfg_with_mode(
         sync_interval: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL,
         sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
         cache_bytes: None,
+        auto_upgrade_legacy: true,
         redb_cache_budgets: Default::default(),
         script_validation_checkpoint: None,
         header_checkpoint: None,

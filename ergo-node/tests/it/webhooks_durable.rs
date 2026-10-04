@@ -46,6 +46,10 @@ async fn independent_api_engines_and_restart_preserve_private_registrations() {
         assert!(value.get("secret").is_none());
     }
     first.shutdown().await.unwrap();
+    drop(
+        ergo_node::data_upgrade::DataDirectoryLock::acquire(first_dir.path())
+            .expect("awaited shutdown must immediately release the directory lock"),
+    );
     // Awaited shutdown must release the durable engine immediately, before a
     // queued Drop supervisor gets another poll on this current-thread runtime.
     drop(
@@ -62,9 +66,20 @@ async fn independent_api_engines_and_restart_preserve_private_registrations() {
 }
 
 #[tokio::test]
-async fn corrupt_webhook_store_disables_hooks_while_api_remains_available() {
+async fn corrupt_webhook_snapshot_disables_hooks_while_api_remains_available() {
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("webhooks.redb"), b"corrupt database").unwrap();
+    {
+        let db = redb::Database::create(directory.path().join("webhooks.redb")).unwrap();
+        let write = ergo_state::begin_write_qr(&db).unwrap();
+        write
+            .open_table(redb::TableDefinition::<&str, &[u8]>::new(
+                "webhook_snapshot_v1",
+            ))
+            .unwrap()
+            .insert("state", b"corrupt snapshot".as_slice())
+            .unwrap();
+        write.commit().unwrap();
+    }
     let node = spawn_node(make_test_config(directory.path().to_path_buf())).await;
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let address = node
@@ -93,8 +108,27 @@ async fn corrupt_webhook_store_disables_hooks_while_api_remains_available() {
         .send()
         .await
         .unwrap();
-    assert_eq!(replay.status(), reqwest::StatusCode::CONFLICT);
-    let value: serde_json::Value = replay.json().await.unwrap();
-    assert_eq!(value["error"]["reason"], "realtime_disabled");
+    // A corrupt webhook snapshot leaves the independent replay engine usable.
+    assert_eq!(replay.status(), reqwest::StatusCode::OK);
     node.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_webhook_file_fails_upgrade_before_state_open_without_changing_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("webhooks.redb");
+    std::fs::write(&path, b"corrupt database").unwrap();
+    let error = match ergo_node::run_inner(make_test_config(directory.path().to_path_buf())).await {
+        Err(error) => error.to_string(),
+        Ok(handle) => {
+            handle.shutdown().await.unwrap();
+            panic!("invalid inventory must fail startup");
+        }
+    };
+    assert!(
+        error.contains("cannot classify") && error.contains("webhooks.redb"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"corrupt database");
+    assert!(!directory.path().join("state.redb").exists());
 }

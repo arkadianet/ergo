@@ -2547,3 +2547,21 @@ fn build_context_protects_nested_rust_wallet_data_and_keeps_vectors() {
         .join("../test-vectors/wallet")
         .is_dir());
 }
+
+#[test]
+fn legacy_auto_upgrade_defaults_on_and_store_can_disable_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.toml");
+    std::fs::write(&path, "[store]\n").unwrap();
+    assert!(
+        NodeConfig::load(minimal_cli(Some(&path)))
+            .unwrap()
+            .auto_upgrade_legacy
+    );
+    std::fs::write(&path, "[store]\nauto_upgrade_legacy = false\n").unwrap();
+    assert!(
+        !NodeConfig::load(minimal_cli(Some(&path)))
+            .unwrap()
+            .auto_upgrade_legacy
+    );
+}

@@ -1177,6 +1177,7 @@ impl NodeConfig {
             sync_interval_stable,
             cache_bytes,
             redb_cache_budgets,
+            auto_upgrade_legacy: toml_cfg.store.auto_upgrade_legacy.unwrap_or(true),
             script_validation_checkpoint,
             header_checkpoint,
             genesis_id,
