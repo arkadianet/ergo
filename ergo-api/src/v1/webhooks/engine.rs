@@ -379,7 +379,11 @@ impl WebhookEngine {
     /// from REST and explicitly re-enables them.
     pub fn record_source_gap(&self, latest_seq: u64) {
         let _ = self.mutate(|g| {
-            for sub in g.subs.values_mut().filter(|sub| sub.active) {
+            for sub in g
+                .subs
+                .values_mut()
+                .filter(|sub| sub.active && sub.start_seq < latest_seq)
+            {
                 sub.active = false;
                 sub.health = WebhookHealth::Disabled;
                 sub.auto_disabled_reason = Some(AutoDisabledReason::SourceGap);

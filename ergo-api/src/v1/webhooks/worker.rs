@@ -215,28 +215,35 @@ async fn catch_up(
                 .max(engine.earliest_active_start().unwrap_or(latest))
         })
         .await?;
-    let channels = filter.read().unwrap_or_else(|e| e.into_inner()).clone();
-    let page = bus.backfill_all(since, 128);
-    if page.gap && !channels.is_empty() {
-        let latest = page.latest_seq;
-        executor
-            .run_worker(move |engine| engine.record_source_gap(latest))
-            .await?;
-        tracing::error!(
-            since,
-            latest,
-            "webhook source gap; subscriptions paused pending REST reconciliation"
-        );
+    if filter.read().unwrap_or_else(|e| e.into_inner()).is_empty() {
         return Ok(());
     }
-    let through = if page.truncated {
+    let mut page = bus.backfill_all(since, 128);
+    let mut through = if page.truncated {
         page.events.last().map(|event| event.seq).unwrap_or(since)
     } else {
         page.latest_seq
     };
-    executor
+    if let Some(missing) = page.first_missing_seq {
+        through = through.min(missing - 1);
+        page.events.retain(|event| event.seq < missing);
+    }
+    let missing = page.first_missing_seq;
+    let gap_end = page.missing_through_seq;
+    let complete = executor
         .run_worker(move |engine| engine.admit_page(&page.events, through, now_unix_ms()))
         .await?;
+    if complete && missing.is_some_and(|missing| through >= missing - 1) {
+        let gap_end = gap_end.expect("missing interval has an end");
+        executor
+            .run_worker(move |engine| engine.record_source_gap(gap_end))
+            .await?;
+        tracing::error!(
+            since,
+            gap_end,
+            "webhook source gap; affected subscriptions paused pending REST reconciliation"
+        );
+    }
 
     Ok(())
 }
@@ -684,6 +691,90 @@ mod tests {
             1000
         );
         executor.shutdown().await;
+    }
+
+    struct CrashReplayStore;
+    impl crate::v1::realtime::journal::RealtimeStore for CrashReplayStore {
+        fn load_events(&self) -> Result<crate::v1::realtime::journal::JournalRecovery, String> {
+            let source = RealtimeBus::blocks_only();
+            for height in 1..=260 {
+                source.publish(block(height));
+            }
+            Ok(crate::v1::realtime::journal::JournalRecovery {
+                next_seq: 1000,
+                events: source
+                    .backfill_all(0, 260)
+                    .events
+                    .iter()
+                    .map(|event| crate::v1::realtime::journal::ReplayEvent::from(event.as_ref()))
+                    .collect(),
+            })
+        }
+        fn reserve_cursor(&self, _: u64) -> Result<(), String> {
+            Ok(())
+        }
+        fn append_events(
+            &self,
+            _: &[crate::v1::realtime::journal::ReplayEvent],
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn crash_catch_up_admits_contiguous_prefix_before_pausing_affected_hooks() {
+        let store = Arc::new(CountingStore::default());
+        let engine = WebhookEngine::durable(Default::default(), store.clone()).unwrap();
+        register_blocks(&engine);
+        let old = engine.list(0, 1).remove(0).webhook_id;
+        let bus = Arc::new(
+            RealtimeBus::durable(
+                [crate::v1::realtime::ChannelClass::Blocks]
+                    .into_iter()
+                    .collect(),
+                Arc::new(CrashReplayStore),
+                1,
+            )
+            .unwrap(),
+        );
+        for event in bus.backfill_all(0, 5).events {
+            engine.enqueue_matches(&event, 0);
+        }
+        engine.checkpoint_replay(5);
+        drop(engine);
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+        let fresh = engine
+            .register_after(
+                "https://fresh.example/hook".into(),
+                vec!["blocks".into()],
+                None,
+                1,
+                0,
+                999,
+            )
+            .unwrap();
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        engine.attach_filter(filter.clone());
+        let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(engine.replay_seq(), 133);
+        assert!(
+            engine.get(&old).unwrap().active,
+            "gap beyond page must wait"
+        );
+        catch_up(&bus, &filter, &executor).await.unwrap();
+        assert_eq!(engine.replay_seq(), 999);
+        assert_eq!(engine.deliveries_for(&old, 0, 300).len(), 260);
+        assert!(!engine.get(&old).unwrap().active);
+        assert!(
+            engine.get(&fresh.webhook_id).unwrap().active,
+            "registration after gap is unaffected"
+        );
+        executor.shutdown().await;
+        drop(engine);
+        let recovered = WebhookEngine::durable(Default::default(), store).unwrap();
+        assert_eq!(recovered.replay_seq(), 999);
+        assert_eq!(recovered.deliveries_for(&old, 0, 300).len(), 260);
     }
 
     #[tokio::test]

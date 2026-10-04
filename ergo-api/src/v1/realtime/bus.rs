@@ -87,6 +87,10 @@ pub struct BackfillPage {
     /// `true` when `since` predates the retained window — the client must treat
     /// its state as cold and re-read via REST.
     pub gap: bool,
+    /// First missing source cursor after `since`, even beyond this page.
+    pub first_missing_seq: Option<u64>,
+    /// Inclusive end of that first missing interval.
+    pub missing_through_seq: Option<u64>,
     /// `true` when more matching events remain beyond the request limit — the
     /// page is NOT the full catch-up and the caller must not treat it as one.
     pub truncated: bool,
@@ -374,26 +378,21 @@ impl RealtimeBus {
     ) -> BackfillPage {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let latest_seq = g.next_seq - 1;
-        let mut gap = match g.backfill.front() {
-            // Oldest retained event is newer than the first event the client
-            // still needs → the window rolled past `since`. Saturating: the
-            // client controls `since`, so `u64::MAX` must not overflow.
-            Some(front) => front.seq > since.saturating_add(1),
-            // Nothing retained but the cursor has advanced past `since`.
-            None => latest_seq > since,
-        };
-        // Reserved-but-unconfirmed crash intervals and lost journal entries
-        // can occur inside the window, not only before its oldest entry.
+        let mut first_missing_seq = None;
+        let mut missing_through_seq = None;
         let mut expected = since.saturating_add(1);
         for event in g.backfill.iter().filter(|event| event.seq > since) {
-            if event.seq != expected {
-                gap = true;
+            if event.seq != expected && first_missing_seq.is_none() {
+                first_missing_seq = Some(expected);
+                missing_through_seq = Some(event.seq - 1);
             }
             expected = event.seq.saturating_add(1);
         }
-        if latest_seq >= expected {
-            gap = true;
+        if latest_seq >= expected && first_missing_seq.is_none() {
+            first_missing_seq = Some(expected);
+            missing_through_seq = Some(latest_seq);
         }
+        let gap = first_missing_seq.is_some();
         // Overfetch by one so a page that exactly fills the limit is
         // distinguishable from one that was cut off.
         let mut events: Vec<_> = g
@@ -410,6 +409,8 @@ impl RealtimeBus {
         BackfillPage {
             events,
             gap,
+            first_missing_seq,
+            missing_through_seq,
             truncated,
             latest_seq,
             oldest_seq: g.backfill.front().map(|event| event.seq),
