@@ -23,7 +23,9 @@ pub(crate) struct Dependencies {
 pub struct PeerControlRequest {
     pub command: ergo_api::operator_control::PeerControl,
     pub deadline: Instant,
-    pub reply: tokio::sync::oneshot::Sender<Result<(), OperatorControlError>>,
+    pub reply: tokio::sync::oneshot::Sender<
+        Result<ergo_api::operator_control::PeerControlResult, OperatorControlError>,
+    >,
 }
 
 type DependencyReader = Arc<dyn Fn(bool, bool) -> Dependencies + Send + Sync>;

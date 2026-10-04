@@ -366,7 +366,7 @@ pub(crate) async fn blacklist_remove(
 
 #[utoipa::path(post, path = "/api/v1/network/disconnect", tag = "network",
     request_body = String,
-    responses((status = 204, description = "Session disconnected; future dialing remains enabled")),
+    responses((status = 200, description = "Reports whether a session was closed; future dialing remains enabled", body = crate::operator_control::PeerControlResult)),
     security(("ApiKeyAuth" = [])))]
 pub(crate) async fn disconnect(
     State(s): State<OperatorState>,
@@ -390,7 +390,7 @@ pub(crate) async fn disconnect(
 
 #[utoipa::path(delete, path = "/api/v1/network/peers/{addr}", tag = "network",
     params(("addr" = String, Path, description = "Socket address to remove from saved peers")),
-    responses((status = 204, description = "Saved dial metadata removed and session disconnected")),
+    responses((status = 200, description = "Saved dial metadata removed; reports whether a session was closed", body = crate::operator_control::PeerControlResult)),
     security(("ApiKeyAuth" = [])))]
 pub(crate) async fn remove(State(s): State<OperatorState>, Path(addr): Path<String>) -> Response {
     let addr = match addr.parse() {
@@ -412,7 +412,8 @@ async fn control(s: OperatorState, command: crate::operator_control::PeerControl
         Err(error) => return *error,
     };
     match admin.peer_control(command).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(result) if result.session_closed.is_some() => Json(result).into_response(),
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => super::control_error(error),
     }
 }

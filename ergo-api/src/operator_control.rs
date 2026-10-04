@@ -158,5 +158,11 @@ pub enum OperatorControlError {
     NotFound(String),
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct PeerControlResult {
+    /// Present for disconnect/remove: whether an active session was closed.
+    pub session_closed: Option<bool>,
+}
+
 pub type PeerControlFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<(), OperatorControlError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<PeerControlResult, OperatorControlError>> + Send + 'a>>;

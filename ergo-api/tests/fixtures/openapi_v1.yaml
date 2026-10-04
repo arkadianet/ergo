@@ -3029,8 +3029,12 @@ paths:
               type: string
         required: true
       responses:
-        '204':
-          description: Session disconnected; future dialing remains enabled
+        '200':
+          description: Reports whether a session was closed; future dialing remains enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerControlResult'
       security:
       - ApiKeyAuth: []
   /api/v1/network/peers:
@@ -3082,8 +3086,12 @@ paths:
         schema:
           type: string
       responses:
-        '204':
-          description: Saved dial metadata removed and session disconnected
+        '200':
+          description: Saved dial metadata removed; reports whether a session was closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeerControlResult'
       security:
       - ApiKeyAuth: []
   /api/v1/network/sync-info:
@@ -9649,6 +9657,14 @@ components:
       properties:
         active:
           type: boolean
+    PeerControlResult:
+      type: object
+      properties:
+        session_closed:
+          type:
+          - boolean
+          - 'null'
+          description: 'Present for disconnect/remove: whether an active session was closed.'
     PeerQuality:
       type: object
       required:
@@ -10034,7 +10050,7 @@ components:
           type: integer
           format: int64
           default:
-            $serde_json::private::Number: '60000'
+            $serde_json::private::Number: '600000'
           minimum: 0
         require_indexer:
           type: boolean
@@ -10052,7 +10068,7 @@ components:
           type: integer
           format: int64
           default:
-            $serde_json::private::Number: '1200000'
+            $serde_json::private::Number: '7200000'
           minimum: 0
       additionalProperties: false
     ProbeReport:

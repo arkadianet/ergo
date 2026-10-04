@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use ergo_api::operator_control::{OperatorControlError, PeerControl};
+use ergo_api::operator_control::{OperatorControlError, PeerControl, PeerControlResult};
 
 use super::peer_actions::{cleanup_disconnected_peer, flush_actions};
 use super::NodeState;
@@ -29,20 +29,23 @@ pub(super) fn dispatch(state: &mut NodeState, request: crate::runtime_control::P
                 for peer in peers {
                     disconnect(state, peer, now);
                 }
+                PeerControlResult::default()
             }),
         PeerControl::Unban { ip } => state
             .peer_manager
             .operator_unban(ip)
-            .map_err(|error| OperatorControlError::Storage(error.to_string())),
-        PeerControl::Disconnect { addr } => {
-            disconnect(state, addr, now);
-            Ok(())
-        }
+            .map_err(|error| OperatorControlError::Storage(error.to_string()))
+            .map(|()| PeerControlResult::default()),
+        PeerControl::Disconnect { addr } => Ok(PeerControlResult {
+            session_closed: Some(disconnect(state, addr, now)),
+        }),
         PeerControl::Remove { addr } => state
             .peer_manager
             .operator_remove(addr)
             .map_err(|error| OperatorControlError::Storage(error.to_string()))
-            .map(|()| disconnect(state, addr, now)),
+            .map(|()| PeerControlResult {
+                session_closed: Some(disconnect(state, addr, now)),
+            }),
     };
     if result.is_ok() {
         super::snapshot_emit::publish_snapshot(state, now);
@@ -50,7 +53,8 @@ pub(super) fn dispatch(state: &mut NodeState, request: crate::runtime_control::P
     let _ = request.reply.send(result);
 }
 
-fn disconnect(state: &mut NodeState, addr: std::net::SocketAddr, now: Instant) {
+fn disconnect(state: &mut NodeState, addr: std::net::SocketAddr, now: Instant) -> bool {
+    let closed = state.registry.peers.contains_key(&addr);
     let actions = state.executor.on_peer_disconnected(
         &addr,
         &mut state.coordinator,
@@ -60,4 +64,28 @@ fn disconnect(state: &mut NodeState, addr: std::net::SocketAddr, now: Instant) {
     state.peer_manager.disconnect(&addr);
     cleanup_disconnected_peer(state, &addr);
     flush_actions(state, actions);
+    closed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn disconnect_reports_whether_a_session_was_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        let peer = "203.0.113.8:9030".parse().unwrap();
+        let now = Instant::now();
+        assert!(!disconnect(&mut state, peer, now));
+        let (outbound_tx, _rx) = crate::peer_loop::outbound::channel(1);
+        state.registry.peers.insert(
+            peer,
+            crate::node::PeerRuntime {
+                sync_version: ergo_p2p::peer::SyncVersion::V2,
+                outbound_tx,
+            },
+        );
+        assert!(disconnect(&mut state, peer, now));
+        assert!(!disconnect(&mut state, peer, now));
+    }
 }

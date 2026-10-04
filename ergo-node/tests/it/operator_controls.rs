@@ -189,27 +189,31 @@ async fn controls_are_authenticated_atomic_and_survive_restart_where_promised() 
             .status(),
         StatusCode::NO_CONTENT
     );
-    assert_eq!(
-        client
-            .post(format!("{base}/api/v1/network/disconnect"))
-            .header("api_key", "observer-key")
-            .json(&"203.0.113.8:9030")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(
-        client
-            .delete(format!("{base}/api/v1/network/peers/203.0.113.8:9030"))
-            .header("api_key", "observer-key")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NO_CONTENT
-    );
+    let disconnected: Value = client
+        .post(format!("{base}/api/v1/network/disconnect"))
+        .header("api_key", "observer-key")
+        .json(&"203.0.113.8:9030")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(disconnected["session_closed"], false);
+    let forgotten: Value = client
+        .delete(format!("{base}/api/v1/network/peers/203.0.113.8:9030"))
+        .header("api_key", "observer-key")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(forgotten["session_closed"], false);
     assert_eq!(
         client
             .get(format!("{base}/wallet/status"))

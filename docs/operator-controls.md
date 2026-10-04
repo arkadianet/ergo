@@ -137,9 +137,9 @@ if the ledger is missing or restored from an old backup.
 
 ## Manual peer administration
 
-All writes require operator credentials. Successful writes return HTTP 204
-after the action loop acknowledges them, rather than accepting queued work as
-completed. Queue saturation, timeout or unavailable persistence returns 503.
+All writes require operator credentials. Ban and unban return HTTP 204
+after the action loop acknowledges them. Disconnect and forget return HTTP 200
+with `session_closed`, reporting whether there was a session to close. Queue saturation, timeout or unavailable persistence returns 503.
 After a timeout, inspect the peer state before retrying.
 
 | Request | Effect |
