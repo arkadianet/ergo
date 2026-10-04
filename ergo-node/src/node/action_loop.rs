@@ -71,17 +71,6 @@ pub(super) async fn action_loop(
     mut shutdown_rx: oneshot::Receiver<()>,
     mempool_tick_ms: u64,
 ) -> Result<(), NodeError> {
-    if let Some(wiring) = mining.as_ref() {
-        for entry in wiring.handle.private_queue().list() {
-            if let Ok(raw) = hex::decode(&entry.tx_id) {
-                if let Ok(id) = <[u8; 32]>::try_from(raw) {
-                    state.mempool.register_private_transaction(
-                        ergo_primitives::digest::Digest32::from_bytes(id),
-                    );
-                }
-            }
-        }
-    }
     // Tick every 5s so cold-start fills the outbound pool quickly.
     // The slow-mode gate inside `try_dial_peers` enforces the
     // original 30s cadence once the deficit is small (see

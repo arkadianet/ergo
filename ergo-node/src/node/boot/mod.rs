@@ -852,6 +852,11 @@ async fn run_inner_with_backend(
     // Phase 3b: mining subsystem (the MiningHandle + API bridge).
     let mining_subsystem =
         mining::build_subsystem(&config, &scaffold.voting_targets_slot, &mining_submit_tx)?;
+    // Keep queued private transactions out of every public admission path
+    // from the first loop iteration, whether or not mining is enabled.
+    if let Some(queue) = mining_subsystem.private_queue.as_deref() {
+        super::private_mining::register_queued(&mut mempool, queue);
+    }
 
     // Graceful shutdown channel for the API task. Plumbed through
     // `ergo_api::serve_on` so axum's `with_graceful_shutdown` can
@@ -879,10 +884,7 @@ async fn run_inner_with_backend(
         sync.indexer_event_observer.clone(),
         &mut mempool,
         mining_subsystem.bridge.clone(),
-        mining_subsystem
-            .handle
-            .as_ref()
-            .map(|handle| handle.private_queue()),
+        mining_subsystem.private_queue.clone(),
         scaffold.voting_targets_slot.clone(),
         &shutdown_notify,
         &peer_connect_tx,

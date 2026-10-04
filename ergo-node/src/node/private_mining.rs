@@ -45,6 +45,21 @@ pub(super) fn api_entry(
     }
 }
 
+/// Decline the queue's transactions on every public admission path. Called at
+/// startup, whether or not mining is enabled.
+pub(super) fn register_queued(
+    mempool: &mut ergo_mempool::Mempool,
+    queue: &ergo_mining::private_queue::PrivateTransactionQueue,
+) {
+    for entry in queue.list() {
+        if let Ok(raw) = hex::decode(&entry.tx_id) {
+            if let Ok(id) = <[u8; 32]>::try_from(raw) {
+                mempool.register_private_transaction(Digest32::from_bytes(id));
+            }
+        }
+    }
+}
+
 pub(super) fn admit(
     state: &mut NodeState,
     handle: &MiningHandle,

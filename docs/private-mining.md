@@ -60,6 +60,10 @@ through a randomly named temporary file; temporaries left by an interrupted
 write are removed when the node next opens the queue. A failed write retains
 reservations, and elapsed work is filtered out of new builds. Protect and back up
 this file alongside the node's wallet data because it contains signed bytes.
+If the node restarts with mining disabled while this file exists, the queue
+still loads: its inputs stay reserved and its transactions stay out of public
+admission. Nothing in it is mined, confirmed, expired, or cancellable until
+mining is enabled again.
 The queue is bounded to 1,024 retained records and 16 MiB of transaction bytes.
 
 Applied transaction IDs and their exact block identities determine confirmation.
