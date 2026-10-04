@@ -1151,3 +1151,55 @@ async fn probes_survive_exhausted_public_ip_budget() {
         );
     }
 }
+
+#[tokio::test]
+async fn sensitive_control_responses_are_not_cacheable() {
+    struct ConfigAdmin;
+    impl NodeAdmin for ConfigAdmin {
+        fn request_shutdown(&self) {}
+        fn effective_config(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({"revision":"boot:0"}))
+        }
+        fn apply_config_patch(
+            &self,
+            _: ergo_api::operator_control::RuntimeConfigPatch,
+        ) -> Result<serde_json::Value, ergo_api::operator_control::OperatorControlError> {
+            Ok(self.effective_config().unwrap())
+        }
+        fn credentials(&self) -> Option<Vec<ergo_api::auth::CredentialInfo>> {
+            Some(vec![])
+        }
+    }
+    let app = operator_router(
+        OperatorState {
+            blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
+            read: Arc::new(StubRead),
+            chain: None,
+            admin: Some(Arc::new(ConfigAdmin)),
+            mining: None,
+            network: NetworkPrefix::Mainnet,
+        },
+        Governor::new(Default::default()).unwrap(),
+        default_auth(),
+    );
+    use tower::ServiceExt;
+    for (method, path) in [
+        (Method::GET, "/api/v1/node/config"),
+        (Method::PATCH, "/api/v1/node/config"),
+        (Method::GET, "/api/v1/node/credentials"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(req(
+                method,
+                path,
+                Some("operator-secret"),
+                Some(LOCAL),
+                Some(Body::from("{}")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
+}

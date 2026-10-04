@@ -139,7 +139,7 @@ pub(crate) async fn config_get(State(s): State<OperatorState>) -> Response {
             ))
         })
     }) {
-        Ok(config) => Json(config).into_response(),
+        Ok(config) => ([(header::CACHE_CONTROL, "no-store")], Json(config)).into_response(),
         Err(error) => *error,
     }
 }
@@ -170,7 +170,7 @@ pub(crate) async fn config_patch(
         }
     };
     match admin.apply_config_patch(patch) {
-        Ok(config) => Json(config).into_response(),
+        Ok(config) => ([(header::CACHE_CONTROL, "no-store")], Json(config)).into_response(),
         Err(error) => super::control_error(error),
     }
 }
@@ -226,7 +226,7 @@ pub(crate) async fn credentials(State(s): State<OperatorState>) -> Response {
         Err(error) => return *error,
     };
     match admin.credentials() {
-        Some(keys) => Json(keys).into_response(),
+        Some(keys) => ([(header::CACHE_CONTROL, "no-store")], Json(keys)).into_response(),
         None => v1_error(
             Reason::RouteUnavailable,
             "credential control unavailable",
