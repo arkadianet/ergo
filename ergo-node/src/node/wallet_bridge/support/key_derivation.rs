@@ -422,10 +422,11 @@ pub(crate) async fn get_private_key_impl(
 
     let path = DerivationPath::from_components(path_components);
 
-    // Derive the scalar.
-    let scalar = unlocked.master.derive_scalar_at_path(&path).map_err(|e| {
-        WalletAdminError::Internal(format!("getPrivateKey: derivation failed: {e}"))
-    })?;
+    // Derive the scalar; never export one that does not control the address.
+    let scalar = unlocked
+        .master
+        .derive_scalar_for_pubkey(&path, &pubkey)
+        .map_err(|e| WalletAdminError::Internal(format!("getPrivateKey: {e}")))?;
 
     // Encode as 32-byte big-endian hex.
     let scalar_bytes: [u8; 32] = scalar.to_bytes().into();
@@ -459,6 +460,183 @@ mod tests {
         > {
             Ok(None)
         }
+    }
+
+    fn leading_zero_vector(mode: &str, path: &str) -> ([u8; 33], String) {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../test-vectors/wallet/leading-zero-master/scala_6_0_6.json"
+        )))
+        .unwrap();
+        let vector = fixture["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["mode"] == mode && v["path"] == path)
+            .unwrap()
+            .clone();
+        let public_key = hex::decode(vector["publicKey"].as_str().unwrap()).unwrap();
+        (
+            public_key.try_into().unwrap(),
+            vector["secret"].as_str().unwrap().to_owned(),
+        )
+    }
+
+    /// Legacy secret file for the public leading-zero-master seed.
+    fn leading_zero_legacy_storage(directory: &std::path::Path) -> ergo_wallet::SecretStorage {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../test-vectors/wallet/leading-zero-master/scala_6_0_6.json"
+        )))
+        .unwrap();
+        let seed = hex::decode(fixture["seed"].as_str().unwrap()).unwrap();
+        let (salt, iv) = ([0x29; 32], [0x39; 12]);
+        let key = ergo_wallet::encryption::derive_key_pbkdf2(b"pw", &salt, 128_000);
+        let (ciphertext, tag) = ergo_wallet::encryption::encrypt(&key, &iv, &seed).unwrap();
+        let encrypted = serde_json::json!({
+            "cipherText": hex::encode(ciphertext), "salt": hex::encode(salt),
+            "iv": hex::encode(iv), "authTag": hex::encode(tag),
+            "cipherParams": { "prf": "HmacSHA512", "c": 128000, "dkLen": 256 },
+            "usePre1627KeyDerivation": true
+        });
+        std::fs::create_dir_all(directory).unwrap();
+        std::fs::write(directory.join("secret.json"), encrypted.to_string()).unwrap();
+        ergo_wallet::SecretStorage::open(directory.to_path_buf())
+    }
+
+    fn track(db: &redb::Database, index: u64, pubkey: &[u8; 33], path: Vec<u32>) {
+        let meta = ergo_state::wallet::types::TrackedPubkeyMeta {
+            derivation_path: path,
+            derivation_path_label: String::new(),
+            added_at_height: 0,
+        };
+        persist_tracked_pubkey(db, index, pubkey, &meta, None).unwrap();
+    }
+
+    fn private_key_config() -> WriterConfig {
+        WriterConfig {
+            network: ergo_ser::address::NetworkPrefix::Mainnet,
+            expose_private_keys: true,
+            reemission: None,
+            min_relay_fee_nano_erg: 1_000_000,
+            max_tx_size_bytes: 98_304,
+        }
+    }
+
+    #[tokio::test]
+    async fn earlier_rust_legacy_wallet_signs_exports_and_derives_its_persisted_tree() {
+        use ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS;
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        // Tables as the earlier Rust node wrote them for this legacy seed:
+        // root key, trimmed-master EIP-3 key and that key as change address.
+        let mode = "legacy-rust-trimmed-master";
+        let eip3 = ergo_wallet::DerivationPath::eip3_first_address();
+        let (root, _) = leading_zero_vector(mode, "m");
+        let (first, first_secret) = leading_zero_vector(mode, &eip3.to_string());
+        track(&db, 0, &root, vec![]);
+        track(&db, 1, &first, eip3.components().to_vec());
+        let write = db.begin_write().unwrap();
+        write
+            .open_table(WALLET_CHANGE_ADDRESS)
+            .unwrap()
+            .insert((), first)
+            .unwrap();
+        write.commit().unwrap();
+
+        let mut storage = leading_zero_legacy_storage(&dir.path().join("secret"));
+        let mut state = ergo_wallet::state::WalletState::empty(true);
+        let network = ergo_ser::address::NetworkPrefix::Mainnet;
+        crate::wallet_boot::WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut state,
+            &db,
+            network,
+            "pw",
+        )
+        .unwrap();
+        let storage = RwLock::new(storage);
+        let address = ergo_wallet::address::pubkey_to_p2pk_address(&first, network).unwrap();
+        let request = ergo_api::wallet::admin_advanced::GetPrivateKeyRequest { address };
+        let exported = get_private_key_impl(&request, &storage, &db, &private_key_config())
+            .await
+            .unwrap();
+        assert_eq!(exported.w, first_secret);
+
+        let tracked: std::collections::BTreeMap<u64, ([u8; 33], Vec<u32>)> = [
+            (0, (root, vec![])),
+            (1, (first, eip3.components().to_vec())),
+        ]
+        .into();
+        let registry = ergo_wallet::proving::secrets::SecretRegistry::from_master_key(
+            &storage.read().unlocked().unwrap().master,
+            &tracked,
+        )
+        .unwrap();
+        assert_eq!(
+            hex::encode(registry.dlog_secret(&first).unwrap().to_bytes()),
+            first_secret
+        );
+
+        let state = RwLock::new(state);
+        let next = derive_next_key_impl(&storage, &state, &db, &EmptyChain, network)
+            .await
+            .unwrap();
+        let seed = {
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../test-vectors/wallet/leading-zero-master/scala_6_0_6.json"
+            )))
+            .unwrap();
+            hex::decode(fixture["seed"].as_str().unwrap()).unwrap()
+        };
+        let path: ergo_wallet::DerivationPath = next.derivation_path.parse().unwrap();
+        let expected = ergo_wallet::ExtendedSecretKeyLegacy::derive_master_key_legacy_rust(&seed)
+            .unwrap()
+            .derive_at_path(&path)
+            .unwrap()
+            .public_key()
+            .unwrap()
+            .compressed_bytes();
+        assert_eq!(
+            next.address,
+            ergo_wallet::address::pubkey_to_p2pk_address(&expected, network).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn private_key_export_refuses_a_stored_key_the_secret_does_not_control() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let eip3 = ergo_wallet::DerivationPath::eip3_first_address();
+        let (root, _) = leading_zero_vector("legacy", "m");
+        let (first, _) = leading_zero_vector("legacy", &eip3.to_string());
+        track(&db, 0, &root, vec![]);
+        track(&db, 1, &first, eip3.components().to_vec());
+        let mut storage = leading_zero_legacy_storage(&dir.path().join("secret"));
+        let network = ergo_ser::address::NetworkPrefix::Mainnet;
+        let mut state = ergo_wallet::state::WalletState::empty(true);
+        crate::wallet_boot::WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut state,
+            &db,
+            network,
+            "pw",
+        )
+        .unwrap();
+        // A row that changed after unlock: another tree's key recorded at m/1.
+        let (foreign, _) = leading_zero_vector("legacy-rust-trimmed-master", "m/0'");
+        track(&db, 7, &foreign, vec![1]);
+        let address = ergo_wallet::address::pubkey_to_p2pk_address(&foreign, network).unwrap();
+        let request = ergo_api::wallet::admin_advanced::GetPrivateKeyRequest { address };
+        let error =
+            get_private_key_impl(&request, &RwLock::new(storage), &db, &private_key_config())
+                .await
+                .unwrap_err();
+        assert!(
+            matches!(&error, WalletAdminError::Internal(detail) if detail.contains("tracked key at m/1")),
+            "{error:?}"
+        );
     }
 
     #[test]

@@ -1391,18 +1391,15 @@ async fn change_address_requires_unlocked_owned_key_and_preserves_persisted_valu
             .unwrap()
             .try_into()
             .unwrap();
+    let foreign_key = tracked_pubkey_key(999, &foreign);
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(WALLET_TRACKED_PUBKEYS).unwrap();
         let existing = table.iter().unwrap().next().unwrap().unwrap().1.value();
         // Reuse valid metadata: the foreign key cannot derive at that path.
-        table
-            .insert(tracked_pubkey_key(999, &foreign), existing)
-            .unwrap();
+        table.insert(foreign_key, existing).unwrap();
     }
     txn.commit().unwrap();
-    admin.lock().await.unwrap();
-    admin.unlock("pw".into()).await.unwrap();
     let foreign_address = ergo_wallet::address::pubkey_to_p2pk_address(
         &foreign,
         ergo_ser::address::NetworkPrefix::Mainnet,
@@ -1412,6 +1409,20 @@ async fn change_address_requires_unlocked_owned_key_and_preserves_persisted_valu
         admin.update_change_address(foreign_address).await,
         Err(WalletAdminError::ChangeAddressUntracked)
     ));
+    // The next unlock re-derives every persisted key and refuses the row.
+    admin.lock().await.unwrap();
+    assert!(matches!(
+        admin.unlock("pw".into()).await,
+        Err(WalletAdminError::Internal(detail)) if detail.contains("tracked key at m/")
+    ));
+    assert!(!admin.status().await.unwrap().is_unlocked);
+    let txn = db.begin_write().unwrap();
+    txn.open_table(WALLET_TRACKED_PUBKEYS)
+        .unwrap()
+        .remove(foreign_key)
+        .unwrap();
+    txn.commit().unwrap();
+    admin.unlock("pw".into()).await.unwrap();
     assert_eq!(read_change(), original);
     admin.update_change_address(address).await.unwrap();
 }

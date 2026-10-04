@@ -190,5 +190,8 @@ ergo-validation, ergo-state, gf2_192
 Modern master construction is `ExtendedSecretKey::derive_master_key(seed)`;
 legacy construction is `ExtendedSecretKeyLegacy::derive_master_key(seed)`.
 Master bytes stay32wide in both modes, while legacy children remain variable
-length. See `test-vectors/wallet/leading-zero-master/README.md` for independent
-Scala vectors and explicit recovery of earlier Rust master trimming.
+length. Unlock binds the master to the persisted keys
+(`SecretStorage::bind_tracked_keys`): a legacy wallet whose keys all come from
+the earlier Rust trimmed master keeps that derivation, and any other mismatch
+refuses the unlock. See `test-vectors/wallet/leading-zero-master/README.md` for
+independent Scala vectors and recovery of earlier Rust master trimming.

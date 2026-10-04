@@ -80,6 +80,15 @@ pub enum WalletError {
     #[error("change_address_untracked — call /wallet/updateChangeAddress with a tracked pubkey")]
     ChangeAddressUntracked,
 
+    /// A persisted tracked public key is not the key the unlocked secret
+    /// derives at its recorded path. The string is the rendered path. The
+    /// wallet refuses to pair that key with a secret it does not control.
+    #[error(
+        "tracked key at {0} is not derived by the unlocked secret: the wallet tables belong to \
+         another secret or mix key derivations; unlock with the secret file that created them"
+    )]
+    TrackedKeyMismatch(String),
+
     /// Proof generation failed — typically a secret key is missing for
     /// a required sigma branch (e.g., trying to prove ProveDlog(pk) when
     /// the wallet doesn't hold the secret for `pk`).

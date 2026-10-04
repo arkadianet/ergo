@@ -180,7 +180,10 @@ impl WalletBootService {
     /// 2. Update `state.use_pre_1627` to match.
     /// 3. `storage.unlock(password)` loads the master key into memory.
     /// 4. Open a redb read txn to check if `WALLET_TRACKED_PUBKEYS` has entries.
-    ///    - Non-empty: hydrate state from `WalletReader` (redb is source of truth).
+    ///    - Non-empty: bind the master to the persisted keys
+    ///      (`SecretStorage::bind_tracked_keys`, refusing keys the secret does
+    ///      not derive), then hydrate state from `WalletReader` (redb is source
+    ///      of truth).
     ///    - Empty: auto-derive master + EIP-3 first child, persist both tables in ONE write txn.
     /// 5. Validate the change address: if `WALLET_CHANGE_ADDRESS` points at an
     ///    untracked pubkey, return `ChangeAddressUntracked` and roll back the unlock.
@@ -238,6 +241,23 @@ impl WalletBootService {
                 .begin_read()
                 .map_err(|e| WalletError::SecretFile(format!("redb begin_read: {e}")))?;
             let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+            // Every persisted key must come from the unlocked secret before
+            // anything pairs it with a derived scalar.
+            let tracked: Vec<([u8; 33], Vec<u32>)> = reader
+                .tracked_pubkeys_with_paths()
+                .map_err(|e| WalletError::SecretFile(format!("wallet tracked keys: {e}")))?
+                .into_iter()
+                .map(|(_, pubkey, path)| (pubkey, path))
+                .collect();
+            if storage.bind_tracked_keys(&tracked)?
+                == ergo_wallet::storage::MasterDerivation::LegacyRustTrimmed
+            {
+                tracing::warn!(
+                    "wallet keys were derived by the earlier Rust legacy master encoding; \
+                     signing and new addresses continue that derivation, whose addresses \
+                     differ from Scala's for this secret file"
+                );
+            }
             state.hydrate_from_reader(&reader, network)?;
         } else {
             // Step 5b: Fresh wallet — auto-derive master + EIP-3 first child + persist.
@@ -734,6 +754,57 @@ mod tests {
             assert!(!state.is_unlocked());
         }
     }
+
+    #[test]
+    fn unlock_refuses_persisted_keys_the_secret_does_not_derive() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("state.redb")).unwrap();
+        let mut storage = SecretStorage::open(dir.path().join("wallet"));
+        storage.restore("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about", "", "pw", false).unwrap();
+        // Another seed's EIP-3 key (BIP32 vector 1 master) at the EIP-3 path.
+        let foreign: [u8; 33] =
+            hex::decode("0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let meta = TrackedPubkeyMeta {
+            derivation_path: ergo_wallet::DerivationPath::eip3_first_address()
+                .components()
+                .to_vec(),
+            derivation_path_label: String::new(),
+            added_at_height: 0,
+        };
+        let write = db.begin_write().unwrap();
+        write
+            .open_table(WALLET_TRACKED_PUBKEYS)
+            .unwrap()
+            .insert(
+                tracked_pubkey_key(1, &foreign),
+                bincode::serialize(&meta).unwrap(),
+            )
+            .unwrap();
+        write
+            .open_table(WALLET_CHANGE_ADDRESS)
+            .unwrap()
+            .insert((), foreign)
+            .unwrap();
+        write.commit().unwrap();
+        let mut state = WalletState::empty(false);
+        let result = WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut state,
+            &db,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            "pw",
+        );
+        assert!(
+            matches!(&result, Err(WalletError::TrackedKeyMismatch(path)) if path == "m/44'/429'/0'/0/0"),
+            "{result:?}"
+        );
+        assert_eq!(storage.lock_state(), LockState::Locked);
+        assert!(!state.is_unlocked());
+    }
+
     // ----- error paths -----
 
     #[test]

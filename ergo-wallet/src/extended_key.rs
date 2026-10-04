@@ -292,11 +292,24 @@ impl ExtendedSecretKeyLegacy {
     /// is explicit because encrypted seed metadata alone cannot distinguish
     /// old Rust legacy wallets from Scala legacy wallets.
     pub fn derive_master_key_legacy_rust(seed: &[u8]) -> Result<Self, WalletError> {
-        let mut master = Self::derive_master_key(seed)?;
-        while master.secret_bytes.len() > 1 && master.secret_bytes[0] == 0 {
-            master.secret_bytes.remove(0);
-        }
-        Ok(master)
+        let master = Self::derive_master_key(seed)?;
+        Ok(master.legacy_rust_trimmed_master().unwrap_or(master))
+    }
+
+    /// This master in the earlier Rust encoding, with leading zero bytes
+    /// dropped. `None` when nothing would be dropped: both encodings then
+    /// derive the same keys.
+    pub(crate) fn legacy_rust_trimmed_master(&self) -> Option<Self> {
+        let leading = self
+            .secret_bytes
+            .iter()
+            .take(self.secret_bytes.len().saturating_sub(1))
+            .take_while(|byte| **byte == 0)
+            .count();
+        (leading > 0).then(|| Self {
+            secret_bytes: self.secret_bytes[leading..].to_vec(),
+            chain_code: self.chain_code,
+        })
     }
 
     /// Convert to a post-1627-shape `ExtendedSecretKey` for public-key

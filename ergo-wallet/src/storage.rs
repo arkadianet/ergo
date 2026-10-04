@@ -237,6 +237,58 @@ impl UnlockedMaster {
         let wide = k256::U256::from_be_slice(&bytes);
         Ok(<k256::Scalar as Reduce<k256::U256>>::reduce(wide))
     }
+
+    /// Derive the scalar at `path` and require that it controls `pubkey`.
+    /// Persisted keys can come from another derivation, so every pairing of
+    /// a stored public key with a derived secret goes through this check.
+    pub fn derive_scalar_for_pubkey(
+        &self,
+        path: &crate::derivation::DerivationPath,
+        pubkey: &[u8; 33],
+    ) -> Result<k256::Scalar, WalletError> {
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        let scalar = self.derive_scalar_at_path(path)?;
+        let derived = (k256::ProjectivePoint::GENERATOR * scalar)
+            .to_affine()
+            .to_encoded_point(true);
+        if derived.as_bytes() != pubkey.as_slice() {
+            return Err(WalletError::TrackedKeyMismatch(path.to_string()));
+        }
+        Ok(scalar)
+    }
+
+    /// The earlier Rust legacy encoding of this master, when it derives
+    /// different keys (a legacy master beginning with a zero byte).
+    fn legacy_rust_trimmed(&self) -> Option<Self> {
+        match self {
+            Self::Modern(_) => None,
+            Self::Legacy(master) => master.legacy_rust_trimmed_master().map(Self::Legacy),
+        }
+    }
+
+    /// Path of the first `(pubkey, path)` entry this master does not derive.
+    fn first_mismatch(
+        &self,
+        tracked: &[([u8; 33], Vec<u32>)],
+    ) -> Result<Option<crate::derivation::DerivationPath>, WalletError> {
+        for (pubkey, components) in tracked {
+            let path = crate::derivation::DerivationPath::from_components(components.clone());
+            if self.derive_pubkey_at_path(&path)? != *pubkey {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Master encoding that derives a wallet's persisted keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MasterDerivation {
+    /// The secret file's mode with the complete master, as Scala derives.
+    Standard,
+    /// Pre-1627 derivation from a master whose leading zero bytes the earlier
+    /// Rust node dropped. Its addresses differ from Scala's for the same file.
+    LegacyRustTrimmed,
 }
 
 /// In-memory unlocked secret state. Held only while `LockState ==
@@ -504,6 +556,31 @@ impl SecretStorage {
             use_pre_1627,
         });
         Ok(())
+    }
+
+    /// Bind the unlocked master to the wallet's persisted `(pubkey, path)`
+    /// keys before anything derives from it. The complete-master derivation is
+    /// used when it reproduces every key. A legacy wallet whose keys were all
+    /// written by the earlier Rust trimmed-master derivation keeps that
+    /// derivation for this unlock, so signing, key export and new addresses
+    /// stay on the tree that holds its funds. The persisted keys determine the
+    /// choice at every unlock. Any other mismatch is
+    /// [`WalletError::TrackedKeyMismatch`].
+    pub fn bind_tracked_keys(
+        &mut self,
+        tracked: &[([u8; 33], Vec<u32>)],
+    ) -> Result<MasterDerivation, WalletError> {
+        let unlocked = self.unlocked.as_mut().ok_or(WalletError::WalletLocked)?;
+        let Some(mismatch) = unlocked.master.first_mismatch(tracked)? else {
+            return Ok(MasterDerivation::Standard);
+        };
+        if let Some(trimmed) = unlocked.master.legacy_rust_trimmed() {
+            if trimmed.first_mismatch(tracked)?.is_none() {
+                unlocked.master = trimmed;
+                return Ok(MasterDerivation::LegacyRustTrimmed);
+            }
+        }
+        Err(WalletError::TrackedKeyMismatch(mismatch.to_string()))
     }
 
     /// Drop the in-memory master key. Idempotent; calling lock() on

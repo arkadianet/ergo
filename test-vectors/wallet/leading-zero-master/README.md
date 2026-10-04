@@ -26,10 +26,16 @@ the key type preserves it throughout descendant derivation.
 
 A legacy wallet created by the previous Rust implementation can have
 addresses based on its incorrectly trimmed master when that master begins
-with zero. Encrypted seed metadata alone cannot identify its producer.
-`ExtendedSecretKeyLegacy::derive_master_key_legacy_rust(seed)` remains an
-explicit library recovery path for those existing addresses. Derive and
-compare the recorded public addresses before choosing a recovery mode;
-there is no automatic persisted-address rewrite or producer inference.
-Normal Scala legacy imports and new legacy restores use the corrected
-32byte master. The recovery constructor is not a node configuration switch.
+with zero. Encrypted seed metadata alone cannot identify its producer, so the
+node decides from the wallet's persisted keys. At every unlock of an existing
+wallet, `SecretStorage::bind_tracked_keys` re-derives each tracked key at its
+recorded path. When the corrected master reproduces all of them, it is used.
+When only `ExtendedSecretKeyLegacy::derive_master_key_legacy_rust(seed)`
+reproduces all of them, the node keeps that derivation for the session and
+logs a warning: signing, `/wallet/getPrivateKey` and new addresses then stay on
+the tree that holds the wallet's funds. The persisted keys make the same choice
+on every later unlock. Any other mismatch refuses the unlock. Separately,
+signing and key export never pair a stored public key with a secret that does
+not control it. Addresses are never rewritten. Normal Scala legacy imports and
+new legacy restores use the corrected 32byte master; the same secret file in a
+Scala node shows the corrected addresses, not the earlier Rust ones.
