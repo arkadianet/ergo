@@ -666,32 +666,6 @@ components:
           items:
             $ref: '#/components/schemas/WalletTransactionEntry'
 
-    WalletTransactionEntry:
-      type: object
-      description: Lean wallet summary; does not contain full transaction inputs and outputs.
-      required: [txId, blockHeight, blockId, walletOutputs, walletInputs]
-      properties:
-        txId:
-          $ref: '#/components/schemas/TransactionId'
-        blockHeight:
-          type: integer
-          minimum: 0
-        blockId:
-          $ref: '#/components/schemas/ModifierId'
-        walletOutputs:
-          type: array
-          items:
-            $ref: '#/components/schemas/ModifierId'
-        walletInputs:
-          type: array
-          items:
-            $ref: '#/components/schemas/ModifierId'
-        scanIds:
-          type: array
-          items:
-            type: integer
-            minimum: 0
-
     WalletTransaction:
       type: object
       description: Transaction augmented with some useful information

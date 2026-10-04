@@ -2408,3 +2408,29 @@ async fn get_blocks_proof_for_tx_404s_when_compat_disabled() {
     let (s, _) = json_get(app, &path).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn served_openapi_yaml_has_no_duplicate_keys() {
+    let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
+    let app = router(
+        read,
+        None,
+        None,
+        None,
+        ergo_ser::address::NetworkPrefix::Mainnet,
+    );
+    for path in [
+        "/api-docs/openapi.yaml",
+        "/api-docs/openapi-scala.yaml",
+        "/api-docs/openapi-rust.yaml",
+        "/api-docs/openapi-native.yaml",
+        "/api-docs/openapi-v1.yaml",
+    ] {
+        let yaml = text_get(app.clone(), path).await;
+        // A YAML mapping value rejects duplicate keys, like Swagger UI's
+        // parser; last-wins parsers silently hide a shadowed definition.
+        if let Err(error) = serde_norway::from_str::<serde_norway::Value>(&yaml) {
+            panic!("{path} is not valid strict YAML: {error}");
+        }
+    }
+}
