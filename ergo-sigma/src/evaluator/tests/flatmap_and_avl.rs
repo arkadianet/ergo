@@ -245,22 +245,37 @@ fn flatmap_copies_typed_results_without_boxing_their_elements() {
     let n = 256;
     let proved = SigmaBoolean::TrivialProp(true);
     let cases = [
-        ("Coll[Byte]", const_bytes(vec![7; n]), Value::CollBytes(vec![7; 2 * n])),
+        (
+            "Coll[Byte]",
+            const_bytes(vec![7; n]),
+            Value::CollBytes(vec![7; 2 * n]),
+        ),
         (
             "Coll[Short]",
             coll(SigmaType::SShort, vec![SigmaValue::Short(9); n]),
             Value::CollShort(vec![9; 2 * n]),
         ),
-        ("Coll[Int]", const_coll_int(vec![5; n]), Value::CollInt(vec![5; 2 * n])),
+        (
+            "Coll[Int]",
+            const_coll_int(vec![5; n]),
+            Value::CollInt(vec![5; 2 * n]),
+        ),
         (
             "Coll[Long]",
             coll(SigmaType::SLong, vec![SigmaValue::Long(3); n]),
             Value::CollLong(vec![3; 2 * n]),
         ),
-        ("Coll[Boolean]", const_coll_bool(vec![true; n]), Value::CollBool(vec![true; 2 * n])),
+        (
+            "Coll[Boolean]",
+            const_coll_bool(vec![true; n]),
+            Value::CollBool(vec![true; 2 * n]),
+        ),
         (
             "Coll[SigmaProp]",
-            coll(SigmaType::SSigmaProp, vec![SigmaValue::SigmaProp(proved.clone()); n]),
+            coll(
+                SigmaType::SSigmaProp,
+                vec![SigmaValue::SigmaProp(proved.clone()); n],
+            ),
             Value::CollSigmaProp(vec![proved; 2 * n]),
         ),
         (
@@ -278,7 +293,10 @@ fn flatmap_copies_typed_results_without_boxing_their_elements() {
         let expr = flat_map_of(const_coll_int(vec![1, 2]), SigmaType::SInt, body);
         let (value, unpacked) = unpacked_while(|| run_eval_ctx(&expr, &ctx));
         assert!(value == expected, "{name}: flattened to {value:?}");
-        assert_eq!(unpacked, 2, "{name}: only the two receiver elements are boxed");
+        assert_eq!(
+            unpacked, 2,
+            "{name}: only the two receiver elements are boxed"
+        );
     }
 }
 
@@ -301,13 +319,15 @@ fn flatmap_output_cost_is_charged_before_the_output_is_built() {
         "building a box output unpacks every lazy result"
     );
     // The flatMap charge comes last, so one unit less fails on that charge.
-    let ((rejected, _), unpacked) =
-        unpacked_while(|| eval_flat_map(&expr, &ctx, Some(total - 1)));
+    let ((rejected, _), unpacked) = unpacked_while(|| eval_flat_map(&expr, &ctx, Some(total - 1)));
     assert!(
         matches!(rejected, Err(EvalError::CostExceeded(_))),
         "{rejected:?}"
     );
-    assert_eq!(unpacked, 64, "an over-limit flatMap must not build its output");
+    assert_eq!(
+        unpacked, 64,
+        "an over-limit flatMap must not build its output"
+    );
 }
 
 #[test]
@@ -401,7 +421,10 @@ fn flatmap_mixed_carrier_fixture_results_are_flat() {
             "flatmap-mixed-width-token-first",
             pairs(vec![wide.clone(), narrow.clone()]),
         ),
-        ("flatmap-mixed-width-generic-first", pairs(vec![narrow, wide])),
+        (
+            "flatmap-mixed-width-generic-first",
+            pairs(vec![narrow, wide]),
+        ),
         (
             "flatmap-mixed-box-generic-first",
             Value::CollBox(vec![Value::SelfBox, Value::SelfBox]),
@@ -599,4 +622,3 @@ fn avltree_update_digest_operations_fixed_cost_invariant() {
         "updateOperations FixedCost(45) - updateDigest FixedCost(40) = 5",
     );
 }
-
