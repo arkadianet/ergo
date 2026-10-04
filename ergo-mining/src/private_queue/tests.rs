@@ -338,3 +338,45 @@ fn mined_and_conflicted_inputs_remain_reserved_before_history_catchup() {
     restarted.cancel(&item.tx_id).unwrap();
     assert!(restarted.reserved_inputs().is_empty());
 }
+
+#[test]
+fn opening_sweeps_temporaries_left_by_an_interrupted_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.json");
+    // Names from every temporary scheme: pid, pid plus counter, random.
+    let stale = [
+        "queue.4242.tmp",
+        "queue.1.0.tmp",
+        "queue.00ff00ff00ff00ff.tmp",
+    ];
+    for name in stale {
+        std::fs::write(dir.path().join(name), b"signed bytes").unwrap();
+    }
+    let unrelated = ["other.tmp", "queue.json.bak", "queue.tmp"];
+    for name in unrelated {
+        std::fs::write(dir.path().join(name), b"keep").unwrap();
+    }
+    PrivateTransactionQueue::open(&path).unwrap();
+    for name in stale {
+        assert!(!dir.path().join(name).exists(), "{name} was not swept");
+    }
+    for name in unrelated {
+        assert!(dir.path().join(name).exists(), "{name} must be kept");
+    }
+}
+
+#[test]
+fn leftover_temporaries_named_from_the_process_id_do_not_block_commits() {
+    // A container restarts the node under the same process id, so names built
+    // from the pid and a per-start counter repeat the previous run's leftovers.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.json");
+    let queue = PrivateTransactionQueue::open(&path).unwrap();
+    let pid = std::process::id();
+    for sequence in 0..2048 {
+        std::fs::write(dir.path().join(format!("queue.{pid}.{sequence}.tmp")), b"").unwrap();
+    }
+    queue
+        .admit(&entry(1), PrivateTransactionOptions::default(), 10, 100)
+        .expect("a random temporary name avoids the leftovers");
+}

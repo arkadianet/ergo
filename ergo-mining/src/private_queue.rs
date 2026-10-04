@@ -115,6 +115,7 @@ impl PrivateTransactionQueue {
     /// Open the node-owned private file; malformed state fails startup closed.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref().to_path_buf();
+        sweep_temporaries(&path);
         let store = match std::fs::read(&path) {
             Ok(bytes) => {
                 if bytes.len() > MAX_PRIVATE_BYTES * 3 {
@@ -478,12 +479,6 @@ impl PrivateTransactionQueue {
             .parent()
             .ok_or("private queue path needs a directory")?;
         std::fs::create_dir_all(parent).map_err(|e| format!("private queue directory: {e}"))?;
-        static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-        let tmp = path.with_extension(format!(
-            "{}.{}.tmp",
-            std::process::id(),
-            WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -493,10 +488,19 @@ impl PrivateTransactionQueue {
         }
         let bytes = serde_json::to_vec(store).map_err(|_| "private queue serialization failed")?;
         // Create exclusively so stale files or symlinks cannot redirect a
-        // write containing private transaction bytes.
-        let mut file = options
-            .open(&tmp)
-            .map_err(|e| format!("private queue temporary file: {e}"))?;
+        // write containing private transaction bytes. A random name never
+        // repeats across restarts; retry the rare collision with a fresh one.
+        let mut attempt = 0;
+        let (tmp, mut file) = loop {
+            let tmp = temporary_path(path);
+            match options.open(&tmp) {
+                Ok(file) => break (tmp, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 3 => {
+                    attempt += 1;
+                }
+                Err(e) => return Err(format!("private queue temporary file: {e}")),
+            }
+        };
         let result = (|| {
             file.write_all(&bytes)?;
             file.sync_all()?;
@@ -509,6 +513,47 @@ impl PrivateTransactionQueue {
             let _ = std::fs::remove_file(&tmp);
         }
         result.map_err(|e: std::io::Error| format!("private queue commit failed: {e}"))
+    }
+}
+
+/// A temporary name that cannot repeat across restarts, even when a container
+/// gives the node the same process id every time. `RandomState` keys come from
+/// the operating system's random source.
+fn temporary_path(path: &Path) -> PathBuf {
+    use std::hash::{BuildHasher, Hasher};
+    static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    path.with_extension(format!("{:016x}.tmp", hasher.finish()))
+}
+
+/// Remove temporaries left by an interrupted write; they can hold signed
+/// bytes. Best effort: a leftover never blocks a later write, whose name is
+/// random. Matches only `<queue stem>.<anything>.tmp` in the queue directory.
+fn sweep_temporaries(path: &Path) {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return;
+    };
+    let prefix = format!("{stem}.");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let stale = name.len() > prefix.len() + ".tmp".len()
+            && name.starts_with(&prefix)
+            && name.ends_with(".tmp");
+        // `file_type` does not follow links, so a link is removed, never its target.
+        if stale && entry.file_type().is_ok_and(|kind| !kind.is_dir()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 

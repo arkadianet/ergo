@@ -50,7 +50,9 @@ they do not make a previously signed transaction invalid elsewhere.
 
 The queue survives restart in `private-mining-queue.json` under the node data
 directory. New files use owner-only permissions on Unix. Atomic durable writes
-happen before admission or input release is acknowledged. A failed write retains
+happen before admission or input release is acknowledged. Each write goes
+through a randomly named temporary file; temporaries left by an interrupted
+write are removed when the node next opens the queue. A failed write retains
 reservations, and elapsed work is filtered out of new builds. Protect and back up
 this file alongside the node's wallet data because it contains signed bytes.
 The queue is bounded to 1,024 retained records and 16 MiB of transaction bytes.
