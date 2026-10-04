@@ -29,8 +29,14 @@ as the wallet. On Unix new backup/restore roots are 0700 and files are 0600.
 Backup and restore refuse every existing destination, including empty
 directories, and require a destination outside the source directory. They build
 and verify a temporary copy before publishing the entire directory with one
-rename. An interruption can leave an empty destination reservation that must be
-removed before retrying; it cannot leave a bootable partial restore. Restore checks the source,
+rename. Staging names are derived from the destination: `.NAME.ergo-backup-staging`
+or `.NAME.ergo-restore-staging` in its parent directory. SIGINT (Ctrl-C) and
+SIGTERM request cancellation; the command closes its files and removes staging
+before exiting. A crash, SIGKILL, or power loss can leave a staging copy containing
+wallet secrets, or an empty destination reservation. The next run refuses a stale
+staging path and reports its location. Confirm no copy is running, remove the
+stale copy and any empty reservation, then retry. A partial restore is never
+published as a bootable destination. Restore checks the source,
 copied checksums, and copied committed metadata/root before publication. Source
 databases and existing destinations are never repaired or replaced.
 

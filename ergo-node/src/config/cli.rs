@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 /// Offline operator commands. These never start the node or load its config.
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum Command {
     /// Copy and upgrade a stopped legacy redb database; never replace either path.
     MigrateRedb {

@@ -65,7 +65,7 @@ async fn run() {
     // file appender is wired, and rejected configs error out instead.
     let cli = Cli::parse();
     if let Some(command) = &cli.command {
-        match ergo_node::maintenance::run(command) {
+        match ergo_node::maintenance::run_interruptible(command).await {
             Ok(report) => println!("{report}"),
             Err(error) => {
                 eprintln!("operator command failed: {error}");

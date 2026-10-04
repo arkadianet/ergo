@@ -5,7 +5,95 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+thread_local! {
+    static CANCELLED: std::cell::RefCell<Option<Arc<AtomicBool>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn check_interrupted() -> Result<()> {
+    if CANCELLED.with(|flag| {
+        flag.borrow()
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+    }) {
+        return Err(fail(
+            "operator command interrupted; staging copy cleaned up",
+        ));
+    }
+    Ok(())
+}
+
+/// Keep signal handling alive until the blocking copy has closed its files and
+/// dropped its staging guard. Cancellation is checked between copy/hash chunks.
+pub async fn run_interruptible(command: &crate::config::Command) -> Result<String> {
+    #[cfg(unix)]
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let worker_flag = cancellation.clone();
+    let command = command.clone();
+    let mut worker = tokio::task::spawn_blocking(move || {
+        CANCELLED.with(|flag| *flag.borrow_mut() = Some(worker_flag));
+        let result = run(&command);
+        CANCELLED.with(|flag| *flag.borrow_mut() = None);
+        result
+    });
+    let signal = async {
+        #[cfg(unix)]
+        tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
+        #[cfg(not(unix))]
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    tokio::select! {
+        result = &mut worker => result?,
+        _ = signal => {
+            cancellation.store(true, Ordering::Relaxed);
+            worker.await?
+        }
+    }
+}
+
+struct Staging(PathBuf);
+
+impl Staging {
+    fn create(parent: &Path, destination: &Path, operation: &str) -> Result<Self> {
+        let name = destination
+            .file_name()
+            .ok_or_else(|| fail("destination needs a directory name"))?;
+        let mut staging_name = std::ffi::OsString::from(".");
+        staging_name.push(name);
+        staging_name.push(format!(".ergo-{operation}-staging"));
+        let path = parent.join(staging_name);
+        if fs::symlink_metadata(&path).is_ok() {
+            return Err(fail(format!("staging path already exists: {}; after confirming no copy is running, remove this stale staging copy before retrying (it may contain wallet secrets)", path.display())));
+        }
+        private_dir(&path)?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        if self.0.exists() {
+            if let Err(error) = fs::remove_dir_all(&self.0) {
+                eprintln!(
+                    "could not remove staging copy {}: {error}",
+                    self.0.display()
+                );
+            }
+        }
+    }
+}
 
 use ergo_state::maintenance::{inspect_tip, visit_utxos, MaintenanceTip, UtxoStats};
 use redb::{
@@ -91,7 +179,9 @@ fn safe_relative(name: &str) -> Result<PathBuf> {
     let path: PathBuf = name.split('/').collect();
     if name.is_empty()
         || name.contains(['\\', ':'])
-        || name.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || name
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
         || path
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
@@ -207,6 +297,7 @@ fn digest_file(path: &Path) -> Result<(u64, String)> {
     let mut buffer = vec![0; 1024 * 1024];
     let mut bytes = 0u64;
     loop {
+        check_interrupted()?;
         let n = file.read(&mut buffer)?;
         if n == 0 {
             break;
@@ -275,7 +366,17 @@ fn copy_checked(source: &Path, destination: &Path) -> Result<BackupFile> {
     let before = fs::metadata(source)?;
     let mut input = File::open(source)?;
     let mut output = private_file(destination)?;
-    let copied = std::io::copy(&mut input, &mut output)?;
+    let mut buffer = vec![0; 1024 * 1024];
+    let mut copied = 0u64;
+    loop {
+        check_interrupted()?;
+        let n = input.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        output.write_all(&buffer[..n])?;
+        copied += n as u64;
+    }
     output.sync_all()?;
     let (bytes, hash) = digest_file(destination)?;
     if copied != bytes || before.len() != bytes || digest_file(source)? != (bytes, hash.clone()) {
@@ -310,6 +411,7 @@ fn destination_parent(source: &Path, destination: &Path) -> Result<PathBuf> {
 // the entire verified tree with one same-filesystem rename, never file-by-file.
 // Interruption can leave an empty reservation, never bootable partial data.
 fn publish(staging: &Path, destination: &Path) -> Result<()> {
+    check_interrupted()?;
     private_dir(destination)?;
     // Unix rename replaces the empty reservation. Windows refuses any existing
     // destination; release our reservation there before the same atomic rename.
@@ -334,16 +436,18 @@ pub fn backup(data_dir: &Path, destination: &Path) -> Result<BackupManifest> {
     }
     let databases = lock_databases(data_dir, &files)?;
     let report = inspect(&databases)?;
-    let staging = tempfile::Builder::new()
-        .prefix(".ergo-backup-")
-        .tempdir_in(parent)?;
-    secure_directory(staging.path())?;
+    let staging = Staging::create(&parent, destination, "backup")?;
     let mut copied = Vec::new();
     for path in &files {
         let mut file = copy_checked(&data_dir.join(path), &staging.path().join(path))?;
         file.path = path
             .components()
-            .map(|component| component.as_os_str().to_str().ok_or_else(|| fail("non-UTF8 filename")))
+            .map(|component| {
+                component
+                    .as_os_str()
+                    .to_str()
+                    .ok_or_else(|| fail("non-UTF8 filename"))
+            })
             .collect::<Result<Vec<_>>>()?
             .join("/");
         safe_relative(&file.path)?;
@@ -417,10 +521,7 @@ pub fn restore(directory: &Path, destination: &Path) -> Result<BackupManifest> {
     let manifest = verify_backup(directory)?;
     let files = inventory(directory)?;
     let _locks = lock_databases(directory, &files)?;
-    let staging = tempfile::Builder::new()
-        .prefix(".ergo-restore-")
-        .tempdir_in(parent)?;
-    secure_directory(staging.path())?;
+    let staging = Staging::create(&parent, destination, "restore")?;
     for file in &manifest.files {
         let copied = copy_checked(
             &directory.join(&file.path),
@@ -589,12 +690,61 @@ mod tests {
         let data = seeded_directory();
         let parent = tempfile::tempdir().unwrap();
         let manifest = backup(data.path(), &parent.path().join("backup")).unwrap();
-        assert!(manifest.files.iter().any(|f| f.path == "wallet/encrypted-seed"));
+        assert!(manifest
+            .files
+            .iter()
+            .any(|f| f.path == "wallet/encrypted-seed"));
         assert!(manifest.files.iter().all(|f| !f.path.contains('\\')));
-        assert_eq!(safe_relative("wallet/encrypted-seed").unwrap(), Path::new("wallet").join("encrypted-seed"));
-        for path in [r"wallet\encrypted-seed", "C:/secret", "C:secret", "../secret", "/secret", "wallet//secret", "wallet/./secret"] {
+        assert_eq!(
+            safe_relative("wallet/encrypted-seed").unwrap(),
+            Path::new("wallet").join("encrypted-seed")
+        );
+        for path in [
+            r"wallet\encrypted-seed",
+            "C:/secret",
+            "C:secret",
+            "../secret",
+            "/secret",
+            "wallet//secret",
+            "wallet/./secret",
+        ] {
             assert!(safe_relative(path).is_err(), "accepted {path:?}");
         }
+    }
+
+    #[test]
+    fn staging_is_destination_scoped_and_stale_copies_are_refused() {
+        let data = seeded_directory();
+        let parent = tempfile::tempdir().unwrap();
+        for operation in ["backup", "restore"] {
+            let destination = parent.path().join(operation);
+            let stale = parent
+                .path()
+                .join(format!(".{operation}.ergo-{operation}-staging"));
+            fs::create_dir(&stale).unwrap();
+            fs::write(stale.join("secret"), b"recoverable").unwrap();
+            let error = if operation == "backup" {
+                backup(data.path(), &destination).unwrap_err()
+            } else {
+                let source = parent.path().join("source-backup");
+                backup(data.path(), &source).unwrap();
+                restore(&source, &destination).unwrap_err()
+            };
+            assert!(error.to_string().contains("staging path already exists"));
+            assert_eq!(fs::read(stale.join("secret")).unwrap(), b"recoverable");
+            assert!(!destination.exists());
+            fs::remove_dir_all(&stale).unwrap();
+        }
+        let destination = parent.path().join("cancelled");
+        CANCELLED.with(|flag| *flag.borrow_mut() = Some(Arc::new(AtomicBool::new(true))));
+        let error = backup(data.path(), &destination).unwrap_err();
+        CANCELLED.with(|flag| *flag.borrow_mut() = None);
+        assert!(error.to_string().contains("interrupted"));
+        assert!(!destination.exists());
+        assert!(!parent
+            .path()
+            .join(".cancelled.ergo-backup-staging")
+            .exists());
     }
 
     #[test]
