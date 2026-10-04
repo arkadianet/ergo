@@ -65,6 +65,18 @@ pub struct WalletStatusDto {
     pub rescan: RescanStateDto,
     /// The wallet scan was invalidated; a full rescan (fromHeight=0) is required.
     pub scan_invalidated: bool,
+    /// Present after current-UTXO discovery; historical transactions before
+    /// the anchor have not been reconstructed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryCoverageDto>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryCoverageDto {
+    pub anchor_height: u32,
+    pub anchor_header_id: String,
+    pub history_complete: bool,
 }
 
 /// Key-derivation mode for `restore` (tagged). Required — no default (the
@@ -191,6 +203,7 @@ mod tests {
             eip27_active: true,
             rescan: RescanStateDto::Idle,
             scan_invalidated: false,
+            discovery: None,
         };
         let back: WalletStatusDto =
             serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();

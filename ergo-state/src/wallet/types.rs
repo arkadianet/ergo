@@ -52,7 +52,9 @@ pub struct WalletBox {
     pub creation_tx_id: [u8; 32],
     /// Output index within the creation tx.
     pub creation_output_index: u16,
-    /// Block height the creation tx was included in.
+    /// Block height the creation tx was included in. For UTXO-discovered boxes
+    /// this is the conservative first-observation height; the additive
+    /// `WALLET_DISCOVERED_BOXES` table marks inclusion as unknown.
     pub creation_height: u32,
     /// Box value in nanoERG.
     pub value: u64,

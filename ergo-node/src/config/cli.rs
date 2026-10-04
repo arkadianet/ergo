@@ -18,6 +18,29 @@ pub enum Command {
         /// New database path in an existing directory; must not exist.
         destination: PathBuf,
     },
+    /// Verify and copy a stopped node's complete data directory.
+    Backup {
+        data_dir: PathBuf,
+        destination: PathBuf,
+    },
+    /// Verify checksums, committed metadata and UTXO root in a backup.
+    VerifyBackup { directory: PathBuf },
+    /// Restore a verified backup into a new data directory.
+    Restore {
+        directory: PathBuf,
+        destination: PathBuf,
+    },
+    /// Inspect a stopped node without repairing or changing its databases.
+    Doctor { data_dir: PathBuf },
+    /// Verify and report logical current-UTXO storage usage.
+    UtxoStats { data_dir: PathBuf },
+    /// Discover tracked wallet holdings from current UTXOs; no historical blocks required.
+    WalletScanUtxo {
+        data_dir: PathBuf,
+        /// Discard a previous checkpoint and start at the current committed tip.
+        #[arg(long)]
+        restart: bool,
+    },
 }
 
 #[derive(Parser, Debug)]

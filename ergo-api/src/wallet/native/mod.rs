@@ -440,7 +440,7 @@ pub(crate) async fn init(
     responses(
         (status = 200, description = "Wallet restored"),
         (status = 400, description = "Malformed body", body = error::NativeWalletError),
-        (status = 409, description = "Wallet exists / restore unsupported on a pruned node", body = error::NativeWalletError),
+        (status = 409, description = "Wallet already exists", body = error::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]

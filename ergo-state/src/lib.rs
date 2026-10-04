@@ -60,6 +60,8 @@ pub(crate) mod digest_utxo_view;
 /// Header + block-section tables extracted from `store::StateStore`
 /// so a second backend can embed the same redb-backed header index.
 pub(crate) mod header_store;
+/// Read-only inspection and current-UTXO discovery for operator maintenance.
+pub mod maintenance;
 pub mod persist;
 pub mod reader;
 pub mod redb_migration;

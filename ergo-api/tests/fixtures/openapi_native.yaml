@@ -785,7 +785,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/NativeWalletError'
         '409':
-          description: Wallet exists / restore unsupported on a pruned node
+          description: Wallet already exists
           content:
             application/json:
               schema:
@@ -3654,6 +3654,21 @@ components:
           format: int32
           description: Address index — the last path component.
           minimum: 0
+    DiscoveryCoverageDto:
+      type: object
+      required:
+      - anchorHeight
+      - anchorHeaderId
+      - historyComplete
+      properties:
+        anchorHeaderId:
+          type: string
+        anchorHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        historyComplete:
+          type: boolean
     ExternalSecret:
       oneOf:
       - type: object
@@ -4621,6 +4636,11 @@ components:
           minimum: 0
         creationTxId:
           type: string
+        inclusionHeightKnown:
+          type: boolean
+          description: |-
+            False after UTXO discovery: creationHeight is first observed height,
+            so confirmation filters remain conservative.
         provenance:
           $ref: '#/components/schemas/BoxProvenanceDto'
         status:
@@ -4649,6 +4669,13 @@ components:
             Current change address, or `null` when unset (never `""`). Surfaced even
             while locked — it is read from the persisted change-address state, not the
             in-memory key.
+        discovery:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/DiscoveryCoverageDto'
+            description: |-
+              Present after current-UTXO discovery; historical transactions before
+              the anchor have not been reconstructed.
         eip27Active:
           type: boolean
           description: |-

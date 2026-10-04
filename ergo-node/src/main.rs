@@ -1,5 +1,5 @@
 use clap::Parser;
-use ergo_node::config::{Cli, Command, LoggingConfig, LoggingFormat, NodeConfig};
+use ergo_node::config::{Cli, LoggingConfig, LoggingFormat, NodeConfig};
 use ergo_node::decode_stack::DECODE_THREAD_STACK_BYTES;
 use tracing::{error, info};
 use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
@@ -64,20 +64,11 @@ async fn run() {
     // subscriber by design — operators see it on next boot once the
     // file appender is wired, and rejected configs error out instead.
     let cli = Cli::parse();
-    if let Some(Command::MigrateRedb {
-        source,
-        destination,
-    }) = &cli.command
-    {
-        match ergo_state::redb_migration::migrate_database(source, destination) {
-            Ok(report) => println!(
-                "verified migration: {} -> {} ({} tables); original preserved",
-                source.display(),
-                destination.display(),
-                report.tables,
-            ),
+    if let Some(command) = &cli.command {
+        match ergo_node::maintenance::run(command) {
+            Ok(report) => println!("{report}"),
             Err(error) => {
-                eprintln!("database migration failed: {error}");
+                eprintln!("operator command failed: {error}");
                 std::process::exit(1);
             }
         }

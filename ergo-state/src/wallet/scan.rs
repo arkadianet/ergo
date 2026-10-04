@@ -26,8 +26,8 @@ use crate::wallet::apply::{
 };
 use crate::wallet::maturity::promote_matured_boxes_rescan;
 use crate::wallet::tables::{
-    box_by_tx_key, WALLET_BOXES, WALLET_BOXES_BY_TX, WALLET_BOX_BYTES, WALLET_SCAN_HEIGHT,
-    WALLET_SCAN_INVALIDATED, WALLET_TXS,
+    box_by_tx_key, WALLET_BOXES, WALLET_BOXES_BY_TX, WALLET_BOX_BYTES, WALLET_DISCOVERED_BOXES,
+    WALLET_SCAN_HEIGHT, WALLET_SCAN_INVALIDATED, WALLET_TXS, WALLET_UTXO_DISCOVERY,
 };
 use crate::wallet::types::WalletBox;
 
@@ -165,6 +165,20 @@ impl WalletScanService {
         T: FnMut() -> Result<u32, RescanReadError>,
         C: FnMut() -> bool,
     {
+        if start_height > 0
+            && crate::wallet::utxo_scan::coverage(&db.begin_read()?)
+                .map_err(|e| RescanError::Matcher {
+                    height: start_height,
+                    reason: e.to_string(),
+                })?
+                .is_some()
+        {
+            return Err(RescanError::Matcher {
+                height: start_height,
+                reason: "UTXO-discovered wallets require a full historical rebuild (fromHeight=0)"
+                    .into(),
+            });
+        }
         let mut invalidation_guard = InvalidateOnError::new(db);
         let result = Self::rescan_full_rebuild_inner(
             db,
@@ -214,6 +228,9 @@ impl WalletScanService {
         if start_height == 0 {
             // Full rebuild: clear all chain-derived tables + mark invalidated.
             let txn = crate::begin_write_qr(db)?;
+            txn.open_table(WALLET_UTXO_DISCOVERY)?.remove(())?;
+            txn.open_table(WALLET_DISCOVERED_BOXES)?
+                .retain(|_, _| false)?;
             if is_cancelled() {
                 return Err(RescanError::Cancelled {
                     height: start_height,
