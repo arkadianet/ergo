@@ -42,6 +42,7 @@ pub struct RuntimeControl {
     dependencies: RwLock<Option<DependencyReader>>,
     governor: Arc<ergo_api::v1::Governor>,
     boot: Value,
+    boot_nonce: u128,
     behind_proxy: bool,
     headers_only: bool,
 }
@@ -115,6 +116,7 @@ impl RuntimeControl {
             dependencies: RwLock::new(None),
             governor,
             boot,
+            boot_nonce: rand::random(),
             behind_proxy: config.api_local_reverse_proxy,
             headers_only: !config.verify_transactions,
         }))
@@ -150,7 +152,7 @@ impl RuntimeControl {
 
     fn view(&self, live: &LiveConfig) -> Value {
         json!({
-            "revision": live.revision, "boot": self.boot,
+            "revision": format!("{:032x}:{}", self.boot_nonce, live.revision), "boot": self.boot,
             "runtime": {"api_limits": live.limits, "readiness": live.policy},
             "reloadable": ["api_limits", "readiness"],
             "persistence": "runtime patches are process-local; update TOML to retain across restart",
@@ -164,10 +166,9 @@ impl RuntimeControl {
 
     pub fn patch(&self, patch: RuntimeConfigPatch) -> Result<Value, OperatorControlError> {
         let mut live = self.config.write().expect("runtime config poisoned");
-        if patch
-            .expected_revision
-            .is_some_and(|expected| expected != live.revision)
-        {
+        if patch.expected_revision.as_ref().is_some_and(|expected| {
+            *expected != format!("{:032x}:{}", self.boot_nonce, live.revision)
+        }) {
             return Err(OperatorControlError::Conflict(
                 "runtime configuration revision changed; read config and retry".into(),
             ));
@@ -391,6 +392,24 @@ mod tests {
     }
 
     #[test]
+    fn stale_revision_cannot_pass_after_restart() {
+        let config = config();
+        let old = RuntimeControl::new(&config).unwrap();
+        let revision = old.effective_config()["revision"].clone();
+        let restarted = RuntimeControl::new(&config).unwrap();
+        assert_ne!(restarted.effective_config()["revision"], revision);
+        assert!(matches!(
+            restarted.patch(
+                serde_json::from_value(
+                    json!({"expected_revision":revision,"api_limits":{"burst":80}})
+                )
+                .unwrap()
+            ),
+            Err(OperatorControlError::Conflict(_))
+        ));
+    }
+
+    #[test]
     fn patch_is_atomic_redacted_and_revision_checked() {
         let mut config = config();
         config.api_key_hash = Some("a".repeat(64));
@@ -403,18 +422,22 @@ mod tests {
         .unwrap();
         assert!(control.patch(bad).is_err());
         assert_eq!(control.effective_config(), before);
-        let good = serde_json::from_value(json!({"expected_revision":0,"api_limits":{"burst":80}}))
-            .unwrap();
+        let good = serde_json::from_value(
+            json!({"expected_revision":before["revision"],"api_limits":{"burst":80}}),
+        )
+        .unwrap();
         let result = control.patch(good).unwrap();
-        assert_eq!(result["revision"], 1);
+        assert_ne!(result["revision"], before["revision"]);
         assert_eq!(
             result["runtime"]["api_limits"]["burst"].as_f64(),
             Some(80.0)
         );
         assert!(control
             .patch(
-                serde_json::from_value(json!({"expected_revision":0,"api_limits":{"burst":90}}))
-                    .unwrap()
+                serde_json::from_value(
+                    json!({"expected_revision":before["revision"],"api_limits":{"burst":90}})
+                )
+                .unwrap()
             )
             .is_err());
         assert!(

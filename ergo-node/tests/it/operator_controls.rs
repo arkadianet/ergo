@@ -90,7 +90,7 @@ async fn controls_are_authenticated_atomic_and_survive_restart_where_promised() 
         .json()
         .await
         .unwrap();
-    assert_eq!(initial["revision"], 0);
+    assert!(initial["revision"].is_string());
     assert!(!initial
         .to_string()
         .contains(&ApiSecurity::hash_key(b"hello")));
@@ -129,7 +129,7 @@ async fn controls_are_authenticated_atomic_and_survive_restart_where_promised() 
     let changed: Value = client
         .patch(&config_url)
         .header("api_key", "hello")
-        .json(&json!({"expected_revision":0,"api_limits":{"burst":80}}))
+        .json(&json!({"expected_revision":initial["revision"],"api_limits":{"burst":80}}))
         .send()
         .await
         .unwrap()
@@ -138,7 +138,7 @@ async fn controls_are_authenticated_atomic_and_survive_restart_where_promised() 
         .json()
         .await
         .unwrap();
-    assert_eq!(changed["revision"], 1);
+    assert_ne!(changed["revision"], initial["revision"]);
     assert_eq!(
         changed["runtime"]["api_limits"]["burst"].as_f64(),
         Some(80.0)
@@ -147,7 +147,7 @@ async fn controls_are_authenticated_atomic_and_survive_restart_where_promised() 
         client
             .patch(&config_url)
             .header("api_key", "hello")
-            .json(&json!({"expected_revision":0,"api_limits":{"burst":90}}))
+            .json(&json!({"expected_revision":initial["revision"],"api_limits":{"burst":90}}))
             .send()
             .await
             .unwrap()
@@ -263,9 +263,20 @@ async fn controls_are_authenticated_atomic_and_survive_restart_where_promised() 
         .json()
         .await
         .unwrap();
+    assert_ne!(
+        config["revision"], initial["revision"],
+        "boot nonce must change at restart"
+    );
     assert_eq!(
-        config["revision"], 0,
-        "runtime-only patches intentionally reset at restart"
+        client
+            .patch(format!("{base}/api/v1/node/config"))
+            .header("api_key", "hello")
+            .json(&json!({"expected_revision":initial["revision"],"api_limits":{"burst":90}}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
     );
     let mut restored = false;
     for _ in 0..60 {

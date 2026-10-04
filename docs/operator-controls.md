@@ -47,19 +47,19 @@ network's best chain has been discovered.
 
 `GET /api/v1/node/config` requires operator credentials and returns an explicit
 allowlist of resolved boot settings, live `api_limits`/`readiness` settings,
-a `revision`, reloadable groups and restart-required groups. It contains no API
+an opaque boot-specific `revision`, reloadable groups and restart-required groups. It contains no API
 key hashes, wallet secrets or shadow-node credentials. Values include CLI
 overrides and defaults. Checkpoint details are represented by presence flags.
 
 `PATCH /api/v1/node/config` requires admin credentials. Members merge into live
 settings. Every member is parsed and validated before applying any change. An
 optional `expected_revision` rejects a concurrent edit with HTTP 409
-`config_conflict`. Success returns the new configuration view and revision.
+`config_conflict`, including after a restart. Success returns the new configuration view and revision.
 
 ```sh
 curl -sS -H "api_key: $ERGO_API_KEY" http://127.0.0.1:9099/api/v1/node/config
 curl -sS -X PATCH -H "api_key: $ERGO_API_KEY" -H 'Content-Type: application/json' \
-  --data '{"expected_revision":0,"api_limits":{"refill_per_sec":30,"burst":60},"readiness":{"require_indexer":true}}' \
+  --data '{"expected_revision":"<revision from GET>","api_limits":{"refill_per_sec":30,"burst":60},"readiness":{"require_indexer":true}}' \
   http://127.0.0.1:9099/api/v1/node/config
 ```
 

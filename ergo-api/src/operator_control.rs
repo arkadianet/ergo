@@ -113,7 +113,7 @@ impl ProbePolicy {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfigPatch {
-    pub expected_revision: Option<u64>,
+    pub expected_revision: Option<String>,
     pub api_limits: Option<serde_json::Value>,
     pub readiness: Option<serde_json::Value>,
 }
