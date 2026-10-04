@@ -501,6 +501,8 @@ async fn native_send_signed_known_tx_short_circuits() {
 
     let resp = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&signed_bytes),
         })
         .await
@@ -527,6 +529,8 @@ async fn native_send_signed_duplicate_is_idempotent_accept() {
 
     let resp = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&signed_bytes),
         })
         .await
@@ -549,6 +553,8 @@ async fn native_send_signed_real_rejection_is_error() {
 
     let err = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&signed_bytes),
         })
         .await
@@ -571,6 +577,8 @@ async fn native_send_signed_malformed_bytes_is_bad_request() {
     // `00` is valid hex (one 0x00 byte) but not a serialized Transaction.
     let err = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&[0x00]),
         })
         .await
@@ -609,7 +617,11 @@ async fn native_send_intent_locked_rejects() {
         allow_token_burn: false,
     };
     let err = admin
-        .send_transaction(SendTxRequest::Intent { intent })
+        .send_transaction(SendTxRequest::Intent {
+            intent,
+            delivery: Default::default(),
+            private_options: None,
+        })
         .await
         .expect_err("intent send requires unlock");
     assert!(matches!(err, WalletAdminError::Locked), "got {err:?}");
@@ -1674,6 +1686,8 @@ mod scan_invalidation {
         assert_invalidated(
             admin
                 .send_transaction(SendTxRequest::Signed {
+                    delivery: Default::default(),
+                    private_options: None,
                     signed_transaction: TxRepr::from_bytes(&minimal_signed_tx().0),
                 })
                 .await,
@@ -1775,4 +1789,59 @@ async fn supervised_wallet_shutdown_joins_blocked_rescan_before_database_reopen(
     drop(admin);
     drop(db);
     redb::Database::open(path).expect("all wallet database owners must have been joined");
+}
+
+struct CapturingPrivateSubmitter {
+    expected_bytes: Vec<u8>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl TxSubmitter for CapturingPrivateSubmitter {
+    async fn submit_transaction(
+        &self,
+        _bytes: Vec<u8>,
+    ) -> Result<String, ergo_api::types::SubmitError> {
+        panic!("mine_private delivery must never reach public submission")
+    }
+    async fn submit_private_transaction(
+        &self,
+        bytes: Vec<u8>,
+        options: ergo_api::mining::PrivateTransactionOptions,
+    ) -> Result<String, ergo_api::types::SubmitError> {
+        assert_eq!(bytes, self.expected_bytes);
+        assert_eq!(options.expires_at_ms, Some(2_000_000_000_000));
+        assert_eq!(options.expires_at_height, Some(250));
+        assert_eq!(options.priority, 5);
+        assert_eq!(options.label.as_deref(), Some("phone signed"));
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(hex::encode(minimal_signed_tx().1))
+    }
+}
+
+#[tokio::test]
+async fn native_signed_private_delivery_preserves_bytes_without_wallet_unlock_or_broadcast() {
+    use ergo_api::wallet::native::dto::{SendTxRequest, TxDelivery, TxRepr};
+    let (bytes, id) = minimal_signed_tx();
+    let submitter = Arc::new(CapturingPrivateSubmitter {
+        expected_bytes: bytes.clone(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (admin, _db, _dir) = spawn_writer(submitter.clone());
+    let request = || SendTxRequest::Signed {
+        signed_transaction: TxRepr::from_bytes(&bytes),
+        delivery: TxDelivery::MinePrivate,
+        private_options: Some(ergo_api::mining::PrivateTransactionOptions {
+            expires_at_ms: Some(2_000_000_000_000),
+            expires_at_height: Some(250),
+            priority: 5,
+            label: Some("phone signed".into()),
+        }),
+    };
+    for _ in 0..2 {
+        let result = admin.send_transaction(request()).await.unwrap();
+        assert!(result.accepted);
+        assert_eq!(result.tx_id, hex::encode(id));
+    }
+    assert_eq!(submitter.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }

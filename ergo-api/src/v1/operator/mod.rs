@@ -29,6 +29,7 @@ pub(crate) mod mining;
 pub(crate) mod mining_policy;
 pub(crate) mod network;
 pub(crate) mod node;
+pub(crate) mod private_mining;
 pub(crate) mod voting;
 
 use std::sync::Arc;
@@ -281,6 +282,14 @@ pub fn operator_router(
         .route(
             "/api/v1/mining/candidate-with-txs",
             post(mining::candidate_with_txs),
+        )
+        .route(
+            "/api/v1/mining/private-transactions",
+            get(private_mining::list).post(private_mining::submit),
+        )
+        .route(
+            "/api/v1/mining/private-transactions/:tx_id/cancel",
+            post(private_mining::cancel),
         )
         // voting operator writes/reads
         .route(

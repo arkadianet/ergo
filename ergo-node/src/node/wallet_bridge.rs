@@ -47,16 +47,56 @@ pub trait TxSubmitter: Send + Sync {
         &self,
         tx_bytes: Vec<u8>,
     ) -> Result<String, ergo_api::types::SubmitError>;
+    /// Submit to the authenticated private mining queue, never public relay.
+    async fn submit_private_transaction(
+        &self,
+        _tx_bytes: Vec<u8>,
+        _options: ergo_api::mining::PrivateTransactionOptions,
+    ) -> Result<String, ergo_api::types::SubmitError> {
+        Err(ergo_api::types::SubmitError {
+            reason: "private_mining_unavailable".into(),
+            detail: None,
+        })
+    }
+
+    async fn private_transaction_status(
+        &self,
+        _tx_id: String,
+    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
+    {
+        Err(ergo_api::types::SubmitError {
+            reason: "private_mining_unavailable".into(),
+            detail: None,
+        })
+    }
+
+    async fn cancel_private_transaction(
+        &self,
+        _tx_id: String,
+    ) -> Result<(), ergo_api::types::SubmitError> {
+        Err(ergo_api::types::SubmitError {
+            reason: "private_mining_unavailable".into(),
+            detail: None,
+        })
+    }
 }
 
 /// Production `TxSubmitter` backed by the node's `NodeSubmit` bridge.
 pub struct NodeSubmitAdapter {
     inner: Arc<dyn ergo_api::traits::NodeSubmit>,
+    mining: Option<Arc<dyn ergo_api::NodeMining>>,
 }
 
 impl NodeSubmitAdapter {
     pub fn new(inner: Arc<dyn ergo_api::traits::NodeSubmit>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            mining: None,
+        }
+    }
+    pub fn with_private_mining(mut self, mining: Option<Arc<dyn ergo_api::NodeMining>>) -> Self {
+        self.mining = mining;
+        self
     }
 }
 
@@ -71,6 +111,72 @@ impl TxSubmitter for NodeSubmitAdapter {
         self.inner
             .submit_transaction(tx_bytes, SubmitMode::Broadcast)
             .await
+    }
+    async fn submit_private_transaction(
+        &self,
+        tx_bytes: Vec<u8>,
+        options: ergo_api::mining::PrivateTransactionOptions,
+    ) -> Result<String, ergo_api::types::SubmitError> {
+        let mining = self
+            .mining
+            .as_ref()
+            .ok_or_else(private_mining_unavailable)?;
+        mining
+            .submit_private_transaction(tx_bytes, options)
+            .await
+            .map(|entry| entry.tx_id)
+            .map_err(private_mining_submit_error)
+    }
+
+    async fn private_transaction_status(
+        &self,
+        tx_id: String,
+    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
+    {
+        let mining = self
+            .mining
+            .as_ref()
+            .ok_or_else(private_mining_unavailable)?;
+        mining
+            .private_transactions()
+            .await
+            .map(|items| items.into_iter().find(|entry| entry.tx_id == tx_id))
+            .map_err(private_mining_submit_error)
+    }
+
+    async fn cancel_private_transaction(
+        &self,
+        tx_id: String,
+    ) -> Result<(), ergo_api::types::SubmitError> {
+        let mining = self
+            .mining
+            .as_ref()
+            .ok_or_else(private_mining_unavailable)?;
+        mining
+            .cancel_private_transaction(tx_id)
+            .await
+            .map(|_| ())
+            .map_err(private_mining_submit_error)
+    }
+}
+
+fn private_mining_unavailable() -> ergo_api::types::SubmitError {
+    ergo_api::types::SubmitError {
+        reason: "private_mining_unavailable".into(),
+        detail: None,
+    }
+}
+
+fn private_mining_submit_error(error: ergo_api::MiningApiError) -> ergo_api::types::SubmitError {
+    let reason = match error {
+        ergo_api::MiningApiError::Unavailable(_) => "private_mining_unavailable",
+        ergo_api::MiningApiError::Timeout(_) => "timeout",
+        ergo_api::MiningApiError::BadRequest(_) => "private_transaction_rejected",
+        _ => "private_mining_error",
+    };
+    ergo_api::types::SubmitError {
+        reason: reason.into(),
+        detail: Some(error.to_string()),
     }
 }
 
@@ -780,6 +886,10 @@ impl WalletAdmin for NodeWalletAdmin {
 /// in `/wallet/restore`, (c) block fetch during `/wallet/rescan`,
 /// and (d) signing-context + UTXO lookup for send routes.
 pub trait ChainStateAccessor: Send + Sync {
+    fn reserved_wallet_inputs(&self) -> std::collections::BTreeSet<[u8; 32]> {
+        std::collections::BTreeSet::new()
+    }
+
     /// Current `WALLET_SCAN_HEIGHT` — populates `walletHeight`.
     fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError>;
     /// Best full-block tip height. Used as the rescan upper bound.
@@ -887,6 +997,7 @@ pub(crate) fn map_chain_error(error: ChainStateError) -> WalletAdminError {
 ///   use the `ChainStoreReader` to read from committed state without
 ///   acquiring the action-loop's mutable `StateStore`.
 pub struct ChainStateAccessorImpl {
+    private_queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
     db: Arc<redb::Database>,
     /// Lock-free reader for chain state (headers, UTXO, active params).
     reader: ergo_state::reader::ChainStoreReader,
@@ -904,15 +1015,30 @@ impl ChainStateAccessorImpl {
     ) -> Self {
         let reader = ergo_state::reader::ChainStoreReader::new_from_db(db.clone());
         Self {
+            private_queue: None,
             db,
             reader,
             is_pruned,
             reemission,
         }
     }
+    pub fn with_private_queue(
+        mut self,
+        queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
+    ) -> Self {
+        self.private_queue = queue;
+        self
+    }
 }
 
 impl ChainStateAccessor for ChainStateAccessorImpl {
+    fn reserved_wallet_inputs(&self) -> std::collections::BTreeSet<[u8; 32]> {
+        self.private_queue
+            .as_ref()
+            .map(|queue| queue.reserved_inputs())
+            .unwrap_or_default()
+    }
+
     fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
         let read_txn = self.db.begin_read()?;
         let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);

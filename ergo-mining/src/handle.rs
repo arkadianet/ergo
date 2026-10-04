@@ -471,6 +471,68 @@ impl MiningHandle {
         generation
     }
 
+    /// Withdraw only the retained templates that include one of `tx_ids`, so a
+    /// solution found for unrelated work is still accepted. With
+    /// `retire_builds`, also advance the operator generation, so a build frozen
+    /// before the change can never publish one of them; callers pass it for
+    /// transactions that builds may still select. Call it after the queue no
+    /// longer offers them (a cancellation), or once selection filters them
+    /// (an elapsed deadline): a build that reads the new generation then
+    /// cannot see them either. Returns how many templates were withdrawn.
+    pub fn withdraw_private_transactions(
+        &self,
+        tx_ids: &std::collections::HashSet<Digest32>,
+        retire_builds: bool,
+    ) -> usize {
+        let offered: Vec<(u64, Arc<Template>)> = {
+            let mut cache = self.cache.write().expect("cache poisoned");
+            if retire_builds {
+                cache.operator_generation = cache
+                    .operator_generation
+                    .checked_add(1)
+                    .expect("operator generation exhausted");
+            }
+            cache
+                .templates
+                .iter()
+                .filter(|t| !t.withdrawn)
+                .map(|t| (t.template.identity.template_seq, t.template.clone()))
+                .collect()
+        };
+        // Hash outside the lock. Nothing published from here on can include
+        // the transactions: older builds fail the generation check, and newer
+        // ones no longer select them.
+        let affected: std::collections::HashSet<u64> = offered
+            .iter()
+            .filter(|(_, template)| {
+                template
+                    .private_transaction_ids()
+                    .iter()
+                    .any(|id| tx_ids.contains(id))
+            })
+            .map(|(seq, _)| *seq)
+            .collect();
+        if affected.is_empty() {
+            return 0;
+        }
+        let withdrawn =
+            {
+                let mut cache = self.cache.write().expect("cache poisoned");
+                let mut withdrawn = 0;
+                for t in cache.templates.iter_mut().filter(|t| {
+                    !t.withdrawn && affected.contains(&t.template.identity.template_seq)
+                }) {
+                    t.withdrawn = true;
+                    withdrawn += 1;
+                }
+                withdrawn
+            };
+        if withdrawn > 0 {
+            self.serve_notify.send_modify(|v| *v = v.wrapping_add(1));
+        }
+        withdrawn
+    }
+
     /// Retained snapshot selected by both work ID and publish sequence. An
     /// absent selector chooses the current offered template; historical lookups
     /// remain available while their bounded cache entry is retained.
@@ -1690,6 +1752,87 @@ mod tests {
             block.header.timestamp, 1_700_000_000_000,
             "accepted for the older template"
         );
+    }
+
+    #[test]
+    fn withdrawing_private_work_keeps_unrelated_templates_solvable() {
+        // Cancelling or expiring one private transaction must not discard
+        // proof-of-work found for a template that does not include it.
+        use ergo_crypto::autolykos::common::calc_n;
+        use ergo_crypto::autolykos::v2::hit_for_v2;
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0u8; 32];
+        let n_bits = ergo_ser::difficulty::encode_compact_bits(&num_bigint::BigUint::from(16u8));
+        let target = ergo_crypto::difficulty::get_target(n_bits);
+        h.set_best_tip(synced_tip(parent));
+        let private_tx = ergo_ser::transaction::Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        };
+        let private_id = Digest32::from_bytes(
+            *ergo_ser::transaction::transaction_id(&private_tx)
+                .unwrap()
+                .as_bytes(),
+        );
+        let (with_msg, without_msg) = ([0x71u8; 32], [0x72u8; 32]);
+        let (mut with, w1) = candidate_pair_msg_nbits(parent, with_msg, n_bits);
+        with.transactions = vec![private_tx];
+        with.observation.transactions = vec![crate::inspection::TransactionObservation {
+            category: "private",
+            ..Default::default()
+        }];
+        h.publish_if_current(with, w1, &parent, || BUILT_AT_MS, BuildReason::Tip)
+            .expect("the template with the private transaction publishes");
+        let (mut without, w2) = candidate_pair_msg_nbits(parent, without_msg, n_bits);
+        without.header.timestamp += 1;
+        h.publish_if_current(without, w2, &parent, || BUILT_AT_MS, BuildReason::Tip)
+            .expect("the unrelated template publishes");
+        let generation = h.operator_generation();
+
+        let ids = std::collections::HashSet::from([private_id]);
+        assert_eq!(h.withdraw_private_transactions(&ids, true), 1);
+        assert_eq!(
+            h.operator_generation(),
+            generation + 1,
+            "builds frozen before the change cannot publish it"
+        );
+        assert_eq!(
+            h.cached_template_if_synced().expect("still serving").0.msg,
+            without_msg
+        );
+        let n = calc_n(3, 1);
+        let solves = |msg: &[u8; 32], nonce: &[u8; 8]| hit_for_v2(msg, nonce, 1, n) <= target;
+        let only = |msg: [u8; 32], other: [u8; 32]| {
+            (0u64..)
+                .map(u64::to_be_bytes)
+                .find(|nonce| solves(&msg, nonce) && !solves(&other, nonce))
+                .expect("some nonce qualifies")
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+        let verify = |nonce| {
+            h.verify_solution(&MinerSolution { nonce, pk: None }, &state)
+                .expect("verify ok")
+        };
+        assert!(
+            matches!(
+                verify(only(without_msg, with_msg)),
+                SolutionOutcome::Accepted(_)
+            ),
+            "work without the withdrawn transaction is accepted"
+        );
+        assert!(
+            matches!(
+                verify(only(with_msg, without_msg)),
+                SolutionOutcome::StaleParent { .. }
+            ),
+            "work with it is stale"
+        );
+
+        // Work that is not selectable (e.g. conflicted) retires no build.
+        assert_eq!(h.withdraw_private_transactions(&ids, false), 0);
+        assert_eq!(h.operator_generation(), generation + 1);
     }
 
     // ----- round-trips -----

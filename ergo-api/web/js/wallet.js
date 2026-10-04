@@ -17,6 +17,7 @@ import { erg, num, truncMiddle } from './format.js';
 import { copyBtn } from './table.js';
 import { fetchTokenMeta, tokenName, getTokenMeta } from './token-meta.js';
 import { createWalletBuilder } from './wallet-builder.js';
+import { createPrivateMiningQueue } from './wallet-private.js';
 import { decimal } from './wallet-transaction.js';
 
 let root = null;
@@ -36,6 +37,7 @@ let unlockRendered = false;
 // token picker can offer "what you actually have" instead of a blank hex
 // field. Refreshed every refreshBalances() poll tick.
 let myAssets = [];
+let privateQueue = null;
 let builder = null, walletBalance = null, walletStatus = null;
 let activeTab = 'assets', assetPage = 0, activityPage = 0, generation = 0, refreshing = false;
 let assetsRendered = false;
@@ -133,12 +135,16 @@ export function mount(el_) {
         <div class="panel__head"><h2 class="panel__title">Wallet activity</h2><span class="muted">Confirmed on chain</span></div>
         <div class="panel__body" data-activity-body></div>
       </section>
+      <section class="panel wallet-view" data-wallet-view="private" id="wallet-private" role="tabpanel" aria-labelledby="wallet-tab-private" hidden>
+        <div class="panel__head"><h2 class="panel__title">Private mining transactions</h2></div>
+        <div class="panel__body" data-private-body></div>
+      </section>
       <section class="panel wallet-view" data-keys-panel data-wallet-view="manage" id="wallet-manage" role="tabpanel" aria-labelledby="wallet-tab-manage" hidden>
         <div class="panel__head"><h2 class="panel__title">Wallet management</h2></div>
         <div class="panel__body" data-keys-body></div>
       </section>
     </div>`;
-  for (const [id, title] of [['assets', 'Assets'], ['build', 'Build transaction'], ['receive', 'Receive'], ['activity', 'Activity'], ['manage', 'Manage']]) {
+  for (const [id, title] of [['assets', 'Assets'], ['build', 'Build transaction'], ['receive', 'Receive'], ['activity', 'Activity'], ['private', 'Private mining'], ['manage', 'Manage']]) {
     const tab = el('button', { type: 'button', role: 'tab', id: 'wallet-tab-' + id,
       'aria-controls': 'wallet-' + id, 'aria-selected': id === activeTab ? 'true' : 'false',
       tabindex: id === activeTab ? '0' : '-1', text: title, onclick: () => selectTab(id) });
@@ -227,6 +233,7 @@ function renderAuthGate(s) {
 function scrubSecrets() {
   if (!root) return;
   generation++;
+  privateQueue?.dispose(); privateQueue = null;
   builder?.dispose(); builder = null;
   walletBalance = walletStatus = null; assetsRendered = false;
   q('[data-wallet-amount]').textContent = '—';
@@ -371,6 +378,7 @@ function selectTab(id, focus = false) {
   }
   for (const panel of root.querySelectorAll('[data-wallet-view]')) panel.hidden = panel.dataset.walletView !== id;
   if (id === 'activity' && walletStatus?.isUnlocked) refreshActivity();
+  if (id === 'private') showPrivateQueue();
 }
 
 async function refreshBalances(epoch = generation) {
@@ -817,6 +825,13 @@ function populateChangeSelect(list) {
   if (list.includes(prev)) sel.value = prev;
 }
 
+function showPrivateQueue() {
+  if (privateQueue) return;
+  const key = getApiKey(), epoch = generation;
+  privateQueue = createPrivateMiningQueue(q('[data-private-body]'), { api: api.wallet,
+    active: () => epoch === generation && key === getApiKey() && !q('[data-wallet-app]').hidden });
+}
+
 // ── refresh ──────────────────────────────────────────────────────────────────
 async function refresh() {
   if (!root || q('[data-wallet-app]').hidden || refreshing) return;
@@ -832,6 +847,7 @@ async function refresh() {
     }
     walletStatus = res.data;
     renderScanBanner(walletStatus);
+    if (activeTab === 'private') showPrivateQueue();
     if (!walletStatus.isInitialized) { setOnboarding(true); showOnboard(); return; }
     setOnboarding(false); renderStatusPanel(walletStatus);
     if (walletStatus.isUnlocked) {

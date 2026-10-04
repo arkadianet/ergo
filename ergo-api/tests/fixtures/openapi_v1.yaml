@@ -2682,6 +2682,56 @@ paths:
                 $ref: '#/components/schemas/V1Error'
       security:
       - ApiKeyAuth: []
+  /api/v1/mining/private-transactions:
+    get:
+      tags:
+      - mining
+      operationId: v1_mining_private_transactions_get
+      responses:
+        '200':
+          description: Owner-only private queue
+      security:
+      - ApiKeyAuth: []
+    post:
+      tags:
+      - mining
+      operationId: v1_mining_private_transactions_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrivateTransactionRequest'
+        required: true
+      responses:
+        '200':
+          description: Durably queued without relay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivateTransactionEntry'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/mining/private-transactions/{tx_id}/cancel:
+    post:
+      tags:
+      - mining
+      operationId: v1_mining_private_transaction_cancel_post
+      parameters:
+      - name: tx_id
+        in: path
+        description: Private transaction id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Transaction withdrawn and inputs released
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivateTransactionEntry'
+      security:
+      - ApiKeyAuth: []
   /api/v1/mining/reward-address:
     get:
       tags:
@@ -9646,6 +9696,109 @@ components:
         acknowledge:
           type: boolean
         address:
+          type: string
+      additionalProperties: false
+    PrivateTransactionEntry:
+      type: object
+      description: Owner-only queue metadata; signed bytes never appear in public snapshots.
+      required:
+      - tx_id
+      - state
+      - created_at_ms
+      - priority
+      - input_ids
+      - fee_nano_erg
+      - size_bytes
+      - validation_cost
+      properties:
+        created_at_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        expires_at_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        expires_at_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        fee_nano_erg:
+          type: string
+        input_ids:
+          type: array
+          items:
+            type: string
+        label:
+          type:
+          - string
+          - 'null'
+        mined_block_id:
+          type:
+          - string
+          - 'null'
+        mined_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        priority:
+          type: integer
+          format: int32
+        reason:
+          type:
+          - string
+          - 'null'
+        size_bytes:
+          type: integer
+          format: int32
+          minimum: 0
+        state:
+          type: string
+        tx_id:
+          type: string
+        validation_cost:
+          type: integer
+          format: int64
+          minimum: 0
+    PrivateTransactionOptions:
+      type: object
+      description: Queue policy. A deadline is local policy, not a transaction script expiry.
+      properties:
+        expires_at_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        expires_at_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        label:
+          type:
+          - string
+          - 'null'
+        priority:
+          type: integer
+          format: int32
+      additionalProperties: false
+    PrivateTransactionRequest:
+      type: object
+      description: Import a signed transaction for this miner without network announcement.
+      required:
+      - signed_transaction_hex
+      properties:
+        options:
+          $ref: '#/components/schemas/PrivateTransactionOptions'
+        signed_transaction_hex:
           type: string
       additionalProperties: false
     ProtocolDetail:

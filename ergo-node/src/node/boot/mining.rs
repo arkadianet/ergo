@@ -16,24 +16,53 @@ use super::super::NodeError;
 /// What [`build_subsystem`] produces. `handle` is consumed by the action
 /// loop (owns the candidate cache); `bridge` holds only the channel sender
 /// plus the pre-computed reward pubkey/address and is cloned into the API
-/// `ServerCtx`.
+/// `ServerCtx`. `private_queue` is the durable private mining queue, open
+/// whenever mining is enabled or a queue file exists.
 pub(super) struct MiningSubsystem {
     pub handle: Option<ergo_mining::handle::MiningHandle>,
     pub bridge: Option<std::sync::Arc<dyn ergo_api::NodeMining>>,
+    pub private_queue: Option<std::sync::Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
 }
 
-/// Build the mining subsystem when `[mining].enabled = true`; both fields
-/// are `None` otherwise (the action-loop arm rejects stray requests with
-/// 503 and `/mining/*` routes are not mounted).
+/// File holding the private mining queue under the data directory.
+const PRIVATE_QUEUE_FILE: &str = "private-mining-queue.json";
+
+/// Open the private mining queue when mining is enabled or when a queue file
+/// exists. A node restarted with mining disabled still reserves the queued
+/// transactions' inputs in the wallet and keeps their ids out of public
+/// admission; it neither mines nor expires them until mining is enabled
+/// again. Malformed state fails startup closed either way.
+pub(super) fn open_private_queue(
+    data_dir: &std::path::Path,
+    mining_enabled: bool,
+) -> Result<Option<std::sync::Arc<ergo_mining::private_queue::PrivateTransactionQueue>>, NodeError>
+{
+    let path = data_dir.join(PRIVATE_QUEUE_FILE);
+    if !mining_enabled && matches!(path.try_exists(), Ok(false)) {
+        return Ok(None);
+    }
+    ergo_mining::private_queue::PrivateTransactionQueue::open(&path)
+        .map(|queue| Some(std::sync::Arc::new(queue)))
+        .map_err(|e| -> NodeError { e.into() })
+}
+
+/// Build the mining subsystem when `[mining].enabled = true`; `handle` and
+/// `bridge` are `None` otherwise (the action-loop arm rejects stray requests
+/// with 503 and `/mining/*` routes are not mounted).
 pub(super) fn build_subsystem(
     config: &NodeConfig,
     voting_targets_slot: &std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
     mining_submit_tx: &tokio::sync::mpsc::Sender<crate::mining_bridge::MiningRequest>,
 ) -> Result<MiningSubsystem, NodeError> {
+    let private_queue = open_private_queue(&config.data_dir, config.mining_config.enabled)?;
     if !config.mining_config.enabled {
+        if private_queue.is_some() {
+            info!("mining disabled; queued private transactions stay reserved until mining is enabled");
+        }
         return Ok(MiningSubsystem {
             handle: None,
             bridge: None,
+            private_queue,
         });
     }
     // Reward-key source: an operator-configured pubkey if present, else
@@ -63,6 +92,7 @@ pub(super) fn build_subsystem(
         config.chain_spec.difficulty.clone(),
         config.chain_spec.voting,
     )
+    .with_private_queue(private_queue.clone().unwrap_or_default())
     .with_network(config.network)
     .with_outcome_journal(&config.data_dir.join("mining-history.json"))
     .with_policy(config.mining_config.block_policy.clone())
@@ -113,6 +143,7 @@ pub(super) fn build_subsystem(
     Ok(MiningSubsystem {
         handle: Some(handle),
         bridge: Some(bridge),
+        private_queue,
     })
 }
 
@@ -242,10 +273,50 @@ pub(super) fn spawn_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_mempool::pool::Entry;
+    use ergo_mining::private_queue::{PrivateTransactionOptions, PrivateTransactionQueue};
+    use ergo_primitives::digest::Digest32;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
     // ----- helpers -----
+
+    /// A queued one-input transaction spending box `[input; 32]`.
+    fn queued_entry(input: u8) -> Entry {
+        use ergo_primitives::reader::VlqReader;
+        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+        let tx = ergo_ser::transaction::Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes([input; 32]),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                1_000_000,
+                ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&[0, 8, 0xd3])).unwrap(),
+                100,
+                vec![],
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        let mut writer = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::transaction::write_transaction(&mut writer, &tx).unwrap();
+        let bytes = writer.result();
+        let id = ergo_ser::transaction::transaction_id(&tx).unwrap();
+        Entry::new(
+            Digest32::from_bytes(*id.as_bytes()),
+            std::sync::Arc::from(bytes.clone()),
+            vec![Digest32::from_bytes([input; 32])],
+            vec![],
+            vec![],
+            0,
+            0,
+            bytes.len() as u32,
+            100,
+            ergo_mempool::types::TxSource::Wallet,
+        )
+    }
 
     /// A mainnet node with mining enabled whose data directory is `data_dir`.
     fn mining_config(data_dir: &Path) -> NodeConfig {
@@ -311,6 +382,48 @@ mod tests {
         .unwrap_or_else(|e| panic!("mining boot refused: {e}"));
         let logged = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
         (subsystem, logged)
+    }
+
+    // ----- private queue -----
+
+    #[test]
+    fn private_queue_opens_without_mining_only_when_its_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(open_private_queue(dir.path(), false).unwrap().is_none());
+        assert!(open_private_queue(dir.path(), true).unwrap().is_some());
+
+        let queue = PrivateTransactionQueue::open(dir.path().join(PRIVATE_QUEUE_FILE)).unwrap();
+        queue
+            .admit(
+                &queued_entry(7),
+                PrivateTransactionOptions::default(),
+                10,
+                100,
+            )
+            .unwrap();
+        drop(queue);
+        // Restarting with mining disabled keeps the reservation and the
+        // public-admission guard instead of silently dropping them.
+        let reopened = open_private_queue(dir.path(), false)
+            .unwrap()
+            .expect("an existing queue opens with mining disabled");
+        assert_eq!(
+            reopened.reserved_inputs(),
+            std::collections::BTreeSet::from([[7; 32]])
+        );
+        let mut mempool = ergo_mempool::Mempool::new(
+            ergo_mempool::types::MempoolConfig::default(),
+            ergo_mempool::weight::from_config("cost").unwrap(),
+        );
+        super::super::super::private_mining::register_queued(&mut mempool, &reopened);
+        assert!(mempool.is_private_transaction(&queued_entry(7).tx_id));
+    }
+
+    #[test]
+    fn malformed_private_queue_fails_startup_with_mining_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(PRIVATE_QUEUE_FILE), b"not json").unwrap();
+        assert!(open_private_queue(dir.path(), false).is_err());
     }
 
     // ----- startup -----

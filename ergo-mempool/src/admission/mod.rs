@@ -284,6 +284,21 @@ pub(crate) fn check_capturing_held<V: Validator>(
         tracing::field::display(hex::encode(peek_fee_value.tx_id.as_bytes())),
     );
 
+    // Operator-private transactions never enter public admission, whichever
+    // path brings the bytes: peer relay, an API submit, revalidation after a
+    // rollback, or orphan promotion. Decline before the fee gate so no action
+    // or cache entry names the id.
+    if cx.pool.is_private_only(&peek_fee_value.tx_id) {
+        return (
+            CheckOutcome::Rejected {
+                reason: RejectReason::ValidationFailed {
+                    kind: ValidationErr::Other("transaction is reserved for private mining".into()),
+                },
+            },
+            actions,
+        );
+    }
+
     if peek_fee_value.fee < cx.config.min_relay_fee_nano_erg {
         // Observability: carry the real tx_id computed during peek
         // so the event stream keeps per-tx identity across the gate.
@@ -786,6 +801,12 @@ fn apply_commit(
         // winner is inserted), but map them to a clean reject as a backstop.
         Err(PoolError::OutputCollision(_)) | Err(PoolError::InputCollision(_)) => {
             return Err(RejectReason::InsertCollision)
+        }
+        // Unreachable: the check above declines private ids. Fail safe.
+        Err(PoolError::PrivateOnly(_)) => {
+            return Err(RejectReason::ValidationFailed {
+                kind: ValidationErr::Other("transaction is reserved for private mining".into()),
+            })
         }
     }
 
