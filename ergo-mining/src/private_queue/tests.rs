@@ -9,6 +9,18 @@ use ergo_ser::transaction::{write_transaction, Transaction};
 /// Rollback window used by tests that do not exercise settlement.
 const WINDOW: u32 = 200;
 
+thread_local! {
+    /// Fails the directory sync that follows a replaced queue file.
+    static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn fail_directory_sync() -> std::io::Result<()> {
+    if FAIL_DIRECTORY_SYNC.with(std::cell::Cell::get) {
+        return Err(std::io::Error::other("injected directory sync failure"));
+    }
+    Ok(())
+}
+
 fn entry(input: u8) -> Entry {
     entry_spending([input; 32])
 }
@@ -645,4 +657,35 @@ fn a_failed_write_is_a_storage_error_and_a_bad_request_is_rejected() {
         queue.cancel(&item.tx_id),
         Err(PrivateQueueError::Storage(_))
     ));
+}
+
+// ----- durability -----
+
+#[test]
+fn a_replaced_file_commits_even_when_its_directory_sync_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.json");
+    let queue = PrivateTransactionQueue::open(&path).unwrap();
+    let item = queue
+        .admit(&entry(1), PrivateTransactionOptions::default(), 10, 100)
+        .unwrap();
+    assert_eq!(queue.take_durability_warning(), None);
+
+    FAIL_DIRECTORY_SYNC.with(|fail| fail.set(true));
+    let cancelled = queue.cancel(&item.tx_id);
+    FAIL_DIRECTORY_SYNC.with(|fail| fail.set(false));
+    // The replaced file already says cancelled, so this process must agree
+    // with what a restart will read.
+    assert_eq!(cancelled.unwrap().state, PrivateTransactionState::Cancelled);
+    assert!(queue.reserved_inputs().is_empty());
+    let warning = queue
+        .take_durability_warning()
+        .expect("the sync failure is reported");
+    assert!(warning.contains("not synced"), "{warning}");
+    assert_eq!(queue.take_durability_warning(), None, "reported once");
+    let reopened = PrivateTransactionQueue::open(&path).unwrap();
+    assert_eq!(
+        reopened.entry(&item.tx_id).unwrap().state,
+        PrivateTransactionState::Cancelled
+    );
 }
