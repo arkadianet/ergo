@@ -281,6 +281,9 @@ fn schema_two_migration_failure_is_atomic_and_open_rebuilds_corruption() {
     let path = tmp.path().join("legacy.redb");
     let store = build(&path, &blocks(), true);
     let before_rows = snapshot(&store);
+    // Windows byte-range locks are mandatory, so the open database blocks raw
+    // reads there; every table's rows are still compared on all platforms.
+    #[cfg(not(windows))]
     let before_bytes = std::fs::read(&path).unwrap();
     let mut writes = 0;
     let result = migrate_observed(&store.db, &mut || {
@@ -294,6 +297,7 @@ fn schema_two_migration_failure_is_atomic_and_open_rebuilds_corruption() {
     assert!(result.is_err());
     assert_eq!(writes, 2);
     assert_eq!(snapshot(&store), before_rows);
+    #[cfg(not(windows))]
     assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
     drop(store);
     let (rebuilt, outcome) = IndexerStore::open_with_migration(&path, 1024 * 1024, |db| {
