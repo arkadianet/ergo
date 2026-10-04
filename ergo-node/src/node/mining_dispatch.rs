@@ -498,6 +498,7 @@ pub(super) fn signal_mining_engine(
         mempool: Arc::new(mempool),
         private_transactions: Arc::new(private_transactions),
         operator_generation,
+        operator_owned: true,
         miner_pk,
         reason,
     };
@@ -714,6 +715,7 @@ pub(super) fn handle_mining_request(
                 reason: BuildReason::Requested,
                 private_transactions: Arc::new(private_transactions),
                 operator_generation,
+                operator_owned: own_miner,
             };
             // The API-owned permit caps queued requests. Sending is nonblocking;
             // validation and AVL proof generation run on the existing worker.

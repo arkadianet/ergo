@@ -26,6 +26,8 @@ pub struct CandidateObservation {
     /// Operator queue/policy generation the engine froze for this build.
     pub operator_generation: u64,
     pub policy_requires_transactions: bool,
+    /// The reward key belonged to the operator when this job was built.
+    pub operator_owned: bool,
 }
 
 /// The exact validated cost and origin of one retained transaction.

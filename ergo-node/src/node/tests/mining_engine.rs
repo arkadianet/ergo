@@ -189,6 +189,7 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
     let intent = BuildIntent {
         private_transactions: std::sync::Arc::new(Vec::new()),
         operator_generation: 0,
+        operator_owned: true,
         expected_parent: [0x42u8; 32],
         expected_height: 5,
         mempool: Arc::new(MempoolReadSnapshot::empty()),
@@ -358,6 +359,7 @@ async fn visibility_retry_budget_resets_on_parent_change() {
     let intent_a = BuildIntent {
         private_transactions: std::sync::Arc::new(Vec::new()),
         operator_generation: 0,
+        operator_owned: true,
         expected_parent: [0x42u8; 32],
         expected_height: 5,
         mempool: Arc::new(MempoolReadSnapshot::empty()),
@@ -410,6 +412,7 @@ async fn visibility_retry_budget_resets_on_parent_change() {
     let intent_b = BuildIntent {
         private_transactions: std::sync::Arc::new(Vec::new()),
         operator_generation: 0,
+        operator_owned: true,
         expected_parent: [0x43u8; 32],
         expected_height: 5,
         mempool: Arc::new(MempoolReadSnapshot::empty()),

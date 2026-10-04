@@ -1307,14 +1307,8 @@ async fn lithos_requested_package_proves_and_applies_with_lender_key() {
             .unwrap();
         assert_eq!(accepted.template_seq, Some(work.template_seq));
         assert!(
-            accepted
-                .accounting
-                .as_ref()
-                .unwrap()
-                .emission_nano_erg
-                .parse::<u64>()
-                .unwrap()
-                > 0
+            accepted.accounting.is_none(),
+            "lender rewards are not operator earnings"
         );
         let next = poll_candidate_at_height(addr, CANDIDATE_HEIGHT + 1).await;
         assert_eq!(next.pk, solo.pk);

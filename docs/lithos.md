@@ -92,7 +92,8 @@ Requested and ordinary jobs have independent bounded retention. Refreshing
 ordinary mempool contents cannot evict a retained Lithos job; solo candidate
 reads use the operator's key even after a lender request. Submit `pk` from the
 work response with the nonce for an explicit-key job. Nonce-only submission
-uses the operator's key. A tip change invalidates old jobs.
+matches templates marked as operator-owned when they were built; it does not
+read the wallet again when a solution arrives. A tip change invalidates old jobs.
 
 ## Validation
 
@@ -128,7 +129,11 @@ Requests for the operator key may include private work as ordinary full builds
 do. Cancellation and expiry withdraw every retained template containing the
 private member, including requested templates, and reject older in-flight
 builds. Unrelated retained jobs survive ordinary refreshes and selective queue
-withdrawals. Policy changes and operator invalidation retire all affected jobs.
+withdrawals. Policy changes and global operator invalidation retire all retained jobs,
+including lender jobs: every build obeys the operator policy, so retaining an
+older job could allow an excluded transaction to be mined after a policy edit.
+Clients must request fresh work after these administrative changes. Selective
+private cancellation and expiry continue to preserve unrelated lender work.
 
 `candidate-details` accepts the requested work's `template_seq` and message.
 It records `build_reason: "Requested"`, categories for requested and private
@@ -136,7 +141,8 @@ members, and their frozen policy revision and operator generation. A requested
 job may show `superseded` because it is separate from the current solo template;
 that status still permits solving offered work. History includes both classes,
 with up to 16 templates per class (32 total), and journals requested outcomes
-with the reward accounting for that job's miner key.
+with their frozen miner identity. Lender jobs have no operator earnings
+accounting and never become the public current-work freshness view.
 
 Requested bytes are parsed on the serial mining worker using the committed
 tip's activated script version, as mempool admission does, and trailing bytes

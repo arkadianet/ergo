@@ -425,6 +425,7 @@ fn publish_candidate(state: &NodeState, handle: &MiningHandle) {
     let intent = BuildIntent {
         private_transactions: std::sync::Arc::new(Vec::new()),
         operator_generation: handle.operator_generation(),
+        operator_owned: true,
         expected_parent: parent,
         expected_height: height,
         mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool)),

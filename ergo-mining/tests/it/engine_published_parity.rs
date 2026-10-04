@@ -459,6 +459,7 @@ fn build_intent(parent: [u8; 32], parent_height: u32) -> BuildIntent {
     BuildIntent {
         private_transactions: Arc::new(Vec::new()),
         operator_generation: 0,
+        operator_owned: true,
         expected_parent: parent,
         expected_height: parent_height,
         mempool: Arc::new(MempoolReadSnapshot::empty()),

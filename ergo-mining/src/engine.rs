@@ -131,6 +131,8 @@ pub struct BuildIntent {
     /// Reward key resolved on the loop (`Ready` only — the loop does not
     /// signal while the wallet key is `Pending`).
     pub miner_pk: [u8; 33],
+    /// Frozen ownership; nonce-only submissions never resolve the wallet again.
+    pub operator_owned: bool,
     pub reason: BuildReason,
 }
 
@@ -556,9 +558,10 @@ fn build_and_publish_inner(
         Err(MiningError::BuildCancelled) => return Ok(BuildOutcome::DroppedStale),
         other => other?,
     };
-    let Some((candidate, work, mut timings)) = built else {
+    let Some((mut candidate, work, mut timings)) = built else {
         return Ok(BuildOutcome::Raced);
     };
+    candidate.observation.operator_owned = intent.operator_owned;
     timings.setup += engine_setup_time;
     timings.rent_resolve = rent_resolve_time;
     if should_cancel() {
@@ -732,6 +735,7 @@ mod tests {
         BuildIntent {
             private_transactions: Arc::new(Vec::new()),
             operator_generation: 0,
+            operator_owned: true,
             expected_parent: parent,
             expected_height,
             mempool: Arc::new(MempoolReadSnapshot::empty()),

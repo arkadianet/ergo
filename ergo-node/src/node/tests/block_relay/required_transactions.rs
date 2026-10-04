@@ -111,6 +111,7 @@ async fn engine_publishes(
         .send(Some(ergo_mining::engine::BuildIntent {
             private_transactions: std::sync::Arc::new(Vec::new()),
             operator_generation: handle.operator_generation(),
+            operator_owned: true,
             expected_parent: parent,
             expected_height: height,
             mempool: std::sync::Arc::new(mempool),

@@ -653,6 +653,10 @@ impl MiningHandle {
             .then(|| {
                 template
                     .as_ref()
+                    .filter(|t| {
+                        t.identity.reason != BuildReason::Requested
+                            || t.candidate.observation.operator_owned
+                    })
                     .map(|t| crate::inspection::outcome_accounting(t, self.reemission_ref()))
             })
             .flatten();
@@ -1151,17 +1155,14 @@ impl MiningHandle {
         let cache = self.cache.read().expect("cache poisoned");
         let mut newest = None;
         let mut saw_stale: Option<SolutionOutcome> = None;
-        // Nonce-only submission retains the operator's mining identity. This
-        // also supports candidateWithTxs without an explicit reward key.
-        let selected_pk = solution
-            .pk
-            .or_else(|| match self.resolve_reward_key(state) {
-                RewardKeyResolution::Ready(pk) => Some(pk),
-                RewardKeyResolution::Pending | RewardKeyResolution::Corrupt => None,
-            });
+        let selected_pk = solution.pk;
         for retained in cache.templates.iter().rev() {
             let candidate = &retained.template.candidate;
-            if selected_pk != Some(candidate.validation_ctx.pre_header.miner_pubkey) {
+            let operator_owned = retained.template.identity.reason != BuildReason::Requested
+                || candidate.observation.operator_owned;
+            if selected_pk.map_or(!operator_owned, |pk| {
+                pk != candidate.validation_ctx.pre_header.miner_pubkey
+            }) {
                 continue;
             }
             // Once a fallback accepts, only offered templates on the live full
@@ -1882,6 +1883,7 @@ mod tests {
             );
             let (with_msg, without_msg) = ([0x71u8; 32], [0x72u8; 32]);
             let (mut with, w1) = candidate_pair_msg_nbits(parent, with_msg, n_bits);
+            with.observation.operator_owned = true;
             with.transactions = vec![private_tx];
             with.observation.transactions = vec![crate::inspection::TransactionObservation {
                 category: "private",
@@ -1890,6 +1892,7 @@ mod tests {
             h.publish_if_current(with, w1, &parent, || BUILT_AT_MS, reason)
                 .expect("the template with the private transaction publishes");
             let (mut without, w2) = candidate_pair_msg_nbits(parent, without_msg, n_bits);
+            without.observation.operator_owned = true;
             without.header.timestamp += 1;
             h.publish_if_current(without, w2, &parent, || BUILT_AT_MS, reason)
                 .expect("the unrelated template publishes");
@@ -3122,7 +3125,8 @@ mod tests {
         let handle = MiningHandle::mainnet(operator_pk);
         let parent = [0; 32];
         handle.set_best_tip(synced_tip(parent));
-        let (candidate, work) = candidate_pair_for_key(parent, [0xA4; 32], operator_pk, 40);
+        let (mut candidate, work) = candidate_pair_for_key(parent, [0xA4; 32], operator_pk, 40);
+        candidate.observation.operator_owned = true;
         handle
             .publish_if_current(
                 candidate,
@@ -3236,12 +3240,45 @@ mod tests {
             .mining_outcomes();
         assert_eq!(restored.len(), 3);
         assert_eq!(restored[2].template_seq, Some(seqs[0]));
-        assert!(restored[2].accounting.is_some());
+        assert!(restored[2].accounting.is_none());
         assert_eq!(restored[1].template_seq, Some(seqs[1]));
         assert!(restored[1].accounting.is_none());
         assert_eq!(
             restored[0].template_seq, None,
             "unknown keys never borrow another miner's identity"
         );
+    }
+    #[test]
+    fn nonce_only_operator_jobs_survive_wallet_key_loss() {
+        let mut handle = MiningHandle::mainnet([2; 33]);
+        handle.reward_key = RewardKeySource::Wallet;
+        let parent = [0; 32];
+        handle.set_best_tip(synced_tip(parent));
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        assert_eq!(
+            handle.resolve_reward_key(&state),
+            RewardKeyResolution::Pending
+        );
+        for reason in [BuildReason::Tip, BuildReason::Requested] {
+            let (mut candidate, work) = candidate_pair_for_key(parent, [0xA8; 32], [2; 33], 50);
+            candidate.observation.operator_owned = true;
+            handle
+                .publish_if_current(candidate, work, &parent, || BUILT_AT_MS, reason)
+                .unwrap();
+            let outcome = handle
+                .verify_solution(
+                    &MinerSolution {
+                        nonce: [0; 8],
+                        pk: None,
+                    },
+                    &state,
+                )
+                .unwrap();
+            assert!(
+                matches!(outcome, SolutionOutcome::Accepted(_)),
+                "{outcome:?}"
+            );
+        }
     }
 }

@@ -1070,6 +1070,7 @@ mod tests {
         ergo_mining::engine::BuildIntent {
             private_transactions: std::sync::Arc::new(Vec::new()),
             operator_generation: 0,
+            operator_owned: true,
             expected_parent: [0u8; 32],
             expected_height: 0,
             mempool: std::sync::Arc::new(mempool),
