@@ -790,7 +790,7 @@ impl From<IndexerError> for IndexerHaltReason {
 mod cache_budget_tests {
     use super::*;
     #[test]
-    fn cache_budget_preserved_on_create_resume_and_schema_rebuild() {
+    fn cache_budget_preserved_on_create_resume_migration_and_schema_rebuild() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("indexer.redb");
         {
@@ -806,9 +806,27 @@ mod cache_budget_tests {
             meta::write_schema_version(&tx, INDEXER_SCHEMA_VERSION - 1).unwrap();
             tx.commit().unwrap();
         }
-        let (store, outcome) = IndexerStore::open_with_cache(&path, 16384).unwrap();
-        assert!(matches!(outcome, OpenOutcome::WipedAndRecreated { .. }));
-        assert_eq!(store.redb_cache_capacity_bytes(), 16384);
+        {
+            let (store, outcome) = IndexerStore::open_with_cache(&path, 16384).unwrap();
+            assert!(matches!(
+                outcome,
+                OpenOutcome::Migrated {
+                    previous_version: 2
+                }
+            ));
+            assert_eq!(store.redb_cache_capacity_bytes(), 16384);
+            let tx = ergo_state::begin_write_qr(&store.db).unwrap();
+            meta::write_schema_version(&tx, 1).unwrap();
+            tx.commit().unwrap();
+        }
+        let (store, outcome) = IndexerStore::open_with_cache(&path, 8192).unwrap();
+        assert!(matches!(
+            outcome,
+            OpenOutcome::WipedAndRecreated {
+                previous_version: 1
+            }
+        ));
+        assert_eq!(store.redb_cache_capacity_bytes(), 8192);
         assert_eq!(store.read_meta().unwrap().indexed_height, 0);
     }
 }
