@@ -43,6 +43,16 @@ impl SigmaChildren {
     pub(super) fn size(&self) -> usize {
         self.inner.as_ref().expect("live proposition children").size
     }
+
+    /// Storage capacity, which parser tests use to observe child reservation.
+    #[cfg(test)]
+    pub(super) fn capacity(&self) -> usize {
+        self.inner
+            .as_ref()
+            .expect("live proposition children")
+            .values
+            .capacity()
+    }
 }
 
 impl Deref for SigmaChildren {

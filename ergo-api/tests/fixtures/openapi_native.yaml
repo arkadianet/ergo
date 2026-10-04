@@ -1743,7 +1743,7 @@ components:
         identity strip. Rust-native — Scala's `/info` has no equivalent.
 
         Field contract:
-        - `state_type`, `verify_transactions`, `history_mode`, `mining`,
+        - `state_type`, `verify_transactions`, `history_mode`, `mining`, `mempool_enabled`,
           `extra_index_enabled`, `declared_addr`, `bind_addr` are
           config-intent: what `NodeConfig` asked for at boot. Scala parity
           for the wire-visible fields lives here.
@@ -1769,6 +1769,7 @@ components:
       - utxo_bootstrap
       - nipopow_bootstrap
       - mining
+      - mempool_enabled
       - extra_index_enabled
       properties:
         bind_addr:
@@ -1792,6 +1793,9 @@ components:
           description: |-
             How the operator configured chain-history retention. Tagged
             union — clients switch on `kind`. See [`ApiHistoryMode`].
+        mempool_enabled:
+          type: boolean
+          description: Whether the configured node admits and maintains mempool transactions.
         mining:
           type: boolean
         mode:

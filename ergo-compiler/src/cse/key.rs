@@ -55,7 +55,7 @@ pub(crate) struct ScopeTable {
 #[derive(Debug)]
 pub(crate) enum Node {
     /// A constant leaf — its wire type + value, re-emitted inline at every use
-    /// (constants never hoist).
+    /// unless its constant category is eligible for the CSE hoist gate.
     Const(SigmaType, SigmaValue),
     /// A whole-tree `Unparsed` body kept verbatim.
     Unparsed(ergo_ser::opcode::UnparsedErgoTree),

@@ -241,6 +241,8 @@ impl RouteOperation {
 pub enum OpenApiMergeError {
     #[error("OpenAPI operation collision at {method} {path}")]
     PathMethodCollision { path: String, method: String },
+    #[error("OpenAPI operation ID is repeated: {operation_id}")]
+    DuplicateOperationId { operation_id: String },
     #[error("OpenAPI component conflict in {section}.{name}")]
     ComponentConflict { section: String, name: String },
     #[error("OpenAPI alias source is missing: {method} {path}")]
@@ -264,8 +266,29 @@ fn http_method_name(method: &HttpMethod) -> &'static str {
     }
 }
 
-/// Merge `incoming` only when operations are disjoint and duplicate components
-/// are structurally identical.
+// OpenAPI 3.1 requires operation IDs to be unique across the whole document,
+// including independently generated fragments and supplemental aliases.
+fn check_operation_ids(documents: &[&OpenApiDocument]) -> Result<(), OpenApiMergeError> {
+    let mut ids = BTreeSet::new();
+    for document in documents {
+        let paths = serde_json::to_value(&document.paths).expect("OpenAPI paths serialize");
+        for item in paths.as_object().expect("OpenAPI paths object").values() {
+            for method in HTTP_METHODS {
+                if let Some(id) = item[method]["operationId"].as_str() {
+                    if !ids.insert(id.to_string()) {
+                        return Err(OpenApiMergeError::DuplicateOperationId {
+                            operation_id: id.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Merge `incoming` only when operations and operation IDs are disjoint and
+/// duplicate components are structurally identical.
 pub fn merge_openapi_checked(
     base: &mut OpenApiDocument,
     incoming: OpenApiDocument,
@@ -326,6 +349,7 @@ pub fn merge_openapi_checked(
         }
     }
 
+    check_operation_ids(&[base, &incoming])?;
     base.merge(incoming);
     Ok(())
 }
@@ -658,6 +682,7 @@ pub fn rust_openapi() -> Result<OpenApiDocument, OpenApiMergeError> {
     merge_openapi_checked(&mut openapi, v1_openapi_fragment())?;
     merge_openapi_checked(&mut openapi, established_rust_contracts())?;
     add_rust_only_operations(&mut openapi)?;
+    check_operation_ids(&[&openapi])?;
     openapi.info.title = format!("Ergo Rust Node — {}", RUST_API.label);
     openapi.info.description = Some(
         "The complete Rust-native API, including legacy operator routes and all \

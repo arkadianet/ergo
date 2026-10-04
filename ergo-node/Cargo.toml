@@ -81,6 +81,12 @@ tracing-subscriber = { workspace = true }
 name = "it"
 path = "tests/it/main.rs"
 
+# Its scan/verdict regression tests must run with the workspace tests;
+# examples are otherwise only compiled.
+[[example]]
+name = "ge_soak"
+test = true
+
 [lints]
 workspace = true
 

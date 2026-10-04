@@ -6,38 +6,26 @@
 
 ## Quick start
 
+From the repository root, select the same exact versions as CI:
+
 ```bash
-# Install a nightly toolchain (do NOT touch rust-toolchain.toml — it stays
-# pinned to stable 1.99.0 for the rest of the workspace) and cargo-fuzz.
-rustup toolchain install nightly --profile minimal
-cargo install cargo-fuzz --locked
+FUZZ_TOOLCHAIN=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["toolchains"]["fuzz"])')
+FUZZ_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["tools"]["fuzz"])')
+rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal --component rust-src
+cargo install cargo-fuzz --version "$FUZZ_VERSION" --locked
+cd ergo-difftest
 
-# From ergo-difftest/fuzz/ (or ergo-difftest/, cargo-fuzz finds the sibling
-# fuzz/ dir either way):
-cd ergo-difftest/fuzz
+# Resolve the detached workspace against its committed lock before building.
+cargo +"$FUZZ_TOOLCHAIN" metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
+cargo +"$FUZZ_TOOLCHAIN" fuzz build --sanitizer address
+cargo +"$FUZZ_TOOLCHAIN" fuzz run ergo_tree fuzz/corpus/ergo_tree -- -max_total_time=60
+cargo +"$FUZZ_TOOLCHAIN" fuzz run constant fuzz/corpus/constant -- -runs=20000
+# cargo-fuzz has no --locked flag; detect drift even after a failing run.
+git diff --exit-code -- fuzz/Cargo.lock
+cargo +"$FUZZ_TOOLCHAIN" fuzz list
 
-# Resolve this separate workspace against its committed dependency lock.
-cargo +nightly metadata --locked --format-version 1 > /dev/null
-
-# Build every target (ASan-instrumented, release).
-cargo +nightly fuzz build
-
-# Run one target with the committed seed corpus for a bounded time budget
-# (seconds) or a bounded run count — either works, pick one:
-cargo +nightly fuzz run ergo_tree -- -max_total_time=60
-cargo +nightly fuzz run constant -- -runs=20000
-
-# cargo-fuzz has no --locked flag; check that its build preserved the lock.
-# CI performs this check even when a fuzz target reports a crash.
-git diff --exit-code -- Cargo.lock
-
-# All surface/target names
-cargo +nightly fuzz list
-
-# If a run finds a crash, minimize the failing input before filing an issue:
-cargo +nightly fuzz tmin <target> fuzz/artifacts/<target>/crash-<hash>
-# (run from ergo-difftest/, so the artifact path above is
-#  ergo-difftest/fuzz/artifacts/<target>/crash-<hash>)
+# Use the actual saved artifact path, from this same working directory.
+cargo +"$FUZZ_TOOLCHAIN" fuzz tmin <target> fuzz/artifacts/<target>/crash-<hash>
 ```
 
 `fuzz/artifacts/` and `fuzz/target/` are gitignored — crash inputs never get
@@ -49,15 +37,17 @@ time — see [CI](#ci-cargo-fuzz-nightly) below.
 
 ## Why nightly?
 
-`cargo-fuzz` wraps `libFuzzer`, which ships as part of the LLVM distribution
-bundled with the Rust nightly compiler. The stable toolchain (pinned 1.99.0)
-does not include `libFuzzer`. See [cargo-fuzz docs](https://rust-fuzz.github.io/book/).
+`libfuzzer-sys` builds its bundled C++ libFuzzer sources. The nightly requirement
+comes from the unstable Rust sanitizer and SanitizerCoverage compiler options
+used by cargo-fuzz, rather than absence of a libFuzzer library on stable.
+The parent harness still builds on the stable workspace toolchain. CI pins the
+separate nightly and cargo-fuzz version in `.github/ci-tools.toml`.
 
 ## Architecture
 
 The real invariant logic is in **`ergo-difftest/src/fuzz.rs`**, compiled on
-stable and unit-tested in `cargo test -p ergo-difftest`. Each target file
-(`fuzz_targets/*.rs`) is a 3-line nightly shim:
+stable and unit-tested in `cargo test -p ergo-difftest`. The six consensus target files
+(`fuzz_targets/*.rs`) are thin nightly shims:
 
 ```rust
 fuzz_target!(|data: &[u8]| {
@@ -67,8 +57,9 @@ fuzz_target!(|data: &[u8]| {
 
 A panic in `fuzz_one` (which means `Outcome::Bug`) is treated as a crash by
 libFuzzer and the input is saved to `artifacts/<target>/`. The `fuzz.rs`
-module is covered by the stable CI gate via unit tests, so coverage-guided
-mutation adds real signal on top of an already-validated invariant.
+module has stable unit coverage. That coverage does not prove the native
+Bug → nonzero process → matching saved artifact → replay → upload chain;
+those are separate assurance checks.
 
 The P2P targets use `ergo-difftest/src/network_fuzz.rs`, also compiled and tested
 on stable, against the production `ergo-p2p` codecs:
@@ -118,6 +109,8 @@ robustness check; it does not simulate TCP scheduling or assert Scala parity.
 | `p2p_handshake`     | Minimal synthetic handshake and negative feature count |
 | `p2p_message`       | Scala payload vectors and synthetic seeds for every registered code |
 | `p2p_delivery`      | Synthetic saturation, hedge/late delivery, disconnect/retry and timeout-boundary sequences |
+| `compiler_source`   | Small ErgoScript sources for the production compiler |
+| `bounded_evaluator` | Selector bytes for a bounded fold/serialization evaluation harness |
 
 P2P files named `scala-*` are decoded from the existing external vectors under
 `test-vectors/ergo-p2p/`; their provenance is retained in that directory's
@@ -131,22 +124,30 @@ help libFuzzer find interesting coverage quickly.
 ### Growing the corpus
 
 ```bash
-# Seed from a larger set of real vectors (mutation basis, not committed)
-cargo +nightly fuzz run ergo_tree -- \
-  -seed_inputs=corpus/ergo_tree            \
-  -corpus=corpus/ergo_tree                 \
-  -jobs=4
+# From ergo-difftest/: first directory receives generated corpus files;
+# later directories supply seed inputs and do not receive generated entries.
+mkdir -p fuzz/corpus-local/ergo_tree
+cargo +"$FUZZ_TOOLCHAIN" fuzz run ergo_tree \
+  fuzz/corpus-local/ergo_tree fuzz/corpus/ergo_tree -- -max_total_time=60
 ```
+
+Mutation changes bytes in memory; output corpus entries go to the first path.
+Use a disposable copy when every input/output file must remain unchanged.
+`-seed_inputs` and
+`-corpus` are not the corpus-directory interface; cargo-fuzz passes positional
+directories to libFuzzer. Compiler/evaluator targets use `execution_fuzz.rs`;
+their bounded Rust checks are not JVM evaluation or compiled-output parity.
+
 
 ## Pinned CI setup and lock maintenance
 
-Use the versions in [`.github/ci-tools.toml`](../../../.github/ci-tools.toml)
+Use the versions in [`.github/ci-tools.toml`](../../.github/ci-tools.toml)
 to reproduce CI. From the repository root:
 
 ```bash
 FUZZ_TOOLCHAIN=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["toolchains"]["fuzz"])')
 FUZZ_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["tools"]["fuzz"])')
-rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal --component rust-src
 cargo install cargo-fuzz --version "$FUZZ_VERSION" --locked
 cargo +"$FUZZ_TOOLCHAIN" metadata --manifest-path ergo-difftest/fuzz/Cargo.toml \
   --locked --format-version 1 > /dev/null
@@ -183,7 +184,7 @@ not a PR gate.
 ## CI: cargo-fuzz (nightly)
 
 The `cargo-fuzz-nightly` job in `.github/workflows/fuzz.yml` builds and runs
-all consensus and P2P targets on a real nightly toolchain — a `fail-fast: false` matrix, one
+all 12 consensus, P2P, compiler and evaluator targets on a real nightly toolchain — a `fail-fast: false` matrix, one
 job per target, each capped at `-max_total_time=600` (10 minutes) seeded
 from the committed `corpus/<target>/`. This build/run job runs only on the
 nightly cron (02:00 UTC) and `workflow_dispatch`, and does not block PRs. PR CI
@@ -196,7 +197,18 @@ directory is uploaded unconditionally as `fuzz-corpus-<target>` so an
 operator can review new inputs and fold curated ones back into the committed
 seed corpus by hand.
 
-### First-run results (local, nightly toolchain, `-max_total_time=60` per target)
+Each leg also uploads `fuzz-evidence-<target>` unconditionally. It contains the
+initial ordered seeds and final corpus/artifacts, source inventory hashes and
+Rust/script/manifest snapshots, both dependency locks, selected compiler and
+cargo-fuzz executable identities, environment, exact command argv/exits/logs,
+and built-target hashes before and after running. A missing start or phase,
+unknown tool, source/lock drift, or missing/changed binary remains explicitly
+incomplete. `COMMANDS_COMPLETED` describes recorded commands, not an independent
+crash-classifier or signed build attestation. Workflow upload wiring and pure
+collector unit tests do not certify an actual artifact-upload execution.
+
+
+### Historical first-run results (six original targets)
 
 | Target                | Runs (in 60s)   | Result                                    |
 |------------------------|-----------------|--------------------------------------------|
@@ -207,7 +219,9 @@ seed corpus by hand.
 | `header`               | 5,454,733       | clean                                       |
 | `sigma_expr`            | 489,380         | clean                                       |
 
-All 6 targets built cleanly on the first try (no shim breakage). The two
+This table preserves historical attribution to issues #304/#305. It is not a
+current-source campaign receipt and does not cover the six later targets.
+The original six targets reportedly built cleanly on that first run. The two
 crashes are real, hermetic `ergo-difftest` invariant violations (round-trip
 and fixed-point checks — see `ergo-difftest/src/fuzz.rs`), minimized with
 `cargo fuzz tmin`, and tracked as issues rather than fixed alongside this CI
@@ -220,5 +234,7 @@ The nightly workflow schedules a JVM consensus differential campaign with a
 recorded seed, reference version and oracle transcripts. Its separate archival
 state-root replay job requires `REPLAY_NODE_URL` and explicitly reports when
 that endpoint is unset. Neither workflow wiring nor a skipped replay is a
-successful external campaign receipt. Local oracle setup is documented in
+successful external campaign receipt. The separate `replay` binary implements
+only the early-mainnet 1–200 diagnostic context; later pins are historical
+metadata, not implemented deep replay. Local oracle setup is documented in
 `ergo-difftest/docs/interface-contracts.md`.

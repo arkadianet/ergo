@@ -1813,6 +1813,7 @@ fn bridge_over_store_at_height(
             name: "test".into(),
             app_version: "test".into(),
             network: "mainnet".into(),
+            state_type: crate::config::StateType::Utxo,
             launch_time_unix_ms: 0,
             voting_length: ergo_chain_spec::ChainSpec::mainnet().voting.voting_length,
             rest_api_url: None,

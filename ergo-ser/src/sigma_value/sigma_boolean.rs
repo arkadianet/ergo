@@ -119,6 +119,12 @@ pub(super) fn read_sigma_boolean_at_depth(
     Ok(node)
 }
 
+// Initial reservation is a resource policy, not a child-count acceptance cap.
+// Grow only after complete children are decoded; retain reference read order.
+fn initial_children(count: usize) -> Vec<SigmaBoolean> {
+    Vec::with_capacity(count.min(64))
+}
+
 fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoolean, ReadError> {
     let tag = r.get_u8()?;
     let next = depth + 1;
@@ -135,7 +141,7 @@ fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoole
         }
         SIGMA_AND => {
             let count = r.get_u16()? as usize;
-            let mut children = Vec::with_capacity(count);
+            let mut children = initial_children(count);
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
@@ -143,7 +149,7 @@ fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoole
         }
         SIGMA_OR => {
             let count = r.get_u16()? as usize;
-            let mut children = Vec::with_capacity(count);
+            let mut children = initial_children(count);
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
@@ -157,7 +163,7 @@ fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoole
             // the bound itself is an `IllegalArgumentException`: a hard reject.
             let k = r.get_u16()?;
             let count = r.get_u16()? as usize;
-            let mut children = Vec::with_capacity(count);
+            let mut children = initial_children(count);
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
@@ -185,6 +191,48 @@ mod tests {
     use crate::sigma_type::SigmaType;
     use crate::sigma_value::{read_value, write_constant, write_value, SigmaValue};
     use ergo_primitives::group_element::GroupElement;
+
+    #[test]
+    fn child_reservation_is_bounded_independently_of_declared_count() {
+        for count in [0, 1, 64, 255, u16::MAX as usize] {
+            assert!(initial_children(count).capacity() <= 64);
+        }
+    }
+
+    #[test]
+    fn parsed_nodes_grow_children_instead_of_reserving_the_declared_count() {
+        // `Vec::with_capacity(65)` is exactly 65. Storage that starts from the
+        // bounded 64-entry reservation must grow on the 65th decoded child, so
+        // its capacity cannot equal the declared count. Checked at every
+        // compound node's own parser call site.
+        const COUNT: u16 = 65;
+        for header in [vec![SIGMA_AND], vec![SIGMA_OR], vec![SIGMA_THRESHOLD]] {
+            let mut w = VlqWriter::new();
+            w.put_bytes(&header);
+            if header == [SIGMA_THRESHOLD] {
+                w.put_u16(1);
+            }
+            w.put_u16(COUNT);
+            for _ in 0..COUNT {
+                w.put_u8(TRIVIAL_PROP_TRUE);
+            }
+            let bytes = w.result();
+            let mut r = VlqReader::new(&bytes);
+            let children = match read_sigma_boolean_at_depth(&mut r, 0).unwrap() {
+                SigmaBoolean::Cand(children)
+                | SigmaBoolean::Cor(children)
+                | SigmaBoolean::Cthreshold { children, .. } => children,
+                other => panic!("expected a compound node, got {other:?}"),
+            };
+            assert!(r.is_empty());
+            assert_eq!(children.len(), usize::from(COUNT));
+            assert!(
+                children.capacity() > usize::from(COUNT),
+                "0x{:02X}: children reserved for the declared count",
+                header[0]
+            );
+        }
+    }
 
     // ----- helpers -----
 

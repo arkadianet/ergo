@@ -1,0 +1,151 @@
+{
+  "header" : {
+    "extensionId" : "0684518620bc13fe299747aa9e5abff9305765e616a9592c78ae192f216f84b0",
+    "difficulty" : "1",
+    "votes" : "000000",
+    "timestamp" : 1763329880437,
+    "size" : 220,
+    "unparsedBytes" : "",
+    "stateRoot" : "dd5bb969b0a6b71899f6c18e60895148c92b4391e149e031b5fb89347843f03608",
+    "height" : 128,
+    "nBits" : 16842752,
+    "version" : 4,
+    "id" : "31207eca673355e367b2a8cb4b928da9f964df71ed11822cb7d4cbbc44b15df5",
+    "adProofsRoot" : "5b685d3f8daac493a245e82fa91adf8650d0ba6dd120047cd175042d900c6608",
+    "transactionsRoot" : "ead6113440a9c802457d3188cd1787f9553164a01919039d13935c1f1334982c",
+    "extensionHash" : "32aad8db6f62664d5dc87763e8667f0edfd4e94f3582fee29ec5bcc70113e2e9",
+    "powSolutions" : {
+      "pk" : "03294509d145171425342e18ebcc5c8dd914b53b40b35f0f56b6967b2a3f1a6b5b",
+      "w" : "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "n" : "0000000000000000",
+      "d" : 0
+    },
+    "adProofsId" : "49c06ab6a259e7b1aa7abf098ca908588d4523024ded8cfd5b76e5571112a5e0",
+    "transactionsId" : "b959c8c332585459f7d32e201fd3583a83532bdc23fec5e6f8d4b3093094066a",
+    "parentId" : "a76a30e10759622ffeace022e77f43c4be4654fb5f0c62fe819e76316986e0b7"
+  },
+  "blockTransactions" : {
+    "headerId" : "31207eca673355e367b2a8cb4b928da9f964df71ed11822cb7d4cbbc44b15df5",
+    "transactions" : [
+      {
+        "id" : "39e75578d2ee90924af23eab8dbcdfc2140c28282e6285a8aeffbb2ebc4c9b3e",
+        "inputs" : [
+          {
+            "boxId" : "46fb0138501ee651059ff06424c27a46f09a525655f37e6d575bc2b9a2891dab",
+            "spendingProof" : {
+              "proofBytes" : "",
+              "extension" : {
+                
+              }
+            }
+          }
+        ],
+        "dataInputs" : [
+        ],
+        "outputs" : [
+          {
+            "boxId" : "448d15a426855813594fcce56d98a7e213f180c10f70cda1096640342a163200",
+            "value" : 93400492500000000,
+            "ergoTree" : "101004020e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a7017300730110010204020404040004c0fd4f05808c82f5f6030580b8c9e5ae040580f882ad16040204c0944004c0f407040004000580f882ad16d19683030191a38cc7a7019683020193c2b2a57300007473017302830108cdeeac93a38cc7b2a573030001978302019683040193b1a5730493c2a7c2b2a573050093958fa3730673079973089c73097e9a730a9d99a3730b730c0599c1a7c1b2a5730d00938cc7b2a5730e0001a390c1a7730f",
+            "assets" : [
+            ],
+            "creationHeight" : 128,
+            "additionalRegisters" : {
+              
+            },
+            "transactionId" : "39e75578d2ee90924af23eab8dbcdfc2140c28282e6285a8aeffbb2ebc4c9b3e",
+            "index" : 0
+          },
+          {
+            "boxId" : "3f3a670d115b09f8da263eab6511dd5d5f6258ea9b7aafca4535a0f5b9537940",
+            "value" : 67500000000,
+            "ergoTree" : "100204a00b08cd03294509d145171425342e18ebcc5c8dd914b53b40b35f0f56b6967b2a3f1a6b5bea02d192a39a8cc7a70173007301",
+            "assets" : [
+            ],
+            "creationHeight" : 128,
+            "additionalRegisters" : {
+              
+            },
+            "transactionId" : "39e75578d2ee90924af23eab8dbcdfc2140c28282e6285a8aeffbb2ebc4c9b3e",
+            "index" : 1
+          }
+        ],
+        "size" : 343
+      }
+    ],
+    "blockVersion" : 4,
+    "size" : 380
+  },
+  "extension" : {
+    "headerId" : "31207eca673355e367b2a8cb4b928da9f964df71ed11822cb7d4cbbc44b15df5",
+    "digest" : "32aad8db6f62664d5dc87763e8667f0edfd4e94f3582fee29ec5bcc70113e2e9",
+    "fields" : [
+      [
+        "0005",
+        "00000064"
+      ],
+      [
+        "0001",
+        "001312d0"
+      ],
+      [
+        "0006",
+        "000007d0"
+      ],
+      [
+        "0009",
+        "0000001e"
+      ],
+      [
+        "0002",
+        "00000168"
+      ],
+      [
+        "0007",
+        "00000064"
+      ],
+      [
+        "0003",
+        "00080000"
+      ],
+      [
+        "007b",
+        "00000004"
+      ],
+      [
+        "0008",
+        "00000064"
+      ],
+      [
+        "0004",
+        "000f4240"
+      ],
+      [
+        "007c",
+        "02d701990300"
+      ],
+      [
+        "0100",
+        "015b1827ca092b599eafbaf339d2acf2445bc5216ec2e022d9c001a6fff660cad9"
+      ],
+      [
+        "0101",
+        "03cd10e366a59c491d74c6ecbb5ad1303375da9344f79569da4da4859b6b2bc84c"
+      ],
+      [
+        "0104",
+        "028eb085c685818c8fd36f6d15f1c00596ab253b070cde7d5c192841f57f5ea4d3"
+      ],
+      [
+        "0106",
+        "03b8827e2accc699666ae717d73e6d77a27e95b5a60b6e72dab22f74eda751d6e6"
+      ],
+      [
+        "0109",
+        "013e7ad4634a0790b90d38fa091c956ca93b761fa4668a7c160a20ffd28dd2e133"
+      ]
+    ]
+  },
+  "adProofs" : null,
+  "size" : 600
+}

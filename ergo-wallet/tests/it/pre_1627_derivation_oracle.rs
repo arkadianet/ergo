@@ -28,7 +28,7 @@ fn first_address(use_pre_1627: bool) -> String {
         let leaf = master.derive_at_path(&path).unwrap();
         leaf.public_key().unwrap().compressed_bytes()
     } else {
-        let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..]).unwrap();
         let leaf = master.derive_at_path(&path).unwrap();
         leaf.public_key().compressed_bytes()
     };

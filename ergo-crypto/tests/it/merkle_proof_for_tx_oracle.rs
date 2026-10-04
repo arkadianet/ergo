@@ -161,7 +161,7 @@ fn assert_proofs_equal(scala: &ScalaProof, ours: &ScalaProof, label: &str) {
     }
 }
 
-fn run_oracle_for(block_fixture: &str, header_fixture: &str, height: u32) {
+fn run_oracle_for(block_fixture: &str, header_fixture: &str, height: u32, expected_txs: usize) {
     let blocks = load_blocks(block_fixture);
     let headers = load_headers_map(header_fixture);
     let block = blocks
@@ -172,15 +172,18 @@ fn run_oracle_for(block_fixture: &str, header_fixture: &str, height: u32) {
         .get(&height)
         .unwrap_or_else(|| panic!("no fixture header at height {height}"));
 
+    assert_eq!(
+        block.transactions.len(),
+        expected_txs,
+        "h={height}: fixture transaction count"
+    );
     for tx in &block.transactions {
         let path = format!(
             "../test-vectors/mainnet/proof_for_tx/h{}_{}.json",
             height, tx.id
         );
-        let scala_raw = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => continue, // fixture not captured for this tx
-        };
+        let scala_raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("required Scala witness {path}: {e}"));
         let scala: ScalaProof = serde_json::from_str(&scala_raw).expect("scala fixture must parse");
         let ours = build_proof(block, header, &tx.id);
         assert_proofs_equal(&scala, &ours, &format!("h={} tx={}", height, tx.id));
@@ -194,6 +197,7 @@ fn proof_oracle_v1_single_tx_blocks_1_through_5() {
             "../test-vectors/mainnet/blocks_1_5.json",
             "../test-vectors/mainnet/headers_1_2000.json",
             h,
+            1,
         );
     }
 }
@@ -205,5 +209,6 @@ fn proof_oracle_v2_block_700000_all_txs() {
         "../test-vectors/mainnet/blocks_700000_700010.json",
         "../test-vectors/mainnet/headers_700000_700500.json",
         700000,
+        3,
     );
 }

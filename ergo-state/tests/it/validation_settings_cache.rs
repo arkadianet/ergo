@@ -120,6 +120,54 @@ fn forward_apply_advances_cached_validation_settings_in_session() {
     assert!(su.iter().any(|(id, _)| *id == 1007));
     assert!(su.iter().any(|(id, _)| *id == 1008));
     assert!(su.iter().any(|(id, _)| *id == 1011));
+
+    // The next epoch's row contains no new statuses. Script context must use
+    // the separately accumulated settings, including after a clean reopen.
+    // These are synthetic unchecked persistence transitions, not a captured
+    // historical activation/script verdict.
+    let expected_sigma = ergo_validation::ProtocolParams::from_active_with_settings(
+        store.active_params(),
+        store.validation_settings(),
+    )
+    .validation_settings;
+    let next_row = epoch_row(2048, ErgoValidationSettingsUpdate::empty());
+    assert_eq!(
+        ergo_validation::ProtocolParams::for_block(
+            store.active_params(),
+            Some(&next_row),
+            store.validation_settings(),
+        )
+        .validation_settings,
+        expected_sigma,
+    );
+    for height in 1025..2048 {
+        apply_no_op(&mut store, height, None);
+    }
+    apply_no_op(&mut store, 2048, Some(next_row));
+    assert!(store
+        .active_params()
+        .activated_update
+        .status_updates
+        .is_empty());
+    assert_eq!(
+        ergo_validation::ProtocolParams::from_active_with_settings(
+            store.active_params(),
+            store.validation_settings(),
+        )
+        .validation_settings,
+        expected_sigma,
+    );
+    drop(store);
+    let reopened = StateStore::open(&path).unwrap();
+    assert_eq!(reopened.height(), 2048);
+    assert_eq!(
+        ergo_validation::ProtocolParams::from_active_with_settings(
+            reopened.active_params(),
+            reopened.validation_settings(),
+        )
+        .validation_settings,
+        expected_sigma,
+    );
 }
 
 /// In-session cumulative (after a forward apply across an activation)

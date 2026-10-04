@@ -669,6 +669,68 @@ fn duplicate_tx_rejected_idempotently() {
         }
     ));
     assert_eq!(pool.len(), 1);
+    assert_eq!(b.global_consumed(), 10_000);
+    assert_eq!(v.validate_call_count(), 1);
+}
+
+#[test]
+fn pooled_ids_are_declined_before_validation_for_every_source() {
+    for source in [
+        TxSource::Peer(peer()),
+        TxSource::PublicApi,
+        TxSource::Api,
+        TxSource::Wallet,
+    ] {
+        let utxo = EmptyUtxo;
+        let c = ctx();
+        let (mut pool, _, mut inv, mut unr) = fresh();
+        let mut budgets = CostBudgets::new(20_000, 20_000, 0);
+        let cfg = default_config();
+        let w = ByCost;
+        // The same id with other proof bytes, which would fail its scripts.
+        let validator = validator_accepting(b"bytes", id(1), 5_000_000).plan(
+            b"other proof".to_vec(),
+            MockPlan {
+                result: Err(ValidationErr::ScriptFailed),
+                charge: 10_000,
+                peek_fee: Some(5_000_000),
+                peek_tx_id: Some(id(1)),
+            },
+        );
+        let tip = c.view(&utxo);
+        let mut cx = AdmissionCtx {
+            tip_ctx: &tip,
+            config: &cfg,
+            pool: &mut pool,
+            budgets: &mut budgets,
+            invalidated: &mut inv,
+            unresolved: &mut unr,
+            weight_fn: &w,
+        };
+        let (first, _) = process(
+            b"bytes",
+            source.clone(),
+            Instant::now(),
+            &mut cx,
+            &validator,
+        );
+        assert!(matches!(first, AdmissionOutcome::Admitted { .. }));
+        for bytes in [&b"bytes"[..], b"bytes", b"other proof"] {
+            let (duplicate, actions) =
+                process(bytes, source.clone(), Instant::now(), &mut cx, &validator);
+            assert_eq!(
+                duplicate,
+                AdmissionOutcome::Rejected {
+                    reason: RejectReason::Duplicate
+                }
+            );
+            assert!(actions.is_empty(), "{actions:?}");
+        }
+        assert_eq!(validator.validate_call_count(), 1);
+        assert_eq!(cx.budgets.global_consumed(), 10_000);
+        assert!(!cx.invalidated.contains(&id(1)));
+        assert_eq!(cx.pool.len(), 1);
+    }
 }
 
 #[test]

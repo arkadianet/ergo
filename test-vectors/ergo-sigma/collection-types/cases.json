@@ -1,0 +1,102 @@
+{
+  "oracle": {
+    "sigma_state": "6.0.6",
+    "sigma_state_jar_sha256": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898",
+    "ergo_core": "6.0.6",
+    "scala": "2.12",
+    "capture_date": "2026-10-03",
+    "compiler_source_sha256": "182a2b9af22d1f0cca2febf0914a5eab277934b6db997625d17b612971d4df36",
+    "evaluator_source_sha256": "7035ee2453e49c171951dedb192458034e4b276bf603a7f8d3746f6a7083ae88",
+    "transcript_sha256": "97640e3ade9ee9010b9362de1620a2598500ba22764ad05c65a4ec2f028240b8",
+    "authority": "Real cached published org.scorexfoundation:sigma-state_2.12:6.0.6 compiler/serializer/evaluator with ErgoSerdeOracle pinned org.ergoplatform:ergo-core:6.0.6; no current live network/whole-node authority claim"
+  },
+  "context": {
+    "height": 0,
+    "activated_version": 3,
+    "tree_version": 3,
+    "cost_init": 0,
+    "pre_header_version": 4,
+    "pre_header_timestamp": 3,
+    "empty_proof": true,
+    "empty_message": true
+  },
+  "cases": [
+    {
+      "id": "flatmap-byte-bool",
+      "source": "sigmaProp(Coll(HEIGHT).flatMap{(x: Int) => Coll((Coll[Byte](x.toByte), true))}.size == 1)",
+      "tree_hex": "1b250201010402d193b1dc0c0f830104a301d90101048301490e86028301027d72010273007301",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 234,
+      "expected_verified": true,
+      "expected_verify_cost": 23
+    },
+    {
+      "id": "flatmap-short-byte-long",
+      "source": "sigmaProp(Coll(HEIGHT).flatMap{(x: Int) => Coll((Coll[Byte](x.toByte), 1L))}.size == 1)",
+      "tree_hex": "1b250205020402d193b1dc0c0f830104a301d901010483014d0e86028301027d72010273007301",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 234,
+      "expected_verified": true,
+      "expected_verify_cost": 23
+    },
+    {
+      "id": "flatmap-byte-int",
+      "source": "sigmaProp(Coll(HEIGHT).flatMap{(x: Int) => Coll((Coll[Byte](x.toByte), 1))}.size == 1)",
+      "tree_hex": "1b250204020402d193b1dc0c0f830104a301d901010483014c0e86028301027d72010273007301",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 234,
+      "expected_verified": true,
+      "expected_verify_cost": 23
+    },
+    {
+      "id": "reverse-sigmaprop-threshold",
+      "source": "atLeast(1, Coll(sigmaProp(HEIGHT >= 0), sigmaProp(HEIGHT >= 1)).reverse)",
+      "tree_hex": "1b1a03040204000402987300db0c1e830208d192a37301d192a37302",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 194,
+      "expected_verified": true,
+      "expected_verify_cost": 19
+    },
+    {
+      "id": "reverse-sigmaprop-equality",
+      "source": "sigmaProp(Coll(sigmaProp(HEIGHT >= 0)).reverse == Coll(sigmaProp(HEIGHT >= 0)))",
+      "tree_hex": "1b18010400d801d601830108d192a37300d193db0c1e72017201",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 155,
+      "expected_verified": true,
+      "expected_verify_cost": 15
+    },
+    {
+      "id": "reverse-group-equality",
+      "source": "sigmaProp(Coll(groupGenerator.exp(HEIGHT.toBigInt)).reverse == Coll(groupGenerator.exp(HEIGHT.toBigInt)))",
+      "tree_hex": "1b1900d801d6018301079fdb6a01dd7ea306d193db0c1e72017201",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 1074,
+      "expected_verified": true,
+      "expected_verify_cost": 107
+    },
+    {
+      "id": "empty-flatmap-bound-long",
+      "source": "{ val ys = Coll[Long](); sigmaProp(Coll[Int]().flatMap{(x: Int) => ys} == ys) }",
+      "tree_hex": "1b1900d801d601830005d193dc0c0f83000401d901020472017201",
+      "tree_version": 3,
+      "activated_version": 3,
+      "expected_proposition": true,
+      "expected_jit_cost": 164,
+      "expected_verified": true,
+      "expected_verify_cost": 16
+    }
+  ]
+}

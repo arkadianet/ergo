@@ -8,7 +8,8 @@ use serde_json::json;
 use super::OperatorState;
 use crate::mining::PrivateTransactionRequest;
 
-#[utoipa::path(get, path = "/api/v1/mining/private-transactions", tag = "mining",
+#[utoipa::path(get, path = "/api/v1/mining/private-transactions",
+    operation_id = "v1_mining_private_transactions_get", tag = "mining",
     responses((status = 200, description = "Owner-only private queue")), security(("ApiKeyAuth" = [])))]
 pub(crate) async fn list(State(s): State<OperatorState>) -> Response {
     let m = match s.mining() {
@@ -27,7 +28,8 @@ pub(crate) async fn list(State(s): State<OperatorState>) -> Response {
     }
 }
 
-#[utoipa::path(post, path = "/api/v1/mining/private-transactions", tag = "mining",
+#[utoipa::path(post, path = "/api/v1/mining/private-transactions",
+    operation_id = "v1_mining_private_transactions_post", tag = "mining",
     request_body = PrivateTransactionRequest,
     responses((status = 200, description = "Durably queued without relay", body = crate::mining::PrivateTransactionEntry)), security(("ApiKeyAuth" = [])))]
 pub(crate) async fn submit(
@@ -61,7 +63,8 @@ pub(crate) async fn submit(
     }
 }
 
-#[utoipa::path(post, path = "/api/v1/mining/private-transactions/{tx_id}/cancel", tag = "mining",
+#[utoipa::path(post, path = "/api/v1/mining/private-transactions/{tx_id}/cancel",
+    operation_id = "v1_mining_private_transaction_cancel_post", tag = "mining",
     params(("tx_id" = String, Path, description = "Private transaction id")),
     responses((status = 200, description = "Transaction withdrawn and inputs released", body = crate::mining::PrivateTransactionEntry)), security(("ApiKeyAuth" = [])))]
 pub(crate) async fn cancel(State(s): State<OperatorState>, Path(tx_id): Path<String>) -> Response {

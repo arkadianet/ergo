@@ -10,7 +10,7 @@ use crate::{BoxId, TxId};
 
 /// `IndexedErgoBox`: one redb row per `BoxId`. The three `Option`
 /// fields together encode "this box has been spent" — `global_index`
-/// is **always non-negative** on the box record (assigned at output
+/// is non-negative on valid persisted box records (assigned at output
 /// time and never sign-flipped; the spent-flag is carried by the
 /// segment-side sign, not the box record). The first-indexed output
 /// (in practice, the genesis output) gets `global_index = 0`; this is
@@ -26,9 +26,10 @@ use crate::{BoxId, TxId};
 /// include `0` — that would diverge from Scala mainnet.
 ///
 /// `spending_tx_id`, `spending_height`, and `spending_proof` are
-/// always set or unset together — Scala's `IndexedErgoBox.asSpent`
+/// set or unset together on valid persisted records — Scala's `IndexedErgoBox.asSpent`
 /// mutates all three at once (`IndexedErgoBox.scala:38-43`). Our
-/// upsert helpers preserve that invariant.
+/// checked persistence helpers preserve that invariant. These public fields
+/// permit other in-memory combinations; callers must validate before persisting.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexedErgoBox {
     pub inclusion_height: i32,
@@ -36,7 +37,7 @@ pub struct IndexedErgoBox {
     pub spending_height: Option<i32>,
     pub spending_proof: Option<SpendingProof>,
     pub box_data: ErgoBox,
-    /// Always non-negative on the box record (i.e. the value assigned
+    /// Non-negative on valid persisted box records (i.e. the value assigned
     /// at output time, never sign-flipped). Genesis output has `0`;
     /// the segment-side spent-flag uses the sign of segment entries
     /// instead.

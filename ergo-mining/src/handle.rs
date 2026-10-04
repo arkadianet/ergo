@@ -116,8 +116,10 @@ use crate::work_message::{MinerSolution, WorkMessage};
 /// cycles — enough for the brief window between a template being served and its
 /// solution arriving, given that longpoll keeps miners on a fresh template
 /// rather than grinding a stale one. A solution for a template evicted beyond
-/// this window is not rejected — the miner re-polls, and the
-/// submit-time executor recheck remains authoritative. Sized for two publishes
+/// this window cannot be matched against its original template; verification
+/// falls through to `InvalidPow` if none of the retained templates match, so
+/// the miner must re-poll. For retained
+/// solutions, the submit-time executor recheck remains authoritative. Sized for two publishes
 /// per tip (minimal + enriched two-phase publish): 16 slots retain ≈8
 /// tip-changes of in-flight solution history, matching the pre-two-phase
 /// horizon.

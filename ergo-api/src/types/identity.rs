@@ -42,7 +42,7 @@ fn default_block_interval_ms() -> u64 {
 /// identity strip. Rust-native — Scala's `/info` has no equivalent.
 ///
 /// Field contract:
-/// - `state_type`, `verify_transactions`, `history_mode`, `mining`,
+/// - `state_type`, `verify_transactions`, `history_mode`, `mining`, `mempool_enabled`,
 ///   `extra_index_enabled`, `declared_addr`, `bind_addr` are
 ///   config-intent: what `NodeConfig` asked for at boot. Scala parity
 ///   for the wire-visible fields lives here.
@@ -76,6 +76,8 @@ pub struct ApiIdentity {
     pub utxo_bootstrap: bool,
     pub nipopow_bootstrap: bool,
     pub mining: bool,
+    /// Whether the configured node admits and maintains mempool transactions.
+    pub mempool_enabled: bool,
     pub extra_index_enabled: bool,
     /// `[peers] declared_addr` from the TOML config — what we advertise
     /// to peers in the handshake. `None` = anonymous, not gossipable.

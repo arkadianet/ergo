@@ -70,6 +70,12 @@ pub struct MethodRef {
 ///                             SEC1-compressed point; the printer decompresses to the
 ///                             affine (x_hex,y_hex) pair (D-T6).
 ///   SigmaProp(inner_str)    → opaque rendering
+///
+/// Manual construction bypasses compiler/environment validation. Curve bytes
+/// must be valid non-identity compressed secp256k1 points; numeric decimal
+/// payloads must satisfy their declared type and version bounds. Prefer values
+/// produced by the public typecheck/lift pipeline when passing them to printers
+/// or emitters.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstPayload {
     /// `@true` or `@false` — values.scala TrueLeaf/FalseLeaf, BooleanConstant.
@@ -131,6 +137,12 @@ pub enum ConstPayload {
 }
 
 /// Typed ErgoScript AST node.
+///
+/// Public fields permit trusted manual construction. Such trees must preserve
+/// node/payload types, child/signature/arity consistency and the `ConstPayload`
+/// invariants. Construction itself performs no validation. Prefer the public
+/// typecheck pipeline for source/environment input; printers and emitters rely
+/// on its established invariants.
 ///
 /// Mirrors the Scala typed vocabulary 1:1 (oracle R6). Every variant corresponds
 /// to a Scala case class or case object; the `productPrefix` returned by

@@ -560,13 +560,14 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
     // Three independent maintenance passes this tick:
     //  - recheck (A): full-pool recheck-and-evict on a tip change.
     //  - suspects (B): re-validate the off-loop build's flagged ids between blocks.
-    //  - drain: re-admit demoted/rolled-back txs from the revalidation
-    //    queue. Gated on the QUEUE being non-empty, NOT the pool — an epoch
-    //    `demote_all` empties the pool INTO the queue, so the drain must run with
-    //    `pool.size() == 0`.
+    //  - drain: continue bounded descendant eviction and re-admit demoted/
+    //    rolled-back txs. Either work queue triggers it between blocks. An
+    //    epoch `demote_all` empties the pool into the revalidation queue, so
+    //    the drain must also run with `pool.size() == 0`.
     let need_recheck = tip_changed && state.mempool.size() > 0;
     let need_suspects = !tip_changed && !suspects.is_empty();
-    let need_drain = state.mempool.revalidation_pending() > 0;
+    let need_drain =
+        state.mempool.revalidation_pending() > 0 || state.mempool.orphan_eviction_pending() > 0;
     if !(need_recheck || need_suspects || need_drain) {
         return;
     }

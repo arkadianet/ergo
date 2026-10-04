@@ -7,8 +7,9 @@ use super::common::{
 /// Compute the Autolykos v2 PoW hit for a header. This is the
 /// header-validation specialization of [`hit_for_v2_pow`]: `k = 32`
 /// indices and `h = height` as 4-byte big-endian. Keeping it a thin
-/// wrapper means the ~9k-header mainnet corpus in `tests/pow_mainnet.rs`
-/// exercises the same general code path `SGlobal.powHit` uses.
+/// wrapper means default curated captures and separately provisioned ignored
+/// bulk corpus tests in `tests/it/pow_mainnet.rs` exercise the same general
+/// code path `SGlobal.powHit` uses.
 pub fn hit_for_v2(msg: &[u8; 32], nonce: &[u8; 8], height: u32, n: u32) -> BigUint {
     hit_for_v2_pow(AUTOLYKOS_K, msg, nonce, &height.to_be_bytes(), n)
 }
@@ -113,8 +114,8 @@ mod tests {
     // ----- happy path -----
 
     /// Byte-order regression guard for `uint_to_4bytes`. The full v2
-    /// hit pipeline is exercised by the ~9k-header mainnet corpus in
-    /// `tests/pow_mainnet.rs`; this only pins the corner cases (zero,
+    /// hit pipeline has default curated fixtures and ignored bulk-corpus
+    /// tests in `tests/it/pow_mainnet.rs`; this pins the corner cases (zero,
     /// small, byte-boundary, full-width) so a mistake here surfaces
     /// instantly without needing a corpus run to bisect.
     #[test]

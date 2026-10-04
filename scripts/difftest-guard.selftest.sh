@@ -55,7 +55,7 @@ out="$WORK/guard.out"
 set +e
 PATH="$WORK/bin:$PATH" \
     DIFFTEST_BIN="$WORK/fake-difftest" \
-    "$GUARD" --surfaces "fake-surface" --iters 5 --keep-regressions \
+    "$GUARD" --surfaces "reduce" --iters 5 --keep-regressions \
     --regressions-dir "$WORK/regressions" \
     >"$out" 2>&1
 rc=$?
@@ -70,3 +70,20 @@ grep -q 'HARNESS ERROR' "$out" || fail "expected a HARNESS ERROR line in the out
 grep -q 'ran 0 checks, expected 5' "$out" || fail "expected the missing-summary line to read as '0 checks ran', not crash silently"
 
 echo "PASS: missing oracle summary line is classified as a harness error (exit 3), not a set -e crash"
+
+# A completed input summary with an unfiled finding must also fail loudly.
+cat >"$WORK/fake-difftest" <<'EOF'
+#!/usr/bin/env bash
+echo 'oracle: checks=5 surfaces=1 unique_classes=1 total_divergences=1'
+echo 'minimize summary: checks=1 unique_divergences=1 minimized=0 pending_queued=0 known_artifacts=0'
+exit 1
+EOF
+set +e
+PATH="$WORK/bin:$PATH" DIFFTEST_BIN="$WORK/fake-difftest" \
+    "$GUARD" --surfaces "reduce" --iters 5 --keep-regressions \
+    --regressions-dir "$WORK/regressions" >"$WORK/missing-record.out" 2>&1
+rc=$?
+set -e
+[[ $rc -eq 3 ]] || fail "completed-summary missing record: expected harness3, got $rc"
+grep -q 'pending filing was incomplete' "$WORK/missing-record.out" || fail "missing record must remain an incomplete run"
+echo 'PASS: completed input summaries cannot hide unfiled findings'

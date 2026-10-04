@@ -16,12 +16,11 @@
 //! order (e.g. ascending by key), `bytes_to_sign(tx)` desyncs and the
 //! signature won't verify.
 //!
-//! Block ingest is already safe via verbatim preservation in
-//! [`crate::input::SpendingProof::from_trusted_raw_parts`]. This module
-//! exists so the REST submit path's *re-serialize from parsed
-//! [`crate::input::ContextExtension`]* path reproduces HAMT order from
-//! a [`std::collections::BTreeMap`] storage. The wire-correct order
-//! falls out of sorting keys by [`hamt_sort_key_for_byte_key`].
+//! Both parsed block inputs and newly built inputs cache canonical extension
+//! bytes through `SpendingProof`. This module supplies the same HAMT ordering
+//! when those bytes are reconstructed from a parsed `ContextExtension`.
+//! The trusted raw constructor requires canonical bytes; accepted wire bytes
+//! alone are insufficient to satisfy that contract.
 //!
 //! # The algorithm, ported from Scala 2.12 `HashMap.scala`
 //!

@@ -51,14 +51,17 @@ pub fn read_accepted_ergo_box(r: &mut VlqReader) -> Result<ErgoBox, ReadError> {
 }
 
 fn read_ergo_box_parts(r: &mut VlqReader) -> Result<ErgoBox, ReadError> {
+    let start = r.position();
     let candidate = read_ergo_box_candidate_parts(r)?;
     let transaction_id = ModifierId::from_bytes(r.get_array::<32>()?);
     let index = r.get_u16()?;
-    Ok(ErgoBox {
+    let mut parsed = ErgoBox {
         candidate,
         transaction_id,
         index,
-    })
+    };
+    parsed.remember_received_bytes(r.data_slice(start, r.position()));
+    Ok(parsed)
 }
 
 /// Serialize a full ErgoBox and return the bytes.
@@ -68,18 +71,20 @@ pub fn serialize_ergo_box(b: &ErgoBox) -> Result<Vec<u8>, WriteError> {
     Ok(w.result())
 }
 
-/// Self-cleaning scratch variant of `ErgoBox::box_id`. Clears `w` first, writes
-/// the canonical box bytes into it, hashes them, returns the digest. Leaves
-/// `w` containing the hashed bytes (caller may inspect via `as_slice()` before
-/// the next emit).
-///
-/// Used by the indexer apply path to reuse a single long-lived `VlqWriter`
-/// across many box-id computations without per-call `Vec<u8>` allocations.
-/// Byte-identical to `b.box_id()` modulo writer state.
+/// Scratch variant of [`ErgoBox::box_id`]. Clears `w` and serializes canonical
+/// bytes when possible. A parsed whole box returns its received cached ID;
+/// those canonical scratch bytes can therefore hash to a different ID.
+/// If an unchanged received box cannot serialize, its cached ID remains
+/// available and the scratch is cleared. Newly sealed or changed boxes still
+/// propagate writer failures. Identity matches `b.box_id()`.
 pub fn box_id_with(w: &mut VlqWriter, b: &ErgoBox) -> Result<Digest32, WriteError> {
     w.clear();
-    write_ergo_box(w, b)?;
-    Ok(blake2b256(w.as_slice()))
+    if let Err(error) = write_ergo_box(w, b) {
+        w.clear();
+        return b.received_box_id().ok_or(error);
+    }
+    Ok(b.received_box_id()
+        .unwrap_or_else(|| blake2b256(w.as_slice())))
 }
 
 /// Parse a complete box and verify its proposition bytes against a separately
@@ -153,7 +158,7 @@ pub fn parse_ergo_box_bytes(
         )));
     }
 
-    Ok(ErgoBox {
+    let mut parsed = ErgoBox {
         candidate: ErgoBoxCandidate {
             value,
             ergo_tree,
@@ -163,10 +168,13 @@ pub fn parse_ergo_box_bytes(
             tokens,
             additional_registers,
             register_bytes,
+            received_box_identity: None,
         },
         transaction_id,
         index,
-    })
+    };
+    parsed.remember_received_bytes(box_bytes);
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -310,7 +318,8 @@ mod tests {
     // ----- oracle parity -----
 
     /// A box keeps the tree bytes it was read from as `propositionBytes`, and is
-    /// written (and identified) with the canonical tree. Box vectors from SANTA
+    /// written with the canonical tree; its parsed whole-box ID retains the
+    /// received bytes, unlike a newly sealed candidate. Box vectors from SANTA
     /// `Box.tree_count_wrap` #0-#2 and `Box.tree_parse_acceptance` #2/#3
     /// (https://github.com/mwaddip/santa, MIT); expected bytes and
     /// `propositionBytes` are our own sigma-state 6.0.6 JVM runs of
@@ -695,5 +704,212 @@ mod tests {
                 tv.box_id,
             );
         }
+    }
+
+    // ----- independently captured received versus newly sealed identity -----
+
+    fn cached_identity_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../test-vectors/scala/box-cached-identity/cases.json"
+        ))
+        .unwrap()
+    }
+
+    fn captured_whole_box() -> ErgoBox {
+        let fixture = cached_identity_fixture();
+        let bytes = hex::decode(fixture["cases"][0]["cached"].as_str().unwrap()).unwrap();
+        read_ergo_box(&mut VlqReader::new(&bytes)).unwrap()
+    }
+
+    #[test]
+    fn received_whole_box_id_and_new_sealed_id_match_scala() {
+        let fixture = cached_identity_fixture();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 3);
+        for case in cases {
+            let bytes = hex::decode(case["cached"].as_str().unwrap()).unwrap();
+            let mut streaming = bytes.clone();
+            streaming.push(0x42);
+            let activation = case["activation"].as_str().unwrap().parse().unwrap();
+            let mut reader = VlqReader::new(&streaming).with_activated_script_version(activation);
+            let parsed = read_ergo_box(&mut reader).unwrap();
+            assert_eq!(
+                reader.position(),
+                case["consumed"].as_str().unwrap().parse::<usize>().unwrap()
+            );
+            assert_eq!(
+                reader.get_u8().unwrap(),
+                0x42,
+                "only whole-box bytes enter the received ID"
+            );
+            assert_eq!(
+                hex::encode(parsed.box_id().unwrap().as_bytes()),
+                case["id"].as_str().unwrap()
+            );
+            assert_eq!(
+                hex::encode(serialize_ergo_box(&parsed).unwrap()),
+                case["serialized"].as_str().unwrap()
+            );
+            let mut scratch = VlqWriter::new();
+            assert_eq!(
+                box_id_with(&mut scratch, &parsed).unwrap(),
+                parsed.box_id().unwrap()
+            );
+            assert_eq!(
+                hex::encode(scratch.as_slice()),
+                case["serialized"].as_str().unwrap()
+            );
+            let assisted =
+                parse_ergo_box_bytes(&bytes, parsed.candidate.ergo_tree_bytes()).unwrap();
+            assert_eq!(assisted.box_id().unwrap(), parsed.box_id().unwrap());
+            let resealed = ErgoBox::new(
+                parsed.candidate.clone(),
+                parsed.transaction_id,
+                parsed.index,
+            );
+            assert_eq!(
+                hex::encode(resealed.box_id().unwrap().as_bytes()),
+                case["reconstructedId"].as_str().unwrap()
+            );
+            assert_eq!(
+                hex::encode(serialize_ergo_box(&resealed).unwrap()),
+                case["reconstructedBytes"].as_str().unwrap()
+            );
+            assert_ne!(
+                parsed.candidate, resealed.candidate,
+                "identity metadata participates in candidate equality"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_raw_candidate_seals_with_canonical_tree_and_registers() {
+        let parsed = captured_whole_box();
+        let raw = ErgoBoxCandidate::try_from_raw_parts(
+            parsed.candidate.value,
+            parsed.candidate.ergo_tree().clone(),
+            parsed.candidate.ergo_tree_bytes().to_vec(),
+            parsed.candidate.creation_height,
+            parsed.candidate.tokens.clone(),
+            parsed.candidate.additional_registers().clone(),
+            parsed.candidate.register_bytes().to_vec(),
+        )
+        .unwrap();
+        assert_eq!(raw.ergo_tree_bytes(), parsed.candidate.ergo_tree_bytes());
+        assert_eq!(
+            raw.serialized_ergo_tree_bytes(),
+            parsed.candidate.serialized_ergo_tree_bytes()
+        );
+        let sealed = ErgoBox::new(raw, parsed.transaction_id, parsed.index);
+        let fixture = cached_identity_fixture();
+        assert_eq!(
+            hex::encode(sealed.box_id().unwrap().as_bytes()),
+            fixture["cases"][0]["reconstructedId"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn checked_raw_registers_use_captured_canonical_serialization() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/scala/evaluated_value_forms.json"
+        ))
+        .unwrap();
+        let prefix = fixture["box_prefix"]["candidate_prefix_hex"]
+            .as_str()
+            .unwrap();
+        for form in fixture["forms"].as_array().unwrap() {
+            let Some(expected_id) = form["box_id"].as_str().filter(|id| id.len() == 64) else {
+                continue;
+            };
+            let register = form["register_hex"].as_str().unwrap();
+            let bytes = hex::decode(format!("{prefix}{register}")).unwrap();
+            let parsed =
+                crate::ergo_box::read_ergo_box_candidate(&mut VlqReader::new(&bytes)).unwrap();
+            let raw_registers = hex::decode(format!("01{register}")).unwrap();
+            let checked = ErgoBoxCandidate::try_from_raw_parts(
+                parsed.value,
+                parsed.ergo_tree().clone(),
+                parsed.ergo_tree_bytes().to_vec(),
+                parsed.creation_height,
+                parsed.tokens.clone(),
+                parsed.additional_registers().clone(),
+                raw_registers,
+            )
+            .unwrap();
+            assert_eq!(checked.register_bytes(), parsed.register_bytes());
+            let sealed = ErgoBox::new(checked, ModifierId::from_bytes([7; 32]), 3);
+            assert_eq!(
+                hex::encode(sealed.box_id().unwrap().as_bytes()),
+                expected_id,
+                "{}",
+                form["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn received_id_does_not_survive_public_field_changes_or_register_replacement() {
+        let parsed = captured_whole_box();
+        let received_id = parsed.box_id().unwrap();
+        let token = Token {
+            token_id: make_token_id(0x77),
+            amount: 1,
+        };
+        let mutations: [fn(&mut ErgoBox, &Token); 6] = [
+            |b, _| b.candidate.value += 1,
+            |b, _| b.candidate.creation_height += 1,
+            |b, token| b.candidate.tokens.push(token.clone()),
+            |b, _| b.transaction_id = ModifierId::from_bytes([0x33; 32]),
+            |b, _| b.index += 1,
+            |b, _| {
+                b.candidate
+                    .replace_additional_registers(AdditionalRegisters::empty())
+                    .unwrap()
+            },
+        ];
+        for mutate in mutations {
+            let mut changed = parsed.clone();
+            mutate(&mut changed, &token);
+            let expected = blake2b256(&serialize_ergo_box(&changed).unwrap());
+            assert_eq!(changed.box_id().unwrap(), expected);
+            assert_ne!(changed.box_id().unwrap(), received_id);
+            assert_eq!(
+                box_id_with(&mut VlqWriter::new(), &changed).unwrap(),
+                expected
+            );
+        }
+        for (tx, index) in [
+            (ModifierId::from_bytes([0x44; 32]), parsed.index),
+            (parsed.transaction_id, parsed.index + 1),
+        ] {
+            let resealed = ErgoBox::new(parsed.candidate.clone(), tx, index);
+            assert_eq!(
+                resealed.box_id().unwrap(),
+                blake2b256(&serialize_ergo_box(&resealed).unwrap())
+            );
+            assert_ne!(resealed.box_id().unwrap(), received_id);
+        }
+    }
+
+    #[test]
+    fn stale_received_metadata_cannot_hide_writer_failure() {
+        let mut changed = captured_whole_box();
+        changed.candidate.tokens = vec![
+            Token {
+                token_id: make_token_id(0x77),
+                amount: 1
+            };
+            256
+        ];
+        assert!(
+            changed.box_id().is_err(),
+            "changed box must use the writer's existing token-count bound"
+        );
+        let mut writer = VlqWriter::new();
+        assert!(box_id_with(&mut writer, &changed).is_err());
+        assert!(
+            writer.as_slice().is_empty(),
+            "failed scratch writer is cleared"
+        );
     }
 }

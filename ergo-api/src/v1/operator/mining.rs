@@ -162,7 +162,8 @@ pub(crate) struct MiningStatus {
 /// (`identity().mining` + `status().sync_state`); never triggers a `candidate()`
 /// build just to health-check.
 #[utoipa::path(
-    get, path = "/api/v1/mining/status", tag = "mining",
+    get, path = "/api/v1/mining/status",
+    operation_id = "v1_mining_status_get", tag = "mining",
     responses((status = 200, description = "Mining capability and current served-template freshness", body = MiningStatus)),
 )]
 pub(crate) async fn status(State(s): State<OperatorState>) -> Response {
@@ -200,7 +201,8 @@ pub(crate) struct CandidateQuery {
 /// candidate can be built. This CLOSES the finding-3 gap: the flat compat
 /// Both `/mining/candidate` and this v1 path require a configured API key.
 #[utoipa::path(
-    get, path = "/api/v1/mining/candidate", tag = "mining",
+    get, path = "/api/v1/mining/candidate",
+    operation_id = "v1_mining_candidate_get", tag = "mining",
     params(("longpoll" = Option<String>, Query, description = "getblocktemplate-style longpoll id — block until the candidate changes from this msg")),
     responses(
         (status = 200, description = "Work message (WorkMessageJson — Scala-parity shape)", body = serde_json::Value),
@@ -237,7 +239,8 @@ pub(crate) struct InspectionQuery {
 
 /// Operator-only transaction and rent inventory of one frozen template.
 #[utoipa::path(
-    get, path = "/api/v1/mining/candidate-details", tag = "mining",
+    get, path = "/api/v1/mining/candidate-details",
+    operation_id = "v1_mining_candidate_details_get", tag = "mining",
     params(("msg" = Option<String>, Query, description = "32-byte hexadecimal work ID"), ("template_seq" = Option<u64>, Query, description = "Exact retained publish sequence")),
     responses((status = 200, description = "Frozen template inventory and miner proceeds", body = serde_json::Value), (status = 404, description = "Template was evicted or selectors do not match", body = V1Error), (status = 503, description = "No current template", body = V1Error)),
     security(("ApiKeyAuth" = [])),
@@ -261,7 +264,8 @@ pub(crate) async fn candidate_details(
 
 /// Bounded local template and solution history. Resets on restart.
 #[utoipa::path(
-    get, path = "/api/v1/mining/history", tag = "mining",
+    get, path = "/api/v1/mining/history",
+    operation_id = "v1_mining_history_get", tag = "mining",
     responses((status = 200, description = "Bounded operator mining history", body = serde_json::Value), (status = 503, description = "Mining history unavailable", body = V1Error)),
     security(("ApiKeyAuth" = [])),
 )]

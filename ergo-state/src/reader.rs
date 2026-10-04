@@ -24,6 +24,29 @@ use crate::store::{
     HEADERS_BY_HEIGHT, HEADER_CHAIN_INDEX, HEADER_META, MODIFIER_TYPE_INDEX, STATE_META,
 };
 
+pub(crate) fn applied_header_id_in_txn(
+    txn: &redb::ReadTransaction,
+    height: u32,
+) -> Result<Option<[u8; 32]>, StateError> {
+    let table = match txn.open_table(CHAIN_INDEX) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    match table.get(u64::from(height))? {
+        Some(row) => row
+            .value()
+            .try_into()
+            .map(Some)
+            .map_err(|_| StateError::DbCorruption {
+                table: "chain_index",
+                key: hex::encode(u64::from(height).to_be_bytes()),
+                reason: format!("row has len {} (expected 32)", row.value().len()),
+            }),
+        None => Ok(None),
+    }
+}
+
 /// Lock-free read handle over the chain state. Cloning is cheap — the
 /// underlying redb [`Database`] is shared via `Arc`, and every method
 /// opens its own read transaction so concurrent readers are
@@ -263,6 +286,15 @@ impl ChainStoreReader {
             }
             None => Ok(None),
         }
+    }
+
+    /// Header ID on the fully applied block chain. Header-only fork choice
+    /// cannot replace this index; each call reads committed `CHAIN_INDEX`.
+    pub fn get_applied_header_id_at_height(
+        &self,
+        height: u32,
+    ) -> Result<Option<[u8; 32]>, StateError> {
+        applied_header_id_in_txn(&self.db.begin_read()?, height)
     }
 
     /// Active voted-protocol parameters at `height` — the latest row in

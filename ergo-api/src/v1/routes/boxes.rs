@@ -408,7 +408,8 @@ async fn render_unspent_page(
 /// `GET /api/v1/boxes/{box_id}` — a single box. `404 box_not_found` on miss (a
 /// real absent resource, not a disabled subsystem).
 #[utoipa::path(
-    get, path = "/api/v1/boxes/{box_id}", tag = "boxes",
+    get, path = "/api/v1/boxes/{box_id}",
+    operation_id = "v1_boxes_box_id_get", tag = "boxes",
     params(
         ("box_id" = String, Path, description = "64-char lowercase hex box id"),
         ("decode" = Option<bool>, Query, description = "Semantic-decode the box contract"),

@@ -520,7 +520,8 @@ pub struct LightStatus {
 /// wires a chain reader at all (the prover hooks live on it); a node without
 /// one honestly advertises `false` rather than 404.
 #[utoipa::path(
-    get, path = "/api/v1/light/status", tag = "light",
+    get, path = "/api/v1/light/status",
+    operation_id = "v1_light_status_get", tag = "light",
     responses(
         (status = 200, description = "Light-client serving capability advertisement", body = LightStatus),
     ),

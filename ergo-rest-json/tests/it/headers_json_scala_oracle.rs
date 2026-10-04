@@ -1,19 +1,19 @@
 //! Scala-node JSON → `Header` parity oracle.
 //!
-//! Two fixtures, both captured VERBATIM from live Scala nodes — nothing
-//! re-serialized or hand-edited, so every derived field is an EXTERNAL
-//! oracle:
+//! Two JSON projections captured from Scala nodes, retaining observed field
+//! values and derived identifiers. JSON reconstruction does not preserve lexical
+//! whitespace, numeric spelling or object formatting:
 //!
 //! - `test-vectors/testnet/headers_json/scala_headers_442325_442334.json`:
 //!   10 CONSECUTIVE header bodies from `arks-testnet-node` 6.0.3
 //!   (`GET http://127.0.0.1:9062/blocks/{id}/header`, heights
 //!   442325-442334, captured 2026-07-12). That chain carries version-4
-//!   headers from genesis, i.e. the Autolykos **v2** solution layout.
+//!   headers at these heights, i.e. the Autolykos **v2** solution layout.
 //! - `test-vectors/mainnet/headers_json/scala_headers_v1_mainnet.json`:
 //!   10 header bodies from a live mainnet node
 //!   (`GET http://127.0.0.1:9053/blocks/{id}/header`, heights 1-9 and
 //!   15, captured 2026-09-03) — the Autolykos **v1** layout, which the
-//!   testnet chain cannot cover because it has no v1 headers.
+//!   testnet corpus does not cover (testnet genesis is a separate v1 exception).
 //!
 //! For both, the same contract holds:
 //!

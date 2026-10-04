@@ -3,9 +3,9 @@
 //! routes (#24, #25).
 //!
 //! Pinned behavior:
-//! - Body is a JSON-string holding the hex-encoded canonical
+//! - Body is a JSON-string holding the hex-encoded received
 //!   `ErgoTree.bytes`.
-//! - Both routes hex-decode → parse → re-serialize → blake2b256 the
+//! - Both routes hex-decode → parse → hash the received bytes of the
 //!   tree. The resulting tree_hash is the same key the indexer's
 //!   address-keyed tables use, so the dispatch lands on
 //!   `address_boxes_paged` / `address_unspent_paged` without any new
@@ -131,10 +131,87 @@ async fn post_by_ergo_tree_400_on_limit_above_max() {
     assert_eq!(body["detail"], "No more than 16384 boxes can be requested");
 }
 
+// ---------------- native persisted identity oracle -----------------------
+
+#[tokio::test]
+async fn received_tree_query_finds_native_index_rows_without_normalizing_key() {
+    use ergo_indexer::{apply_block, IndexerBlock, IndexerStore};
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+    use ergo_ser::transaction::Transaction;
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/scala/tree-cached-identity/cases.json"
+    ))
+    .unwrap();
+    let case = &fixture["cases"][0];
+    let tree_hex = case["cached_tree_hex"].as_str().unwrap();
+    let raw = hex::decode(tree_hex).unwrap();
+    let normalized = hex::decode(case["serialized_tree_hex"].as_str().unwrap()).unwrap();
+    assert_ne!(blake2b256(&raw), blake2b256(&normalized));
+    let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&raw)).unwrap();
+    let candidate = ErgoBoxCandidate::try_from_raw_parts(
+        1_000_000,
+        tree,
+        raw,
+        1,
+        Vec::new(),
+        AdditionalRegisters::empty(),
+        vec![0],
+    )
+    .unwrap();
+    let tx = Transaction {
+        inputs: vec![Input {
+            box_id: Digest32::from_bytes([0x12; 32]),
+            spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: Vec::new(),
+        output_candidates: vec![candidate.clone(), candidate],
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let (store, _) = IndexerStore::open(&temporary.path().join("indexer.redb")).unwrap();
+    let handle = IndexerHandle::with_store(store, 0);
+    let store = handle.store().unwrap();
+    let block = IndexerBlock {
+        height: 1,
+        header_id: Digest32::from_bytes([0x13; 32]),
+        transactions: &[tx],
+    };
+    apply_block(&store, &store.read_meta().unwrap(), &block).unwrap();
+    handle.set_status(IndexerStatus::CaughtUp);
+    let app = build_app(Arc::new(handle));
+    for (path, request, expected) in [
+        ("/blockchain/box/byErgoTree", serde_json::json!(tree_hex), 2),
+        (
+            "/blockchain/box/unspent/byErgoTree",
+            serde_json::json!(tree_hex),
+            1,
+        ),
+        (
+            "/api/v1/boxes/by-ergo-tree",
+            serde_json::json!({"ergo_tree":tree_hex}),
+            2,
+        ),
+        (
+            "/api/v1/boxes/unspent/by-ergo-tree",
+            serde_json::json!({"ergo_tree":tree_hex}),
+            1,
+        ),
+    ] {
+        let (status, body) = json_post(app.clone(), path, &request.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        let items = body
+            .as_array()
+            .or_else(|| body["items"].as_array())
+            .expect("box collection");
+        assert_eq!(items.len(), expected, "{path}: {body}");
+    }
+}
+
 // ---------------- P5 overlay (slice 7) -------------------------------------
 //
 // `unspent/byErgoTree` dispatches by `tree_hash` after hex-decoding +
-// re-serializing the body, so its overlay is byte-identical to
+// validating the received bytes, so its overlay is byte-identical to
 // `unspent/byAddress`: same `pool_unspent_for_tree` filter on pool
 // outputs, same `Segment.scala:265` confirmed filter, same DESC/ASC
 // merge order, same `[inherited]` paging quirk. These tests pin the
@@ -169,7 +246,7 @@ async fn unspent_overlay_include_unconfirmed_appends_matching_pool_output() {
     assert_eq!(entry["value"], 7_000_000);
 }
 
-// Pool outputs whose canonical `tree_hash` doesn't match the queried
+// Pool outputs whose received-byte `tree_hash` doesn't match the queried
 // ergotree are excluded — overlay is per-tree, not "show me the pool".
 #[tokio::test]
 async fn unspent_overlay_pool_output_for_other_tree_excluded() {

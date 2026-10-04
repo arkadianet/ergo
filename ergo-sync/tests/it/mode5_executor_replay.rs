@@ -428,9 +428,9 @@ fn mode5_executor_replay_reproduces_mainnet_state_roots() {
         "final root must equal mainnet's"
     );
     assert!(crossed_boundary, "run must cross the epoch boundary");
-    assert!(
-        data_input_blocks > 0,
-        "run must include data-input blocks, got {data_input_blocks}"
+    assert_eq!(
+        data_input_blocks, 55,
+        "advertised data-input-block denominator"
     );
 }
 

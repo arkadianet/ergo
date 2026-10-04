@@ -698,11 +698,9 @@ fn inject_local_full_block(
     // raw `process_header_cfg` would have stranded those orphans
     // indefinitely.
     //
-    // `HeaderProcessError::Deserialize` here means "re-parse of a
-    // persisted parent header failed" — NOT "caller sent bad bytes".
-    // We already parsed the caller bytes successfully at the top
-    // (`read_header(&mut r)`), so any Deserialize from process_local_header
-    // is internal-state corruption, not a submitter error.
+    // Incoming parse/validation failures are submitter rejections. Stored
+    // parent integrity and local arithmetic/caller-contract failures are
+    // separately typed and reported as internal errors.
     match state.executor.process_local_header(
         &mut state.store,
         &mut state.coordinator,
@@ -728,56 +726,29 @@ fn inject_local_full_block(
             // hiccup on a section write). All downstream calls are
             // store-write-idempotent.
         }
-        Err(
-            e @ (HeaderProcessError::ParentNotFound { .. }
-            | HeaderProcessError::Invalid { .. }
-            | HeaderProcessError::HeightMismatch { .. }
-            | HeaderProcessError::TooOld { .. }
-            | HeaderProcessError::EpochContextIncomplete { .. }
-            | HeaderProcessError::EpochHeaderMissing { .. }
-            | HeaderProcessError::CheckpointMismatch { .. }
-            | HeaderProcessError::GenesisIdMismatch { .. }
-            | HeaderProcessError::Validation(_)),
-        ) => {
+        Err(e) => {
+            if e.is_local_failure() {
+                let chain = state.store.chain_state_meta();
+                ergo_state::storage_observability::report_storage_failure(
+                    &ergo_state::storage_observability::StorageFailureContext {
+                        subsystem: "mining",
+                        component: "mined_block_persistence",
+                        database_path: Some(state.store.database_path()),
+                        operation: "mined_block_store_header",
+                        best_full_block_height: Some(chain.best_full_block_height),
+                        best_header_height: Some(chain.best_header_height),
+                        attempted_height: None,
+                    },
+                    &e,
+                );
+                return Err(SubmitError {
+                    reason: "internal_error".to_string(),
+                    detail: Some(format!("local header apply failure: {e}")),
+                });
+            }
             return Err(SubmitError {
                 reason: "header_rejected".to_string(),
                 detail: Some(format!("header rejected by validator: {e}")),
-            });
-        }
-        Err(e @ HeaderProcessError::Storage(_)) => {
-            let chain = state.store.chain_state_meta();
-            ergo_state::storage_observability::report_storage_failure(
-                &ergo_state::storage_observability::StorageFailureContext {
-                    subsystem: "mining",
-                    component: "mined_block_persistence",
-                    database_path: Some(state.store.database_path()),
-                    operation: "mined_block_store_header",
-                    best_full_block_height: Some(chain.best_full_block_height),
-                    best_header_height: Some(chain.best_header_height),
-                    attempted_height: None,
-                },
-                &e,
-            );
-            return Err(SubmitError {
-                reason: "internal_error".to_string(),
-                detail: Some(format!("local store error during header apply: {e}")),
-            });
-        }
-        Err(e @ HeaderProcessError::Deserialize(_)) => {
-            let diagnostics = ergo_state::storage_observability::ErrorDiagnostics::from_error(&e);
-            tracing::error!(
-                event = "mined_block_header_failure",
-                subsystem = "mining",
-                component = "mined_block_persistence",
-                operation = "mined_block_reparse_header",
-                error = %diagnostics.display,
-                error_debug = %diagnostics.debug,
-                error_chain = %diagnostics.chain,
-                "mined block header persistence failed",
-            );
-            return Err(SubmitError {
-                reason: "internal_error".to_string(),
-                detail: Some(format!("local store error during header apply: {e}")),
             });
         }
     }

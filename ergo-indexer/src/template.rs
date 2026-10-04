@@ -29,7 +29,7 @@ use ergo_ser::ergo_tree::{template_hash_from_bytes, TemplateHashError};
 use redb::{ReadableTable, Table};
 
 use crate::error::IndexerError;
-use crate::segment::{read_segment, write_segment, Segment};
+use crate::segment::{read_persisted_segment, write_segment, Segment};
 
 /// Parent record under `INDEXED_TEMPLATE`, keyed by `template_hash`.
 ///
@@ -72,7 +72,7 @@ pub fn read_indexed_template(r: &mut VlqReader) -> Result<IndexedTemplate, ReadE
     let mut hash_arr = [0u8; 32];
     hash_arr.copy_from_slice(hash_bytes);
     let template_hash = Digest32::from_bytes(hash_arr);
-    let segment = read_segment(r)?;
+    let segment = read_persisted_segment(r)?;
     Ok(IndexedTemplate {
         template_hash,
         segment,
@@ -82,23 +82,20 @@ pub fn read_indexed_template(r: &mut VlqReader) -> Result<IndexedTemplate, ReadE
 /// Derive the template hash for a box's `ergo_tree` bytes for indexer use.
 ///
 /// Returns:
-/// - `Ok(Some(hash))` when the tree parses cleanly and the template is
-///   well-defined. The indexer must record this output / input under
-///   the returned `template_hash`.
-/// - `Ok(None)` when the tree was wrapped by the soft-fork unparseable
-///   path (`TemplateHashError::Unparseable`). The indexer must skip
-///   template recording for this output rather than emit a hash that
-///   would collide across all unparseable trees — Scala's
-///   `IndexedContractTemplate.scala` simply throws on these, so
-///   unparsed outputs are never recorded under a template.
-/// - `Err(IndexerError::HashDerivation)` when the parsed tree's body
-///   fails to reserialize. The same bytes already round-tripped at box
-///   decode/encode, so a write failure here implies a serializer bug,
-///   not row corruption.
-/// - `Err(IndexerError::DbDecode)` when the bytes fail to re-parse
-///   under the wrap-tracking reader. Carries the underlying
-///   `ergo_primitives::reader::ReadError` — same divergence class as
-///   any other row-decode mismatch.
+/// - `Ok(Some(hash))` for every completely parsed tree, including one wrapped
+///   by the soft-fork path. Like Scala's `hashTreeTemplate`, a wrapped tree is
+///   keyed by the template re-read from its retained bytes, or by the hash of
+///   those bytes where that re-read fails. The indexer must record this
+///   output / input under the returned `template_hash`.
+/// - `Ok(Some(hash))` of the tree bytes themselves when they do not re-read
+///   as one tree. A box can retain such bytes: a size-delimited tree whose
+///   body fails soft-forkably is wrapped at its declared size, which may end
+///   inside its constants. Scala's `hashTreeTemplate` catches any failure of
+///   `tree.template` and falls back to `Algos.hash(tree.bytes)`, so any
+///   consensus-valid output indexes rather than halting the indexer.
+/// - `Ok(None)` / `Err(IndexerError::HashDerivation)`: the shared
+///   `TemplateHashError` arms that only the structured `template_hash`
+///   produces; the received-bytes helper never returns them.
 pub(crate) fn template_hash_for_box_bytes(
     tree_bytes: &[u8],
 ) -> Result<Option<Digest32>, IndexerError> {
@@ -109,10 +106,9 @@ pub(crate) fn template_hash_for_box_bytes(
             context: "template_hash",
             source,
         }),
-        Err(TemplateHashError::Parse(source)) => Err(IndexerError::DbDecode {
-            context: "template_hash_tree_bytes",
-            source,
-        }),
+        Err(TemplateHashError::Parse(_)) => {
+            Ok(Some(crate::segment_id::tree_hash_from_bytes(tree_bytes)))
+        }
     }
 }
 
@@ -204,6 +200,31 @@ mod tests {
         bytes
     }
 
+    // ----- Scala hashTreeTemplate fallback -----
+
+    /// A box may carry a size-delimited tree whose declared size ends inside
+    /// its segregated constants: the box reader keeps it as a soft-fork wrap,
+    /// but those bytes do not re-read as one tree. Scala's `hashTreeTemplate`
+    /// catches the failed `template` and keys the box by the hash of its tree
+    /// bytes, so such an output must index rather than halt the indexer.
+    #[test]
+    fn unreadable_wrapped_tree_bytes_key_by_their_own_hash() {
+        // value 1; tree `18 01 01` declares a one-byte body, but its constant
+        // runs on into `09`, a type code version-0 trees may not use, so the
+        // reader wraps the declared bytes and rewinds: `09` is then the
+        // creation height, followed by no tokens and no registers.
+        let box_bytes = hex::decode("01180101090000").unwrap();
+        let candidate =
+            ergo_ser::ergo_box::read_ergo_box_candidate(&mut VlqReader::new(&box_bytes)).unwrap();
+        let tree_bytes = candidate.ergo_tree_bytes();
+        assert_eq!(tree_bytes, [0x18, 0x01, 0x01]);
+        assert!(template_hash_from_bytes(tree_bytes).is_err());
+        assert_eq!(
+            template_hash_for_box_bytes(tree_bytes).unwrap(),
+            Some(crate::segment_id::tree_hash_from_bytes(tree_bytes))
+        );
+    }
+
     // ----- happy path -----
 
     #[test]
@@ -270,27 +291,17 @@ mod tests {
     }
 
     #[test]
-    fn template_hash_for_box_bytes_returns_none_for_block_1702686_unparseable() {
-        // Block 1,702,686 size-flagged non-SigmaProp tree — the
-        // soft-fork wrap path. Indexer must skip template recording
-        // rather than emit a colliding hash.
+    fn template_hash_for_box_bytes_keys_block_1702686_wrapped_tree_like_scala() {
+        // Block 1,702,686 size-flagged non-SigmaProp tree — the soft-fork
+        // wrap path. Scala records it under its cached template, the bytes
+        // after the header and size (pinned in ergo-ser from sigma-state).
         let hex = "092f0204a00b08cd021dde34603426402615658f1d970cfa7c7bd92ac81a8b16ee20427901040404040004020504040402";
         let bytes = hex::decode(hex).unwrap();
-        let result = template_hash_for_box_bytes(&bytes).unwrap();
-        assert!(
-            result.is_none(),
-            "unparseable soft-fork tree must yield None for skip"
+        let result = template_hash_for_box_bytes(&bytes).unwrap().unwrap();
+        assert_eq!(
+            hex::encode(result.as_bytes()),
+            "c7f899c5518eddc86a5052a932551fd54706cd8d12641150b160c25cdbd4befd"
         );
-    }
-
-    #[test]
-    fn template_hash_for_box_bytes_returns_none_for_v4_softfork_tree() {
-        // Tree header 0x0C declares v4 + has_size; current code only
-        // supports v1-v3, so the bytes path must surface Unparseable
-        // (mapped to None for the indexer skip contract).
-        let bytes = hex::decode("0C0100").unwrap();
-        let result = template_hash_for_box_bytes(&bytes).unwrap();
-        assert!(result.is_none(), "v4 tree must yield None");
     }
 
     // ----- error paths -----

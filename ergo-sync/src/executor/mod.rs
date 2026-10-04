@@ -7,9 +7,11 @@
 //! - PeerManager (penalties, peer state)
 //!
 //! The executor owns:
-//! - ProtocolParams (mainnet defaults; epoch-boundary updates not yet implemented)
-//! - Recent validated header window (last 10 CheckedHeaders for CONTEXT.headers)
-//!   Must be hydrated from store on startup via hydrate_from_store().
+//! - Fallback ProtocolParams; block processing derives runtime numeric and
+//!   cumulative validation settings from state, including target epoch updates.
+//! - Best-header window (50 entries) for SyncInfo V2, hydrated on startup.
+//! - Applied-block context window (10 entries); block scripts receive 9
+//!   ancestors, while upcoming candidate/mempool contexts receive 10.
 //! - The feedback loop: action results → coordinator state updates
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -76,13 +78,13 @@ fn report_sync_storage_failure(
 /// the branch (it might be our bug, a stale local root, or missing data).
 ///
 /// Only the consensus-rule verdicts qualify: `Validation`,
-/// `TransactionValidation`, `HeaderMeta`, `EpochExtension`, and
+/// `TransactionValidation`, `EpochExtension`, and
 /// `AdProofsHashMismatch` (the regenerated proof
 /// hash contradicting the header's declared `adProofsRoot` is exactly
 /// Scala's "Regenerated proofHash is not equal to the declared one"
 /// reject). `TransactionValidation` has the same durable-invalidation semantics
-/// as `Validation`. `Deserialize`, `HeaderNotFound`, `ParentNotFound`, and `State`
-/// are data/IO/consistency paths (a stored section that won't parse could
+/// as `Validation`. `Deserialize`, `HeaderNotFound`, `ParentNotFound`, `State`,
+/// and `HeaderMeta` are data/IO/consistency paths (a stored section that won't parse could
 /// be disk corruption, not a bad block); `DigestApply` is session-scoped by
 /// its own contract. When in doubt we do NOT invalidate — the conservative
 /// direction, since a wrongly persisted invalidity would permanently orphan
@@ -99,14 +101,13 @@ fn is_validation_verdict(e: &BlockProcessError) -> bool {
         e,
         BlockProcessError::Validation(_)
             | BlockProcessError::TransactionValidation { .. }
-            | BlockProcessError::HeaderMeta(_)
             | BlockProcessError::EpochExtension(_)
             | BlockProcessError::AdProofsHashMismatch { .. }
     )
 }
 
-/// Maximum number of recent headers kept for CONTEXT.headers and SyncInfo cache.
-/// Sized to cover SyncInfo V2's 50-header requirement plus script evaluation.
+/// Number of best-header ancestors cached for SyncInfo V2. Applied-block
+/// script context uses the separately aligned `block_context_headers`.
 const LAST_HEADERS_WINDOW: usize = 50;
 
 /// Sync-S2 low-watermark for drain-triggered download refill.
@@ -178,6 +179,9 @@ pub struct SyncExecutor {
     /// because `finalize_header` consumes the `PreValidatedHeader`
     /// and storage needs the bytes.
     orphan_headers: HashMap<[u8; 32], Vec<OrphanHeaderEntry>>,
+    /// Buckets containing headers blocked on older epoch ancestors, rather
+    /// than their immediate parent. Retry once on subsequent header progress.
+    context_retry_parents: HashSet<[u8; 32]>,
     /// Total entries across all `orphan_headers` values — kept in
     /// sync on insert/remove so `cap_orphan_buffer` and the
     /// `mem_csv` reporter don't have to recount on every read.
@@ -266,6 +270,7 @@ impl SyncExecutor {
             full_candidate_height: None,
             recently_installed: HashSet::new(),
             orphan_headers: HashMap::new(),
+            context_retry_parents: HashSet::new(),
             orphan_headers_len: 0,
             header_index: BTreeMap::new(),
             recovery_done: false,
@@ -454,6 +459,16 @@ impl SyncExecutor {
         now: Instant,
         wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) -> Vec<Action> {
+        // Recheck the current mode even for actions queued before a mode
+        // transition, or supplied by a public caller outside the coordinator.
+        if coordinator.should_skip_block_sections()
+            && matches!(
+                action,
+                Action::PersistSection { .. } | Action::AssembleBlock { .. }
+            )
+        {
+            return Vec::new();
+        }
         match action {
             Action::ValidateHeader {
                 peer,

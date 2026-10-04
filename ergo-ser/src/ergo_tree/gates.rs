@@ -156,11 +156,10 @@ pub fn check_resolvable_methods(tree: &ErgoTree) -> Result<(), ReadError> {
 /// as `UnparsedErgoTree` during the parse (Scala's `sizeOpt == Some` arm), so the
 /// wrapped tree's body is `Unparsed` and `determinable_root_type` returns `None`
 /// here. The reachable case is therefore a sizeless v0 tree (rule 1012 already
-/// hard-rejects a sizeless `version != 0` tree). Our untyped IR can only judge a
-/// determinable root — an inline `Const` or a `ConstPlaceholder` resolving to its
-/// segregated constant's type; a bare Boolean/Int root (e.g. `000173`) is the
-/// reachable accept-invalid case. An `Op` root has no typechecker and would fail
-/// at evaluation instead.
+/// hard-rejects a sizeless `version != 0` tree). Conservative root inference
+/// covers constants/placeholders and known opcode/method result types. An
+/// unknown result stays undecidable here; this is not a complete typechecker
+/// or a proof that the expression will evaluate successfully.
 ///
 /// Enforced at the box-script readers (alongside [`check_header_size_bit`]) — the
 /// node's lenient codec accepts a box storing such a tree, never spends it (so the

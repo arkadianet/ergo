@@ -877,28 +877,22 @@ proposition) — asserted for every lowering below.
    `SizeOf` over a `Coll` CONSTANT (not a literal — `x.toBytes.size`) is
    NOT folded (oracle-pinned; the `CollConst.length` graph rule does not
    fire for a lifted `toBytes`/`toBits` constant).
-5. **Post-write self-check** (`compile`): the tree bytes are re-read before
-   any address is derived; a failure is a `CompileError::Serializer` reject
-   (wrong-accept strands funds, wrong-reject surfaces a user error). The
-   re-read runs under the ACTIVATED-version axis (`tree_version`) via
-   `read_ergo_tree_with_activated_version`, NOT the emitted header version
-   (always 0) — because Scala gates V6-EMBEDDABLE TYPE CODES
-   (`SUnsignedBigInt`, …) on the ACTIVATED version
-   (`TypeSerializer.getEmbeddableType` → `VersionContext.isV6Activated`,
-   `VersionContext.scala:33`; deser under `withVersions(activatedVersion,
-   treeVersion)`, `ErgoTreeSerializer.scala:148-154`).
-   (a) **V6-type-code-under-v0-header family — GENUINE ACCEPT.** A
-   `tree_version >= 3` compile emits a
-   header-v0 tree whose body carries a V6 type code, e.g.
-   `getVar[UnsignedBigInt](1)` → `1000d1e6e30109` /
-   `SELF.R4[UnsignedBigInt].isDefined` → `1000d1e6c6a70409`. Scala
-   re-parses these fine on a V6-ACTIVATED network (the embeddable gate is on
-   the activated version, not the tree header — bytes neither side's
-   version-gated reader could re-parse would strand funds, but that is not
-   what happens here). The only thing rejecting them was OUR self-check reading on the
-   wrong (header-version) axis; the activated-version reader now ACCEPTS all
-   7 captured blast-radius shapes byte-identically to the oracle (pinned in
-   `tree/mod.rs` `compile_v6_embeddable_type_code_under_v0_header_accepts_at_tv3_matching_oracle`).
+5. **Post-write self-check** (`compile`): bytes are re-read before addresses
+   are derived; local read failure returns `CompileError::Serializer`. The
+   frontend version supplies ambient activation but cannot replace the emitted
+   header0 type table. Pinned6.0.6 `TypeSerializer.embeddableIdToType` chooses
+   table membership by ErgoTree version; activation selects validation rules.
+   (a) **V6 type codes under header0 — explicit validation refusal.** Scala's
+   frontend3 compiles all seven ordinary examples captured in
+   `test-vectors/ergoscript/compiled-reader`, including
+   `SELF.R4[UnsignedBigInt].isDefined` → `1000d1e6c6a70409`. Its independent
+   reader rejects all seven header0 outputs at activated1/2/3, while header3
+   controls parse at activated3. The earlier activated-table override and
+   “GENUINE ACCEPT” claim were incorrect. Rust now returns a structured local
+   validation error before address derivation. This deliberately differs from
+   the reference compiler's successful emission, preserves actual captured
+   outputs/verdicts, and does not alter incoming consensus gates or emit a new
+   header. A local successful read alone does not establish spendability.
    (b) **the UBI-fold family (NF-1)** — the INLINE-constant cases whose
    fold Scala performs now fold on OUR
    side too: `unsignedBigInt("1") == unsignedBigInt("1")` folds via the
@@ -912,8 +906,8 @@ proposition) — asserted for every lowering below.
    which gates v6-only constant DATA/VALUES on the header-0 wire — distinct
    from the embeddable-TYPE-code axis fixed in (a)) must NOT be weakened. The
    val-bound `Coll[UnsignedBigInt]()` under `.size` folds the UBI off the
-   wire before either gate, so it too is byte-exact. No self-check
-   reject-side divergence remains.
+   wire before either gate, so it too is byte-exact. The header0 type-code refusal in (a) remains an explicit compiler policy
+   distinction; folded v0 outputs do not carry that unsupported type.
 
 ### D-C7 — no IR optimization pass: proposition-shape (and P2SH) parity only for transform-free trees (wave 3)
 

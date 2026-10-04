@@ -252,18 +252,21 @@ pub fn validate_full_block_with_costs(
         height: header.height,
         miner_pubkey: *header.solution.pk().as_bytes(),
         pre_header_timestamp: header.timestamp,
-        // Scala derives this from the voted parameters' `blockVersion`
-        // (`ErgoStateContext.scala:109`); `exBlockVersion` (`:222`) pins that
-        // value to `header.version` for every accepted block, so the header is
-        // an equivalent source.
-        activated_script_version: header.version.saturating_sub(1),
+        // Scala derives this from the target block's parameters
+        // (`ErgoContext.activatedScriptVersion = stateContext.blockVersion - 1`,
+        // `ErgoStateContext.blockVersion = currentParameters.blockVersion`).
+        // `exBlockVersion` ties those parameters to `header.version` only at
+        // epoch starts, so a mid-epoch header's version is not a substitute.
+        activated_script_version: crate::voting::derive_activated_script_version(
+            ctx.params.block_version,
+        ),
         pre_header_version: header.version,
         pre_header_parent_id: *header.parent_id.as_bytes(),
         pre_header_n_bits: header.n_bits as u64,
         pre_header_votes: header.votes,
     };
 
-    let mut overlay = BlockUtxoOverlay::new(ctx.utxo);
+    let mut overlay = BlockUtxoOverlay::new(ctx.utxo, txs);
     let mut checked_txs = Vec::with_capacity(txs.len());
     let mut total_block_cost: u64 = 0;
 
@@ -296,9 +299,9 @@ pub fn validate_full_block_with_costs(
             .collect::<Result<_, _>>()?;
 
         // Resolve data inputs through `BlockUtxoOverlay::get_box_from_base`,
-        // which returns the union of pre-block UTXO + intra-block creates
-        // without filtering on `spent_in_block`. See the helper's rustdoc
-        // for the mainnet oracle evidence (blocks 290684 + 422179).
+        // which returns the union of pre-block UTXO + every output of the
+        // block without filtering on `spent_in_block`. See the helper's
+        // rustdoc for the Scala rule and mainnet oracle evidence.
         let resolved_data_inputs: Vec<ErgoBox> = tx
             .data_inputs
             .iter()
@@ -345,7 +348,7 @@ pub fn validate_full_block_with_costs(
 
         costs.push((i, cost.total_block_cost()));
         total_block_cost += cost.total_block_cost();
-        overlay.apply_tx(checked.transaction());
+        overlay.apply_tx(i, checked.transaction());
         checked_txs.push(checked);
     }
 
@@ -365,29 +368,24 @@ pub fn validate_full_block_with_costs(
     ))
 }
 
-/// Parallel equivalent of [`validate_full_block`]: topologically layers the
-/// block's transactions by intra-block dependency, then validates each layer
-/// via `rayon::par_iter`. Identical output to the sequential path for any
-/// block the sequential path accepts (and for every rejection — first-failing
-/// tx by index wins, matching Scala's error-order semantics).
+/// Layered parallel block validation. Backward dependencies determine layers;
+/// resolution is serial within each layer, followed by parallel transaction
+/// validation and original-index collection of that layer's results. Successful
+/// results are returned in original block order, with summed transaction costs.
 ///
-/// Consensus invariants held constant across both paths:
-/// - Per-tx structural / monetary / script validation is untouched — same
-///   `validate_transaction_parsed` call, same `CostAccumulator`, same
-///   `TransactionContext`.
-/// - Section-id linkage + merkle-root checks are performed identically and
-///   up-front, before any per-tx work.
-/// - Total block cost is summed from per-tx totals after all layers finish;
-///   `max_block_cost` comparison is the exact same inequality.
-/// - Returned `CheckedBlock.transactions()` is ordered by original tx index,
-///   so downstream AVL application mutates the UTXO tree in consensus order.
-/// - Intra-block double-spend (two txs listing the same input box_id) is
-///   rejected up front via `build_tx_layers` rather than being caught
-///   implicitly by the sequential overlay's spent-set.
+/// Rejection order is deterministic for a fixed block and context, but differs
+/// from the sequential test path: an earlier layer can fail before a lower-index
+/// transaction in a later layer; any layer-wide resolution error precedes that
+/// layer's script failures. Within the parallel validation results, the lowest
+/// failing index in the current layer wins. Double spends are rejected up front.
 ///
-/// Only difference visible to callers: errors report the first-by-index
-/// failing tx, which matches sequential behavior. If two txs in the same
-/// layer fail concurrently, the lower tx index is reported (deterministic).
+/// Data inputs resolve against every output of the block, independent of
+/// layering, as in the sequential path and Scala's `createdOutputs`; a data
+/// input naming a later transaction's output is valid. Regular inputs see
+/// only outputs committed by lower layers. A forward spend that resolves
+/// because its producer happens to sit in a lower layer is still rejected
+/// when the block's removals apply before that insertion, as in Scala's
+/// ordered `boxChanges`.
 fn validate_full_block_parallel_impl(
     checked_header: CheckedHeader,
     block_transactions: &BlockTransactions,
@@ -542,18 +540,21 @@ fn validate_full_block_parallel_impl(
         height: header.height,
         miner_pubkey: *header.solution.pk().as_bytes(),
         pre_header_timestamp: header.timestamp,
-        // Scala derives this from the voted parameters' `blockVersion`
-        // (`ErgoStateContext.scala:109`); `exBlockVersion` (`:222`) pins that
-        // value to `header.version` for every accepted block, so the header is
-        // an equivalent source.
-        activated_script_version: header.version.saturating_sub(1),
+        // Scala derives this from the target block's parameters
+        // (`ErgoContext.activatedScriptVersion = stateContext.blockVersion - 1`,
+        // `ErgoStateContext.blockVersion = currentParameters.blockVersion`).
+        // `exBlockVersion` ties those parameters to `header.version` only at
+        // epoch starts, so a mid-epoch header's version is not a substitute.
+        activated_script_version: crate::voting::derive_activated_script_version(
+            ctx.params.block_version,
+        ),
         pre_header_version: header.version,
         pre_header_parent_id: *header.parent_id.as_bytes(),
         pre_header_n_bits: header.n_bits as u64,
         pre_header_votes: header.votes,
     };
 
-    let mut overlay = BlockUtxoOverlay::new(ctx.utxo);
+    let mut overlay = BlockUtxoOverlay::new(ctx.utxo, txs);
     let mut checked_slots: Vec<Option<CheckedTransaction>> = (0..txs.len()).map(|_| None).collect();
     let mut total_block_cost: u64 = 0;
 
@@ -664,9 +665,9 @@ fn validate_full_block_parallel_impl(
         // Step 3: deterministic error ordering + commit. Layer members
         // are already sorted ascending by tx index in `build_tx_layers`,
         // and par_iter preserves input order in collect, so iterating
-        // `layer_results` is ascending. First Err wins — matches the
-        // sequential path's early-return on first failing tx (Scala
-        // parity). The owned `ValidationError` is taken directly from
+        // `layer_results` is ascending. The first Err in THIS layer wins;
+        // earlier resolution/layer errors may precede lower original indices.
+        // The owned `ValidationError` is taken directly from
         // the parallel result, not reconstructed by re-running the
         // failing tx through a second validator instance.
         let mut successes: Vec<(usize, CheckedTransaction, u64)> =
@@ -685,7 +686,7 @@ fn validate_full_block_parallel_impl(
         // sequential path's commit order.
         for (i, checked, tx_cost) in successes {
             total_block_cost += tx_cost;
-            overlay.apply_tx(checked.transaction());
+            overlay.apply_tx(i, checked.transaction());
             checked_slots[i] = Some(checked);
             if let Some(ref mut v) = costs_out {
                 v.push((i, tx_cost));

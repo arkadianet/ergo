@@ -12,7 +12,8 @@ use super::OperatorState;
 use crate::v1::error::Reason;
 
 #[utoipa::path(
-    get, path = "/api/v1/mining/policy", tag = "mining",
+    get, path = "/api/v1/mining/policy",
+    operation_id = "v1_mining_policy_get", tag = "mining",
     responses((status = 200, description = "Active durable block assembly policy", body = Value)),
     security(("ApiKeyAuth" = [])),
 )]
@@ -28,7 +29,8 @@ pub(crate) async fn get(State(state): State<OperatorState>) -> Response {
 }
 
 #[utoipa::path(
-    put, path = "/api/v1/mining/policy", tag = "mining",
+    put, path = "/api/v1/mining/policy",
+    operation_id = "v1_mining_policy_put", tag = "mining",
     request_body = Value,
     responses(
         (status = 200, description = "Saved policy; previously offered templates retired", body = Value),
