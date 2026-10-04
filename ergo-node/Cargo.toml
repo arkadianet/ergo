@@ -31,6 +31,7 @@ ergo-mining     = { workspace = true }
 ergo-indexer    = { workspace = true }
 ergo-api        = { workspace = true }
 ergo-rest-json  = { workspace = true }
+redb_legacy     = { workspace = true }
 redb            = { workspace = true, features = ["logging"] }
 bincode         = { workspace = true }
 arc-swap        = { workspace = true }
@@ -65,7 +66,6 @@ rand               = { workspace = true }
 ergo-sigma         = { workspace = true }
 
 [dev-dependencies]
-redb_legacy = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 ergo-api           = { workspace = true }
