@@ -77,6 +77,9 @@ pub struct DiscoveryCoverageDto {
     pub anchor_height: u32,
     pub anchor_header_id: String,
     pub history_complete: bool,
+    pub covered_pubkeys: Vec<String>,
+    /// Keys added since discovery; nonempty means discovery is required again.
+    pub uncovered_pubkeys: Vec<String>,
 }
 
 /// Key-derivation mode for `restore` (tagged). Required — no default (the

@@ -428,3 +428,46 @@ fn corrupt_discovery_metadata_invalidates_wallet_without_aborting_rollback() {
     txn.commit().unwrap();
     assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
 }
+
+#[test]
+fn discovery_persists_key_coverage_and_flags_new_keys_until_rediscovery() {
+    use super::super::store::WalletStore;
+    let (dir, db, _) = fixture(4);
+    let result = discover(&db, false).unwrap();
+    assert_eq!(result.covered_pubkeys, vec![PK.to_string()]);
+    assert!(!requires_discovery(&db.begin_read().unwrap()).unwrap());
+    let new_pk: [u8; 33] =
+        hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap()
+            .try_into()
+            .unwrap();
+    let txn = crate::begin_write_qr(&db).unwrap();
+    txn.open_table(WALLET_TRACKED_PUBKEYS)
+        .unwrap()
+        .insert(
+            tracked_pubkey_key(1, &new_pk),
+            bincode::serialize(&super::super::types::TrackedPubkeyMeta {
+                derivation_path: vec![1],
+                derivation_path_label: "new".into(),
+                added_at_height: 1000,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    txn.commit().unwrap();
+    let store = super::super::store::RedbWalletStore::new(db.clone());
+    assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
+    drop(store);
+    drop(db);
+    let db = Database::open(dir.path().join("state.redb")).unwrap();
+    let read = db.begin_read().unwrap();
+    let meta = coverage(&read).unwrap().unwrap();
+    assert_eq!(meta.covered_pubkeys, vec![PK.to_string()]);
+    assert_eq!(
+        uncovered_pubkeys(&read, &meta).unwrap(),
+        vec![hex::encode(new_pk)]
+    );
+    drop(read);
+    assert_eq!(discover(&db, false).unwrap().matched_boxes, 4);
+    assert!(!requires_discovery(&db.begin_read().unwrap()).unwrap());
+}

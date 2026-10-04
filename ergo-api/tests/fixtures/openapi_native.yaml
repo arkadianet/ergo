@@ -3738,6 +3738,8 @@ components:
       - anchorHeight
       - anchorHeaderId
       - historyComplete
+      - coveredPubkeys
+      - uncoveredPubkeys
       properties:
         anchorHeaderId:
           type: string
@@ -3745,8 +3747,17 @@ components:
           type: integer
           format: int32
           minimum: 0
+        coveredPubkeys:
+          type: array
+          items:
+            type: string
         historyComplete:
           type: boolean
+        uncoveredPubkeys:
+          type: array
+          items:
+            type: string
+          description: Keys added since discovery; nonempty means discovery is required again.
     ExternalSecret:
       oneOf:
       - type: object

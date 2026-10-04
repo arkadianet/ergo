@@ -23,6 +23,10 @@ pub struct DiscoveryCoverage {
     /// Historical transactions before this height have not been reconstructed.
     pub history_complete: bool,
     pub matched_boxes: u64,
+    /// Public keys included in the verified UTXO traversal. Older coverage
+    /// without this field needs discovery again before claiming complete funds.
+    #[serde(default)]
+    pub covered_pubkeys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +55,29 @@ pub fn coverage(txn: &ReadTransaction) -> Result<Option<DiscoveryCoverage>, Stat
             .transpose(),
         Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
         Err(e) => Err(e.into()),
+    }
+}
+
+pub fn uncovered_pubkeys(
+    txn: &ReadTransaction,
+    meta: &DiscoveryCoverage,
+) -> Result<Vec<String>, StateError> {
+    let covered: BTreeSet<_> = meta.covered_pubkeys.iter().collect();
+    let current: BTreeSet<_> = super::reader::WalletReader::new(txn)
+        .tracked_pubkeys_with_paths()?
+        .into_iter()
+        .map(|(_, pk, _)| hex::encode(pk))
+        .collect();
+    Ok(current
+        .into_iter()
+        .filter(|pk| !covered.contains(pk))
+        .collect())
+}
+
+pub fn requires_discovery(txn: &ReadTransaction) -> Result<bool, StateError> {
+    match coverage(txn)? {
+        Some(meta) => Ok(!uncovered_pubkeys(txn, &meta)?.is_empty()),
+        None => Ok(false),
     }
 }
 
@@ -221,6 +248,7 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
         state_root: tip.state_root.clone().unwrap(),
         history_complete: false,
         matched_boxes: job.matched,
+        covered_pubkeys: job.pubkeys.clone(),
     };
     let txn = crate::begin_write_qr(db)?;
     {

@@ -80,7 +80,10 @@ cursor to the anchor in one transaction only after full verification.
 
 Current UTXOs cannot reconstruct historical transactions, already-spent boxes,
 or their inclusion heights. Discovery records `historyComplete: false`; native
-wallet status includes `discovery.anchorHeight` and `anchorHeaderId`. Native box
+wallet status includes `discovery.anchorHeight` and `anchorHeaderId`, plus the
+persisted `coveredPubkeys` and any `uncoveredPubkeys` added later. Adding keys
+requires discovery again before balances and boxes are available; older coverage
+records without a key set also require discovery again. Native box
 summaries expose `inclusionHeightKnown: false`; their `creationHeight` is the
 first-observed height. Legacy wallet and reserved scan entries return null inclusion height and
 confirmation count for discovered boxes, and skip those filters when inclusion

@@ -1150,6 +1150,9 @@ pub(crate) async fn native_status(
             // changeAddress is persisted PUBLIC metadata — surfaced regardless of
             // lock state (it must not disappear when locked); `null` only
             // when unset. Read the stored pubkey + render to the network address.
+            let scan_invalidated = scan_invalidated
+                || ergo_state::wallet::utxo_scan::requires_discovery(&read_txn)
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
             let change_address = match read_txn
                 .open_table(ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS)
             {
@@ -1217,11 +1220,21 @@ pub(crate) async fn native_status(
                 scan_invalidated,
                 discovery: ergo_state::wallet::utxo_scan::coverage(&read_txn)
                     .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                    .map(|v| ergo_api::wallet::native::dto::DiscoveryCoverageDto {
-                        anchor_height: v.anchor_height,
-                        anchor_header_id: v.anchor_header_id,
-                        history_complete: v.history_complete,
-                    }),
+                    .map(|v| {
+                        let uncovered_pubkeys =
+                            ergo_state::wallet::utxo_scan::uncovered_pubkeys(&read_txn, &v)
+                                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+                        Ok::<_, WalletAdminError>(
+                            ergo_api::wallet::native::dto::DiscoveryCoverageDto {
+                                anchor_height: v.anchor_height,
+                                anchor_header_id: v.anchor_header_id,
+                                history_complete: v.history_complete,
+                                covered_pubkeys: v.covered_pubkeys,
+                                uncovered_pubkeys,
+                            },
+                        )
+                    })
+                    .transpose()?,
             })
         })();
     let _ = reply.send(result);

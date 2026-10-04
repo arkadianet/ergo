@@ -466,6 +466,12 @@ async fn pruned_restore_and_discovery_coverage_remain_visible_while_locked() {
         state_root: "00".repeat(33),
         history_complete: false,
         matched_boxes: 1,
+        covered_pubkeys: ergo_state::wallet::reader::WalletReader::new(&db.begin_read().unwrap())
+            .tracked_pubkeys_with_paths()
+            .unwrap()
+            .into_iter()
+            .map(|(_, pk, _)| hex::encode(pk))
+            .collect(),
     };
     txn.open_table(WALLET_UTXO_DISCOVERY)
         .unwrap()
