@@ -16,6 +16,13 @@ infrastructure.
 
 ## [Unreleased]
 
+### Changed
+
+- The P2P handshake advertises version 6.0.7, the current Scala stable
+  release whose consensus and mempool rules the node implements; it
+  advertised 6.0.2. Scala gates no peer behavior on versions above 5.0.13, so
+  this only signals parity. The agent name remains `ergo-rust`.
+
 ## [0.12.0-rc.1] - 2026-10-05
 
 Release candidate for 0.12.0:
