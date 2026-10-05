@@ -11,6 +11,8 @@ use clap::{Parser, Subcommand};
 /// Offline operator commands. These never start the node or load its config.
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Create a new validated configuration and protected API credential.
+    Init(crate::init::InitArgs),
     /// Generate or hash an API credential without starting the node.
     ApiKey {
         #[command(subcommand)]

@@ -15,6 +15,7 @@ pub mod decode_stack;
 pub mod genesis;
 pub mod incidents;
 pub mod indexer_chain;
+pub mod init;
 pub mod maintenance;
 pub mod mem_csv;
 pub mod mem_probe;
