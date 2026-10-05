@@ -18,10 +18,15 @@ const FAST_CAVEAT: &str = "Fast sync downloads a UTXO snapshot and NiPoPoW proof
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Preset {
+    /// Wallet and transaction relay, without historical indexing.
     Wallet,
+    /// External mining without storage-rent claims or indexing.
     MiningFast,
+    /// External mining with storage-rent claims and indexing; genesis sync only.
     MiningFull,
+    /// Historical transaction and address indexing; genesis sync only.
     Explorer,
+    /// Full block history without indexing; genesis sync only.
     Archival,
 }
 
@@ -49,54 +54,74 @@ impl Preset {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Sync {
+    /// UTXO snapshot plus NiPoPoW proof; wallet and mining-fast only.
     Fast,
+    /// Verify every block from the start; takes hours to days.
     Genesis,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Network {
+    /// The live Ergo network, with real ERG.
     Mainnet,
+    /// A separate network for testing, with no mainnet funds.
     Testnet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Reward {
+    /// The node wallet; initialize and unlock it before work is served.
     Wallet,
+    /// The key given with --miner-public-key.
     PublicKey,
 }
 
 #[derive(Args, Clone, Debug)]
 pub struct InitArgs {
+    /// What the node is for; prompted for when omitted in a terminal.
     #[arg(long, value_enum)]
     pub preset: Option<Preset>,
+    /// How to reach the current chain state.
     #[arg(long, value_enum)]
     pub sync: Option<Sync>,
     /// Explicitly accept provisional snapshot trust; cross-check the UTXO root.
     #[arg(long)]
     pub accept_unanchored_bootstrap: bool,
+    /// Network to join.
     #[arg(long, value_enum)]
     pub network: Option<Network>,
+    /// Config file to create [default: DATA_DIR/ergo-node.toml].
     #[arg(long)]
     pub config: Option<PathBuf>,
+    /// Directory for databases and logs [default: ./ergo-data].
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
+    /// Address for the REST API and dashboard.
     #[arg(long, default_value = "127.0.0.1:9099")]
     pub api_bind: SocketAddr,
+    /// Accept inbound peer connections on this address; outbound-only when unset.
     #[arg(long)]
     pub p2p_bind: Option<SocketAddr>,
+    /// Public address advertised to peers.
     #[arg(long)]
     pub declared_addr: Option<SocketAddr>,
+    /// Where mining rewards go (mining presets only).
     #[arg(long, value_enum)]
     pub reward: Option<Reward>,
+    /// Compressed secp256k1 public key for --reward public-key (66 hex characters).
     #[arg(long)]
     pub miner_public_key: Option<String>,
+    /// Continue when free disk space is below the recommended amount.
     #[arg(long)]
     pub allow_low_disk: bool,
+    /// Never prompt; a missing choice is an error.
     #[arg(long)]
     pub non_interactive: bool,
+    /// Print the plan without writing any file.
     #[arg(long)]
     pub dry_run: bool,
+    /// Print the plan as JSON.
     #[arg(long)]
     pub json: bool,
 }

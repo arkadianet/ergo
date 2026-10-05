@@ -28,13 +28,14 @@ the [release workflow](.github/workflows/release.yml):
 Extract the node archive into its own directory. From that directory:
 
 ```sh
-./ergo-node init
+./ergo-node init --data-dir ../ergo-data
 ```
 
 `init` asks what the node is for (wallet, mining, explorer or archival) and how
-to sync, then writes a validated config and a protected API key and prints the
-command that starts the node. For scripted setups, pass the choices as flags;
-see `./ergo-node init --help`. To configure by hand instead:
+to sync, then writes a validated config and a protected API key into the data
+directory and prints the command that starts the node. For scripted setups,
+pass the choices as flags; see `./ergo-node init --help`. To configure by hand
+instead:
 
 ```sh
 cp config/ergo-node.toml ./ergo-node.toml
