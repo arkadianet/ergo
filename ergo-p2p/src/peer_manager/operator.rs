@@ -90,6 +90,7 @@ impl PeerManager {
             .ok_or_else(|| AddressBookError::Db("persistent address book is unavailable".into()))?;
         book.remove_peer(addr)?;
         self.known_addresses.retain(|known| known.addr != addr);
+        self.recovery_dials.remove(&addr);
         Ok(())
     }
 }

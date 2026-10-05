@@ -2352,3 +2352,205 @@ fn outbound_handshake_rotated_declared_addresses_never_earn_outbound_provenance(
         );
     }
 }
+
+// ----- starvation recovery -----
+
+fn recovery_known(index: u8, now: Instant) -> KnownPeer {
+    KnownPeer {
+        addr: addr(40 + index, 1, 1, 1, 1),
+        origin: PeerOrigin::Gossip,
+        last_seen: None,
+        consecutive_failures: 5,
+        last_failure: Some(now),
+    }
+}
+
+#[test]
+fn recovery_selection_orders_priorities_and_caps_batch_at_four() {
+    let now = Instant::now();
+    let mut mgr = PeerManager::new(1);
+    let mut peers: Vec<_> = (0..7).map(|i| recovery_known(i, now)).collect();
+    peers[0].origin = PeerOrigin::Seed;
+    peers[1].last_seen = Some(now);
+    peers[2].consecutive_failures = 3;
+    peers[3].last_failure = Some(now - Duration::from_secs(10));
+    // Deliberately insert in reverse priority order.
+    for peer in peers.iter().rev() {
+        mgr.restore_known_peer(peer.clone());
+    }
+    assert_eq!(
+        mgr.addresses_for_recovery(now, 32, 0),
+        peers[..4].iter().map(|p| p.addr).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn recovery_batches_sweep_every_address_even_with_distinct_priorities() {
+    // Real failures land at different times and counts, so priorities rarely
+    // tie. Recovery failures do not change them, so a selection that only
+    // rotated ties would retry the same four (possibly dead) addresses
+    // forever. Successive batches must instead sweep the whole order.
+    let now = Instant::now();
+    let mut mgr = PeerManager::new(1);
+    let peers: Vec<_> = (0..10)
+        .map(|i| {
+            let mut peer = recovery_known(i, now);
+            peer.consecutive_failures = 1 + u32::from(i);
+            peer
+        })
+        .collect();
+    for peer in &peers {
+        mgr.restore_known_peer(peer.clone());
+    }
+    let order: Vec<_> = peers.iter().map(|p| p.addr).collect();
+    assert_eq!(mgr.addresses_for_recovery(now, 4, 0), order[..4]);
+    assert_eq!(mgr.addresses_for_recovery(now, 4, 1), order[4..8]);
+    assert_eq!(
+        mgr.addresses_for_recovery(now, 4, 2),
+        [order[8], order[9], order[0], order[1]]
+    );
+}
+
+#[test]
+fn recovery_selection_excludes_operator_automatic_bans_and_inflight_dials() {
+    let (mut mgr, _book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let peers: Vec<_> = (0..6).map(|i| recovery_known(i, now)).collect();
+    for peer in &peers {
+        mgr.restore_known_peer(peer.clone());
+    }
+    mgr.operator_ban(peers[0].addr.ip(), Duration::from_secs(60), now)
+        .unwrap();
+    mgr.record_ban(peers[1].addr.ip(), now, false);
+    mgr.register_outbound(peers[2].addr, now).unwrap();
+    mgr.register_outbound(peers[3].addr, now).unwrap();
+    mgr.mark_tcp_connected(&peers[3].addr);
+    assert_eq!(
+        mgr.addresses_for_recovery(now, 32, 0),
+        vec![peers[4].addr, peers[5].addr]
+    );
+}
+
+#[test]
+fn recovery_selection_stops_with_a_connected_peer_or_normal_candidate() {
+    let now = Instant::now();
+    let mut mgr = PeerManager::new(1);
+    let known = recovery_known(0, now);
+    mgr.restore_known_peer(known.clone());
+    let connected = recovery_known(1, now).addr;
+    mgr.register_outbound(connected, now).unwrap();
+    mgr.mark_tcp_connected(&connected);
+    mgr.complete_handshake(&connected, spec_with_declared(None), None, now)
+        .unwrap();
+    assert!(mgr.addresses_for_recovery(now, 4, 0).is_empty());
+    mgr.disconnect(&connected);
+    mgr.add_known_address(recovery_known(2, now).addr, PeerOrigin::Seed);
+    assert!(mgr.addresses_for_recovery(now, 4, 0).is_empty());
+}
+
+#[test]
+fn recovery_selection_respects_capacity_target_and_routability() {
+    let now = Instant::now();
+    let mut mgr = PeerManager::new_with_limits(
+        1,
+        PeerLimits {
+            target_outbound: 2,
+            max_connections: 2,
+            ..PeerLimits::default()
+        },
+    );
+    for i in 0..6 {
+        mgr.restore_known_peer(recovery_known(i, now));
+    }
+    let mut local = recovery_known(7, now);
+    local.addr = addr(127, 0, 0, 1, 1);
+    mgr.restore_known_peer(local.clone());
+    let batch = mgr.addresses_for_recovery(now, 32, 0);
+    assert_eq!(batch.len(), 2);
+    assert!(!batch.contains(&local.addr));
+    for addr in batch {
+        mgr.register_recovery_outbound(addr, now).unwrap();
+    }
+    assert!(mgr.addresses_for_recovery(now, 4, 0).is_empty());
+    assert_eq!(
+        mgr.register_recovery_outbound(recovery_known(6, now).addr, now),
+        Err(ConnectError::TooManyConnections)
+    );
+}
+
+#[test]
+fn recovery_failure_preserves_memory_and_persisted_backoff() {
+    let (mut mgr, book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let addr = recovery_known(0, now).addr;
+    mgr.add_known_address(addr, PeerOrigin::Seed);
+    for _ in 0..5 {
+        mgr.mark_dial_failed(&addr, now);
+    }
+    let before = book.load_all(false).unwrap().peers.remove(0);
+    mgr.register_recovery_outbound(addr, now).unwrap();
+    mgr.disconnect(&addr);
+    mgr.mark_dial_failed(&addr, now + Duration::from_secs(1));
+    // A late failure event after eviction belongs to the same attempt.
+    mgr.mark_dial_failed(&addr, now + Duration::from_secs(2));
+    let memory = mgr.known_addresses.iter().find(|k| k.addr == addr).unwrap();
+    assert_eq!(memory.consecutive_failures, 5);
+    assert_eq!(memory.last_failure, Some(now));
+    let after = book.load_all(false).unwrap().peers.remove(0);
+    assert_eq!(after.consecutive_failures, before.consecutive_failures);
+    assert_eq!(after.last_failure, before.last_failure);
+    // Ordinary subsequent dials still escalate normally.
+    mgr.register_outbound(addr, now).unwrap();
+    mgr.disconnect(&addr);
+    mgr.mark_dial_failed(&addr, now);
+    assert_eq!(
+        book.load_all(false).unwrap().peers[0].consecutive_failures,
+        6
+    );
+}
+
+#[test]
+fn recovery_success_clears_memory_and_persisted_backoff() {
+    let (mut mgr, book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let addr = recovery_known(0, now).addr;
+    mgr.add_known_address(addr, PeerOrigin::Seed);
+    for _ in 0..5 {
+        mgr.mark_dial_failed(&addr, now);
+    }
+    let batch = mgr.addresses_for_recovery(now, 4, 0);
+    assert_eq!(batch, vec![addr]);
+    mgr.register_recovery_outbound(batch[0], now).unwrap();
+    mgr.mark_tcp_connected(&addr);
+    mgr.complete_handshake(&addr, spec_with_declared(None), None, now)
+        .unwrap();
+    mgr.mark_dial_succeeded(&addr, now);
+    mgr.disconnect(&addr);
+    let memory = mgr.known_addresses.iter().find(|k| k.addr == addr).unwrap();
+    assert_eq!(memory.consecutive_failures, 0);
+    assert_eq!(memory.last_failure, None);
+    let row = book.load_all(false).unwrap().peers.remove(0);
+    assert_eq!(row.consecutive_failures, 0);
+    assert_eq!(row.last_failure, None);
+    assert_eq!(mgr.addresses_to_connect(now, 4), vec![addr]);
+}
+
+#[test]
+fn recovery_selection_filters_per_ip_and_per_subnet_limits() {
+    let now = Instant::now();
+    let mut mgr = PeerManager::new(1);
+    let pending = addr(41, 1, 1, 1, 1);
+    mgr.register_outbound(pending, now).unwrap();
+    let mut duplicate_ip = recovery_known(1, now);
+    duplicate_ip.addr.set_port(2);
+    mgr.restore_known_peer(duplicate_ip);
+    for i in 1..=3 {
+        mgr.register_outbound(addr(50, 1, 1, i, 1), now).unwrap();
+    }
+    let mut saturated_subnet = recovery_known(10, now);
+    saturated_subnet.addr = addr(50, 1, 1, 4, 1);
+    mgr.restore_known_peer(saturated_subnet);
+    let allowed = recovery_known(2, now);
+    mgr.restore_known_peer(allowed.clone());
+    assert_eq!(mgr.addresses_for_recovery(now, 32, 0), vec![allowed.addr]);
+}

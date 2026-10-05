@@ -178,6 +178,8 @@ fn make_state_with_backend(
         last_dial_at: Instant::now(),
         last_gossip_at: Instant::now(),
         last_starve_warn_at: None,
+        last_recovery_dial_at: None,
+        recovery_dial_rotation: 0,
         indexer_handle: None,
         anchor_map: anchor_map::AnchorMap::new(),
         rest_peer_urls: std::sync::Arc::new(std::sync::RwLock::new(RestPeers::new())),
