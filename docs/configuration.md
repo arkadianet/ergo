@@ -7,6 +7,85 @@ node — it is not the reference node, and several config keys exist
 specifically to mirror Scala's `consistentSettings` checks. Keys whose
 behavior follows Scala are noted as such below.
 
+## New-install setup
+
+`ergo-node init` is the recommended first step for a new installation. With a
+TTY it explains and prompts for missing choices; otherwise it requires
+`--preset`, `--sync`, `--network`, and a mining `--reward` choice and exits 2
+if anything is missing. `--non-interactive` always disables prompts.
+
+```sh
+ergo-node init --data-dir ./ergo-data
+# Or preview an unattended wallet installation without writing:
+ergo-node init --preset wallet --sync genesis --network mainnet \
+  --data-dir ./ergo-data --non-interactive --dry-run --json
+```
+
+The wizard resolves paths to absolute paths, validates generated TOML using the
+node's loader, saves an API secret first and then publishes the new config.
+It prints the exact start command with explicit `--config` and `--data-dir`,
+the dashboard URL, key-file path, and next steps. `--dry-run` writes nothing
+and elides the API hash in its config preview; `--json` returns a plan with
+`schema_version = 1`, paths, config contents, disk recommendation, warnings,
+reward address (when supplied), and next steps. No mode prints the secret.
+
+| Preset | Indexer | External mining | Storage-rent claims | Sync choices |
+|---|---|---|---|---|
+| `wallet` | off | off | off | fast, genesis |
+| `mining-fast` | off | on | off | fast, genesis |
+| `mining-full` | on | on | on | genesis |
+| `explorer` | on | off | off | genesis |
+| `archival` | off | off | off | genesis |
+
+All presets enable the mempool and write `[node] state_type = "utxo"`,
+`verify_transactions = true`, and `blocks_to_keep = -1`. Fast sync writes
+`[node.utxo] utxo_bootstrap = true`, `[node.nipopow] nipopow_bootstrap = true`
+and `p2p_nipopows = 2`. It avoids historical replay, with download time depending
+on peers and bandwidth, and requires `--accept-unanchored-bootstrap` or a
+separate interactive consent: snapshot trust is provisional, so **cross-check
+the installed UTXO root** against an independently trusted node. Genesis sync
+sets both bootstrap flags false and takes hours to days. Explorer and full
+mining also need historical index catch-up.
+
+Mining requires `--reward wallet` or `--reward public-key`. Wallet rewards omit
+`miner_public_key_hex`; initialize and **unlock** the node wallet in the
+dashboard before work is served. Public-key rewards require
+`--miner-public-key HEX`, a valid 33-byte compressed secp256k1 point beginning
+with `02` or `03`. The wizard displays its P2PK address for the selected
+network and requests confirmation in interactive mode. Use
+[ergo-solo's Stratum bridge](https://github.com/arkadianet/ergo-stratum-rs) or
+[the Lithos guide](lithos.md) to connect external miners.
+
+`--network mainnet|testnet` selects embedded network seeds. `--api-bind ADDR`
+defaults to `127.0.0.1:9099`. An explicit non-loopback bind also writes
+`[api] public_bind = true` to satisfy the loader and reports that transaction
+submission remains publicly callable; privileged routes still require the key.
+`--p2p-bind ADDR` and `--declared-addr ADDR` write `[peers] bind_addr` and
+`declared_addr` only when supplied; inbound connections need a listener and
+port forwarding. The wizard never writes a peer list, voting targets,
+private-key exposure, or unauthenticated legacy mining.
+
+`--data-dir PATH` defaults to `./ergo-data`; `--config PATH` defaults to
+`<data-dir>/ergo-node.toml`. The resolved data directory is stored in the config.
+The secret is `<config-dir>/secrets/api-key`: send its contents in the `api_key`
+header or enter them in the dashboard. Unix directory/file modes are
+`0700`/`0600`; Windows inherits ACLs, so use a directory only you can read.
+Existing secret directories must already have mode `0700` on Unix.
+
+The wizard queries free space on the data filesystem, or its nearest existing
+ancestor. Recommended free space (**provisional**) is 100 GiB for wallet or
+mining-fast with fast sync, 150 GiB for either with genesis sync or archival,
+and 250 GiB for explorer or mining-full. A lower reading requires
+`--allow-low-disk` or interactive confirmation; an unknown reading warns and
+continues. These budgets are recommendations, not storage limits.
+
+V1 creates new configurations only, installs no service, and edits no existing
+files. It refuses existing config/key paths, including symlinks. Fast sync
+requires a new or empty data directory to prevent bootstrapping over node data.
+Use the printed start command, then press Ctrl-C and wait for graceful shutdown
+to stop. For existing installations, edit the configuration deliberately and
+use the standalone `api-key` command when a new credential is needed.
+
 ## Resolution model
 
 Values are resolved from three sources, highest precedence first:
