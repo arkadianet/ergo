@@ -331,7 +331,7 @@ fn generation_refuses_symlinked_destinations_but_follows_symlinked_parents() {
 
 #[test]
 fn api_key_dispatch_precedes_runtime_and_startup_thread() {
-    let source = include_str!("../src/main.rs");
+    let source = include_str!("../../src/main.rs");
     let dispatch = source
         .find("ergo_node::api_key::run(")
         .expect("api-key dispatch must exist");

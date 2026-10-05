@@ -1,3 +1,4 @@
+mod api_key;
 #[path = "../common/mod.rs"]
 mod common;
 mod identity_live_refresh;
