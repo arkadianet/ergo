@@ -59,7 +59,7 @@ def main():
     parser.add_argument("--end", type=int, required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--rounds", type=int, default=3)
-    parser.add_argument("--modes", nargs="+", choices=["single", "legacy", "adaptive", "prefetch", "cached", "cached-short", "cached-large-cache", "cached-probes", "cached-probes-short", "cached-probes-prefetch", "cached-probes-short-prefetch"], default=["legacy", "adaptive", "prefetch"])
+    parser.add_argument("--modes", nargs="+", choices=["single", "legacy", "adaptive", "prefetch"], default=["legacy", "adaptive", "prefetch"])
     args = parser.parse_args()
     if not args.name or args.name in {".", ".."} or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_." for c in args.name):
         parser.error("name must be a single directory name")

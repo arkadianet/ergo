@@ -797,7 +797,8 @@ fn adaptive_batches_expand_far_behind_and_publish_per_block_near_tip() {
     // A moving State tip can bring the next poll inside the near-tip margin.
     chain.tip.store(544, Ordering::Relaxed);
     assert!(matches!(task.step_batch(), IndexerPoll::Applied(513)));
-    chain.tip.store(546, Ordering::Relaxed); // 33 behind: batching resumes
+    // 33 behind: a batch starts but ends on entering the last 32 blocks.
+    chain.tip.store(546, Ordering::Relaxed);
     assert!(matches!(task.step_batch(), IndexerPoll::Applied(514)));
     while handle.indexed_height() < 546 {
         let next = handle.indexed_height() + 1;
