@@ -141,6 +141,7 @@ pub(crate) enum TemplateKey {
     Current,
     /// A fixed alternative derivation, such as a legacy schema's in migration
     /// fixtures. Never memoized, so its results cannot mix with `Current`'s.
+    #[cfg(test)]
     Fixed(fn(&[u8]) -> Result<Option<Digest32>, IndexerError>),
 }
 

@@ -96,6 +96,7 @@ impl BlockApplyScratch {
     ) -> Result<Option<Digest32>, crate::IndexerError> {
         let derive = match key {
             TemplateKey::Current => crate::template::template_hash_for_box_bytes,
+            #[cfg(test)]
             TemplateKey::Fixed(derive) => return derive(bytes),
         };
         #[cfg(test)]
