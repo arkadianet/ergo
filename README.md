@@ -1,163 +1,230 @@
 # Ergo Rust Node
 
-A from-scratch Rust implementation of an [Ergo Platform](https://ergoplatform.org)
-full node. The goal is strict consensus compatibility with the
-[Scala reference client](https://github.com/ergoplatform/ergo) without
-inheriting its architecture: every component is built in idiomatic Rust,
-checked against externally-produced test vectors, and laid out so the boundary
-between consensus-critical and non-consensus code is visible.
+An independent Rust full node for [Ergo](https://ergoplatform.org), built for
+consensus compatibility with the [Scala reference client](https://github.com/ergoplatform/ergo).
+It is for node operators, miners, and developers who want to explore a Rust implementation.
+**Pre-1.0 alpha: do not use it for funds custody or production infrastructure.**
+Read the [security policy](SECURITY.md) and [compatibility limits](docs/compatibility.md).
 
-Repository: <https://github.com/arkadianet/ergo>
+## Get started
 
-## Documentation
+### Download
 
-- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — the big picture: crate layering, the
-  single-writer runtime model, data-flow paths, and the consensus / persistence
-  / reorg contracts.
-- [`docs/codemap.md`](./docs/codemap.md) — per-crate **codebase map**: a layered
-  index, the dependency graph, and a landmark page for each of the 19 crates
-  (purpose, modules, key types, invariants, "start here").
-- [`docs/overview.md`](./docs/overview.md) — the handbook: repository layout and
-  the full build / test / run / configure surface.
-- [`docs/configuration.md`](./docs/configuration.md) — every config field, by type.
-- [`docs/operating.md`](./docs/operating.md) — running, modes, observability.
-- [`docs/operator-recovery.md`](./docs/operator-recovery.md) — verified offline backup/restore, integrity inspection, and wallet discovery on pruned UTXO nodes.
-- [`docs/releasing.md`](./docs/releasing.md) — exact-tag validation and tested binary archives.
-- [`docs/lithos.md`](./docs/lithos.md) — Lithos mining integration and keystore setup.
-- [`docs/compatibility.md`](./docs/compatibility.md) — consensus-compatibility and versioning policy.
-- [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`SECURITY.md`](./SECURITY.md) · [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
+Get the `ergo-node` archive from [GitHub Releases](https://github.com/arkadianet/ergo/releases).
+The wallet CLI has a separate `ergo-wallet` archive. These six platforms are built by
+the [release workflow](.github/workflows/release.yml):
+
+| Platform | Release target |
+|---|---|
+| Linux x86-64, glibc | `x86_64-unknown-linux-gnu` |
+| Linux x86-64, static musl | `x86_64-unknown-linux-musl` |
+| Linux ARM64, glibc | `aarch64-unknown-linux-gnu` |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+| macOS Intel | `x86_64-apple-darwin` |
+| Windows x86-64, MSVC | `x86_64-pc-windows-msvc` |
+
+### Run
+
+Extract the node archive into its own directory. From that directory:
+
+```sh
+./ergo-node --version
+./ergo-node --help
+cp config/ergo-node.toml ./ergo-node.toml
+./ergo-node --config ./ergo-node.toml --data-dir ../ergo-data
+```
+
+On Windows, use `ergo-node.exe`. Open the dashboard at <http://127.0.0.1:9099/>.
+Keep the data directory outside the extracted archive so upgrades do not replace it.
+See the [release quickstart](docs/release-quickstart.md).
+
+### Choose a setup
+
+Edit the copied `ergo-node.toml` before starting; update its existing sections.
+
+| Preset | Settings | What to expect |
+|---|---|---|
+| Archival + explorer (default) | `[node] state_type = "utxo"`, `verify_transactions = true`, `blocks_to_keep = -1`; `[indexer] enabled = true` | Full history and address/token queries; long sync from genesis. |
+| Fast bootstrap | `[node.utxo] utxo_bootstrap = true`; `[node.nipopow] nipopow_bootstrap = true`; `[indexer] enabled = false` | UTXO snapshot + NiPoPoW; about 20 minutes on mainnet, depending on peers and bandwidth. |
+| Mining | `[node] state_type = "utxo"`; `[mining] enabled = true`; reward key as described below | External miner API; starts serving work after sync. |
+
+For fast bootstrap, start with an empty data directory and use these settings:
+
+```toml
+[node]
+state_type = "utxo"
+verify_transactions = true
+blocks_to_keep = -1
+[node.utxo]
+utxo_bootstrap = true
+[node.nipopow]
+nipopow_bootstrap = true
+p2p_nipopows = 2
+[indexer]
+enabled = false
+```
+
+Snapshot trust verification is provisional. Cross-check the installed UTXO root
+against a known-good reference before trusting the state. Read the [fast bootstrap guide](docs/operating.md#fast-clean-db-boot-mode-2--nipopow)
+and [configuration reference](docs/configuration.md).
+
+Mining needs either `[mining] miner_public_key_hex` (a 33-byte compressed
+secp256k1 public key, 66 hex characters; `ergo-wallet pubkey` prints it from a
+mnemonic) or an initialized node wallet, whose first EIP-3 key is used.
+The node supplies mining work through REST, so GPU rigs need a Stratum server
+or pool in between: for example [ergo-solo](https://github.com/arkadianet/ergo-stratum-rs)
+for solo mining, or [Lithos](docs/lithos.md). See [mining templates](docs/operator-mining.md).
+
+### Unlock wallet and mining
+
+**Wallet routes, mining controls, and other privileged calls need an API key.**
+The dashboard and public reads work without one. Generate a secret and its lowercase Blake2b-256 hash:
+
+```bash
+secret=$(openssl rand -hex 32)
+printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
+```
+
+On macOS or Windows, where `b2sum` is not installed, Python works on any
+platform:
+
+```bash
+python3 -c "import hashlib, secrets; s = secrets.token_hex(32); print('secret:', s); print('hash:  ', hashlib.blake2b(s.encode(), digest_size=32).hexdigest())"
+```
+
+Save the secret securely. Put the hash in your config:
+
+```toml
+[api.security]
+api_key_hash = "<64 lowercase hex characters>"
+```
+
+Restart the node with the same command. Clients send the **secret**, not the hash,
+in the `api_key` header. Enter it in the dashboard to authorize privileged calls.
+Then initialize or unlock your wallet. See [API authentication](docs/configuration.md#apisecurity).
+
+### Requirements
+
+- Mainnet P2P uses TCP port **9030**. The default config is outbound-only;
+  set `[peers] bind_addr` to accept inbound connections.
+- The API and dashboard bind to **127.0.0.1:9099** by default. Keep remote
+  access behind an authenticated reverse proxy. See [API security](docs/configuration.md#security-notes-for-the-api).
+- The explorer index roughly doubles disk usage. For scale, one mainnet archival
+  node in October 2026 used about 44 GB for state, 45 GB for the index and about
+  3 GB of RAM. Memory includes a default 1 GiB tree cache plus separate 1 GiB
+  cache budgets for state, indexer, and peer databases; these do not limit total
+  memory use. See [resource planning](docs/operating.md#troubleshooting).
+
+### Run as a service
+
+Linux systemd and Docker Compose packages are included. Systemd uses an unprivileged user and persistent state.
+Compose keeps data in a named volume and publishes the API on host loopback. Follow [deployment instructions](docs/deployment.md).
+
+### Upgrading
+
+Stop the old node cleanly and back up its data and config before upgrading.
+**0.11 data upgrades automatically** when started with the new binary.
+Conversion needs extra free space, and the explorer index rebuilds in the background.
+Read the [0.11 upgrade guide](CHANGELOG.md#upgrading-from-011) and [operating instructions](docs/operating.md#upgrading-the-node) first.
+
+## What you get
+
+- **Dashboard:** Overview with charts and events, Explorer, Peers, Mempool,
+  Mining, Voting, and Wallet. See [monitoring](docs/operating.md#monitoring).
+- **REST APIs:** Scala-compatible routes plus the native `/api/v1/*` API.
+  Browse `/swagger` and `/swagger/native` on your node; see [API coverage](docs/compatibility.md).
+- **Events and webhooks:** polling, realtime WebSocket subscriptions, replay, and delivery.
+  See the [events guide](docs/events.md).
+- **Mining:** external-miner candidates and solutions, exact candidate inspection,
+  fee estimates, block policies, and private transactions. See [mining](docs/operator-mining.md),
+  [block policies](docs/miner-block-policy.md), and [private mining](docs/private-mining.md).
+- **Wallet CLI:** mnemonic generation/import, key derivation, addresses, and encrypted keystore export.
+  Run `./ergo-wallet --help`; see [wallet usage](docs/overview.md#running) and [keystore export](docs/lithos.md#wallet-files).
+- **Offline recovery:** `doctor`, `utxo-stats`, `backup`, `verify-backup`, `restore`, and `wallet-scan-utxo`.
+  Stop the node first and follow the [recovery guide](docs/operator-recovery.md).
 
 ## Status
 
-Pre-1.0, alpha. Consensus-critical paths are exercised by oracle-backed tests
-against Scala-produced fixtures and against mainnet, but the node has not had
-broad real-world deployment exposure and **must not be relied on for production
-infrastructure or funds custody**. See [`SECURITY.md`](./SECURITY.md).
+Consensus paths have oracle-backed tests and mainnet validation evidence; deployment
+exposure is limited. Read [compatibility](docs/compatibility.md) and
+[mode evidence](docs/operating-mode-evidence.md) for scope and remaining work.
 
-What ships today, against the Scala reference node's mode taxonomy:
-
-| Capability | Scala | This node |
+| Capability | Status | Caveat |
 |---|---|---|
-| Mode 1 — Full archive | yes | yes |
-| Mode 2 — UTXO snapshot bootstrap (consume + serve) | yes | yes |
-| Mode 3 — Pruned (suffix window) | yes | yes (functional; fresh UTXO stores replay from genesis before pruning; complete activation and retention campaigns remain open) |
-| Mode 4 — Pruned + UTXO bootstrap | yes | yes for the composed lifecycle: a real UTXO-snapshot install and a NiPoPoW proof compose max-style on the prune sentinel and reboot cleanly (proof-first composition succeeds; snapshot-first rejects the later proof and preserves the installed state; `ergo-node/tests/it/mode4_acceptance.rs`). End-to-end deferred snapshot installation through real header catch-up and a live multi-peer soak remain outstanding |
-| Mode 5 — Digest verifier (AD-proof tx validation) | yes | yes (boots and syncs headers from peers; external ADProof-corpus parity beyond the pinned mainnet window and reorg-abort re-anchor remain) |
-| Mode 6 — Headers-only | yes | yes |
-| NiPoPoW bootstrap (consume + serve) | yes | yes |
-| Extra-index (`/blockchain/*`) | yes | yes (requires Mode 1) |
-| Mining — external-miner protocol | yes | yes; requires `state_type = "utxo"` (Modes 1–4), rejected on `digest` (Modes 5–6) |
-| HD wallet | yes | yes (single-prover + multi-sig primitives; cooperative distributed multi-sig deferred) |
+| Mode 1 — full archive | Supported | Long initial sync |
+| Mode 2 — UTXO snapshot, consume + serve | Supported | Provisional snapshot trust |
+| Mode 3 — pruned history | Supported | Fresh stores replay from genesis before pruning; retention campaigns open |
+| Mode 4 — pruned + snapshot | Supported | Live multi-peer soak outstanding |
+| Mode 5 — digest verifier | Supported | AD-proof parity pinned to one mainnet window; reorg re-anchor open |
+| Mode 6 — headers only | Supported | No transaction validation or UTXO queries |
+| NiPoPoW, consume + serve | Supported | Bootstrap requires compatible settings |
+| Explorer index (`/blockchain/*`) | Supported | Full archive required |
+| External-miner protocol | Supported | UTXO state required |
+| HD wallet and multisig primitives | Supported | Cooperative distributed multisig deferred |
 
-Specifics operators should read before deploying:
+## For developers
 
-- **Mainnet sync to tip** was reached on 2026-04-26 at height 1,771,976;
-  continued live-mainnet sync has been part of the development loop since.
-- **Mode 2 + NiPoPoW combined boot** is ~20 minutes from an empty `data_dir` to
-  "bootstrap complete" on mainnet. The Mode 2 trust anchor is provisional —
-  cross-check the installed UTXO root against a known-good reference manifest
-  before treating it as authoritative.
-- **REST API authentication** gates privileged routes, including `POST /blocks`,
-  wallet, scan, mining and operator controls (Blake2b-256 of the `api_key` header
-  vs `[api.security].api_key_hash`). Public reads and transaction submission
-  remain unauthenticated — front the public surface with a reverse proxy if
-  exposing off loopback. See the [route inventory](docs/configuration.md#security-notes-for-the-api).
+### Build and test
 
-Configuration enforces four of Scala's five `consistentSettings` rules at load
-time (R1, R2, R3, R5); R4 has no analogue because the node exposes no
-`check_reemission_rules` opt-out.
-
-## Goals
-
-- A from-scratch Rust implementation — not a wrapper, port, or transcription.
-- Strict protocol compatibility: accept every block Scala accepts, reject every
-  block it rejects; mainnet-observed behaviour is the authoritative tie-breaker.
-- Explicit consensus boundaries — consensus-critical paths sit in dedicated
-  crates with narrow APIs (see [`docs/codemap.md`](./docs/codemap.md)).
-- Test-vector-driven correctness — boundary tests pin against Scala-produced
-  fixtures, not against the implementation under test.
-- Proven cryptographic primitives (`k256`, `blake2`, `pbkdf2`, `aes-gcm`,
-  `num-bigint`, `gf2_192`); no hand-rolled crypto.
-- An AST-walking ErgoTree interpreter — no bytecode VM unless profiling proves
-  one necessary.
-
-## Non-goals
-
-- Not a wrapper around, or a line-by-line port of, the Scala node.
-- Not a light client (the NiPoPoW bootstrap covers the fast-start case).
-- Not an internal-CPU miner — the external-miner REST protocol is supported; an
-  in-node mining loop is out of scope.
-- Not production-ready. See Status and [`SECURITY.md`](./SECURITY.md).
-
-## Quickstart
-
-The workspace pins Rust 1.99.0 via [`rust-toolchain.toml`](./rust-toolchain.toml)
-(`rustup` installs it on first build).
+Rust **1.99.0** is pinned in [rust-toolchain.toml](rust-toolchain.toml); `rustup` installs it on first build.
+From a source checkout:
 
 ```bash
-# Build the node + wallet binaries.
-cargo build --release -p ergo-node -p ergo-wallet
-
-# Run against the bundled default config (mainnet full archival; REST + operator
-# web UI on 127.0.0.1:9099).
+cargo build --locked --release -p ergo-node
+cargo build --locked --release -p ergo-wallet
 ./target/release/ergo-node --config ergo-node/ergo-node.toml
-
-# CLI help.
-./target/release/ergo-node --help
 ```
 
-The first run performs a full Initial Block Download from genesis; subsequent
-runs resume from the persisted tip. The node also serves a dependency-free
-operator web dashboard at the REST bind address (`http://127.0.0.1:9099/` by
-default) — a single-page app with Overview (live charts + event feed),
-Explorer, Peers, Mempool, Mining, Voting, and Wallet sections — plus Scala API
-docs at `/swagger` and RUST API docs at `/swagger/native`. Dashboard and public
-REST work without a key. Wallet, mining controls, voting writes and admin routes
-stay locked until you set `[api.security] api_key_hash` and restart; see
-[API configuration](docs/configuration.md#apisecurity) for key generation. For a ~20-minute clean-DB boot, enable Mode 2 + NiPoPoW.
-The Peers page includes connection, traffic, sync and handshake details by default.
-Optional DB-IP database downloads and reverse DNS are both off by default;
-installed IP databases are queried locally. See
-[peer details configuration](docs/configuration.md#apipeer_details) to opt in or
-use your own offline databases.
-The full build / test / run / configuration surface — profiles, feature-gated
-tests, the config reference, observability — is in
-[`docs/overview.md`](./docs/overview.md).
+The core checks are:
 
-## Correctness
+```bash
+cargo fmt --all -- --check
+python3 scripts/check-rust-fragments.py
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
+python3 scripts/ci-policy.py
+```
 
-Correctness discipline is the largest investment in the project. Consensus-
-boundary tests pin against **externally-produced fixtures** (a running Scala
-node + real mainnet bytes), never self-oracles; `sigma-rust` is used only as a
-dev/test oracle and is never linked into the consensus path. CI runs `cargo fmt
---check`, `cargo check`, `cargo clippy --all-targets --all-features -- -D
-warnings`, and `cargo test --all` on Linux / macOS / Windows, plus
-`cargo-audit` / `cargo-deny` / `cargo-machete`. Detail in
-[`docs/overview.md`](./docs/overview.md); subsystem-by-subsystem parity status
-in [`docs/compatibility.md`](./docs/compatibility.md).
+The [contribution guide](CONTRIBUTING.md) gives the full local gate and feature-gated tests.
+The [overview](docs/overview.md) covers build profiles and workflows; [ARCHITECTURE.md](ARCHITECTURE.md)
+and the [codemap](docs/codemap.md) explain runtime boundaries and crate responsibilities.
 
-## Contributing
+### Correctness and contributions
 
-[`CONTRIBUTING.md`](./CONTRIBUTING.md) has the full guide. Safe starting points:
-test-vector extraction, operator ergonomics (config/CLI/logging), documentation,
-and non-consensus tooling. Anything in the consensus crates (`ergo-primitives`,
-`ergo-ser`, `ergo-crypto`, `ergo-sigma`, `ergo-validation`, `ergo-state`,
-`ergo-mining`) — serialization, ID computation, PoW, the AVL+ digest, reorg
-semantics, the NiPoPoW verifier — requires an oracle-backed test; PRs touching
-it without fixtures will be sent back.
+Consensus-boundary tests use external Scala fixtures and real mainnet bytes, never self-oracles.
+Expected values computed by the code under test show internal consistency, not compatibility.
+Mainnet-observed behavior settles parity disputes.
+`sigma-rust` is a dev/test oracle and never part of the consensus path.
+
+Changes to consensus crates (`ergo-primitives`, `ergo-ser`, `ergo-crypto`, `ergo-sigma`,
+`ergo-validation`, `ergo-state`, `ergo-mining`) require oracle-backed fixtures. Keep fixtures in `test-vectors/` with reproducible provenance.
+Read [contribution rules](CONTRIBUTING.md#test-conventions) and [compatibility policy](docs/compatibility.md).
+
+## Documentation
+
+**Operators**
+
+- [Release quickstart](docs/release-quickstart.md) · [Configuration](docs/configuration.md)
+- [Operating and modes](docs/operating.md) · [Deployment](docs/deployment.md)
+- [Offline recovery](docs/operator-recovery.md) · [Operator controls](docs/operator-controls.md)
+- [Mining](docs/operator-mining.md) · [Lithos](docs/lithos.md) · [Wallet mining jobs](docs/miner-wallet-jobs.md)
+- [Events and webhooks](docs/events.md) · [Logging](docs/logging.md) · [Release notes](CHANGELOG.md)
+
+**Developers**
+
+- [Architecture](ARCHITECTURE.md) · [Codemap](docs/codemap.md) · [Overview](docs/overview.md)
+- [Compatibility](docs/compatibility.md) · [Operating-mode evidence](docs/operating-mode-evidence.md)
+- [Contributing](CONTRIBUTING.md) · [Releasing](docs/releasing.md) · [Code of conduct](CODE_OF_CONDUCT.md)
 
 ## Security
 
-Pre-1.0. **Do not use this node for production infrastructure or funds
-custody.** Consensus, state-integrity, remote-input crash, and cryptographic-
-verdict regressions are in scope. Report privately via a GitHub Security
-Advisory draft — not a public issue or PR. Findings against `sigma-rust` go
-upstream (this node uses it only as a dev oracle). Full scope and process in
-[`SECURITY.md`](./SECURITY.md).
+Pre-1.0: **do not use this node for production infrastructure or funds custody.**
+Report consensus, state-integrity, remote-input crash, and cryptographic-verdict issues
+privately through a GitHub Security Advisory. See [SECURITY.md](SECURITY.md).
+Findings against the dev oracle `sigma-rust` belong upstream.
 
 ## License
 
-Every workspace crate is dual-licensed under
-[MIT](https://opensource.org/license/mit) **or**
-[Apache 2.0](https://opensource.org/license/apache-2-0), at your option. See
-[`LICENSE-MIT`](./LICENSE-MIT) and [`LICENSE-APACHE`](./LICENSE-APACHE).
+Dual-licensed under MIT or Apache 2.0, at your option.
+See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
