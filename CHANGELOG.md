@@ -16,114 +16,150 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.12.0-rc.1] - 2026-10-05
+
+Release candidate for 0.12.0:
+- **Storage:** moves to redb 4, and the node upgrades a 0.11 data directory automatically.
+- **Mining:** exact candidate inspection, a persisted block policy, private zero-fee transactions, wallet maintenance jobs and Lithos transaction packages.
+- **Operators:** health probes, runtime controls, scoped API credentials, a durable event replay journal with webhooks, and offline backup, restore and recovery commands.
+- **Correctness:** a crate-by-crate audit brings a broad set of Scala-parity and robustness fixes (#571).
+
+### Upgrading from 0.11
+
+1. **Stop 0.11 cleanly and back up.** Back up the stopped data directory, including `wallet/` and your config. Then install 0.12 and start it with the same configuration. Configs from 0.11 work unchanged.
+2. **The database upgrade is automatic.** Before opening storage, the node converts each redb 2.6 database (`state.redb` with its wallet tables, `peers.redb`, `webhooks.redb` and the indexer database) to redb 4.
+   - Every converted file is verified before use: its schemas and every typed row are checked under both readers.
+   - The verified copy is swapped in through a crash-safe journal, and the original is kept as `<file>.redb2-backup`.
+   - On a mainnet archival node, a 41.7 GiB `state.redb` was converted and verified (29 tables, 29.3 million rows) in 11 minutes. Total downtime was about 15 minutes.
+3. **Free disk space.** Each conversion needs free space equal to the file's size plus 10% (at least 256 MiB) on the same filesystem. If you don't have it, either:
+   - free space;
+   - take an external backup and run `ergo-node upgrade-data DATA_DIR --discard-backups`;
+   - or convert to another disk with `ergo-node migrate-redb`.
+4. **The extra index rebuilds from genesis in the background.** Indexer schema 3 corrects token metadata and wrapped-script templates in already-indexed history.
+   - The stale index is deleted first to make room. To keep it, set `[store] auto_upgrade_keep_stale_indexer = true`, or pass `--keep-stale-indexer` to `upgrade-data`.
+   - The node syncs and mines meanwhile. Until the index catches up, `/blockchain/*` answers `503 indexer-syncing` and mining pauses storage-rent self-claims (#584).
+   - Expect a couple of hours on mainnet, depending on hardware.
+5. **Delete the backups once you're satisfied.** The node warns at every start while `*.redb2-backup` files exist. They are plain files the node never opens, so you can delete them while it runs. Rolling back to 0.11 needs them (or your external backup), because 0.11 cannot read redb 4 files.
+6. **Reapply operator bans.** Legacy ban rows are discarded on first start. Reapply operator bans through the new peer-control API.
+7. **Storage-rent claims are declined on mainnet by default,** as Scala now does. Set `[mempool] reject_storage_rent_txs = false` to relay them.
+8. **Building from source requires Rust 1.99.**
+
+See [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases) for space planning, interruption recovery and rollback.
+
 ### Added
 
-- Persist webhook registrations, signing secrets and admitted delivery retries
-  in a private `webhooks.redb` database. Restarts retain delivery IDs and retry
-  state; consumers must deduplicate retries and reconcile events missed before
-  admission. Storage failures disable webhooks while public API routes remain
-  available. See [`docs/configuration.md`](docs/configuration.md#webhook-state).
+**Mining**
+- **Candidate inspection and block policy (#494).** An authenticated inspector shows each candidate's exact transactions, fee/cost/size accounting and rent branches. A persisted block policy covers:
+  - rent budgets;
+  - reserved private capacity;
+  - required transactions and ordered dependency bundles;
+  - exclusions and token handling.
+- **Private zero-fee transactions (#495).** Wallet transactions can be kept private to this miner:
+  - import, list and cancel routes;
+  - kept out of the public mempool and P2P;
+  - durable across restarts, with reserved inputs;
+  - reconciled with the chain on every tip change.
+- **Wallet maintenance jobs (#496).** Bounded, approved private jobs for consolidation, box renewal, reward spending and fixed payments, with preview, approval and cancellation.
+- **Lithos transaction packages and keystores (#573).**
+  - New routes: `POST /mining/candidateWithTxs`, `POST /mining/candidateWithTxsAndPk` and `POST /api/v1/mining/candidate-with-txs`.
+  - Lender jobs for other miner keys, isolated from the operator's private work and earnings.
+  - Scala-style reuse of identical requests.
+  - An explicit `allow_unauthenticated_legacy_mining` switch for Lithos clients.
+- **Full templates and fee estimates (#576).** Full mining templates in candidate inspection, and observed fee estimates (`GET /api/v1/mempool/fee-estimate`) with Scala-matched pool histograms.
+
+**Operators**
+- **Probes, runtime controls and scoped credentials (#577).**
+  - Startup, liveness and readiness probes.
+  - Revision-checked runtime configuration of API limits and readiness.
+  - Durable peer bans, unbans, disconnects and removals.
+  - Scoped API credentials (`mining`, `wallet`, `operator`, `admin`) with immediate revocation.
+- **Packaging (#577).** Docker, Compose and systemd deployment examples, plus Linux ARM64 and Apple Silicon release builds.
+- **Offline commands (#578, #581).** `backup`, `verify-backup`, `restore`, `doctor`, `utxo-stats` and `wallet-scan-utxo`. The last discovers wallet holdings from the current UTXO set, for pruned and snapshot nodes.
+- **Data upgrade (#582).** `upgrade-data` and the automatic startup upgrade of 0.11 databases.
+- **Cache budgets (#469).** Separate cache budgets for the state, indexer and address-book databases, with memory gauges.
+
+**Events and API**
+- **Indexed change events (#477).** Indexed address, box and token changes on the WebSocket and webhook bus.
+- **Durable webhooks (#478).** Webhook registrations, signing secrets and pending deliveries persist in a private `webhooks.redb`.
+- **Replay journal (#575).** A persisted realtime replay journal: `GET /api/v1/events/replay`, WebSocket backfill after restarts, and webhook catch-up that survives restarts and bursts.
+
+**Wallet**
+- **Native transaction building:**
+  - payment registers R4–R9 (#466);
+  - EIP-4 mint and explicit burn intents (#472);
+  - input constraints and unconfirmed parents (#475).
 
 ### Changed
 
-- Mining pauses storage-rent self-claim scans while the indexer trails the
-  candidate parent by more than two blocks and resumes automatically within
-  that margin. One transition warning and resume message, plus the typed
-  `rent_self_claim` field on `/api/v1/mining/status`, distinguish index catch-up
-  from an empty eligible set.
+- **Storage engine.** Storage moves to redb 4.3 (#491), with automatic, verified conversion of 0.11 databases (#582); see Upgrading. Indexer apply and repair commits use `Immediate` durability.
+- **Indexer schema 3.** Index rebuilds apply two Scala-parity corrections to already-indexed history (#571):
+  - EIP-4 token names, descriptions and decimals use the JVM text and digit projections;
+  - outputs with soft-fork-wrapped scripts are listed under the template hash Scala records for them (for example, the mainnet block 1,702,686 output).
 
-- Peer-store startup discards legacy ban rows as automatic bans in a single
-  transaction. Earlier main releases did not implement manual blacklisting
-  (`route_unavailable`); reapply intended operator bans through the new API.
-  New operator rows survive restart. The optional origin byte is compatible
-  with peer schema version 1; no peer database migration is required.
+  Indexes already in redb 4 format at schema 2, as written by development builds, migrate in place in the background instead of rebuilding (#585). Schema upgrades run as an ordered list of atomic steps that resume after shutdown.
+- **Index catch-up (#586).** While far behind, the indexer commits up to 256 blocks per transaction and reuses template hashes; per-block undo and `Immediate` durability are unchanged. On mainnet data, early history indexes about three times faster and dense history about 1.5 times faster.
+- **Rent self-claims during indexing (#584).** Mining pauses storage-rent self-claim scans while the indexer trails the candidate parent by more than two blocks, and resumes automatically. `rent_self_claim` on `/api/v1/mining/status` reports the pause.
+- **Storage-rent relay policy (#458).** Matches Scala via `[mempool] reject_storage_rent_txs`, which defaults to true on mainnet and false on testnet and devnet.
+- **Candidate refresh (#464).** Mining candidates refresh on an explicit deadline (default interval 250 ms, down from 1,000 ms), and transaction inclusion continues past oversized transactions.
+- **Peer store.** Startup discards legacy ban rows as automatic bans. Operator bans now survive restarts.
+- **Probes and the Host allowlist.** Startup, liveness and readiness GET/HEAD probes bypass the API Host allowlist, so Kubernetes and load-balancer checks work. Other routes still require an allowed Host.
+- **Legacy snapshot stores.** UTXO-snapshot bootstraps (Modes 2 and 4) from earlier releases stored the snapshot root at AVL node ID 0, which is also the null child ID. Such stores now fail to open with `LegacySnapshotNodeIds` instead of serving misread lookups. Bootstrap a fresh data directory from a verified snapshot.
+- **Wallet unlock.** Unlock checks every persisted tracked key against the unlocked secret. Wallets that an earlier release restored from a master beginning with a zero byte keep their earlier derivation and log a warning. Any other mismatch refuses the unlock with `TrackedKeyMismatch`.
+- **Scala response shapes.**
+  - `/wallet/addresses` follows Scala's key storage order.
+  - `POST /transactions/unconfirmed/byTransactionIds` returns Scala's shape.
+- **Wallet crate split (#416).** Wallet orchestration moved into the `ergo-wallet-service` crate.
+- **Toolchain (#493).** The stable toolchain and minimum Rust version are now 1.99.0.
 
-- Startup, liveness and readiness GET/HEAD probes now bypass the API Host
-  allowlist so Kubernetes pod-IP and load-balancer checks work with the shipped
-  container configuration. Existing Host overrides remain valid. Other routes
-  still require an allowed Host; add forwarded API hostnames to
-  `[api] allowed_hosts`. See [`docs/deployment.md`](docs/deployment.md).
+### Fixed
 
-- UTXO-snapshot bootstraps (Modes 2 and 4) by earlier releases stored the
-  snapshot root at AVL node ID 0, the ID the store also reads as a null child.
-  Such databases now fail to open with `LegacySnapshotNodeIds` rather than
-  serving misread lookups. Keep the old database and bootstrap from a
-  verified snapshot into a fresh data directory; stores synced from genesis
-  and snapshots installed by this release are unaffected.
-- Wallet unlock checks every persisted tracked key against the unlocked
-  secret before deriving, signing or exporting keys. Pre-1627 wallets that an
-  earlier release restored from a master beginning with a zero byte keep the
-  earlier Rust derivation for signing, `/wallet/getPrivateKey` and new keys
-  (their addresses differ from Scala's for the same secret file) and log a
-  warning; any other mismatch refuses the unlock with `TrackedKeyMismatch`.
-- `/wallet/addresses` follows Scala's key storage order; an unlock rewrites a
-  list stored in the earlier insertion order.
-- `POST /transactions/unconfirmed/byTransactionIds` returns Scala's shape: the
-  requested IDs that are pooled, in pool order, instead of full transactions.
-- Upgrade normal storage to redb 4.3 and automatically convert 0.11 redb 2.6
-  data directories before opening storage. Verified, journaled swaps retain
-  `*.redb2-backup` originals and recover after interruption. Legacy indexers
-  below the current schema are deleted first to reclaim space for the state
-  copy, even with ample space or a registered schema migration path; both the
-  new node and a rollback to 0.11 rebuild the deleted index. `--keep-stale-indexer`
-  or `[store] auto_upgrade_keep_stale_indexer = true` explicitly retains it.
-  `ergo-node upgrade-data DATA_DIR --indexer-db NAME` runs offline; `--discard-backups` trades local rollback
-  copies for space. Every startup warns with retained backup paths, sizes and
-  removal instructions; enabled indexers also warn when the rebuild needs
-  more free space than remains after upgrading. Backups are plain files the
-  node never opens and can be deleted while it runs once satisfied, or removed
-  with the offline command after stopping. `[store] auto_upgrade_legacy`
-  defaults to true. Free-space checks query the path's own filesystem and
-  warn and proceed if unavailable, so container overlay mounts do not block
-  startup. Unclean legacy indexers requiring repair to inspect their schema
-  are treated as stale with a warning; clean current-schema indexes are still
-  migrated, and other databases retain strict verified private-copy recovery. See
-  [space, recovery and rollback instructions](docs/operating.md#migrating-legacy-redb-databases).
-- Indexer apply and repair commits now use synchronous `Immediate` durability
-  instead of `Eventual`, preserving durable guarantees across platforms with
-  possible additional flush latency. The startup upgrade inventory fails
-  closed on unsupported formats, corruption and access errors, preserving
-  database files before normal storage opens.
-- Indexer schema 3: redb-4 schema-2 indexes migrate in place atomically in the
-  background, preserving indexed history and rollback. Stale 0.11 (redb 2.6)
-  indexes rebuild in the background after the state upgrade while the node
-  mines. Older schemas or failed migrations rebuild from genesis, with
-  `/blockchain/*` answering
-  `503 indexer-syncing` until caught up. The migration applies two Scala-parity
-  corrections to already-indexed history: EIP-4 token names, descriptions and decimals use
-  the JVM text and digit projections, and outputs with soft-fork-wrapped
-  scripts are listed under the template hash Scala records for them (for
-  example the mainnet block 1,702,686 output).
-- Indexer catch-up commits up to 256 blocks, one second of work or 32 MiB of
-  transactions at a time while more than 32 blocks behind the applied tip, and
-  each block on its own nearer the tip. Repeated scripts reuse their template
-  hash. Per-block undo, rollback, cancellation, repair markers and `Immediate`
-  durability are unchanged. On mainnet data the early chain indexes about
-  three times faster with 61% fewer bytes written, and dense history about 1.5
-  times faster with 31% less CPU. See the
-  [archival catch-up note](docs/perf/indexer-catchup-2026-10-05.md).
+**Consensus and serialization**
+- **Storage-rent uniqueness (#460).** Storage-rent outputs are unique from height 1,885,000 (rule 125).
+- **Script writes (#461).** Box script write refusals propagate as in Scala.
+- **Type writer (#462).** The type writer's recursion is bounded like the reader's.
+- **Collection ops (#498).** `flatMap` and `reverse` preserve collection types.
+- **Sigma settings (#553).** Cumulative Sigma settings are retained across epochs.
+- **Emission and voting (#510).** Emission contracts bind to their parameter sets, and Scala's voting overflow is matched.
+- **Transaction validation (#511).** Resolved input IDs are verified, and parameter writers are validated.
+- **Testnet launch (#517).** The public testnet launch context is seeded correctly.
 
-### Upgrading
+**Storage, indexer and runtime**
+- **Integrity and lifecycle.**
+  - Persistence integrity and wallet lifecycle supervision (#481).
+  - Bounded admission and node worker ownership (#482).
+  - Indexer read failures propagate instead of reading as zero balances (#483).
+- **Bounds.** Compiler depth is bounded, and Sigma proof structure is shared instead of duplicated (#484).
+- **Indexer checkpoints (#526).** Durable indexer checkpoints are compared inside every mutation.
+- **Snapshot allocator (#501).** The snapshot allocator and persistence lifecycle are preserved.
+- **Pruned stores (#550).** Genesis is replayed before pruning unapplied UTXO history.
+- **Audit remediation (#571).** The combined crate-audit fixes, among them:
+  - atomic state and indexer checkpoints;
+  - coherent rollback to height zero;
+  - winning-fork header indexing;
+  - checked wire, REST, Sigma and compiler boundaries;
+  - bounded mempool accounting.
 
-- Indexer schema upgrades now follow an ordered registry, committing each step
-  separately and resuming from the last completed version after shutdown. The
-  registry applies to redb-4 indexes with a registered path; these migrate in
-  place in the background and boot never waits. Stale 0.11 (redb 2.6) indexes
-  rebuild in the background after the state upgrade while the node mines,
-  avoiding synchronous indexer file-format conversion. They are deleted first
-  by default or retained as legacy rollback backups with `--keep-stale-indexer`
-  or `[store] auto_upgrade_keep_stale_indexer = true`. Unsupported versions and
-  failed steps rebuild from genesis. See the
-  [reference measurements and developer workflow](docs/dev/indexer-schema-migrations.md).
+**P2P**
+- **IPv6 limits (#468).** IPv6 /48 subnet limits and IPv4-mapped address normalization.
+- **Handshakes and deliveries (#528).** Bounded handshake prefixes and retired delivery bookkeeping.
+
+**API**
+- **Paging and numbers.** Global ranges page from the latest indexed snapshot (#499), and REST decodes exact integers within Scala's numeric domains (#522).
+- **OpenAPI.**
+  - Operation IDs are unique document-wide (#548).
+  - Numeric schema defaults serialize as numbers (#577).
+  - Swagger UI no longer fails on a duplicate schema (#580).
+- **Explorer (#549).** The explorer distinguishes absent entities from failed reads.
+- **Configuration (#532).** An explicitly selected config file must be readable.
 
 ### Removed
 
-- The unused Mode 3 header-flip seed:
-  `ergo_state::store::activation_minimal_full_block_height`,
-  `SyncState::flip_seed_height` and the height argument of
-  `SyncState::check_headers_synced`. Fresh pruned UTXO stores replay full
-  blocks from genesis and prune after apply, so nothing seeds the prune
-  floor when the header chain is declared synced.
+- **Mode 3 header-flip seed.** The unused seed is removed:
+  - `ergo_state::store::activation_minimal_full_block_height`;
+  - `SyncState::flip_seed_height`;
+  - the height argument of `SyncState::check_headers_synced`.
+
+  Fresh pruned UTXO stores replay full blocks from genesis and prune after apply.
 
 ## [0.11.0] - 2026-09-30
 
