@@ -16,20 +16,15 @@ infrastructure.
 
 ## [Unreleased]
 
-## [0.12.0-rc.2] - 2026-10-05
+## [0.12.0] - 2026-10-05
 
-Second release candidate for 0.12.0. Since rc.1:
-- **New installs:** `ergo-node init` writes a validated config and a protected API key (#595), and `ergo-node api-key` creates and hashes API keys (#592).
-- **Downloads:** one archive per platform holds both programs, with `SHA256SUMS` and `release.json` (#593).
-- **Fixes:** the dashboard loads again (#588), peers recover after a network outage (#589), and index rollback deletes records it leaves empty, as Scala does (#596). The node advertises version 6.0.7 to peers (#587).
-
-Upgrading from rc.1 changes no data: stop the node, replace the binaries and start it again.
-
-0.12 overall:
 - **Storage:** moves to redb 4, and the node upgrades a 0.11 data directory automatically.
+- **Setup:** `ergo-node init` writes a validated config and a protected API key for new installs, and each platform ships as one archive holding both programs, with `SHA256SUMS` and `release.json`.
 - **Mining:** exact candidate inspection, a persisted block policy, private zero-fee transactions, wallet maintenance jobs and Lithos transaction packages.
 - **Operators:** health probes, runtime controls, scoped API credentials, a durable event replay journal with webhooks, and offline backup, restore and recovery commands.
 - **Correctness:** a crate-by-crate audit brings a broad set of Scala-parity and robustness fixes (#571).
+
+Upgrading from 0.12.0-rc.1 or rc.2 changes no data: stop the node, replace the binaries and start it again. Nothing changed since rc.2 except the version.
 
 ### Upgrading from 0.11
 
