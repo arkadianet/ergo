@@ -40,11 +40,9 @@
 //!   rather than running header sync's real bounded forward
 //!   catch-up (`rewrite_best_chain_into_index`,
 //!   `ergo-state/src/store/height_index.rs:204`) end-to-end through
-//!   a running node. Driving that handoff through the ACTUAL
-//!   catch-up mechanism inside `run_inner` remains open — it is the
-//!   second half of Gate 2 task 4.3 in
-//!   `dev-docs/plans/2026-09-03-mode-gates-plan.md`, not closed by
-//!   this PR.
+//!   a running node. The handoff through the actual catch-up mechanism
+//!   inside `run_inner` is covered separately by `mode4_catchup.rs`. See
+//!   `docs/compatibility.md` for the remaining live-soak limitation.
 //! - **Scala pin (archive + utxo_bootstrap)** — an archive-configured
 //!   node with `utxo_bootstrap = true` keeps a CONSTANT prune
 //!   sentinel across boot, matching

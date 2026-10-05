@@ -1,5 +1,5 @@
 //! Route-level integration tests for the `/api/v1/script/*` ErgoScript
-//! playground (`dev-docs/v1-design-fragments/script-tooling.md`).
+//! playground (see `docs/configuration.md`, API script settings).
 //!
 //! Drives the wired endpoints over `oneshot` through the real
 //! `script_router` (governor `Compute` layer + T0 `Tier::Public` gate):

@@ -1,5 +1,5 @@
-//! Route-level tests for `POST /api/v1/batch` (`dev-docs/v1-api-design.md`
-//! §3.18/§4.7). Convention-lock coverage: ordered results with echoed `id`s,
+//! Route-level tests for `POST /api/v1/batch`.
+//! Convention-lock coverage: ordered results with echoed `id`s,
 //! `data` byte-identical to the standalone endpoint, partial-failure
 //! semantics (one bad member never sinks the batch), the structural
 //! item-count cap, and the closed allow-list rejecting a mutating path

@@ -6,5 +6,4 @@
 reviews:
   path_filters:
     - "!test-vectors/**"
-    - "!dev-docs/**"
     - "!**/*.snap"

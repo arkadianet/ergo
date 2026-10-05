@@ -24,8 +24,8 @@ Checksums detect corruption; they do not independently authenticate a release.
 ## Status
 
 This independent Rust node is pre-1.0 alpha software. Read
-[compatibility and known limitations](docs/compatibility.md) before deploying.
-The [security policy](SECURITY.md) describes private disclosure.
+[compatibility and known limitations](compatibility.md) before deploying.
+The [security policy](../SECURITY.md) describes private disclosure.
 
 ## Running
 
@@ -53,11 +53,11 @@ read; its ACL is inherited. On Unix the generated file has mode `0600`. The
 packaged default selects mainnet with
 the extra-index and serves the API on loopback at `127.0.0.1:9099`. Privileged
 routes require your own API credential; follow the
-[configuration reference](docs/configuration.md#apisecurity). Keep your data
+[configuration reference](configuration.md#apisecurity). Keep your data
 directory outside the extracted archive so upgrades do not replace it.
 
 For modes, monitoring, backups and graceful shutdown, read
-[operating the node](docs/operating.md). Use `ergo-wallet --help` for wallet
-commands. Review [CHANGELOG.md](CHANGELOG.md) before upgrades. Source build
+[operating the node](operating.md). Use `ergo-wallet --help` for wallet
+commands. Review [CHANGELOG.md](../CHANGELOG.md) before upgrades. Source build
 and contributor instructions live in the
 [repository](https://github.com/arkadianet/ergo).

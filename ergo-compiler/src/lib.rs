@@ -22,7 +22,7 @@
 //!
 //! Current limitations, oracle versions, pass-order rationale and historical
 //! closure evidence are maintained in the
-//! [compiler design ledger](https://github.com/arkadianet/ergo/blob/main/docs/compiler-design-ledger.md).
+//! [compiler design ledger](https://github.com/arkadianet/ergo/blob/main/ergo-compiler/docs/compiler-design-ledger.md).
 //!
 //! # Examples
 //!

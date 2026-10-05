@@ -2,7 +2,7 @@
 
 This ledger preserves the compiler's oracle-backed design decisions, known
 residuals, and closure evidence. The public entry point and current examples
-live in [`ergo-compiler/src/lib.rs`](../ergo-compiler/src/lib.rs). Identifiers
+live in [`ergo-compiler/src/lib.rs`](../src/lib.rs). Identifiers
 below refer to compiler modules unless qualified otherwise. Reference versions
 and dates belong to the evidence for each entry; they do not claim parity with
 an untested future reference release. Update an entry when its behavior or

@@ -26,7 +26,7 @@ impl Scope {
         args: &[TypedExpr],
         type_subst: &[(String, SType)],
     ) -> Result<Expr, EmitError> {
-        // GraphBuilding reject gates (compiler-design-ledger.md D-C5) — residual MethodCalls the
+        // GraphBuilding reject gates (ergo-compiler/docs/compiler-design-ledger.md D-C5) — residual MethodCalls the
         // typer accepts but the FULL Scala compiler rejects:
         //
         // (a) Shared-SNumericType-container methods (`toBytes`/`toBits`,
@@ -36,7 +36,7 @@ impl Scope {
         //     (oracle, ORACLE_TREE_VERSION=2: `ccs sigmaProp(x.toBytes.size
         //     == 4)` → `REJECT 1:13 GraphBuildingException`). At v3 the owner
         //     resolves per-type (`Int`/…): a CONSTANT receiver folds at gate
-        //     (d) below (compiler-design-ledger.md D-C6), a non-constant one keeps the residual
+        //     (d) below (ergo-compiler/docs/compiler-design-ledger.md D-C6), a non-constant one keeps the residual
         //     MethodCall (Err/Err reduce parity).
         if method.owner == "SNumericType" {
             return Err(EmitError::GraphBuildingReject {
@@ -112,7 +112,7 @@ impl Scope {
         //     writes `tpe.elemType`). Only a LITERAL Int argument lowers — a
         //     dynamic index stays a MethodCall in Scala too (oracle:
         //     `getReg[Int](HEIGHT)` keeps wire pair (99,19) on both sides;
-        //     Err/Err reduce parity). Residual (compiler-design-ledger.md D-C6): Scala
+        //     Err/Err reduce parity). Residual (ergo-compiler/docs/compiler-design-ledger.md D-C6): Scala
         //     const-propagates a val-bound index (`{ val i = 4; …getReg[Int]
         //     (i) }` → `ExtractRegisterAs` reg 4, oracle ×3) — our typed AST
         //     keeps the ValUse, so that form stays a both-accept unevaluable
@@ -170,7 +170,7 @@ impl Scope {
         //     (`300.toByte.toBytes`) do NOT fold here ([`const_numeric_i64`]
         //     returns `None`): the residual Downcast reaches tree.rs's
         //     `fold_direct_const_casts`, which rejects with the
-        //     oracle's ArithmeticException. Residual (compiler-design-ledger.md D-C6): deeper
+        //     oracle's ArithmeticException. Residual (ergo-compiler/docs/compiler-design-ledger.md D-C6): deeper
         //     constant receivers Scala's full partial evaluation also folds —
         //     arithmetic results (`(1 + 2).toBytes`) and multi-cast chains —
         //     stay residual MethodCalls here.
@@ -286,7 +286,7 @@ impl Scope {
 }
 
 /// Constant value of a v6-numeric-method receiver/argument for the
-/// compile-time fold (`emit_method_call` gate (d), compiler-design-ledger.md D-C6): a DIRECT
+/// compile-time fold (`emit_method_call` gate (d), ergo-compiler/docs/compiler-design-ledger.md D-C6): a DIRECT
 /// Byte/Short/Int/Long constant, or a single explicit numeric cast of one
 /// (`7.toByte` — a typed `Select` the typer leaves unfolded).
 /// The cast case is range-checked: an out-of-range cast (`300.toByte`)

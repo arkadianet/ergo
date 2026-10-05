@@ -58,13 +58,13 @@ pub(crate) use walk::*;
 /// only difference between the two callers is whether the emitted root carried
 /// `ConstantPlaceholder` nodes for named params.
 pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
-    // GraphBuilding verdict-parity gates (compiler-design-ledger.md D-C5): reject the emitted
+    // GraphBuilding verdict-parity gates (ergo-compiler/docs/compiler-design-ledger.md D-C5): reject the emitted
     // shapes Scala's full compiler rejects — lambda/application rules first.
     if let Some(e) = graph_building_lambda_reject(&root) {
         return Err(CompileError::Emit(e));
     }
 
-    // Explicit-cast folds, BOTH directions (compiler-design-ledger.md D-C7 cast bullet): fold
+    // Explicit-cast folds, BOTH directions (ergo-compiler/docs/compiler-design-ledger.md D-C7 cast bullet): fold
     // `Downcast`/`Upcast` of a DIRECT constant (range-checked), while leaving
     // a cast-of-cast CHAIN's outer casts unfolded, exactly like Scala. MUST
     // run BEFORE `crate::fold::fold` below: a direct-constant `Upcast` (e.g.
@@ -293,12 +293,12 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
 ///   ([`CompileError::Serializer`], mirroring Scala's
 ///   `SerializerException`).
 /// - Residual `SigmaPropIsProven` in mixed `Bool`/`SigmaProp` logical
-///   contexts: coercion-cancellation (compiler-design-ledger.md D-C3) —
+///   contexts: coercion-cancellation (ergo-compiler/docs/compiler-design-ledger.md D-C3) —
 ///   `crate::isproven` cancels the `BoolToSigmaProp`/`SigmaPropIsProven`
 ///   round trips before the fold and after the lowering block. The
 ///   surviving-sigma `HasSigmas` `SigmaAnd`/`SigmaOr` reconstruction (a
 ///   residual `0xCF` in some corpus outputs) stays open.
-/// - The GraphBuilding reject-gate family (compiler-design-ledger.md D-C5): bit ops,
+/// - The GraphBuilding reject-gate family (ergo-compiler/docs/compiler-design-ledger.md D-C5): bit ops,
 ///   zero-arg/non-1-arg lambda applications, SFunc-typed lambda params,
 ///   postfix `size`, out-of-range `getReg` literals, pre-v3 SNumericType
 ///   methods, and the constant-fold overflow check
@@ -325,7 +325,7 @@ pub fn compile(
 }
 
 /// [`compile`] plus a P5-B [`SourceMap`] over the compiled tree body
-/// (`docs/ergoscript-compiler-source-map-design.md`). Bytes and addresses are
+/// (`ergo-compiler/docs/ergoscript-compiler-source-map-design.md`). Bytes and addresses are
 /// identical to [`compile`]'s: the map is side data, recorded at emit and
 /// resolved against the final tree.
 pub fn compile_with_source_map(
@@ -383,7 +383,7 @@ fn compile_inner(
     // still inline here, no placeholders yet), so hashing it is byte-equal to
     // Scala's re-inlining step AND cheaper than segregating then substituting
     // back. For a bare-constant root this is the body itself — equivalent. This
-    // is why segregation leaves the P2SH address INVARIANT (compiler-design-ledger.md D-C1/D-C7).
+    // is why segregation leaves the P2SH address INVARIANT (ergo-compiler/docs/compiler-design-ledger.md D-C1/D-C7).
     let mut pw = VlqWriter::new();
     write_expr(&mut pw, &root, false)?;
     let proposition_bytes = pw.result();
@@ -867,7 +867,7 @@ mod tests {
         }
     }
 
-    // ----- error paths: GraphBuilding parity gates (compiler-design-ledger.md D-C5) -----
+    // ----- error paths: GraphBuilding parity gates (ergo-compiler/docs/compiler-design-ledger.md D-C5) -----
     // Every oracle fact below: captured 2026-07-07, 3 identical runs,
     // committed as compile_seed.json vectors (except the ACCEPT boundaries
     // that byte-mismatch pending val-inline/pruning — the unused/aliased
@@ -1258,11 +1258,11 @@ mod tests {
         // The P2SH address hashes the constant-INLINED proposition
         // (`d191a304c801`) — segregation-invariant, so it matches regardless
         // of the D-C1 flip. Wherever Scala's IR reshapes the proposition
-        // itself, the P2SH diverges (compiler-design-ledger.md D-C7).
+        // itself, the P2SH diverges (ergo-compiler/docs/compiler-design-ledger.md D-C7).
         assert_eq!(r.p2sh_address, ORACLE_HGT_P2SH);
     }
 
-    // ----- oracle parity: lowerings/folds (compiler-design-ledger.md D-C6) -----
+    // ----- oracle parity: lowerings/folds (ergo-compiler/docs/compiler-design-ledger.md D-C6) -----
     // Every oracle fact below: TyperOracle cc/ccs verbs, sigma-state 6.0.2,
     // ORACLE_TREE_VERSION=3, ORACLE_NETWORK=testnet
     // (committed as compile_seed.json vectors).

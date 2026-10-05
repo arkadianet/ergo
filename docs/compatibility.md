@@ -208,9 +208,42 @@ written by redb 4 may contain type metadata unreadable by redb 2.6.
 
 Areas where parity is incomplete, partial, or deliberately out of scope.
 Be aware of these before depending on the node.
-The [operating-mode evidence inventory](operating-mode-evidence.md) separates
-bounded fixture/recovery tests, recorded external campaigns and remaining
-closure criteria.
+### Operating-mode status
+
+These statuses describe the implemented modes and the limits of their current
+coverage. Fixture tests, process-recovery tests and configured external jobs
+have different scopes; a skipped job does not establish parity.
+
+| Mode | Current status and caveats |
+| --- | --- |
+| **1 — UTXO full archive** | Supported default. Mainnet replay checks authenticated state roots, but limited deployment exposure remains. Bounded early-mainnet process-death tests cover reorg recovery, not every historical fork or interruption inside a database commit. |
+| **2 — UTXO snapshot bootstrap** | Supported consume/serve lifecycle. Trust-flag persistence tests do not verify an external trust root. A Scala-produced manifest/chunk set and independently reported header root are still needed to establish installation, tamper rejection with unchanged state, and reopen against an external snapshot. Cross-check the installed root with a known-good reference. |
+| **3 — pruned UTXO** | Partial. Scala fixtures cover retention calculations and section eviction; native boot/reopen tests cover genesis-first downloads and guarded legacy-floor repair. They do not establish a complete historical genesis replay, pruning activation and restart lifecycle. |
+| **4 — pruned + snapshot bootstrap** | Partial. Install/reopen and proof-first versus snapshot-first composition are tested. A deterministic three-peer test validates mainnet block 10 after a Rust-reconstructed block-9 snapshot and header catch-up, then reopens. This is neither a Scala-produced snapshot trust fixture nor a long-running live multi-peer soak. |
+| **5 — digest verifier** | Partial. Full transaction/AD-proof replay covers a mainnet voting boundary and additional mainnet/testnet windows, including data inputs, rollback/replay and corrupted-proof rejection. Seeded windows are neither genesis replay nor cold-open historical reorg coverage; broader eras and complete rollback/index/parameter history remain required. Digest rollback history is currently unbounded; a retention change needs a supported-window contract and storage migration. |
+| **6 — headers-only digest** | Supported header validation and sync. It does not download or validate full blocks and provides no UTXO state. |
+
+Current regression entry points include the [Mode 3 lifecycle tests](../ergo-node/tests/it/mode3_lifecycle.rs),
+[Mode 4 acceptance](../ergo-node/tests/it/mode4_acceptance.rs) and
+[catch-up tests](../ergo-node/tests/it/mode4_catchup.rs),
+[Mode 5 executor replay](../ergo-sync/tests/it/mode5_executor_replay.rs) and
+[corpus breadth tests](../ergo-sync/tests/it/mode5_corpus_breadth.rs), and
+[UTXO/digest interrupted-reorg recovery](../ergo-sync/src/executor/relay_tests.rs).
+Early-mainnet recovery uses externally captured replacement blocks with a
+synthetic abandoned fork. Synthetic AVL cold-reopen tests check root caching
+and read bounds, rather than an external snapshot trust anchor.
+
+Historical private UTXO mixed-node tests do not establish current-revision
+Mode 4/5 live-soak coverage. The nightly JVM campaign and archival replay are
+separate obligations; archival replay requires `REPLAY_NODE_URL`, and an unset
+secret reports that replay was not tested. Workflow wiring alone does not
+establish a successful external campaign.
+
+The webhook connector checks every DNS answer, rejects mixed forbidden/public
+answers, connects through the checked results and disables redirects/proxies.
+Peer admission, handshake slots and dial selection share normalized IPv4 `/16`
+or native IPv6 `/48` connection groups, including IPv4-mapped addresses. These
+bounded policies and their regression tests do not expand the mode guarantees.
 
 ### Partial (landed but incomplete)
 

@@ -11,7 +11,7 @@
 - `segment.rs` module doc + `segment_buffer.rs` module doc — the head-buffer/spill model (512-entry spills, sign-bit = spent flag) shared by all three keyed indexes. This is the trickiest invariant in the crate.
 - `store::IndexerStore` — owns the redb file, the wipe/resume open table, and every read accessor the handle drives.
 - `lib.rs` — the module map, written as a guided tour.
-- [Shipping an indexer schema change](../dev/indexer-schema-migrations.md) —
+- [Shipping an indexer schema change](../../ergo-indexer/docs/indexer-schema-migrations.md) —
   registry steps, equivalence and rollback tests, and the real-data copy harness.
 
 ## Modules

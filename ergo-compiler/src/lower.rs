@@ -213,7 +213,7 @@ fn fold_prove_dlog_dhtuple(expr: Expr) -> Expr {
                 // pairwise DISTINCT. Scala hash-conses (CSE) BEFORE `buildValue`'s
                 // four-`Constant` fold-guard runs, so a REPEATED point is already a
                 // shared `ValDef`/`ValUse` — not a `Constant` — by the time the
-                // guard is checked, and the guard does not fire (compiler-design-ledger.md D-C7).
+                // guard is checked, and the guard does not fire (ergo-compiler/docs/compiler-design-ledger.md D-C7).
                 // `proveDHTuple(g1,g2,g1,g2)` under the `cce`
                 // env (g1==g2) therefore stays a `CreateProveDHTuple` node whose one
                 // distinct `GroupElement` (a `LiftedConst`, NOT P4-suppressed) CSE
@@ -240,7 +240,7 @@ fn fold_prove_dlog_dhtuple(expr: Expr) -> Expr {
 /// `SigmaAnd`(0xEA)/`SigmaOr`(0xEB) over a one-item `SigmaCollection`,
 /// collapses to its sole item. The `SigmaAnd`/`SigmaOr` arm is PERMANENTLY
 /// unreachable from ErgoScript source, not merely pending a future wiring
-/// (compiler-design-ledger.md D-C8): binary `&&`/`||` between `SigmaProp`s
+/// (ergo-compiler/docs/compiler-design-ledger.md D-C8): binary `&&`/`||` between `SigmaProp`s
 /// always produces >= 2 items, and `allZK`/`anyZK` — the only OTHER route
 /// that could construct a single-item `SigmaAnd`/`SigmaOr` — never lowers to
 /// one at all: Scala's own `SigmaPredef.AllZKFunc`/`AnyZKFunc` irBuilder is
