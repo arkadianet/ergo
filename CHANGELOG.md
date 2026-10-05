@@ -16,44 +16,16 @@ infrastructure.
 
 ## [Unreleased]
 
-### Added
+## [0.12.0-rc.2] - 2026-10-05
 
-- `ergo-node init` creates a validated config and protected API key for new
-  installs, with wallet, fast/full mining, explorer and archival presets.
-  Includes explicit snapshot-trust consent, disk checks, mining reward address
-  validation, interactive prompts and a versioned JSON dry-run plan; runs before
-  node startup and refuses existing config files.
+Second release candidate for 0.12.0. Since rc.1:
+- **New installs:** `ergo-node init` writes a validated config and a protected API key (#595), and `ergo-node api-key` creates and hashes API keys (#592).
+- **Downloads:** one archive per platform holds both programs, with `SHA256SUMS` and `release.json` (#593).
+- **Fixes:** the dashboard loads again (#588), peers recover after a network outage (#589), and index rollback deletes records it leaves empty, as Scala does (#596). The node advertises version 6.0.7 to peers (#587).
 
-- `ergo-node api-key generate --secret-file PATH` saves a random API secret in a
-  new protected file and prints its configuration hash; `api-key hash` hashes
-  a secret file or stdin. Both support `--json`, run without node startup or a
-  config, and never print the secret. Paste the hash into `[api.security]` and
-  restart to unlock privileged routes.
+Upgrading from rc.1 changes no data: stop the node, replace the binaries and start it again.
 
-### Changed
-
-- Release downloads are now one archive per platform containing both `ergo-node`
-  and `ergo-wallet`, plus release-wide `SHA256SUMS` and `release.json`. Bare
-  binaries and per-file checksum sidecars are no longer published.
-- The P2P handshake advertises version 6.0.7, the current Scala stable
-  release whose consensus and mempool rules the node implements; it
-  advertised 6.0.2. Scala gates no peer behavior on versions above 5.0.13, so
-  this only signals parity. The agent name remains `ergo-rust`.
-
-### Fixed
-
-- Indexer rollback now deletes address and template records it leaves empty,
-  as the Scala node does. Previously, an address seen only in an orphaned
-  block kept an empty record; API answers were unaffected.
-
-- Recover from P2P starvation after a network outage or restart by attempting
-  up to four known addresses every 30 seconds when no peers or normal dial
-  candidates remain. Recovery starts immediately at boot, respects bans and
-  connection limits, and does not escalate or persist failed-dial backoff.
-
-## [0.12.0-rc.1] - 2026-10-05
-
-Release candidate for 0.12.0:
+0.12 overall:
 - **Storage:** moves to redb 4, and the node upgrades a 0.11 data directory automatically.
 - **Mining:** exact candidate inspection, a persisted block policy, private zero-fee transactions, wallet maintenance jobs and Lithos transaction packages.
 - **Operators:** health probes, runtime controls, scoped API credentials, a durable event replay journal with webhooks, and offline backup, restore and recovery commands.
@@ -73,7 +45,7 @@ Release candidate for 0.12.0:
 4. **The extra index rebuilds from genesis in the background.** Indexer schema 3 corrects token metadata and wrapped-script templates in already-indexed history.
    - The stale index is deleted first to make room. To keep it, set `[store] auto_upgrade_keep_stale_indexer = true`, or pass `--keep-stale-indexer` to `upgrade-data`.
    - The node syncs and mines meanwhile. Until the index catches up, `/blockchain/*` answers `503 indexer-syncing` and mining pauses storage-rent self-claims (#584).
-   - Expect a couple of hours on mainnet, depending on hardware.
+   - In a benchmark that ran the indexer alone over a copy of mainnet chain data, a full rebuild to height 1,887,066 took about 2 h 40 min. Expect longer while the node also syncs and mines.
 5. **Delete the backups once you're satisfied.** The node warns at every start while `*.redb2-backup` files exist. They are plain files the node never opens, so you can delete them while it runs. Rolling back to 0.11 needs them (or your external backup), because 0.11 cannot read redb 4 files.
 6. **Reapply operator bans.** Legacy ban rows are discarded on first start. Reapply operator bans through the new peer-control API.
 7. **Storage-rent claims are declined on mainnet by default,** as Scala now does. Set `[mempool] reject_storage_rent_txs = false` to relay them.
@@ -111,6 +83,7 @@ See [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases) for
 - **Packaging (#577).** Docker, Compose and systemd deployment examples, plus Linux ARM64 and Apple Silicon release builds.
 - **Offline commands (#578, #581).** `backup`, `verify-backup`, `restore`, `doctor`, `utxo-stats` and `wallet-scan-utxo`. The last discovers wallet holdings from the current UTXO set, for pruned and snapshot nodes.
 - **Data upgrade (#582).** `upgrade-data` and the automatic startup upgrade of 0.11 databases.
+- **Setup commands (#592, #595).** `ergo-node init` creates a validated config and a protected API key for new installs, with wallet, fast or full mining, explorer and archival presets. It asks for explicit consent to snapshot trust before fast sync, checks free disk space, validates mining reward keys and offers a JSON dry run. `ergo-node api-key generate` and `api-key hash` create and hash API keys without starting the node.
 - **Cache budgets (#469).** Separate cache budgets for the state, indexer and address-book databases, with memory gauges.
 
 **Events and API**
@@ -145,6 +118,9 @@ See [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases) for
   - `POST /transactions/unconfirmed/byTransactionIds` returns Scala's shape.
 - **Wallet crate split (#416).** Wallet orchestration moved into the `ergo-wallet-service` crate.
 - **Toolchain (#493).** The stable toolchain and minimum Rust version are now 1.99.0.
+- **Release downloads (#593).** One archive per platform holds both `ergo-node` and `ergo-wallet`, with release-wide `SHA256SUMS` and `release.json`. Bare binaries and per-file checksum files are no longer published.
+- **P2P handshake version (#587).** The node advertises 6.0.7, the current Scala stable release whose consensus and mempool rules it implements; it advertised 6.0.2. Scala gates no peer behavior on versions above 5.0.13, and the agent name stays `ergo-rust`.
+- **Documentation (#590, #594).** The README is rewritten for operators and developers. The docs now cover only the current product and code, and CI checks that their links resolve.
 
 ### Fixed
 
@@ -167,6 +143,7 @@ See [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases) for
 - **Indexer checkpoints (#526).** Durable indexer checkpoints are compared inside every mutation.
 - **Snapshot allocator (#501).** The snapshot allocator and persistence lifecycle are preserved.
 - **Pruned stores (#550).** Genesis is replayed before pruning unapplied UTXO history.
+- **Rollback parity (#596).** Index rollback deletes address and template records it leaves empty, as Scala does. Before, an address seen only in an orphaned block kept an empty record; API answers were unaffected.
 - **Audit remediation (#571).** The combined crate-audit fixes, among them:
   - atomic state and indexer checkpoints;
   - coherent rollback to height zero;
@@ -175,10 +152,12 @@ See [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases) for
   - bounded mempool accounting.
 
 **P2P**
+- **Recovery after outages (#589).** When no peers or normal dial candidates remain, the node dials up to four known addresses every 30 seconds, starting immediately at boot. Recovery respects bans and connection limits, and failed recovery dials do not lengthen the persisted backoff.
 - **IPv6 limits (#468).** IPv6 /48 subnet limits and IPv4-mapped address normalization.
 - **Handshakes and deliveries (#528).** Bounded handshake prefixes and retired delivery bookkeeping.
 
 **API**
+- **Web dashboard (#588).** In 0.12.0-rc.1 the dashboard stayed at "connecting" because two of its modules were not served. Every module is now served, and a test requests each one through the router.
 - **Paging and numbers.** Global ranges page from the latest indexed snapshot (#499), and REST decodes exact integers within Scala's numeric domains (#522).
 - **OpenAPI.**
   - Operation IDs are unique document-wide (#548).
