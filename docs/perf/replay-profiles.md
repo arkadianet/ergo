@@ -87,14 +87,6 @@ mining graphs and API load. Run a separate combined-load soak for those owners.
 Do not overlap compilation or tests with matched comparisons. Warm OS page
 cache is recorded honestly; no global cache drop is performed.
 
-The [October 2 matched smoke](replay-profiles-2026-10-02.md) retains all 12
-cache-crossed runs and root/reopen checks. Its small working set cannot choose
-a universal mainnet budget.
-The [September baseline](ibd-baseline-2026-09-30.md) also documents why its live
-120-second RSS growth was neither a memory leak diagnosis nor a before/after
-comparison. Use later intervals and long retained-memory observations before
-changing production defaults.
-
 ## Read-only live observation
 
 The maintained Linux sampler accepts an explicitly selected PID and public API
