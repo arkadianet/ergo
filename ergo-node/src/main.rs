@@ -22,6 +22,20 @@ fn main() {
         }
         return;
     }
+    if let Some(ergo_node::config::Command::Init(args)) = &cli.command {
+        use std::io::IsTerminal;
+        if let Err(error) = ergo_node::init::run(
+            args,
+            std::io::stdin().is_terminal(),
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        ) {
+            eprintln!("{error}");
+            std::process::exit(error.exit_code());
+        }
+        return;
+    }
     // block_on polls startup on its calling thread. Store recovery can decode
     // transactions before the async action loop exists, so it needs the same
     // stack as the runtime workers. This thread owns and drops the runtime.

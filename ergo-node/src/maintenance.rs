@@ -42,7 +42,8 @@ fn requires_interruption_cleanup(command: &crate::config::Command) -> bool {
     use crate::config::Command;
     match command {
         Command::Backup { .. } | Command::Restore { .. } | Command::UpgradeData { .. } => true,
-        Command::ApiKey { .. }
+        Command::Init(_)
+        | Command::ApiKey { .. }
         | Command::MigrateRedb { .. }
         | Command::VerifyBackup { .. }
         | Command::Doctor { .. }
@@ -144,8 +145,10 @@ const MANIFEST: &str = "ergo-backup.json";
 pub fn run(command: &crate::config::Command) -> Result<String> {
     use crate::config::Command;
     let value = match command {
-        Command::ApiKey { .. } => {
-            return Err(fail("api-key must be dispatched before the runtime"));
+        Command::Init(_) | Command::ApiKey { .. } => {
+            return Err(fail(
+                "init and api-key must be dispatched before the runtime",
+            ));
         }
         Command::MigrateRedb {
             source,

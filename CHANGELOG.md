@@ -18,6 +18,12 @@ infrastructure.
 
 ### Added
 
+- `ergo-node init` creates a validated config and protected API key for new
+  installs, with wallet, fast/full mining, explorer and archival presets.
+  Includes explicit snapshot-trust consent, disk checks, mining reward address
+  validation, interactive prompts and a versioned JSON dry-run plan; runs before
+  node startup and refuses existing config files.
+
 - `ergo-node api-key generate --secret-file PATH` saves a random API secret in a
   new protected file and prints its configuration hash; `api-key hash` hashes
   a secret file or stdin. Both support `--json`, run without node startup or a

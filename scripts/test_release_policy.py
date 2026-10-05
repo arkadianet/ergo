@@ -181,6 +181,8 @@ class PackagedDocumentation(unittest.TestCase):
                 self.assertIn("## State modes and how to choose", content)
                 readme = self.format("README.md", extension=extension)
                 self.assertIn(f"./ergo-node{extension} --config", readme)
+                self.assertIn(f"./ergo-node{extension} init --data-dir ../ergo-data", readme)
+                self.assertIn(f"./ergo-node{extension} api-key generate", readme)
                 self.assertIn(f"./ergo-wallet{extension} --help", readme)
 
     def test_bundled_links_stay_local_and_source_links_use_exact_revision(self):
