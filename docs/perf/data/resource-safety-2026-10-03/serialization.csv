@@ -1,6 +1,0 @@
-sample,boxes,corpus_bytes,repeats,parse_ns_per_box,write_ns_per_box,scratch_id_ns_per_box
-1,26,2225,1000,407,155,256
-2,26,2225,1000,410,152,232
-3,26,2225,1000,417,150,231
-4,26,2225,1000,410,151,233
-5,26,2225,1000,468,156,237
