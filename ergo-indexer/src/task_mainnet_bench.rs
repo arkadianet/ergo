@@ -233,6 +233,9 @@ fn benchmark_archival_catchup() {
         ReplaySource::Direct(archive.clone())
     };
     let mut task = IndexerTask::new(handle.clone(), Arc::new(chain));
+    // `legacy` reproduces the catch-up before adaptive batching: the old
+    // budgets and no template-hash cache.
+    task.scratch.cache_templates = mode != "legacy";
     let ticks_per_second: f64 = String::from_utf8(
         std::process::Command::new("getconf")
             .arg("CLK_TCK")
