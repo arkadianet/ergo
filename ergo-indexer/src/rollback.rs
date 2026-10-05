@@ -644,6 +644,41 @@ fn rollback_one_block_inner(
             num_tx_table.remove(num_key.as_slice())?;
         }
 
+        // Scala deletes parents only when all head and spilled history is
+        // empty. Remove them from the touched maps so the flushes below
+        // cannot reinsert them. These deletes share the rollback writer.
+        let empty_addresses: Vec<_> = touched_addresses
+            .iter()
+            .filter_map(|(tree_hash, addr)| {
+                let segment = &addr.segment;
+                (segment.boxes.is_empty()
+                    && segment.txs.is_empty()
+                    && segment.box_segment_count == 0
+                    && segment.tx_segment_count == 0)
+                    .then_some(*tree_hash)
+            })
+            .collect();
+        for tree_hash in empty_addresses {
+            let addr = touched_addresses.remove(&tree_hash).unwrap();
+            debug_assert!(addr
+                .balance
+                .as_ref()
+                .is_some_and(|balance| balance.nano_ergs == 0 && balance.tokens.is_empty()));
+            addr_table.remove(tree_hash.as_bytes().as_slice())?;
+        }
+
+        let empty_templates: Vec<_> = touched_templates
+            .iter()
+            .filter_map(|(template_hash, template)| {
+                (template.segment.boxes.is_empty() && template.segment.box_segment_count == 0)
+                    .then_some(*template_hash)
+            })
+            .collect();
+        for template_hash in empty_templates {
+            touched_templates.remove(&template_hash);
+            template_table.remove(template_hash.as_bytes().as_slice())?;
+        }
+
         // One short-lived writer reused across all four flush passes —
         // every row clears it via `write_then_insert` before emit, so
         // the writer's prior contents (or stale bytes from an earlier
