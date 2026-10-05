@@ -10,6 +10,7 @@ mod reorg_spill;
 mod reorg_token;
 mod resume_contract;
 mod rollback;
+mod rollback_empty_parents;
 mod storage_rent_apply;
 mod store_open;
 mod task_step;

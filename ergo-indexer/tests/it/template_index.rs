@@ -332,20 +332,11 @@ fn rollback_undoes_template_append_and_flip() {
         "post-rollback-block-2: template entry restored to positive"
     );
 
-    // Rollback block 1 — must pop the template entry. The parent row
-    // either disappears or is left empty — `read_template` returning
-    // `Some(empty)` is acceptable since `flush_templates` overwrites
-    // the row with whatever the in-memory copy is at end of block.
+    // Rollback block 1 — must pop the template entry and delete its
+    // now-empty parent, as Scala does.
     let after_rb1 = rollback_one_block(&store, &after_rb2, &block1).unwrap();
     assert_eq!(after_rb1.indexed_height, 0);
-    let post = store.read_template_box_entries(&template).unwrap();
-    match post {
-        None => {} // ideal: row never existed and rollback didn't write
-        Some(v) => assert!(
-            v.is_empty(),
-            "post-rollback-block-1: template entries must be empty, got {v:?}"
-        ),
-    }
+    assert!(store.read_template(&template).unwrap().is_none());
 }
 
 #[test]

@@ -532,12 +532,11 @@ fn rollback_returns_owner_balance_to_pre_block_snapshot() {
 }
 
 #[test]
-fn rollback_genesis_zeroes_owner_balance_but_address_record_remains() {
+fn rollback_genesis_removes_empty_owner_address_record() {
     // Genesis creates a brand-new address record with 3.5M balance.
     // Rollback runs `subtract_box` against that record — Scala's
     // BalanceInfo.subtract clamps nano_ergs at 0 and drops zero-tokens,
-    // and we never delete the row (matches Scala's upsert-only model).
-    // So post-rollback the record exists with an empty balance.
+    // then deletes the parent when all its history is empty, as Scala does.
     let (store, _tmp) = open_store();
 
     let tx = Transaction {
@@ -564,10 +563,7 @@ fn rollback_genesis_zeroes_owner_balance_but_address_record_remains() {
     );
 
     rollback_one_block(&store, &meta1, &block).unwrap();
-    let after = store.read_address(&th).unwrap().expect("record stays");
-    let bal = after.balance.expect("balance present");
-    assert_eq!(bal.nano_ergs, 0);
-    assert!(bal.tokens.is_empty());
+    assert!(store.read_address(&th).unwrap().is_none());
 }
 
 #[test]
@@ -643,9 +639,9 @@ fn rollback_drops_token_amounts_added_by_apply() {
     assert_eq!(bal_after_transfer_rollback.tokens, vec![(token_b, 7)]);
     assert_eq!(bal_after_transfer_rollback.nano_ergs, 1_000_000);
     rollback_one_block(&store, &restored, &block1).unwrap();
-    let bal_after_rollback = store.read_address(&th).unwrap().unwrap().balance.unwrap();
-    assert_eq!(bal_after_rollback.nano_ergs, 0);
-    assert!(bal_after_rollback.tokens.is_empty());
+    // Once the mint block is also reversed, the zero-token balance
+    // belongs to an empty parent and the address record is removed.
+    assert!(store.read_address(&th).unwrap().is_none());
 }
 
 #[test]
@@ -727,11 +723,8 @@ fn rollback_undoes_box_spill_via_merge_back_clearing_segments_row() {
 
     rollback_one_block(&store, &meta1, &block).unwrap();
 
-    // Always-upsert: the address record stays on disk after rollback,
-    // but its segment is empty and the spill row is gone.
-    let addr = store.read_address(&th).unwrap().expect("address kept");
-    assert!(addr.segment.boxes.is_empty());
-    assert_eq!(addr.segment.box_segment_count, 0);
+    // Both the empty parent and its spill row are removed.
+    assert!(store.read_address(&th).unwrap().is_none());
     assert!(
         store
             .read_spill_segment(&box_segment_id(&th, 0))
@@ -774,11 +767,7 @@ fn rollback_undoes_tx_segment_spill_via_merge_back() {
 
     rollback_one_block(&store, &meta1, &block).unwrap();
 
-    let addr = store.read_address(&th).unwrap().expect("address kept");
-    assert!(addr.segment.txs.is_empty());
-    assert_eq!(addr.segment.tx_segment_count, 0);
-    assert!(addr.segment.boxes.is_empty());
-    assert_eq!(addr.segment.box_segment_count, 0);
+    assert!(store.read_address(&th).unwrap().is_none());
     assert!(store
         .read_spill_segment(&tx_segment_id(&th, 0))
         .unwrap()
