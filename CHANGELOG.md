@@ -35,9 +35,10 @@ Release candidate for 0.12.0:
    - free space;
    - take an external backup and run `ergo-node upgrade-data DATA_DIR --discard-backups`;
    - or convert to another disk with `ergo-node migrate-redb`.
-4. **The extra index rebuilds from genesis.** Indexer schema 3 corrects token metadata and wrapped-script templates in already-indexed history.
+4. **The extra index rebuilds from genesis in the background.** Indexer schema 3 corrects token metadata and wrapped-script templates in already-indexed history.
    - The stale index is deleted first to make room. To keep it, set `[store] auto_upgrade_keep_stale_indexer = true`, or pass `--keep-stale-indexer` to `upgrade-data`.
-   - On mainnet the rebuild takes several hours. `/blockchain/*` answers `503 indexer-syncing` until it catches up, while the node itself is fully available.
+   - The node syncs and mines meanwhile. Until the index catches up, `/blockchain/*` answers `503 indexer-syncing` and mining pauses storage-rent self-claims (#584).
+   - Expect a couple of hours on mainnet, depending on hardware.
 5. **Delete the backups once you're satisfied.** The node warns at every start while `*.redb2-backup` files exist. They are plain files the node never opens, so you can delete them while it runs. Rolling back to 0.11 needs them (or your external backup), because 0.11 cannot read redb 4 files.
 6. **Reapply operator bans.** Legacy ban rows are discarded on first start. Reapply operator bans through the new peer-control API.
 7. **Storage-rent claims are declined on mainnet by default,** as Scala now does. Set `[mempool] reject_storage_rent_txs = false` to relay them.
@@ -94,6 +95,10 @@ See [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases) for
 - **Indexer schema 3.** Index rebuilds apply two Scala-parity corrections to already-indexed history (#571):
   - EIP-4 token names, descriptions and decimals use the JVM text and digit projections;
   - outputs with soft-fork-wrapped scripts are listed under the template hash Scala records for them (for example, the mainnet block 1,702,686 output).
+
+  Indexes already in redb 4 format at schema 2, as written by development builds, migrate in place in the background instead of rebuilding (#585). Schema upgrades run as an ordered list of atomic steps that resume after shutdown.
+- **Index catch-up (#586).** While far behind, the indexer commits up to 256 blocks per transaction and reuses template hashes; per-block undo and `Immediate` durability are unchanged. On mainnet data, early history indexes about three times faster and dense history about 1.5 times faster.
+- **Rent self-claims during indexing (#584).** Mining pauses storage-rent self-claim scans while the indexer trails the candidate parent by more than two blocks, and resumes automatically. `rent_self_claim` on `/api/v1/mining/status` reports the pause.
 - **Storage-rent relay policy (#458).** Matches Scala via `[mempool] reject_storage_rent_txs`, which defaults to true on mainnet and false on testnet and devnet.
 - **Candidate refresh (#464).** Mining candidates refresh on an explicit deadline (default interval 250 ms, down from 1,000 ms), and transaction inclusion continues past oversized transactions.
 - **Peer store.** Startup discards legacy ban rows as automatic bans. Operator bans now survive restarts.
