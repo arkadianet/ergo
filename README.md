@@ -69,10 +69,11 @@ against a known-good reference before trusting the state. Read the [fast bootstr
 and [configuration reference](docs/configuration.md).
 
 Mining needs either `[mining] miner_public_key_hex` (a 33-byte compressed
-secp256k1 public key, 66 hex characters) or an initialized wallet's first EIP-3 key.
-An initialized wallet can supply that public key while locked. GPU rigs need an external
-Stratum server or pool; the node supplies mining work through REST. See [mining templates](docs/operator-mining.md)
-and [Lithos integration](docs/lithos.md), which runs Stratum in a separate process.
+secp256k1 public key, 66 hex characters; `ergo-wallet pubkey` prints it from a
+mnemonic) or an initialized node wallet, whose first EIP-3 key is used.
+The node supplies mining work through REST, so GPU rigs need a Stratum server
+or pool in between: for example [ergo-solo](https://github.com/arkadianet/ergo-stratum-rs)
+for solo mining, or [Lithos](docs/lithos.md). See [mining templates](docs/operator-mining.md).
 
 ### Unlock wallet and mining
 
@@ -84,7 +85,14 @@ secret=$(openssl rand -hex 32)
 printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
 ```
 
-Save the value of `$secret` securely. Put the printed hash in your config:
+On macOS or Windows, where `b2sum` is not installed, Python works on any
+platform:
+
+```bash
+python3 -c "import hashlib, secrets; s = secrets.token_hex(32); print('secret:', s); print('hash:  ', hashlib.blake2b(s.encode(), digest_size=32).hexdigest())"
+```
+
+Save the secret securely. Put the hash in your config:
 
 ```toml
 [api.security]
@@ -101,9 +109,11 @@ Then initialize or unlock your wallet. See [API authentication](docs/configurati
   set `[peers] bind_addr` to accept inbound connections.
 - The API and dashboard bind to **127.0.0.1:9099** by default. Keep remote
   access behind an authenticated reverse proxy. See [API security](docs/configuration.md#security-notes-for-the-api).
-- The explorer index roughly doubles disk usage. Memory includes a default 1 GiB
-  tree cache plus separate 1 GiB cache budgets for state, indexer, and peer databases.
-  These do not limit total memory use. See [resource planning](docs/operating.md#troubleshooting).
+- The explorer index roughly doubles disk usage. For scale, one mainnet archival
+  node in October 2026 used about 44 GB for state, 45 GB for the index and about
+  3 GB of RAM. Memory includes a default 1 GiB tree cache plus separate 1 GiB
+  cache budgets for state, indexer, and peer databases; these do not limit total
+  memory use. See [resource planning](docs/operating.md#troubleshooting).
 
 ### Run as a service
 
@@ -143,9 +153,9 @@ exposure is limited. Read [compatibility](docs/compatibility.md) and
 |---|---|---|
 | Mode 1 — full archive | Supported | Long initial sync |
 | Mode 2 — UTXO snapshot, consume + serve | Supported | Provisional snapshot trust |
-| Mode 3 — pruned history | Partial | Genesis replay; lifecycle coverage incomplete |
-| Mode 4 — pruned + snapshot | Partial | Live multi-peer soak outstanding |
-| Mode 5 — digest verifier | Partial | Historical recovery and retention work remain |
+| Mode 3 — pruned history | Supported | Fresh stores replay from genesis before pruning; retention campaigns open |
+| Mode 4 — pruned + snapshot | Supported | Live multi-peer soak outstanding |
+| Mode 5 — digest verifier | Supported | AD-proof parity pinned to one mainnet window; reorg re-anchor open |
 | Mode 6 — headers only | Supported | No transaction validation or UTXO queries |
 | NiPoPoW, consume + serve | Supported | Bootstrap requires compatible settings |
 | Explorer index (`/blockchain/*`) | Supported | Full archive required |
