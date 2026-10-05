@@ -16,20 +16,15 @@ infrastructure.
 
 ## [Unreleased]
 
-## [0.12.0-rc.2] - 2026-10-05
+## [0.12.0] - 2026-10-05
 
-Second release candidate for 0.12.0. Since rc.1:
-- **New installs:** `ergo-node init` writes a validated config and a protected API key (#595), and `ergo-node api-key` creates and hashes API keys (#592).
-- **Downloads:** one archive per platform holds both programs, with `SHA256SUMS` and `release.json` (#593).
-- **Fixes:** the dashboard loads again (#588), peers recover after a network outage (#589), and index rollback deletes records it leaves empty, as Scala does (#596). The node advertises version 6.0.7 to peers (#587).
-
-Upgrading from rc.1 changes no data: stop the node, replace the binaries and start it again.
-
-0.12 overall:
 - **Storage:** moves to redb 4, and the node upgrades a 0.11 data directory automatically.
+- **Setup:** `ergo-node init` writes a validated config and a protected API key for new installs, and each platform ships as one archive holding both programs, with `SHA256SUMS` and `release.json`.
 - **Mining:** exact candidate inspection, a persisted block policy, private zero-fee transactions, wallet maintenance jobs and Lithos transaction packages.
 - **Operators:** health probes, runtime controls, scoped API credentials, a durable event replay journal with webhooks, and offline backup, restore and recovery commands.
 - **Correctness:** a crate-by-crate audit brings a broad set of Scala-parity and robustness fixes (#571).
+
+Upgrading from 0.12.0-rc.1 or rc.2 changes no data: stop the node, replace the binaries and start it again. Nothing changed since rc.2 except the version.
 
 ### Upgrading from 0.11
 
@@ -119,7 +114,7 @@ See [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases) for
 - **Wallet crate split (#416).** Wallet orchestration moved into the `ergo-wallet-service` crate.
 - **Toolchain (#493).** The stable toolchain and minimum Rust version are now 1.99.0.
 - **Release downloads (#593).** One archive per platform holds both `ergo-node` and `ergo-wallet`, with release-wide `SHA256SUMS` and `release.json`. Bare binaries and per-file checksum files are no longer published.
-- **P2P handshake version (#587).** The node advertises 6.0.7, the current Scala stable release whose consensus and mempool rules it implements; it advertised 6.0.2. Scala gates no peer behavior on versions above 5.0.13, and the agent name stays `ergo-rust`.
+- **P2P handshake version (#587).** The handshake reports version 6.0.7, the current Scala stable release, instead of 6.0.2. Only the reported version changes: Scala gates no peer behavior on versions above 5.0.13, and the agent name stays `ergo-rust`.
 - **Documentation (#590, #594).** The README is rewritten for operators and developers. The docs now cover only the current product and code, and CI checks that their links resolve.
 
 ### Fixed
