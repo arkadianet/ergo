@@ -45,15 +45,17 @@ impl Version {
         minor: 0,
         patch: 13,
     };
-    /// Reference-node default `scorex.network.appVersion`.
+    /// Reference-node default `scorex.network.appVersion` of Scala 6.0.7, the
+    /// stable release whose consensus and mempool rules this node implements.
     ///
     /// Scala keeps named constants here for activation milestones, then wires
     /// the advertised handshake version from config. Until we expose the same
-    /// config knob, this is the version our node announces.
+    /// config knob, this is the version our node announces. Scala gates no
+    /// peer behavior on versions above `NIPOPOW`, so this signals parity only.
     pub const CURRENT: Self = Self {
         major: 6,
         minor: 0,
-        patch: 2,
+        patch: 7,
     };
 }
 
@@ -796,6 +798,11 @@ mod tests {
         assert!(Version::EIP37_FORK < Version::JIT_SOFT_FORK);
         assert!(Version::JIT_SOFT_FORK < Version::NIPOPOW);
         assert!(Version::NIPOPOW < Version::CURRENT);
+    }
+
+    #[test]
+    fn advertised_version_is_scala_6_0_7() {
+        assert_eq!(Version::CURRENT.to_string(), "6.0.7");
     }
 
     #[test]
