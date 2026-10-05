@@ -73,29 +73,13 @@ pub fn run(
             let mut file = options
                 .open(secret_file)
                 .map_err(|e| io_error("create", secret_file, e))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = file
-                    .metadata()
-                    .map_err(|e| io_error("check protection", secret_file, e))?
-                    .permissions()
-                    .mode()
-                    & 0o777;
-                if mode != 0o600 {
-                    return Err(fail(
-                        1,
-                        "check protection",
-                        secret_file,
-                        "expected mode 0600",
-                    ));
-                }
+            // We created this file exclusively, so on any later failure remove
+            // it rather than leave an empty or partial secret behind.
+            if let Err(error) = write_secret(&mut file, secret_file, secret.as_ref()) {
+                drop(file);
+                let _ = fs::remove_file(secret_file);
+                return Err(error);
             }
-            file.write_all(secret.as_ref())
-                .and_then(|()| file.write_all(b"\n"))
-                .and_then(|()| file.flush())
-                .and_then(|()| file.sync_all())
-                .map_err(|e| io_error("write and sync", secret_file, e))?;
             print_hash(stdout, &hash, Some(secret_file), *json)?;
             writeln!(stderr, "Secret file: {}", secret_file.display())
                 .map_err(|e| io_error("report", secret_file, e))?;
@@ -135,38 +119,59 @@ fn check_destination(path: &Path) -> Result<()> {
             "a secret file path is required; stdout is forbidden",
         ));
     }
+    // Refuse anything already at the destination, including a dangling
+    // symlink. `create_new` repeats this check atomically when opening.
     match fs::symlink_metadata(path) {
         Ok(_) => {
             return Err(fail(
                 1,
                 "create",
                 path,
-                "destination already exists (symlinks are forbidden)",
+                "destination already exists (including as a symlink)",
             ))
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(io_error("check destination", path, e)),
     }
-    // Check every ancestor, including lexical components before `..`, so a
-    // symlink hidden higher in the path cannot bypass the parent check.
-    for ancestor in path.ancestors().skip(1) {
-        let ancestor = if ancestor.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            ancestor
-        };
-        let metadata =
-            fs::symlink_metadata(ancestor).map_err(|e| io_error("check parent", ancestor, e))?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(fail(
-                1,
-                "check parent",
-                ancestor,
-                "parent must be an existing directory, without symlinks",
-            ));
+    // The parent may be reached through symlinks: macOS `/tmp` and `/var`,
+    // a `/home` that links elsewhere, or a data directory on another disk.
+    // The secret file itself is created exclusively with owner-only access.
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    match fs::metadata(parent) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(fail(
+            1,
+            "check parent",
+            parent,
+            "parent must be an existing directory",
+        )),
+        Err(e) => Err(io_error("check parent", parent, e)),
+    }
+}
+
+/// Verify the new file's protection, then write, flush and sync the secret.
+fn write_secret(file: &mut fs::File, path: &Path, secret: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = file
+            .metadata()
+            .map_err(|e| io_error("check protection", path, e))?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode != 0o600 {
+            return Err(fail(1, "check protection", path, "expected mode 0600"));
         }
     }
-    Ok(())
+    file.write_all(secret)
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_all())
+        .map_err(|e| io_error("write and sync", path, e))
 }
 
 fn read_hash(reader: &mut impl Read, source: &Path) -> Result<String> {

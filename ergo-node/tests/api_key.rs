@@ -267,34 +267,66 @@ fn file_errors_exit_one_and_preserve_existing_files() {
 
 #[cfg(unix)]
 #[test]
-fn generation_refuses_symlinks_in_destination_and_ancestors() {
-    use std::os::unix::fs::symlink;
+fn failed_protection_check_removes_the_new_secret_file() {
+    // A umask that strips the owner's write bit makes the new file 0400, so
+    // the protection check fails after creation. The command must not leave
+    // an empty or partial secret file behind.
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new("/bin/sh")
+        .current_dir(dir.path())
+        .arg("-c")
+        .arg("umask 277; exec \"$0\" api-key generate --secret-file secret.key")
+        .arg(env!("CARGO_BIN_EXE_ergo-node"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!dir.path().join("secret.key").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn generation_refuses_symlinked_destinations_but_follows_symlinked_parents() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
     let dir = tempfile::tempdir().unwrap();
     let directory = dir.path().canonicalize().unwrap();
     fs::create_dir_all(directory.join("real/nested")).unwrap();
     fs::write(directory.join("target.key"), b"existing").unwrap();
+    fs::write(directory.join("plain-file"), b"not a directory").unwrap();
     symlink("target.key", directory.join("file.link")).unwrap();
     symlink("absent.key", directory.join("dangling.link")).unwrap();
     symlink("real", directory.join("parent.link")).unwrap();
-    for path in [
-        "file.link",
-        "dangling.link",
-        "parent.link/secret.key",
-        "parent.link/nested/secret.key",
-        "parent.link/nested/../secret.key",
+    // A symlink at the destination itself, live or dangling, and a parent
+    // that is not a directory are refused without touching their targets.
+    for path in ["file.link", "dangling.link", "plain-file/secret.key"] {
+        let output = invoke(
+            &directory,
+            &["api-key", "generate", "--secret-file", path],
+            b"",
+        );
+        assert_eq!(output.status.code(), Some(1), "{path}");
+        assert!(output.stdout.is_empty());
+    }
+    assert_eq!(fs::read(directory.join("target.key")).unwrap(), b"existing");
+    assert!(!directory.join("absent.key").exists());
+    // Parents reached through symlinks are ordinary (macOS /tmp and /var, a
+    // linked /home, data on another disk), so generation follows them.
+    for (path, created) in [
+        ("parent.link/secret.key", "real/secret.key"),
+        ("parent.link/nested/secret.key", "real/nested/secret.key"),
     ] {
         let output = invoke(
             &directory,
             &["api-key", "generate", "--secret-file", path],
             b"",
         );
-        assert_eq!(output.status.code(), Some(1));
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.status.code(), Some(0), "{path}");
+        let mode = fs::metadata(directory.join(created))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{created}");
     }
-    assert_eq!(fs::read(directory.join("target.key")).unwrap(), b"existing");
-    assert!(!directory.join("real/secret.key").exists());
-    assert!(!directory.join("real/nested/secret.key").exists());
-    assert!(!directory.join("absent.key").exists());
 }
 
 #[test]

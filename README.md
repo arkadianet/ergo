@@ -78,30 +78,25 @@ for solo mining, or [Lithos](docs/lithos.md). See [mining templates](docs/operat
 ### Unlock wallet and mining
 
 **Wallet routes, mining controls, and other privileged calls need an API key.**
-The dashboard and public reads work without one. Generate a secret and its lowercase Blake2b-256 hash:
+The dashboard and public reads work without one. Create a key:
 
-```bash
-secret=$(openssl rand -hex 32)
-printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
+```sh
+./ergo-node api-key generate --secret-file ./api-key.secret
 ```
 
-On macOS or Windows, where `b2sum` is not installed, Python works on any
-platform:
-
-```bash
-python3 -c "import hashlib, secrets; s = secrets.token_hex(32); print('secret:', s); print('hash:  ', hashlib.blake2b(s.encode(), digest_size=32).hexdigest())"
-```
-
-Save the secret securely. Put the hash in your config:
+This saves a random secret in a new file only you can read, and prints the
+line to add to your config:
 
 ```toml
 [api.security]
 api_key_hash = "<64 lowercase hex characters>"
 ```
 
-Restart the node with the same command. Clients send the **secret**, not the hash,
-in the `api_key` header. Enter it in the dashboard to authorize privileged calls.
-Then initialize or unlock your wallet. See [API authentication](docs/configuration.md#apisecurity).
+Add it to `ergo-node.toml` and restart the node. Clients send the **secret**
+from the file, not the hash, in the `api_key` header; enter it in the dashboard
+to authorize privileged calls. Then initialize or unlock your wallet.
+`ergo-node api-key hash --secret-file PATH` prints the hash for an existing
+secret. See [API authentication](docs/configuration.md#apisecurity).
 
 ### Requirements
 

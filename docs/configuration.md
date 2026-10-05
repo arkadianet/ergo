@@ -451,8 +451,9 @@ Paste the printed section into your config (or add the hash to an existing
 the hash, in the `api_key` header or enter it in the dashboard. Keep the secret
 file safe: it is created with mode `0600` on Unix. On Windows it inherits the
 parent's ACL; choose a directory only you can read. The parent directory must
-already exist, and generation refuses existing destinations and symlinks in
-the destination or its parents. Use a new file path for each new credential.
+already exist (it may be reached through a symlink). Generation refuses any
+existing destination, including a symlink, and removes the new file if writing
+it fails. Use a new file path for each new credential.
 The command does not edit your config or initialize node data.
 
 To hash an existing secret without writing any files:
