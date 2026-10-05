@@ -25,6 +25,9 @@ infrastructure.
 
 ### Changed
 
+- Release downloads are now one archive per platform containing both `ergo-node`
+  and `ergo-wallet`, plus release-wide `SHA256SUMS` and `release.json`. Bare
+  binaries and per-file checksum sidecars are no longer published.
 - The P2P handshake advertises version 6.0.7, the current Scala stable
   release whose consensus and mempool rules the node implements; it
   advertised 6.0.2. Scala gates no peer behavior on versions above 5.0.13, so

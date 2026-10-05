@@ -1,8 +1,25 @@
 # Ergo binaries
 
-This archive contains either `ergo-node` or `ergo-wallet` (with `.exe` on
-Windows), licenses, the changelog, configuration templates and operating docs.
-Download the matching archive for the other binary when you need both.
+One `ergo-<target>.tar.gz` archive per platform (or `.zip` on Windows) contains
+both `ergo-node` and `ergo-wallet` (with `.exe` on Windows), licenses, the
+changelog, configuration templates, operating docs and `deploy/` examples.
+`release-info.json` records the tag, version, source commit, target and both
+executable SHA-256s. Release downloads also include `release.json` and
+`SHA256SUMS`; bare binaries and per-file checksum sidecars are no longer published.
+
+Before extracting, download the archive, `release.json` and `SHA256SUMS` from
+the same release tag. On Linux, verify just the downloaded platform and manifest:
+
+```sh
+awk '$2 == "ergo-x86_64-unknown-linux-gnu.tar.gz" || $2 == "release.json"' SHA256SUMS | sha256sum --check --strict
+```
+
+Require two successful checks. Substitute your exact archive basename for other
+platforms. On macOS use `shasum -a 256 -c` in place of `sha256sum --check --strict`;
+on Windows compare SHA-256s using PowerShell `Get-FileHash -Algorithm SHA256`.
+Check that the selected `release.json` target entry agrees with `SHA256SUMS`
+on the archive name and hash; it also gives the byte size and executable hashes.
+Checksums detect corruption; they do not independently authenticate a release.
 
 ## Status
 
@@ -13,7 +30,6 @@ The [security policy](SECURITY.md) describes private disclosure.
 ## Running
 
 Extract the archive into its own directory. Check `--version` and `--help`.
-The following configuration and startup steps require the `ergo-node` archive.
 Copy `config/ergo-node.toml` to a writable working directory, review the
 settings, and start the node with an explicit config and data directory:
 

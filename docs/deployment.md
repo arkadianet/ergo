@@ -1,7 +1,16 @@
 # Deployment packages
 
-Release archives contain configuration examples, operator runbooks and the
-`deploy/` directory. The release matrix builds native Linux glibc ARM64 and
+Each platform has one combined `ergo-<target>.tar.gz` archive (`.zip` on
+Windows), containing both `ergo-node` and `ergo-wallet` at the root, configuration
+examples, operator runbooks, licenses and the `deploy/` directory. Download it
+with `SHA256SUMS` and `release.json` from the same release tag and verify the
+selected archive and manifest before extracting; see the
+[binary quickstart](release-quickstart.md). `release-info.json` inside the archive
+records source identity and both executable hashes. Bare binaries and per-file
+checksum sidecars are no longer published. Updaters must verify and extract the
+combined archive, then install the programs they need.
+
+The release matrix builds native Linux glibc ARM64 and
 Apple Silicon binaries alongside the existing x86-64 platforms. Every platform
 runs the existing extracted-binary smoke checks before publication. ARM64
 Linux uses GitHub's `ubuntu-24.04-arm` runner; Apple Silicon uses `macos-latest`.
