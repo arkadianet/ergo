@@ -974,8 +974,12 @@ impl PeerManager {
 
     /// Select up to four backoff-bypassing addresses only when starved.
     /// Seeds precede previously seen peers, then fewer failures and older
-    /// failures win. Rotate each equal-priority group between batches.
-    /// Routability, bans, existing sessions and connection limits still apply.
+    /// failures win. `rotation` is the recovery batch index: batch `n`
+    /// starts `n` batches into that order and wraps, so successive batches
+    /// sweep every eligible address instead of retrying a leading group that
+    /// never answers. Recovery failures leave the order unchanged, so the
+    /// sweep is stable. Routability, bans, existing sessions and connection
+    /// limits still apply.
     pub fn addresses_for_recovery(
         &self,
         now: Instant,
@@ -1002,20 +1006,13 @@ impl PeerManager {
             })
             .collect();
         eligible.sort_by_key(|k| (priority(k), k.addr));
-        let mut start = 0;
-        while start < eligible.len() {
-            let mut end = start + 1;
-            while end < eligible.len() && priority(eligible[end]) == priority(eligible[start]) {
-                end += 1;
-            }
-            eligible[start..end].rotate_left(rotation % (end - start));
-            start = end;
+        let take = limit.min(4).min(self.outbound_deficit());
+        if take == 0 || eligible.is_empty() {
+            return Vec::new();
         }
-        eligible
-            .into_iter()
-            .take(limit.min(4).min(self.outbound_deficit()))
-            .map(|k| k.addr)
-            .collect()
+        let offset = rotation.wrapping_mul(take) % eligible.len();
+        eligible.rotate_left(offset);
+        eligible.into_iter().take(take).map(|k| k.addr).collect()
     }
 
     /// Whether we need more outbound connections.

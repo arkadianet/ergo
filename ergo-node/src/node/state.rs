@@ -193,7 +193,8 @@ pub(crate) struct NodeState {
     pub(super) last_dial_at: Instant,
     /// Independent recovery cadence; None makes startup recovery immediate.
     pub(super) last_recovery_dial_at: Option<Instant>,
-    /// Advances each recovery batch to rotate equal-priority addresses.
+    /// Recovery batch index; each batch dials the next addresses in priority
+    /// order, so a sweep reaches every eligible address.
     pub(super) recovery_dial_rotation: usize,
     /// Timestamp of the most recent periodic-gossip `GetPeers` send.
     /// Gates the gossip path so we ask one random connected peer for

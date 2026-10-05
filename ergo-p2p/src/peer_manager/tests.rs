@@ -2385,18 +2385,30 @@ fn recovery_selection_orders_priorities_and_caps_batch_at_four() {
 }
 
 #[test]
-fn recovery_selection_rotates_only_equal_priority_addresses() {
+fn recovery_batches_sweep_every_address_even_with_distinct_priorities() {
+    // Real failures land at different times and counts, so priorities rarely
+    // tie. Recovery failures do not change them, so a selection that only
+    // rotated ties would retry the same four (possibly dead) addresses
+    // forever. Successive batches must instead sweep the whole order.
     let now = Instant::now();
     let mut mgr = PeerManager::new(1);
-    let peers: Vec<_> = (0..8).map(|i| recovery_known(i, now)).collect();
+    let peers: Vec<_> = (0..10)
+        .map(|i| {
+            let mut peer = recovery_known(i, now);
+            peer.consecutive_failures = 1 + u32::from(i);
+            peer
+        })
+        .collect();
     for peer in &peers {
         mgr.restore_known_peer(peer.clone());
     }
-    let first = mgr.addresses_for_recovery(now, 4, 0);
-    let next = mgr.addresses_for_recovery(now, 4, 4);
-    assert_eq!(first, peers[..4].iter().map(|p| p.addr).collect::<Vec<_>>());
-    assert_eq!(next, peers[4..].iter().map(|p| p.addr).collect::<Vec<_>>());
-    assert_eq!(mgr.addresses_for_recovery(now, 4, 8), first);
+    let order: Vec<_> = peers.iter().map(|p| p.addr).collect();
+    assert_eq!(mgr.addresses_for_recovery(now, 4, 0), order[..4]);
+    assert_eq!(mgr.addresses_for_recovery(now, 4, 1), order[4..8]);
+    assert_eq!(
+        mgr.addresses_for_recovery(now, 4, 2),
+        [order[8], order[9], order[0], order[1]]
+    );
 }
 
 #[test]
