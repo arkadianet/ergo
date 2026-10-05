@@ -10,22 +10,26 @@ Read the [security policy](SECURITY.md) and [compatibility limits](docs/compatib
 
 ### Download
 
-Get the `ergo-node` archive from [GitHub Releases](https://github.com/arkadianet/ergo/releases).
-The wallet CLI has a separate `ergo-wallet` archive. These six platforms are built by
-the [release workflow](.github/workflows/release.yml):
+Download the archive for your platform from [GitHub Releases](https://github.com/arkadianet/ergo/releases).
+Each archive holds both programs, `ergo-node` and the `ergo-wallet` CLI, with
+config templates and docs. These six platforms are built by the
+[release workflow](.github/workflows/release.yml):
 
-| Platform | Release target |
+| Platform | Archive |
 |---|---|
-| Linux x86-64, glibc | `x86_64-unknown-linux-gnu` |
-| Linux x86-64, static musl | `x86_64-unknown-linux-musl` |
-| Linux ARM64, glibc | `aarch64-unknown-linux-gnu` |
-| macOS Apple Silicon | `aarch64-apple-darwin` |
-| macOS Intel | `x86_64-apple-darwin` |
-| Windows x86-64, MSVC | `x86_64-pc-windows-msvc` |
+| Linux x86-64, glibc | `ergo-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x86-64, static musl | `ergo-x86_64-unknown-linux-musl.tar.gz` |
+| Linux ARM64, glibc | `ergo-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `ergo-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `ergo-x86_64-apple-darwin.tar.gz` |
+| Windows x86-64, MSVC | `ergo-x86_64-pc-windows-msvc.zip` |
+
+Verify it against the release's `SHA256SUMS`, for example
+`sha256sum --ignore-missing -c SHA256SUMS` on Linux.
 
 ### Run
 
-Extract the node archive into its own directory. From that directory:
+Extract the archive into its own directory. From that directory:
 
 ```sh
 ./ergo-node --version
