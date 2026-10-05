@@ -56,9 +56,18 @@ interactive confirmation; an unknown free-space reading produces a warning.
 The wizard creates new configs only. It refuses an existing config or key,
 and fast sync requires a new or empty data directory. For the full option
 reference, see [configuration](docs/configuration.md#new-install-setup).
-For manual configuration or existing installs, review `config/ergo-node.toml`;
-`ergo-node api-key generate --secret-file PATH` and `api-key hash` remain
-available without starting the node.
+
+To configure by hand instead, or for an existing install, copy and edit the
+bundled config, then start the node:
+
+```sh
+cp config/ergo-node.toml ./ergo-node.toml
+./ergo-node --config ./ergo-node.toml --data-dir ../ergo-data
+```
+
+For a hand-written config, `./ergo-node api-key generate --secret-file PATH`
+creates an API key without starting the node; see
+[API authentication](docs/configuration.md#apisecurity).
 
 On Windows use `ergo-node.exe`; inherited ACLs must restrict access to the
 secrets directory. On Unix the wizard creates `secrets/` with mode `0700` and

@@ -74,7 +74,10 @@ fn every_allowed_preset_sync_network_writes_loader_accepted_config() {
                 let cli = Cli::parse_from(["ergo-node", "--config", config.to_str().unwrap()]);
                 let loaded = NodeConfig::load(cli).unwrap();
                 assert_eq!(loaded.network.as_str(), network);
-                assert_eq!(loaded.data_dir, root.path().join("data"));
+                assert_eq!(
+                    fs::canonicalize(&loaded.data_dir).unwrap(),
+                    fs::canonicalize(root.path().join("data")).unwrap()
+                );
                 assert_eq!(loaded.state_type, StateType::Utxo);
                 assert!(loaded.verify_transactions);
                 assert_eq!(loaded.blocks_to_keep, -1);

@@ -193,7 +193,7 @@ cp config/ergo-node.toml ./ergo-node.toml
         content = content.replace("in the README for the cargo one-shot form",
                                   "in the source README for the cargo one-shot form")
     elif document == "README.md":
-        content = content.replace("./ergo-node --config", f"./ergo-node{extension} --config")
+        content = content.replace("./ergo-node ", f"./ergo-node{extension} ")
         content = content.replace("Use `ergo-wallet --help`", f"Use `./ergo-wallet{extension} --help`")
     content = content.replace("../ergo-node/ergo-node.toml", "../config/ergo-node.toml")
 

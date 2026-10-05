@@ -584,7 +584,7 @@ fn absolute(path: &Path, cwd: &Path) -> Result<PathBuf> {
             }
             other => {
                 resolved.push(other.as_os_str());
-                match fs::canonicalize(&resolved) {
+                match canonicalize(&resolved) {
                     Ok(real) => resolved = real,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                     Err(e) => return Err(e.into()),
@@ -593,6 +593,20 @@ fn absolute(path: &Path, cwd: &Path) -> Result<PathBuf> {
         }
     }
     Ok(resolved)
+}
+/// `fs::canonicalize`, but on Windows a drive path keeps its plain `C:\...`
+/// form instead of the verbatim `\\?\C:\...` form, which would otherwise
+/// end up in the written config and the printed start command.
+fn canonicalize(path: &Path) -> io::Result<PathBuf> {
+    let real = fs::canonicalize(path)?;
+    #[cfg(windows)]
+    if let Some(plain) = real.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        let drive = plain.as_bytes();
+        if drive.len() < 260 && drive.get(1) == Some(&b':') && drive[0].is_ascii_alphabetic() {
+            return Ok(PathBuf::from(plain));
+        }
+    }
+    Ok(real)
 }
 fn absent(path: &Path, reason: &str) -> Result<()> {
     match fs::symlink_metadata(path) {
@@ -621,6 +635,7 @@ fn check_secrets_dir(path: &Path) -> Result<()> {
     }
 }
 fn create_secrets_dir(path: &Path) -> Result<()> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -828,9 +843,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("real/sub")).unwrap();
         symlink(root.path().join("real/sub"), root.path().join("link")).unwrap();
+        // The temporary directory itself may sit behind a symlink (macOS /var).
         assert_eq!(
             absolute(Path::new("link/../new"), root.path()).unwrap(),
-            root.path().join("real/new")
+            fs::canonicalize(root.path()).unwrap().join("real/new")
         );
     }
 }
