@@ -26,6 +26,7 @@ use ergo_primitives::digest::Digest32;
 use ergo_primitives::writer::VlqWriter;
 
 use crate::address::IndexedAddress;
+use crate::apply::TemplateKey;
 use crate::segment_buffer::{DeletedSpills, StagedSpills};
 use crate::template::IndexedTemplate;
 use crate::token::IndexedToken;
@@ -34,6 +35,12 @@ use crate::TokenId;
 /// Reusable scratch buffers for one indexer run loop. Lives across many
 /// `apply_block` calls; cleared (not reallocated) at each scope entry.
 pub struct BlockApplyScratch {
+    #[cfg(test)]
+    pub(crate) cache_templates: bool,
+    template_hashes: HashMap<Vec<u8>, Option<Digest32>>,
+    template_cache_bytes: usize,
+    #[cfg(test)]
+    pub(crate) template_derivations: u64,
     pub(crate) capture_changes: bool,
     pub(crate) box_changes: Vec<crate::events::BoxChange>,
     pub(crate) touched_addresses: HashMap<Digest32, IndexedAddress>,
@@ -55,6 +62,12 @@ pub struct BlockApplyScratch {
 impl BlockApplyScratch {
     pub fn new() -> Self {
         Self {
+            #[cfg(test)]
+            cache_templates: true,
+            template_hashes: HashMap::new(),
+            template_cache_bytes: 0,
+            #[cfg(test)]
+            template_derivations: 0,
             capture_changes: false,
             box_changes: Vec::new(),
             touched_addresses: HashMap::new(),
@@ -70,6 +83,45 @@ impl BlockApplyScratch {
             data_inputs: Vec::new(),
             writer: VlqWriter::new(),
         }
+    }
+
+    /// The template hash of `bytes` under `key`. `Current` results are
+    /// retained across blocks, keyed by exact script bytes and bounded by
+    /// 4,096 keys and 4 MiB of retained keys; errors are never retained. A
+    /// fixed derivation always derives and never reads or fills the cache.
+    pub(crate) fn template_hash(
+        &mut self,
+        bytes: &[u8],
+        key: TemplateKey,
+    ) -> Result<Option<Digest32>, crate::IndexerError> {
+        let derive = match key {
+            TemplateKey::Current => crate::template::template_hash_for_box_bytes,
+            #[cfg(test)]
+            TemplateKey::Fixed(derive) => return derive(bytes),
+        };
+        #[cfg(test)]
+        if !self.cache_templates {
+            return derive(bytes);
+        }
+        if let Some(hash) = self.template_hashes.get(bytes) {
+            return Ok(*hash);
+        }
+        #[cfg(test)]
+        {
+            self.template_derivations += 1;
+        }
+        let hash = derive(bytes)?;
+        if bytes.len() <= 4 * 1024 * 1024 {
+            if self.template_hashes.len() >= 4096
+                || self.template_cache_bytes + bytes.len() > 4 * 1024 * 1024
+            {
+                self.template_hashes.clear();
+                self.template_cache_bytes = 0;
+            }
+            self.template_cache_bytes += bytes.len();
+            self.template_hashes.insert(bytes.to_vec(), hash);
+        }
+        Ok(hash)
     }
 
     /// Reset all per-block + per-tx state. Called at apply_block entry so
@@ -194,5 +246,76 @@ mod tests {
 
         assert_eq!(s.input_nums.capacity(), cap_input);
         assert_eq!(s.tx_touched_order.capacity(), cap_order);
+    }
+}
+
+#[cfg(test)]
+mod template_cache_tests {
+    use super::*;
+
+    #[test]
+    fn template_cache_reuses_exact_bytes_across_blocks_and_bounds_retention() {
+        let mut scratch = BlockApplyScratch::new();
+        let bytes = hex::decode("1000d10101").unwrap();
+        let expected = crate::template::template_hash_for_box_bytes(&bytes).unwrap();
+        assert_eq!(
+            scratch.template_hash(&bytes, TemplateKey::Current).unwrap(),
+            expected
+        );
+        scratch.clear_block();
+        assert_eq!(
+            scratch.template_hash(&bytes, TemplateKey::Current).unwrap(),
+            expected
+        );
+        assert_eq!(scratch.template_derivations, 1);
+        // Retain byte identity even for soft-fork/fallback shapes.
+        for bytes in [vec![0xff], vec![0xff, 1], vec![0xff, 2]] {
+            assert_eq!(
+                scratch.template_hash(&bytes, TemplateKey::Current).unwrap(),
+                crate::template::template_hash_for_box_bytes(&bytes).unwrap()
+            );
+        }
+        for key in 0_u32..5000 {
+            let mut bytes = vec![0xff];
+            bytes.extend_from_slice(&key.to_be_bytes());
+            scratch.template_hash(&bytes, TemplateKey::Current).unwrap();
+            assert!(scratch.template_hashes.len() <= 4096);
+        }
+        for key in 0_u32..600 {
+            let mut bytes = vec![0xff; 8192];
+            bytes[..4].copy_from_slice(&key.to_be_bytes());
+            scratch.template_hash(&bytes, TemplateKey::Current).unwrap();
+            assert!(scratch.template_cache_bytes <= 4 * 1024 * 1024);
+        }
+        let retained = scratch.template_cache_bytes;
+        scratch
+            .template_hash(&vec![0xff; 4 * 1024 * 1024 + 1], TemplateKey::Current)
+            .unwrap();
+        assert_eq!(scratch.template_cache_bytes, retained);
+    }
+
+    #[test]
+    fn fixed_derivation_neither_reads_nor_fills_the_cache() {
+        fn fixed(_: &[u8]) -> Result<Option<Digest32>, crate::IndexerError> {
+            Ok(None)
+        }
+        let mut scratch = BlockApplyScratch::new();
+        let bytes = hex::decode("1000d10101").unwrap();
+        assert!(scratch
+            .template_hash(&bytes, TemplateKey::Current)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            scratch
+                .template_hash(&bytes, TemplateKey::Fixed(fixed))
+                .unwrap(),
+            None
+        );
+        scratch
+            .template_hash(&[0xff, 3], TemplateKey::Fixed(fixed))
+            .unwrap();
+        assert_eq!(scratch.template_hashes.len(), 1);
+        assert_eq!(scratch.template_cache_bytes, bytes.len());
+        assert_eq!(scratch.template_derivations, 1);
     }
 }

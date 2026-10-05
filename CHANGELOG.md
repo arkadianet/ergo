@@ -94,6 +94,14 @@ infrastructure.
   the JVM text and digit projections, and outputs with soft-fork-wrapped
   scripts are listed under the template hash Scala records for them (for
   example the mainnet block 1,702,686 output).
+- Indexer catch-up commits up to 256 blocks, one second of work or 32 MiB of
+  transactions at a time while more than 32 blocks behind the applied tip, and
+  each block on its own nearer the tip. Repeated scripts reuse their template
+  hash. Per-block undo, rollback, cancellation, repair markers and `Immediate`
+  durability are unchanged. On mainnet data the early chain indexes about
+  three times faster with 61% fewer bytes written, and dense history about 1.5
+  times faster with 31% less CPU. See the
+  [archival catch-up note](docs/perf/indexer-catchup-2026-10-05.md).
 
 ### Upgrading
 

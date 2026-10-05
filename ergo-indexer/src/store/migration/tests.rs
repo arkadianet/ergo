@@ -1,5 +1,5 @@
 use super::*;
-use crate::apply::{apply_block, apply_block_with_derivation, IndexerBlock};
+use crate::apply::{apply_block, apply_block_with_derivation, IndexerBlock, TemplateKey};
 use crate::scratch::BlockApplyScratch;
 use crate::store::{IndexerMeta, IndexerStore, OpenOutcome};
 use crate::token::IndexedToken;
@@ -154,7 +154,7 @@ fn build(path: &std::path::Path, blocks: &[Vec<Transaction>], legacy: bool) -> I
                 &checkpoint,
                 &b,
                 &mut BlockApplyScratch::new(),
-                old_template,
+                TemplateKey::Fixed(old_template),
                 old_token,
             )
             .unwrap();
