@@ -189,6 +189,5 @@ same state root from a block's ADProofs instead of a box arena.
 ## Doc accuracy notes
 - The crate's read-only handle is `reader::ChainStoreReader`
   (`src/reader.rs:31`), reached via `StateStore::reader_handle()`. There is no
-  type named `StateReader`; the stale `src/lib.rs` crate-doc reference is
-  corrected to `ChainStoreReader`, and `docs/architecture.md` is now only a
-  redirect to `ARCHITECTURE.md`.
+  type named `StateReader`. See [the architecture](../../ARCHITECTURE.md)
+  for the cross-crate read boundary.

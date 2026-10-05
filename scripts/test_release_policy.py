@@ -189,7 +189,7 @@ class PackagedDocumentation(unittest.TestCase):
         content = self.format("docs/operating.md")
         self.assertIn("](configuration.md#apiscript)", content)
         self.assertIn("](../config/ergo-node.toml.example)", content)
-        for path in ("docs/events.md", "docs/operating-mode-evidence.md", "docs/overview.md#running"):
+        for path in ("docs/events.md", "docs/overview.md#running"):
             self.assertIn(f"](https://github.com/arkadianet/ergo/blob/{self.sha}/{path})", content)
         self.assertIn(f"](https://github.com/arkadianet/ergo/tree/{self.sha}/ergo-node/src/config/)", content)
         self.assertNotIn("github.com/arkadianet/ergo/tree/main/", content)
@@ -215,7 +215,7 @@ class PackagedDocumentation(unittest.TestCase):
 
     def test_missing_source_reference_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "missing source link target"):
-            release.packaged_document("[missing](no-such-evidence.md)", "docs/operating-mode-evidence.md",
+            release.packaged_document("[missing](no-such-evidence.md)", "docs/compatibility.md",
                                       self.stage, self.sha)
 
 

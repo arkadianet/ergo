@@ -218,7 +218,7 @@ settings, verifying final roots and reopen before comparing throughput and RSS.
 
 Start with the 1 GiB default for full-mainnet replay, then compare the same
 height interval and validation settings before changing it. The
-[measured cache comparison](perf/ibd-baseline-2026-09-30.md) found no material
+measured cache comparison found no material
 benefit from 16, 128 or 1024 MiB budgets on blocks 851..1000: that small AVL
 working set fit all three. This supports a smaller budget for that workload,
 but does not establish a full-mainnet minimum or optimal budget.

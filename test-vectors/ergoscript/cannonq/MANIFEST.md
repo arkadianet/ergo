@@ -91,4 +91,5 @@ For test writers consuming this corpus:
   (after re-derivation against our oracle node)
 - **Ecosystem**: expected to type-check and compile without errors; byte parity TBD
 
-See `dev-docs/m2-recon/m2-harvest.md` for detailed context.
+See the [compiler ledger](../../../ergo-compiler/docs/compiler-design-ledger.md)
+for current compiler coverage and residuals.

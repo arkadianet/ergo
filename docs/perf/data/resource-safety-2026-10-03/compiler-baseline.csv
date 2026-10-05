@@ -1,5 +1,0 @@
-layers,source_bytes,tree_bytes,logical_nodes,stored_nodes,eval_jit,crypto_jit,compile_us,reduce_us,clone_ns,estimate_ns
-1,77,34,3,3,110,7975,225,30,51,16
-5,85,50,63,63,318,127825,96,19,1328,177
-10,95,70,2047,2047,578,4090865,91,494,42632,5952
-16,107,94,131071,131071,891,261816305,137,32314,2706924,388995

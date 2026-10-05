@@ -10,7 +10,7 @@
 //! properties, `FuncApply`), and defensive mixed-width `Upcast`
 //! normalization inside the binary arith/relation and `ByIndex` arms. Bit
 //! operators are GraphBuilding-parity rejects (see
-//! [`EmitError::GraphBuildingReject`], compiler-design-ledger.md D-C5) — Scala's full compiler
+//! [`EmitError::GraphBuildingReject`], ergo-compiler/docs/compiler-design-ledger.md D-C5) — Scala's full compiler
 //! cannot lower them.
 //!
 //! This module keeps `EmitError`, the entry points ([`emit`]/
@@ -116,7 +116,7 @@ pub enum EmitError {
     /// bytes + addresses the reference compiler can never produce (several
     /// such trees are unspendable — the funds-stranding surface the
     /// oracle-parity bar exists for). `class` is the ORACLE's exception
-    /// class, verbatim, for reject-class parity grading (compiler-design-ledger.md D-C5).
+    /// class, verbatim, for reject-class parity grading (ergo-compiler/docs/compiler-design-ledger.md D-C5).
     #[error("rejected for Scala GraphBuilding parity ({class}): {what}")]
     GraphBuildingReject {
         /// The Scala exception class the oracle reports for this reject.

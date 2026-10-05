@@ -22,7 +22,7 @@ limit. SELF carries the exact tree bytes. Each tree is
 `If(ConstantPlaceholder(0), DeserializeContext[SigmaProp](0), TrueSigmaProp)`
 or the equivalent `DeserializeRegister[SigmaProp](R4, None)`, with a segregated
 true Boolean condition. Embedded expressions are a 2-byte SigmaProp true constant
-and a **300-byte** BoolToSigmaProp(EQ(Coll[Byte](146 zeros), same)). No compiler is
+and a **300-byte** `BoolToSigmaProp(EQ(Coll[Byte](146 zeros), same))`. No compiler is
 used. Every embedded byte belongs to the expression; there is no trailing padding.
 
 | Case | Tree bytes | Embedded bytes | JVM eval BC | Rust eval BC | JVM total BC | Rust total BC |

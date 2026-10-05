@@ -81,9 +81,8 @@ to start on an unsupported combination.
 | **Mode 3 — pruned** | `state_type = "utxo"`, `blocks_to_keep = N > 0` | Partial | A standard pruned config boots — `blocks_to_keep` at or above the rollback-window floor (`keep_versions + SAFETY_MARGIN`, 250 at the defaults) — with `block_sections` eviction. Fresh UTXO stores replay from genesis before pruning; complete activation and retention campaigns remain open. |
 | **Mode 4 — pruned + bootstrap** | Mode 3 plus `utxo_bootstrap = true` | Partial | Install/reopen and both NiPoPoW/UTXO orderings are tested. A three-peer test exercises deferred snapshot installation through real header catch-up, full validation of the next mainnet block and restart. Long-running live multi-peer soak remains outstanding. |
 
-The [operating-mode evidence inventory](operating-mode-evidence.md) links the
-fixtures, bounded recovery tests, historical campaign receipts and remaining
-closure criteria behind these statuses.
+The [operating-mode status](compatibility.md#operating-mode-status) describes
+current implementation coverage, bounded regression tests and remaining caveats.
 
 Defaults: `state_type = "utxo"`, `verify_transactions = true`,
 `blocks_to_keep = -1` — i.e. omitting all three knobs gives you Mode 1.
@@ -370,7 +369,7 @@ while API, P2P and mining run. On shutdown, uncommitted schema migration is
 aborted and schema 2 remains available for the next boot. Unsupported versions
 and failed schema migrations rebuild in the background. Progress logs report
 scanned boxes, changed tokens, affected boxes/templates and elapsed time every
-ten seconds. The [developer reference measurement](dev/indexer-schema-migrations.md#011-upgrade-policy-and-reference-measurement)
+ten seconds. The [developer migration guide](../ergo-indexer/docs/indexer-schema-migrations.md#011-upgrade-policy)
 explains why stale 0.11 indexes rebuild instead of undergoing synchronous
 file-format conversion.
 

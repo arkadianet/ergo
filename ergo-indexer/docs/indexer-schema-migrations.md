@@ -25,7 +25,7 @@ worker runs those steps in order. Unsupported versions rebuild from genesis. Syn
 5. Add an **Upgrading** note to `CHANGELOG.md` describing supported versions,
    preservation, fallback and any space requirements. Run the repository gates.
 
-## 0.11 upgrade policy and reference measurement
+## 0.11 upgrade policy
 
 A stale 0.11 index (redb 2.6, schema below current) is deleted first through the
 upgrade journal by default, freeing space for the state upgrade. With
@@ -39,25 +39,10 @@ future schema bumps, migrate in place in the background when the registry has a
 complete path. Boot never waits for the schema migration. Unsupported versions
 and failed steps rebuild in the background.
 
-The reviewer measured the 2 → 3 harness on a copy of a real 0.11 mainnet schema-2
-index at height **1,887,066**, with **57,777,147 boxes**, **11.4 million
-transactions**, and **140,557 tokens**:
-
-| Phase | Reference result |
-| --- | --- |
-| Migration changes | 4 tokens and 14 boxes across 7 templates |
-| Undo validation | 201 entries |
-| Commit | 0.06 seconds |
-| Box scan | 62 minutes across 6 workers on a heavily loaded machine |
-| redb 2.6 → 4 file-format conversion | 3 hours 14 minutes under the same load |
-
-File-format conversion hashes every typed row under both readers. Preserving
-this index requires that conversion plus the migration and about **46 GB** of
-extra disk, costing about as much as rebuilding. Running the conversion during
-synchronous startup would add hours of mining downtime. The 0.11 path therefore
-rebuilds; the registry remains useful for redb-4 indexes and future schema bumps.
-These are reference measurements under load, not runtime estimates for every
-machine.
+File-format conversion hashes every typed row under both readers and requires
+an additional copy of the index. The 0.11 upgrade path rebuilds stale indexes
+in the background to avoid a synchronous conversion during startup. The registry
+handles indexes already using redb 4 and future schema bumps.
 
 ## Real-data copy harness
 

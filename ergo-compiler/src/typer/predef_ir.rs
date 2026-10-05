@@ -90,7 +90,7 @@
 //! descriptive `TyperError` rather than silently mismapped: no source in the
 //! 79-contract corpus calls `deserialize` at all, and closing the general
 //! case would mean porting a second full opcode-IR↔TypedExpr symmetric
-//! mapping for a predef nothing exercises. See compiler-design-ledger.md § "Known M2
+//! mapping for a predef nothing exercises. See ergo-compiler/docs/compiler-design-ledger.md § "Known M2
 //! deviations" (D-T2) for the full ledger.
 //!
 //! `fromBase16`/`bigInt` ARE fully implemented (oracle-verified against the JVM

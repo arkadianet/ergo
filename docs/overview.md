@@ -30,8 +30,7 @@ See also: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (cross-crate design),
 │   ├── codemap.md + codemap/          per-crate codebase map (index + 19 pages)
 │   ├── configuration.md               every config field, by type
 │   ├── operating.md                   running, modes, observability
-│   ├── compatibility.md               consensus-compatibility + versioning policy
-│   └── architecture.md                redirect to ../ARCHITECTURE.md
+│   └── compatibility.md               consensus-compatibility + versioning policy
 ├── test-vectors/
 │   ├── mainnet/                       real mainnet bytes (headers, blocks, proofs)
 │   ├── testnet/                       testnet equivalents

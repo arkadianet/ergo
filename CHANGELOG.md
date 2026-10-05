@@ -32,12 +32,19 @@ infrastructure.
 
 ### Changed
 
+- Release downloads are now one archive per platform containing both `ergo-node`
+  and `ergo-wallet`, plus release-wide `SHA256SUMS` and `release.json`. Bare
+  binaries and per-file checksum sidecars are no longer published.
 - The P2P handshake advertises version 6.0.7, the current Scala stable
   release whose consensus and mempool rules the node implements; it
   advertised 6.0.2. Scala gates no peer behavior on versions above 5.0.13, so
   this only signals parity. The agent name remains `ergo-rust`.
 
 ### Fixed
+
+- Indexer rollback now deletes address and template records it leaves empty,
+  as the Scala node does. Previously, an address seen only in an orphaned
+  block kept an empty record; API answers were unaffected.
 
 - Recover from P2P starvation after a network outage or restart by attempting
   up to four known addresses every 30 seconds when no peers or normal dial

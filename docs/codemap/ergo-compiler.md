@@ -17,7 +17,7 @@ the native `/api/v1/script/*` surface)
 
 ## Start here
 - `src/lib.rs` — current public pipeline, module map, re-exports and examples.
-- [`compiler-design-ledger.md`](../compiler-design-ledger.md) — oracle versions,
+- [`compiler-design-ledger.md`](../../ergo-compiler/docs/compiler-design-ledger.md) — oracle versions,
   known residuals and closure evidence (`D-T*` typer, `D-E*` emit, `D-C*` tree).
 - `src/tree/mod.rs:60` — `graph_build`, the oracle-pinned nine-pass ordering
   (cast fold → isProven fusion → fold → dead-val prune → v0 gate → lower →
@@ -91,7 +91,7 @@ the native `/api/v1/script/*` surface)
 - `src/typed_print.rs` — canonical oracle s-expression printer
   (`print_typed` `:103`).
 - `src/source_map.rs` — emit-time IR-node → source-offset map (`:80`), per
-  [`docs/ergoscript-compiler-source-map-design.md`](../ergoscript-compiler-source-map-design.md).
+  [`source-map contract`](../../ergo-compiler/docs/ergoscript-compiler-source-map-design.md).
 - `src/error.rs` / `src/span.rs` / `src/token.rs` — parse errors, source
   positions, scannerless-lexer reconstruction.
 
