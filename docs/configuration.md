@@ -549,6 +549,11 @@ bytes. Both modes support `--json`; output includes `schema_version: 1` and
 The shipped templates contain no credential; privileged routes stay locked
 until you configure a hash and restart. The API is already enabled.
 
+As in Scala, a running node can also hash a secret: `POST /utils/hash/blake2b`
+with the secret as a JSON string returns the same `api_key_hash`. Use it only
+over loopback (the secret travels in the request), and generate the secret
+randomly rather than choosing a memorable one.
+
 **Upgrade:** operators running the bundled file directly lose the old known
 `hello` key. Privileged calls using it now fail until they set their own
 `[api.security] api_key_hash`. Existing explicitly configured hashes keep their

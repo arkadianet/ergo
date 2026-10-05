@@ -371,8 +371,14 @@ fn run_with_space(
         warnings.push(warning.into());
     }
     let mut next_steps = vec![format!("Start: {start_command}"), format!("Dashboard: {dashboard_url}"), format!("API key file: {}. Send its contents in the api_key header or enter them in the dashboard; never send the hash.", key_file.display())];
-    if preset == Preset::Wallet || args.reward == Some(Reward::Wallet) {
-        next_steps.push("Initialize and unlock the node wallet in the dashboard. Wallet mining serves no work until the wallet is unlocked.".into());
+    if preset == Preset::Wallet {
+        next_steps.push(
+            "Initialize or restore the node wallet in the dashboard, then unlock it to use it."
+                .into(),
+        );
+    }
+    if args.reward == Some(Reward::Wallet) {
+        next_steps.push("Initialize and unlock the node wallet in the dashboard; mining serves no work until the wallet is unlocked.".into());
     }
     if preset.mining() {
         next_steps.push("Connect an external miner through ergo-solo: https://github.com/arkadianet/ergo-stratum-rs or follow docs/lithos.md.".into());
