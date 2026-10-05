@@ -1,6 +1,6 @@
 //! The canonical preorder walk over an [`Expr`] tree — the ONE node-identity
 //! contract shared by the compiler's source map and any consumer that wants
-//! to cite a node (`docs/ergoscript-compiler-source-map-design.md` §2).
+//! to cite a node (`ergo-compiler/docs/ergoscript-compiler-source-map-design.md` §2).
 //!
 //! Ids are assigned by depth-first traversal in payload field order
 //! (`0` = root). Both producer and consumer MUST take ids from this walk

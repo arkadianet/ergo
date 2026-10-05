@@ -1,5 +1,5 @@
 //! Route-level integration tests for the first v1 group: `chain/*` +
-//! `transactions/*` reads (`dev-docs/v1-api-design.md` §3.5–§3.6).
+//! `transactions/*` reads.
 //!
 //! These are the convention-lock tests: they assert the exact snake_case field
 //! names from the design's example responses, the `{items, page}` collection

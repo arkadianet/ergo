@@ -147,7 +147,7 @@ Read the [0.11 upgrade guide](CHANGELOG.md#upgrading-from-011) and [operating in
 
 Consensus paths have oracle-backed tests and mainnet validation evidence; deployment
 exposure is limited. Read [compatibility](docs/compatibility.md) and
-[mode evidence](docs/operating-mode-evidence.md) for scope and remaining work.
+[mode evidence](docs/compatibility.md#operating-mode-status) for scope and remaining work.
 
 | Capability | Status | Caveat |
 |---|---|---|
@@ -214,7 +214,7 @@ Read [contribution rules](CONTRIBUTING.md#test-conventions) and [compatibility p
 **Developers**
 
 - [Architecture](ARCHITECTURE.md) · [Codemap](docs/codemap.md) · [Overview](docs/overview.md)
-- [Compatibility](docs/compatibility.md) · [Operating-mode evidence](docs/operating-mode-evidence.md)
+- [Compatibility](docs/compatibility.md) · [Operating-mode evidence](docs/compatibility.md#operating-mode-status)
 - [Contributing](CONTRIBUTING.md) · [Releasing](docs/releasing.md) · [Code of conduct](CODE_OF_CONDUCT.md)
 
 ## Security

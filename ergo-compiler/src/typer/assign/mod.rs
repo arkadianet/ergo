@@ -51,7 +51,7 @@
 //! graded fact and reject `line:col` stays advisory (E5). Positions ride on
 //! [`TypedExpr`] (typed.rs); rebuilt nodes inherit the position of the node
 //! being rewritten (Scala's `currentSrcCtx` pinning), so typed children carry
-//! their bound-tree offsets. Ledger: `compiler-design-ledger.md` § "Known M2 deviations" D-T7.
+//! their bound-tree offsets. Ledger: `ergo-compiler/docs/compiler-design-ledger.md` § "Known M2 deviations" D-T7.
 
 use crate::span::Pos;
 use crate::stype::SType;
@@ -1266,7 +1266,7 @@ mod tests {
     /// Scala `SByte.downcast` / `SShort.downcast` = `toByteExact` / `toShortExact`:
     /// throw `ArithmeticException` on overflow.  We reject with `TyperError`.
     /// Verdict parity is exact; class-tag differs (ArithmeticException vs TyperError
-    /// — see compiler-design-ledger.md Known M2 deviations).
+    /// — see ergo-compiler/docs/compiler-design-ledger.md Known M2 deviations).
     #[test]
     fn id_narrowing_overflow_rejects() {
         // getVar[Int](200): 200 > i8::MAX (127) → ArithmeticException (oracle §13).

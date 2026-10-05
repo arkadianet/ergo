@@ -1,15 +1,11 @@
 //! P5-B: the emit-time source map — compiled IR node → source offset.
 //!
-//! Design record: `docs/ergoscript-compiler-source-map-design.md`. What is
-//! implemented here differs from that doc's sketch in one way, for a reason
-//! the doc did not account for: six rewrite passes run AFTER emit
-//! (`tree::graph_build` — cast folds, isProven fusion, constant folding,
-//! dead-val pruning, lowering, CSE), so an origin tree built alongside emit
-//! describes a tree that no longer exists by the time bytes are written.
-//! Threading origins through every pass would touch ~5k lines of
-//! oracle-graded code for no parity gain.
-//!
-//! Instead:
+//! Contract: `ergo-compiler/docs/ergoscript-compiler-source-map-design.md`.
+//! Graph-building rewrites run after emit (`tree::graph_build` — cast folds,
+//! isProven fusion, constant folding, dead-val pruning, lowering, CSE), so an
+//! origin tree built alongside emit describes a tree that can change before
+//! bytes are written. Origins are recorded at emit and resolved after those
+//! rewrites:
 //!
 //! 1. **Emit records origins** — for every typed node it lowers, the
 //!    serialized bytes of the IR subtree it produced with the typed node's

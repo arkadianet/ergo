@@ -478,7 +478,7 @@ pub(crate) fn assign_byindex(
     // structural equality.  ByIndex is not produced by the binder or any in-scope
     // arm — the index/default carry pre-typed children and are passed through
     // un-retyped, exactly as Scala does (SigmaTyper.scala:499).
-    // Ledger: compiler-design-ledger.md § "Known M2 deviations" D-T11.
+    // Ledger: ergo-compiler/docs/compiler-design-ledger.md § "Known M2 deviations" D-T11.
     if let Some(v) = &default {
         if *node_tpe(v) != elem {
             // SigmaTyper.scala:498: `v.sourceContext`

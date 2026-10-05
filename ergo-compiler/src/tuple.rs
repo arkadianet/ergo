@@ -16,7 +16,7 @@
 //! argument"), so the tupled 1-arg shape is the ONLY valid on-chain form —
 //! and the ONLY one Scala's compiler ever emits.
 //!
-//! This pass corrects a deviation (compiler-design-ledger.md D-C4): the emitter produces a 2-arg
+//! This pass corrects a deviation (ergo-compiler/docs/compiler-design-ledger.md D-C4): the emitter produces a 2-arg
 //! `FuncValue`, which is wire-legal but unevaluable. Lowering it to the tupled
 //! 1-arg form here makes fold-slot lambdas evaluable and byte-matchable.
 //!

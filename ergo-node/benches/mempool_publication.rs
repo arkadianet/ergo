@@ -1,4 +1,4 @@
-//! Repeatable mempool/API microbenchmark; see docs/perf/mempool-publication-2026-10-03.md.
+//! Repeatable mempool/API microbenchmark over prepared DTOs and synthetic validation.
 //!
 //! CSV goes to stdout. Setup and summary checks are untimed; warm-up is discarded.
 //! Admission deliberately supplies a synthetic constant-cost validator: results

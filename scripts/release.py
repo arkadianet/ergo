@@ -169,6 +169,7 @@ def checksum(path):
 
 def packaged_document(content, document, stage, source_sha, *, extension="", root=ROOT):
     """Adapt archive commands and keep omitted source references revision-pinned."""
+    source_document = "docs/release-quickstart.md" if document == "README.md" else document
     if document == "docs/operating.md":
         quickstart = f"""## Quick start
 
@@ -204,11 +205,13 @@ cp config/ergo-node.toml ./ergo-node.toml
         if link.scheme or link.netloc or not link.path:
             return match.group(0)
         relative = PurePosixPath(posixpath.normpath(posixpath.join(
-            str(PurePosixPath(document).parent), urllib.parse.unquote(link.path))))
+            str(PurePosixPath(source_document).parent), urllib.parse.unquote(link.path))))
         # The archive README is a quick start; source documents link to the
         # repository README's build/status sections, not that replacement.
         if relative.as_posix() != "README.md" and stage.joinpath(*relative.parts).exists():
-            return match.group(0)
+            archive_path = posixpath.relpath(relative.as_posix(), str(PurePosixPath(document).parent))
+            target = urllib.parse.urlunsplit(("", "", urllib.parse.quote(archive_path), link.query, link.fragment))
+            return f"]({target})"
         source = root.joinpath(*relative.parts)
         if relative.is_absolute() or ".." in relative.parts or not source.exists():
             raise ValueError(f"{document}: missing source link target: {link.path}")

@@ -3,8 +3,7 @@
 //! `POST /mining/solution` injects a PoW solution into the block pipeline,
 //! the candidate longpoll holds an API task, and the reward routes leak
 //! the miner payout identity — operator surface that used to be mounted
-//! with no gate (audit finding M-2; drift flagged in
-//! `dev-docs/v1-api-design.md`). All four routes now sit behind the same
+//! with no gate. All four routes now sit behind the same
 //! api_key middleware as `/node/shutdown`. An absent verifier denies access.
 //!
 //! Pinned on the *real* merged router (`router_with_mempool_and_wallet_and_security`

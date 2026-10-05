@@ -1,7 +1,7 @@
 //! P5-B: the emit-time source map — compiled IR node (preorder id over the
 //! pre-segregation root) → byte offset into the authored source.
 //!
-//! Design: `docs/ergoscript-compiler-source-map-design.md`. The map is
+//! Design: `ergo-compiler/docs/ergoscript-compiler-source-map-design.md`. The map is
 //! resolved against the FINAL tree (after every rewrite pass), so a
 //! consumer's `ergo_ser::opcode::preorder` walk of the parsed tree body
 //! agrees with `SourceMap::node_count` by construction.

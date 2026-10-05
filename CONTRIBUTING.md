@@ -16,7 +16,7 @@ need to build, test, and submit changes; it is self-contained.
 - For consensus-boundary changes, tests must be oracle-backed (Scala-produced
   fixtures or mainnet bytes), never self-oracles.
 
-See [`docs/architecture.md`](./docs/architecture.md) for the crate layering and
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the crate layering and
 data flow, and [`docs/compatibility.md`](./docs/compatibility.md) for what
 "consensus-compatible" means here and where the known gaps are.
 
