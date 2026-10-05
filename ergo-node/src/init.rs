@@ -294,6 +294,15 @@ fn run_with_space(
             .unwrap_or(&data_dir.join("ergo-node.toml")),
         &cwd,
     )?;
+    // Every file the node keeps in its data directory is a database, a JSON
+    // state file or a directory, so a `.toml` config can never take one's place.
+    if !config_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+    {
+        return Err(invalid("--config must name a .toml file"));
+    }
     let config_dir = config_path
         .parent()
         .ok_or_else(|| invalid("config path must name a file"))?;
@@ -774,6 +783,26 @@ mod tests {
             assert!(plan["free_bytes"].is_null());
             assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
         }
+    }
+
+    #[test]
+    fn config_must_be_a_toml_file_so_it_cannot_take_a_node_file() {
+        let root = tempfile::tempdir().unwrap();
+        let mut args = args(root.path(), "wallet", "genesis");
+        for name in [
+            "data/state.redb",
+            "data/wallet",
+            "data/mining-policy.json",
+            "data",
+        ] {
+            args.config = Some(root.path().join(name));
+            let error = execute(&args, false, "", Some(300 * GIB)).0.unwrap_err();
+            assert_eq!(error.exit_code(), 2);
+            assert!(error.to_string().contains(".toml"), "{name}: {error}");
+        }
+        args.config = Some(root.path().join("data/custom.TOML"));
+        execute(&args, false, "", Some(300 * GIB)).0.unwrap();
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     #[test]

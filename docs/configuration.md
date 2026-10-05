@@ -66,7 +66,9 @@ port forwarding. The wizard never writes a peer list, voting targets,
 private-key exposure, or unauthenticated legacy mining.
 
 `--data-dir PATH` defaults to `./ergo-data`; `--config PATH` defaults to
-`<data-dir>/ergo-node.toml`. The resolved data directory is stored in the config.
+`<data-dir>/ergo-node.toml` and must end in `.toml`, so it cannot take the
+place of a file the node keeps in its data directory. The resolved data
+directory is stored in the config.
 The secret is `<config-dir>/secrets/api-key`: send its contents in the `api_key`
 header or enter them in the dashboard. Unix directory/file modes are
 `0700`/`0600`; Windows inherits ACLs, so use a directory only you can read.
