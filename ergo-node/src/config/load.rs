@@ -47,6 +47,19 @@ impl NodeConfig {
             Err(e) => return Err(format!("failed to read {}: {e}", config_path.display())),
         };
 
+        Self::resolve(cli, toml_cfg)
+    }
+
+    /// Validate and resolve TOML in memory using the same checks as file loading.
+    /// This does not create directories, open databases, or start networking.
+    pub fn from_toml(contents: &str) -> Result<Self, String> {
+        use clap::Parser;
+        let toml_cfg = toml::from_str::<TomlConfig>(contents)
+            .map_err(|e| format!("failed to parse generated config: {e}"))?;
+        Self::resolve(Cli::parse_from(["ergo-node"]), toml_cfg)
+    }
+
+    fn resolve(cli: Cli, toml_cfg: TomlConfig) -> Result<Self, String> {
         // 3. Merge: CLI overrides TOML overrides defaults
         let network_str = cli
             .network

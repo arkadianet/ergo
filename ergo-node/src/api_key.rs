@@ -54,33 +54,10 @@ pub fn run(
     match command {
         ApiKeyCommand::Generate { secret_file, json } => {
             check_destination(secret_file)?;
-            let mut random = Zeroizing::new([0u8; 32]);
-            OsRng
-                .try_fill_bytes(random.as_mut())
-                .map_err(|_| fail(1, "generate", secret_file, "OS entropy unavailable"))?;
-            let mut secret = Zeroizing::new([0u8; 64]);
-            // Encode directly into the protected allocation, with no String copy.
-            hex::encode_to_slice(random.as_ref(), secret.as_mut())
-                .expect("32 bytes encode to 64 hex bytes");
-            let hash = ApiSecurity::hash_key(secret.as_ref());
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options
-                .open(secret_file)
-                .map_err(|e| io_error("create", secret_file, e))?;
-            // We created this file exclusively, so on any later failure remove
-            // it rather than leave an empty or partial secret behind.
-            if let Err(error) = write_secret(&mut file, secret_file, secret.as_ref()) {
-                drop(file);
-                let _ = fs::remove_file(secret_file);
-                return Err(error);
-            }
-            print_hash(stdout, &hash, Some(secret_file), *json)?;
+            let key = GeneratedKey::generate(secret_file)?;
+            key.publish(secret_file)?;
+            let hash = &key.hash;
+            print_hash(stdout, hash, Some(secret_file), *json)?;
             writeln!(stderr, "Secret file: {}", secret_file.display())
                 .map_err(|e| io_error("report", secret_file, e))?;
             #[cfg(windows)]
@@ -107,6 +84,47 @@ pub fn run(
             print_hash(stdout, &hash, None, *json)?;
             guidance(stderr, source)
         }
+    }
+}
+
+/// Shared generation and exclusive publication core for offline commands.
+/// Secret material stays in zeroizing allocations and is never formatted.
+pub(crate) struct GeneratedKey {
+    secret: Zeroizing<[u8; 64]>,
+    pub(crate) hash: String,
+}
+
+impl GeneratedKey {
+    pub(crate) fn generate(path: &Path) -> Result<Self> {
+        let mut random = Zeroizing::new([0u8; 32]);
+        OsRng
+            .try_fill_bytes(random.as_mut())
+            .map_err(|_| fail(1, "generate", path, "OS entropy unavailable"))?;
+        let mut secret = Zeroizing::new([0u8; 64]);
+        hex::encode_to_slice(random.as_ref(), secret.as_mut())
+            .expect("32 bytes encode to 64 hex bytes");
+        let hash = ApiSecurity::hash_key(secret.as_ref());
+        Ok(Self { secret, hash })
+    }
+
+    pub(crate) fn publish(&self, path: &Path) -> Result<()> {
+        check_destination(path)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(path)
+            .map_err(|e| io_error("create", path, e))?;
+        if let Err(error) = write_secret(&mut file, path, self.secret.as_ref()) {
+            drop(file);
+            let _ = fs::remove_file(path);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
