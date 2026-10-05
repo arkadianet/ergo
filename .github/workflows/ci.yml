@@ -441,6 +441,10 @@ jobs:
         run: node scripts/test-voting-ui.cjs
       - name: Shared compiler, lint, action and lockfile policy
         run: python scripts/ci-policy.py
+      - name: Documentation links and checker tests
+        run: |
+          python3 scripts/check-doc-links.py
+          python3 -m unittest discover -s scripts -p 'test_check_doc_links.py'
       - name: Engineering policy and release helper tests
         run: |
           python -m unittest discover -s scripts -p 'test_release*.py'
