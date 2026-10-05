@@ -94,3 +94,48 @@ pub(super) fn setup(config: &NodeConfig) -> Result<(i64, PeerManager), NodeError
 
     Ok((session_id, peer_manager))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use std::time::Instant;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_startup_restores_persisted_backoff_and_dials_first_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let addrs: Vec<std::net::SocketAddr> = (1..=8)
+            .map(|i| format!("127.{i}.0.1:1").parse().unwrap())
+            .collect();
+        {
+            let book =
+                std::sync::Arc::new(AddressBook::open_at(&dir.path().join("peers.redb")).unwrap());
+            let mut manager = PeerManager::new(1);
+            manager.set_address_book(book);
+            for addr in &addrs {
+                manager.add_known_address(*addr, PeerOrigin::Seed);
+                for _ in 0..5 {
+                    manager.mark_dial_failed(addr, Instant::now());
+                }
+            }
+        }
+        let cli = crate::config::Cli::try_parse_from([
+            "ergo-node",
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let mut config = NodeConfig::load(cli).unwrap();
+        config.known_peers = addrs.clone();
+        config.peer_limits.target_outbound = 8;
+        let (_, manager) = setup(&config).unwrap();
+        assert!(manager.addresses_to_connect(Instant::now(), 32).is_empty());
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        state.peer_manager = manager;
+        // last_dial_at is fresh, exercising startup even in slow mode.
+        super::super::super::peer_actions::try_dial_peers(&mut state);
+        assert_eq!(state.peer_manager.peer_count(), 4);
+        assert!(state.last_recovery_dial_at.is_some());
+        // No await: the spawned dial tasks are dropped without running.
+    }
+}

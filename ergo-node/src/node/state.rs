@@ -191,6 +191,10 @@ pub(crate) struct NodeState {
     /// target it backs off to one cycle every 30s. Same gentleness
     /// guarantee as the old fixed 30s, with no cold-start penalty.
     pub(super) last_dial_at: Instant,
+    /// Independent recovery cadence; None makes startup recovery immediate.
+    pub(super) last_recovery_dial_at: Option<Instant>,
+    /// Advances each recovery batch to rotate equal-priority addresses.
+    pub(super) recovery_dial_rotation: usize,
     /// Timestamp of the most recent periodic-gossip `GetPeers` send.
     /// Gates the gossip path so we ask one random connected peer for
     /// its peer list every `GOSSIP_INTERVAL` — independent of the

@@ -16,6 +16,13 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover from P2P starvation after a network outage or restart by attempting
+  up to four known addresses every 30 seconds when no peers or normal dial
+  candidates remain. Recovery starts immediately at boot, respects bans and
+  connection limits, and does not escalate or persist failed-dial backoff.
+
 ### Changed
 
 - The P2P handshake advertises version 6.0.7, the current Scala stable

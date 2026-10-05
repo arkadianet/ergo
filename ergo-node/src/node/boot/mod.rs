@@ -986,6 +986,8 @@ async fn run_inner_with_backend(
             .checked_sub(ergo_p2p::peer_manager::GOSSIP_INTERVAL)
             .unwrap_or_else(Instant::now),
         last_starve_warn_at: None,
+        last_recovery_dial_at: None,
+        recovery_dial_rotation: 0,
         indexer_handle: sync.indexer_handle.clone(),
         anchor_map: anchor_map::AnchorMap::new(),
         rest_peer_urls: std::sync::Arc::new(std::sync::RwLock::new(RestPeers::new())),
