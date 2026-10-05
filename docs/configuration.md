@@ -431,18 +431,43 @@ Consequences:
   enforcing here by default would risk breaking that setup for no
   defensive gain.
 
-Generate a hash from a RANDOM secret (never a guessable word) with, for
-example:
+Generate a random API secret with the standalone command (no config or data
+directory is needed):
 
-```bash
-secret=$(openssl rand -hex 32)
-printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
+```sh
+ergo-node api-key generate --secret-file ./api-secret.key
 ```
 
-Save `$secret` somewhere safe — it is the plaintext `api_key` clients send;
-the hash above is what goes in `api_key_hash`. The shipped
-templates contain no credential. Add the generated hash under `[api.security]`
-and restart to unlock privileged routes; the API is already enabled.
+The command saves a new 64-character lowercase hex secret in `api-secret.key`
+and prints only its configuration hash:
+
+```toml
+[api.security]
+api_key_hash = "<64 lowercase hex hash>"
+```
+
+Paste the printed section into your config (or add the hash to an existing
+`[api.security]` section), then restart the node. Send the **secret**, never
+the hash, in the `api_key` header or enter it in the dashboard. Keep the secret
+file safe: it is created with mode `0600` on Unix. On Windows it inherits the
+parent's ACL; choose a directory only you can read. The parent directory must
+already exist, and generation refuses existing destinations and symlinks in
+the destination or its parents. Use a new file path for each new credential.
+The command does not edit your config or initialize node data.
+
+To hash an existing secret without writing any files:
+
+```sh
+ergo-node api-key hash --secret-file ./api-secret.key
+# Or pipe a secret into: ergo-node api-key hash --stdin
+```
+
+Hashing accepts 1–1024 printable non-space ASCII bytes, removes exactly one
+trailing LF or CRLF, and rejects other whitespace, controls and non-ASCII
+bytes. Both modes support `--json`; output includes `schema_version: 1` and
+`api_key_hash`, plus `secret_file` for generation, and never includes the secret.
+The shipped templates contain no credential; privileged routes stay locked
+until you configure a hash and restart. The API is already enabled.
 
 **Upgrade:** operators running the bundled file directly lose the old known
 `hello` key. Privileged calls using it now fail until they set their own

@@ -11,6 +11,11 @@ use clap::{Parser, Subcommand};
 /// Offline operator commands. These never start the node or load its config.
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Generate or hash an API credential without starting the node.
+    ApiKey {
+        #[command(subcommand)]
+        command: ApiKeyCommand,
+    },
     /// Copy and upgrade a stopped legacy redb database; never replace either path.
     MigrateRedb {
         /// Existing database belonging to a stopped node.
@@ -56,6 +61,29 @@ pub enum Command {
         /// Discard a previous checkpoint and start at the current committed tip.
         #[arg(long)]
         restart: bool,
+    },
+}
+
+/// Secrets are supplied through files or stdin, never through CLI arguments.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ApiKeyCommand {
+    /// Save a new random secret and print its configuration hash.
+    Generate {
+        /// New secret file in an existing directory; stdout (-) is forbidden.
+        #[arg(long)]
+        secret_file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the configuration hash of an existing secret.
+    Hash {
+        #[arg(long, required_unless_present = "stdin", conflicts_with = "stdin")]
+        secret_file: Option<PathBuf>,
+        /// Read from stdin without a prompt.
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 

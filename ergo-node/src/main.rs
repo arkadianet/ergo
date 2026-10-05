@@ -9,13 +9,26 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer, Registry};
 
 fn main() {
+    let cli = Cli::parse();
+    if let Some(ergo_node::config::Command::ApiKey { command }) = &cli.command {
+        if let Err(error) = ergo_node::api_key::run(
+            command,
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        ) {
+            eprintln!("{error}");
+            std::process::exit(error.exit_code());
+        }
+        return;
+    }
     // block_on polls startup on its calling thread. Store recovery can decode
     // transactions before the async action loop exists, so it needs the same
     // stack as the runtime workers. This thread owns and drops the runtime.
     let thread = std::thread::Builder::new()
         .name("node-main".into())
         .stack_size(DECODE_THREAD_STACK_BYTES)
-        .spawn(run_node)
+        .spawn(move || run_node(cli))
         .unwrap_or_else(|e| {
             eprintln!("node startup thread failed: {e}");
             std::process::exit(1);
@@ -25,7 +38,7 @@ fn main() {
     }
 }
 
-fn run_node() {
+fn run_node(cli: Cli) {
     // Block validation fans out over Rayon (`ergo-validation`'s
     // `into_par_iter`), and script evaluation deserializes on those threads
     // (`DeserializeContext` / `DeserializeRegister`, `Global.deserialize`), so
@@ -53,17 +66,16 @@ fn run_node() {
             std::process::exit(1);
         }
     };
-    runtime.block_on(run());
+    runtime.block_on(run(cli));
 }
 
-async fn run() {
+async fn run(cli: Cli) {
     // Config load runs before tracing init so the subscriber knows
     // whether `[logging.file]` was requested. Errors here predate the
     // subscriber and go to stderr directly. The single warn emitted
     // inside config-load (non-loopback API bind) reaches a no-op
     // subscriber by design — operators see it on next boot once the
     // file appender is wired, and rejected configs error out instead.
-    let cli = Cli::parse();
     if let Some(command) = &cli.command {
         match ergo_node::maintenance::run_interruptible(command).await {
             Ok(report) => println!("{report}"),

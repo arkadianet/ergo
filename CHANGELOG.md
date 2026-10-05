@@ -16,12 +16,13 @@ infrastructure.
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- Recover from P2P starvation after a network outage or restart by attempting
-  up to four known addresses every 30 seconds when no peers or normal dial
-  candidates remain. Recovery starts immediately at boot, respects bans and
-  connection limits, and does not escalate or persist failed-dial backoff.
+- `ergo-node api-key generate --secret-file PATH` saves a random API secret in a
+  new protected file and prints its configuration hash; `api-key hash` hashes
+  a secret file or stdin. Both support `--json`, run without node startup or a
+  config, and never print the secret. Paste the hash into `[api.security]` and
+  restart to unlock privileged routes.
 
 ### Changed
 
@@ -29,6 +30,13 @@ infrastructure.
   release whose consensus and mempool rules the node implements; it
   advertised 6.0.2. Scala gates no peer behavior on versions above 5.0.13, so
   this only signals parity. The agent name remains `ergo-rust`.
+
+### Fixed
+
+- Recover from P2P starvation after a network outage or restart by attempting
+  up to four known addresses every 30 seconds when no peers or normal dial
+  candidates remain. Recovery starts immediately at boot, respects bans and
+  connection limits, and does not escalate or persist failed-dial backoff.
 
 ## [0.12.0-rc.1] - 2026-10-05
 

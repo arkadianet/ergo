@@ -26,7 +26,7 @@ mod load;
 mod resolved;
 mod toml_sections;
 
-pub use cli::{Cli, Command};
+pub use cli::{ApiKeyCommand, Cli, Command};
 pub use resolved::{
     LoggingConfig, LoggingFileConfig, LoggingFormat, NodeConfig, RedbCacheBudgets, StateType,
 };
