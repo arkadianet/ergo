@@ -283,6 +283,13 @@ node --experimental-default-type=module --test ergo-api/web/tests/*.test.mjs
 node scripts/test-voting-ui.cjs
 ```
 
+## Documentation policy
+
+`docs/` describes the current product and codebase. Behavior changes update
+those docs in the same PR. Session artifacts — audits, plans, benchmark runs
+and evidence logs — belong in PR descriptions or issues, not the repository.
+Crate-specific deep documentation lives with its crate.
+
 ## Pull requests
 
 - Keep PRs focused. If a change touches multiple subsystems, split it. A single
