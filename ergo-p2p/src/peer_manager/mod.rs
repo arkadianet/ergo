@@ -11,7 +11,7 @@
 //! ranking with throughput metrics and randomization is queued for a
 //! follow-up pass.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -82,6 +82,10 @@ pub struct PeerManager {
     /// Ban list: IP → ban expiry. Separate from peers so bans survive disconnection.
     bans: HashMap<IpAddr, BanEntry>,
     known_addresses: Vec<KnownPeer>,
+    /// Recovery attempts do not feed dial backoff. Keep the marker through
+    /// removal/timeout until success or the next registration, so a late
+    /// failure event from the same attempt cannot escalate backoff either.
+    recovery_dials: HashSet<SocketAddr>,
     our_session_id: i64,
     limits: PeerLimits,
     /// Persistent address book. Optional so tests and callers that don't
@@ -138,6 +142,7 @@ impl PeerManager {
             peers: HashMap::new(),
             bans: HashMap::new(),
             known_addresses: Vec::new(),
+            recovery_dials: HashSet::new(),
             our_session_id: session_id,
             limits,
             book: None,
@@ -188,7 +193,20 @@ impl PeerManager {
     /// Attempt to register a new outbound connection. Returns Err if limits prevent it.
     pub fn register_outbound(&mut self, addr: PeerId, now: Instant) -> Result<(), ConnectError> {
         self.check_can_connect(addr, now)?;
+        self.recovery_dials.remove(&addr);
         self.peers.insert(addr, PeerInfo::new_outbound(addr, now));
+        Ok(())
+    }
+
+    /// Register a starvation-recovery dial under the usual connection limits.
+    /// Failures of this attempt leave both memory and the address book alone.
+    pub fn register_recovery_outbound(
+        &mut self,
+        addr: PeerId,
+        now: Instant,
+    ) -> Result<(), ConnectError> {
+        self.register_outbound(addr, now)?;
+        self.recovery_dials.insert(addr);
         Ok(())
     }
 
@@ -204,6 +222,7 @@ impl PeerManager {
         if inbound_count >= max_inbound {
             return Err(ConnectError::TooManyInbound);
         }
+        self.recovery_dials.remove(&addr);
         self.peers.insert(addr, PeerInfo::new_inbound(addr, now));
         Ok(())
     }
@@ -762,7 +781,8 @@ impl PeerManager {
             if new_priority <= worst_priority {
                 return AddKnownOutcome::DroppedPoolFull;
             }
-            self.known_addresses.swap_remove(worst_idx);
+            let removed = self.known_addresses.swap_remove(worst_idx);
+            self.recovery_dials.remove(&removed.addr);
         }
 
         self.known_addresses.push(KnownPeer {
@@ -808,6 +828,8 @@ impl PeerManager {
     /// `addresses_to_connect` will skip this address until the backoff
     /// window elapses (see `DIAL_BACKOFF_SECS`).
     ///
+    /// Recovery attempts are a no-op in memory and on disk.
+    ///
     /// Fully a no-op — in memory *and* on disk — for an address the dial
     /// pool does not hold. Backoff is a fact about an address we chose to
     /// dial, and only dialable addresses ever enter the pool, so this is
@@ -820,6 +842,9 @@ impl PeerManager {
     /// stub is routable enough to survive the boot purge and be replayed
     /// into the dial pool (issue #298 review, P1-1).
     pub fn mark_dial_failed(&mut self, addr: &SocketAddr, now: Instant) {
+        if self.recovery_dials.contains(addr) {
+            return;
+        }
         let Some(k) = self.known_addresses.iter_mut().find(|k| k.addr == *addr) else {
             return;
         };
@@ -831,6 +856,7 @@ impl PeerManager {
     /// Record a successful handshake. Clears the backoff state so future
     /// failures start fresh from the shortest delay.
     pub fn mark_dial_succeeded(&mut self, addr: &SocketAddr, now: Instant) {
+        self.recovery_dials.remove(addr);
         if let Some(k) = self.known_addresses.iter_mut().find(|k| k.addr == *addr) {
             k.last_failure = None;
             k.consecutive_failures = 0;
@@ -942,6 +968,52 @@ impl PeerManager {
                 self.check_can_connect(k.addr, now).is_ok()
             })
             .take(limit)
+            .map(|k| k.addr)
+            .collect()
+    }
+
+    /// Select up to four backoff-bypassing addresses only when starved.
+    /// Seeds precede previously seen peers, then fewer failures and older
+    /// failures win. Rotate each equal-priority group between batches.
+    /// Routability, bans, existing sessions and connection limits still apply.
+    pub fn addresses_for_recovery(
+        &self,
+        now: Instant,
+        limit: usize,
+        rotation: usize,
+    ) -> Vec<SocketAddr> {
+        if self.connected_count() > 0 || !self.addresses_to_connect(now, 1).is_empty() {
+            return Vec::new();
+        }
+        let priority = |k: &KnownPeer| {
+            (
+                !k.origin.is_seed(),
+                k.last_seen.is_none(),
+                k.consecutive_failures,
+                k.last_failure,
+            )
+        };
+        let mut eligible: Vec<_> = self
+            .known_addresses
+            .iter()
+            .filter(|k| {
+                (k.origin.is_seed() || is_routable_for_p2p(&k.addr, self.allow_local))
+                    && self.check_can_connect(k.addr, now).is_ok()
+            })
+            .collect();
+        eligible.sort_by_key(|k| (priority(k), k.addr));
+        let mut start = 0;
+        while start < eligible.len() {
+            let mut end = start + 1;
+            while end < eligible.len() && priority(eligible[end]) == priority(eligible[start]) {
+                end += 1;
+            }
+            eligible[start..end].rotate_left(rotation % (end - start));
+            start = end;
+        }
+        eligible
+            .into_iter()
+            .take(limit.min(4).min(self.outbound_deficit()))
             .map(|k| k.addr)
             .collect()
     }
