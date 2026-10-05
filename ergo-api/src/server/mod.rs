@@ -740,6 +740,10 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         )
         .route("/js/api-client.js", get(|| async { js(JS_API_CLIENT) }))
         .route("/js/auth.js", get(|| async { js(JS_AUTH) }))
+        .route(
+            "/js/capabilities.js",
+            get(|| async { js(crate::web::JS_CAPABILITIES) }),
+        )
         .route("/js/format.js", get(|| async { js(JS_FORMAT) }))
         .route("/js/fee-stats.js", get(|| async { js(JS_FEE_STATS) }))
         .route("/js/router.js", get(|| async { js(JS_ROUTER) }))
@@ -764,6 +768,10 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         )
         .route("/js/explorer.js", get(|| async { js(JS_EXPLORER) }))
         .route("/js/token-meta.js", get(|| async { js(JS_TOKEN_META) }))
+        .route(
+            "/js/transaction-source.js",
+            get(|| async { js(crate::web::JS_TRANSACTION_SOURCE) }),
+        )
         .route("/js/peers.js", get(|| async { js(JS_PEERS) }))
         .route("/js/mempool.js", get(|| async { js(JS_MEMPOOL) }))
         .route("/js/voting.js", get(|| async { js(JS_VOTING) }))
