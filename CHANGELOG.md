@@ -114,7 +114,7 @@ See [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases) for
 - **Wallet crate split (#416).** Wallet orchestration moved into the `ergo-wallet-service` crate.
 - **Toolchain (#493).** The stable toolchain and minimum Rust version are now 1.99.0.
 - **Release downloads (#593).** One archive per platform holds both `ergo-node` and `ergo-wallet`, with release-wide `SHA256SUMS` and `release.json`. Bare binaries and per-file checksum files are no longer published.
-- **P2P handshake version (#587).** The node advertises 6.0.7, the current Scala stable release whose consensus and mempool rules it implements; it advertised 6.0.2. Scala gates no peer behavior on versions above 5.0.13, and the agent name stays `ergo-rust`.
+- **P2P handshake version (#587).** The handshake reports version 6.0.7, the current Scala stable release, instead of 6.0.2. Only the reported version changes: Scala gates no peer behavior on versions above 5.0.13, and the agent name stays `ergo-rust`.
 - **Documentation (#590, #594).** The README is rewritten for operators and developers. The docs now cover only the current product and code, and CI checks that their links resolve.
 
 ### Fixed
