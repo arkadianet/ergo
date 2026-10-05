@@ -117,6 +117,11 @@ impl V1State {
         })?;
         match idx.status() {
             IndexerStatus::CaughtUp => Ok(idx),
+            IndexerStatus::Migrating => Err(Box::new(v1_error(
+                Reason::IndexerSyncing,
+                "the extra index is migrating",
+                "retry once GET /api/v1/indexer/status reports caught up",
+            ))),
             IndexerStatus::Syncing => Err(Box::new(v1_error(
                 Reason::IndexerSyncing,
                 "the extra index is still syncing",

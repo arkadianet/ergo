@@ -5,7 +5,7 @@ use crate::config::IndexerConfig;
 use crate::error::IndexerError;
 use crate::segment::SEGMENT_THRESHOLD;
 use crate::store::paging::{PageOwner, PageReader};
-use crate::store::IndexerStore;
+use crate::store::{IndexerStore, OpenOutcome};
 use crate::{BoxId, TemplateHash, TokenId, TreeHash, TxId};
 use ergo_indexer_types::{
     BalanceDto, IndexedBoxDto, IndexedTokenDto, IndexedTxDto, IndexerHaltReason, IndexerHealthDto,
@@ -46,7 +46,8 @@ pub(crate) fn report_indexer_storage_failure(
 /// Construction policy:
 /// - `IndexerHandle::boot(config, datadir)` returns `None` only when
 ///   `config.enabled = false`. Otherwise it always returns `Some` —
-///   either a `Syncing` handle backed by an open `IndexerStore`, or a
+///   a `Migrating` handle awaiting background conversion, a `Syncing`
+///   handle backed by an open `IndexerStore`, or a
 ///   `Halted(reason)` handle with no store attached.
 /// - A halted handle cannot serve reads (`IndexerStore` is `None`) and
 ///   the polling task is not spawned.
@@ -59,19 +60,17 @@ pub struct IndexerHandle {
 struct HandleInner {
     status: RwLock<IndexerStatus>,
     indexed_height: RwLock<u64>,
-    /// `None` for boot-time-halted handles; `Some` once a successful
-    /// `IndexerStore::open` has produced the backing store.
-    store: Option<Arc<IndexerStore>>,
+    /// Published only after open and any schema conversion complete.
+    store: RwLock<Option<Arc<IndexerStore>>>,
+    pending_migration: RwLock<Option<IndexerStore>>,
     /// Retain observed read corruption until the handle is reopened. An
     /// unrelated successful query cannot establish that the index is healthy.
     read_error: RwLock<Option<IndexerReadError>>,
 }
 
 impl IndexerHandle {
-    fn query_store(&self) -> Result<&IndexerStore, IndexerReadError> {
-        self.inner
-            .store
-            .as_deref()
+    fn query_store(&self) -> Result<Arc<IndexerStore>, IndexerReadError> {
+        self.store()
             .ok_or_else(|| IndexerReadError::new("indexer store is unavailable"))
     }
 
@@ -115,6 +114,8 @@ impl IndexerHandle {
     /// - `config.enabled = true` and `IndexerStore::open` succeeds →
     ///   `Some(syncing_handle)` with `indexed_height` seeded from the
     ///   persisted meta and the store wired in.
+    /// - Schema 2 → `Some(migrating_handle)`; the worker converts the private
+    ///   store before publishing it for queries.
     /// - Boot-time `IndexerError::SchemaCorruption` → `Some(halted)`
     ///   with `IndexerHaltReason::SchemaCorruption`. No store wired.
     /// - Any other boot-time `IndexerError` → `Some(halted)` with
@@ -138,8 +139,8 @@ impl IndexerHandle {
         }
 
         let path = datadir.join(&config.db_filename);
-        match IndexerStore::open_with_cache(&path, cache_bytes) {
-            Ok((mut store, _outcome)) => {
+        match IndexerStore::open_for_boot(&path, cache_bytes) {
+            Ok((mut store, outcome)) => {
                 store.set_rollback_window(config.rollback_window);
                 let meta = match store.read_meta() {
                     Ok(m) => m,
@@ -160,7 +161,18 @@ impl IndexerHandle {
                         return Some(Self::halted(e.halt_reason()));
                     }
                 };
-                Some(Self::with_store(store, meta.indexed_height))
+                if outcome == OpenOutcome::MigrationPending {
+                    let handle = Self::syncing(meta.indexed_height);
+                    handle.set_status(IndexerStatus::Migrating);
+                    *handle
+                        .inner
+                        .pending_migration
+                        .write()
+                        .unwrap_or_else(|p| p.into_inner()) = Some(store);
+                    Some(handle)
+                } else {
+                    Some(Self::with_store(store, meta.indexed_height))
+                }
             }
             Err(IndexerError::SchemaCorruption) => {
                 tracing::error!(
@@ -191,7 +203,8 @@ impl IndexerHandle {
             inner: Arc::new(HandleInner {
                 status: RwLock::new(IndexerStatus::Halted(reason)),
                 indexed_height: RwLock::new(0),
-                store: None,
+                store: RwLock::new(None),
+                pending_migration: RwLock::new(None),
                 read_error: RwLock::new(None),
             }),
         }
@@ -205,7 +218,8 @@ impl IndexerHandle {
             inner: Arc::new(HandleInner {
                 status: RwLock::new(IndexerStatus::Syncing),
                 indexed_height: RwLock::new(indexed_height),
-                store: None,
+                store: RwLock::new(None),
+                pending_migration: RwLock::new(None),
                 read_error: RwLock::new(None),
             }),
         }
@@ -218,16 +232,51 @@ impl IndexerHandle {
             inner: Arc::new(HandleInner {
                 status: RwLock::new(IndexerStatus::Syncing),
                 indexed_height: RwLock::new(indexed_height),
-                store: Some(Arc::new(store)),
+                store: RwLock::new(Some(Arc::new(store))),
+                pending_migration: RwLock::new(None),
                 read_error: RwLock::new(None),
             }),
         }
     }
 
     /// Read-only access to the backing store (used by the polling
-    /// task and the per-type read methods). `None` for halted handles.
+    /// task and the per-type read methods). `None` while migrating or halted.
     pub fn store(&self) -> Option<Arc<IndexerStore>> {
-        self.inner.store.clone()
+        self.inner
+            .store
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn finish_boot(
+        &self,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), IndexerError> {
+        self.finish_boot_with(cancel, |store| store.finish_migration(cancel))
+    }
+
+    pub(crate) fn finish_boot_with(
+        &self,
+        cancel: &std::sync::atomic::AtomicBool,
+        migrate: impl FnOnce(IndexerStore) -> Result<IndexerStore, IndexerError>,
+    ) -> Result<(), IndexerError> {
+        let pending = self
+            .inner
+            .pending_migration
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(store) = pending {
+            let store = migrate(store)?;
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(IndexerError::MigrationCancelled);
+            }
+            self.set_indexed_height(store.read_meta()?.indexed_height);
+            *self.inner.store.write().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(store));
+            self.set_status(IndexerStatus::Syncing);
+        }
+        Ok(())
     }
 
     /// Update the in-memory status. Called by the polling task on
@@ -289,7 +338,7 @@ impl IndexerQuery for IndexerHandle {
         }
         // Offline handles explicitly report Syncing/Halted through status;
         // their absent counters are not a successful database read.
-        if self.inner.store.is_none() && !self.is_caught_up() {
+        if self.store().is_none() && !self.is_caught_up() {
             return Ok(IndexerHealthDto {
                 drift_skips: crate::segment_buffer::secondary_index_drift_skips(),
                 ..IndexerHealthDto::default()

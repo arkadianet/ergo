@@ -313,6 +313,7 @@ pub struct MiningHandle {
     /// Whether to sweep storage-rent-eligible boxes into a pinned zero-fee
     /// self-claim. Off by default; set via [`MiningHandle::with_rent_config`].
     claim_storage_rent: bool,
+    rent_self_claim_state: Arc<RwLock<crate::rent_state::RentSelfClaimState>>,
     /// Max rent boxes per block's self-claim (see `with_rent_config`).
     max_storage_rent_claims: u32,
     /// Operator-configured on-chain voting targets, keyed by signed-i8
@@ -390,6 +391,7 @@ impl MiningHandle {
             network: ergo_chain_spec::Network::Mainnet,
             voting_settings: Arc::new(voting_settings),
             claim_storage_rent: false,
+            rent_self_claim_state: Arc::new(RwLock::new(Default::default())),
             max_storage_rent_claims: 0,
             custom_extension_fields: Arc::new(Vec::new()),
             voting_targets: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
@@ -790,7 +792,32 @@ impl MiningHandle {
     ) -> Self {
         self.claim_storage_rent = claim_storage_rent;
         self.max_storage_rent_claims = max_storage_rent_claims;
+        self.set_rent_self_claim_state(crate::rent_state::RentSelfClaimState::at_height(
+            claim_storage_rent && max_storage_rent_claims > 0,
+            0,
+            0,
+        ));
         self
+    }
+
+    /// Last scan availability observed by the serial build worker.
+    pub fn rent_self_claim_state(&self) -> crate::rent_state::RentSelfClaimState {
+        *self
+            .rent_self_claim_state
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Update availability and return the previous state for transition logging.
+    pub fn set_rent_self_claim_state(
+        &self,
+        next: crate::rent_state::RentSelfClaimState,
+    ) -> crate::rent_state::RentSelfClaimState {
+        let mut state = self
+            .rent_self_claim_state
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        std::mem::replace(&mut *state, next)
     }
 
     /// Install operator-configured custom extension fields, injected into every

@@ -215,6 +215,7 @@ Use BigInt with a lossless parser and send cursor query parameters as decimal te
             crate::v1::accounts::scan::ScanView,
             crate::v1::error::V1Error,
             crate::v1::operator::mining::MiningStatus,
+            crate::mining::RentSelfClaimState,
             crate::v1::operator::mining::RewardAddress,
             crate::v1::operator::mining::RewardPubkey,
             crate::v1::operator::network::BlacklistedPeer,

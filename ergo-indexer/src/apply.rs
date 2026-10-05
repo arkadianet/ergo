@@ -50,7 +50,7 @@ use crate::store::tables::{
     NUMERIC_TX, SEGMENTS,
 };
 use crate::store::{meta as meta_io, undo as undo_io, IndexerMeta, IndexerStore, UndoEntry};
-use crate::template::{flush_templates, load_template_into_map, template_hash_for_box_bytes};
+use crate::template::{flush_templates, load_template_into_map};
 use crate::token::{
     flush_tokens, is_mint, load_required_token_into_map, load_token_into_map, IndexedToken,
 };
@@ -133,6 +133,18 @@ pub(crate) struct AppliedBlock {
     pub serialized_bytes: u64,
 }
 
+/// How apply derives a box's template key.
+#[derive(Clone, Copy)]
+pub(crate) enum TemplateKey {
+    /// The current derivation, `template_hash_for_box_bytes`. The writer
+    /// scratch memoizes its results across blocks.
+    Current,
+    /// A fixed alternative derivation, such as a legacy schema's in migration
+    /// fixtures. Never memoized, so its results cannot mix with `Current`'s.
+    #[cfg(test)]
+    Fixed(fn(&[u8]) -> Result<Option<Digest32>, IndexerError>),
+}
+
 /// Apply one complete block, including its undo and metadata, in the caller's
 /// transaction. Nothing is externally visible until that transaction commits.
 pub(crate) fn apply_block_in_transaction(
@@ -141,6 +153,30 @@ pub(crate) fn apply_block_in_transaction(
     meta: &IndexerMeta,
     block: &IndexerBlock<'_>,
     scratch: &mut BlockApplyScratch,
+) -> Result<AppliedBlock, IndexerError> {
+    apply_block_with_derivation(
+        write_txn,
+        rollback_window,
+        meta,
+        block,
+        scratch,
+        TemplateKey::Current,
+        IndexedToken::from_box,
+    )
+}
+
+pub(crate) fn apply_block_with_derivation(
+    write_txn: &redb::WriteTransaction,
+    rollback_window: u64,
+    meta: &IndexerMeta,
+    block: &IndexerBlock<'_>,
+    scratch: &mut BlockApplyScratch,
+    template_key: TemplateKey,
+    token_from_box: fn(
+        &crate::BoxId,
+        &ergo_ser::token::Token,
+        &ergo_ser::register::AdditionalRegisters,
+    ) -> IndexedToken,
 ) -> Result<AppliedBlock, IndexerError> {
     meta_io::check_mutation_checkpoint(write_txn, meta)?;
     let expected_next = meta
@@ -311,9 +347,10 @@ pub(crate) fn apply_block_in_transaction(
                         &segments_table,
                     )?;
 
-                    if let Some(template_hash) =
-                        template_hash_for_box_bytes(existing.box_data.candidate.ergo_tree_bytes())?
-                    {
+                    if let Some(template_hash) = scratch.template_hash(
+                        existing.box_data.candidate.ergo_tree_bytes(),
+                        template_key,
+                    )? {
                         let template = load_template_into_map(
                             &template_table,
                             &mut scratch.touched_templates,
@@ -468,7 +505,7 @@ pub(crate) fn apply_block_in_transaction(
                 )?;
 
                 if let Some(template_hash) =
-                    template_hash_for_box_bytes(candidate.ergo_tree_bytes())?
+                    scratch.template_hash(candidate.ergo_tree_bytes(), template_key)?
                 {
                     let template = load_template_into_map(
                         &template_table,
@@ -500,7 +537,7 @@ pub(crate) fn apply_block_in_transaction(
                                 token.token_id,
                             )?;
                             if record.creating_box_id.is_none() {
-                                let fresh = IndexedToken::from_box(
+                                let fresh = token_from_box(
                                     &box_id,
                                     token,
                                     candidate.additional_registers(),

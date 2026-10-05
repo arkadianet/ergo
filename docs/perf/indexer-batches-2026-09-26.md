@@ -1,11 +1,16 @@
 # Bounded indexer catch-up transactions
 
+This is the September 26 measurement. The
+[October 5 archival catch-up note](indexer-catchup-2026-10-05.md) describes the
+current limits, durability and measurement procedure.
+
 The driver groups consecutive canonical blocks into one redb write transaction,
 stopping after 16 blocks, 50 ms of work, or 8 MiB of serialized transaction data.
 Limits are checked between blocks: one slow or large block still completes,
 and the byte counter is not a strict memory limit. Only one decoded block is
 loaded at a time. `step()` retains its single-block contract; the driver uses
-`step_batch()`. Database schema and Eventual durability remain unchanged.
+`step_batch()`. At the time, the database schema and Eventual durability were
+unchanged.
 
 Each block still writes its own undo, metadata, and rollback-window pruning.
 Readers see only committed batch checkpoints. Missing later sections or

@@ -150,6 +150,7 @@ pub(crate) async fn miner_stats(
 #[derive(Serialize, ToSchema)]
 pub(crate) struct MiningStatus {
     mining_enabled: bool,
+    rent_self_claim: crate::mining::RentSelfClaimState,
     synced: bool,
     longpoll_supported: bool,
     last_template_msg: Option<String>,
@@ -177,8 +178,13 @@ pub(crate) async fn status(State(s): State<OperatorState>) -> Response {
     } else {
         s.read.status().sync_state == SyncStateLabel::AtTip
     };
+    let rent_self_claim = match &s.mining {
+        Some(m) if mining_enabled => m.rent_self_claim_state().await,
+        _ => Default::default(),
+    };
     Json(MiningStatus {
         mining_enabled,
+        rent_self_claim,
         synced,
         longpoll_supported: true,
         last_template_msg: freshness.last_template_msg,

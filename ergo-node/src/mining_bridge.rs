@@ -514,6 +514,27 @@ impl NodeMining for MiningBridge {
         })
     }
 
+    async fn rent_self_claim_state(&self) -> ergo_api::mining::RentSelfClaimState {
+        use ergo_api::mining::RentSelfClaimState as JsonState;
+        use ergo_mining::rent_state::RentSelfClaimState;
+        match self
+            .handle
+            .as_ref()
+            .map(|h| h.rent_self_claim_state())
+            .unwrap_or_default()
+        {
+            RentSelfClaimState::Disabled => JsonState::Disabled,
+            RentSelfClaimState::Active => JsonState::Active,
+            RentSelfClaimState::PausedIndexerBehind {
+                indexed_height,
+                chain_height,
+            } => JsonState::PausedIndexerBehind {
+                indexed_height,
+                chain_height,
+            },
+        }
+    }
+
     async fn block_policy(&self) -> Result<serde_json::Value, MiningApiError> {
         serde_json::to_value(self.inspection_handle()?.policy())
             .map_err(|e| MiningApiError::Internal(e.to_string()))
@@ -677,6 +698,44 @@ impl NodeMining for MiningBridge {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn rent_self_claim_state_maps_worker_availability() {
+        use ergo_api::mining::RentSelfClaimState as JsonState;
+        use ergo_mining::rent_state::RentSelfClaimState;
+        let handle = ergo_mining::handle::MiningHandle::new(
+            [0x02; 33],
+            ergo_mining::emission_rules::MonetarySettings::mainnet(),
+            None,
+            ergo_crypto::difficulty::DifficultyParams::mainnet(),
+            ergo_validation::VotingSettings::mainnet(),
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        let bridge = MiningBridge::new(
+            tx,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            handle.subscribe_serve_changes(),
+        )
+        .with_handle(handle.clone());
+        assert_eq!(bridge.rent_self_claim_state().await, JsonState::Disabled);
+        for (state, expected) in [
+            (RentSelfClaimState::Active, JsonState::Active),
+            (
+                RentSelfClaimState::PausedIndexerBehind {
+                    indexed_height: 90,
+                    chain_height: 100,
+                },
+                JsonState::PausedIndexerBehind {
+                    indexed_height: 90,
+                    chain_height: 100,
+                },
+            ),
+            (RentSelfClaimState::Disabled, JsonState::Disabled),
+        ] {
+            handle.set_rent_self_claim_state(state);
+            assert_eq!(bridge.rent_self_claim_state().await, expected);
+        }
+    }
 
     // ----- helpers -----
 

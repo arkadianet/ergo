@@ -461,10 +461,11 @@ fn assert_upgraded_directory(
     originals: &[(String, Vec<u8>)],
     stale: bool,
     discard: bool,
+    keep_stale: bool,
 ) {
     for (name, bytes) in originals {
         let backup = directory.join(format!("{name}.redb2-backup"));
-        let retained = !discard && !(name == "archive-index.redb" && stale);
+        let retained = !discard && !(name == "archive-index.redb" && stale && !keep_stale);
         assert_eq!(backup.exists(), retained);
         if retained {
             assert_eq!(fs::read(backup).unwrap(), *bytes);
@@ -531,10 +532,12 @@ fn assert_upgraded_directory(
 
 #[test]
 fn packaged_upgrade_data_command_upgrades_entire_directory_and_is_idempotent() {
-    for (schema, discard) in [
-        (2, false),
-        (ergo_indexer::store::INDEXER_SCHEMA_VERSION, false),
-        (2, true),
+    for (schema, discard, keep_stale) in [
+        (2, false, false),
+        (ergo_indexer::store::INDEXER_SCHEMA_VERSION, false, false),
+        (2, true, false),
+        (1, false, false),
+        (2, false, true),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let originals = directory_upgrade_fixture(dir.path(), schema);
@@ -547,6 +550,9 @@ fn packaged_upgrade_data_command_upgrades_entire_directory_and_is_idempotent() {
                 .args(["--indexer-db", "archive-index.redb"]);
             if discard {
                 command.arg("--discard-backups");
+            }
+            if keep_stale {
+                command.arg("--keep-stale-indexer");
             }
             command
         };
@@ -565,7 +571,13 @@ fn packaged_upgrade_data_command_upgrades_entire_directory_and_is_idempotent() {
         if discard {
             assert!(stderr.contains("external backup"));
         }
-        assert_upgraded_directory(dir.path(), &originals, schema == 2, discard);
+        assert_upgraded_directory(
+            dir.path(),
+            &originals,
+            schema < ergo_indexer::store::INDEXER_SCHEMA_VERSION,
+            discard,
+            keep_stale,
+        );
         let output = command().output().unwrap();
         assert!(
             output.status.success(),
@@ -579,34 +591,37 @@ fn packaged_upgrade_data_command_upgrades_entire_directory_and_is_idempotent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_hook_upgrades_without_networking_and_disabled_switch_gives_guidance() {
-    let dir = tempfile::tempdir().unwrap();
-    let originals = directory_upgrade_fixture(dir.path(), 2);
-    let mut config = super::common::make_test_config(dir.path().to_path_buf());
-    config.indexer_config.db_filename = "archive-index.redb".into();
-    config.auto_upgrade_legacy = false;
-    let error = ergo_node::data_upgrade::prepare_startup(&config)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("ergo-node upgrade-data") && error.contains("archive-index.redb"),
-        "{error}"
-    );
-    for (name, bytes) in &originals {
-        assert_eq!(fs::read(dir.path().join(name)).unwrap(), *bytes);
+    for keep_stale in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let originals = directory_upgrade_fixture(dir.path(), 2);
+        let mut config = super::common::make_test_config(dir.path().to_path_buf());
+        config.indexer_config.db_filename = "archive-index.redb".into();
+        config.auto_upgrade_legacy = false;
+        config.auto_upgrade_keep_stale_indexer = keep_stale;
+        let error = ergo_node::data_upgrade::prepare_startup(&config)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("ergo-node upgrade-data") && error.contains("archive-index.redb"),
+            "{error}"
+        );
+        for (name, bytes) in &originals {
+            assert_eq!(fs::read(dir.path().join(name)).unwrap(), *bytes);
+        }
+        config.auto_upgrade_legacy = true;
+        let lock = ergo_node::data_upgrade::prepare_startup(&config)
+            .await
+            .unwrap();
+        assert!(ergo_node::data_upgrade::DataDirectoryLock::acquire(dir.path()).is_err());
+        assert_upgraded_directory(dir.path(), &originals, true, false, keep_stale);
+        drop(lock);
+        let lock = ergo_node::data_upgrade::prepare_startup(&config)
+            .await
+            .unwrap();
+        assert_upgraded_directory(dir.path(), &originals, true, false, keep_stale);
+        drop(lock);
     }
-    config.auto_upgrade_legacy = true;
-    let lock = ergo_node::data_upgrade::prepare_startup(&config)
-        .await
-        .unwrap();
-    assert!(ergo_node::data_upgrade::DataDirectoryLock::acquire(dir.path()).is_err());
-    assert_upgraded_directory(dir.path(), &originals, true, false);
-    drop(lock);
-    let lock = ergo_node::data_upgrade::prepare_startup(&config)
-        .await
-        .unwrap();
-    assert_upgraded_directory(dir.path(), &originals, true, false);
-    drop(lock);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -632,7 +647,7 @@ async fn boot_hook_precedes_sentinel_peek_and_refuses_a_second_directory_owner()
         }
     };
     assert!(error.contains("initialized for state backend"), "{error}");
-    assert_upgraded_directory(dir.path(), &original, true, false);
+    assert_upgraded_directory(dir.path(), &original, true, false, false);
     let lock = ergo_node::data_upgrade::DataDirectoryLock::acquire(dir.path()).unwrap();
     let config = super::common::make_test_config(dir.path().to_path_buf());
     let error = match ergo_node::run_inner(config).await {
@@ -668,5 +683,5 @@ async fn upgraded_directory_retained_backups_support_doctor_backup_verify_and_re
     ergo_node::maintenance::verify_backup(&backup).unwrap();
     let restored = destinations.path().join("restored");
     ergo_node::maintenance::restore(&backup, &restored).unwrap();
-    assert_upgraded_directory(&restored, &originals, true, false);
+    assert_upgraded_directory(&restored, &originals, true, false, false);
 }

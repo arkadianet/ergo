@@ -27,6 +27,15 @@ recreated owner outputs, even when their owner is also the miner. Tokens held in
 recreated boxes are not miner income. Recovered and burned token amounts come from
 the final claim's input/output difference, after selection and trimming.
 
+Storage-rent self-claims pause automatically when the indexer trails the
+candidate's parent by more than two blocks, avoiding stale-index scans while
+allowing normal one- or two-block apply lag; they resume on the next build within
+that margin, with one WARN on pause and one INFO on resume.
+`GET /api/v1/mining/status` reports the latest worker observation in
+`rent_self_claim`: `active`, `paused_indexer_behind` (with `indexed_height` and
+parent `chain_height`), or `disabled`, under its `state` field; a disabled claim
+setting or zero claim cap reports disabled.
+
 The storage-rent scan count is the bounded set resolved for that build, rather
 than the whole eligible backlog. It includes overdue boxes. Actual selected inputs,
 recreation/consumption branches, collected ERG and token-preservation deferrals are

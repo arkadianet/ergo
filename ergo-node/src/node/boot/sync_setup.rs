@@ -351,9 +351,8 @@ pub(super) fn setup(
 
     // 6c. Indexer boot (opt-in via [indexer] enabled in config).
     // `boot` returns `None` only when disabled — otherwise we get a
-    // syncing handle (store wired) or a halted handle (store unavailable
-    // due to schema/db corruption at open time). The polling task is only
-    // spawned when the handle has a backing store; halted handles answer
+    // syncing, migrating or halted handle. The worker completes migration
+    // before polling; halted handles answer
     // status reads but never write.
     //
     // The cancel flag is allocated unconditionally so `RunHandle` can
@@ -367,7 +366,7 @@ pub(super) fn setup(
             &config.data_dir,
             config.redb_cache_budgets.indexer,
         ) {
-            Some(handle) if handle.store().is_some() => {
+            Some(handle) if !matches!(handle.status(), ergo_indexer::IndexerStatus::Halted(_)) => {
                 info!(
                     poll_idle_ms = config.indexer_config.poll_idle_ms,
                     db = %config.indexer_config.db_filename,

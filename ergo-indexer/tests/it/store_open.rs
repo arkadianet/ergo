@@ -76,11 +76,10 @@ fn open_wipes_when_schema_version_mismatches() {
     assert_eq!(store.read_meta().unwrap(), IndexerMeta::empty());
 }
 
-/// A populated schema-2 index (0.11.0 and earlier) holds token metadata and
-/// template keys derived by the replaced projections, so opening it must
-/// resync from genesis rather than resume.
+/// A schema-2 checkpoint claiming boxes absent from the primary tables cannot
+/// be migrated completely, so opening it must fall back to a rebuild.
 #[test]
-fn schema_two_index_is_rebuilt_on_open() {
+fn inconsistent_schema_two_index_is_rebuilt_on_open() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("indexer.redb");
     {

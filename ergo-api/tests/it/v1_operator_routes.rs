@@ -421,7 +421,7 @@ impl NodeAdmin for SpyAdmin {
     }
 }
 
-struct StubMining;
+struct StubMining(ergo_api::mining::RentSelfClaimState);
 
 fn fixed_work() -> WorkMessageJson {
     serde_json::from_value(serde_json::json!({
@@ -437,6 +437,9 @@ fn fixed_work() -> WorkMessageJson {
 
 #[async_trait]
 impl NodeMining for StubMining {
+    async fn rent_self_claim_state(&self) -> ergo_api::mining::RentSelfClaimState {
+        self.0
+    }
     async fn mining_freshness(
         &self,
     ) -> Result<ergo_rest_json::mining_inspection::MiningFreshnessJson, MiningApiError> {
@@ -492,12 +495,19 @@ fn security() -> Arc<ApiSecurity> {
 
 /// Full-featured app: chain + admin + mining all wired.
 fn app_full(auth: Arc<V1AuthConfig>) -> Router {
+    app_with_rent_state(auth, Default::default())
+}
+
+fn app_with_rent_state(
+    auth: Arc<V1AuthConfig>,
+    rent_state: ergo_api::mining::RentSelfClaimState,
+) -> Router {
     let state = OperatorState {
         blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
         read: Arc::new(StubRead),
         chain: Some(Arc::new(StubChain)),
         admin: Some(Arc::new(SpyAdmin::default())),
-        mining: Some(Arc::new(StubMining)),
+        mining: Some(Arc::new(StubMining(rent_state))),
         network: NetworkPrefix::Mainnet,
     };
     let gov = Governor::new(Default::default()).expect("valid governor config");
@@ -511,7 +521,7 @@ fn app_with_admin(admin: Arc<SpyAdmin>, auth: Arc<V1AuthConfig>) -> Router {
         read: Arc::new(StubRead),
         chain: Some(Arc::new(StubChain)),
         admin: Some(admin),
-        mining: Some(Arc::new(StubMining)),
+        mining: Some(Arc::new(StubMining(Default::default()))),
         network: NetworkPrefix::Mainnet,
     };
     let gov = Governor::new(Default::default()).expect("valid governor config");
@@ -700,6 +710,36 @@ async fn mining_status_t0_composed_always_200() {
     assert_eq!(v["last_template_height"], 100);
     assert_eq!(v["last_template_age_ms"], 25);
     assert_eq!(v["template_seq"], 7);
+}
+
+#[tokio::test]
+async fn mining_status_exposes_rent_self_claim_states() {
+    use ergo_api::mining::RentSelfClaimState;
+    for (state, expected) in [
+        (
+            RentSelfClaimState::Disabled,
+            serde_json::json!({"state": "disabled"}),
+        ),
+        (
+            RentSelfClaimState::Active,
+            serde_json::json!({"state": "active"}),
+        ),
+        (
+            RentSelfClaimState::PausedIndexerBehind {
+                indexed_height: 90,
+                chain_height: 100,
+            },
+            serde_json::json!({"state": "paused_indexer_behind", "indexed_height": 90, "chain_height": 100}),
+        ),
+    ] {
+        let (status, value) = send(
+            app_with_rent_state(default_auth(), state),
+            req(Method::GET, "/api/v1/mining/status", None, None, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["rent_self_claim"], expected);
+    }
 }
 
 #[tokio::test]

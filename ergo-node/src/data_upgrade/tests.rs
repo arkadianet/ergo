@@ -1020,9 +1020,12 @@ fn unknown_free_space_warns_and_proceeds_including_the_index_rebuild_check() {
             .filter(|message| message.contains("cannot determine available bytes"))
             .collect();
         assert_eq!(space_warnings.len(), if indexer_enabled { 2 } else { 1 });
-        assert!(space_warnings.iter().all(|message| message
-            .contains("injected filesystem query failure")
-            && message.contains("proceeding without")));
+        assert!(space_warnings
+            .iter()
+            .all(|message| message.contains("injected filesystem query failure")));
+        assert!(space_warnings
+            .iter()
+            .all(|message| message.contains("proceeding without")));
     }
 }
 
@@ -1210,4 +1213,61 @@ fn malformed_clean_indexer_schema_remains_an_error_without_mutation() {
     assert_eq!(fs::read(&path).unwrap(), bytes);
     assert!(!sibling(&path, ".redb2-backup").exists());
     assert!(!sibling(&path, ".redb-upgrade").exists());
+}
+
+#[test]
+fn legacy_schema_two_rebuilds_without_conversion_even_with_ample_space() {
+    for keep_stale_indexer in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = DataDirectoryLock::acquire(dir.path()).unwrap();
+        let idx = dir.path().join("custom-index.redb");
+        let original = indexer(&idx, 2);
+        let state = dir.path().join("state.redb");
+        let state_bytes = legacy(&state);
+        let backup = sibling(&idx, ".redb2-backup");
+        let mut warnings = Vec::new();
+        let report = upgrade_data(
+            &lock,
+            dir.path(),
+            Path::new("custom-index.redb"),
+            &mut UpgradeOptions {
+                discard_backups: false,
+                keep_stale_indexer,
+                indexer_enabled: true,
+                warning: &mut |s| warnings.push(s.to_owned()),
+                free_space: &|path| {
+                    assert_ne!(
+                        path, idx,
+                        "legacy indexer must not reserve conversion space"
+                    );
+                    if path == state && !keep_stale_indexer {
+                        assert!(!idx.exists(), "delete the index before the state preflight");
+                        assert!(!backup.exists(), "free index space before the state copy");
+                    }
+                    Ok(u64::MAX)
+                },
+                cancelled: &|| false,
+                progress: &mut |path, _, _, _| {
+                    assert_eq!(path, state, "startup must only convert state");
+                },
+                step: &mut |_| Ok(()),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.migrated, 1);
+        assert_eq!(report.stale_indexers, 1);
+        assert_current(&state);
+        assert_eq!(
+            fs::read(sibling(&state, ".redb2-backup")).unwrap(),
+            state_bytes
+        );
+        assert!(!idx.exists());
+        assert_eq!(backup.exists(), keep_stale_indexer);
+        if keep_stale_indexer {
+            assert_eq!(fs::read(&backup).unwrap(), original);
+            assert_eq!(classify(&backup).unwrap(), FileFormat::LegacyV2);
+        }
+        assert!(!sibling(&idx, ".redb-upgrade").exists());
+        assert!(warnings.iter().any(|s| s.contains("rebuilt from genesis")));
+    }
 }
