@@ -102,6 +102,8 @@ impl fmt::Display for HeightOverflowContext {
 /// `503 indexer-halted` envelope.
 #[derive(Debug, thiserror::Error)]
 pub enum IndexerError {
+    #[error("indexer schema migration cancelled")]
+    MigrationCancelled,
     // ----- redb -----
     /// Any redb call returned an error (open, table-level, storage,
     /// iter, range, get/insert/remove). Boxed because `redb::Error`
@@ -392,7 +394,8 @@ impl IndexerError {
             Self::UndoMissing(_) => IndexerHaltReason::UndoMissing,
             Self::SectionMissing(_) => IndexerHaltReason::SectionMissing,
             Self::InputMissing { .. } => IndexerHaltReason::InputMissing,
-            Self::Db(_)
+            Self::MigrationCancelled
+            | Self::Db(_)
             | Self::DbCommit(_)
             | Self::DbDecode { .. }
             | Self::DbRowLength { .. }

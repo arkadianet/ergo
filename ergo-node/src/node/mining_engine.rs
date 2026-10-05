@@ -175,6 +175,12 @@ fn resolve_eligible_rent_boxes(
         indexer.map_or(0, IndexerQuery::indexed_height),
         candidate_height.saturating_sub(1),
         || {
+            // A schema-2 index migrating in the background has no store yet;
+            // its status already reports Migrating, so skip without warning.
+            if indexer.is_some_and(|h| matches!(h.status(), ergo_indexer::IndexerStatus::Migrating))
+            {
+                return Vec::new();
+            }
             let Some(store_idx) = indexer.and_then(|h| h.store()) else {
                 warn!(
                     "mining: rent claiming enabled but indexer store unavailable; building without rent self-claim"
@@ -906,6 +912,52 @@ mod tests {
             candidate: cand,
             transaction_id: ModifierId::from_bytes([seed; 32]),
             index: 0,
+        }
+    }
+
+    #[test]
+    fn rent_claims_pause_quietly_while_index_migrates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state =
+            ergo_state::store::StateStore::open(&tmp.path().join("state.redb")).unwrap();
+        state.initialize_genesis(&[([1; 32], vec![1; 40])]).unwrap();
+        let snapshot = state.committed_snapshot().unwrap().unwrap();
+        let candidate_height = STORAGE_PERIOD_BLOCKS + 1;
+        // Within the lag margin the scan runs, and only the Migrating check
+        // keeps it from warning that the store is unavailable on every build.
+        // Far behind, the rent state logs its single pause transition.
+        for (indexed_height, pause_warnings) in [(u64::from(STORAGE_PERIOD_BLOCKS), 0), (123, 1)] {
+            let handle = plain_handle().with_rent_config(true, 4);
+            let indexer = ergo_indexer::IndexerHandle::syncing(indexed_height);
+            indexer.set_status(ergo_indexer::IndexerStatus::Migrating);
+            let log_path = tmp.path().join(format!("rent-{indexed_height}.log"));
+            let log = std::fs::File::create(&log_path).unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || log.try_clone().unwrap())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                for _ in 0..3 {
+                    assert!(resolve_eligible_rent_boxes(
+                        Some(&indexer),
+                        &snapshot,
+                        candidate_height,
+                        &handle,
+                        &|| false
+                    )
+                    .is_empty());
+                }
+            });
+            let logged = std::fs::read_to_string(log_path).unwrap();
+            assert!(
+                !logged.contains("indexer store unavailable"),
+                "migration must not warn on each candidate build: {logged}"
+            );
+            assert_eq!(
+                logged.matches("storage-rent self-claims paused").count(),
+                pause_warnings,
+                "{logged}"
+            );
         }
     }
 

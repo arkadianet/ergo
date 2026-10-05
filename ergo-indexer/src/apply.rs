@@ -142,6 +142,30 @@ pub(crate) fn apply_block_in_transaction(
     block: &IndexerBlock<'_>,
     scratch: &mut BlockApplyScratch,
 ) -> Result<AppliedBlock, IndexerError> {
+    apply_block_with_derivation(
+        write_txn,
+        rollback_window,
+        meta,
+        block,
+        scratch,
+        template_hash_for_box_bytes,
+        IndexedToken::from_box,
+    )
+}
+
+pub(crate) fn apply_block_with_derivation(
+    write_txn: &redb::WriteTransaction,
+    rollback_window: u64,
+    meta: &IndexerMeta,
+    block: &IndexerBlock<'_>,
+    scratch: &mut BlockApplyScratch,
+    template_key: fn(&[u8]) -> Result<Option<Digest32>, IndexerError>,
+    token_from_box: fn(
+        &crate::BoxId,
+        &ergo_ser::token::Token,
+        &ergo_ser::register::AdditionalRegisters,
+    ) -> IndexedToken,
+) -> Result<AppliedBlock, IndexerError> {
     meta_io::check_mutation_checkpoint(write_txn, meta)?;
     let expected_next = meta
         .indexed_height
@@ -312,7 +336,7 @@ pub(crate) fn apply_block_in_transaction(
                     )?;
 
                     if let Some(template_hash) =
-                        template_hash_for_box_bytes(existing.box_data.candidate.ergo_tree_bytes())?
+                        template_key(existing.box_data.candidate.ergo_tree_bytes())?
                     {
                         let template = load_template_into_map(
                             &template_table,
@@ -467,9 +491,7 @@ pub(crate) fn apply_block_in_transaction(
                     &mut scratch.staged_spills,
                 )?;
 
-                if let Some(template_hash) =
-                    template_hash_for_box_bytes(candidate.ergo_tree_bytes())?
-                {
+                if let Some(template_hash) = template_key(candidate.ergo_tree_bytes())? {
                     let template = load_template_into_map(
                         &template_table,
                         &mut scratch.touched_templates,
@@ -500,7 +522,7 @@ pub(crate) fn apply_block_in_transaction(
                                 token.token_id,
                             )?;
                             if record.creating_box_id.is_none() {
-                                let fresh = IndexedToken::from_box(
+                                let fresh = token_from_box(
                                     &box_id,
                                     token,
                                     candidate.additional_registers(),

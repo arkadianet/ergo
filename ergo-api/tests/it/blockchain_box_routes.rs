@@ -67,6 +67,19 @@ async fn box_by_index_503_indexer_syncing_pins_envelope() {
     assert_eq!(body["detail"], "indexer at height 0, target 1234");
 }
 
+#[tokio::test]
+async fn box_by_index_503_indexer_migrating_pins_envelope() {
+    let app = build_app(|| {
+        let h = IndexerHandle::syncing(500);
+        h.set_status(IndexerStatus::Migrating);
+        h
+    });
+    let (status, body) = json_get(app, "/blockchain/box/byIndex/42").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["reason"], "indexer-migrating");
+    assert_eq!(body["detail"], "indexer schema migration in progress");
+}
+
 // ---------- gate: Halted → 503 indexer-halted ---------------------------
 
 #[tokio::test]
