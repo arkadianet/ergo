@@ -124,8 +124,13 @@ pub(in crate::evaluator) fn read_register_option(
     // GetVar 10 JIT, and their normal consumers retain their own charges.
     // CBox.registers is lazy as a whole: even R0 or an absent R9 forces
     // `.value` on every additional register before selecting the requested one.
-    for rv in b.registers.iter().flatten() {
-        sigma_to_value_versioned(&rv.tpe, &rv.value, ctx)?;
+    // Scala materializes once per box; repeat reads must not redo the work.
+    let materialized = &b.lazy_vals.registers_materialized[usize::from(ctx.is_v3_ergo_tree())];
+    if materialized.get().is_none() {
+        for rv in b.registers.iter().flatten() {
+            sigma_to_value_versioned(&rv.tpe, &rv.value, ctx)?;
+        }
+        let _ = materialized.set(());
     }
     match reg_id {
         // R0: box.value (Long)
@@ -242,11 +247,11 @@ pub(in crate::evaluator) fn eval_extract_bytes_with_no_ref(
     add_cost(cx.cost, 0xC4)?;
     let box_val = cx.eval_expr(input)?;
     let b = resolve_box(&box_val, cx.ctx)?;
-    if let Some(bytes) = b.bytes_without_ref_cache.get() {
+    if let Some(bytes) = b.lazy_vals.bytes_without_ref.get() {
         return Ok(Value::CollBytes(bytes.clone()));
     }
     let bytes = box_candidate_bytes_versioned(b, cx.ctx.ergo_tree_version)?;
-    let _ = b.bytes_without_ref_cache.set(bytes.clone());
+    let _ = b.lazy_vals.bytes_without_ref.set(bytes.clone());
     Ok(Value::CollBytes(bytes))
 }
 

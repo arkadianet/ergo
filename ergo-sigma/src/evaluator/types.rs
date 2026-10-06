@@ -48,9 +48,21 @@ pub struct EvalBox {
     /// construction; empty for test-only boxes (which fall back to a structural
     /// re-encode).
     pub register_bytes: Vec<u8>,
-    /// Scala ErgoBoxCandidate.bytesWithNoRef is lazy and retains the version
-    /// of its first reader. Clones share this cache across transaction inputs.
-    pub bytes_without_ref_cache: std::sync::Arc<std::sync::OnceLock<Vec<u8>>>,
+    /// Scala's per-box lazy values. Clones share them across transaction inputs.
+    pub lazy_vals: std::sync::Arc<EvalBoxLazyVals>,
+}
+
+/// Values Scala computes once per box in `lazy val`s.
+#[derive(Debug, Default)]
+pub struct EvalBoxLazyVals {
+    /// `ErgoBoxCandidate.bytesWithNoRef`: the first reader's VersionContext
+    /// fixes the bytes (a constant `Upcast` is stripped below ErgoTree v3).
+    pub bytes_without_ref: std::sync::OnceLock<Vec<u8>>,
+    /// Whether every additional register materialized (`CBox.registers`),
+    /// indexed by ErgoTree-version class `[pre-v3, v3+]` because the
+    /// SHeader/SOption gates differ between them. Only success is recorded:
+    /// a failure aborts the script, so a register read never repeats it.
+    pub registers_materialized: [std::sync::OnceLock<()>; 2],
 }
 
 impl EvalBox {
@@ -68,7 +80,7 @@ impl EvalBox {
             tokens: Vec::new(),
             raw_bytes: Vec::new(),
             register_bytes: Vec::new(),
-            bytes_without_ref_cache: Default::default(),
+            lazy_vals: Default::default(),
         }
     }
 }

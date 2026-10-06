@@ -204,7 +204,7 @@ fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
         w.result()
     };
     let b = EvalBox {
-        bytes_without_ref_cache: Default::default(),
+        lazy_vals: Default::default(),
         creation_height: 0,
         script_bytes: ergo_box.candidate.ergo_tree_bytes().to_vec(),
         value: ergo_box.candidate.value as i64,

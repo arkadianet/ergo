@@ -652,7 +652,7 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
                 .map(|t| (*t.token_id.as_bytes(), t.amount))
                 .collect();
             Ok(Value::InlineBox(Box::new(EvalBox {
-                bytes_without_ref_cache: Default::default(),
+                lazy_vals: Default::default(),
                 creation_height: ergo_box.candidate.creation_height,
                 script_bytes: ergo_box.candidate.ergo_tree_bytes().to_vec(),
                 value: ergo_box.candidate.value as i64,

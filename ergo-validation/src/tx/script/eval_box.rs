@@ -28,7 +28,7 @@ pub(crate) fn ergo_box_to_eval_box(b: &ErgoBox, index: usize) -> Result<EvalBox,
     };
 
     Ok(EvalBox {
-        bytes_without_ref_cache: Default::default(),
+        lazy_vals: Default::default(),
         creation_height: b.candidate.creation_height,
         script_bytes: b.candidate.ergo_tree_bytes().to_vec(),
         value: b.candidate.value as i64,
@@ -67,7 +67,7 @@ pub(crate) fn candidate_to_eval_box(
     let id = ergo_primitives::digest::blake2b256(&raw_bytes);
 
     Ok(EvalBox {
-        bytes_without_ref_cache: Default::default(),
+        lazy_vals: Default::default(),
         creation_height: c.creation_height,
         script_bytes: c.ergo_tree_bytes().to_vec(),
         value: c.value as i64,

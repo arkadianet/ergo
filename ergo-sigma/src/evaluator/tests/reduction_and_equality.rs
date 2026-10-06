@@ -74,7 +74,7 @@ fn cost_limit_exceeded_rejects() {
 #[test]
 fn box_equality_self_vs_inputs_0() {
     let box0 = EvalBox {
-        bytes_without_ref_cache: Default::default(),
+        lazy_vals: Default::default(),
         creation_height: 100,
         script_bytes: vec![0x00],
         value: 1000,
@@ -123,7 +123,7 @@ fn box_equality_self_vs_inputs_0() {
 #[test]
 fn box_equality_in_tuple() {
     let box0 = EvalBox {
-        bytes_without_ref_cache: Default::default(),
+        lazy_vals: Default::default(),
         creation_height: 100,
         script_bytes: vec![0x00],
         value: 1000,
@@ -171,7 +171,7 @@ fn box_equality_in_tuple() {
 #[test]
 fn box_equality_in_option() {
     let box0 = EvalBox {
-        bytes_without_ref_cache: Default::default(),
+        lazy_vals: Default::default(),
         creation_height: 100,
         script_bytes: vec![0x00],
         value: 1000,
@@ -221,7 +221,7 @@ fn box_equality_in_option() {
 fn box_collection_vs_derived_tuple() {
     // INPUTS == INPUTS.filter(_ => true) — BoxCollection vs Tuple of BoxRefs
     let box0 = EvalBox {
-        bytes_without_ref_cache: Default::default(),
+        lazy_vals: Default::default(),
         creation_height: 100,
         script_bytes: vec![0x00],
         value: 1000,
@@ -234,7 +234,7 @@ fn box_collection_vs_derived_tuple() {
         register_bytes: Vec::new(),
     };
     let box1 = EvalBox {
-        bytes_without_ref_cache: Default::default(),
+        lazy_vals: Default::default(),
         creation_height: 101,
         script_bytes: vec![0x00],
         value: 2000,
@@ -302,7 +302,7 @@ fn box_collection_vs_derived_tuple() {
 fn coll_box_eq_cost_uses_per_item() {
     use ergo_primitives::cost::CostAccumulator;
     let box0 = EvalBox {
-        bytes_without_ref_cache: Default::default(),
+        lazy_vals: Default::default(),
         creation_height: 100,
         script_bytes: vec![0x00],
         value: 1000,
@@ -315,7 +315,7 @@ fn coll_box_eq_cost_uses_per_item() {
         register_bytes: Vec::new(),
     };
     let box1 = EvalBox {
-        bytes_without_ref_cache: Default::default(),
+        lazy_vals: Default::default(),
         creation_height: 101,
         script_bytes: vec![0x00],
         value: 2000,
@@ -890,4 +890,35 @@ fn every_value_variant_equals_itself() {
         f != f.clone(),
         "Value::Func must never compare equal — Ergo has no function equality",
     );
+}
+
+#[test]
+fn register_materialization_is_memoized_only_on_success() {
+    use crate::evaluator::opcodes::box_context::read_register_option;
+    let with_r4 = |bytes: &[u8]| {
+        let regs =
+            ergo_ser::register::read_registers(&mut ergo_primitives::reader::VlqReader::new(bytes))
+                .unwrap();
+        let mut b = EvalBox::simple(100, vec![0x00]);
+        b.registers[0] = Some(regs.registers[0].clone());
+        b
+    };
+    let ctx = ReductionContext::minimal(100_000, 0);
+    let class = usize::from(ctx.is_v3_ergo_tree());
+
+    // R4 = Int 1: the first read records success; later reads reuse it.
+    let good = with_r4(&[0x01, 0x04, 0x02]);
+    for _ in 0..2 {
+        read_register_option(&good, 4, 0xC6, Some(&SigmaType::SInt), &ctx).unwrap();
+        assert!(good.lazy_vals.registers_materialized[class].get().is_some());
+    }
+    assert!(good.lazy_vals.registers_materialized[1 - class].get().is_none());
+
+    // R4 = Coll[Int](HEIGHT): the stored child never materializes, so every
+    // read fails, even of R0, and nothing is recorded.
+    let bad = with_r4(&[0x01, 0x83, 0x01, 0x04, 0xA3]);
+    for reg_id in [4, 0] {
+        assert!(read_register_option(&bad, reg_id, 0xC6, None, &ctx).is_err());
+        assert!(bad.lazy_vals.registers_materialized[class].get().is_none());
+    }
 }
