@@ -117,6 +117,21 @@ pub(in crate::evaluator) fn read_register_option(
     requested: Option<&SigmaType>,
     ctx: &ReductionContext<'_>,
 ) -> Result<Value, EvalError> {
+    // Scala 6.0.7 sources:
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CBox.scala#L32-L45
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CBox.scala#L75-L95
+    // Materialization adds no JIT charge; ExtractRegisterAs costs 50 JIT,
+    // GetVar 10 JIT, and their normal consumers retain their own charges.
+    // CBox.registers is lazy as a whole: even R0 or an absent R9 forces
+    // `.value` on every additional register before selecting the requested one.
+    // Scala materializes once per box; repeat reads must not redo the work.
+    let materialized = &b.lazy_vals.registers_materialized[usize::from(ctx.is_v3_ergo_tree())];
+    if materialized.get().is_none() {
+        for rv in b.registers.iter().flatten() {
+            sigma_to_value_versioned(&rv.tpe, &rv.value, ctx)?;
+        }
+        let _ = materialized.set(());
+    }
     match reg_id {
         // R0: box.value (Long)
         0 => {
@@ -221,6 +236,10 @@ pub(in crate::evaluator) fn eval_extract_bytes(
 // This is distinct from `.bytes`/`.id` (0xC3/0xC5), which Scala surfaces from
 // the RETAINED original bytes (garbage preserved) — so do NOT touch raw_bytes
 // or the box id here.
+// This lazy candidate cache is shared across inputs: the first reader's
+// VersionContext controls constant Upcast serialization (below v3 it is stripped).
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/ErgoBoxCandidate.scala#L54
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ValueSerializer.scala#L157-L170
 pub(in crate::evaluator) fn eval_extract_bytes_with_no_ref(
     input: &Expr,
     cx: &mut EvalCtx<'_>,
@@ -228,7 +247,12 @@ pub(in crate::evaluator) fn eval_extract_bytes_with_no_ref(
     add_cost(cx.cost, 0xC4)?;
     let box_val = cx.eval_expr(input)?;
     let b = resolve_box(&box_val, cx.ctx)?;
-    Ok(Value::CollBytes(box_candidate_bytes_canonical(b)?))
+    if let Some(bytes) = b.lazy_vals.bytes_without_ref.get() {
+        return Ok(Value::CollBytes(bytes.clone()));
+    }
+    let bytes = box_candidate_bytes_versioned(b, cx.ctx.ergo_tree_version)?;
+    let _ = b.lazy_vals.bytes_without_ref.set(bytes.clone());
+    Ok(Value::CollBytes(bytes))
 }
 
 /// Canonical candidate serialization (`bytesWithNoRef`): value, script, height,
@@ -245,7 +269,8 @@ pub(in crate::evaluator) fn eval_extract_bytes_with_no_ref(
 /// parsed registers rather than the wire slice, and the parsed `RegisterValue`
 /// keeps each node's identity (a tuple `Constant` is `SigmaValue::Tuple`, a
 /// `CreateTuple` node is `SigmaValue::Coll`), while `read_group_element`
-/// normalizes identity encodings at parse. So this simply emits those bytes.
+/// normalizes identity encodings at parse. Reconstruct the stored nodes from
+/// that cache to apply the reader's ambient version before caching the result.
 /// Getting it wrong is the divergence class that stalled mainnet block
 /// 1808895.
 ///
@@ -255,6 +280,10 @@ pub(in crate::evaluator) fn eval_extract_bytes_with_no_ref(
 pub(in crate::evaluator) fn box_candidate_bytes_canonical(
     b: &EvalBox,
 ) -> Result<Vec<u8>, EvalError> {
+    box_candidate_bytes_versioned(b, 3)
+}
+
+fn box_candidate_bytes_versioned(b: &EvalBox, version: u8) -> Result<Vec<u8>, EvalError> {
     let mut w = ergo_primitives::writer::VlqWriter::new();
     w.put_u64(b.value as u64);
     w.put_bytes(&b.script_bytes);
@@ -264,11 +293,25 @@ pub(in crate::evaluator) fn box_candidate_bytes_canonical(
         w.put_bytes(id);
         w.put_u64(*amount);
     }
-    if b.register_bytes.is_empty() {
-        write_registers_structural(&mut w, b)?;
+    let registers = if b.register_bytes.is_empty() {
+        ergo_ser::register::AdditionalRegisters {
+            registers: b.registers.iter().flatten().cloned().collect(),
+        }
     } else {
-        w.put_bytes(&b.register_bytes);
-    }
+        ergo_ser::register::read_registers(&mut ergo_primitives::reader::VlqReader::new(
+            &b.register_bytes,
+        ))
+        .map_err(|e| EvalError::TypeError {
+            expected: "valid cached box registers",
+            got: e.to_string(),
+        })?
+    };
+    ergo_ser::register::write_registers_versioned(&mut w, &registers, version).map_err(|e| {
+        EvalError::TypeError {
+            expected: "serializable box registers",
+            got: e.to_string(),
+        }
+    })?;
     Ok(w.result())
 }
 
@@ -288,22 +331,6 @@ pub(in crate::evaluator) fn box_canonical_bytes(b: &EvalBox) -> Result<Vec<u8>, 
     w.put_bytes(&b.transaction_id);
     w.put_u16(b.output_index);
     Ok(w.result())
-}
-
-/// Structural register re-encode for test-only boxes that carry no
-/// `register_bytes`. Identical output to the cached block for any box built
-/// from wire bytes — `write_registers` is the same encoder that produced them.
-fn write_registers_structural(
-    w: &mut ergo_primitives::writer::VlqWriter,
-    b: &EvalBox,
-) -> Result<(), EvalError> {
-    use ergo_ser::register::{write_registers, AdditionalRegisters};
-
-    let registers = b.registers.iter().flatten().cloned().collect();
-    write_registers(w, &AdditionalRegisters { registers }).map_err(|e| EvalError::TypeError {
-        expected: "serializable box registers",
-        got: format!("register re-serialization failed: {e}"),
-    })
 }
 
 // 0xE3 GetVar(var_id, type) -> Option[T]

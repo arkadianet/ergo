@@ -39,15 +39,30 @@ pub struct EvalBox {
     /// emits: `DataSerializer.serialize(SBox)` re-serializes from structure
     /// (`box_canonical_bytes`), never from `bytes`. Empty for test-only boxes.
     pub raw_bytes: Vec<u8>,
-    /// Verbatim register block (count byte + concatenated per-register
-    /// entries) exactly as it appeared on the wire. Preserves each register's
+    /// Canonical register block (count byte + concatenated per-register
+    /// entries) produced by the parser. Preserves each register's
     /// node provenance — Constant vs `CreateTuple` (0x86) vs `ConcreteCollection`
-    /// (0x83) — which the parsed `registers` field discards. `bytesWithNoRef`
+    /// (0x83), including stored expression children. `bytesWithNoRef`
     /// (0xC4) re-serializes from these bytes to keep that provenance, matching
     /// Scala's `ErgoBoxCandidate.serializer`. Populated from `ErgoBox` at
     /// construction; empty for test-only boxes (which fall back to a structural
     /// re-encode).
     pub register_bytes: Vec<u8>,
+    /// Scala's per-box lazy values. Clones share them across transaction inputs.
+    pub lazy_vals: std::sync::Arc<EvalBoxLazyVals>,
+}
+
+/// Values Scala computes once per box in `lazy val`s.
+#[derive(Debug, Default)]
+pub struct EvalBoxLazyVals {
+    /// `ErgoBoxCandidate.bytesWithNoRef`: the first reader's VersionContext
+    /// fixes the bytes (a constant `Upcast` is stripped below ErgoTree v3).
+    pub bytes_without_ref: std::sync::OnceLock<Vec<u8>>,
+    /// Whether every additional register materialized (`CBox.registers`),
+    /// indexed by ErgoTree-version class `[pre-v3, v3+]` because the
+    /// SHeader/SOption gates differ between them. Only success is recorded:
+    /// a failure aborts the script, so a register read never repeats it.
+    pub registers_materialized: [std::sync::OnceLock<()>; 2],
 }
 
 impl EvalBox {
@@ -65,6 +80,7 @@ impl EvalBox {
             tokens: Vec::new(),
             raw_bytes: Vec::new(),
             register_bytes: Vec::new(),
+            lazy_vals: Default::default(),
         }
     }
 }

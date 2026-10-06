@@ -2,7 +2,7 @@ use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
 use crate::error::WriteError;
-use crate::opcode::{parse_expr, write_expr, Expr, IrNode, Payload};
+use crate::opcode::{parse_expr, write_expr_versioned, Expr, IrNode, Payload};
 use crate::sigma_type::SigmaType;
 use crate::sigma_value::{write_constant, CollValue, SigmaValue};
 
@@ -72,6 +72,15 @@ impl AdditionalRegisters {
 /// matching the Scala node's `ValueSerializer` encoding. All other values
 /// are written as plain Constants (type code + value data).
 pub fn write_registers(w: &mut VlqWriter, regs: &AdditionalRegisters) -> Result<(), WriteError> {
+    write_registers_versioned(w, regs, 3)
+}
+
+/// Serialize registers under the ambient Scala ErgoTree version.
+pub fn write_registers_versioned(
+    w: &mut VlqWriter,
+    regs: &AdditionalRegisters,
+    version: u8,
+) -> Result<(), WriteError> {
     // Mirrors the read-side strict cap: AdditionalRegisters holds at
     // most R4..R9 (6 entries); the read path rejects any count > 6.
     // A programmer constructing an out-of-spec block would otherwise
@@ -84,7 +93,7 @@ pub fn write_registers(w: &mut VlqWriter, regs: &AdditionalRegisters) -> Result<
     }
     w.put_u8(regs.registers.len() as u8);
     for reg in &regs.registers {
-        write_register_value(w, &reg.tpe, &reg.value)?;
+        write_register_value(w, &reg.tpe, &reg.value, version)?;
     }
     Ok(())
 }
@@ -93,6 +102,7 @@ fn write_register_value(
     w: &mut VlqWriter,
     tpe: &SigmaType,
     val: &SigmaValue,
+    version: u8,
 ) -> Result<(), WriteError> {
     if matches!(
         (tpe, val),
@@ -106,7 +116,7 @@ fn write_register_value(
         // opcode. Both must round-trip in that form — the box id is a hash
         // of these bytes.
         let expr = register_value_to_expr(tpe, val)?;
-        write_expr(w, &expr, false)
+        write_expr_versioned(w, &expr, version)
     } else {
         write_constant(w, tpe, val)
     }
@@ -175,7 +185,7 @@ pub(crate) fn type_has_v6_only_type(tpe: &SigmaType) -> bool {
 
 /// Read a single register value. Handles both plain Constants (type <= 0x70)
 /// and expression opcodes (> 0x70) like CreateTuple.
-fn read_register_value(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), ReadError> {
+pub(crate) fn read_register_value(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), ReadError> {
     if r.depth_floor() >= crate::opcode::MAX_EXPR_DEPTH {
         return Err(ReadError::DepthLimitExceeded {
             max: crate::opcode::MAX_EXPR_DEPTH,
@@ -230,8 +240,8 @@ pub fn split_register_bytes(register_bytes: &[u8]) -> Result<Vec<Vec<u8>>, ReadE
 
 /// Extract (SigmaType, SigmaValue) from a parsed expression.
 ///
-/// Registers store evaluated values, so only a limited set of expression forms
-/// are valid: Constants, Tuples (CreateTuple), and ConcreteCollections.
+/// The outer node must be an EvaluatedValue. Tuple and collection children
+/// retain their expressions; the reader does not force the node's lazy `.value`.
 fn expr_to_register_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadError> {
     match expr {
         Expr::Const { tpe, val } => Ok((tpe.clone(), val.clone())),
@@ -254,7 +264,7 @@ fn expr_to_register_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadEr
             let mut types = Vec::with_capacity(items.len());
             let mut values = Vec::with_capacity(items.len());
             for item in items {
-                let (t, v) = expr_to_register_value(item)?;
+                let (t, v) = stored_child_value(item)?;
                 types.push(t);
                 values.push(v);
             }
@@ -273,7 +283,7 @@ fn expr_to_register_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadEr
             // unchanged — the box id hashes these bytes.
             let mut values = Vec::with_capacity(items.len());
             for item in items {
-                let (_, v) = expr_to_register_value(item)?;
+                let (_, v) = stored_child_value(item)?;
                 values.push(v);
             }
             Ok((
@@ -341,6 +351,7 @@ fn expr_to_register_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadEr
 /// Convert a typed register value back to an expression for serialization.
 fn register_value_to_expr(tpe: &SigmaType, val: &SigmaValue) -> Result<Expr, WriteError> {
     match (tpe, val) {
+        (_, SigmaValue::Unevaluated(expr)) => Ok(expr.as_ref().clone()),
         // `GroupGenerator` goes back out as its bare opcode, never as a
         // group-element constant — see `expr_to_register_value`.
         (SigmaType::SGroupElement, SigmaValue::GroupGenerator) => Ok(Expr::Op(IrNode {
@@ -369,7 +380,9 @@ fn register_value_to_expr(tpe: &SigmaType, val: &SigmaValue) -> Result<Expr, Wri
                      declared register type {tpe:?}"
                 )));
             }
-            if matches!(elem_type.as_ref(), SigmaType::SBoolean) {
+            if matches!(elem_type.as_ref(), SigmaType::SBoolean)
+                && items.iter().all(|v| matches!(v, SigmaValue::Boolean(_)))
+            {
                 let bits = items
                     .iter()
                     .map(|v| match v {
@@ -417,6 +430,23 @@ fn register_value_to_expr(tpe: &SigmaType, val: &SigmaValue) -> Result<Expr, Wri
             val: val.clone(),
         }),
     }
+}
+
+/// Scala 6.0.7 casts ONLY the outer ValueSerializer result to EvaluatedValue.
+/// Tuple/ConcreteCollection `.value` lazily casts their children; Height,
+/// Upcast and FuncValue children therefore parse but fail on materialization.
+/// They are never evaluated and incur no opcode costs on that path.
+/// Sources (tag v6.0.7):
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/values.scala#L805-L900>
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/ErgoBoxCandidate.scala#L229-L233>
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/interpreter/ContextExtension.scala#L61-L63>
+fn stored_child_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadError> {
+    if let Ok(value) = expr_to_register_value(expr) {
+        return Ok(value);
+    }
+    let tpe = crate::ergo_tree::determinable_root_type_of(expr, &[])
+        .ok_or_else(|| ReadError::InvalidData("cannot determine stored child type".into()))?;
+    Ok((tpe, SigmaValue::Unevaluated(Box::new(expr.clone()))))
 }
 
 #[cfg(test)]

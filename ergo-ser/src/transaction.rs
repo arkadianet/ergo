@@ -162,6 +162,25 @@ fn read_transaction_tail_after_inputs(
 /// (full spending proofs), data inputs, the per-tx distinct token ID
 /// table, and outputs serialized in indexed mode against that table.
 pub fn write_transaction(w: &mut VlqWriter, tx: &Transaction) -> Result<(), WriteError> {
+    write_transaction_inner(w, tx, false)
+}
+
+/// Serialize for the wire canonicality check, preserving parser-accepted
+/// context-extension encodings. Scala accepts TrueLeaf/FalseLeaf in extensions
+/// but hashes their ConstantSerializer form into bytesToSign. All surrounding
+/// transaction fields still use the normal canonical encoders.
+pub fn write_transaction_preserving_extension_encodings(
+    w: &mut VlqWriter,
+    tx: &Transaction,
+) -> Result<(), WriteError> {
+    write_transaction_inner(w, tx, true)
+}
+
+fn write_transaction_inner(
+    w: &mut VlqWriter,
+    tx: &Transaction,
+    received_extensions: bool,
+) -> Result<(), WriteError> {
     let token_table = extract_distinct_token_ids(&tx.output_candidates);
     check_transaction_collection_bounds(
         tx.inputs.len(),
@@ -171,7 +190,18 @@ pub fn write_transaction(w: &mut VlqWriter, tx: &Transaction) -> Result<(), Writ
     )?;
     w.put_u16(tx.inputs.len() as u16);
     for input in &tx.inputs {
-        write_input(w, input)?;
+        if received_extensions {
+            w.put_bytes(input.box_id.as_bytes());
+            let proof = &input.spending_proof;
+            if proof.proof.len() > u16::MAX as usize {
+                return Err(WriteError::InvalidData("spending proof exceeds u16".into()));
+            }
+            w.put_u16(proof.proof.len() as u16);
+            w.put_bytes(&proof.proof);
+            w.put_bytes(proof.received_extension_bytes());
+        } else {
+            write_input(w, input)?;
+        }
     }
     write_transaction_tail(w, &tx.data_inputs, &token_table, &tx.output_candidates)
 }

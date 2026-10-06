@@ -11,7 +11,7 @@ use ergo_primitives::digest::blake2b256;
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::ergo_box::ErgoBox;
-use ergo_ser::transaction::{bytes_to_sign, read_transaction, write_transaction, Transaction};
+use ergo_ser::transaction::{bytes_to_sign, read_transaction, Transaction};
 
 use ergo_primitives::cost::JitCost;
 
@@ -385,7 +385,8 @@ fn deserialize_transaction(
 
 fn check_canonical(tx: &Transaction, expected_bytes: &[u8]) -> Result<(), ValidationError> {
     let mut w = VlqWriter::new();
-    write_transaction(&mut w, tx).map_err(|e| ValidationError::Deserialization(e.to_string()))?;
+    ergo_ser::transaction::write_transaction_preserving_extension_encodings(&mut w, tx)
+        .map_err(|e| ValidationError::Deserialization(e.to_string()))?;
     if w.result() != expected_bytes {
         return Err(ValidationError::NonCanonical);
     }

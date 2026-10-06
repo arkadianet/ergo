@@ -253,6 +253,7 @@ fn ergo_box_to_eval_box_simple(b: &ErgoBox, _index: usize) -> EvalBox {
     let registers = copy_registers_to_eval(&b.candidate);
 
     EvalBox {
+        lazy_vals: Default::default(),
         creation_height: b.candidate.creation_height,
         script_bytes: b.candidate.ergo_tree_bytes().to_vec(),
         value: b.candidate.value as i64,
@@ -293,6 +294,7 @@ fn candidate_to_eval_box_simple(c: &ErgoBoxCandidate, index: usize) -> EvalBox {
     };
     let registers = copy_registers_to_eval(c);
     EvalBox {
+        lazy_vals: Default::default(),
         creation_height: c.creation_height,
         script_bytes: c.ergo_tree_bytes().to_vec(),
         value: c.value as i64,

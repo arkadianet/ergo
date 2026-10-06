@@ -125,14 +125,19 @@ fn read_box_tail(
     // The canonical re-serialization of the parsed registers, never the
     // verbatim wire slice: Scala writes an output box's registers back from
     // its parsed values (`ValueSerializer.serialize` on each stored
-    // `EvaluatedValue`), so a transaction id and its output box ids commit to
-    // those bytes. A register the reference accepts in a non-canonical form
+    // `EvaluatedValue`), so the transaction ID commits to those bytes in the
+    // parsing context. Newly sealed output box IDs use the default context
+    // instead; keep that provenance separately below. A non-canonical register
     // (the `TrueLeaf` opcode `7f`, a collection length above 2^32) would
     // otherwise give the transaction a different id than the reference's.
     // Same rule as the standalone reader, `read_ergo_box_candidate`.
     let mut rw = VlqWriter::new();
-    crate::register::write_registers(&mut rw, &additional_registers)
-        .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
+    crate::register::write_registers_versioned(
+        &mut rw,
+        &additional_registers,
+        r.activated_script_version().unwrap_or(3),
+    )
+    .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
     let register_bytes = rw.result();
     let canonical_tree_bytes = super::canonical_tree_bytes(&ergo_tree, &ergo_tree_bytes);
     Ok(ErgoBoxCandidate {
@@ -144,6 +149,7 @@ fn read_box_tail(
         tokens,
         additional_registers,
         register_bytes,
+        box_serialization_version: 1,
         received_box_identity: None,
     })
 }

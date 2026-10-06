@@ -16,6 +16,10 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- Accept tuple and collection nodes with expression children in box registers and context extensions; preserve their wire forms, reject invalid runtime reads, and account for version-dependent output bytes and sizes.
+
 ## [0.12.1] - 2026-10-06
 
 A consensus fix for mainnet. Upgrade every 0.12.0 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.

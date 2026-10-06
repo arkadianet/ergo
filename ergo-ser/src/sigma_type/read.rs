@@ -283,7 +283,13 @@ fn decode_one(r: &mut VlqReader, byte: u8, depth: usize, gate_v: u8) -> Result<S
         // TypeSerializer.scala:212-224 reads counts as unsigned bytes
         // and requires each tpeParam ident to be an STypeVar
         // (`require(ident.isInstanceOf[STypeVar])`).
-        FUNC_CODE if r.ergo_tree_version().is_some_and(|version| version < 3) => {
+        // A headerless extension uses the enclosing VersionContext too.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/serialization/TypeSerializer.scala#L214-L228
+        FUNC_CODE
+            if r.ergo_tree_version()
+                .or(r.activated_script_version())
+                .is_some_and(|version| version < 3) =>
+        {
             Err(ReadError::SigmaValidation {
                 rule_id: 1008,
                 args: vec![FUNC_CODE],

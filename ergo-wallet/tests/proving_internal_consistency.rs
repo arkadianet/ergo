@@ -874,6 +874,7 @@ fn make_verifier_context<'a>(
 fn eval_box_from_ergo(b: &ErgoBox) -> ergo_sigma::evaluator::EvalBox {
     let id = b.box_id().map(|id| *id.as_bytes()).unwrap_or([0u8; 32]);
     ergo_sigma::evaluator::EvalBox {
+        lazy_vals: Default::default(),
         creation_height: b.candidate.creation_height,
         script_bytes: b.candidate.ergo_tree_bytes().to_vec(),
         value: b.candidate.value as i64,
@@ -890,6 +891,7 @@ fn eval_box_from_ergo(b: &ErgoBox) -> ergo_sigma::evaluator::EvalBox {
 /// Build a minimal `EvalBox` from an output candidate.
 fn eval_box_from_candidate(c: &ErgoBoxCandidate, index: usize) -> ergo_sigma::evaluator::EvalBox {
     ergo_sigma::evaluator::EvalBox {
+        lazy_vals: Default::default(),
         creation_height: c.creation_height,
         script_bytes: c.ergo_tree_bytes().to_vec(),
         value: c.value as i64,

@@ -393,7 +393,7 @@ fn write_payload(
             let tpe = tpe.as_ref().ok_or_else(|| {
                 WriteError::InvalidData("TaggedVar requires its type on the wire".into())
             })?;
-            write_type(w, tpe)?;
+            write_type_versioned(w, tpe, tree_version)?;
         }
 
         Payload::ValDef { id, rhs, .. } => {
@@ -418,7 +418,7 @@ fn write_payload(
             );
             w.put_u8(tpe_args.len() as u8);
             for t in tpe_args {
-                crate::sigma_type::write_type(w, t)?;
+                write_type_versioned(w, t, tree_version)?;
             }
             write_expr_inner(w, rhs, sink.as_deref_mut(), tree_version)?;
         }
@@ -436,7 +436,7 @@ fn write_payload(
             for (id, tpe) in args {
                 w.put_u32(*id);
                 let t = tpe.as_ref().expect("FuncValue arg always has type");
-                write_type(w, t)?;
+                write_type_versioned(w, t, tree_version)?;
             }
             write_expr_inner(w, body, sink.as_deref_mut(), tree_version)?;
         }
@@ -469,13 +469,13 @@ fn write_payload(
             // `method_explicit_type_args_count` (0 for almost everything,
             // 1 for the v6 methods declaring `Seq(tT)`); zero writes zero.
             for t in type_args {
-                crate::sigma_type::write_type(w, t)?;
+                write_type_versioned(w, t, tree_version)?;
             }
         }
 
         Payload::ConcreteCollection { elem_type, items } => {
             w.put_u16(collection_count(items.len())?);
-            write_type(w, elem_type)?;
+            write_type_versioned(w, elem_type, tree_version)?;
             for item in items {
                 write_expr_inner(w, item, sink.as_deref_mut(), tree_version)?;
             }
@@ -520,17 +520,17 @@ fn write_payload(
         Payload::ExtractRegisterAs { input, reg_id, tpe } => {
             write_expr_inner(w, input, sink.as_deref_mut(), tree_version)?;
             w.put_u8(*reg_id);
-            write_type(w, tpe)?;
+            write_type_versioned(w, tpe, tree_version)?;
         }
 
         Payload::GetVar { var_id, tpe } => {
             w.put_u8(*var_id);
-            write_type(w, tpe)?;
+            write_type_versioned(w, tpe, tree_version)?;
         }
 
         Payload::DeserializeContext { id, tpe } => {
             // Scala: type first, then id
-            write_type(w, tpe)?;
+            write_type_versioned(w, tpe, tree_version)?;
             w.put_u8(*id);
         }
 
@@ -540,7 +540,7 @@ fn write_payload(
             default,
         } => {
             w.put_u8(*reg_id);
-            write_type(w, tpe)?;
+            write_type_versioned(w, tpe, tree_version)?;
             if let Some(d) = default {
                 w.put_u8(1);
                 write_expr_inner(w, d, sink.as_deref_mut(), tree_version)?;
@@ -560,7 +560,7 @@ fn write_payload(
         }
 
         Payload::NoneValue { tpe } => {
-            write_type(w, tpe)?;
+            write_type_versioned(w, tpe, tree_version)?;
         }
 
         Payload::ByIndex {
@@ -580,7 +580,7 @@ fn write_payload(
 
         Payload::NumericCast { input, tpe } => {
             write_expr_inner(w, input, sink.as_deref_mut(), tree_version)?;
-            write_type(w, tpe)?;
+            write_type_versioned(w, tpe, tree_version)?;
         }
 
         Payload::FuncApply { func, args } => {
@@ -592,6 +592,23 @@ fn write_payload(
         }
     }
     Ok(())
+}
+
+fn write_type_versioned(w: &mut VlqWriter, tpe: &SigmaType, version: u8) -> Result<(), WriteError> {
+    fn contains_func(tpe: &SigmaType) -> bool {
+        match tpe {
+            SigmaType::SFunc { .. } => true,
+            SigmaType::SColl(inner) | SigmaType::SOption(inner) => contains_func(inner),
+            SigmaType::STuple(items) => items.iter().any(contains_func),
+            _ => false,
+        }
+    }
+    if version < 3 && contains_func(tpe) {
+        return Err(WriteError::InvalidData(
+            "SFunc type requires ErgoTree version >= 3".into(),
+        ));
+    }
+    write_type(w, tpe)
 }
 
 #[cfg(test)]

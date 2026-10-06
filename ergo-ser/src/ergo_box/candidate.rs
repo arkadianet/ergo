@@ -28,6 +28,29 @@ pub fn write_ergo_box_candidate(w: &mut VlqWriter, c: &ErgoBoxCandidate) -> Resu
     Ok(())
 }
 
+/// Serialize a candidate under the ambient version, including stored node children.
+/// The transaction wire cache and a newly sealed box's default-context bytes
+/// are distinct (ValueSerializer.serializable strips constant Upcast below v3).
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ValueSerializer.scala#L157-L170>
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala#L163-L176>
+pub fn write_ergo_box_candidate_versioned(
+    w: &mut VlqWriter,
+    c: &ErgoBoxCandidate,
+    version: u8,
+) -> Result<(), WriteError> {
+    w.put_u64(c.value);
+    w.put_bytes(c.checked_serialized_ergo_tree_bytes()?);
+    w.put_u32(c.creation_height);
+    check_token_count(c.tokens.len())?;
+    w.put_u8(c.tokens.len() as u8);
+    for token in &c.tokens {
+        w.put_bytes(token.token_id.as_bytes());
+        w.put_u64(token.amount);
+    }
+    crate::register::write_registers_versioned(w, &c.additional_registers, version)?;
+    Ok(())
+}
+
 /// Read ErgoBoxCandidate in standalone mode (full token IDs).
 ///
 /// The tree reader consumes its parsed expression, leaving the following box
@@ -124,8 +147,12 @@ pub(super) fn read_ergo_box_candidate_parts(
     // wallet or the reference node itself produces) these bytes are identical
     // to the wire slice they replace.
     let mut rw = VlqWriter::new();
-    crate::register::write_registers(&mut rw, &additional_registers)
-        .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
+    crate::register::write_registers_versioned(
+        &mut rw,
+        &additional_registers,
+        r.activated_script_version().unwrap_or(3),
+    )
+    .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
     let register_bytes = rw.result();
 
     r.set_position_limit(box_limit);
@@ -138,6 +165,7 @@ pub(super) fn read_ergo_box_candidate_parts(
         tokens,
         additional_registers,
         register_bytes,
+        box_serialization_version: r.activated_script_version().unwrap_or(3),
         received_box_identity: None,
     })
 }

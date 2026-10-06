@@ -26,6 +26,7 @@ mod whole;
 
 pub use candidate::{
     read_accepted_ergo_box_candidate, read_ergo_box_candidate, write_ergo_box_candidate,
+    write_ergo_box_candidate_versioned,
 };
 pub use candidate_indexed::{read_ergo_box_candidate_indexed, write_ergo_box_candidate_indexed};
 pub use whole::{
@@ -52,7 +53,7 @@ pub use whole::{
 /// documented accessors for the required identity rather than treating them as
 /// interchangeable. Registers retain the evaluated-value forms needed for
 /// canonical box serialization.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ErgoBoxCandidate {
     /// Box value in nanoErg.
     pub value: u64,
@@ -70,10 +71,43 @@ pub struct ErgoBoxCandidate {
     /// Non-mandatory registers R4-R9 (densely packed from R4 upward).
     additional_registers: AdditionalRegisters,
     register_bytes: Vec<u8>,
+    // Standalone box serializers use the ambient parse version; newly sealed
+    // transaction outputs serialize under Scala's default VersionContext(1,1).
+    // Indexed transaction serialization keeps register_bytes independently.
+    box_serialization_version: u8,
     // Present only for a parsed whole box whose received identity differs from
     // canonical serialization. Include it in equality: identity-distinct
     // received candidates must not alias in equality-keyed caller caches.
     received_box_identity: Option<Box<ReceivedBoxIdentity>>,
+}
+
+// Equal candidates must also encode equal whole-box register bytes.
+// Version provenance is ignored only when it has no effect on that encoding.
+impl PartialEq for ErgoBoxCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+            && self.ergo_tree == other.ergo_tree
+            && self.ergo_tree_bytes == other.ergo_tree_bytes
+            && self.canonical_tree_bytes == other.canonical_tree_bytes
+            && self.creation_height == other.creation_height
+            && self.tokens == other.tokens
+            && self.additional_registers == other.additional_registers
+            && self.register_bytes == other.register_bytes
+            && self.received_box_identity == other.received_box_identity
+            && (self.box_serialization_version == other.box_serialization_version || {
+                let encode = |version| {
+                    let mut w = VlqWriter::new();
+                    crate::register::write_registers_versioned(
+                        &mut w,
+                        &self.additional_registers,
+                        version,
+                    )
+                    .ok()
+                    .map(|()| w.result())
+                };
+                encode(self.box_serialization_version) == encode(other.box_serialization_version)
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +144,7 @@ impl ErgoBoxCandidate {
             tokens,
             additional_registers,
             register_bytes,
+            box_serialization_version: 1,
             received_box_identity: None,
         })
     }
@@ -151,6 +186,7 @@ impl ErgoBoxCandidate {
             tokens,
             additional_registers,
             register_bytes,
+            box_serialization_version: 3,
             received_box_identity: None,
         }
     }
@@ -244,6 +280,7 @@ impl ErgoBoxCandidate {
             tokens,
             additional_registers,
             register_bytes,
+            box_serialization_version: 3,
             received_box_identity: None,
         })
     }
@@ -355,6 +392,7 @@ impl ErgoBox {
     /// the same transaction ID and index, matching Scala's new-box constructor.
     pub fn new(mut candidate: ErgoBoxCandidate, transaction_id: ModifierId, index: u16) -> Self {
         candidate.received_box_identity = None;
+        candidate.box_serialization_version = 1;
         Self {
             candidate,
             transaction_id,

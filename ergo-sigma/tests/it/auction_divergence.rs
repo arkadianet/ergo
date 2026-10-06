@@ -128,6 +128,7 @@ fn make_eval_box(b: &ErgoBox) -> EvalBox {
     let mut w = ergo_primitives::writer::VlqWriter::new();
     ergo_ser::ergo_box::write_ergo_box(&mut w, b).unwrap_or_default();
     EvalBox {
+        lazy_vals: Default::default(),
         creation_height: b.candidate.creation_height,
         script_bytes: b.candidate.ergo_tree_bytes().to_vec(),
         value: b.candidate.value as i64,
