@@ -16,26 +16,26 @@ infrastructure.
 
 ## [Unreleased]
 
-### Fixed
-
-- Reject type descriptors whose deserialization recursion depth exceeds 8.
-- Reject collection data whose element type is Unit, a collection of zero-width elements, or a tuple made entirely of zero-width items, including empty collections.
-- Preserve the active script version when decoding nested boxes through `deserializeTo`.
-- Serialize argument-free method calls as property calls, and reject collection expressions whose arithmetic item type differs from the declared element type.
-- Reject nested Box constants whose tree version exceeds the activated version when decoding embedded scripts, substituting template constants, or deserializing global values.
-- Accept size-delimited output trees whose declared size differs from their parsed body, preserving received proposition bytes while re-encoding box bytes and transaction messages; verify threshold proofs with truncated polynomial coefficients.
-- Reject script spends whose tree version exceeds a negative activated version derived from block versions 0 or 129–255.
-- Verify Fiat–Shamir proofs for empty AND and zero-of-zero threshold propositions, including empty children nested in large conjectures.
-- Correct embedded-script substitution in box registers and context variables: preserve unresolved nodes after swallowed decode casts, reject failed ancestor reconstruction, read SELF proposition bytes from R1, and charge Boolean-root conversion.
-- Accept tuple and collection nodes with expression children in box registers and context extensions; preserve their wire forms, reject invalid runtime reads, and account for version-dependent output bytes and sizes.
-
 ## [0.12.1] - 2026-10-06
 
-A consensus fix for mainnet. Upgrade every 0.12.0 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.
+A consensus release for mainnet. Upgrade every 0.12.0 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.
+
+- **Scala node 6.0.7 rules:** the node now enforces the three consensus rules the Scala node added in 6.0.7 that 0.12.0 lacked. Rule 110 applies from height 1,885,000, which mainnet reached on 2026-10-01 (#603). The other two are deserialization limits: a type nesting depth of 8, and no zero-width collections (#606).
+- **Script and serialization fixes** found with the SANTA conformance vectors, covering register and context values, embedded-script substitution, sigma proofs, block-version arithmetic, sized trees and wire encodings (#600, #601, #602, #605, #606). Each fix has regression tests built from those vectors.
 
 ### Fixed
 
 - Enforce validation rule 110 (`txDataInputsUnique`), added in the Scala node 6.0.7, from height 1,885,000. A transaction may repeat at most one data input; a transaction with a second repeat is now rejected in blocks, in the mempool and in mining candidates. Mainnet reached this height on 2026-10-01; 0.12.0 and earlier do not check the rule and accept such transactions (#603).
+- Reject type descriptors whose deserialization recursion depth exceeds 8 (#606).
+- Reject collection data whose element type is Unit, a collection of zero-width elements, or a tuple made entirely of zero-width items, including empty collections (#606).
+- Preserve the active script version when decoding nested boxes through `deserializeTo` (#606).
+- Serialize argument-free method calls as property calls, and reject collection expressions whose arithmetic item type differs from the declared element type (#606).
+- Reject nested Box constants whose tree version exceeds the activated version when decoding embedded scripts, substituting template constants, or deserializing global values (#605).
+- Accept size-delimited output trees whose declared size differs from their parsed body, preserving received proposition bytes while re-encoding box bytes and transaction messages; verify threshold proofs with truncated polynomial coefficients (#605).
+- Reject script spends whose tree version exceeds a negative activated version derived from block versions 0 or 129–255 (#601).
+- Verify Fiat–Shamir proofs for empty AND and zero-of-zero threshold propositions, including empty children nested in large conjectures (#601).
+- Correct embedded-script substitution in box registers and context variables: preserve unresolved nodes after swallowed decode casts, reject failed ancestor reconstruction, read SELF proposition bytes from R1, and charge Boolean-root conversion (#602).
+- Accept tuple and collection nodes with expression children in box registers and context extensions; preserve their wire forms, reject invalid runtime reads, and account for version-dependent output bytes and sizes (#600).
 
 ## [0.12.0] - 2026-10-05
 
