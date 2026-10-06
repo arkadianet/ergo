@@ -233,6 +233,8 @@ pub struct TransactionContext {
     /// `ErgoContext.activatedScriptVersion = stateContext.blockVersion - 1`).
     /// Controls consensus-preserving behavior (e.g., selfBoxIndex bug in v4.x)
     /// and, through [`Self::block_version`], the version-gated transaction rules.
+    /// Stored as byte bits; use `as i8` for Scala's signed activation comparisons.
+    /// See [`crate::derive_activated_script_version`] for the matched JVM quirk.
     pub activated_script_version: u8,
     /// Pre-header version byte, script-visible as `CONTEXT.preHeader.version`
     /// (the validated header's own version for a block).
@@ -251,7 +253,7 @@ impl TransactionContext {
     /// [`Self::activated_script_version`], which Scala derives as
     /// `blockVersion - 1`. Never the pre-header's version byte.
     pub fn block_version(&self) -> u8 {
-        self.activated_script_version.saturating_add(1)
+        self.activated_script_version.wrapping_add(1)
     }
 }
 

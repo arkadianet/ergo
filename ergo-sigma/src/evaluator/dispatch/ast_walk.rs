@@ -324,7 +324,7 @@ fn deserialize_measured(
     let script = ergo_ser::opcode::parse_body(&mut reader, ctx.ergo_tree_version).map_err(|e| {
         if let ergo_primitives::reader::ReadError::SigmaValidation { rule_id, args, .. } = e {
             // ValidationRules: A6 uses new rule identities even for legacy trees.
-            let rule_id = match (rule_id, ctx.activated_script_version >= 3) {
+            let rule_id = match (rule_id, (ctx.activated_script_version as i8) >= 3) {
                 (1011, true) => 1016,
                 (1007, true) => 1017,
                 (1008, true) => 1018,

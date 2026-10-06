@@ -491,7 +491,7 @@ pub(super) fn eval_no_arg_method(
         // (sigmastate-interpreter#603, preserved as consensus).
         (101, 8) => {
             add_method_cost(cost, COST_CONTEXT_SELF_BOX_INDEX)?;
-            if ctx.activated_script_version < 2 {
+            if (ctx.activated_script_version as i8) < 2 {
                 Ok(Some(Value::Int(-1)))
             } else {
                 let idx = ctx

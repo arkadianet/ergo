@@ -34,7 +34,7 @@ pub(in crate::evaluator) fn eval_bool_to_sigma_prop(
             SigmaBoolean::TrivialProp(false)
         })),
         // trees.scala:39: VersionContext.current.isJitActivated is activation >= 2.
-        Value::SigmaProp(_) if cx.ctx.activated_script_version < 2 => Ok(val),
+        Value::SigmaProp(_) if (cx.ctx.activated_script_version as i8) < 2 => Ok(val),
         _ => Err(EvalError::TypeError {
             expected: "Bool",
             got: format!("{val:?}"),

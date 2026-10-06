@@ -66,3 +66,29 @@ fn activated_script_version_follows_the_parameters_block_version() {
         );
     }
 }
+
+#[test]
+fn negative_activation_rejects_v0_spends_in_both_block_validation_paths() {
+    let input = pre_block_box(1, 0, 100);
+    let utxo = MapUtxo::of(&[&input]);
+    for block_version in [0, 129, 200, 255] {
+        // A normal wire header keeps the test focused on the active parameters'
+        // signed activation, in both serial and parallel transaction validation.
+        let spend = vec![tx(vec![input.box_id().unwrap()], vec![], 100)];
+        for result in validate_both(spend, &utxo, 4, &params(block_version)) {
+            assert!(
+                matches!(
+                    result,
+                    Err(BlockValidationError::Transaction { index: 0, .. })
+                ),
+                "block version {block_version} must reject the script spend: {result:?}"
+            );
+        }
+    }
+    for block_version in [1, 127, 128] {
+        let spend = vec![tx(vec![input.box_id().unwrap()], vec![], 100)];
+        for result in validate_both(spend, &utxo, 4, &params(block_version)) {
+            assert!(result.is_ok(), "block version {block_version}: {result:?}");
+        }
+    }
+}

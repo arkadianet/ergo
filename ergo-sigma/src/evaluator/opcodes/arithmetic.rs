@@ -463,7 +463,7 @@ pub(in crate::evaluator) fn eval_xor_of(
             add_cost_per_item(cx.cost, 0xFF, bs.len() as u32)?;
             // CSigmaDslBuilder.scala:117: VersionContext.current.isJitActivated
             // (activation >= 2); the historical rule is distinct.length == 2.
-            let result = if cx.ctx.activated_script_version >= 2 {
+            let result = if (cx.ctx.activated_script_version as i8) >= 2 {
                 bs.iter().fold(false, |acc, b| acc ^ b)
             } else {
                 bs.contains(&true) && bs.contains(&false)

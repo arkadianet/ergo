@@ -288,7 +288,7 @@ fn decode_one(r: &mut VlqReader, byte: u8, depth: usize, gate_v: u8) -> Result<S
         FUNC_CODE
             if r.ergo_tree_version()
                 .or(r.activated_script_version())
-                .is_some_and(|version| version < 3) =>
+                .is_some_and(|version| (version as i8) < 3) =>
         {
             Err(ReadError::SigmaValidation {
                 rule_id: 1008,

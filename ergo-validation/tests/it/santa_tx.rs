@@ -44,18 +44,6 @@ fn boxes(j: &J, field: &str) -> Result<Vec<ErgoBox>, String> {
 // A node fix must remove the corresponding independently confirmed exception.
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     (
-        "any/authored/tree-version-block-version-edges.json",
-        "bv0-tree-v0-reject#7",
-    ),
-    (
-        "any/authored/tree-version-block-version-edges.json",
-        "bv200-tree-v0-reject#10",
-    ),
-    (
-        "v6/authored/conjecture-child-count-wrap.json",
-        "cand-child-count-wrap-fiat-shamir#0",
-    ),
-    (
         "v6/authored/deserialize-substitution-spend.json",
         "l1-decode-cast-swallowed-live-reject#1",
     ),
@@ -113,19 +101,11 @@ const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     ),
     (
         "v6/authored/sized-tree-spend.json",
-        "cand-empty-fiat-shamir-proof-accept#3",
-    ),
-    (
-        "v6/authored/sized-tree-spend.json",
         "cthreshold-k0-cand-truncated-proof-half-coefficient-accept#15",
     ),
     (
         "v6/authored/sized-tree-spend.json",
         "cthreshold-k0-cand-truncated-proof-no-coefficient-accept#14",
-    ),
-    (
-        "v6/authored/sized-tree-spend.json",
-        "cthreshold-k0-empty-fiat-shamir-proof-accept#5",
     ),
     (
         "v6/authored/tree-version-above-activated-eval.json",
@@ -189,8 +169,7 @@ fn validate(entry: &J) -> Result<NodeVerdict, String> {
             .ok_or("preHeader.timestamp missing")?
             .parse::<u64>()
             .map_err(|e| e.to_string())?,
-        // Same production helper used by block and candidate contexts. Its
-        // treatment of synthetic version zero is a node behavior, not corrected here.
+        // Same signed-byte derivation used by production block/candidate contexts.
         activated_script_version: ergo_validation::voting::derive_activated_script_version(
             block_version,
         ),

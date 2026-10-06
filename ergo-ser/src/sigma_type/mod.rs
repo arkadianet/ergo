@@ -236,7 +236,7 @@ fn prim_from_code(code: u8, gate_version: u8) -> Result<SigmaType, ReadError> {
         // `deserializeErgoTree` catches → `UnparsedErgoTree` under has_size, and
         // hard-rejects sizeless. The node previously accepted code 9 at any
         // version and then hard-rejected on the bigint value read — a reject-valid.
-        9 if gate_version >= V6_EMBEDDABLE_TREE_VERSION => Ok(SigmaType::SUnsignedBigInt),
+        9 if (gate_version as i8) >= V6_EMBEDDABLE_TREE_VERSION as i8 => Ok(SigmaType::SUnsignedBigInt),
         9 => Err(ReadError::SigmaValidation { rule_id: 1007, args: vec![code], message: format!(
             "embeddable type SUnsignedBigInt (code 9) requires ErgoTree version >= {V6_EMBEDDABLE_TREE_VERSION}, got tree version {gate_version}"
         ) }),

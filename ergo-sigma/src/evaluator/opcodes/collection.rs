@@ -514,7 +514,7 @@ pub(in crate::evaluator) fn map_values(
             }
             let result = infer_collection(result, &body, &param_bindings, cx.constants)?;
             // Only PairOfCols.map leaves a Tuple2 array for pre-JIT append.
-            if cx.ctx.activated_script_version < 2 && maps_pair_columns {
+            if (cx.ctx.activated_script_version as i8) < 2 && maps_pair_columns {
                 if let Value::CollGeneric(items, elem_type) = result {
                     if matches!(elem_type.as_ref(), SigmaType::STuple(ts) if ts.len() == 2) {
                         return Ok(Value::CollLegacyPair(items, elem_type, None));
@@ -601,7 +601,7 @@ fn append_values(left: Value, right: Value, cx: &EvalCtx<'_>) -> Result<Value, E
     let elem_type = coll_elem_type(&left).unwrap_or(SigmaType::SAny);
     // CollsOverArrays.scala:50,184: VersionContext.current.isJitActivated
     // (activation >= 2) fixes Tuple2 array concatenation and truncates zip sides.
-    if cx.ctx.activated_script_version < 2 {
+    if (cx.ctx.activated_script_version as i8) < 2 {
         if let Value::CollLegacyPair(items, _, None) = &left {
             if !items.is_empty() {
                 return Err(EvalError::TypeError {

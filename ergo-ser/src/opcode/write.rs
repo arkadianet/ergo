@@ -210,7 +210,10 @@ fn write_expr_inner(
 ) -> Result<(), WriteError> {
     // ValueSerializer.serializable feeds the constant match only: a cast whose
     // input is nonconstant still uses the original opcode and serializer.
-    let expr = if tree_version < 3 {
+    // The ambient version can also come from block activation when serializing
+    // registers/extensions. Deliberately preserve the JVM's signed-byte quirk.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ValueSerializer.scala#L157-L170
+    let expr = if (tree_version as i8) < 3 {
         match expr {
             Expr::Op(IrNode {
                 opcode: 0x7e,
@@ -603,7 +606,7 @@ fn write_type_versioned(w: &mut VlqWriter, tpe: &SigmaType, version: u8) -> Resu
             _ => false,
         }
     }
-    if version < 3 && contains_func(tpe) {
+    if (version as i8) < 3 && contains_func(tpe) {
         return Err(WriteError::InvalidData(
             "SFunc type requires ErgoTree version >= 3".into(),
         ));
