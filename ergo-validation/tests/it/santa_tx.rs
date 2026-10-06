@@ -52,10 +52,6 @@ const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
         "bv200-tree-v0-reject#10",
     ),
     (
-        "v6/authored/conjecture-child-count-wrap.json",
-        "cand-child-count-wrap-fiat-shamir#0",
-    ),
-    (
         "v6/authored/deserialize-substitution-spend.json",
         "l1-decode-cast-swallowed-live-reject#1",
     ),
@@ -113,19 +109,11 @@ const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     ),
     (
         "v6/authored/sized-tree-spend.json",
-        "cand-empty-fiat-shamir-proof-accept#3",
-    ),
-    (
-        "v6/authored/sized-tree-spend.json",
         "cthreshold-k0-cand-truncated-proof-half-coefficient-accept#15",
     ),
     (
         "v6/authored/sized-tree-spend.json",
         "cthreshold-k0-cand-truncated-proof-no-coefficient-accept#14",
-    ),
-    (
-        "v6/authored/sized-tree-spend.json",
-        "cthreshold-k0-empty-fiat-shamir-proof-accept#5",
     ),
     (
         "v6/authored/tree-version-above-activated-eval.json",
