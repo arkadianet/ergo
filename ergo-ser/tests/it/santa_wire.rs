@@ -277,6 +277,24 @@ fn evaluated_output_box_bytes_and_ids_match_jvm_607() {
         let mut wire = VlqWriter::new();
         write_transaction(&mut wire, &tx).unwrap();
         assert_eq!(wire.result(), bytes, "{name}: indexed wire encoding retains Upcast");
+        // The same box received in its v3 form parses under the default
+        // context and serializes there like the forced (1,1) bytes above.
+        let candidate = &tx.output_candidates[0];
+        let mut received = VlqWriter::new();
+        ergo_ser::ergo_box::write_ergo_box_candidate_versioned(&mut received, candidate, 3)
+            .unwrap();
+        received.put_bytes(tx_id.as_bytes());
+        received.put_u16(0);
+        let received = received.result();
+        assert_ne!(hex::encode(&received), expected_bytes, "{name}: v3 form keeps Upcast");
+        let parsed =
+            ergo_ser::ergo_box::parse_ergo_box_bytes(&received, candidate.ergo_tree_bytes())
+                .unwrap();
+        assert_eq!(
+            hex::encode(ergo_ser::ergo_box::serialize_ergo_box(&parsed).unwrap()),
+            expected_bytes,
+            "{name}: default-context parse"
+        );
     }
     let entry = fixture["entries"]
         .as_array()
