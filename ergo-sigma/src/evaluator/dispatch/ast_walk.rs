@@ -421,6 +421,11 @@ fn deserialize_measured(
 ) -> Result<Option<(Expr, ergo_ser::opcode::ConstructorType)>, super::EvalError> {
     use ergo_primitives::cost::{CostError, JitCost};
     let mut reader = ergo_primitives::reader::VlqReader::new(bytes);
+    // The executing VersionContext also scopes nested SBox tree parsing.
+    // Its version require raises SerializerException, escaping both soft-fork
+    // handling and Kiama's ClassCastException swallowing below.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L151-L196
+    reader.set_activated_script_version(Some(ctx.activated_script_version));
     reader.set_strict_method_resolution();
     reader.set_embeddable_activated_version(Some(ctx.activated_script_version));
     let parsed = ergo_ser::opcode::parse_body_for_substitution(&mut reader, ctx.ergo_tree_version);

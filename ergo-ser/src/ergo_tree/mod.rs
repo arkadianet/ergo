@@ -29,6 +29,7 @@ pub(crate) mod root_type;
 mod tests;
 mod type_infer;
 
+pub(crate) use gates::check_tree_version_value_supported;
 pub use gates::{
     check_header_size_bit, check_resolvable_methods, check_sigma_prop_root,
     check_tree_version_supported,

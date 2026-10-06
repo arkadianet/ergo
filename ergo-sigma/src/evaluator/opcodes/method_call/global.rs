@@ -226,6 +226,12 @@ pub(super) fn deserialize_to(
     // (GHSA-hfj8-hjph-7r78); a pre-v3 ErgoTree calling
     // deserializeTo[SHeader] is rejected here, matching the reference.
     let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+    // DataSerializer(SBox) -> ErgoBox.parse -> deserializeErgoTree inherits
+    // the executing VersionContext. A high-version nested tree throws a hard
+    // SerializerException (wrapped by reflective invocation on the JVM).
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L277-L282
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/DataSerializer.scala#L33-L38
+    r.set_activated_script_version(Some(cx.ctx.activated_script_version));
     let parsed = ergo_ser::sigma_value::read_value(&mut r, target_type).map_err(|e| {
         EvalError::TypeError {
             expected: "valid data-serialized value for SGlobal.deserializeTo",

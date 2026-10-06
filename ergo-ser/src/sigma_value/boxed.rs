@@ -118,6 +118,17 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
     let cseg = header & 0x10 != 0;
 
     if has_size {
+        let activated = crate::ergo_tree::reader_activated_script_version(r);
+        if !r.is_trusted() && (activated as i8) >= 2 && (version as i8) > (activated as i8) {
+            // Scala reads header/size, then constructs VersionContext BEFORE
+            // parsing the nested box's constants or body. Reject here so a
+            // body ClassCastException cannot mask this hard version failure
+            // during deserialize substitution. Top-level wire trees continue
+            // to use the existing lenient reader and their box-layer gates.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L145-L196
+            r.get_uint_to_i32()?;
+            crate::ergo_tree::check_tree_version_value_supported(version, activated)?;
+        }
         // Size-delimited: Scala deserializes the nested box's proposition INLINE via
         // `ErgoTreeSerializer.deserializeErgoTree`, which is structure-delimited —
         // the declared size does NOT bound the parse or advance the reader on
@@ -490,6 +501,31 @@ mod tests {
             "box-field boundary must land exactly at end"
         );
         assert_eq!(val, SigmaValue::OpaqueBoxBytes(box_bytes));
+    }
+
+    #[test]
+    fn nested_box_version_failure_precedes_body_parsing_and_size_region_reads() {
+        // VersionContext is constructed after header/size, before any body read.
+        // In particular, an oversized declared region must not hide the hard
+        // version failure, nor may a malformed supported-version body do so.
+        for (tree, activated) in [("0cffffffff0f", 3), ("0b00", 2)] {
+            let bytes = sbox_constant_bytes(&hex::decode(tree).unwrap());
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(activated);
+            let error = read_value(&mut r, &SigmaType::SBox).unwrap_err();
+            assert!(
+                matches!(error, ReadError::HardReject(ref message)
+                if message.contains("activated script version")),
+                "{error:?}"
+            );
+        }
+        // Legacy and negative signed activation keep VersionContext's require
+        // inactive. This is parse behavior, separate from spend-time checking.
+        let bytes = sbox_constant_bytes(&[0x0c, 2, 0x08, 0xd3]);
+        for activated in [1, 0, 255, 128] {
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(activated);
+            assert!(read_value(&mut r, &SigmaType::SBox).is_ok());
+            assert!(r.is_empty());
+        }
     }
 
     /// A nested `SBox`-constant whose inner script is a sizeless Boolean-root tree

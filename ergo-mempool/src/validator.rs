@@ -794,3 +794,6 @@ mod tests {
 
 #[cfg(test)]
 mod reemission_tests;
+
+#[cfg(test)]
+mod sized_tree_tests;
