@@ -633,3 +633,82 @@ fn allow_duplicate_data_inputs() {
     validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx)
         .expect("duplicate data inputs should be accepted");
 }
+
+#[test]
+fn rule_110_limits_repeated_data_inputs_from_activation_on_both_routes() {
+    use ergo_validation::tx::data_inputs::DATA_INPUTS_UNIQUENESS_HEIGHT;
+    use ergo_validation::tx::validate_transaction_parsed;
+    let input = make_ergo_box(1_000_000_000, 1);
+    let data = make_ergo_box(1_000_000_000, 2);
+    let params = ProtocolParams::mainnet_default();
+    let policy = LocalPolicy::default_policy();
+    for copies in [2, 3] {
+        let tx = Transaction {
+            inputs: vec![Input {
+                box_id: input.box_id().unwrap(),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![
+                DataInput {
+                    box_id: data.box_id().unwrap(),
+                };
+                copies
+            ],
+            output_candidates: vec![make_candidate(1_000_000_000)],
+        };
+        let view = TestUtxo(HashMap::from([
+            (tx.inputs[0].box_id, input.clone()),
+            (tx.data_inputs[0].box_id, data.clone()),
+        ]));
+        let bytes = serialize_tx(&tx);
+        for height in [
+            DATA_INPUTS_UNIQUENESS_HEIGHT - 1,
+            DATA_INPUTS_UNIQUENESS_HEIGHT,
+        ] {
+            let mut ctx = default_ctx();
+            ctx.height = height;
+            for parsed in [false, true] {
+                let mut cost = CostAccumulator::recording_only();
+                let mut cx = ergo_validation::TxValidationCtx {
+                    ctx: &ctx,
+                    params: &params,
+                    cost: &mut cost,
+                    last_headers: &[],
+                    rules: ergo_validation::TxValidationRules::default(),
+                };
+                let result = if parsed {
+                    validate_transaction_parsed(
+                        tx.clone(),
+                        &bytes,
+                        vec![input.clone()],
+                        vec![data.clone(); copies],
+                        false,
+                        &mut cx,
+                    )
+                    .map(|_| ())
+                } else {
+                    validate_transaction(&bytes, &view, &policy, &mut cx).map(|_| ())
+                };
+                // One repeated data input stays valid; a second one is
+                // rejected only from the activation height.
+                if copies == 3 && height >= DATA_INPUTS_UNIQUENESS_HEIGHT {
+                    assert!(
+                        matches!(
+                            result,
+                            Err(ValidationError::DuplicateDataInputs {
+                                count: 3,
+                                distinct: 1
+                            })
+                        ),
+                        "copies {copies}, height {height}, parsed {parsed}: {result:?}"
+                    );
+                } else {
+                    assert!(
+                        result.is_ok(),
+                        "copies {copies}, height {height}, parsed {parsed}: {result:?}"
+                    );
+                }
+            }
+        }
+    }
+}
