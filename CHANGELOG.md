@@ -16,9 +16,13 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-06
+
+A consensus fix for mainnet. Upgrade every 0.12.0 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.
+
 ### Fixed
 
-- Enforce validation rule 110 (`txDataInputsUnique`), added in the Scala node 6.0.7, from height 1,885,000. A transaction may repeat at most one data input; a transaction with a second repeat is now rejected in blocks, in the mempool and in mining candidates. Mainnet reached this height on 2026-10-01; 0.12.0 and earlier do not check the rule and accept such transactions.
+- Enforce validation rule 110 (`txDataInputsUnique`), added in the Scala node 6.0.7, from height 1,885,000. A transaction may repeat at most one data input; a transaction with a second repeat is now rejected in blocks, in the mempool and in mining candidates. Mainnet reached this height on 2026-10-01; 0.12.0 and earlier do not check the rule and accept such transactions (#603).
 
 ## [0.12.0] - 2026-10-05
 
