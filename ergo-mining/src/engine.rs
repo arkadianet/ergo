@@ -275,7 +275,8 @@ pub(crate) fn should_publish(best_tip: &BestTip, built_parent: &[u8; 32]) -> boo
 /// outcomes — `NoState`, `TipNotVisible`, `IntentSuperseded`, `NotSynced` —
 /// leave it `None`). Callers that want the wire-string label should map the
 /// value after the call:
-/// `Hit → "primed"`, `Advanced → "advanced"`, `Rehydrated → "cold"`,
+/// `Hit → "primed"`, `Advanced → "advanced"`,
+/// `AdvancedFromAncestor → "advanced_fork"`, `Rehydrated → "cold"`,
 /// `RehydratedAfterFailedAdvance → "cold_fallback"`,
 /// `None` with a `Some(base)` and a building outcome → treat as `"cold"`.
 #[allow(clippy::too_many_arguments)]

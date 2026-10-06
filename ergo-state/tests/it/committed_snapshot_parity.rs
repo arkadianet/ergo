@@ -324,12 +324,11 @@ fn cached_reorg_same_height_rebuilds() {
     assert_eq!(oracle_b.0, got.0, "state_root must match B's oracle");
     assert_eq!(oracle_b.1, got.1, "proof bytes must match B's oracle");
     assert_eq!(oracle_b.2, got.2, "tip id must match B's oracle");
-    // A stale base exists (keyed to tip_a). For the sibling reorg, store B's
-    // tip_b has a different parent_id than tip_a (they're independent chains),
-    // so try_advance_base's parent-id check fires first and returns an error
-    // ("not single-step"). The advance falls back to full rehydrate with
-    // RehydratedAfterFailedAdvance (not Rehydrated, which only fires when
-    // no prior base exists at all).
+    // A stale base exists (keyed to tip_a). Store B's chain shares no block
+    // with A's, so try_advance_base's walk back from tip_b never reaches
+    // tip_a or a retained ancestor and returns an error. The advance falls
+    // back to full rehydrate with RehydratedAfterFailedAdvance (not
+    // Rehydrated, which only fires when no prior base exists at all).
     assert_eq!(
         disp_b,
         Some(ergo_state::store::BaseDisposition::RehydratedAfterFailedAdvance),

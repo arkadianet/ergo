@@ -213,7 +213,7 @@ impl CandidateStateView for CommittedSnapshot {
 ///
 /// After a build, [`Self::last_disposition`] returns the path the dry-run
 /// took: [`BaseDisposition::Hit`], [`BaseDisposition::Advanced`],
-/// [`BaseDisposition::Rehydrated`], or
+/// [`BaseDisposition::AdvancedFromAncestor`], [`BaseDisposition::Rehydrated`], or
 /// [`BaseDisposition::RehydratedAfterFailedAdvance`]. The disposition is `None`
 /// if no build has completed through this view yet (i.e. `candidate_dry_run`
 /// has not been called).
