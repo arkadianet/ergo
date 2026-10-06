@@ -21,7 +21,6 @@ infrastructure.
 - Reject type descriptors whose deserialization recursion depth exceeds 8.
 - Reject collection data whose element type is Unit, a collection of zero-width elements, or a tuple made entirely of zero-width items, including empty collections.
 - Preserve the active script version when decoding nested boxes through `deserializeTo`.
-
 - Serialize argument-free method calls as property calls, and reject collection expressions whose arithmetic item type differs from the declared element type.
 - Reject nested Box constants whose tree version exceeds the activated version when decoding embedded scripts, substituting template constants, or deserializing global values.
 - Accept size-delimited output trees whose declared size differs from their parsed body, preserving received proposition bytes while re-encoding box bytes and transaction messages; verify threshold proofs with truncated polynomial coefficients.
