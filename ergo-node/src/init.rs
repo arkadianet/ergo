@@ -40,13 +40,16 @@ impl Preset {
     fn supports_fast(self) -> bool {
         matches!(self, Self::Wallet | Self::MiningFast)
     }
-    fn budget(self, sync: Sync) -> u64 {
-        if self.indexer() {
-            250
-        } else if sync == Sync::Fast {
-            100
-        } else {
-            150
+    /// Recommended free space in GiB. Testnet's chain is far smaller: a full
+    /// explorer sync measured about 27 GiB (#608).
+    fn budget(self, sync: Sync, network: Network) -> u64 {
+        match (network, self.indexer(), sync) {
+            (Network::Mainnet, true, _) => 250,
+            (Network::Mainnet, false, Sync::Fast) => 100,
+            (Network::Mainnet, false, Sync::Genesis) => 150,
+            (Network::Testnet, true, _) => 50,
+            (Network::Testnet, false, Sync::Fast) => 20,
+            (Network::Testnet, false, Sync::Genesis) => 30,
         }
     }
 }
@@ -359,14 +362,14 @@ fn run_with_space(
     let contents = config_contents(&args, &data_dir, PLAN_HASH)?;
     NodeConfig::from_toml(&contents).map_err(invalid)?;
     let free_bytes = disk(&data_dir);
-    let recommended = preset.budget(sync) * GIB;
+    let recommended = preset.budget(sync, network) * GIB;
     let mut warnings = Vec::new();
     match free_bytes {
         Some(free) if free < recommended => {
             let warning = format!(
                 "Free space: {:.1} GiB; recommended free space (provisional): {} GiB.",
                 free as f64 / GIB as f64,
-                preset.budget(sync)
+                recommended / GIB
             );
             writeln!(diagnostics, "Warning: {warning}")?;
             warnings.push(warning);
@@ -498,7 +501,7 @@ fn run_with_space(
             free_bytes
                 .map(|n| format!("{:.1} GiB", n as f64 / GIB as f64))
                 .unwrap_or_else(|| "unknown".into()),
-            preset.budget(sync)
+            plan.recommended_free_space_bytes / GIB
         )?;
         for warning in &plan.warnings {
             writeln!(output, "Warning: {warning}")?;
@@ -749,17 +752,23 @@ mod tests {
 
     #[test]
     fn disk_budgets_warning_override_boundary_and_unknown() {
-        for (preset, sync, budget) in [
-            ("wallet", "fast", 100),
-            ("mining-fast", "fast", 100),
-            ("wallet", "genesis", 150),
-            ("mining-fast", "genesis", 150),
-            ("archival", "genesis", 150),
-            ("explorer", "genesis", 250),
-            ("mining-full", "genesis", 250),
+        for (preset, sync, network, budget) in [
+            ("wallet", "fast", Network::Mainnet, 100),
+            ("mining-fast", "fast", Network::Mainnet, 100),
+            ("wallet", "genesis", Network::Mainnet, 150),
+            ("mining-fast", "genesis", Network::Mainnet, 150),
+            ("archival", "genesis", Network::Mainnet, 150),
+            ("explorer", "genesis", Network::Mainnet, 250),
+            ("mining-full", "genesis", Network::Mainnet, 250),
+            ("wallet", "fast", Network::Testnet, 20),
+            ("mining-fast", "fast", Network::Testnet, 20),
+            ("archival", "genesis", Network::Testnet, 30),
+            ("explorer", "genesis", Network::Testnet, 50),
+            ("mining-full", "genesis", Network::Testnet, 50),
         ] {
             let root = tempfile::tempdir().unwrap();
             let mut args = args(root.path(), preset, sync);
+            args.network = Some(network);
             let (result, output, diagnostics) = execute(&args, false, "", Some(budget * GIB - 1));
             let error = result.unwrap_err();
             assert_eq!(error.exit_code(), 2);

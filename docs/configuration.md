@@ -75,9 +75,10 @@ header or enter them in the dashboard. Unix directory/file modes are
 Existing secret directories must already have mode `0700` on Unix.
 
 The wizard queries free space on the data filesystem, or its nearest existing
-ancestor. Recommended free space (**provisional**) is 100 GiB for wallet or
-mining-fast with fast sync, 150 GiB for either with genesis sync or archival,
-and 250 GiB for explorer or mining-full. A lower reading requires
+ancestor. Recommended free space (**provisional**) on mainnet is 100 GiB for
+wallet or mining-fast with fast sync, 150 GiB for either with genesis sync or
+archival, and 250 GiB for explorer or mining-full. On testnet the same tiers
+are 20, 30 and 50 GiB. A lower reading requires
 `--allow-low-disk` or interactive confirmation; an unknown reading warns and
 continues. These budgets are recommendations, not storage limits.
 

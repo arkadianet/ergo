@@ -126,6 +126,10 @@ impl HostAllowlist {
             allowed.push((bind_addr.ip().to_string(), None));
         }
         allowed.extend(allowed_hosts.iter().map(|h| split_host_port(h)));
+        // Keep the first copy of each entry: a loopback bind repeats a
+        // default, and `allowed_hosts` may too. Matching is unchanged.
+        let mut seen = std::collections::HashSet::new();
+        allowed.retain(|(host, port)| seen.insert((host.to_ascii_lowercase(), *port)));
         Self { enforce, allowed }
     }
 
@@ -286,6 +290,26 @@ mod tests {
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn describe_lists_each_entry_once() {
+        let list = allowlist(
+            "127.0.0.1:9053",
+            &["LOCALHOST", "node.example", "node.example:443"],
+        );
+        assert_eq!(
+            list.describe(),
+            [
+                "localhost",
+                "127.0.0.1",
+                "::1",
+                "node.example",
+                "node.example:443"
+            ]
+        );
+        assert!(list.permits("127.0.0.1:9053"));
+        assert!(list.permits("localhost"));
+    }
 
     #[test]
     fn split_host_port_plain_host_no_port() {

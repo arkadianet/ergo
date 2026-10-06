@@ -502,9 +502,10 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         info!(boxes = boxes.len(), "genesis initialized");
     }
 
-    // 2b. Back-fill MODIFIER_TYPE_INDEX for any pre-existing data.
-    // No-op on fresh DBs; one-shot pass on first run after upgrade.
-    // Idempotent — safe to run every boot. Progress + completion logs
+    // 2b. Back-fill MODIFIER_TYPE_INDEX. Header sync does not tag it,
+    // so this one-shot pass runs on the first restart after a fresh
+    // sync, or the first run after an upgrade; a sentinel skips it
+    // afterwards. Idempotent. Info-level progress and completion logs
     // come from inside `back_fill_modifier_type_index` (store layer).
     if let Err(e) = store.back_fill_modifier_type_index() {
         warn!(error = %e, "modifier-type-index back-fill failed");
