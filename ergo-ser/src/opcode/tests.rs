@@ -1936,7 +1936,7 @@ fn numeric_cast_non_numeric_target_hard_rejects() {
         let err = parse_body(&mut r, 0)
             .expect_err(&format!("{name}: a non-numeric target must not parse"));
         assert!(
-            matches!(&err, ReadError::HardReject(m) if m.contains("target type must be numeric")),
+            matches!(&err, ReadError::ClassCast(m) if m.contains("target type must be numeric")),
             "{name}: expected a hard reject naming the target type, got {err:?}"
         );
     }
@@ -2020,7 +2020,10 @@ fn numeric_cast_and_select_field_match_scala_oracle() {
             assert!(r.is_empty(), "{}: trailing bytes", fields[0]);
         } else {
             assert!(
-                matches!(result, Err(ReadError::HardReject(_))),
+                matches!(
+                    result,
+                    Err(ReadError::HardReject(_) | ReadError::ClassCast(_))
+                ),
                 "{}: {result:?}",
                 fields[0]
             );

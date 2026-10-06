@@ -159,6 +159,11 @@ pub enum ReadError {
         /// The depth bound that was exceeded.
         max: usize,
     },
+    /// A direct JVM ClassCastException. Hard at the wire boundary, but the
+    /// deserialize-substitution rewrite rule deliberately swallows this class.
+    /// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/kiama/rewriting/Rewriter.scala#L180-L191>
+    #[error("deserialization class cast: {0}")]
+    ClassCast(String),
     /// A hard, NON-soft-forkable deserialization rejection that must propagate
     /// even out of a size-delimited tree — the Rust analog of a Scala
     /// `SerializerException` (as opposed to a soft-forkable `ValidationException`,

@@ -52,12 +52,21 @@ pub struct EvalBox {
     pub lazy_vals: std::sync::Arc<EvalBoxLazyVals>,
 }
 
+/// Per-register source carriers cached by the deserialize-substitution path.
+pub type DeserializeRegisterByteCache = [[std::sync::OnceLock<Option<Vec<u8>>>; 6]; 2];
+
 /// Values Scala computes once per box in `lazy val`s.
 #[derive(Debug, Default)]
 pub struct EvalBoxLazyVals {
     /// `ErgoBoxCandidate.bytesWithNoRef`: the first reader's VersionContext
     /// fixes the bytes (a constant `Upcast` is stripped below ErgoTree v3).
     pub bytes_without_ref: std::sync::OnceLock<Vec<u8>>,
+    /// Materialized source for DeserializeRegister (Some(bytes), or a carrier
+    /// whose unchecked JVM byte-array cast fails). Raw byte constants are
+    /// borrowed directly. Tuple/ConcreteCollection `.value` is lazy per box.
+    /// Indexed by ErgoTree-version class, like registers_materialized.
+    /// Allocate the register cache only on the paid substitution path.
+    pub deserialize_register_bytes: std::sync::OnceLock<Box<DeserializeRegisterByteCache>>,
     /// Whether every additional register materialized (`CBox.registers`),
     /// indexed by ErgoTree-version class `[pre-v3, v3+]` because the
     /// SHeader/SOption gates differ between them. Only success is recorded:

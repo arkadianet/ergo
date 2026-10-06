@@ -30,6 +30,24 @@ pub fn parse_body(r: &mut VlqReader, tree_version: u8) -> Result<Body, ReadError
     parse_expr(r, 0, tree_version)
 }
 
+/// Parse an embedded expression and retain the outcome of its deferred type read.
+/// Constructor casts fail before charging; a deferred type cast is returned for
+/// the caller to inspect after charging. Both use the same single parser walk.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/interpreter/Interpreter.scala#L97-L126>
+pub fn parse_body_for_substitution(
+    r: &mut VlqReader,
+    tree_version: u8,
+) -> Result<(Body, super::ConstructorType), ReadError> {
+    let mut types = ParseTypes {
+        constructors: Some(super::ConstructorTypes::default()),
+        constructor_children: vec![Vec::new()],
+        ..Default::default()
+    };
+    let expr = parse_typed_expr(r, 0, tree_version, &mut types, &mut Vec::new())?;
+    let tpe = types.constructor_children.pop().unwrap().pop().unwrap();
+    Ok((expr, tpe))
+}
+
 /// Parse a single expression from the byte stream.
 ///
 /// `depth` guards against stack overflow on malicious input.
@@ -51,6 +69,8 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
 struct ParseTypes<'a> {
     bindings: crate::ergo_tree::root_type::ValDefTypeStore,
     constants: &'a [(SigmaType, SigmaValue)],
+    constructors: Option<super::ConstructorTypes>,
+    constructor_children: Vec<Vec<super::ConstructorType>>,
 }
 
 pub(crate) fn parse_body_with_constants(
@@ -72,6 +92,9 @@ fn parse_typed_expr(
     types: &mut ParseTypes<'_>,
     parent_types: &mut Vec<Option<SigmaType>>,
 ) -> Result<Expr, ReadError> {
+    if types.constructors.is_some() {
+        types.constructor_children.push(Vec::new());
+    }
     let mut children = Vec::new();
     let expr = parse_node(r, depth, version, types, &mut children)?;
     let mut children = children.into_iter();
@@ -87,6 +110,48 @@ fn parse_typed_expr(
             _ => children.next().flatten(),
         },
     );
+    if let Some(constructors) = &mut types.constructors {
+        let children = types.constructor_children.pop().unwrap();
+        super::check_rebuilt_constructor(&expr, &children)
+            .map_err(super::ConstructorError::into_read_error)?;
+        // These are serializer/builder type reads, distinct from reflective
+        // case-class construction. Preserve their direct exception class.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L686-L703
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ConcreteCollectionSerializer.scala#L33-L39
+        if let Expr::Op(node) = &expr {
+            let reads_all = matches!(
+                node.payload,
+                Payload::ValDef { .. }
+                    | Payload::FunDef { .. }
+                    | Payload::MethodCall { .. }
+                    | Payload::ConcreteCollection { .. }
+            ) || (0x8F..=0x94).contains(&node.opcode);
+            if reads_all {
+                for t in &children {
+                    t.as_ref().map_err(|e| e.into_read_error())?;
+                }
+            }
+            if let Payload::ConcreteCollection { elem_type, .. } = &node.payload {
+                for t in &children {
+                    if let Ok(Some(t)) = t {
+                        if t != elem_type {
+                            return Err(ReadError::HardReject(
+                                "ConcreteCollection item type mismatch (Scala AssertionError)"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
+            }
+            if version < 3 && matches!(node.payload, Payload::ByIndex { .. }) {
+                if let Some(Err(e)) = children.get(1) {
+                    return Err(e.into_read_error());
+                }
+            }
+        }
+        let tpe = constructors.node_type(&expr, &children);
+        types.constructor_children.last_mut().unwrap().push(tpe);
+    }
     parent_types.push(tpe.filter(crate::ergo_tree::root_type::type_is_precise));
     // `ValDefSerializer` stores the binding once its rhs is parsed.
     if let Expr::Op(IrNode {
@@ -208,7 +273,7 @@ fn parse_node_value(
             if first == 0xe4 {
                 if let Some(Some(tpe)) = children.last() {
                     if !matches!(tpe, SigmaType::SOption(_)) {
-                        return Err(ReadError::HardReject(format!(
+                        return Err(ReadError::ClassCast(format!(
                             "OptionGet input must be an option, got {tpe:?}"
                         )));
                     }
@@ -332,7 +397,7 @@ fn parse_node_value(
             for _ in 0..n_tpe_args {
                 let t = read_type(r)?;
                 if !matches!(t, SigmaType::STypeVar(_)) {
-                    return Err(ReadError::InvalidData(format!(
+                    return Err(ReadError::ClassCast(format!(
                         "FunDef tpeArg must be an STypeVar, got {t:?}"
                     )));
                 }
@@ -363,7 +428,7 @@ fn parse_node_value(
                         ..
                     })
                 ) {
-                    return Err(ReadError::HardReject(
+                    return Err(ReadError::ClassCast(
                         "BlockValue item must be a ValDef or FunDef".into(),
                     ));
                 }
@@ -392,6 +457,9 @@ fn parse_node_value(
                 types.bindings.bindings.insert(id, tpe.clone());
                 r.bind_val(id);
                 args.push((id, tpe));
+            }
+            if let Some(constructors) = &mut types.constructors {
+                constructors.bind_args(&args);
             }
             let body = parse_typed_expr(r, next, _tree_version, types, children)?;
             Payload::FuncValue {
@@ -597,7 +665,7 @@ fn parse_node_value(
                     // SelectField's constructor eagerly reads input.tpe.items.
                     // A known non-tuple throws ClassCastException in Scala,
                     // which is not eligible for an ErgoTree soft-fork wrap.
-                    return Err(ReadError::HardReject(format!(
+                    return Err(ReadError::ClassCast(format!(
                         "SelectField input must be a tuple, got {tpe:?}"
                     )));
                 }
@@ -750,7 +818,7 @@ fn parse_node_value(
                 // Scala STuple extends SCollection[SAny], so dynamic tuple
                 // indexing also reaches this constructor.
                 if !matches!(tpe, SigmaType::SColl(_) | SigmaType::STuple(_)) {
-                    return Err(ReadError::HardReject(format!(
+                    return Err(ReadError::ClassCast(format!(
                         "ByIndex input must be a collection, got {tpe:?}"
                     )));
                 }
@@ -782,7 +850,7 @@ fn parse_node_value(
             // `Upcast(Const)` strip then re-emitted bytes whose re-parse failed
             // rule 1001 — how the nightly fuzzer found this.
             if !tpe.is_numeric() {
-                return Err(ReadError::HardReject(format!(
+                return Err(ReadError::ClassCast(format!(
                     "numeric cast target type must be numeric, got {tpe:?} \
                      (Scala asNumType ClassCastException)"
                 )));
@@ -932,7 +1000,7 @@ fn check_constructor_casts(opcode: u8, operands: &[Option<SigmaType>]) -> Result
         _ => matches!(tpe, SigmaType::SColl(_) | SigmaType::STuple(_)),
     };
     if !fits {
-        return Err(ReadError::HardReject(format!(
+        return Err(ReadError::ClassCast(format!(
             "operand of opcode {opcode:#04x} must be {want}, got {tpe:?} (Scala ClassCastException)"
         )));
     }
@@ -1161,7 +1229,10 @@ mod tests {
                 assert!(result.is_ok(), "{body}: {result:?}");
             } else {
                 assert!(
-                    matches!(&result, Err(ReadError::HardReject(_))),
+                    matches!(
+                        &result,
+                        Err(ReadError::HardReject(_) | ReadError::ClassCast(_))
+                    ),
                     "{body}: {result:?}"
                 );
             }

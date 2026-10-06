@@ -200,11 +200,27 @@ pub(super) fn substitute_deserialize(
     expr: &mut Expr,
     ctx: &super::ReductionContext<'_>,
     cost: &mut ergo_primitives::cost::CostAccumulator,
-) -> Result<(), super::EvalError> {
+) -> Result<ergo_ser::opcode::ConstructorType, super::EvalError> {
+    let mut types = ergo_ser::opcode::ConstructorTypes::default();
+    let mut extension_bytes = std::collections::HashMap::new();
+    substitute_node(expr, ctx, cost, &mut types, &mut extension_bytes).map(|(_, tpe)| tpe)
+}
+
+fn substitute_node(
+    expr: &mut Expr,
+    ctx: &super::ReductionContext<'_>,
+    cost: &mut ergo_primitives::cost::CostAccumulator,
+    types: &mut ergo_ser::opcode::ConstructorTypes,
+    extension_bytes: &mut std::collections::HashMap<u8, std::sync::OnceLock<Option<Vec<u8>>>>,
+) -> Result<(bool, ergo_ser::opcode::ConstructorType), super::EvalError> {
     use super::EvalError;
+    use ergo_ser::opcode::{check_rebuilt_constructor, ConstructorError};
     let Expr::Op(node) = expr else {
-        return Ok(());
+        return Ok((false, types.node_type(expr, &[])));
     };
+    if let Payload::FuncValue { args, .. } = &node.payload {
+        types.bind_args(args);
+    }
     let children: Vec<&mut Expr> = match &mut node.payload {
         Payload::Zero
         | Payload::ValUse { .. }
@@ -254,61 +270,147 @@ pub(super) fn substitute_deserialize(
             v
         }
     };
+    let mut changed = false;
+    let mut child_types = Vec::with_capacity(children.len());
     for child in children {
-        substitute_deserialize(child, ctx, cost)?;
+        let (child_changed, tpe) = substitute_node(child, ctx, cost, types, extension_bytes)?;
+        changed |= child_changed;
+        child_types.push(tpe);
     }
-    let (value, tpe, default) = match &node.payload {
+    // Deliberately match the JVM quirk: only the rule's direct ClassCastException
+    // is swallowed. Reflective ancestor construction is OUTSIDE that catch and
+    // its InvocationTargetException must reject even on a dead branch.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/kiama/rewriting/Rewriter.scala#L180-L191
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/kiama/rewriting/Rewriter.scala#L448-L473
+    if changed {
+        check_rebuilt_constructor(expr, &child_types)
+            .map_err(|_| EvalError::RuntimeException("deserialize ancestor constructor failed"))?;
+    }
+    let original_type = types.node_type(expr, &child_types);
+    let Expr::Op(node) = expr else { unreachable!() };
+    let (source, tpe, default) = match &node.payload {
         Payload::DeserializeContext { id, tpe } => {
-            (ctx.extension.get(id).map(|(t, v)| (t, v)), tpe, None)
+            let source = match ctx.extension.get(id) {
+                // Interpreter checks the source's declared type BEFORE .value.
+                Some((t @ SigmaType::SColl(elem), v)) if **elem == SigmaType::SByte => {
+                    let cache = extension_bytes.entry(*id).or_default();
+                    Some(deserialize_value_bytes(t, v, cache)?)
+                }
+                _ => None,
+            };
+            (source, tpe, None)
         }
         Payload::DeserializeRegister {
             reg_id,
             tpe,
             default,
         } => {
-            let value = ctx
-                .self_box
-                .and_then(|b| {
-                    reg_id
-                        .checked_sub(4)
-                        .and_then(|i| b.registers.get(i as usize))
-                        .and_then(Option::as_ref)
-                })
-                .map(|r| (&r.tpe, &r.value));
-            (value, tpe, default.as_deref())
+            let source = match ctx.self_box {
+                Some(b) => match reg_id {
+                    // ErgoBoxCandidate.get synthesizes every mandatory register.
+                    // Only R1 has the byte-array carrier needed by this macro;
+                    // R0/R2/R3 are PRESENT and fail its unchecked collection cast.
+                    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/ErgoBoxCandidate.scala#L69-L83
+                    1 => Some(Some(b.script_bytes.as_slice())),
+                    0 | 2 | 3 => Some(None),
+                    _ => match reg_id.checked_sub(4).map(usize::from) {
+                        Some(i) if i < b.registers.len() => match &b.registers[i] {
+                            Some(r) => Some(deserialize_value_bytes(
+                                &r.tpe,
+                                &r.value,
+                                &b.lazy_vals
+                                    .deserialize_register_bytes
+                                    .get_or_init(Default::default)
+                                    [usize::from(ctx.ergo_tree_version >= 3)][i],
+                            )?),
+                            None => None,
+                        },
+                        _ => None,
+                    },
+                },
+                None => None,
+            };
+            (source, tpe, default.as_deref())
         }
-        _ => return Ok(()),
+        _ => return Ok((changed, original_type)),
     };
-    if let Some((t, v)) = value {
-        if let Ok(crate::evaluator::Value::CollBytes(bytes)) =
-            crate::evaluator::helpers::sigma_to_value_versioned(t, v, ctx)
-        {
-            let script = deserialize_measured(&bytes, ctx, cost)?;
-            let actual = ergo_ser::ergo_tree::substitution_type_of(&script);
-            if actual.as_ref() != Some(tpe) {
-                if matches!(node.payload, Payload::DeserializeRegister { .. }) {
-                    return Err(EvalError::RuntimeException(
-                        "DeserializeRegister script type mismatch",
-                    ));
+    if let Some(Some(bytes)) = source {
+        let decoded = deserialize_measured(bytes, ctx, cost)?;
+        if let Some((script, actual)) = decoded {
+            // Decode succeeded and charged the WHOLE buffer before .tpe was read.
+            // A deferred Filter type cast is swallowed with the charge retained.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/interpreter/Interpreter.scala#L97-L126
+            match actual {
+                Err(ConstructorError::ClassCast) => return Ok((changed, original_type)),
+                Ok(actual) if actual.as_ref() == Some(tpe) => {
+                    *expr = script;
+                    return Ok((true, Ok(actual)));
                 }
-                return Err(EvalError::SigmaValidation {
-                    rule_id: 1000,
-                    args: vec![],
-                });
+                _ => {
+                    if matches!(node.payload, Payload::DeserializeRegister { .. }) {
+                        return Err(EvalError::RuntimeException(
+                            "DeserializeRegister script type mismatch",
+                        ));
+                    }
+                    return Err(EvalError::SigmaValidation {
+                        rule_id: 1000,
+                        args: vec![],
+                    });
+                }
             }
-            *expr = script;
-            return Ok(());
         }
+        return Ok((changed, original_type));
     }
-    // A present incompatible register fails the unchecked cast inside Scala's
-    // rewrite strategy, leaving the node unresolved. Only absence uses default;
-    // an unresolved node rejects if evaluation reaches it, including with default.
-    if value.is_none() {
+    // A failed unchecked source cast leaves the macro unresolved, including its
+    // default. Only an absent register selects the already rewritten default.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/org/ergoplatform/ErgoLikeInterpreter.scala#L17-L39
+    if source.is_none() {
         if let Some(default) = default {
             *expr = default.clone();
+            return Ok((true, child_types.pop().unwrap_or(Ok(None))));
         }
     }
-    Ok(())
+    Ok((changed, original_type))
+}
+
+/// Borrow ordinary byte constants, caching only lazy stored-node materialization.
+/// A failure of `.value` (for example CollectionUtil.cast's AssertionError) is
+/// not the byte-array ClassCastException and must escape the rewrite strategy.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/util/CollectionUtil.scala#L184-L193>
+fn deserialize_value_bytes<'a>(
+    tpe: &SigmaType,
+    value: &'a SigmaValue,
+    cache: &'a std::sync::OnceLock<Option<Vec<u8>>>,
+) -> Result<Option<&'a [u8]>, super::EvalError> {
+    if let (
+        SigmaType::SColl(elem),
+        SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Bytes(bytes)),
+    ) = (tpe, value)
+    {
+        if **elem == SigmaType::SByte {
+            return Ok(Some(bytes));
+        }
+    }
+    // Plain non-byte Constants have no lazy children to materialize. Their
+    // carrier fails the unchecked cast immediately, without evaluator type gates.
+    let lazy_node = matches!(value, SigmaValue::ConcreteCollection { .. })
+        || matches!((tpe, value), (SigmaType::STuple(_), SigmaValue::Coll(_)));
+    if !lazy_node && !matches!(tpe, SigmaType::SColl(elem) if **elem == SigmaType::SByte) {
+        return Ok(None);
+    }
+    if cache.get().is_none() {
+        // This is stored `.value`, not expression evaluation/DataSerializer:
+        // do not apply evaluator Header/Option version gates to a failed cast.
+        let materialized = crate::evaluator::helpers::sigma_to_value(tpe, value)?;
+        let bytes = match materialized {
+            crate::evaluator::Value::CollBytes(bytes) => Some(bytes),
+            _ => None,
+        };
+        // A concurrent evaluation may have won initialization; both compute
+        // the same source carrier/bytes in the same version class.
+        let _ = cache.set(bytes);
+    }
+    Ok(cache.get().and_then(Option::as_deref))
 }
 
 /// Scala parses before `addCostChecked`, then charges the entire supplied buffer.
@@ -316,12 +418,22 @@ fn deserialize_measured(
     bytes: &[u8],
     ctx: &super::ReductionContext<'_>,
     cost: &mut ergo_primitives::cost::CostAccumulator,
-) -> Result<Expr, super::EvalError> {
+) -> Result<Option<(Expr, ergo_ser::opcode::ConstructorType)>, super::EvalError> {
     use ergo_primitives::cost::{CostError, JitCost};
     let mut reader = ergo_primitives::reader::VlqReader::new(bytes);
     reader.set_strict_method_resolution();
     reader.set_embeddable_activated_version(Some(ctx.activated_script_version));
-    let script = ergo_ser::opcode::parse_body(&mut reader, ctx.ergo_tree_version).map_err(|e| {
+    let parsed = ergo_ser::opcode::parse_body_for_substitution(&mut reader, ctx.ergo_tree_version);
+    // Deliberately match Kiama.strategy's swallowed direct ClassCastException:
+    // leave the live macro unresolved; do not charge a failed payload decode.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/kiama/rewriting/Rewriter.scala#L180-L191
+    if matches!(
+        parsed,
+        Err(ergo_primitives::reader::ReadError::ClassCast(_))
+    ) {
+        return Ok(None);
+    }
+    let script = parsed.map_err(|e| {
         if let ergo_primitives::reader::ReadError::SigmaValidation { rule_id, args, .. } = e {
             // ValidationRules: A6 uses new rule identities even for legacy trees.
             let rule_id = match (rule_id, (ctx.activated_script_version as i8) >= 3) {
@@ -340,7 +452,7 @@ fn deserialize_measured(
     })?;
     let charge = JitCost::from_block_cost(bytes.len() as u64 * 2).map_err(CostError::from)?;
     cost.add(charge)?;
-    Ok(script)
+    Ok(Some(script))
 }
 
 #[cfg(test)]
@@ -369,6 +481,49 @@ mod tests {
             substitution_type_of(&script),
             Some(SigmaType::SColl(Box::new(SigmaType::SInt)))
         );
+    }
+
+    #[test]
+    fn swallowed_cast_cost_depends_on_decode_or_type_read_phase() {
+        use ergo_primitives::cost::{CostAccumulator, JitCost};
+        use ergo_ser::opcode::ConstructorError;
+        let ctx = super::super::ReductionContext::minimal(0, 0);
+        let mut cost = CostAccumulator::recording_only();
+        let decode_cast = hex::decode("e4b2860204000400040000").unwrap();
+        assert!(deserialize_measured(&decode_cast, &ctx, &mut cost)
+            .unwrap()
+            .is_none());
+        assert_eq!(cost.total_block_cost(), 0);
+        let type_cast = hex::decode("b5b2860204000400040000d90101040101").unwrap();
+        assert!(matches!(
+            deserialize_measured(&type_cast, &ctx, &mut cost).unwrap(),
+            Some((_, Err(ConstructorError::ClassCast)))
+        ));
+        assert_eq!(cost.total_block_cost(), 34);
+        // The cost-limit exception happens before the deferred cast and must
+        // escape. Catching every decode/type error would wrongly accept this.
+        let mut limited = CostAccumulator::new(JitCost::from_block_cost(33).unwrap());
+        assert!(matches!(
+            deserialize_measured(&type_cast, &ctx, &mut limited),
+            Err(super::super::EvalError::CostExceeded(_))
+        ));
+        // A successfully decoded expression charges ignored trailing bytes too.
+        let mut trailing = CostAccumulator::recording_only();
+        assert!(deserialize_measured(&[4, 2, 0xff], &ctx, &mut trailing)
+            .unwrap()
+            .is_some());
+        assert_eq!(trailing.total_block_cost(), 6);
+    }
+
+    #[test]
+    fn stored_source_assertion_is_not_swallowed_as_a_byte_array_cast() {
+        let tpe = SigmaType::SColl(Box::new(SigmaType::SByte));
+        let value = SigmaValue::ConcreteCollection {
+            elem_type: Box::new(SigmaType::SByte),
+            items: vec![SigmaValue::Unevaluated(Box::new(op(0xA3, Payload::Zero)))],
+        };
+        let cache = std::sync::OnceLock::new();
+        assert!(deserialize_value_bytes(&tpe, &value, &cache).is_err());
     }
 
     // ----- error paths -----
