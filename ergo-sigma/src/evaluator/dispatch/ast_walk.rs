@@ -202,7 +202,6 @@ pub(super) fn substitute_deserialize(
     cost: &mut ergo_primitives::cost::CostAccumulator,
 ) -> Result<(), super::EvalError> {
     use super::EvalError;
-    use ergo_ser::sigma_value::CollValue;
     let Expr::Op(node) = expr else {
         return Ok(());
     };
@@ -280,9 +279,11 @@ pub(super) fn substitute_deserialize(
         }
         _ => return Ok(()),
     };
-    if let Some((SigmaType::SColl(inner), SigmaValue::Coll(CollValue::Bytes(bytes)))) = value {
-        if **inner == SigmaType::SByte {
-            let script = deserialize_measured(bytes, ctx, cost)?;
+    if let Some((t, v)) = value {
+        if let Ok(crate::evaluator::Value::CollBytes(bytes)) =
+            crate::evaluator::helpers::sigma_to_value_versioned(t, v, ctx)
+        {
+            let script = deserialize_measured(&bytes, ctx, cost)?;
             let actual = ergo_ser::ergo_tree::substitution_type_of(&script);
             if actual.as_ref() != Some(tpe) {
                 if matches!(node.payload, Payload::DeserializeRegister { .. }) {

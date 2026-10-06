@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use ergo_primitives::writer::VlqWriter;
-use ergo_ser::ergo_box::{write_ergo_box_candidate, ErgoBoxCandidate};
+use ergo_ser::ergo_box::ErgoBoxCandidate;
 use ergo_ser::transaction::Transaction;
 
 use crate::context::ProtocolParams;
@@ -163,7 +163,7 @@ fn check_output_box(
 /// 32 + vlq_size(index) to match.
 fn serialized_box_size(out: &ErgoBoxCandidate, index: u16) -> Result<usize, ValidationError> {
     let mut w = VlqWriter::new();
-    write_ergo_box_candidate(&mut w, out)
+    ergo_ser::ergo_box::write_ergo_box_candidate_versioned(&mut w, out, 1)
         .map_err(|e| ValidationError::Deserialization(e.to_string()))?;
     let mut idx_w = VlqWriter::new();
     idx_w.put_u16(index);

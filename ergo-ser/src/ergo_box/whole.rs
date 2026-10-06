@@ -15,7 +15,15 @@ use super::{ErgoBox, ErgoBoxCandidate};
 
 /// Serialize a full ErgoBox (standalone mode).
 pub fn write_ergo_box(w: &mut VlqWriter, b: &ErgoBox) -> Result<(), WriteError> {
-    write_ergo_box_candidate(w, &b.candidate)?;
+    if b.candidate.box_serialization_version < 3 {
+        super::write_ergo_box_candidate_versioned(
+            w,
+            &b.candidate,
+            b.candidate.box_serialization_version,
+        )?;
+    } else {
+        write_ergo_box_candidate(w, &b.candidate)?;
+    }
     w.put_bytes(b.transaction_id.as_bytes());
     w.put_u16(b.index);
     Ok(())
@@ -168,6 +176,7 @@ pub fn parse_ergo_box_bytes(
             tokens,
             additional_registers,
             register_bytes,
+            box_serialization_version: 3,
             received_box_identity: None,
         },
         transaction_id,

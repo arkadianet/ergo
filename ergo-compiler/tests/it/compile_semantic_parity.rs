@@ -613,6 +613,7 @@ fn build_dummy_self_box(tree: &ErgoTree, script_bytes: Vec<u8>) -> Result<EvalBo
         .map(|d| *d.as_bytes())
         .map_err(|e| format!("dummy SELF box id failed: {e:?}"))?;
     Ok(EvalBox {
+        bytes_without_ref_cache: Default::default(),
         value: 1_000_000,
         script_bytes,
         creation_height: 0,

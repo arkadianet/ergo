@@ -39,15 +39,18 @@ pub struct EvalBox {
     /// emits: `DataSerializer.serialize(SBox)` re-serializes from structure
     /// (`box_canonical_bytes`), never from `bytes`. Empty for test-only boxes.
     pub raw_bytes: Vec<u8>,
-    /// Verbatim register block (count byte + concatenated per-register
-    /// entries) exactly as it appeared on the wire. Preserves each register's
+    /// Canonical register block (count byte + concatenated per-register
+    /// entries) produced by the parser. Preserves each register's
     /// node provenance — Constant vs `CreateTuple` (0x86) vs `ConcreteCollection`
-    /// (0x83) — which the parsed `registers` field discards. `bytesWithNoRef`
+    /// (0x83), including stored expression children. `bytesWithNoRef`
     /// (0xC4) re-serializes from these bytes to keep that provenance, matching
     /// Scala's `ErgoBoxCandidate.serializer`. Populated from `ErgoBox` at
     /// construction; empty for test-only boxes (which fall back to a structural
     /// re-encode).
     pub register_bytes: Vec<u8>,
+    /// Scala ErgoBoxCandidate.bytesWithNoRef is lazy and retains the version
+    /// of its first reader. Clones share this cache across transaction inputs.
+    pub bytes_without_ref_cache: std::sync::Arc<std::sync::OnceLock<Vec<u8>>>,
 }
 
 impl EvalBox {
@@ -65,6 +68,7 @@ impl EvalBox {
             tokens: Vec::new(),
             raw_bytes: Vec::new(),
             register_bytes: Vec::new(),
+            bytes_without_ref_cache: Default::default(),
         }
     }
 }

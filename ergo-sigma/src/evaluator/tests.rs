@@ -99,6 +99,7 @@ fn run_eval_err(expr: &Expr) -> EvalError {
 
 fn make_test_box() -> EvalBox {
     EvalBox {
+        bytes_without_ref_cache: Default::default(),
         creation_height: 500_000,
         script_bytes: vec![0x00, 0x08, 0xCD],
         value: 1_000_000_000,
@@ -813,6 +814,7 @@ fn expr_wire_bytes(e: &Expr) -> Vec<u8> {
 // tail, so the prefix fields and parsed `registers` are placeholders.
 fn bytes_with_no_ref_for_register_block(register_bytes: Vec<u8>) -> Vec<u8> {
     let b = EvalBox {
+        bytes_without_ref_cache: Default::default(),
         creation_height: 0,
         script_bytes: vec![0x10, 0x00],
         value: 1000,

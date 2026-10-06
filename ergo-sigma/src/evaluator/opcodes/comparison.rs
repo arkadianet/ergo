@@ -156,7 +156,9 @@ pub(in crate::evaluator) fn eval_eq(
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left).and_then(reject_sstring)?;
+    super::binding::check_expr_tuple_type(left, cx.constants, &l)?;
     let r = cx.eval_expr(right).and_then(reject_sstring)?;
+    super::binding::check_expr_tuple_type(right, cx.constants, &r)?;
     let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     reject_mixed_numeric_equality(&l, &r)?;
     require_comparable(&l, &r)?;
@@ -170,7 +172,9 @@ pub(in crate::evaluator) fn eval_neq(
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left).and_then(reject_sstring)?;
+    super::binding::check_expr_tuple_type(left, cx.constants, &l)?;
     let r = cx.eval_expr(right).and_then(reject_sstring)?;
+    super::binding::check_expr_tuple_type(right, cx.constants, &r)?;
     let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     reject_mixed_numeric_equality(&l, &r)?;
     require_comparable(&l, &r)?;

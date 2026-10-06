@@ -100,6 +100,9 @@ fn avl_tree_json(t: &AvlTreeData) -> Value {
 fn sigma_value_json(v: &SigmaValue) -> Value {
     match v {
         SigmaValue::Unit => Value::Null,
+        // Stored expression children have no evaluated data value. The outer
+        // decoded register still exposes its serialized bytes and type.
+        SigmaValue::Unevaluated(_) => Value::Null,
         SigmaValue::Boolean(b) => Value::Bool(*b),
         // Small ints fit a JSON number safely (< 2^53).
         SigmaValue::Byte(n) => json!(*n),

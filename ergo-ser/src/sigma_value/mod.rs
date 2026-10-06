@@ -178,6 +178,10 @@ pub enum SigmaValue {
         /// Item values, in wire order.
         items: Vec<SigmaValue>,
     },
+    /// Unevaluated child of a stored Tuple or ConcreteCollection node.
+    /// The outer node is an EvaluatedValue; its children need not be.
+    /// Kept as an expression for serialization, never executed by `.value`.
+    Unevaluated(Box<crate::opcode::Expr>),
     /// Sigma-protocol proposition.
     SigmaProp(SigmaBoolean),
     /// AVL+ tree handle.

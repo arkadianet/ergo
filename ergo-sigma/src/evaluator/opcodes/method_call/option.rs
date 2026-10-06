@@ -40,6 +40,10 @@ pub(super) fn map(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
                 // Scala closure invocation: Value.checkType runs
                 // before the AddToEnvironment charge.
                 check_closure_param_types(&param_types).map_err(reflect_sstring_error)?;
+                if let Some((_, Some(tpe))) = param_types.first() {
+                    crate::evaluator::opcodes::binding::check_runtime_tuple_type(tpe, &inner)
+                        .map_err(reflect_sstring_error)?;
+                }
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
@@ -98,6 +102,10 @@ pub(super) fn filter(
             } => {
                 // Scala validates the parameter before charging its binding.
                 check_closure_param_types(&param_types).map_err(reflect_sstring_error)?;
+                if let Some((_, Some(tpe))) = param_types.first() {
+                    crate::evaluator::opcodes::binding::check_runtime_tuple_type(tpe, &inner)
+                        .map_err(reflect_sstring_error)?;
+                }
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());

@@ -418,3 +418,37 @@ pub(in crate::evaluator) fn eval_func_apply(
         }),
     }
 }
+
+/// Shallow `Value.checkType` for tuple carriers (SType.scala:200-202).
+/// Options and collections deliberately do not inspect their contents here.
+/// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/ast/SType.scala#L200-L202
+pub(in crate::evaluator) fn check_runtime_tuple_type(
+    tpe: &SigmaType,
+    value: &Value,
+) -> Result<(), EvalError> {
+    if let SigmaType::STuple(items) = tpe {
+        if items.len() != 2 {
+            return Err(EvalError::RuntimeException(
+                "unsupported non-pair STuple in Value.checkType",
+            ));
+        }
+        if !matches!(value, Value::Tuple(values) if values.len() == 2) {
+            return Err(EvalError::TypeError {
+                expected: "Tuple2 for STuple",
+                got: format!("{value:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(in crate::evaluator) fn check_expr_tuple_type(
+    expr: &Expr,
+    constants: &[(SigmaType, SigmaValue)],
+    value: &Value,
+) -> Result<(), EvalError> {
+    if let Some(tpe) = ergo_ser::ergo_tree::determinable_root_type_of(expr, constants) {
+        check_runtime_tuple_type(&tpe, value)?;
+    }
+    Ok(())
+}

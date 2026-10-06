@@ -37,56 +37,12 @@ use std::path::{Path, PathBuf};
 // Independently confirmed JVM/node differences. A fix must remove its entry.
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     (
-        "v5/authored/Transaction.extension_evaluated_values.json",
-        "ext-c2-coll-of-func-below-v3-reject#1",
-    ),
-    (
-        "v5/authored/Transaction.extension_evaluated_values.json",
-        "ext-c2-coll-of-func-one-arg-below-v3-reject#2",
-    ),
-    (
-        "v5/authored/Transaction.extension_evaluated_values.json",
-        "ext-u1-tuple-upcast-height-below-v3-accept#3",
-    ),
-    (
-        "v5/authored/Transaction.extension_evaluated_values.json",
-        "ext-x15-tuple-upcast-below-v3-accept#0",
-    ),
-    (
-        "v6/authored/Box.register_evaluated_values.json",
-        "box-coll-int-height-accept#7",
-    ),
-    (
-        "v6/authored/Box.register_evaluated_values.json",
-        "box-g5-tuple-height-accept#4",
-    ),
-    (
         "v6/authored/Box.tree_parse_acceptance.json",
         "box-v0-methodcall-no-args-propertycall-accept#44",
     ),
     (
         "v6/authored/Box.tree_parse_acceptance.json",
         "box-v3-coll-long-plus-int-long-reject#32",
-    ),
-    (
-        "v6/authored/Transaction.extension_evaluated_values.json",
-        "ext-x13-tuple-height-accept#12",
-    ),
-    (
-        "v6/authored/Transaction.extension_evaluated_values.json",
-        "ext-x14-coll-int-height-accept#13",
-    ),
-    (
-        "v6/authored/Transaction.extension_evaluated_values.json",
-        "ext-x15-tuple-upcast-v3-accept#14",
-    ),
-    (
-        "v6/authored/Transaction.register_evaluated_values.json",
-        "transaction-coll-int-height-accept#7",
-    ),
-    (
-        "v6/authored/Transaction.register_evaluated_values.json",
-        "transaction-g5-tuple-height-accept#4",
     ),
     (
         "v6/authored/Transaction.tree_parse_acceptance.json",
@@ -289,5 +245,55 @@ fn santa_wire_vectors_match_santa_the_jvm_and_the_node() {
         seen.len(),
         KNOWN_DIVERGENCES.len(),
         "stale known divergence: missing file/entry"
+    );
+}
+
+// Fresh JVM 6.0.7 check: parse ErgoTransaction in VersionContext(3,3),
+// then force outputs(0).bytes and outputs(0).id in the ambient (1,1).
+// This pins UTXO persistence independently of the transaction wire cache.
+#[test]
+fn evaluated_output_box_bytes_and_ids_match_jvm_607() {
+    let path = vectors_dir()
+        .parent()
+        .unwrap()
+        .join("transaction/v6/authored/evaluated-values-spend.json");
+    let fixture: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    for (name, expected_bytes, expected_id) in [
+        ("bwr-v0-reader-17-accept#51", "8094ebdc030008d30100018602040204020c010fefd92e5160fa3744d9d593ced322a23a92c03321fa4635da5e479db21600", "6bcac94dd4288ab820574617f2ba19a3e743e607c5bc20fca724773c2d95b57d"),
+        ("bytes-v3-reader-50-accept#60", "8094ebdc030008d301000186020402040250d469d61784a71ef1102a56f25674663b684c68483fb0dcc69e619aa7a0887300", "aa5323e9230b4dbd82110348e782fa1a9bf04405c31ee0affba27e2b37a45570"),
+    ] {
+        let entry = fixture["entries"].as_array().unwrap().iter().find(|e| e["name"] == name).unwrap();
+        let bytes = hex::decode(entry["tx_bytes_hex"].as_str().unwrap()).unwrap();
+        let tx = read_transaction(&mut VlqReader::new(&bytes).with_activated_script_version(3)).unwrap();
+        let tx_id = ergo_ser::transaction::transaction_id(&tx).unwrap();
+        // State/mempool callers construct outputs directly from the parsed candidate.
+        let output = ergo_ser::ergo_box::ErgoBox { candidate: tx.output_candidates[0].clone(), transaction_id: tx_id, index: 0 };
+        let sealed = ergo_ser::ergo_box::ErgoBox::new(tx.output_candidates[0].clone(), tx_id, 0);
+        for output in [&output, &sealed] {
+            assert_eq!(hex::encode(ergo_ser::ergo_box::serialize_ergo_box(output).unwrap()), expected_bytes, "{name}");
+            assert_eq!(hex::encode(output.box_id().unwrap().as_bytes()), expected_id, "{name}");
+        }
+        let mut wire = VlqWriter::new();
+        write_transaction(&mut wire, &tx).unwrap();
+        assert_eq!(wire.result(), bytes, "{name}: indexed wire encoding retains Upcast");
+    }
+    let entry = fixture["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "c2-twin-output-register-reject#46")
+        .unwrap();
+    let bytes = hex::decode(entry["tx_bytes_hex"].as_str().unwrap()).unwrap();
+    let tx =
+        read_transaction(&mut VlqReader::new(&bytes).with_activated_script_version(3)).unwrap();
+    let output = ergo_ser::ergo_box::ErgoBox::new(
+        tx.output_candidates[0].clone(),
+        ergo_ser::transaction::transaction_id(&tx).unwrap(),
+        0,
+    );
+    assert!(
+        ergo_ser::ergo_box::serialize_ergo_box(&output).is_err(),
+        "JVM MatchError: function type cannot serialize in (1,1)"
     );
 }

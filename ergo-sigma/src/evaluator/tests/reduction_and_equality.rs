@@ -74,6 +74,7 @@ fn cost_limit_exceeded_rejects() {
 #[test]
 fn box_equality_self_vs_inputs_0() {
     let box0 = EvalBox {
+        bytes_without_ref_cache: Default::default(),
         creation_height: 100,
         script_bytes: vec![0x00],
         value: 1000,
@@ -122,6 +123,7 @@ fn box_equality_self_vs_inputs_0() {
 #[test]
 fn box_equality_in_tuple() {
     let box0 = EvalBox {
+        bytes_without_ref_cache: Default::default(),
         creation_height: 100,
         script_bytes: vec![0x00],
         value: 1000,
@@ -169,6 +171,7 @@ fn box_equality_in_tuple() {
 #[test]
 fn box_equality_in_option() {
     let box0 = EvalBox {
+        bytes_without_ref_cache: Default::default(),
         creation_height: 100,
         script_bytes: vec![0x00],
         value: 1000,
@@ -218,6 +221,7 @@ fn box_equality_in_option() {
 fn box_collection_vs_derived_tuple() {
     // INPUTS == INPUTS.filter(_ => true) — BoxCollection vs Tuple of BoxRefs
     let box0 = EvalBox {
+        bytes_without_ref_cache: Default::default(),
         creation_height: 100,
         script_bytes: vec![0x00],
         value: 1000,
@@ -230,6 +234,7 @@ fn box_collection_vs_derived_tuple() {
         register_bytes: Vec::new(),
     };
     let box1 = EvalBox {
+        bytes_without_ref_cache: Default::default(),
         creation_height: 101,
         script_bytes: vec![0x00],
         value: 2000,
@@ -297,6 +302,7 @@ fn box_collection_vs_derived_tuple() {
 fn coll_box_eq_cost_uses_per_item() {
     use ergo_primitives::cost::CostAccumulator;
     let box0 = EvalBox {
+        bytes_without_ref_cache: Default::default(),
         creation_height: 100,
         script_bytes: vec![0x00],
         value: 1000,
@@ -309,6 +315,7 @@ fn coll_box_eq_cost_uses_per_item() {
         register_bytes: Vec::new(),
     };
     let box1 = EvalBox {
+        bytes_without_ref_cache: Default::default(),
         creation_height: 101,
         script_bytes: vec![0x00],
         value: 2000,

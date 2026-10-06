@@ -632,6 +632,7 @@ fn build_dummy_self_box(
         .map(|d| *d.as_bytes())
         .map_err(|e| format!("dummy SELF box id failed: {e:?}"))?;
     Ok(EvalBox {
+        bytes_without_ref_cache: Default::default(),
         value: 1_000_000,
         script_bytes,
         creation_height: 0,
@@ -810,6 +811,7 @@ fn reduce_ctx_verdict(bytes: &[u8]) -> (Verdict, usize) {
         Err(e) => return (Verdict::Reject(format!("SELF id: {e:?}")), consumed),
     };
     let self_box = EvalBox {
+        bytes_without_ref_cache: Default::default(),
         value: candidate.value as i64,
         script_bytes: candidate.ergo_tree_bytes().to_vec(),
         creation_height: candidate.creation_height,

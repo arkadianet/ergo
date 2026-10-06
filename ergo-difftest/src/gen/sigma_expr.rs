@@ -961,6 +961,7 @@ mod tests {
         let mut r = VlqReader::new(bytes);
         let tree = read_ergo_tree(&mut r).map_err(|e| format!("parse: {e:?}"))?;
         let self_box = EvalBox {
+            bytes_without_ref_cache: Default::default(),
             value: 1_000_000,
             script_bytes: bytes.to_vec(),
             creation_height: 0,

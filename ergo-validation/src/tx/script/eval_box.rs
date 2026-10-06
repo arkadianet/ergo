@@ -28,6 +28,7 @@ pub(crate) fn ergo_box_to_eval_box(b: &ErgoBox, index: usize) -> Result<EvalBox,
     };
 
     Ok(EvalBox {
+        bytes_without_ref_cache: Default::default(),
         creation_height: b.candidate.creation_height,
         script_bytes: b.candidate.ergo_tree_bytes().to_vec(),
         value: b.candidate.value as i64,
@@ -53,32 +54,20 @@ pub(crate) fn candidate_to_eval_box(
     tx_id: &ModifierId,
     index: u16,
 ) -> Result<EvalBox, ValidationError> {
-    let temp_box = ErgoBox {
-        candidate: c.clone(),
-        transaction_id: *tx_id,
-        index,
-    };
-    let id = temp_box
-        .box_id()
-        .map_err(|e| ValidationError::ScriptError {
-            index: index as usize,
-            reason: format!("output box_id computation failed: {e}"),
-        })?;
-
-    // See `ergo_box_to_eval_box`: ExtractBytes reads raw_bytes; failures
-    // here would silently corrupt script semantics.
+    // verifyOutput has already forced Scala's new ErgoBox.bytes in the
+    // default VersionContext(1,1). Preserve that cached serialization here.
     let raw_bytes = {
         let mut w = ergo_primitives::writer::VlqWriter::new();
-        ergo_ser::ergo_box::write_ergo_box(&mut w, &temp_box).map_err(|e| {
-            ValidationError::ScriptError {
-                index: index as usize,
-                reason: format!("output ErgoBox serialization for ExtractBytes failed: {e}"),
-            }
-        })?;
+        ergo_ser::ergo_box::write_ergo_box_candidate_versioned(&mut w, c, 1)
+            .map_err(|e| ValidationError::Deserialization(e.to_string()))?;
+        w.put_bytes(tx_id.as_bytes());
+        w.put_u16(index);
         w.result()
     };
+    let id = ergo_primitives::digest::blake2b256(&raw_bytes);
 
     Ok(EvalBox {
+        bytes_without_ref_cache: Default::default(),
         creation_height: c.creation_height,
         script_bytes: c.ergo_tree_bytes().to_vec(),
         value: c.value as i64,

@@ -55,6 +55,12 @@ pub(in crate::evaluator) fn eval_expr(
         // (which bypasses this function); re-running here is cheap and keeps the
         // non-verifier entries covered.
         pre_reduction_checks(ctx, constants, expr)?;
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/org/ergoplatform/ErgoLikeContext.scala#L158-L162
+        // ErgoLikeContext.toSigmaContext materializes every extension entry;
+        // Interpreter's SigmaPropConstant fast path bypasses this evaluator.
+        for (tpe, value) in ctx.extension.values() {
+            sigma_to_value_versioned(tpe, value, ctx)?;
+        }
     }
     let substituted = if *depth == 0 && expr_has_deserialize(expr) {
         let mut inlined = inline_placeholders(expr, constants);
@@ -497,10 +503,10 @@ fn eval_op(
                     // serialize-back preserve the right `Coll[T]` T.
                     let mut vals = Vec::with_capacity(items.len());
                     for item in items {
-                        vals.push(
-                            eval_expr(item, ctx, constants, env, depth, cost, trace)
-                                .and_then(crate::evaluator::helpers::reject_sstring)?,
-                        );
+                        let value = eval_expr(item, ctx, constants, env, depth, cost, trace)
+                            .and_then(crate::evaluator::helpers::reject_sstring)?;
+                        opcodes::binding::check_runtime_tuple_type(elem_type, &value)?;
+                        vals.push(value);
                     }
                     Ok(Value::CollGeneric(vals, Box::new(elem_type.clone())))
                 }
