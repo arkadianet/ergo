@@ -3710,7 +3710,8 @@ impl StateStore {
         let t0 = std::time::Instant::now();
         info!(
             best_header_height = cs.best_header_height,
-            "backfilling HEADER_CHAIN_INDEX",
+            "one-time migration: building the header chain index; the node starts \
+             serving when the startup migrations finish",
         );
 
         // Phase 1: sequential scan of HEADER_META into an in-memory
@@ -3834,7 +3835,7 @@ impl StateStore {
         write_txn.commit()?;
         info!(
             elapsed_ms = t0.elapsed().as_millis() as u64,
-            "backfill complete",
+            "one-time migration: header chain index complete",
         );
         Ok(())
     }

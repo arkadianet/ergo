@@ -64,9 +64,9 @@ through [ergo-solo](https://github.com/arkadianet/ergo-stratum-rs) or follow
 [the Lithos guide](lithos.md). Explorer and full mining also need time for
 historical index catch-up.
 
-Free-space recommendations are provisional: 100 GiB for fast wallet/mining,
-150 GiB for genesis wallet/mining-fast or archival, and 250 GiB for explorer or
-mining-full. Below the recommendation, the wizard needs `--allow-low-disk` or
+Free-space recommendations are provisional. On mainnet: 100 GiB for fast
+wallet/mining, 150 GiB for genesis wallet/mining-fast or archival, and 250 GiB
+for explorer or mining-full. On testnet: 20, 30 and 50 GiB respectively. Below the recommendation, the wizard needs `--allow-low-disk` or
 interactive confirmation; an unknown free-space reading produces a warning.
 
 The wizard creates new configs only. It refuses an existing config or key,

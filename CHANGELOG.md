@@ -22,6 +22,7 @@ A consensus release for mainnet. Upgrade every 0.12.0 node, mining nodes first. 
 
 - **Scala node 6.0.7 rules:** the node now enforces the three consensus rules the Scala node added in 6.0.7 that 0.12.0 lacked. Rule 110 applies from height 1,885,000, which mainnet reached on 2026-10-01 (#603). The other two are deserialization limits: a type nesting depth of 8, and no zero-width collections (#606).
 - **Script and serialization fixes** found with the SANTA conformance vectors, covering register and context values, embedded-script substitution, sigma proofs, block-version arithmetic, sized trees and wire encodings (#600, #601, #602, #605, #606). Each fix has regression tests built from those vectors.
+- **Operator feedback** from a testnet soak: clearer startup migration logs, testnet disk recommendations, and a log line without duplicates (#608).
 
 ### Fixed
 
@@ -36,6 +37,9 @@ A consensus release for mainnet. Upgrade every 0.12.0 node, mining nodes first. 
 - Verify Fiat–Shamir proofs for empty AND and zero-of-zero threshold propositions, including empty children nested in large conjectures (#601).
 - Correct embedded-script substitution in box registers and context variables: preserve unresolved nodes after swallowed decode casts, reject failed ancestor reconstruction, read SELF proposition bytes from R1, and charge Boolean-root conversion (#602).
 - Accept tuple and collection nodes with expression children in box registers and context extensions; preserve their wire forms, reject invalid runtime reads, and account for version-dependent output bytes and sizes (#600).
+- Log the one-time index migrations that run before the API starts at info level, with progress. They run on the first restart after a fresh sync and on the first run after an upgrade (#608).
+- `ergo-node init` recommends free space per network. On testnet it recommends 20, 30 and 50 GiB where mainnet needs 100, 150 and 250 GiB (#608).
+- The `api listening` log line lists each host-guard allowlist entry once (#608).
 
 ## [0.12.0] - 2026-10-05
 
