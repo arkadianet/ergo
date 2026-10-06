@@ -19,13 +19,14 @@
 //     scala-cli run scripts/santa_wire_oracle/SantaWireOracle.scala -- "$f" > "${f%.json}.jvm.tsv"
 //   done
 //
-// ergo-core is not on Maven Central; publish it locally from the v6.0.6 tag of
+// ergo-core is not on Maven Central; publish it locally from the v6.0.7 tag of
 // https://github.com/ergoplatform/ergo (see scripts/jvm_serde_oracle/ErgoSerdeOracle.scala).
 //
 //> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
+//> using repository "ivy2Local"
 //> using scala 2.12
-//> using dep org.scorexfoundation::sigma-state:6.0.6
-//> using dep org.ergoplatform::ergo-core:6.0.6
+//> using dep org.scorexfoundation::sigma-state:6.0.7
+//> using dep org.ergoplatform::ergo-core:6.0.7
 
 import io.circe.parser.parse
 import org.ergoplatform.ErgoBox

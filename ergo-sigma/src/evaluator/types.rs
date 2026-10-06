@@ -244,6 +244,11 @@ impl SigmaValidationSettings {
     /// org/.../ValidationRules.scala:122-131. Rule 1019 throws a single SType,
     /// which cannot match its MethodsContainer/method-pair Changed override.
     pub fn is_soft_fork(&self, rule_id: u16, args: &[u8], activated_version: u8) -> bool {
+        // Deliberately match the node's omission for consensus: rule 1020 is
+        // in coreSettings V5/V6, but absent from org.ergoplatform's currentSettings.
+        // SigmaValidationSettings.isSoftFork returns false for an absent rule,
+        // including a replaced status received by this Rust settings map.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/validation/ValidationRules.scala#L207-L249
         matches!(rule_id, 1000..=1016 | 1019)
             && match self.0.get(&rule_id) {
                 Some(RuleStatus::Replaced(_)) => {
@@ -754,6 +759,10 @@ pub enum EvalError {
     /// A recognized Sigma deserialization validation rule failed.
     #[error("Sigma validation rule {rule_id} failed")]
     SigmaValidation { rule_id: u16, args: Vec<u8> },
+    /// A validation exception thrown during evaluation, outside Scala's
+    /// substitution-only soft-fork catch.
+    #[error("evaluation validation rule {rule_id} failed")]
+    EvaluationValidation { rule_id: u16, args: Vec<u8> },
     /// Scala `Interpreter.checkSoftForkCondition` (`Interpreter.scala:325-328`),
     /// run by `verify` BEFORE any reduction (`:362-365`): with the activated
     /// script version within this interpreter's range, a tree whose header

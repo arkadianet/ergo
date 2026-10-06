@@ -1,0 +1,1094 @@
+{
+  "entries": [
+    {
+      "name": "compact-pair-invalid-primitive-before-deep-child",
+      "mode": "type",
+      "bytes_hex": "520c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c02",
+      "version": 0,
+      "result": "ValidationException",
+      "position": 1,
+      "rule_id": 1017,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-empty-v0",
+      "mode": "constant",
+      "bytes_hex": "0c6200",
+      "version": 0,
+      "result": "ValidationException",
+      "position": 3,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-empty-unsized-v0",
+      "mode": "tree",
+      "bytes_hex": "00d1930c62000c6200",
+      "version": 0,
+      "result": "SerializerException",
+      "position": 6,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-empty-sized-v0",
+      "mode": "tree",
+      "bytes_hex": "0808d1930c62000c6200",
+      "version": 0,
+      "result": "WRAPPED",
+      "position": 10,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-one-v0",
+      "mode": "constant",
+      "bytes_hex": "0c6201",
+      "version": 0,
+      "result": "ValidationException",
+      "position": 3,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-one-unsized-v0",
+      "mode": "tree",
+      "bytes_hex": "00d1930c62010c6201",
+      "version": 0,
+      "result": "SerializerException",
+      "position": 6,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-one-sized-v0",
+      "mode": "tree",
+      "bytes_hex": "0808d1930c62010c6201",
+      "version": 0,
+      "result": "WRAPPED",
+      "position": 10,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-nested-v0",
+      "mode": "constant",
+      "bytes_hex": "0c0c6200",
+      "version": 0,
+      "result": "ValidationException",
+      "position": 4,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-nested-unsized-v0",
+      "mode": "tree",
+      "bytes_hex": "00d1930c0c62000c0c6200",
+      "version": 0,
+      "result": "SerializerException",
+      "position": 7,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-nested-sized-v0",
+      "mode": "tree",
+      "bytes_hex": "080ad1930c0c62000c0c6200",
+      "version": 0,
+      "result": "WRAPPED",
+      "position": 12,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-tuple-v0",
+      "mode": "constant",
+      "bytes_hex": "0c3c626200",
+      "version": 0,
+      "result": "ValidationException",
+      "position": 5,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-tuple-unsized-v0",
+      "mode": "tree",
+      "bytes_hex": "00d1930c3c6262000c3c626200",
+      "version": 0,
+      "result": "SerializerException",
+      "position": 8,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-tuple-sized-v0",
+      "mode": "tree",
+      "bytes_hex": "080cd1930c3c6262000c3c626200",
+      "version": 0,
+      "result": "WRAPPED",
+      "position": 14,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "nonzero-tuple-control-v0",
+      "mode": "constant",
+      "bytes_hex": "0c3c046200",
+      "version": 0,
+      "result": "ACCEPT",
+      "position": 5,
+      "rule_id": null,
+      "canonical_hex": "0c406200"
+    },
+    {
+      "name": "nonzero-tuple-control-unsized-v0",
+      "mode": "tree",
+      "bytes_hex": "00d1930c3c0462000c3c046200",
+      "version": 0,
+      "result": "ACCEPT",
+      "position": 13,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "nonzero-tuple-control-sized-v0",
+      "mode": "tree",
+      "bytes_hex": "080cd1930c3c0462000c3c046200",
+      "version": 0,
+      "result": "ACCEPT",
+      "position": 14,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "unit-control-v0",
+      "mode": "constant",
+      "bytes_hex": "62",
+      "version": 0,
+      "result": "ACCEPT",
+      "position": 1,
+      "rule_id": null,
+      "canonical_hex": "62"
+    },
+    {
+      "name": "unit-control-unsized-v0",
+      "mode": "tree",
+      "bytes_hex": "00d1936262",
+      "version": 0,
+      "result": "ACCEPT",
+      "position": 5,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "unit-control-sized-v0",
+      "mode": "tree",
+      "bytes_hex": "0804d1936262",
+      "version": 0,
+      "result": "ACCEPT",
+      "position": 6,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "all-unit-tuple-control-v0",
+      "mode": "constant",
+      "bytes_hex": "3c6262",
+      "version": 0,
+      "result": "ACCEPT",
+      "position": 3,
+      "rule_id": null,
+      "canonical_hex": "3c6262"
+    },
+    {
+      "name": "all-unit-tuple-control-unsized-v0",
+      "mode": "tree",
+      "bytes_hex": "00d1933c62623c6262",
+      "version": 0,
+      "result": "ACCEPT",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "all-unit-tuple-control-sized-v0",
+      "mode": "tree",
+      "bytes_hex": "0808d1933c62623c6262",
+      "version": 0,
+      "result": "ACCEPT",
+      "position": 10,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "option-unit-control-v0",
+      "mode": "constant",
+      "bytes_hex": "246201",
+      "version": 0,
+      "result": "ValidationException",
+      "position": 2,
+      "rule_id": 1009,
+      "canonical_hex": null
+    },
+    {
+      "name": "option-unit-control-unsized-v0",
+      "mode": "tree",
+      "bytes_hex": "00d193246201246201",
+      "version": 0,
+      "result": "SerializerException",
+      "position": 5,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "option-unit-control-sized-v0",
+      "mode": "tree",
+      "bytes_hex": "0808d193246201246201",
+      "version": 0,
+      "result": "WRAPPED",
+      "position": 10,
+      "rule_id": 1009,
+      "canonical_hex": null
+    },
+    {
+      "name": "coll-option-unit-control-v0",
+      "mode": "constant",
+      "bytes_hex": "0c2462020100",
+      "version": 0,
+      "result": "ValidationException",
+      "position": 4,
+      "rule_id": 1009,
+      "canonical_hex": null
+    },
+    {
+      "name": "coll-option-unit-control-unsized-v0",
+      "mode": "tree",
+      "bytes_hex": "00d1930c24620201000c2462020100",
+      "version": 0,
+      "result": "SerializerException",
+      "position": 7,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "coll-option-unit-control-sized-v0",
+      "mode": "tree",
+      "bytes_hex": "080ed1930c24620201000c2462020100",
+      "version": 0,
+      "result": "WRAPPED",
+      "position": 16,
+      "rule_id": 1009,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-empty-v3",
+      "mode": "constant",
+      "bytes_hex": "0c6200",
+      "version": 3,
+      "result": "ValidationException",
+      "position": 3,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-empty-unsized-v3",
+      "mode": "tree",
+      "bytes_hex": "00d1930c62000c6200",
+      "version": 3,
+      "result": "SerializerException",
+      "position": 6,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-empty-sized-v3",
+      "mode": "tree",
+      "bytes_hex": "0808d1930c62000c6200",
+      "version": 3,
+      "result": "WRAPPED",
+      "position": 10,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-one-v3",
+      "mode": "constant",
+      "bytes_hex": "0c6201",
+      "version": 3,
+      "result": "ValidationException",
+      "position": 3,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-one-unsized-v3",
+      "mode": "tree",
+      "bytes_hex": "00d1930c62010c6201",
+      "version": 3,
+      "result": "SerializerException",
+      "position": 6,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-one-sized-v3",
+      "mode": "tree",
+      "bytes_hex": "0808d1930c62010c6201",
+      "version": 3,
+      "result": "WRAPPED",
+      "position": 10,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-nested-v3",
+      "mode": "constant",
+      "bytes_hex": "0c0c6200",
+      "version": 3,
+      "result": "ValidationException",
+      "position": 4,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-nested-unsized-v3",
+      "mode": "tree",
+      "bytes_hex": "00d1930c0c62000c0c6200",
+      "version": 3,
+      "result": "SerializerException",
+      "position": 7,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-nested-sized-v3",
+      "mode": "tree",
+      "bytes_hex": "080ad1930c0c62000c0c6200",
+      "version": 3,
+      "result": "WRAPPED",
+      "position": 12,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-tuple-v3",
+      "mode": "constant",
+      "bytes_hex": "0c3c626200",
+      "version": 3,
+      "result": "ValidationException",
+      "position": 5,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-tuple-unsized-v3",
+      "mode": "tree",
+      "bytes_hex": "00d1930c3c6262000c3c626200",
+      "version": 3,
+      "result": "SerializerException",
+      "position": 8,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "zero-tuple-sized-v3",
+      "mode": "tree",
+      "bytes_hex": "080cd1930c3c6262000c3c626200",
+      "version": 3,
+      "result": "WRAPPED",
+      "position": 14,
+      "rule_id": 1020,
+      "canonical_hex": null
+    },
+    {
+      "name": "nonzero-tuple-control-v3",
+      "mode": "constant",
+      "bytes_hex": "0c3c046200",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 5,
+      "rule_id": null,
+      "canonical_hex": "0c406200"
+    },
+    {
+      "name": "nonzero-tuple-control-unsized-v3",
+      "mode": "tree",
+      "bytes_hex": "00d1930c3c0462000c3c046200",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 13,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "nonzero-tuple-control-sized-v3",
+      "mode": "tree",
+      "bytes_hex": "080cd1930c3c0462000c3c046200",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 14,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "unit-control-v3",
+      "mode": "constant",
+      "bytes_hex": "62",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 1,
+      "rule_id": null,
+      "canonical_hex": "62"
+    },
+    {
+      "name": "unit-control-unsized-v3",
+      "mode": "tree",
+      "bytes_hex": "00d1936262",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 5,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "unit-control-sized-v3",
+      "mode": "tree",
+      "bytes_hex": "0804d1936262",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 6,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "all-unit-tuple-control-v3",
+      "mode": "constant",
+      "bytes_hex": "3c6262",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 3,
+      "rule_id": null,
+      "canonical_hex": "3c6262"
+    },
+    {
+      "name": "all-unit-tuple-control-unsized-v3",
+      "mode": "tree",
+      "bytes_hex": "00d1933c62623c6262",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "all-unit-tuple-control-sized-v3",
+      "mode": "tree",
+      "bytes_hex": "0808d1933c62623c6262",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 10,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "option-unit-control-v3",
+      "mode": "constant",
+      "bytes_hex": "246201",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 3,
+      "rule_id": null,
+      "canonical_hex": "246201"
+    },
+    {
+      "name": "option-unit-control-unsized-v3",
+      "mode": "tree",
+      "bytes_hex": "00d193246201246201",
+      "version": 3,
+      "result": "SerializerException",
+      "position": 5,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "option-unit-control-sized-v3",
+      "mode": "tree",
+      "bytes_hex": "0808d193246201246201",
+      "version": 3,
+      "result": "WRAPPED",
+      "position": 10,
+      "rule_id": 1009,
+      "canonical_hex": null
+    },
+    {
+      "name": "coll-option-unit-control-v3",
+      "mode": "constant",
+      "bytes_hex": "0c2462020100",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 6,
+      "rule_id": null,
+      "canonical_hex": "0c2462020100"
+    },
+    {
+      "name": "coll-option-unit-control-unsized-v3",
+      "mode": "tree",
+      "bytes_hex": "00d1930c24620201000c2462020100",
+      "version": 3,
+      "result": "SerializerException",
+      "position": 7,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "coll-option-unit-control-sized-v3",
+      "mode": "tree",
+      "bytes_hex": "080ed1930c24620201000c2462020100",
+      "version": 3,
+      "result": "WRAPPED",
+      "position": 16,
+      "rule_id": 1009,
+      "canonical_hex": null
+    },
+    {
+      "name": "coll-8",
+      "mode": "type",
+      "bytes_hex": "0c0c0c0c0c0c0c0c02",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": "0c0c0c0c0c0c1a"
+    },
+    {
+      "name": "compact-coll-8",
+      "mode": "type",
+      "bytes_hex": "181818181818181863",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c63"
+    },
+    {
+      "name": "option-8",
+      "mode": "type",
+      "bytes_hex": "242424242424242402",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": "2424242424242426"
+    },
+    {
+      "name": "compact-option-coll-8",
+      "mode": "type",
+      "bytes_hex": "303030303030303063",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": "240c240c240c240c240c240c240c240c63"
+    },
+    {
+      "name": "pair-left-8",
+      "mode": "type",
+      "bytes_hex": "3c3c3c3c3c3c3c3c636363636363636363",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 17,
+      "rule_id": null,
+      "canonical_hex": "3c3c3c3c3c3c3c3c636363636363636363"
+    },
+    {
+      "name": "pair-compact-left-8",
+      "mode": "type",
+      "bytes_hex": "404040404040404063",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": "404040404040404063"
+    },
+    {
+      "name": "pair-compact-right-8",
+      "mode": "type",
+      "bytes_hex": "4c4c4c4c4c4c4c4c63",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": "4c4c4c4c4c4c4c4c63"
+    },
+    {
+      "name": "triple-8",
+      "mode": "type",
+      "bytes_hex": "48484848484848486362626262626262626262626262626262",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 25,
+      "rule_id": null,
+      "canonical_hex": "48484848484848486362626262626262626262626262626262"
+    },
+    {
+      "name": "quad-8",
+      "mode": "type",
+      "bytes_hex": "545454545454545463626262626262626262626262626262626262626262626262",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 33,
+      "rule_id": null,
+      "canonical_hex": "545454545454545463626262626262626262626262626262626262626262626262"
+    },
+    {
+      "name": "general-tuple-8",
+      "mode": "type",
+      "bytes_hex": "60026002600260026002600260026002636363636363636363",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 25,
+      "rule_id": null,
+      "canonical_hex": "3c3c3c3c3c3c3c3c636363636363636363"
+    },
+    {
+      "name": "function-domain-8",
+      "mode": "type",
+      "bytes_hex": "700170017001700170017001700170016362006200620062006200620062006200",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 33,
+      "rule_id": null,
+      "canonical_hex": "700170017001700170017001700170016362006200620062006200620062006200"
+    },
+    {
+      "name": "function-range-8",
+      "mode": "type",
+      "bytes_hex": "70007000700070007000700070007000630000000000000000",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 25,
+      "rule_id": null,
+      "canonical_hex": "70007000700070007000700070007000630000000000000000"
+    },
+    {
+      "name": "embedded-coll-8",
+      "mode": "type",
+      "bytes_hex": "0c0c0c0c0c0c0c0c1a",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": "0c0c0c0c0c0c0c0c1a"
+    },
+    {
+      "name": "typevar-8",
+      "mode": "type",
+      "bytes_hex": "0c0c0c0c0c0c0c0c670154",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 11,
+      "rule_id": null,
+      "canonical_hex": "0c0c0c0c0c0c0c0c670154"
+    },
+    {
+      "name": "function-type-params-8",
+      "mode": "type",
+      "bytes_hex": "0c0c0c0c0c0c0c70000401670154",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 14,
+      "rule_id": null,
+      "canonical_hex": "0c0c0c0c0c0c0c70000401670154"
+    },
+    {
+      "name": "constant-depth-8",
+      "mode": "constant",
+      "bytes_hex": "0c0c0c0c0c0c0c0c0e00",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 10,
+      "rule_id": null,
+      "canonical_hex": "0c0c0c0c0c0c0c1a00"
+    },
+    {
+      "name": "getvar-depth-8",
+      "mode": "expression",
+      "bytes_hex": "e3000c0c0c0c0c0c0c0c0e",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 11,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "deserialize-context-type-depth-8",
+      "mode": "expression",
+      "bytes_hex": "d40c0c0c0c0c0c0c0c0e00",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 11,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "deserialize-register-type-depth-8",
+      "mode": "expression",
+      "bytes_hex": "d5040c0c0c0c0c0c0c0c0e00",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 12,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "method-type-argument-depth-8",
+      "mode": "expression",
+      "bytes_hex": "db6a0add0c0c0c0c0c0c0c0c0e",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 13,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "tree-10-depth-8",
+      "mode": "tree",
+      "bytes_hex": "10010c0c0c0c0c0c0c0c0e0008d3",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 14,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "tree-18-depth-8",
+      "mode": "tree",
+      "bytes_hex": "180d010c0c0c0c0c0c0c0c0e0008d3",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 15,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "coll-9",
+      "mode": "type",
+      "bytes_hex": "0c0c0c0c0c0c0c0c0c02",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "compact-coll-9",
+      "mode": "type",
+      "bytes_hex": "18181818181818181863",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "option-9",
+      "mode": "type",
+      "bytes_hex": "24242424242424242402",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "compact-option-coll-9",
+      "mode": "type",
+      "bytes_hex": "30303030303030303063",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "pair-left-9",
+      "mode": "type",
+      "bytes_hex": "3c3c3c3c3c3c3c3c3c63636363636363636363",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "pair-compact-left-9",
+      "mode": "type",
+      "bytes_hex": "40404040404040404063",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "pair-compact-right-9",
+      "mode": "type",
+      "bytes_hex": "4c4c4c4c4c4c4c4c4c63",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "triple-9",
+      "mode": "type",
+      "bytes_hex": "48484848484848484863626262626262626262626262626262626262",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "quad-9",
+      "mode": "type",
+      "bytes_hex": "54545454545454545463626262626262626262626262626262626262626262626262626262",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "general-tuple-9",
+      "mode": "type",
+      "bytes_hex": "60026002600260026002600260026002600263636363636363636363",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 18,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "function-domain-9",
+      "mode": "type",
+      "bytes_hex": "70017001700170017001700170017001700163620062006200620062006200620062006200",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 18,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "function-range-9",
+      "mode": "type",
+      "bytes_hex": "70007000700070007000700070007000700063000000000000000000",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 18,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "embedded-coll-9",
+      "mode": "type",
+      "bytes_hex": "0c0c0c0c0c0c0c0c0c1a",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "typevar-9",
+      "mode": "type",
+      "bytes_hex": "0c0c0c0c0c0c0c0c0c670154",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "function-type-params-9",
+      "mode": "type",
+      "bytes_hex": "0c0c0c0c0c0c0c0c70000401670154",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 10,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "constant-depth-9",
+      "mode": "constant",
+      "bytes_hex": "0c0c0c0c0c0c0c0c0c0e00",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 9,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "getvar-depth-9",
+      "mode": "expression",
+      "bytes_hex": "e3000c0c0c0c0c0c0c0c0c0e",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 11,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "deserialize-context-type-depth-9",
+      "mode": "expression",
+      "bytes_hex": "d40c0c0c0c0c0c0c0c0c0e00",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 10,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "deserialize-register-type-depth-9",
+      "mode": "expression",
+      "bytes_hex": "d5040c0c0c0c0c0c0c0c0c0e00",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 11,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "method-type-argument-depth-9",
+      "mode": "expression",
+      "bytes_hex": "db6a0add0c0c0c0c0c0c0c0c0c0e",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 13,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "tree-10-depth-9",
+      "mode": "tree",
+      "bytes_hex": "10010c0c0c0c0c0c0c0c0c0e0008d3",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 11,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "tree-18-depth-9",
+      "mode": "tree",
+      "bytes_hex": "180e010c0c0c0c0c0c0c0c0c0e0008d3",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 12,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "write-coll-unit",
+      "mode": "write-zero-coll",
+      "bytes_hex": "0c62",
+      "version": 3,
+      "result": "SerializerException",
+      "position": 2,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "write-coll-coll-unit",
+      "mode": "write-zero-coll",
+      "bytes_hex": "0c0c62",
+      "version": 3,
+      "result": "SerializerException",
+      "position": 3,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "write-coll-all-unit-tuple",
+      "mode": "write-zero-coll",
+      "bytes_hex": "0c3c6262",
+      "version": 3,
+      "result": "SerializerException",
+      "position": 4,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "write-coll-empty-tuple",
+      "mode": "write-zero-coll",
+      "bytes_hex": "0c6000",
+      "version": 3,
+      "result": "SerializerException",
+      "position": 3,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "fuzz-compact-nested-type",
+      "mode": "tree",
+      "bytes_hex": "2800d1c6ff181818181818181850505050505050505050505050505050505050505050505050505050505050505050505050505050505050501818181818181818181818181818181818181818181818181c01000004000000000fff",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 14,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "fuzz-ergo_tree-nightly-2026-09-30-compact-type-expansion",
+      "mode": "tree",
+      "bytes_hex": "00d118181818181818181818403f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818183f1818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818181818181818181818431818181841181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f181818181818181818181818181818181818181818181818181818181818431818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818181818181818181818431818181841181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f181818181818181818181818181818181818181818181818181818181818431818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818183f1818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f181818181818181818181818181818181818181818181818181818181818431818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818183f1818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181818181818181818181818181818181818181843181818184118183e3e181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818180100000018183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e180c62627c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c6060886262626262626618181800ff97971818",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 11,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "fuzz-ergo_box_candidate-nightly-2026-10-01-type-expansion",
+      "mode": "box-candidate",
+      "bytes_hex": "39c92fcdffff1818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f18181818181818411818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f181818181818184118181818181818181818181818181818181818181818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f18181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f1818181818181841181818181818181818181818181818181818181818181818181818184f4f4f4f4f4f4f4f4f1818184f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f1818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f18181818181818411818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f1818181818181841181818181818181818181818181818181818181818181818181818184f4f4f4f4f4f4f4f4f1818184f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f18181818181818411818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f181818181818184118181818181818181818181818181818181818181818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f18181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f1818181818181841181818181818181818181818181818181818181818181818181818184f4f4f4f4f4f4f4f4f1818184f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f18181818181818411818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f1818181841181818181818181818181818181818181818181818181818181818184f4f4a4f4f18181818181818411818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f18181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f1818181818181841181818181818181818181818181818181818181818181818181818184f4f4f4f4f4f4f4f4f1818184f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f1818181818181818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f18181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f1818181818181841181818181818181818181818181818181818181818181818181818184f4f4f4f4f4f4f4f4f1818184f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f1818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f18181818181818411818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f1818181818181841181818181818181818181818181818181818181818181818181818184f4f4f4f4f4f4f4f4f1818184f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f18181818181818411818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f181818181818184118181818181818181818181818181818181818181818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f18181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f1818181818181841181818181818181818181818181818181818181818181818181818184f4f4f4f4f4f4f4f4f1818184f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f18181818181818411818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f1818181841181818181818181818181818181818181818181818181818181818184f4f4a4f4f18181818181818411818181818181818181818181818184f4f4f18181818181818181818181818181818181818181818181818181818184f4f4f4f18181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f1818181818181841181818181818181818181818181818181818181818181818181818184f4f4a4f4f1818181818181841181818181818181818181818184a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a18184f4f4f1818181818184f4f4f4f4f4f4f4f4f4f4f4f4f4a4f4f1818181818181841181818181818181818181818181818181818181818181818181818184f4f4a4f4f18181818181818411818181818181818181818181818184f4f4f1818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818184f18184f4f4f4f4f4f4f4f4f4f4f04000000000000004f4f4a4f4f1818181818181841181818181818181818181818181818181818181818181818181818184f4f4f4f4f4f4f4f4f18184f4f4f4f4f4f4f4f4f4f4a4f4f184f4f4f4f4f4f4f4f4f4a4f4f1818181818181841181818181818181818181818181818181818181818181818181818184f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f181818181818181818181818181818181818181801004f4f4f4f4f4f4f4f1818181818181818181818181818181818181818010011ffff11",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 15,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "fuzz-sigma_expr-nightly-2026-10-01-boolean-depth",
+      "mode": "tree",
+      "bytes_hex": "00cdcdcfefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefcfefefefefefefefefefefefefefefcfefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefcdcdcdcdcdcdcdcfefefefefef7f050b05",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 111,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "fuzz-ergo_box_candidate-nightly-2026-10-01-cached-upcast",
+      "mode": "box-candidate",
+      "bytes_hex": "39c904cdff7e040404040000",
+      "version": 3,
+      "result": "ACCEPT",
+      "position": 12,
+      "rule_id": null,
+      "canonical_hex": null
+    },
+    {
+      "name": "fuzz-ergo_tree-nightly-2026-10-01-sized-type-expansion",
+      "mode": "tree",
+      "bytes_hex": "2b0fd68d05d6cd00d118181818181818181818403f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818183f1818181818181818181818181818181818181818181843181843181818184118183f181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818181818181818181818431818181841181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f181818181818181818181818181818181818181818181818181818181818431818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818181818181818181818431818181841181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e18181818181818181818184318183e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181818181818181843181818184118183e3e3e18181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818181818181818181818431818181841181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e1818181818181818181843181843181818184118183f181818181818181818181818181818181818181818181818181818181818431818181818181818181818181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818181818181818181818431818181841181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e18181818181818181818184318183e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818183f1818181818181818181818181818181818181818181843181843181818184118183f181818181818181818181818181818181843181843181818184118183f1818181818181818181818181818181818181818181818181818181818184318181818411818181818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e181818181818181818181843181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e18181818181818183f18181818181818181818181818181818181818181818181818181818181843181818181818181818181818181818181818181843181818184118183e3e181818184118183e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e1818180100000018183e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e0481ffff3fffff04663e3e3e3e3e3e1818181818183e3e3c3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e180c62627c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c847c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c6060886262626262626618181800ff97971818",
+      "version": 3,
+      "result": "DeserializeCallDepthExceeded",
+      "position": 18,
+      "rule_id": null,
+      "canonical_hex": null
+    }
+  ]
+}

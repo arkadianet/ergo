@@ -1,6 +1,8 @@
 mod boxes_roundtrip;
+mod deserialization_607;
 mod ergotrees_roundtrip;
 mod headers_roundtrip;
+mod mainnet_deserialization_607;
 mod nipopow_scala_oracle;
 mod roundtrip_triage;
 mod santa_wire;

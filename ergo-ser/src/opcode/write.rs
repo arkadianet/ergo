@@ -2,7 +2,7 @@ use ergo_primitives::writer::VlqWriter;
 
 use crate::error::WriteError;
 use crate::sigma_type::{write_type, SigmaType};
-use crate::sigma_value::{write_constant, SigmaValue};
+use crate::sigma_value::{write_constant_versioned, SigmaValue};
 
 use super::types::{opcode_pattern, ArgPattern, Body, Expr, IrNode, Payload};
 
@@ -245,7 +245,7 @@ fn write_expr_inner(
                 w.put_u8(0x73);
                 w.put_u32(index);
             }
-            None => write_constant(w, tpe, val)?,
+            None => write_constant_versioned(w, tpe, val, tree_version)?,
         },
         Expr::Op(node) => {
             // Check before building the compact Boolean copy as well.
@@ -278,8 +278,15 @@ fn write_expr_inner(
                     tree_version,
                 )?;
             } else {
-                w.put_u8(node.opcode);
-                write_payload(w, node.opcode, &node.payload, sink, tree_version)?;
+                // Deliberately match MethodCall.companion, including accepted
+                // noncanonical wire nodes: empty args serialize as PropertyCall.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/values.scala#L1351
+                let opcode = match &node.payload {
+                    Payload::MethodCall { args, .. } if args.is_empty() => 0xDB,
+                    _ => node.opcode,
+                };
+                w.put_u8(opcode);
+                write_payload(w, opcode, &node.payload, sink, tree_version)?;
             }
         }
         // `Expr::Unparsed` is a whole-tree body (the full original bytes,

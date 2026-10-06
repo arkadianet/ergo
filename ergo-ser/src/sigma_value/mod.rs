@@ -196,6 +196,17 @@ pub enum SigmaValue {
     /// Preserved verbatim for roundtrip; full structural parsing happens
     /// at the ergo_box layer.
     OpaqueBoxBytes(Vec<u8>),
+    /// An accepted box whose structured serialization differs from its received
+    /// bytes. Cache the writer form once; identity and proposition reads retain
+    /// the received form. Both byte forms are independent of later accesses.
+    CanonicalBoxBytes {
+        /// Received box bytes, which determine the parsed box identity.
+        bytes: Vec<u8>,
+        /// Bytes emitted when serializing this box as a data value.
+        canonical_bytes: Result<Vec<u8>, WriteError>,
+        /// Pre-v3 writer form, only when it differs from the v3 form.
+        legacy_bytes: Option<Result<Vec<u8>, WriteError>>,
+    },
     /// Block header (`SHeader`) value — the full parsed header plus the
     /// Blake2b256 id of the RETAINED wire slice it was read from (Scala
     /// `ErgoHeader.serializedId`, `ErgoHeader.scala:132-140,167-180`). The id is
@@ -277,8 +288,18 @@ pub fn write_constant(
     tpe: &SigmaType,
     val: &SigmaValue,
 ) -> Result<(), WriteError> {
+    write_constant_versioned(w, tpe, val, 3)
+}
+
+/// Write constant data under the ambient ErgoTree serialization version.
+pub fn write_constant_versioned(
+    w: &mut VlqWriter,
+    tpe: &SigmaType,
+    val: &SigmaValue,
+    version: u8,
+) -> Result<(), WriteError> {
     write_type(w, tpe)?;
-    write_value(w, tpe, val)
+    write_value_versioned(w, tpe, val, version)
 }
 
 /// Read a Constant: type descriptor followed by value data.
@@ -311,6 +332,16 @@ pub(crate) fn read_constant_as_expr(
 /// Write value data for a known type. The caller is responsible for ensuring
 /// that `val` matches `tpe`.
 pub fn write_value(w: &mut VlqWriter, tpe: &SigmaType, val: &SigmaValue) -> Result<(), WriteError> {
+    write_value_versioned(w, tpe, val, 3)
+}
+
+/// Write value data under the ambient ErgoTree serialization version.
+pub fn write_value_versioned(
+    w: &mut VlqWriter,
+    tpe: &SigmaType,
+    val: &SigmaValue,
+    version: u8,
+) -> Result<(), WriteError> {
     match (tpe, val) {
         (SigmaType::SUnit, SigmaValue::Unit) => {}
         (SigmaType::SFunc { .. }, _) => {
@@ -320,6 +351,21 @@ pub fn write_value(w: &mut VlqWriter, tpe: &SigmaType, val: &SigmaValue) -> Resu
         }
         (SigmaType::SBox, SigmaValue::OpaqueBoxBytes(bytes)) => {
             w.put_bytes(bytes);
+        }
+        (
+            SigmaType::SBox,
+            SigmaValue::CanonicalBoxBytes {
+                canonical_bytes,
+                legacy_bytes,
+                ..
+            },
+        ) => {
+            let bytes = if (version as i8) < 3 {
+                legacy_bytes.as_ref().unwrap_or(canonical_bytes)
+            } else {
+                canonical_bytes
+            };
+            w.put_bytes(bytes.as_ref().map_err(Clone::clone)?);
         }
         // SHeader: full block-header data format (Scala DataSerializer ->
         // ErgoHeader.sigmaSerializer). The v3+ gate is enforced by the
@@ -375,10 +421,10 @@ pub fn write_value(w: &mut VlqWriter, tpe: &SigmaType, val: &SigmaValue) -> Resu
             write_avl_tree(w, avl);
         }
         (SigmaType::SColl(elem_type), SigmaValue::Coll(coll)) => {
-            write_coll(w, elem_type, coll)?;
+            write_coll(w, elem_type, coll, version)?;
         }
         (SigmaType::SOption(elem_type), SigmaValue::Opt(opt)) => {
-            write_option(w, elem_type, opt)?;
+            write_option(w, elem_type, opt, version)?;
         }
         (SigmaType::STuple(elem_types), SigmaValue::Tuple(vals)) => {
             if elem_types.len() != vals.len() {
@@ -389,7 +435,7 @@ pub fn write_value(w: &mut VlqWriter, tpe: &SigmaType, val: &SigmaValue) -> Resu
                 )));
             }
             for (t, v) in elem_types.iter().zip(vals.iter()) {
-                write_value(w, t, v)?;
+                write_value_versioned(w, t, v, version)?;
             }
         }
         _ => {

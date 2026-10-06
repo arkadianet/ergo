@@ -59,7 +59,7 @@ fn runtime_key(tpe: &SigmaType, value: &SigmaValue) -> Result<RuntimeKey, Valida
         SigmaValue::Int(n) => RuntimeKey::Number(i64::from(*n)),
         SigmaValue::Long(n) => RuntimeKey::Number(*n),
         SigmaValue::Header(_, id) => RuntimeKey::Header(*id),
-        SigmaValue::OpaqueBoxBytes(bytes) => {
+        SigmaValue::OpaqueBoxBytes(bytes) | SigmaValue::CanonicalBoxBytes { bytes, .. } => {
             // CBox equality/hash use the parsed ErgoBox id, not the input
             // encoding. Read an already-accepted nested box without resetting
             // its binding scope; allow all supported script versions here.

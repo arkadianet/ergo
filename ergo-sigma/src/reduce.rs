@@ -1605,3 +1605,7 @@ mod soft_fork_condition_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "reduce/deserialization_607.rs"]
+mod deserialization_607;

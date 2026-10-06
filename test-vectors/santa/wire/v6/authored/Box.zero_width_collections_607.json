@@ -1,0 +1,1086 @@
+{
+  "schema": "santa-wire/v1",
+  "op": "wire:authored:zero-width-collections-607",
+  "entries": [
+    {
+      "name": "constant-coll-unit-empty",
+      "kind": "Constant",
+      "bytes_hex": "0c6200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "register-coll-unit-empty",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010c6200000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "extension-coll-unit-empty",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010c6200000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "output-register-coll-unit-empty",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010c6200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "unsized-coll-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930c62000c6200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "sized-v0-coll-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "0808d1930c62000c6200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0808d1930c62000c6200"
+    },
+    {
+      "name": "sized-v3-coll-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b08d1930c62000c6200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b08d1930c62000c6200"
+    },
+    {
+      "name": "constant-coll-unit-one",
+      "kind": "Constant",
+      "bytes_hex": "0c6201",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "register-coll-unit-one",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010c6201000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "extension-coll-unit-one",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010c6201000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "output-register-coll-unit-one",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010c6201",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "unsized-coll-unit-one",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930c62010c6201",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "sized-v0-coll-unit-one",
+      "kind": "ErgoTree",
+      "bytes_hex": "0808d1930c62010c6201",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0808d1930c62010c6201"
+    },
+    {
+      "name": "sized-v3-coll-unit-one",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b08d1930c62010c6201",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b08d1930c62010c6201"
+    },
+    {
+      "name": "constant-coll-unit-max",
+      "kind": "Constant",
+      "bytes_hex": "0c62ffff03",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "register-coll-unit-max",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010c62ffff03000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "extension-coll-unit-max",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010c62ffff03000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "output-register-coll-unit-max",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010c62ffff03",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "unsized-coll-unit-max",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930c62ffff030c62ffff03",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "sized-v0-coll-unit-max",
+      "kind": "ErgoTree",
+      "bytes_hex": "080cd1930c62ffff030c62ffff03",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "080cd1930c62ffff030c62ffff03"
+    },
+    {
+      "name": "sized-v3-coll-unit-max",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b0cd1930c62ffff030c62ffff03",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b0cd1930c62ffff030c62ffff03"
+    },
+    {
+      "name": "constant-coll-coll-unit-empty",
+      "kind": "Constant",
+      "bytes_hex": "0c0c6200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "register-coll-coll-unit-empty",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010c0c6200000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "extension-coll-coll-unit-empty",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010c0c6200000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "output-register-coll-coll-unit-empty",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010c0c6200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "unsized-coll-coll-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930c0c62000c0c6200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "sized-v0-coll-coll-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "080ad1930c0c62000c0c6200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "080ad1930c0c62000c0c6200"
+    },
+    {
+      "name": "sized-v3-coll-coll-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b0ad1930c0c62000c0c6200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b0ad1930c0c62000c0c6200"
+    },
+    {
+      "name": "constant-coll-tuple-unit-empty",
+      "kind": "Constant",
+      "bytes_hex": "0c3c626200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "register-coll-tuple-unit-empty",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010c3c626200000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "extension-coll-tuple-unit-empty",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010c3c626200000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "output-register-coll-tuple-unit-empty",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010c3c626200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "unsized-coll-tuple-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930c3c6262000c3c626200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "sized-v0-coll-tuple-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "080cd1930c3c6262000c3c626200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "080cd1930c3c6262000c3c626200"
+    },
+    {
+      "name": "sized-v3-coll-tuple-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b0cd1930c3c6262000c3c626200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b0cd1930c3c6262000c3c626200"
+    },
+    {
+      "name": "constant-coll-empty-tuple-empty",
+      "kind": "Constant",
+      "bytes_hex": "0c600000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "register-coll-empty-tuple-empty",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010c600000000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "extension-coll-empty-tuple-empty",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010c600000000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "output-register-coll-empty-tuple-empty",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010c600000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "unsized-coll-empty-tuple-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930c6000000c600000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "sized-v0-coll-empty-tuple-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "080ad1930c6000000c600000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "080ad1930c6000000c600000"
+    },
+    {
+      "name": "sized-v3-coll-empty-tuple-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b0ad1930c6000000c600000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b0ad1930c6000000c600000"
+    },
+    {
+      "name": "constant-coll-tuple-collunit-unit-empty",
+      "kind": "Constant",
+      "bytes_hex": "0c3c0c626200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "register-coll-tuple-collunit-unit-empty",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010c3c0c626200000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "extension-coll-tuple-collunit-unit-empty",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010c3c0c626200000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "output-register-coll-tuple-collunit-unit-empty",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010c3c0c626200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "unsized-coll-tuple-collunit-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930c3c0c6262000c3c0c626200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "sized-v0-coll-tuple-collunit-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "080ed1930c3c0c6262000c3c0c626200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "080ed1930c3c0c6262000c3c0c626200"
+    },
+    {
+      "name": "sized-v3-coll-tuple-collunit-unit-empty",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b0ed1930c3c0c6262000c3c0c626200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b0ed1930c3c0c6262000c3c0c626200"
+    },
+    {
+      "name": "constant-unit-control",
+      "kind": "Constant",
+      "bytes_hex": "62",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "62"
+    },
+    {
+      "name": "register-unit-control",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d301000162000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "c0843d0008d301000162000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "extension-unit-control",
+      "kind": "Transaction",
+      "bytes_hex": "01000000000000000000000000000000000000000000000000000000000000000000010162000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "01000000000000000000000000000000000000000000000000000000000000000000010162000001c0843d0008d3010000"
+    },
+    {
+      "name": "output-register-unit-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d301000162",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d301000162"
+    },
+    {
+      "name": "unsized-unit-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1936262",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "00d1936262"
+    },
+    {
+      "name": "sized-v0-unit-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0804d1936262",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0804d1936262"
+    },
+    {
+      "name": "sized-v3-unit-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b04d1936262",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b04d1936262"
+    },
+    {
+      "name": "constant-tuple-unit-control",
+      "kind": "Constant",
+      "bytes_hex": "3c6262",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "3c6262"
+    },
+    {
+      "name": "register-tuple-unit-control",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100013c6262000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "c0843d0008d30100013c6262000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "extension-tuple-unit-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001013c6262000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001013c6262000001c0843d0008d3010000"
+    },
+    {
+      "name": "output-register-tuple-unit-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100013c6262",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100013c6262"
+    },
+    {
+      "name": "unsized-tuple-unit-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1933c62623c6262",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "00d1933c62623c6262"
+    },
+    {
+      "name": "sized-v0-tuple-unit-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0808d1933c62623c6262",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0808d1933c62623c6262"
+    },
+    {
+      "name": "sized-v3-tuple-unit-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b08d1933c62623c6262",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b08d1933c62623c6262"
+    },
+    {
+      "name": "constant-coll-byte-empty-control",
+      "kind": "Constant",
+      "bytes_hex": "0e00",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0e00"
+    },
+    {
+      "name": "register-coll-byte-empty-control",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010e00000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "c0843d0008d30100010e00000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "extension-coll-byte-empty-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010e00000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010e00000001c0843d0008d3010000"
+    },
+    {
+      "name": "output-register-coll-byte-empty-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010e00",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010e00"
+    },
+    {
+      "name": "unsized-coll-byte-empty-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930e000e00",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "00d1930e000e00"
+    },
+    {
+      "name": "sized-v0-coll-byte-empty-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0806d1930e000e00",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0806d1930e000e00"
+    },
+    {
+      "name": "sized-v3-coll-byte-empty-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b06d1930e000e00",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b06d1930e000e00"
+    },
+    {
+      "name": "constant-coll-byte-control",
+      "kind": "Constant",
+      "bytes_hex": "0e020102",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0e020102"
+    },
+    {
+      "name": "register-coll-byte-control",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010e020102000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "c0843d0008d30100010e020102000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "extension-coll-byte-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010e020102000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010e020102000001c0843d0008d3010000"
+    },
+    {
+      "name": "output-register-coll-byte-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010e020102",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010e020102"
+    },
+    {
+      "name": "unsized-coll-byte-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930e0201020e020102",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "00d1930e0201020e020102"
+    },
+    {
+      "name": "sized-v0-coll-byte-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "080ad1930e0201020e020102",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "080ad1930e0201020e020102"
+    },
+    {
+      "name": "sized-v3-coll-byte-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b0ad1930e0201020e020102",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b0ad1930e0201020e020102"
+    },
+    {
+      "name": "constant-coll-bool-control",
+      "kind": "Constant",
+      "bytes_hex": "0d0305",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0d0305"
+    },
+    {
+      "name": "register-coll-bool-control",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010d0305000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "c0843d0008d30100010d0305000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "extension-coll-bool-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010d0305000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010d0305000001c0843d0008d3010000"
+    },
+    {
+      "name": "output-register-coll-bool-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010d0305",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010d0305"
+    },
+    {
+      "name": "unsized-coll-bool-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930d03050d0305",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "00d1930d03050d0305"
+    },
+    {
+      "name": "sized-v0-coll-bool-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0808d1930d03050d0305",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0808d1930d03050d0305"
+    },
+    {
+      "name": "sized-v3-coll-bool-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b08d1930d03050d0305",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b08d1930d03050d0305"
+    },
+    {
+      "name": "constant-coll-tuple-int-unit-empty-control",
+      "kind": "Constant",
+      "bytes_hex": "0c3c046200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0c406200"
+    },
+    {
+      "name": "register-coll-tuple-int-unit-empty-control",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010c3c046200000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "c0843d0008d30100010c406200000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "extension-coll-tuple-int-unit-empty-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010c3c046200000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010c406200000001c0843d0008d3010000"
+    },
+    {
+      "name": "output-register-coll-tuple-int-unit-empty-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010c3c046200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010c406200"
+    },
+    {
+      "name": "unsized-coll-tuple-int-unit-empty-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930c3c0462000c3c046200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "00d1930c4062000c406200"
+    },
+    {
+      "name": "sized-v0-coll-tuple-int-unit-empty-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "080cd1930c3c0462000c3c046200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "080ad1930c4062000c406200"
+    },
+    {
+      "name": "sized-v3-coll-tuple-int-unit-empty-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b0cd1930c3c0462000c3c046200",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b0ad1930c4062000c406200"
+    },
+    {
+      "name": "constant-coll-tuple-int-unit-control",
+      "kind": "Constant",
+      "bytes_hex": "0c3c0462020204",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0c4062020204"
+    },
+    {
+      "name": "register-coll-tuple-int-unit-control",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d30100010c3c0462020204000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "c0843d0008d30100010c4062020204000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "extension-coll-tuple-int-unit-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010c3c0462020204000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000001010c4062020204000001c0843d0008d3010000"
+    },
+    {
+      "name": "output-register-coll-tuple-int-unit-control",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010c3c0462020204",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d30100010c4062020204"
+    },
+    {
+      "name": "unsized-coll-tuple-int-unit-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d1930c3c04620202040c3c0462020204",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "00d1930c40620202040c4062020204"
+    },
+    {
+      "name": "sized-v0-coll-tuple-int-unit-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0810d1930c3c04620202040c3c0462020204",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "080ed1930c40620202040c4062020204"
+    },
+    {
+      "name": "sized-v3-coll-tuple-int-unit-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b10d1930c3c04620202040c3c0462020204",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b0ed1930c40620202040c4062020204"
+    },
+    {
+      "name": "nested-box-register-zero-constant",
+      "kind": "Constant",
+      "bytes_hex": "63c0843d0008d30100010c6200000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "nested-box-register-zero-unsized",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d19363c0843d0008d30100010c620000000000000000000000000000000000000000000000000000000000000000000063c0843d0008d30100010c6200000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "nested-box-register-zero-sized",
+      "kind": "ErgoTree",
+      "bytes_hex": "085ed19363c0843d0008d30100010c620000000000000000000000000000000000000000000000000000000000000000000063c0843d0008d30100010c6200000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "085ed19363c0843d0008d30100010c620000000000000000000000000000000000000000000000000000000000000000000063c0843d0008d30100010c6200000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "nested-box-unsized-script-zero-constant",
+      "kind": "Constant",
+      "bytes_hex": "63c0843d00d1930c62000c6200010000000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "nested-box-unsized-script-zero-in-sized-tree",
+      "kind": "ErgoTree",
+      "bytes_hex": "0864d19363c0843d00d1930c62000c620001000000000000000000000000000000000000000000000000000000000000000000000063c0843d00d1930c62000c6200010000000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "segregated-zero-unsized",
+      "kind": "ErgoTree",
+      "bytes_hex": "10010c620008d3",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "segregated-zero-sized-v0",
+      "kind": "ErgoTree",
+      "bytes_hex": "1806010c620008d3",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "1806010c620008d3"
+    },
+    {
+      "name": "segregated-zero-sized-v3",
+      "kind": "ErgoTree",
+      "bytes_hex": "1b06010c620008d3",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "1b06010c620008d3"
+    },
+    {
+      "name": "ast-unit-collection-unsized-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d193830062830062",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "00d193830062830062"
+    },
+    {
+      "name": "ast-unit-collection-sized-v3-control",
+      "kind": "ErgoTree",
+      "bytes_hex": "0b0ad193830062830062",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0b08d193830062830062"
+    }
+  ]
+}

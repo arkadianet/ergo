@@ -148,8 +148,8 @@ pub enum ReadError {
         args: Vec<u8>,
         message: String,
     },
-    /// Nested value/expression deserialization exceeded the maximum tree depth
-    /// (Scala `SigmaConstants.MaxTreeDepth`). Scala raises this as a
+    /// Deserialization exceeded the value/expression or type recursion bound
+    /// (Scala `SigmaConstants.MaxTreeDepth` or `MaxTypeDepth`). Scala raises this as a
     /// `SerializerException` (`DeserializeCallDepthExceeded`), which is NOT in
     /// the set its `ErgoTreeSerializer.deserializeErgoTree` catches, so it is
     /// never wrapped into an `UnparsedErgoTree` (soft fork) even for

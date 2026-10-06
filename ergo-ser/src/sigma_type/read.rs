@@ -61,12 +61,12 @@ pub fn decode_type(r: &mut VlqReader, first: u8) -> Result<SigmaType, ReadError>
 /// depth guard.
 fn read_type_byte(r: &mut VlqReader, depth: usize) -> Result<u8, ReadError> {
     if depth > MAX_TYPE_DEPTH {
-        // Past the guard Scala's recursive reader overflows its thread stack,
-        // a `StackOverflowError` that is not a `ValidationException`: a
-        // size-delimited tree does not degrade on it, so neither does ours.
-        return Err(ReadError::HardReject(format!(
-            "type recursion depth exceeds maximum ({MAX_TYPE_DEPTH})"
-        )));
+        // DeserializeCallDepthExceeded is a SerializerException, not a
+        // ValidationException: hard at every boundary, including sized trees.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/serialization/TypeSerializer.scala#L134-L137
+        return Err(ReadError::DepthLimitExceeded {
+            max: MAX_TYPE_DEPTH,
+        });
     }
     r.get_u8()
 }
@@ -338,10 +338,11 @@ fn decode_constructor(byte: u8, depth: usize, gate_v: u8) -> Result<Step, ReadEr
         (1, 0) => wrap(next, |t| SigmaType::SColl(Box::new(t))),
         (1, _) => Ok(Step::Done(coll(prim()?))),
 
-        // constrId 2: Coll[Coll[T]]. Two levels in one byte; both writers
-        // expand the non-embeddable form to one byte per level, so charge both
-        // to keep the guard's verdict.
-        (2, 0) => wrap(depth + 2, |t| {
+        // getArgType makes only ONE recursive call, even when the compact
+        // constructor creates two collection layers. Embedded primitives make
+        // no recursive call at all. Deliberately retain this wire-shape limit.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/serialization/TypeSerializer.scala#L150-L163
+        (2, 0) => wrap(next, |t| {
             SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(t))))
         }),
         (2, _) => Ok(Step::Done(coll(coll(prim()?)))),
@@ -350,8 +351,8 @@ fn decode_constructor(byte: u8, depth: usize, gate_v: u8) -> Result<Step, ReadEr
         (3, 0) => wrap(next, |t| SigmaType::SOption(Box::new(t))),
         (3, _) => Ok(Step::Done(option(prim()?))),
 
-        // constrId 4: Option[Coll[T]], charged two levels like constrId 2.
-        (4, 0) => wrap(depth + 2, |t| {
+        // Option[Coll[T]] also makes just one getArgType recursive call.
+        (4, 0) => wrap(next, |t| {
             SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(t))))
         }),
         (4, _) => Ok(Step::Done(option(coll(prim()?)))),
@@ -371,17 +372,20 @@ fn decode_constructor(byte: u8, depth: usize, gate_v: u8) -> Result<Step, ReadEr
             }))
         }
 
-        // constrId 6: triple (primId 0), or `(T, prim)`: the embeddable second
-        // item is decoded only after the first is read.
+        // constrId 6: triple (primId 0), or `(T, prim)`: Scala validates the
+        // embedded second type BEFORE recursively reading the first type.
         (6, 0) => Ok(open_tuple(next, 3)),
-        (6, _) => Ok(Step::Open(Frame {
-            child_depth: next,
-            kind: FrameKind::Tuple {
-                items: Vec::with_capacity(2),
-                remaining: 1,
-                then_prim: Some(prim_id),
-            },
-        })),
+        (6, _) => {
+            prim()?;
+            Ok(Step::Open(Frame {
+                child_depth: next,
+                kind: FrameKind::Tuple {
+                    items: Vec::with_capacity(2),
+                    remaining: 1,
+                    then_prim: Some(prim_id),
+                },
+            }))
+        }
 
         // constrId 7: quad (primId 0), or the symmetric pair `(prim, prim)`.
         (7, 0) => Ok(open_tuple(next, 4)),
@@ -703,10 +707,7 @@ mod tests {
 
     #[test]
     fn read_type_nested_to_max_depth_round_trips() {
-        // Scala reads a `Coll` chain until its JVM stack overflows, about
-        // 9,800 levels with the default 1 MiB stack. The guard sits above
-        // that, and the iterative reader needs no deep native stack to get
-        // there.
+        // Eight recursive calls plus an embedded terminal are accepted.
         on_big_stack(|| {
             let bytes = nested_coll_bytes(MAX_TYPE_DEPTH + 1);
             let mut r = VlqReader::new(&bytes);
@@ -724,15 +725,12 @@ mod tests {
 
     #[test]
     fn read_type_past_max_depth_hard_rejects() {
-        // One level past the guard. A JVM overflowing its stack throws a
-        // `StackOverflowError`, not a `ValidationException`, so the refusal is
-        // hard: a size-delimited tree must not degrade on it.
+        // One recursive call beyond 8 throws DeserializeCallDepthExceeded;
+        // it cannot degrade even inside a size-delimited tree.
         let bytes = nested_coll_bytes(MAX_TYPE_DEPTH + 2);
         let mut r = VlqReader::new(&bytes);
         match read_type(&mut r) {
-            Err(ReadError::HardReject(msg)) => {
-                assert!(msg.contains("type recursion depth"), "got: {msg}")
-            }
+            Err(ReadError::DepthLimitExceeded { max }) => assert_eq!(max, 8),
             other => panic!("expected a hard depth reject, got: {other:?}"),
         }
     }
@@ -747,24 +745,25 @@ mod tests {
         let bytes = [0x60u8, 0xFF].repeat(MAX_TYPE_DEPTH + 2);
         let mut r = VlqReader::new(&bytes);
         match read_type(&mut r) {
-            Err(ReadError::HardReject(msg)) => {
-                assert!(msg.contains("type recursion depth"), "got: {msg}")
-            }
+            Err(ReadError::DepthLimitExceeded { max }) => assert_eq!(max, 8),
             other => panic!("expected a hard depth reject, got: {other:?}"),
         }
     }
 
     #[test]
-    fn read_type_compact_nested_coll_charges_two_levels() {
-        // `Coll[Coll[T]]` (0x18) with a non-embeddable T is two levels in one
-        // byte and is charged both, like the one-byte-per-level form.
-        let mut bytes = vec![0x18u8; MAX_TYPE_DEPTH / 2];
+    fn read_type_compact_nested_coll_counts_recursive_calls() {
+        // Eight compact constructors make eight recursive calls while
+        // constructing 16 collection layers. The embedded terminal adds none.
+        let mut bytes = vec![0x18u8; MAX_TYPE_DEPTH];
         bytes.push(0x0E);
         let mut r = VlqReader::new(&bytes);
         assert!(read_type(&mut r).is_ok(), "the last item sits at the guard");
         bytes.insert(0, 0x18);
         let mut r = VlqReader::new(&bytes);
-        assert!(matches!(read_type(&mut r), Err(ReadError::HardReject(_))));
+        assert!(matches!(
+            read_type(&mut r),
+            Err(ReadError::DepthLimitExceeded { max: 8 })
+        ));
     }
 
     // ----- oracle parity -----

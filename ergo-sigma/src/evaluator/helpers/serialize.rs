@@ -585,7 +585,10 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
             None => Ok(Value::Opt(None)),
         },
         // SBox constant — parse full ErgoBox (candidate + txId + index) with real identity
-        (SigmaType::SBox, SigmaValue::OpaqueBoxBytes(bytes)) => {
+        (
+            SigmaType::SBox,
+            SigmaValue::OpaqueBoxBytes(bytes) | SigmaValue::CanonicalBoxBytes { bytes, .. },
+        ) => {
             use ergo_ser::register::RegisterId;
             let mut r = ergo_primitives::reader::VlqReader::new(bytes);
             let ergo_box = ergo_ser::ergo_box::read_accepted_ergo_box(&mut r).map_err(|e| {

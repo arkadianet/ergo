@@ -465,7 +465,14 @@ fn roundtrip_method_call() {
             type_args: vec![],
         },
     });
-    roundtrip(&body, false);
+    let mut w = VlqWriter::new();
+    write_expr(&mut w, &body, false).unwrap();
+    assert_eq!(hex::encode(w.result()), "db0105a7");
+    let bytes = hex::decode("dc0105a700").unwrap();
+    let parsed = parse_expr(&mut VlqReader::new(&bytes), 0, 0).unwrap();
+    let mut w = VlqWriter::new();
+    write_expr(&mut w, &parsed, false).unwrap();
+    assert_eq!(hex::encode(w.result()), "db0105a7");
 }
 
 #[test]

@@ -5,12 +5,13 @@
 // https://github.com/mwaddip/santa/blob/a7a128bb/docs/contract/runner-contract-transaction.md
 // JVM setup/decode failures abort regeneration; only validateStateful failures
 // become rejection verdicts. This prevents an oracle failure blessing bad fixtures.
-// ergo-core 6.0.6 is available in the GitLab Maven repository below or via
-// publishLocal from ergoplatform/ergo v6.0.6, as for SantaWireOracle.
+// ergo-core 6.0.7 is available in the GitLab Maven repository below or via
+// publishLocal from ergoplatform/ergo v6.0.7, as for SantaWireOracle.
 //> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
+//> using repository "ivy2Local"
 //> using scala 2.12
-//> using dep org.scorexfoundation::sigma-state:6.0.6
-//> using dep org.ergoplatform::ergo-core:6.0.6
+//> using dep org.scorexfoundation::sigma-state:6.0.7
+//> using dep org.ergoplatform::ergo-core:6.0.7
 
 import io.circe.Json
 import io.circe.parser.parse

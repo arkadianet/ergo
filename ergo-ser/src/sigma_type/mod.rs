@@ -54,30 +54,17 @@ const SHEADER_CODE: u8 = 104;
 const SPREHEADER_CODE: u8 = 105;
 const SGLOBAL_CODE: u8 = 106;
 
-/// Maximum nesting depth of a type descriptor.
-///
-/// Scala has no explicit limit: `TypeSerializer.deserialize` threads a `depth`
-/// parameter but never checks it, and the `CoreByteReader.level` /
-/// `SigmaConstants.MaxTreeDepth` (= 110) counter is charged only by the value
-/// serializers, never by `TypeSerializer`. Its real limit is the JVM thread
-/// stack its recursive reader runs on: with the default 1 MiB stack
-/// (the official Docker image sets none) sigma-state 6.0.6 reads a
-/// `Coll[Coll[...]]` chain about 9,800 levels deep before a
-/// `StackOverflowError`. Inside a box or a tree the 4096-byte position limit
-/// binds first, one byte per level; a context extension has no such limit.
-///
-/// The guard sits above what a default JVM accepts, so the node refuses no
-/// descriptor a default-configured reference node reads. Our reader is
-/// iterative, and the recursive walks over a parsed type (clone, equality,
-/// drop, the writer, `Debug`) each stay under ~3 MiB of stack at this depth in
-/// release builds, well inside the node's 8 MiB thread stacks. A reference node run
-/// with a larger `-Xss` reads deeper descriptors in a context extension; those
-/// remain refused here.
-///
-/// The guard counts nesting levels, not bytes: the compact `Coll[Coll[T]]`
-/// and `Option[Coll[T]]` codes are charged two levels, matching the
-/// one-byte-per-level form both writers emit.
-const MAX_TYPE_DEPTH: usize = 16_384;
+/// Scala 6.0.7 TypeSerializer's independent recursion bound. Depth starts at
+/// zero and only recursive deserialize calls increment it; compact embedded
+/// constructors do not consume additional depth.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/serialization/TypeSerializer.scala#L131-L243>
+// SigmaConstants.MaxTypeDepth is SizeConstant(value = 8, id = 16).
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/data/SigmaConstants.scala#L81-L83
+const MAX_TYPE_DEPTH: usize = 8;
+
+// The JVM type writer has no MaxTypeDepth check. Retain the existing independent
+// native-stack safety backstop for caller-created types, not the read limit.
+const MAX_TYPE_WRITE_DEPTH: usize = 16_384;
 
 /// Sigma type descriptors used by the Ergo protocol for serializing
 /// typed values.
