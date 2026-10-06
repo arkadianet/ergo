@@ -19,9 +19,7 @@ infrastructure.
 ### Fixed
 
 - Reject nested Box constants whose tree version exceeds the activated version when decoding embedded scripts, substituting template constants, or deserializing global values.
-
 - Accept size-delimited output trees whose declared size differs from their parsed body, preserving received proposition bytes while re-encoding box bytes and transaction messages; verify threshold proofs with truncated polynomial coefficients.
-
 - Reject script spends whose tree version exceeds a negative activated version derived from block versions 0 or 129–255.
 - Verify Fiat–Shamir proofs for empty AND and zero-of-zero threshold propositions, including empty children nested in large conjectures.
 - Correct embedded-script substitution in box registers and context variables: preserve unresolved nodes after swallowed decode casts, reject failed ancestor reconstruction, read SELF proposition bytes from R1, and charge Boolean-root conversion.
