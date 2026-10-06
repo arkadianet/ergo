@@ -110,6 +110,7 @@ fn write_transaction_tail(
     data_inputs: &[DataInput],
     token_table: &[TokenId],
     output_candidates: &[ErgoBoxCandidate],
+    received_tree_sizes: bool,
 ) -> Result<(), WriteError> {
     w.put_u16(data_inputs.len() as u16);
     for di in data_inputs {
@@ -121,7 +122,11 @@ fn write_transaction_tail(
     }
     w.put_u16(output_candidates.len() as u16);
     for out in output_candidates {
-        write_ergo_box_candidate_indexed(w, out, token_table)?;
+        if received_tree_sizes {
+            crate::ergo_box::write_ergo_box_candidate_indexed_for_wire_check(w, out, token_table)?;
+        } else {
+            write_ergo_box_candidate_indexed(w, out, token_table)?;
+        }
     }
     Ok(())
 }
@@ -166,9 +171,9 @@ pub fn write_transaction(w: &mut VlqWriter, tx: &Transaction) -> Result<(), Writ
 }
 
 /// Serialize for the wire canonicality check, preserving parser-accepted
-/// context-extension encodings. Scala accepts TrueLeaf/FalseLeaf in extensions
-/// but hashes their ConstantSerializer form into bytesToSign. All surrounding
-/// transaction fields still use the normal canonical encoders.
+/// context-extension encodings and declared output tree sizes. Scala accepts
+/// TrueLeaf/FalseLeaf in extensions and mismatched tree sizes, but normalizes
+/// both in bytesToSign. Other fields use the normal canonical encoders.
 pub fn write_transaction_preserving_extension_encodings(
     w: &mut VlqWriter,
     tx: &Transaction,
@@ -203,7 +208,13 @@ fn write_transaction_inner(
             write_input(w, input)?;
         }
     }
-    write_transaction_tail(w, &tx.data_inputs, &token_table, &tx.output_candidates)
+    write_transaction_tail(
+        w,
+        &tx.data_inputs,
+        &token_table,
+        &tx.output_candidates,
+        received_extensions,
+    )
 }
 
 /// Decode the wire form produced by [`write_transaction`].
@@ -275,7 +286,13 @@ pub fn write_unsigned_transaction(
     for input in &utx.inputs {
         write_unsigned_input(w, input)?;
     }
-    write_transaction_tail(w, &utx.data_inputs, &token_table, &utx.output_candidates)
+    write_transaction_tail(
+        w,
+        &utx.data_inputs,
+        &token_table,
+        &utx.output_candidates,
+        false,
+    )
 }
 
 /// Decode the wire form produced by [`write_unsigned_transaction`].
@@ -323,7 +340,13 @@ pub fn bytes_to_sign_into(w: &mut VlqWriter, tx: &Transaction) -> Result<(), Wri
     for input in &tx.inputs {
         write_input_to_sign(w, input)?;
     }
-    write_transaction_tail(w, &tx.data_inputs, &token_table, &tx.output_candidates)
+    write_transaction_tail(
+        w,
+        &tx.data_inputs,
+        &token_table,
+        &tx.output_candidates,
+        false,
+    )
 }
 
 /// Serialize a signed transaction in bytes_to_sign form: each input's proof
@@ -869,6 +892,43 @@ mod tests {
             hex::encode(transaction_id(&tx).unwrap().as_bytes()),
             "9aa2fdeccef1976c7b7dd004a38a51d74429fd9f47486121c8b204b0d6f5650c"
         );
+    }
+
+    #[test]
+    fn wire_check_preserves_declared_tree_size_but_signing_recomputes_it() {
+        let prefix = hex::decode(
+            "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d",
+        )
+        .unwrap();
+        let mut canonical = prefix.clone();
+        canonical.extend_from_slice(&[0x08, 2, 0x08, 0xd3, 1, 0, 0]);
+        for declared in [0, 1, 2, 3, 127, 128, i32::MAX as u32, 1 << 31, u32::MAX] {
+            let mut w = VlqWriter::new();
+            w.put_bytes(&prefix);
+            w.put_u8(0x08);
+            w.put_u32(declared);
+            w.put_bytes(&[0x08, 0xd3, 1, 0, 0]);
+            let received = w.result();
+            let mut r = VlqReader::new(&received).with_activated_script_version(3);
+            let tx = read_transaction(&mut r).unwrap();
+            assert!(r.is_empty());
+            let mut w = VlqWriter::new();
+            write_transaction_preserving_extension_encodings(&mut w, &tx).unwrap();
+            assert_eq!(w.result(), received, "declared={declared}");
+            assert_eq!(
+                bytes_to_sign(&tx).unwrap(),
+                canonical,
+                "declared={declared}"
+            );
+        }
+        // The exception is limited to the size slot. A normalized body still
+        // differs in the wire check, preserving the existing acceptance gates.
+        let mut received = prefix;
+        received.extend_from_slice(&[0x08, 2, 0xd1, 0x7f, 1, 0, 0]); // sigmaProp(TrueLeaf)
+        let tx = read_transaction(&mut VlqReader::new(&received)).unwrap();
+        let mut w = VlqWriter::new();
+        write_transaction_preserving_extension_encodings(&mut w, &tx).unwrap();
+        assert_ne!(w.result(), received);
     }
 
     /// Scala oracle vector: a 1-in / 1-out transaction whose input's

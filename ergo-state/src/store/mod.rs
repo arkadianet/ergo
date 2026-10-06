@@ -478,7 +478,10 @@ pub(crate) fn verify_or_init_state_type_inner(
 }
 
 mod apply;
+
 pub mod emission;
+#[cfg(test)]
+mod sized_tree_tests;
 pub use apply::compute_minimal_full_block_height;
 mod backfill;
 mod dry_run;
