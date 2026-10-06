@@ -5,7 +5,7 @@
 
 #![cfg(test)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::store::dry_run::{
     apply_change_set_to_prover, apply_change_set_via_prover, DryRunInsertMap, DryRunRemoveMap,
@@ -458,6 +458,7 @@ fn poison_guard_drops_base_on_unwind() {
         state_root: snap.state_root(),
         tree,
         tree_height,
+        ancestors: VecDeque::new(),
     });
     assert!(base.as_ref().unwrap().root_identity().is_some());
 
@@ -792,11 +793,11 @@ fn advanced_base_second_dry_run_still_matches_oracle() {
     assert_eq!(oracle.1, second.1, "second run proof bytes == oracle");
 }
 
-/// With a 2-block jump (base at N, snapshot at N+2), the advance gate
-/// rejects (parent_id mismatch) and falls back to full rehydrate.
-/// The result must equal the fresh-rehydrate oracle.
+/// A base keyed to a tip that is not on the snapshot's chain (walking back
+/// from the committed tip never reaches a held tree) is rejected and falls
+/// back to full rehydrate. The result must equal the fresh-rehydrate oracle.
 #[test]
-fn advance_rejected_on_multi_block_jump() {
+fn advance_rejected_when_base_tip_is_off_chain() {
     use ergo_primitives::digest::ModifierId;
     use ergo_ser::header::serialize_header;
 
@@ -839,18 +840,9 @@ fn advance_rejected_on_multi_block_jump() {
         parent = id;
     }
 
-    // Seed base at N=1 (BEFORE block 2 was applied, so two blocks behind).
-    // To get the base at height 1, we need to snapshot before block 2 was
-    // applied. But the store is already at height 2. We cannot go back.
-    // Instead: prime the base with a WRONG tip_id (different from any block
-    // in the chain at height N+1 from the snapshot's perspective), which
-    // forces the advance gate to reject on parent-id mismatch.
-    //
-    // Specifically: the snapshot is now at height 2. We prime the base with
-    // a fake tip_id that is not the height-1 block id, so the height-2
-    // header's parent_id won't match.
-    // Manually construct a base with a fake tip_id (all 0xFF) so the
-    // advance gate rejects on parent-id mismatch and falls back to rehydrate.
+    // Prime the base with a fake tip_id (all 0xFF) that is not any block on
+    // the snapshot's chain: the walk back from the tip never meets it, so the
+    // advance is rejected and falls back to rehydrate.
     let snap_for_fake = store.committed_snapshot().unwrap().unwrap();
     let (fake_tree, fake_tree_height) =
         snap_for_fake.hydrate_tree().expect("hydrate for fake base");
@@ -859,6 +851,7 @@ fn advance_rejected_on_multi_block_jump() {
         state_root: snap_for_fake.state_root(),
         tree: fake_tree,
         tree_height: fake_tree_height,
+        ancestors: VecDeque::new(),
     });
 
     let oracle_snap = store.committed_snapshot().unwrap().unwrap();
@@ -869,20 +862,17 @@ fn advance_rejected_on_multi_block_jump() {
     let snap = store.committed_snapshot().unwrap().unwrap();
     let got = snap
         .candidate_dry_run_cached_with_changes(&mut base, &[], &empty_r, &empty_i, &mut None)
-        .expect("fallback after multi-block jump");
+        .expect("fallback after off-chain base");
 
     assert_eq!(
         oracle.0, got.0,
-        "multi-block jump fallback: state_root == oracle"
+        "off-chain base fallback: state_root == oracle"
     );
     assert_eq!(
         oracle.1, got.1,
-        "multi-block jump fallback: proof bytes == oracle"
+        "off-chain base fallback: proof bytes == oracle"
     );
-    assert_eq!(
-        oracle.2, got.2,
-        "multi-block jump fallback: tip id == oracle"
-    );
+    assert_eq!(oracle.2, got.2, "off-chain base fallback: tip id == oracle");
     // Base was rebuilt by fallback to match current tip.
     assert_eq!(
         base.as_ref().map(|b| b.tip_id()),
@@ -1688,3 +1678,417 @@ fn advance_digest_mismatch_falls_back_to_rehydrate() {
 // hydrate boundary ignores the only v1/v2-differing fields (cached
 // child labels), so the structural walk is format-agnostic — see the
 // note in `avl/hydrate.rs`.
+
+// ----- advance across reorgs and multi-block catch-up -----
+//
+// A base retains pristine trees for its tip's recent ancestors, so a tip that
+// forks off below the base (a reorg) — or that grew by several blocks — is
+// reached by replaying stored blocks instead of a full rehydrate. Same oracle
+// discipline as above: every advanced result is compared against a fresh
+// uncached dry-run on the same snapshot. Reorgs use the cross-store mechanism
+// of `advance_rejected_on_sibling_reorg`, with both stores sharing an
+// identical prefix so the branches meet at a common ancestor.
+
+/// Script for synthetic outputs: a constant `true`.
+fn always_true_tree() -> ergo_ser::ergo_tree::ErgoTree {
+    use ergo_ser::opcode::Expr;
+    use ergo_ser::sigma_type::SigmaType;
+    use ergo_ser::sigma_value::SigmaValue;
+    ergo_ser::ergo_tree::ErgoTree {
+        version: 0,
+        has_size: true,
+        constant_segregation: false,
+        reserved_header_bits: 0,
+        constants: vec![],
+        body: Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(true),
+        },
+    }
+}
+
+/// A transaction spending `input` into one fresh output; `creation_height`
+/// makes outputs of otherwise identical spends distinct.
+fn spend(input: [u8; 32], creation_height: u32) -> ergo_ser::transaction::Transaction {
+    use ergo_primitives::digest::Digest32;
+    use ergo_ser::ergo_box::ErgoBoxCandidate;
+    use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+    use ergo_ser::register::AdditionalRegisters;
+    ergo_ser::transaction::Transaction {
+        inputs: vec![Input {
+            box_id: Digest32::from_bytes(input),
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![ErgoBoxCandidate::new(
+            1_000_000,
+            always_true_tree(),
+            creation_height,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap()],
+    }
+}
+
+/// Apply `txs` as the next block on `store`, with a header committing to the
+/// true post-block state root. The header is always stored; the
+/// BlockTransactions section only when `store_section` (an advance must
+/// replay it). Returns the block's header id.
+fn apply_test_block(
+    store: &mut StateStore,
+    parent: ergo_primitives::digest::ModifierId,
+    height: u32,
+    timestamp: u64,
+    txs: &[ergo_ser::transaction::Transaction],
+    store_section: bool,
+) -> ergo_primitives::digest::ModifierId {
+    use ergo_primitives::digest::Digest32;
+    use ergo_ser::header::serialize_header;
+
+    let refs: Vec<&ergo_ser::transaction::Transaction> = txs.iter().collect();
+    let (to_remove, to_insert) = StateStore::build_utxo_changes_raw(&refs).expect("utxo changes");
+    let post_root = {
+        let snap = store.committed_snapshot().unwrap().unwrap();
+        let mut prover = snap.hydrate_prover().expect("hydrate for post-root");
+        apply_change_set_to_prover(&mut prover, &[], &to_remove, &to_insert)
+            .expect("post-root preview")
+            .0
+    };
+    let hdr = ergo_ser::header::Header {
+        version: 2,
+        parent_id: parent,
+        ad_proofs_root: Digest32::from_bytes([0u8; 32]),
+        transactions_root: Digest32::from_bytes([0u8; 32]),
+        state_root: post_root,
+        timestamp,
+        extension_root: Digest32::from_bytes([0u8; 32]),
+        n_bits: 16842752,
+        height,
+        votes: [0u8; 3],
+        unparsed_bytes: vec![],
+        solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+            pk: ergo_primitives::group_element::GroupElement::from([0x02u8; 33]),
+            nonce: [0u8; 8],
+        },
+    };
+    let (bytes, id) = serialize_header(&hdr).expect("serialize header");
+    let id_b: [u8; 32] = *id.as_bytes();
+    store.store_header(&id_b, &bytes).expect("store header");
+    if store_section {
+        make_and_store_block_transactions_section(
+            store,
+            &id_b,
+            hdr.transactions_root.as_bytes(),
+            txs,
+        );
+    }
+    store
+        .apply_block_unchecked(height, &id_b, &post_root, txs)
+        .expect("apply block");
+    id
+}
+
+/// Genesis store plus block 1 (spends `box_id(1)`). Deterministic, so two
+/// calls produce stores sharing an identical block 1 — the common ancestor.
+fn store_with_shared_block_1() -> (
+    tempfile::TempDir,
+    StateStore,
+    ergo_primitives::digest::ModifierId,
+) {
+    let (dir, mut store) = genesis_store();
+    let genesis_parent = ergo_primitives::digest::ModifierId::from_bytes([0u8; 32]);
+    let b1 = apply_test_block(
+        &mut store,
+        genesis_parent,
+        1,
+        11_000_001,
+        &[spend(box_id(1), 1)],
+        true,
+    );
+    (dir, store, b1)
+}
+
+/// Run the cached dry-run for `store`'s committed tip and assert it is
+/// bit-identical to the fresh-rehydrate oracle. Returns the disposition.
+fn cached_build_matching_oracle(
+    store: &StateStore,
+    base: &mut Option<crate::store::snapshot::DryRunBase>,
+    label: &str,
+) -> Option<BaseDisposition> {
+    let empty_r: DryRunRemoveMap = BTreeMap::new();
+    let empty_i: DryRunInsertMap = BTreeMap::new();
+    let oracle = store
+        .committed_snapshot()
+        .unwrap()
+        .unwrap()
+        .candidate_dry_run_via_changes_for_test(&[], &empty_r, &empty_i)
+        .expect("oracle");
+    let snap = store.committed_snapshot().unwrap().unwrap();
+    let mut disposition = None;
+    let got = snap
+        .candidate_dry_run_cached_with_changes(base, &[], &empty_r, &empty_i, &mut disposition)
+        .unwrap_or_else(|e| panic!("{label}: cached build failed: {e:?}"));
+    assert_eq!(oracle.0, got.0, "{label}: state_root == oracle");
+    assert_eq!(oracle.1, got.1, "{label}: proof bytes == oracle");
+    assert_eq!(oracle.2, got.2, "{label}: tip id == oracle");
+    disposition
+}
+
+fn ancestor_tips(base: &Option<crate::store::snapshot::DryRunBase>) -> Vec<[u8; 32]> {
+    base.as_ref()
+        .expect("base present")
+        .ancestors
+        .iter()
+        .map(|a| a.tip_id)
+        .collect()
+}
+
+/// The reorg the mining cache must survive: the base advanced 1 → 2A, then
+/// the chain switched to 1 → 2B → 3B. The next build replays 2B and 3B from
+/// the retained tree at 1 — never rehydrating — and is bit-identical to the
+/// oracle. Branch A and B mutate different boxes, so this also proves the
+/// advance to 2A left the retained tree at 1 untouched.
+#[test]
+fn advance_across_reorg_replays_new_branch_from_ancestor_and_matches_oracle() {
+    // Chain A: 1 → 2A (spends box 2). Seed at 1, advance to 2A.
+    let (_dir_a, mut store_a, b1) = store_with_shared_block_1();
+    let mut base = None;
+    assert_eq!(
+        cached_build_matching_oracle(&store_a, &mut base, "seed at 1"),
+        Some(BaseDisposition::Rehydrated)
+    );
+    apply_test_block(
+        &mut store_a,
+        b1,
+        2,
+        11_000_002,
+        &[spend(box_id(2), 2)],
+        true,
+    );
+    assert_eq!(
+        cached_build_matching_oracle(&store_a, &mut base, "advance to 2A"),
+        Some(BaseDisposition::Advanced)
+    );
+    assert_eq!(ancestor_tips(&base), vec![*b1.as_bytes()], "1 retained");
+
+    // Chain B shares block 1, then 2B (spends box 3) → 3B (spends 2B's output).
+    let (_dir_b, mut store_b, b1_b) = store_with_shared_block_1();
+    assert_eq!(b1, b1_b, "both chains share block 1");
+    let tx_2b = spend(box_id(3), 2);
+    let b2b = apply_test_block(
+        &mut store_b,
+        b1,
+        2,
+        22_000_002,
+        std::slice::from_ref(&tx_2b),
+        true,
+    );
+    let out_2b = ergo_ser::ergo_box::ErgoBox {
+        candidate: tx_2b.output_candidates[0].clone(),
+        transaction_id: ergo_ser::transaction::transaction_id(&tx_2b).unwrap(),
+        index: 0,
+    }
+    .box_id()
+    .unwrap();
+    let b3b = apply_test_block(
+        &mut store_b,
+        b2b,
+        3,
+        22_000_003,
+        &[spend(*out_2b.as_bytes(), 3)],
+        true,
+    );
+
+    // Reorg: the base (at 2A) is fed chain B's snapshot (tip 3B).
+    assert_eq!(
+        cached_build_matching_oracle(&store_b, &mut base, "reorg to 3B"),
+        Some(BaseDisposition::AdvancedFromAncestor),
+        "a reorg onto a retained ancestor must replay, not rehydrate"
+    );
+    assert_eq!(base.as_ref().unwrap().tip_id(), *b3b.as_bytes());
+    assert_eq!(
+        ancestor_tips(&base),
+        vec![*b2b.as_bytes(), *b1.as_bytes()],
+        "ancestors follow the new branch; 2A is gone"
+    );
+
+    // The replayed base is pristine: a same-tip rebuild hits and still
+    // matches the oracle.
+    assert_eq!(
+        cached_build_matching_oracle(&store_b, &mut base, "hit on 3B"),
+        Some(BaseDisposition::Hit)
+    );
+}
+
+/// A tip that moved back onto a retained ancestor (rollback with no new
+/// block yet) reuses that ancestor's tree as the base, with nothing to replay.
+#[test]
+fn advance_to_a_retained_ancestor_tip_reuses_its_tree_and_matches_oracle() {
+    let (_dir_a, mut store_a, b1) = store_with_shared_block_1();
+    let mut base = None;
+    cached_build_matching_oracle(&store_a, &mut base, "seed at 1");
+    apply_test_block(
+        &mut store_a,
+        b1,
+        2,
+        11_000_002,
+        &[spend(box_id(2), 2)],
+        true,
+    );
+    cached_build_matching_oracle(&store_a, &mut base, "advance to 2A");
+
+    // Chain B stops at the shared block 1.
+    let (_dir_b, store_b, _) = store_with_shared_block_1();
+    assert_eq!(
+        cached_build_matching_oracle(&store_b, &mut base, "back to 1"),
+        Some(BaseDisposition::AdvancedFromAncestor)
+    );
+    assert_eq!(base.as_ref().unwrap().tip_id(), *b1.as_bytes());
+    assert!(
+        ancestor_tips(&base).is_empty(),
+        "1 had no retained ancestors"
+    );
+}
+
+/// The chain grew by several blocks between two builds: the base replays all
+/// of them from its own tip instead of rehydrating.
+#[test]
+fn advance_across_multi_block_catch_up_matches_oracle() {
+    let (_dir, mut store, b1) = store_with_shared_block_1();
+    let mut base = None;
+    cached_build_matching_oracle(&store, &mut base, "seed at 1");
+    let b2 = apply_test_block(&mut store, b1, 2, 11_000_002, &[spend(box_id(2), 2)], true);
+    let b3 = apply_test_block(&mut store, b2, 3, 11_000_003, &[spend(box_id(3), 3)], true);
+    assert_eq!(
+        cached_build_matching_oracle(&store, &mut base, "catch up 1 → 3"),
+        Some(BaseDisposition::Advanced)
+    );
+    assert_eq!(base.as_ref().unwrap().tip_id(), *b3.as_bytes());
+    assert_eq!(ancestor_tips(&base), vec![*b2.as_bytes(), *b1.as_bytes()]);
+}
+
+/// A reorg whose fork point is not retained (here: the chains diverge below
+/// block 1) still falls back to a full rehydrate, which matches the oracle
+/// and leaves a base with no ancestors.
+#[test]
+fn advance_across_reorg_below_retained_ancestors_falls_back_to_rehydrate() {
+    let (_dir_a, mut store_a, b1) = store_with_shared_block_1();
+    let mut base = None;
+    cached_build_matching_oracle(&store_a, &mut base, "seed at 1");
+    apply_test_block(
+        &mut store_a,
+        b1,
+        2,
+        11_000_002,
+        &[spend(box_id(2), 2)],
+        true,
+    );
+    cached_build_matching_oracle(&store_a, &mut base, "advance to 2A");
+
+    // Chain B shares only genesis.
+    let (_dir_b, mut store_b) = genesis_store();
+    let genesis_parent = ergo_primitives::digest::ModifierId::from_bytes([0u8; 32]);
+    let c1 = apply_test_block(&mut store_b, genesis_parent, 1, 33_000_001, &[], true);
+    apply_test_block(
+        &mut store_b,
+        c1,
+        2,
+        33_000_002,
+        &[spend(box_id(3), 2)],
+        true,
+    );
+    assert_eq!(
+        cached_build_matching_oracle(&store_b, &mut base, "deep reorg"),
+        Some(BaseDisposition::RehydratedAfterFailedAdvance)
+    );
+    assert!(
+        ancestor_tips(&base).is_empty(),
+        "a rehydrated base starts fresh"
+    );
+}
+
+/// A replay that fails part-way (the new branch's BlockTransactions section
+/// is missing) drops every held tree — retained ancestors included — and
+/// rehydrates.
+#[test]
+fn advance_failing_mid_replay_drops_retained_trees_then_rehydrates() {
+    let (_dir_a, mut store_a, b1) = store_with_shared_block_1();
+    let mut base = None;
+    cached_build_matching_oracle(&store_a, &mut base, "seed at 1");
+    apply_test_block(
+        &mut store_a,
+        b1,
+        2,
+        11_000_002,
+        &[spend(box_id(2), 2)],
+        true,
+    );
+    cached_build_matching_oracle(&store_a, &mut base, "advance to 2A");
+
+    let (_dir_b, mut store_b, _) = store_with_shared_block_1();
+    apply_test_block(
+        &mut store_b,
+        b1,
+        2,
+        22_000_002,
+        &[spend(box_id(3), 2)],
+        false,
+    );
+    assert_eq!(
+        cached_build_matching_oracle(&store_b, &mut base, "reorg without section"),
+        Some(BaseDisposition::RehydratedAfterFailedAdvance)
+    );
+    assert!(
+        ancestor_tips(&base).is_empty(),
+        "failed replay keeps no trees"
+    );
+}
+
+/// More new blocks than one advance replays: full rehydrate.
+#[test]
+fn advance_beyond_roll_forward_window_rehydrates() {
+    let (_dir, mut store, b1) = store_with_shared_block_1();
+    let mut base = None;
+    cached_build_matching_oracle(&store, &mut base, "seed at 1");
+    let mut parent = b1;
+    for h in 2..=(2 + super::MAX_ROLL_FORWARD_BLOCKS as u32) {
+        parent = apply_test_block(&mut store, parent, h, 11_000_000 + u64::from(h), &[], true);
+    }
+    assert_eq!(
+        cached_build_matching_oracle(&store, &mut base, "window exceeded"),
+        Some(BaseDisposition::RehydratedAfterFailedAdvance)
+    );
+}
+
+/// Retained ancestors are capped at `RETAINED_ANCESTORS`, nearest first.
+#[test]
+fn advance_retains_at_most_the_configured_number_of_ancestors() {
+    let (_dir, mut store, b1) = store_with_shared_block_1();
+    let mut base = None;
+    cached_build_matching_oracle(&store, &mut base, "seed at 1");
+    let mut chain = vec![b1];
+    for h in 2..=6u32 {
+        let id = apply_test_block(
+            &mut store,
+            *chain.last().unwrap(),
+            h,
+            11_000_000 + u64::from(h),
+            &[],
+            true,
+        );
+        chain.push(id);
+        assert_eq!(
+            cached_build_matching_oracle(&store, &mut base, "single-step advance"),
+            Some(BaseDisposition::Advanced)
+        );
+    }
+    let want: Vec<[u8; 32]> = chain
+        .iter()
+        .rev()
+        .skip(1)
+        .take(super::RETAINED_ANCESTORS)
+        .map(|id| *id.as_bytes())
+        .collect();
+    assert_eq!(ancestor_tips(&base), want);
+}

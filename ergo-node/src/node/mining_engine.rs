@@ -362,9 +362,11 @@ pub(super) struct BuildRequest {
     ///
     /// The reply carries the build result plus the dry-run base-cache
     /// disposition string for the build-complete log line:
-    /// `"off"` (cache disabled), `"primed"` (tip hit), `"advanced"` (single-step
-    /// advance succeeded), `"cold"` (full rehydrate), or `"cold_fallback"`
-    /// (advance attempted, failed, fell back to rehydrate). The disposition is
+    /// `"off"` (cache disabled), `"primed"` (tip hit), `"advanced"` (base
+    /// advanced from its own tip), `"advanced_fork"` (tip forked off below the
+    /// base; a retained ancestor was advanced along the new branch), `"cold"`
+    /// (full rehydrate), or `"cold_fallback"` (advance attempted, failed, fell
+    /// back to rehydrate). The disposition is
     /// computed on the worker — the only place that can observe the cache slot
     /// state after the build — and threaded back here because the log lines live
     /// on the coordinator.
@@ -551,8 +553,8 @@ pub(super) fn run_build_worker(
             break result;
         };
         // Map the returned disposition to the wire string the coordinator logs.
-        // `"off"` when the cache is disabled; `"advanced"` / `"primed"` /
-        // `"cold"` / `"cold_fallback"` from the actual path taken.
+        // `"off"` when the cache is disabled; `"advanced"` / `"advanced_fork"`
+        // / `"primed"` / `"cold"` / `"cold_fallback"` from the actual path taken.
         // Non-building outcomes (TipNotVisible etc.) leave `raw_disposition`
         // `None`; we keep `"off"` when the cache is disabled and `"cold"` as
         // the fallback for the non-building paths (the slot is unaffected, so
@@ -563,6 +565,7 @@ pub(super) fn run_build_worker(
             match raw_disposition {
                 Some(BaseDisposition::Hit) => "primed",
                 Some(BaseDisposition::Advanced) => "advanced",
+                Some(BaseDisposition::AdvancedFromAncestor) => "advanced_fork",
                 Some(BaseDisposition::Rehydrated) => "cold",
                 Some(BaseDisposition::RehydratedAfterFailedAdvance) => "cold_fallback",
                 // Cache enabled but no build ran (early-return outcome): keep
