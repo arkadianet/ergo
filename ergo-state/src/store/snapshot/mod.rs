@@ -931,7 +931,7 @@ pub enum BaseDisposition {
 /// consumer — never shared).
 ///
 /// Reorgs: the base also keeps pristine trees for its tip's most recent
-/// ancestors (up to [`RETAINED_ANCESTORS`]), so when the tip forks off below
+/// ancestors (up to `RETAINED_ANCESTORS`), so when the tip forks off below
 /// it the next build replays the new branch from the fork point instead of
 /// rehydrating the whole UTXO graph. Consecutive trees share every node a
 /// block did not touch, so each ancestor costs roughly one block's worth of
