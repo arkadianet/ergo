@@ -215,6 +215,7 @@ fn scala_sourced_rejection_parity() {
             | ValidationError::OutputFromFuture { .. }
             | ValidationError::OutputCreationHeightBelowInputs { .. }
             | ValidationError::DuplicateStorageRentOutput { .. }
+            | ValidationError::DuplicateDataInputs { .. }
             | ValidationError::ReemissionRulesViolated(_) => "MONETARY",
             ValidationError::ScriptError { .. } => "SCRIPT",
             ValidationError::ProofFailed { .. } => "PROOF",

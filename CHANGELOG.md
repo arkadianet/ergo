@@ -23,6 +23,14 @@ infrastructure.
 - Correct embedded-script substitution in box registers and context variables: preserve unresolved nodes after swallowed decode casts, reject failed ancestor reconstruction, read SELF proposition bytes from R1, and charge Boolean-root conversion.
 - Accept tuple and collection nodes with expression children in box registers and context extensions; preserve their wire forms, reject invalid runtime reads, and account for version-dependent output bytes and sizes.
 
+## [0.12.1] - 2026-10-06
+
+A consensus fix for mainnet. Upgrade every 0.12.0 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.
+
+### Fixed
+
+- Enforce validation rule 110 (`txDataInputsUnique`), added in the Scala node 6.0.7, from height 1,885,000. A transaction may repeat at most one data input; a transaction with a second repeat is now rejected in blocks, in the mempool and in mining candidates. Mainnet reached this height on 2026-10-01; 0.12.0 and earlier do not check the rule and accept such transactions (#603).
+
 ## [0.12.0] - 2026-10-05
 
 - **Storage:** moves to redb 4, and the node upgrades a 0.11 data directory automatically.

@@ -37,7 +37,8 @@ pub fn validate_structural(
     check_has_outputs(tx)?;
     check_collection_caps(tx)?;
     check_no_duplicate_inputs(tx)?;
-    // Note: duplicate data inputs are allowed (read-only references, matches Scala)
+    // Repeated data inputs are a stateful, height-gated rule (110); see
+    // `tx::data_inputs`.
     for (i, out) in tx.output_candidates.iter().enumerate() {
         check_output_box(i, out, params)?;
     }
