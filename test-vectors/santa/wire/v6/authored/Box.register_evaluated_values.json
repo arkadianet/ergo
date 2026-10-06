@@ -1,0 +1,191 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Box.register_evaluated_values",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "box-g1-group-generator-accept#0",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 82, GroupGenerator. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity.",
+      "bytes_hex" : "c0843d0008d3010001821d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-g2-coll-int-accept#1",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 83 02 04 04 02 04 04, Coll[Int](1, 2). An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity.",
+      "bytes_hex" : "c0843d0008d3010001830204040204041d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-g3-trueleaf-accept#2",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 7f, TrueLeaf. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Written back as the constant 01 01 (ErgoBoxCandidate.scala:175, putValue). NON-IDENTITY. A standalone box keeps its bytes as received, and its id hashes them; the round-trip re-serializes it.",
+      "bytes_hex" : "c0843d0008d30100017f1d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "expected_bytes_hex" : "c0843d0008d301000101011d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-g4-coll-boolean-constants-accept#3",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 83 02 01 01 01 01 00, Coll[Boolean](true, false) of constant items. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Written back packed: 85 02 01. NON-IDENTITY.",
+      "bytes_hex" : "c0843d0008d3010001830201010101001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "expected_bytes_hex" : "c0843d0008d30100018502011d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-g5-tuple-height-accept#4",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 02 04 02 a3, Tuple(1, HEIGHT): items are not cast at parse. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity. (Reading any register of such a box fails; see the transaction vector evaluated-values-spend.)",
+      "bytes_hex" : "c0843d0008d301000186020402a31d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-g6-tuple-one-accept#5",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 01 04 02, a 1-item Tuple: no arity check. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity.",
+      "bytes_hex" : "c0843d0008d3010001860104021d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-tuple-pair-accept#6",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 02 04 02 04 04, Tuple(1, 2), a Tuple node of constants. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity.",
+      "bytes_hex" : "c0843d0008d30100018602040204041d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-coll-int-height-accept#7",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 83 01 04 a3, Coll[Int](HEIGHT). An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity.",
+      "bytes_hex" : "c0843d0008d3010001830104a31d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-placeholder-reject#8",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 73 00, a placeholder with no store: the JVM rejects.",
+      "bytes_hex" : "c0843d0008d301000173001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-height-reject#9",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is a3, HEIGHT: the EvaluatedValue cast throws, a reject.",
+      "bytes_hex" : "c0843d0008d3010001a31d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-plus-reject#10",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 9a 04 02 04 04, Plus(1, 2): the cast throws, a reject.",
+      "bytes_hex" : "c0843d0008d30100019a040204041d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-tuple-placeholder-reject#11",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 02 04 02 73 00, a Tuple holding a placeholder: a reject.",
+      "bytes_hex" : "c0843d0008d30100018602040273001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-tuple-getvar-reject#12",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 02 04 02 e3 00 04, a Tuple holding GetVar[Int](0): CheckV6Type (ErgoBoxCandidate.scala:232) fails rule 1019 on the Option item, a reject.",
+      "bytes_hex" : "c0843d0008d301000186020402e300041d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-tuple-count-0x80-reject#13",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 80 followed by 128 × Int 1: the count reads -128, a reject.",
+      "bytes_hex" : "c0843d0008d30100018680040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204021d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-coll-of-tuple-node-accept#14",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 83 01 58 86 02 04 02 04 04, a Coll[(Int, Int)] holding the Tuple node (1, 2). An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity. (Reading any register of such a box fails; see the transaction vector evaluated-values-spend.)",
+      "bytes_hex" : "c0843d0008d30100018301588602040204041d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-coll-byte-node-accept#15",
+      "kind" : "Box",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 83 02 02 02 01 02 01, Coll[Byte](1, 1) as a ConcreteCollection node. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity. (DeserializeRegister reads it as the bytes 01 01; see the transaction vector.)",
+      "bytes_hex" : "c0843d0008d3010001830202020102011d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

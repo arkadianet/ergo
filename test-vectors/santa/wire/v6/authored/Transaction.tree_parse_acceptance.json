@@ -1,0 +1,632 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.tree_parse_acceptance",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "transaction-c1-exists-on-int-accept#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose unsized v0 tree is BoolToSigmaProp(Exists(Int 1, (x: Int) => true)): Exists over an Int. The JVM builds the node with an erased cast and checks nothing, so the tree parses. Round-trip identity. An impl that type-checks the operand at parse rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1ae0402d90101040101010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-c2-logicalnot-on-int-accept#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(LogicalNot(Int 1)). The JVM builds the node with an erased cast and checks nothing, so the tree parses. Round-trip identity. An impl that type-checks the operand at parse rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1ef0402010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-c3-trueleaf-opcode-accept#2",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(TrueLeaf) with TrueLeaf as its own opcode 7f (CaseObjectSerialization, ValueSerializer.scala:79). It parses. NON-IDENTITY: TrueLeaf is the Boolean constant true (values.scala:771) and the box serializer writes a parsed tree back from its structure (ErgoBoxCandidate.scala:142), so the tree comes back as 00 d1 01 01. A transaction's id and its output boxes' ids are computed over those bytes. An impl that keeps the 7f, or does not parse it, diverges.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d17f010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d10101010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-c3-falseleaf-opcode-accept#3",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(FalseLeaf), opcode 80 (ValueSerializer.scala:80). It parses and, like #2, comes back as the Boolean constant: 00 d1 01 00. NON-IDENTITY.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d180010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d10100010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-c4-property-call-on-wrong-type-accept#4",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(PropertyCall(SBox.value) on Int 1, Long 1)) (db 63 01). SMethod.specializeFor finds no unification of SBox with SInt and keeps the method as it is (SMethod.scala:193-199), typed Long, so the EQ is well-typed and the tree parses. Round-trip identity. An impl that fails the unification rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193db630104020502010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-c5-apply-non-function-accept#5",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(Apply(Int 1, [])). Apply's tpe is a lazy val, NoType for a non-function, and nothing reads it at parse (values.scala:1247-1251). The JVM builds the node with an erased cast and checks nothing, so the tree parses. Round-trip identity. An impl that type-checks the operand at parse rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1da040200010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-e1-append-on-int-reject#6",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(SizeOf(Append(Int 1, Int 2)), Int 0)). Append holds `val tpe = input.tpe` (transformers.scala:62), a strict val whose checkcast to SCollection throws ClassCastException when the node is built: the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193b1b3040204040400010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-e1-append-on-int-sized-reject#7",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is the same, size-flagged: a ClassCastException is not a ValidationException, so the tree does not degrade and the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d080ad193b1b3040204040400010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-e2-slice-on-int-reject#8",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(SizeOf(Slice(Int 1, 0, 1)), Int 0)). Slice holds `val tpe = input.tpe` too (transformers.scala:89): ClassCastException, a reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193b1b40402040004020400010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-e2-slice-on-int-sized-reject#9",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is the same, size-flagged: rejected as well.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d080cd193b1b40402040004020400010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-e3-option-isdefined-on-int-accept#10",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(OptionIsDefined(Int 1)). Its opType is SFunc(input.tpe, SBoolean) (transformers.scala:656), which takes any type with no cast to SOption, and its tpe is SBoolean. The JVM builds the node with an erased cast and checks nothing, so the tree parses. Round-trip identity. An impl that type-checks the operand at parse rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1e60402010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-l1-eq-int-long-v3-reject#11",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v3 tree (0b) is BoolToSigmaProp(EQ(Int 1, Long 1)). From tree v3 the deserializing builder does not upcast (SigmaBuilder.scala:757-758), so the same-type check throws ConstraintFailed (:691), which is not a ValidationException: the JVM rejects. An impl without the check parses it: the over-accept.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0b06d19304020502010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-l1-eq-int-long-v0-upcast-accept#12",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output whose tree is the same EQ in an unsized v0 tree. Below v3 the builder upcasts the Int to Long first, so the tree parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d19304020502010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-l1-eq-int-int-v3-accept#13",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The other twin: A transaction output whose v3 tree is BoolToSigmaProp(EQ(Int 1, Int 1)): the same types, so it parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0b06d19304020402010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-l2-gt-boolean-reject#14",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(GT(true, true)). The builder's comparison check requires numeric operands (SigmaBuilder.scala:699): ConstraintFailed, a reject. An impl without the check parses it.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d19101010101010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-l2-gt-boolean-sized-reject#15",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is the same, size-flagged: ConstraintFailed does not degrade, so rejected as well.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0806d19101010101010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-l2-gt-int-accept#16",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output whose tree is BoolToSigmaProp(GT(Int 1, Int 1)). It parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d19104020402010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-l3-bitor-boolean-reject#17",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(BitOr(true, true), Int 0)). BitOp requires numeric operands (trees.scala:913): an IllegalArgumentException, which deserializeErgoTree rethrows as a SerializerException reading 'Tree version (0) is above activated script version (3)': the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193f2010101010400010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-l3-bitor-boolean-sized-reject#18",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is the same, size-flagged: the SerializerException does not degrade, so rejected as well.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0809d193f2010101010400010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-l3-bitor-int-accept#19",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output whose tree is BoolToSigmaProp(EQ(BitOr(Int 1, Int 1), Int 0)). It parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193f2040204020400010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-coll-item-wrong-type-reject#20",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(SizeOf(Coll[Int](Long 1)), Int 1)): a ConcreteCollection (83) declaring Int items (04) whose item is Long 1 (05 02). ConcreteCollectionSerializer asserts each item's type (ConcreteCollectionSerializer.scala:38), and the build does not elide the assert: an AssertionError, which no handler in deserializeErgoTree catches: the JVM rejects. An impl that does not compare the item types parses it: the over-accept.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193b183010405020402010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-coll-item-wrong-type-sized-reject#21",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is the same, size-flagged: an AssertionError is not a ValidationException, so the tree does not degrade and the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d080ad193b183010405020402010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-coll-item-right-type-accept#22",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output whose tree is BoolToSigmaProp(EQ(SizeOf(Coll[Int](Int 1)), Int 1)). It parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193b183010404020402010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-context-getvar-v5-method-accept#23",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(OptionIsDefined(MethodCall(CONTEXT, SContext method 11, [Byte 0]))) (dc 65 0b fe 01 02 00). Method 11 is getVarV5Method, declared with info but no IR builder or Java method (methods.scala:1750-1753) and listed for v5 and v6 (:1766-1774): it resolves, and its type variable is left unbound, so the tree parses. Round-trip identity. Evaluating it fails (NoSuchMethodException for Context.getVar(byte); see the transaction vector evaluated-values-spend).",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1e6dc650bfe010200010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-context-getvar-v5-method-sized-accept#24",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is the same, size-flagged: it parses as well. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0809d1e6dc650bfe010200010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-upcast-true-long-sized-root-reject#25",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v0 tree is the root Upcast(true, Long) (08 04 7e 01 01 05). Upcast's constructor requires a numeric input (trees.scala:398): an IllegalArgumentException as the node is built. deserializeErgoTree rethrows an IllegalArgumentException as a SerializerException (ErgoTreeSerializer.scala:191-195), and only a ValidationException degrades a size-flagged tree (:197), so the JVM rejects. An impl that checks the root only after reading the body degrades the tree (its root is not a SigmaProp: rule 1001) and accepts: the over-accept.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d08047e010105010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-upcast-coll-int-long-sized-root-reject#26",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v0 tree is the root Upcast(Coll[Int](), Long) (08 04 7e 10 00 05): rejected the same way.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d08047e100005010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-downcast-true-byte-sized-root-reject#27",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v0 tree is the root Downcast(true, Byte) (08 04 7d 01 01 02). Downcast has the same require (trees.scala:431): rejected.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d08047d010102010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-downcast-coll-int-byte-sized-root-reject#28",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v0 tree is the root Downcast(Coll[Int](), Byte) (08 04 7d 10 00 02): rejected.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d08047d100002010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-upcast-int-long-sized-root-degrade-accept#29",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin for #25 to #28: A transaction output whose size-flagged v0 tree is the root Upcast(Int 1, Long) (08 04 7e 04 02 05). The node builds, and the root is a Long: rule 1001 degrades the tree, so the object is accepted. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d08047e040205010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-upcast-boolean-target-sized-root-reject#30",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v0 tree is the root Upcast(Int 1, Boolean) (08 04 7e 04 02 01). NumericCastSerializer casts the target type with asNumType (NumericCastSerializer.scala:22): a ClassCastException for a non-numeric type, and the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d08047e040201010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v0-coll-long-plus-int-long-accept#31",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose unsized v0 tree is BoolToSigmaProp(EQ(SizeOf(Coll[Long](Plus(Int 1, Long 2))), Int 1)) (83 01 05 9a 04 02 05 04: one Long item). Below tree v3 the deserializing builder upcasts mixed numeric operands to the wider type (SigmaBuilder.scala:674-683, :707-712), so Plus is a Long and the item assert passes (ConcreteCollectionSerializer.scala:38). It parses. Round-trip identity: below v3 the serializer writes the Upcast of the constant Int 1 as the constant.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193b18301059a040205040402010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v3-coll-long-plus-int-long-reject#32",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v3 tree (0b) is the same. From tree v3 the builder does not upcast (SigmaBuilder.scala:757-758), so Plus is typed as its left operand, an Int, and the item assert throws AssertionError: the JVM rejects. An impl that types Plus as the wider operand at v3, or does not compare item types, parses it.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0b0dd193b18301059a040205040402010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v0-byindex-long-index-reject#33",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose unsized v0 tree is BoolToSigmaProp(ByIndex(Coll[Boolean](true), Long 0)) (b2 0d 01 01 05 00 00). Below tree v3 ByIndexSerializer upcasts the index to Int as soon as it is read (ByIndexSerializer.scala:29-33), and upcastTo asserts that the target is at least as wide as the index (syntax.scala:168-177): a Long fails, an AssertionError, and the JVM rejects. An impl without the check parses it.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1b20d0101050000010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v3-byindex-long-index-accept#34",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output whose size-flagged v3 tree is the same ByIndex. From v3 the index is taken as it is (ByIndexSerializer.scala:29-30), so the tree parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0b08d1b20d0101050000010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-blockvalue-int-item-reject#35",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose unsized v0 tree is BlockValue([Int 1], SigmaProp(true)) (d8 01 04 02 08 d3). BlockValueSerializer casts each item to BlockItem as it is read (BlockValueSerializer.scala:39), and a constant is not one: ClassCastException, the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d801040208d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-blockvalue-int-item-sized-reject#36",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is the same, size-flagged: a ClassCastException does not degrade, so rejected as well.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0806d801040208d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-blockvalue-valdef-item-accept#37",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output whose tree is BlockValue([ValDef(1, Int 1)], SigmaProp(true)). It parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d801d601040208d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-extract-register-as-id-10-reject#38",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose unsized v0 tree is BoolToSigmaProp(OptionIsDefined(SELF.R10[Int])) (c6 a7 0a 04). ExtractRegisterAsSerializer looks the id up with ErgoBox.findRegisterByIndex(id).get right after reading it (ExtractRegisterAsSerializer.scala:28). The registers are R0 to R9, so id 10 is None.get: NoSuchElementException, and the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1e6c6a70a04010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-extract-register-as-id-0x80-reject#39",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose tree is the same with the id byte 0x80, the signed byte -128: rejected the same way.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1e6c6a78004010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-extract-register-as-id-9-accept#40",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output whose tree reads SELF.R9[Int].isDefined (c6 a7 09 04). It parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1e6c6a70904010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-deserialize-register-id-10-reject#41",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose unsized v0 tree is the root DeserializeRegister(R10, SigmaProp) (d5 0a 08 00). DeserializeRegisterSerializer makes the same lookup (DeserializeRegisterSerializer.scala:28): rejected.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d50a0800010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-deserialize-register-id-9-accept#42",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output whose tree is the root DeserializeRegister(R9, SigmaProp) (d5 09 08 00). It parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d5090800010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v3-methodcall-no-args-reject#43",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v3 tree is BoolToSigmaProp(OptionIsDefined(MethodCall(CONTEXT, SContext method 11, []))) (dc 65 0b fe 00: no arguments). From tree v3 MethodCallSerializer asserts that there are arguments (MethodCallSerializer.scala:52-55), the check its serializer makes (:27): AssertionError, and the JVM rejects. An impl that checks the arity only when it evaluates parses it.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0b07d1e6dc650bfe00010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v0-methodcall-no-args-propertycall-accept#44",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose unsized v0 tree is the same MethodCall with no arguments. Below v3 there is no check, and it parses. NON-IDENTITY: a MethodCall with no arguments is written as a PropertyCall (its companion is PropertyCall when args is empty, values.scala:1350), so the tree comes back as 00 d1 e6 db 65 0b fe, one byte shorter.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1e6dc650bfe00010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1e6db650bfe010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v3-methodcall-one-arg-accept#45",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin for #43: A transaction output whose size-flagged v3 tree is the MethodCall with its argument, Byte 0 (dc 65 0b fe 01 02 00). It parses. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0b09d1e6dc650bfe010200010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-order-upcast-true-then-window-reject#46",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v0 tree is declared 12 bytes: BoolToSigmaProp(If(EQ(Upcast(true, Long), Long 0), Coll[Byte](4083), ...)). The Upcast is built at candidate offset 10, right after its input and target type, and its require throws (trees.scala:398): the JVM rejects before it reaches the window. An impl that makes its type checks only after reading the body meets the window first: the Coll[Byte]'s bulk read runs from offset 17 to 4100, past the tree window (4099), the next read trips rule 1014, and the size-flagged tree degrades, as #47 does.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000002c0843d080cd195937e01010505000ef31f0100010eed1f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0843d0008d3020000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-order-upcast-int-then-window-degrade-accept#47",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output with Upcast(Int 1, Long). The node builds, the Coll[Byte]'s bulk read crosses the tree window, and the read of If's third child trips rule 1014: the tree degrades to its declared 12 bytes. The box resumes at offset 17: height 1, no tokens, R4 = Coll[Byte](4077), whose bulk read starts in time and crosses the box window. Round-trip identity. A second output follows, so the parser's unchecked peek before the trip lands on a real byte.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000002c0843d080cd195937e04020505000ef31f0100010eed1f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0843d0008d3020000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v0-method-lookup-1016-then-gt-degrade-accept#48",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v0 tree is sigmaProp(1.toBytes > 0) (d1 91 db 04 06 04 02 04 00: a PropertyCall on Int, method 6). Below tree v3 no numeric method is found by id: the v5 method list keeps the generic numeric container as each method's objType (methods.scala:237-241), whose type is SNumericType (:263), and the lookup map groups methods by objType (:95-99). So the lookup fails rule 1016, a ValidationException, and the tree degrades before GT is built. Round-trip identity. An impl that finds the method, or does not treat the failed lookup as a soft failure, goes on to GT (#49) and rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0809d191db040604020400010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v3-tobytes-gt-int-reject#49",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output whose tree is the same at v3 (0b): toBytes is found, a Coll[Byte], and GT's builder check needs numeric operands (SigmaBuilder.scala:696-704): ConstraintFailed, a reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0b09d191db040604020400010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v0-type-read-1017-then-gt-degrade-accept#50",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v0 tree is sigmaProp(UnsignedBigInt(5) > true) (d1 91 09 01 05 01 01). Below v3 there is no primitive type 9 (TypeSerializer.scala:257-267): rule 1017 fails at the constant's type, and the tree degrades before GT is built. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0807d1910901050101010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v3-ubi-gt-boolean-reject#51",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output whose tree is the same at v3: the UnsignedBigInt parses, and GT's builder check needs numeric operands (SigmaBuilder.scala:696-704): ConstraintFailed, a reject on the Boolean.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0b07d1910901050101010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v0-no-methods-1010-then-gt-degrade-accept#52",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A transaction output whose size-flagged v0 tree is sigmaProp(PropertyCall(type 9, method 1, Int 1) > true) (d1 91 db 09 01 04 02 01 01). Below v3 type 9 has no methods (MethodsContainer's v5 list, methods.scala:146-175), so CheckTypeWithMethods (rule 1010, SMethod.scala:345) fails after the object is read, and the tree degrades. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0809d191db090104020101010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-v3-type-9-method-gt-boolean-reject#53",
+      "kind" : "Transaction",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A transaction output whose tree is the same at v3: the method is found, and GT's builder check needs numeric operands (SigmaBuilder.scala:696-704): ConstraintFailed, a reject on the Boolean.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0b09d191db090104020101010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

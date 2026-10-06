@@ -1,0 +1,191 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.register_evaluated_values",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "transaction-g1-group-generator-accept#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 82, GroupGenerator. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d301000182",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-g2-coll-int-accept#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 83 02 04 04 02 04 04, Coll[Int](1, 2). An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d301000183020404020404",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-g3-trueleaf-accept#2",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 7f, TrueLeaf. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Written back as the constant 01 01 (ErgoBoxCandidate.scala:175, putValue). NON-IDENTITY. The output's box id and the tx id hash the written form.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d30100017f",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d30100010101",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-g4-coll-boolean-constants-accept#3",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 83 02 01 01 01 01 00, Coll[Boolean](true, false) of constant items. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Written back packed: 85 02 01. NON-IDENTITY.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d301000183020101010100",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010001850201",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-g5-tuple-height-accept#4",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 02 04 02 a3, Tuple(1, HEIGHT): items are not cast at parse. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity. (Reading any register of such a box fails; see the transaction vector evaluated-values-spend.)",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d301000186020402a3",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-g6-tuple-one-accept#5",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 01 04 02, a 1-item Tuple: no arity check. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d301000186010402",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-tuple-pair-accept#6",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 02 04 02 04 04, Tuple(1, 2), a Tuple node of constants. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010001860204020404",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-coll-int-height-accept#7",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 83 01 04 a3, Coll[Int](HEIGHT). An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010001830104a3",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-placeholder-reject#8",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 73 00, a placeholder with no store: the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d30100017300",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-height-reject#9",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is a3, HEIGHT: the EvaluatedValue cast throws, a reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010001a3",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-plus-reject#10",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 9a 04 02 04 04, Plus(1, 2): the cast throws, a reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d30100019a04020404",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-tuple-placeholder-reject#11",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 02 04 02 73 00, a Tuple holding a placeholder: a reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010001860204027300",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-tuple-getvar-reject#12",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 02 04 02 e3 00 04, a Tuple holding GetVar[Int](0): CheckV6Type (ErgoBoxCandidate.scala:232) fails rule 1019 on the Option item, a reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d301000186020402e30004",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-tuple-count-0x80-reject#13",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 86 80 followed by 128 × Int 1: the count reads -128, a reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010001868004020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-coll-of-tuple-node-accept#14",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 83 01 58 86 02 04 02 04 04, a Coll[(Int, Int)] holding the Tuple node (1, 2). An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity. (Reading any register of such a box fails; see the transaction vector evaluated-values-spend.)",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010001830158860204020404",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-coll-byte-node-accept#15",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A transaction output (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is 83 02 02 02 01 02 01, Coll[Byte](1, 1) as a ConcreteCollection node. An EvaluatedValue, so the JVM parses it (ErgoBoxCandidate.scala:231). Round-trip identity. (DeserializeRegister reads it as the bytes 01 01; see the transaction vector.)",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d301000183020202010201",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

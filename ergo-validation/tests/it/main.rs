@@ -30,6 +30,7 @@ mod popow_scala_fixture_validation;
 mod rejection_parity;
 mod same_block_data_inputs;
 mod santa_nipopow_chain;
+mod santa_tx;
 mod scala_full_block_pow_verify;
 mod scala_rejection_parity;
 mod synthetic_block;

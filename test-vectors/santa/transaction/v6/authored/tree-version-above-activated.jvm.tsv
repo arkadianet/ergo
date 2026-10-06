@@ -1,0 +1,8 @@
+input-tree-v4-reject#0	false	null
+input-tree-v5-reject#1	false	null
+input-tree-v6-reject#2	false	null
+input-tree-v7-reject#3	false	null
+input-tree-v3-accept#4	true	12105
+data-input-tree-v7-accept#5	true	12205
+rent-tree-v4-dust-accept#6	true	12150
+rent-tree-v4-no-index-reject#7	false	null
