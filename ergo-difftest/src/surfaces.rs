@@ -38,8 +38,12 @@ const MAX_UPCAST_STRIP_ROUNDS: usize = 110;
 const CURRENT_ACTIVATED_VERSION: u8 = 3;
 
 fn is_boolean_depth_limit_error(error: &ReadError) -> bool {
+    is_depth_limit_error(error, 110)
+}
+
+fn is_depth_limit_error(error: &ReadError, max: usize) -> bool {
     match error {
-        ReadError::DepthLimitExceeded { max: 110 } => true,
+        ReadError::DepthLimitExceeded { max: actual } => *actual == max,
         // ergo-ser/src/block_transactions.rs:237-238 wraps transaction read
         // errors as InvalidData(format!("tx[{tx_idx}]: {e}")). Match exactly
         // that wrapper with a canonical usize index and this depth error.
@@ -53,7 +57,7 @@ fn is_boolean_depth_limit_error(error: &ReadError) -> bool {
             index
                 .parse::<usize>()
                 .is_ok_and(|parsed| parsed.to_string() == index)
-                && inner == ReadError::DepthLimitExceeded { max: 110 }.to_string()
+                && inner == ReadError::DepthLimitExceeded { max }.to_string()
         }
         _ => false,
     }
@@ -108,6 +112,14 @@ where
             // last expression level their added data-value read exceeds 110.
             // Exempt only this AST shape and the matching depth failure.
             if is_boolean_depth_limit_error(&e) && v1.has_depth_expanding_boolean() {
+                return Outcome::WriteRejected;
+            }
+            // 6.0.7 counts deserialize calls rather than constructed layers.
+            // Require both the exact hard type-depth error and an existing type
+            // whose canonical descriptor independently fails that same bound.
+            if matches!(e, ReadError::DepthLimitExceeded { max: 8 })
+                && v1.has_type_depth_expansion()
+            {
                 return Outcome::WriteRejected;
             }
             // Scala also expands compact type descriptors (e.g. 0x18 into
@@ -835,21 +847,59 @@ mod tests {
         );
     }
 
-    /// Local fuzz find (2026-09-29): a constant type written with compact
-    /// `Coll[Coll[T]]` codes stays under the type-depth guard, but the
-    /// canonical re-encode (one `Coll` byte per level, as Scala writes it)
-    /// did not, flipping the sized tree to an opaque wrap on re-decode. The
-    /// guard now charges both levels, so both reads wrap alike.
+    /// 6.0.7 rejects this old compact-type seed at its independent type bound.
+    /// JVM evidence: test-vectors/scala/deserialization_607.json.
     #[test]
-    fn compact_nested_coll_type_depth_is_stable_across_reencode() {
+    fn compact_nested_coll_type_depth_rejects_on_607() {
         let bytes = hex::decode(
             "2800d1c6ff181818181818181850505050505050505050505050505050505050505050505050505050505050505050505050505050505050501818181818181818181818181818181818181818181818181c01000004000000000fff",
         )
         .unwrap();
         assert_eq!(
             (registry(Some("sigma_expr"))[0].run)(&bytes),
-            Outcome::Accepted
+            Outcome::Rejected
         );
+    }
+
+    /// JVM 6.0.7 accepts compressed recursion at depth 8 and writes a
+    /// descriptor whose expanded calls fail the same limit on the next read.
+    #[test]
+    fn compact_type_expansion_is_write_rejected_only_for_the_exact_type_bound() {
+        let bytes = hex::decode(format!("{}0e", "18".repeat(8))).unwrap();
+        assert_eq!(
+            (registry(Some("sigma_type"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+        let mut r = VlqReader::new(&bytes);
+        let t = ergo_ser::sigma_type::read_type(&mut r).unwrap();
+        assert!(t.has_type_depth_expansion());
+        let mut shallow = VlqReader::new(&[0x1a]);
+        assert!(!ergo_ser::sigma_type::read_type(&mut shallow)
+            .unwrap()
+            .has_type_depth_expansion());
+        for value_depth in [true, false] {
+            let calls = std::cell::Cell::new(0);
+            let outcome = rw_check(
+                &bytes,
+                |reader| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() > 1 {
+                        return Err(if value_depth {
+                            ReadError::DepthLimitExceeded { max: 110 }
+                        } else {
+                            ReadError::UnexpectedEnd { pos: 0, needed: 1 }
+                        });
+                    }
+                    ergo_ser::sigma_type::read_type(reader)
+                },
+                ergo_ser::sigma_type::write_type,
+                |_| false,
+            );
+            assert!(
+                matches!(outcome, Outcome::Bug(_)),
+                "unrelated error was exempted: {outcome:?}"
+            );
+        }
     }
 
     #[test]
@@ -1461,43 +1511,19 @@ mod tests {
         assert!(tree_is_unparsed(&tree));
     }
 
-    /// Both writers expand the original 3205-byte compact descriptor input to
-    /// the captured 4940-byte Scala output, which both readers then refuse.
+    /// 6.0.7 rejects this formerly writable deep descriptor during the first read.
+    /// JVM evidence: test-vectors/scala/deserialization_607.json.
     #[test]
-    fn nightly_compact_type_expansion_matches_scala_write_rejection() {
-        std::thread::Builder::new()
-            // Deep type clone/equality/drop are recursive in debug builds.
-            .stack_size(32 * 1024 * 1024)
-            .spawn(|| {
-                let bytes = include_bytes!(
-                    "../fuzz/corpus/ergo_tree/nightly-2026-09-30-compact-type-expansion"
-                );
-                let mut reader = VlqReader::new(bytes).with_activated_script_version(3);
-                let tree = read_ergo_tree_gated(&mut reader).unwrap();
-                let mut writer = VlqWriter::new();
-                ergo_ser::ergo_tree::write_ergo_tree(&mut writer, &tree).unwrap();
-                let output = writer.result();
-                let expected =
-                    include_str!("../../test-vectors/scala/sigma/nightly_type_expansion.hex")
-                        .lines()
-                        .find(|line| !line.starts_with('#'))
-                        .unwrap();
-                assert_eq!(hex::encode(&output), expected);
-                assert_eq!(output.len(), 4940);
-                assert!(matches!(
-                    read_ergo_tree_gated(&mut VlqReader::new(&output)),
-                    Err(ReadError::SigmaValidation { rule_id: 1014, .. })
-                ));
-                for surface in ["ergo_tree", "sigma_expr"] {
-                    assert_eq!(
-                        (registry(Some(surface))[0].run)(bytes),
-                        Outcome::WriteRejected
-                    );
-                }
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+    fn nightly_compact_type_expansion_rejects_on_607() {
+        let bytes =
+            include_bytes!("../fuzz/corpus/ergo_tree/nightly-2026-09-30-compact-type-expansion");
+        assert!(matches!(
+            read_ergo_tree_gated(&mut VlqReader::new(bytes).with_activated_script_version(3)),
+            Err(ReadError::DepthLimitExceeded { max: 8 })
+        ));
+        for surface in ["ergo_tree", "sigma_expr"] {
+            assert_eq!((registry(Some(surface))[0].run)(bytes), Outcome::Rejected);
+        }
     }
 
     /// Runs 36835270692 and 36792671282: pinned sigma-state 6.0.6 behavior.
@@ -1509,28 +1535,17 @@ mod tests {
                 let bytes = include_bytes!(
                     "../fuzz/corpus/ergo_box_candidate/nightly-2026-10-01-type-expansion"
                 );
-                let mut reader = VlqReader::new(bytes).with_activated_script_version(3);
-                let candidate = ergo_ser::ergo_box::read_ergo_box_candidate(&mut reader).unwrap();
-                assert_eq!(reader.position(), 2656);
-                let mut writer = VlqWriter::new();
-                ergo_ser::ergo_box::write_ergo_box_candidate(&mut writer, &candidate).unwrap();
-                let output = writer.result();
-                let expected =
-                    include_str!("../../test-vectors/scala/sigma/nightly_box_type_expansion.hex")
-                        .lines()
-                        .find(|line| !line.starts_with('#'))
-                        .unwrap();
-                assert_eq!(hex::encode(&output), expected);
-                assert_eq!(output.len(), 4589);
+                // 6.0.7 rejects the compact descriptor before serialization.
+                // JVM evidence: test-vectors/scala/deserialization_607.json.
                 assert!(matches!(
                     ergo_ser::ergo_box::read_ergo_box_candidate(
-                        &mut VlqReader::new(&output).with_activated_script_version(3)
+                        &mut VlqReader::new(bytes).with_activated_script_version(3)
                     ),
-                    Err(ReadError::SigmaValidation { rule_id: 1014, .. })
+                    Err(ReadError::DepthLimitExceeded { max: 8 })
                 ));
                 assert_eq!(
                     (registry(Some("ergo_box_candidate"))[0].run)(bytes),
-                    Outcome::WriteRejected
+                    Outcome::Rejected
                 );
                 crate::fuzz::fuzz_one("ergo_box_candidate", bytes);
 
@@ -1927,6 +1942,23 @@ mod tests {
                         .join(fields[0])
                         .join(fields[1]);
                     let bytes = std::fs::read(path).unwrap();
+                    // The old transcript records 6.0.6 canonical bytes. The
+                    // sized-type seed now fails first-read MaxTypeDepth on 6.0.7;
+                    // the two non-type-depth controls retain their exact bytes.
+                    if fields[1] == "nightly-2026-10-01-sized-type-expansion" {
+                        assert!(matches!(
+                            read_ergo_tree_gated(
+                                &mut VlqReader::new(&bytes).with_activated_script_version(3)
+                            ),
+                            Err(ReadError::DepthLimitExceeded { max: 8 })
+                        ));
+                        assert_eq!(
+                            (registry(Some(fields[0]))[0].run)(&bytes),
+                            Outcome::Rejected
+                        );
+                        crate::fuzz::fuzz_one(fields[0], &bytes);
+                        continue;
+                    }
                     let mut reader = VlqReader::new(&bytes).with_activated_script_version(3);
                     let mut writer = VlqWriter::new();
                     if fields[0] == "ergo_box_candidate" {

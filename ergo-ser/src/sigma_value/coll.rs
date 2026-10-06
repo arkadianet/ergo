@@ -9,6 +9,20 @@ use crate::sigma_type::SigmaType;
 
 use super::{read_value_at_depth, write_value_versioned, CollValue, SigmaValue};
 
+// The predicate is deliberately identical to CoreDataSerializer, including
+// Coll[zero-width] even though a collection length itself consumes bytes.
+// Options are not zero-width: their tags consume bytes. Tuple forall also
+// treats an empty tuple as zero-width. Check data collections, not AST nodes.
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/serialization/CoreDataSerializer.scala#L157-L171
+fn is_zero_width(tpe: &SigmaType) -> bool {
+    match tpe {
+        SigmaType::SUnit => true,
+        SigmaType::SColl(elem) => is_zero_width(elem),
+        SigmaType::STuple(items) => items.iter().all(is_zero_width),
+        _ => false,
+    }
+}
+
 // -- Collection serialization --
 
 pub(super) fn write_coll(
@@ -17,6 +31,13 @@ pub(super) fn write_coll(
     coll: &CollValue,
     version: u8,
 ) -> Result<(), WriteError> {
+    // SerializerException is a hard write failure, without validation wrapping.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/serialization/CoreDataSerializer.scala#L51-L57
+    if is_zero_width(elem_type) {
+        return Err(WriteError::InvalidData(format!(
+            "collection with zero-width element type {elem_type:?} cannot be serialized"
+        )));
+    }
     // Scala writes Coll length as a u16 across all element-type
     // specializations; >65535-element collections silently wrap on
     // `as u16`. Cap once for all three branches.
@@ -60,6 +81,19 @@ pub(super) fn read_coll(
     depth: usize,
 ) -> Result<CollValue, ReadError> {
     let count = r.get_u16()? as usize;
+    // Check after reading length and BEFORE materializing any items, including
+    // an empty collection. Rule 1020 is unconditional in both V5 and V6.
+    // Sized ErgoTrees wrap this ValidationException; other readers propagate it.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/validation/ValidationRules.scala#L199-L217
+    if is_zero_width(elem_type) {
+        return Err(ReadError::SigmaValidation {
+            rule_id: 1020,
+            args: vec![], // SType argument: SoftForkWhenReplaced ignores it.
+            message: format!(
+                "collection with zero-width element type {elem_type:?} cannot be deserialized"
+            ),
+        });
+    }
     match elem_type {
         SigmaType::SBoolean => {
             let bits = read_bits(r, count)?;

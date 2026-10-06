@@ -5,10 +5,10 @@ use crate::error::WriteError;
 use ergo_primitives::writer::VlqWriter;
 
 use super::{
-    SigmaType, COLL_CODE, COLL_COLL_CODE, FUNC_CODE, MAX_TYPE_DEPTH, OPTION_CODE, OPTION_COLL_CODE,
-    PAIR1_CODE, PAIR2_CODE, PAIR_SYM_CODE, SANY_CODE, SAVL_TREE_CODE, SBOX_CODE, SCONTEXT_CODE,
-    SGLOBAL_CODE, SHEADER_CODE, SPREHEADER_CODE, SSTRING_CODE, STYPEVAR_CODE, SUNIT_CODE,
-    TUPLE_CODE,
+    SigmaType, COLL_CODE, COLL_COLL_CODE, FUNC_CODE, MAX_TYPE_WRITE_DEPTH, OPTION_CODE,
+    OPTION_COLL_CODE, PAIR1_CODE, PAIR2_CODE, PAIR_SYM_CODE, SANY_CODE, SAVL_TREE_CODE, SBOX_CODE,
+    SCONTEXT_CODE, SGLOBAL_CODE, SHEADER_CODE, SPREHEADER_CODE, SSTRING_CODE, STYPEVAR_CODE,
+    SUNIT_CODE, TUPLE_CODE,
 };
 
 /// Serialize a Sigma type descriptor.
@@ -21,19 +21,19 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) -> Result<(), WriteError> {
 ///
 /// This walk is recursive on the native stack, unlike the reader's heap stack,
 /// so it needs its own guard. The reader refuses a descriptor deeper than
-/// [`MAX_TYPE_DEPTH`], so a parsed type cannot drive this past that depth; the
+/// [`MAX_TYPE_WRITE_DEPTH`], so a parsed type cannot drive this past that depth; the
 /// guard covers the other direction, a `SigmaType` built in-process to a depth
 /// the reader would never have produced. It returns an error instead of
 /// overflowing the stack, which is unrecoverable and takes the process down
 /// rather than the one call.
 fn write_type_at(w: &mut VlqWriter, t: &SigmaType, depth: usize) -> Result<(), WriteError> {
-    if depth > MAX_TYPE_DEPTH {
+    if depth > MAX_TYPE_WRITE_DEPTH {
         // Past this depth the reference's own recursive writer overflows its
         // thread stack, so refusing matches the reference rather than
         // diverging from it. See read.rs's `read_type_byte` for the same
         // reasoning on the read side.
         return Err(WriteError::InvalidData(format!(
-            "type recursion depth exceeds maximum ({MAX_TYPE_DEPTH})"
+            "type recursion depth exceeds maximum ({MAX_TYPE_WRITE_DEPTH})"
         )));
     }
     match t {
@@ -288,4 +288,3 @@ fn write_pair(
     write_type_at(w, t2, depth + 1)?;
     Ok(())
 }
-

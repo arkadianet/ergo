@@ -6,8 +6,8 @@
 //! The SANTA Authors); `test-vectors/santa/README.md` records the commit.
 //! Each `<op>.json` is paired with an `<op>.jvm.tsv` written by
 //! `scripts/santa_wire_oracle/SantaWireOracle.scala`, which re-parses every
-//! entry on sigma-state / ergo-core 6.0.6 under the entry's own
-//! `VersionContext`. SANTA and JVM must always agree; node differences are
+//! entry on sigma-state / ergo-core 6.0.7 under the entry's own
+//! `VersionContext`. SANTA and JVM agree except the exact 6.0.7 supersessions below; node differences are
 //! permitted only by the explicit list below. The three verdicts are:
 //!
 //! - SANTA's expectation: `error == "errored"` means the JVM rejects the bytes;
@@ -36,6 +36,36 @@ use std::path::{Path, PathBuf};
 
 // Independently confirmed JVM/node differences. A fix must remove its entry.
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
+
+// SANTA still blesses these with 6.0.6. 6.0.7 unconditionally rejects their
+// excessive type recursion with DeserializeCallDepthExceeded. This list must
+// shrink if upstream SANTA ever adopts the current JVM expectations.
+const SUPERSEDED_BY_607: &[(&str, &str)] = &[
+    (
+        "v6/authored/Transaction.context_extension_depth_bound.json",
+        "ext-depth-coll109-accept#0",
+    ),
+    (
+        "v6/authored/Transaction.degraded_tree_depth_leak.json",
+        "degrade-leak-coll99-accept#0",
+    ),
+    (
+        "v6/authored/Transaction.nested_box_depth_bound.json",
+        "nested-box-coll108-accept#0",
+    ),
+    (
+        "v6/authored/Transaction.nested_degrade_depth_leak.json",
+        "nested-degrade-leak-coll99-accept#0",
+    ),
+    (
+        "v6/authored/Transaction.register_depth_bound.json",
+        "register-coll109-accept#0",
+    ),
+    (
+        "v6/authored/Transaction.segregated_constant_depth_bound.json",
+        "segregated-coll110-accept#0",
+    ),
+];
 
 // ----- helpers -----
 
@@ -155,6 +185,16 @@ fn santa_wire_vectors_match_santa_the_jvm_and_the_node() {
     let mut failures = Vec::new();
     let mut graded = 0;
     let mut seen = BTreeSet::new();
+    let mut superseded_seen = BTreeSet::new();
+    assert_eq!(
+        SUPERSEDED_BY_607
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len(),
+        SUPERSEDED_BY_607.len(),
+        "duplicate 6.0.7 supersession"
+    );
     assert_eq!(
         KNOWN_DIVERGENCES
             .iter()
@@ -193,7 +233,24 @@ fn santa_wire_vectors_match_santa_the_jvm_and_the_node() {
                         .to_ascii_lowercase(),
                 )
             };
+            let key = (relative.as_str(), entry.name.as_str());
+            let superseded = SUPERSEDED_BY_607.contains(&key);
             match jvm.get(&entry.name) {
+                Some(v) if superseded => {
+                    superseded_seen.insert((relative.clone(), entry.name.clone()));
+                    if *v == santa {
+                        failures.push(format!(
+                            "{id}: SANTA now agrees; remove it from SUPERSEDED_BY_607"
+                        ));
+                    }
+                    assert_eq!(*v, Verdict::Reject, "{id}: 6.0.7 type-depth hard rejection");
+                    let lines = std::fs::read_to_string(path.with_extension("jvm.tsv")).unwrap();
+                    assert!(
+                        lines.lines().any(|line| line
+                            == format!("{}\tREJECT DeserializeCallDepthExceeded", entry.name)),
+                        "{id}: exact JVM exception"
+                    );
+                }
                 Some(v) if *v == santa => {}
                 Some(v) => failures.push(format!("{id}: SANTA expects {santa:?}, JVM says {v:?}")),
                 None => failures.push(format!("{id}: no JVM verdict")),
@@ -204,7 +261,11 @@ fn santa_wire_vectors_match_santa_the_jvm_and_the_node() {
                 Err(_) => Verdict::Reject,
             };
             println!("WIRE\t{relative}\t{}\t{santa:?}\t{node:?}", entry.name);
-            let key = (relative.as_str(), entry.name.as_str());
+            let expected = if superseded {
+                jvm.get(&entry.name).unwrap()
+            } else {
+                &santa
+            };
             if KNOWN_DIVERGENCES.contains(&key) {
                 seen.insert((relative.clone(), entry.name.clone()));
                 if jvm.get(&entry.name) == Some(&node) {
@@ -212,8 +273,8 @@ fn santa_wire_vectors_match_santa_the_jvm_and_the_node() {
                         "{id}: known divergence now agrees; remove it from KNOWN_DIVERGENCES"
                     ));
                 }
-            } else if node != santa {
-                failures.push(format!("{id}: expected {santa:?}, node gives {node:?}"));
+            } else if &node != expected {
+                failures.push(format!("{id}: expected {expected:?}, node gives {node:?}"));
             }
             graded += 1;
         }
@@ -223,6 +284,11 @@ fn santa_wire_vectors_match_santa_the_jvm_and_the_node() {
         "{} of {graded} SANTA wire entries disagree:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+    assert_eq!(
+        superseded_seen.len(),
+        SUPERSEDED_BY_607.len(),
+        "stale 6.0.7 supersession: missing file/entry"
     );
     assert_eq!(
         seen.len(),

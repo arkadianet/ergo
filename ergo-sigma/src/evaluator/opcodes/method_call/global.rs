@@ -225,14 +225,30 @@ pub(super) fn deserialize_to(
     // `sigma_to_value_versioned` handle SHeader and enforce that gate
     // (GHSA-hfj8-hjph-7r78); a pre-v3 ErgoTree calling
     // deserializeTo[SHeader] is rejected here, matching the reference.
-    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
     // DataSerializer(SBox) -> ErgoBox.parse -> deserializeErgoTree inherits
     // the executing VersionContext. A high-version nested tree throws a hard
     // SerializerException (wrapped by reflective invocation on the JVM).
     // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L277-L282
     // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/DataSerializer.scala#L33-L38
-    r.set_activated_script_version(Some(cx.ctx.activated_script_version));
+    let mut r = ergo_primitives::reader::VlqReader::new(&bytes)
+        .with_activated_script_version(cx.ctx.activated_script_version);
+    r.set_ergo_tree_version(Some(cx.ctx.ergo_tree_version));
     let parsed = ergo_ser::sigma_value::read_value(&mut r, target_type).map_err(|e| {
+        // DataSerializer preserves ValidationException, including rule 1020.
+        // It arises during evaluation and remains a hard spend failure.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/methods.scala
+        if let ergo_primitives::reader::ReadError::SigmaValidation { rule_id, args, .. } = e {
+            // Not the substitution soft-fork (TrueSigmaProp at the pre-substitution
+            // cost). A tree without deserialize nodes evaluates through evalToCrypto,
+            // with no soft-fork catch, so the failure is hard. A tree with them
+            // evaluates in reduceToCryptoJITC, whose trySoftForkable would yield
+            // TrueProp at the post-substitution cost for a soft-forkable rule; under
+            // the node's current settings none of the rules raised here qualifies
+            // (1020 is absent from them, and replaced 1007/1008/1011 are not
+            // tolerated after v6), so it is hard there too.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/interpreter/Interpreter.scala#L171-L186
+            return EvalError::EvaluationValidation { rule_id, args };
+        }
         EvalError::TypeError {
             expected: "valid data-serialized value for SGlobal.deserializeTo",
             got: format!("deserialization error: {e}"),

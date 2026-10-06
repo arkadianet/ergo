@@ -446,10 +446,11 @@ mod tests {
         format!("{:02x}{:02x}{body}", 0x08 | version, body.len() / 2)
     }
 
-    /// A `Coll^n[Byte]` register constant, one element per level and the
-    /// innermost collection empty: reading it takes `1 + n` levels.
-    fn nested_byte_coll(n: usize) -> String {
-        format!("{}1a{}00", "0c".repeat(n - 2), "01".repeat(n - 1))
+    /// An n-deep tuple-node register with a Byte constant leaf.
+    fn nested_tuple_value(n: usize) -> String {
+        // AST tuple nodes have no type descriptors on the wire, so this tests
+        // leaked VALUE levels independently of the new TypeSerializer limit.
+        format!("{}0200", "8601".repeat(n))
     }
 
     /// An `SBox` constant: an output (txid 0, index 0) under `tree`.
@@ -1214,8 +1215,8 @@ mod tests {
     /// value, a data value or a `SigmaBoolean` and down only when it returns.
     /// A size-delimited tree that degrades keeps every level open at the
     /// throw for the rest of the transaction's reader. Each case puts
-    /// `Coll^n[Byte]` (`1 + n` levels) in a later register, at the boundary.
-    /// JVM (`ErgoSerdeOracle.scala`, sigma-state 6.0.6, `transaction@3`): the
+    /// n tuple nodes and a Byte constant in a later register, at the boundary.
+    /// JVM (SantaWireOracle.scala, sigma-state 6.0.7, transaction@3): the
     /// accepted twin ACCEPT, the rejected one REJECT
     /// DeserializeCallDepthExceeded.
     ///
@@ -1230,8 +1231,8 @@ mod tests {
     ///   `LogicalNot`, the constant's value and data frames: 10), also when
     ///   the option holds a box whose own tree would leak 10 more;
     /// - a tree wrapped only for its non-`SigmaProp` root has returned every
-    ///   level (0: 109 accepts);
-    /// - two degraded outputs add up (20: 89 accepts);
+    ///   level (0: 108 accepts);
+    /// - two degraded outputs add up (20: 88 accepts);
     /// - the degraded box's own registers count it too;
     /// - so does a tree degrading inside an `SBox` register constant or
     ///   context-extension value: its box's frames return, the tree's 10 stay.
@@ -1246,9 +1247,9 @@ mod tests {
             2,
             &format!("d1{}246301{}", "ef".repeat(7), &box_constant(LEAKS_10)[2..]),
         );
-        let reg = |n| vec![nested_byte_coll(n)];
+        let reg = |n| vec![nested_tuple_value(n)];
         let mut cases = Vec::new();
-        for (n, accept) in [(99, true), (100, false)] {
+        for (n, accept) in [(98, true), (99, false)] {
             let later = output(TRUE_TREE, &reg(n));
             cases.extend([
                 (
@@ -1286,7 +1287,7 @@ mod tests {
                 ),
             ]);
         }
-        for (n, accept) in [(99, true), (100, false)] {
+        for (n, accept) in [(98, true), (99, false)] {
             let later = output(TRUE_TREE, &reg(n));
             cases.push((
                 "option",
@@ -1299,7 +1300,7 @@ mod tests {
                 accept,
             ));
         }
-        for (n, accept) in [(109, true), (110, false)] {
+        for (n, accept) in [(108, true), (109, false)] {
             let later = output(TRUE_TREE, &reg(n));
             cases.push((
                 "root",
@@ -1307,7 +1308,7 @@ mod tests {
                 accept,
             ));
         }
-        for (n, accept) in [(89, true), (90, false)] {
+        for (n, accept) in [(88, true), (89, false)] {
             let outputs = [
                 output(LEAKS_10, &[]),
                 output(LEAKS_10, &[]),

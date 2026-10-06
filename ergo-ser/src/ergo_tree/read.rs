@@ -365,7 +365,21 @@ pub(super) fn read_ergo_tree_tracking_template(
         let parsed = parse_body(r, header, has_size, constant_segregation);
         r.set_position_limit(saved_limit);
         r.set_ergo_tree_version(saved_v);
-        parsed.map(|(tree, template_start)| (tree, false, Some(template_start..r.position())))
+        // Rule 1020 is caught at this tree's boundary. A sizeless tree
+        // rethrows it as SerializerException, so an enclosing sized tree must
+        // not mistake it for its own soft-forkable ValidationException.
+        // Deliberately match the JVM's exception translation for consensus.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L194-L215
+        parsed
+            .map_err(|error| match error {
+                ReadError::SigmaValidation {
+                    rule_id: 1020,
+                    message,
+                    ..
+                } => ReadError::HardReject(message),
+                other => other,
+            })
+            .map(|(tree, template_start)| (tree, false, Some(template_start..r.position())))
     }
 }
 
