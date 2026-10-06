@@ -16,6 +16,10 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- Enforce validation rule 110 (`txDataInputsUnique`), added in the Scala node 6.0.7, from height 1,885,000. A transaction may repeat at most one data input; a transaction with a second repeat is now rejected in blocks, in the mempool and in mining candidates. Mainnet reached this height on 2026-10-01; 0.12.0 and earlier do not check the rule and accept such transactions.
+
 ## [0.12.0] - 2026-10-05
 
 - **Storage:** moves to redb 4, and the node upgrades a 0.11 data directory automatically.

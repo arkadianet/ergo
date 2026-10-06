@@ -138,6 +138,15 @@ pub enum ValidationError {
     #[error("repeated storage rent var-127 value at input {index} (rule 125)")]
     DuplicateStorageRentOutput { index: usize },
 
+    /// Scala rule 110: more than one repeated data input after activation.
+    #[error("{count} data inputs name only {distinct} distinct boxes; at most one may repeat (rule 110)")]
+    DuplicateDataInputs {
+        /// Number of data inputs in the transaction.
+        count: usize,
+        /// Number of distinct data-input box ids.
+        distinct: usize,
+    },
+
     // --- State-dependent (UTXO resolution) ---
     /// A spending input references a box that the UTXO view does not
     /// know about.

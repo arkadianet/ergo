@@ -1,3 +1,4 @@
+pub mod data_inputs;
 pub mod ge;
 pub mod heights;
 pub mod monetary;
@@ -177,6 +178,9 @@ pub fn validate_transaction(
     // before the per-output verifyOutput loop (112/124); it is stateless
     // (output token amounts only), so it runs here, ahead of the height loop.
     monetary::check_positive_assets(&tx)?;
+    // Rule 110 (txDataInputsUnique) — Scala checks it after the data boxes
+    // resolve and before the per-output loop.
+    data_inputs::validate_data_inputs_unique(&tx, cx.ctx.height)?;
     heights::validate_output_heights(&tx, cx.ctx)?;
     heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
 
@@ -298,6 +302,8 @@ pub fn validate_transaction_parsed_with_group_elements(
 
     // Rule 108 (txPositiveAssets) — before the per-output 112/124 loop.
     monetary::check_positive_assets(&tx)?;
+    // Rule 110 (txDataInputsUnique), in Scala's position.
+    data_inputs::validate_data_inputs_unique(&tx, cx.ctx.height)?;
     // Per-output height constraints (Scala rules 112 + 124)
     heights::validate_output_heights(&tx, cx.ctx)?;
     heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
