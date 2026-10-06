@@ -42,28 +42,7 @@ fn boxes(j: &J, field: &str) -> Result<Vec<ErgoBox>, String> {
 }
 
 // A node fix must remove the corresponding independently confirmed exception.
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "v6/authored/tree-version-above-activated-eval.json",
-        "context-deserialize-box-v4-reject#0",
-    ),
-    (
-        "v6/authored/tree-version-above-activated-eval.json",
-        "dead-context-deserialize-box-v4-reject#4",
-    ),
-    (
-        "v6/authored/tree-version-above-activated-eval.json",
-        "deserializeto-box-v4-reject#9",
-    ),
-    (
-        "v6/authored/tree-version-above-activated-eval.json",
-        "register-deserialize-box-v4-reject#2",
-    ),
-    (
-        "v6/authored/tree-version-above-activated-eval.json",
-        "substconstants-box-v4-reject#6",
-    ),
-];
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 #[derive(Debug)]
 enum NodeVerdict {
