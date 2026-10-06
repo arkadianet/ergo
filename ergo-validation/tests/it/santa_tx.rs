@@ -44,54 +44,6 @@ fn boxes(j: &J, field: &str) -> Result<Vec<ErgoBox>, String> {
 // A node fix must remove the corresponding independently confirmed exception.
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     (
-        "v6/authored/deserialize-substitution-spend.json",
-        "l1-decode-cast-swallowed-live-reject#1",
-    ),
-    (
-        "v6/authored/deserialize-substitution-spend.json",
-        "r1-self-proposition-decoded-accept#16",
-    ),
-    (
-        "v6/authored/deserialize-substitution-spend.json",
-        "r1-unsized-tree-decode-fails-reject#19",
-    ),
-    (
-        "v6/authored/deserialize-substitution-spend.json",
-        "root-boolean-default-true-accept#20",
-    ),
-    (
-        "v6/authored/deserialize-substitution-spend.json",
-        "s16-context-type-read-cast-swallowed-dead-accept#13",
-    ),
-    (
-        "v6/authored/deserialize-substitution-spend.json",
-        "s16b-context-decode-cast-swallowed-dead-accept#14",
-    ),
-    (
-        "v6/authored/deserialize-substitution-spend.json",
-        "s3-type-read-cast-swallowed-dead-accept#3",
-    ),
-    (
-        "v6/authored/deserialize-substitution-spend.json",
-        "s3j-decode-cast-swallowed-dead-accept#0",
-    ),
-    (
-        "v6/authored/deserialize-substitution-spend.json",
-        "s5-default-negation-rebuilt-reject#9",
-    ),
-    (
-        "v6/authored/deserialize-substitution-spend.json",
-        "s6-default-optionget-rebuilt-reject#10",
-    ),
-    (
-        "v6/authored/deserialize-substitution-spend.json",
-        "s8-default-if-rebuilt-reject#8",
-    ),
-    (
-        "v6/authored/deserialize-substitution-spend.json",
-        "s9-default-plus-rebuilt-reject#11",
-    ),
-    (
         "v6/authored/sized-tree-output-bytes.json",
         "output-declared-over-accept#0",
     ),

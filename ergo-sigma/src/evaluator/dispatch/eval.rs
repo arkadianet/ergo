@@ -28,6 +28,54 @@ pub(in crate::evaluator) fn eval_expr(
     cost: &mut CostAccumulator,
     trace: &mut Option<Vec<TraceEntry>>,
 ) -> Result<Value, EvalError> {
+    eval_expr_inner(
+        expr,
+        EvalCtx {
+            ctx,
+            constants,
+            env,
+            depth,
+            cost,
+            trace,
+        },
+        false,
+    )
+}
+
+/// Interpreter reduction also normalizes the substituted root script type.
+/// Raw value evaluation keeps arbitrary result types for evaluator diagnostics.
+pub(super) fn eval_script_expr(
+    expr: &Expr,
+    ctx: &ReductionContext<'_>,
+    constants: &[(SigmaType, SigmaValue)],
+    env: &mut Env,
+    depth: &mut usize,
+    cost: &mut CostAccumulator,
+    trace: &mut Option<Vec<TraceEntry>>,
+) -> Result<Value, EvalError> {
+    eval_expr_inner(
+        expr,
+        EvalCtx {
+            ctx,
+            constants,
+            env,
+            depth,
+            cost,
+            trace,
+        },
+        true,
+    )
+}
+
+fn eval_expr_inner(expr: &Expr, cx: EvalCtx<'_>, script_root: bool) -> Result<Value, EvalError> {
+    let EvalCtx {
+        ctx,
+        constants,
+        env,
+        depth,
+        cost,
+        trace,
+    } = cx;
     // Scala `Interpreter.fullReduction` forks on `ErgoTree.hasDeserialize`:
     // a tree containing DeserializeContext/DeserializeRegister goes
     // through `propositionFromErgoTree` →
@@ -64,7 +112,21 @@ pub(in crate::evaluator) fn eval_expr(
     }
     let substituted = if *depth == 0 && expr_has_deserialize(expr) {
         let mut inlined = inline_placeholders(expr, constants);
-        substitute_deserialize(&mut inlined, ctx, cost)?;
+        let root_type = substitute_deserialize(&mut inlined, ctx, cost)?
+            .map_err(|_| EvalError::RuntimeException("substituted root type read failed"))?;
+        // Interpreter.toValidScriptTypeJITC wraps a substituted Boolean root.
+        // Use the actual node so BoolToSigmaProp's normal 15-JIT charge applies.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/interpreter/Interpreter.scala#L598-L602
+        if script_root && root_type == Some(SigmaType::SBoolean) {
+            inlined = Expr::Op(IrNode {
+                opcode: 0xD1,
+                payload: Payload::One(Box::new(inlined)),
+            });
+        } else if script_root && root_type.is_some() && root_type != Some(SigmaType::SSigmaProp) {
+            return Err(EvalError::RuntimeException(
+                "substituted root must be Boolean or SigmaProp",
+            ));
+        }
         Some(inlined)
     } else {
         None

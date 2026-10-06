@@ -608,6 +608,9 @@ pub(in crate::evaluator) fn eval_subst_constants(
 }
 
 // Deserialize nodes remaining after substitution cannot be evaluated.
+// Both Deserialize classes inherit Value.eval's "Should be overriden" throw.
+// An unresolved live macro must fail, without using a register/default at eval.
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/values.scala#L101-L102
 pub(in crate::evaluator) fn eval_deserialize_context(
     id: u8,
     _cx: &mut EvalCtx<'_>,

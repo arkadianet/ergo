@@ -43,7 +43,7 @@ pub fn reduce_expr_with_cost(
     let mut env = Env::new();
     let mut depth = 0usize;
     let mut trace = None;
-    let val = eval_expr(expr, ctx, constants, &mut env, &mut depth, cost, &mut trace)?;
+    let val = eval::eval_script_expr(expr, ctx, constants, &mut env, &mut depth, cost, &mut trace)?;
     match val {
         Value::SigmaProp(sb) => Ok(sb),
         Value::Bool(true) => Ok(SigmaBoolean::TrivialProp(true)),
@@ -99,7 +99,8 @@ pub fn reduce_expr_traced_with_cost(
     let mut env = Env::new();
     let mut depth = 0usize;
     let mut trace = Some(Vec::new());
-    let result = eval_expr(expr, ctx, constants, &mut env, &mut depth, cost, &mut trace);
+    let result =
+        eval::eval_script_expr(expr, ctx, constants, &mut env, &mut depth, cost, &mut trace);
     let entries = trace.unwrap_or_default();
     let sb_result = result.and_then(|val| match val {
         Value::SigmaProp(sb) => Ok(sb),
