@@ -1,0 +1,29 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "ErgoTree.unparsed_soft_fork_roundtrip",
+  "blessed_by" : "jvm:sigma-state-6.0.3",
+  "entries" : [
+    {
+      "name" : "unparsed-soft-fork-1-byte-body-roundtrip#0",
+      "kind" : "ErgoTree",
+      "source" : "santa:authored-unparsed-soft-fork-roundtrip",
+      "description" : "Size-flagged ErgoTree (header 0x0b = v3 + size bit) whose body is unknown opcode 0xfd (1-byte declared body (the minimal soft-fork tree)): the JVM wraps it as UnparsedErgoTree and re-serializes byte-IDENTICAL (preserves the declared-size body). Identity round-trip. An impl that substitutes a Const(true) placeholder + empty constants (the soft-fork forward-compat path) diverges -> different propositionBytes -> different boxId -> UTXO-digest/consensus fork.",
+      "bytes_hex" : "0b01fd",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "unparsed-soft-fork-3-byte-body-roundtrip#1",
+      "kind" : "ErgoTree",
+      "source" : "santa:authored-unparsed-soft-fork-roundtrip",
+      "description" : "Size-flagged ErgoTree (header 0x0b = v3 + size bit) whose body is unknown opcode 0xfd (3-byte declared body — the full declared region (fd 01 02) is preserved, not just the opcode): the JVM wraps it as UnparsedErgoTree and re-serializes byte-IDENTICAL (preserves the declared-size body). Identity round-trip. An impl that substitutes a Const(true) placeholder + empty constants (the soft-fork forward-compat path) diverges -> different propositionBytes -> different boxId -> UTXO-digest/consensus fork.",
+      "bytes_hex" : "0b03fd0102",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "ErgoTree.unparsed_soft_fork_option_constant",
+  "blessed_by" : "jvm:sigma-state-6.0.3",
+  "entries" : [
+    {
+      "name" : "unparsed-soft-fork-option-constant-roundtrip#0",
+      "kind" : "ErgoTree",
+      "source" : "santa:authored-unparsed-soft-fork-option-constant",
+      "description" : "Size-flagged ErgoTree (header 0x1a = v2 + size + const-seg) with one segregated constant of type SOption[SInt] (typeCode 0x28), value Some(5), body 73 00: the Option typecode trips CheckSerializableTypeCode (rule 1009) — a soft-forkable ValidationException — so the size flag wraps the whole tree as UnparsedErgoTree and the JVM re-serializes byte-IDENTICAL. Identity round-trip; the DEGRADE side of the rule-1009 boundary (the SHeader-constant REJECT twin is a separate wire reject arm). An impl that rejects this (no soft-fork degrade) or substitutes a Const(true) placeholder diverges -> different propositionBytes -> different boxId.",
+      "bytes_hex" : "1a060128010a7300",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 2
+      }
+    }
+  ]
+}
