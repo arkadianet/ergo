@@ -437,9 +437,9 @@ fn register_value_to_expr(tpe: &SigmaType, val: &SigmaValue) -> Result<Expr, Wri
 /// Upcast and FuncValue children therefore parse but fail on materialization.
 /// They are never evaluated and incur no opcode costs on that path.
 /// Sources (tag v6.0.7):
-/// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/values.scala#L805-L900
-/// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/ErgoBoxCandidate.scala#L229-L233
-/// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/interpreter/ContextExtension.scala#L61-L63
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/values.scala#L805-L900>
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/ErgoBoxCandidate.scala#L229-L233>
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/interpreter/ContextExtension.scala#L61-L63>
 fn stored_child_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadError> {
     if let Ok(value) = expr_to_register_value(expr) {
         return Ok(value);

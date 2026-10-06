@@ -421,7 +421,7 @@ pub(in crate::evaluator) fn eval_func_apply(
 
 /// Shallow `Value.checkType` for tuple carriers (SType.scala:200-202).
 /// Options and collections deliberately do not inspect their contents here.
-/// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/ast/SType.scala#L200-L202
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/ast/SType.scala#L200-L202>
 pub(in crate::evaluator) fn check_runtime_tuple_type(
     tpe: &SigmaType,
     value: &Value,

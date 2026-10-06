@@ -692,7 +692,7 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
 
 /// `Evaluation.stypeToRType` supports only unary, monomorphic functions.
 /// This also runs for empty ConcreteCollections, before allocating their array.
-/// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/Evaluation.scala#L18-L56
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/Evaluation.scala#L18-L56>
 fn check_stored_rtype(tpe: &SigmaType) -> Result<(), EvalError> {
     match tpe {
         SigmaType::SFunc {

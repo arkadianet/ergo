@@ -31,8 +31,8 @@ pub fn write_ergo_box_candidate(w: &mut VlqWriter, c: &ErgoBoxCandidate) -> Resu
 /// Serialize a candidate under the ambient version, including stored node children.
 /// The transaction wire cache and a newly sealed box's default-context bytes
 /// are distinct (ValueSerializer.serializable strips constant Upcast below v3).
-/// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ValueSerializer.scala#L157-L170
-/// https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala#L163-L176
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ValueSerializer.scala#L157-L170>
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala#L163-L176>
 pub fn write_ergo_box_candidate_versioned(
     w: &mut VlqWriter,
     c: &ErgoBoxCandidate,
