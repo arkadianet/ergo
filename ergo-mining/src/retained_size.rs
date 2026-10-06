@@ -35,6 +35,20 @@ fn value_size(value: &SigmaValue) -> usize {
         SigmaValue::Coll(CollValue::Bytes(bytes)) | SigmaValue::OpaqueBoxBytes(bytes) => {
             bytes.capacity()
         }
+        SigmaValue::CanonicalBoxBytes {
+            bytes,
+            canonical_bytes,
+            legacy_bytes,
+        } => {
+            let cached_size = |cached: &Result<Vec<u8>, ergo_ser::error::WriteError>| match cached {
+                Ok(bytes) => bytes.capacity(),
+                Err(ergo_ser::error::WriteError::InvalidData(message)) => message.capacity(),
+            };
+            bytes
+                .capacity()
+                .saturating_add(cached_size(canonical_bytes))
+                .saturating_add(legacy_bytes.as_ref().map_or(0, cached_size))
+        }
         SigmaValue::Opt(Some(value)) => size_of::<SigmaValue>().saturating_add(value_size(value)),
         SigmaValue::Str(value) => value.capacity(),
         SigmaValue::BigInt(value) => (value.bits().div_ceil(8) as usize).saturating_mul(2),

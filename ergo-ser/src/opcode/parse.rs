@@ -14,18 +14,10 @@ use super::types::{
 ///
 /// `tree_version` is the ErgoTree header version byte (`0..=3` in
 /// real-world chains), threaded through the whole expression walk the
-/// way Scala's `SigmaByteReader` exposes the version context to every
-/// serializer. No body-wire SHAPE rule consults it: the `MethodCall`
-/// explicit-type-args bytes are keyed on `(type_id, method_id)` alone
-/// (see [`method_explicit_type_args_count`]), so callers without a
-/// surrounding tree header (registers,
-/// `DeserializeContext`/`DeserializeRegister` payloads) pass `0` and
-/// still parse v6 method calls correctly without desyncing the stream.
-/// It IS consulted for VALIDATION: pre-v3 inline `SHeader`/`SOption`
-/// constants are rejected (see [`parse_expr`]); the version-0 sentinel
-/// those headerless callers pass makes that rejection fire, which is
-/// correct — the reference also rejects such values there (the constant
-/// path via the v3 data gate, register/context vars via `CheckV6Type`).
+/// way Scala's `VersionContext` scopes each deserializer. Headerless register,
+/// extension and embedded-expression callers supply their ambient tree version.
+/// Method wire shapes (including explicit type arguments) remain keyed on the
+/// method ids; builder upcasts and the empty-argument assert use the version.
 pub fn parse_body(r: &mut VlqReader, tree_version: u8) -> Result<Body, ReadError> {
     parse_expr(r, 0, tree_version)
 }
@@ -39,8 +31,7 @@ pub fn parse_body_for_substitution(
     tree_version: u8,
 ) -> Result<(Body, super::ConstructorType), ReadError> {
     let mut types = ParseTypes {
-        constructors: Some(super::ConstructorTypes::default()),
-        constructor_children: vec![Vec::new()],
+        check_substitution_constructors: true,
         ..Default::default()
     };
     let expr = parse_typed_expr(r, 0, tree_version, &mut types, &mut Vec::new())?;
@@ -65,12 +56,24 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
     )
 }
 
-#[derive(Default)]
 struct ParseTypes<'a> {
     bindings: crate::ergo_tree::root_type::ValDefTypeStore,
     constants: &'a [(SigmaType, SigmaValue)],
     constructors: Option<super::ConstructorTypes>,
+    check_substitution_constructors: bool,
     constructor_children: Vec<Vec<super::ConstructorType>>,
+}
+
+impl Default for ParseTypes<'_> {
+    fn default() -> Self {
+        Self {
+            bindings: Default::default(),
+            constants: &[],
+            constructors: Some(Default::default()),
+            constructor_children: vec![Vec::new()],
+            check_substitution_constructors: false,
+        }
+    }
 }
 
 pub(crate) fn parse_body_with_constants(
@@ -112,8 +115,10 @@ fn parse_typed_expr(
     );
     if let Some(constructors) = &mut types.constructors {
         let children = types.constructor_children.pop().unwrap();
-        super::check_rebuilt_constructor(&expr, &children)
-            .map_err(super::ConstructorError::into_read_error)?;
+        if types.check_substitution_constructors {
+            super::check_rebuilt_constructor(&expr, &children)
+                .map_err(super::ConstructorError::into_read_error)?;
+        }
         // These are serializer/builder type reads, distinct from reflective
         // case-class construction. Preserve their direct exception class.
         // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L686-L703
@@ -126,30 +131,21 @@ fn parse_typed_expr(
                     | Payload::MethodCall { .. }
                     | Payload::ConcreteCollection { .. }
             ) || (0x8F..=0x94).contains(&node.opcode);
-            if reads_all {
+            if reads_all && types.check_substitution_constructors {
                 for t in &children {
                     t.as_ref().map_err(|e| e.into_read_error())?;
                 }
             }
-            if let Payload::ConcreteCollection { elem_type, .. } = &node.payload {
-                for t in &children {
-                    if let Ok(Some(t)) = t {
-                        if t != elem_type {
-                            return Err(ReadError::HardReject(
-                                "ConcreteCollection item type mismatch (Scala AssertionError)"
-                                    .into(),
-                            ));
-                        }
-                    }
-                }
-            }
-            if version < 3 && matches!(node.payload, Payload::ByIndex { .. }) {
+            if types.check_substitution_constructors
+                && version < 3
+                && matches!(node.payload, Payload::ByIndex { .. })
+            {
                 if let Some(Err(e)) = children.get(1) {
                     return Err(e.into_read_error());
                 }
             }
         }
-        let tpe = constructors.node_type(&expr, &children);
+        let tpe = constructors.node_type_with_constants(&expr, &children, types.constants);
         types.constructor_children.last_mut().unwrap().push(tpe);
     }
     parent_types.push(tpe.filter(crate::ergo_tree::root_type::type_is_precise));
@@ -284,8 +280,57 @@ fn parse_node_value(
         }
 
         ArgPattern::Two => {
-            let a = parse_typed_expr(r, next, _tree_version, types, children)?;
-            let b = parse_typed_expr(r, next, _tree_version, types, children)?;
+            let mut a = parse_typed_expr(r, next, _tree_version, types, children)?;
+            let mut b = parse_typed_expr(r, next, _tree_version, types, children)?;
+            // DeserializationSigmaBuilder deliberately stops auto-upcasting
+            // arithmetic from tree v3. Earlier trees retain inserted Upcasts.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L706-L711
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L750-L763
+            if _tree_version < 3 && matches!(first, 0x99..=0x9A | 0x9C..=0x9E | 0xA1..=0xA2) {
+                let num_children = children.len();
+                let operand_types = &mut children[num_children - 2..];
+                if let [Some(left), Some(right)] = operand_types {
+                    let rank = |t: &SigmaType| match t {
+                        SigmaType::SByte => 1,
+                        SigmaType::SShort => 2,
+                        SigmaType::SInt => 3,
+                        SigmaType::SLong => 4,
+                        SigmaType::SBigInt => 5,
+                        SigmaType::SUnsignedBigInt => 6,
+                        _ => 0,
+                    };
+                    if left != right && rank(left) > 0 && rank(right) > 0 {
+                        let target = if rank(left) > rank(right) {
+                            left.clone()
+                        } else {
+                            right.clone()
+                        };
+                        for (expr, tpe) in [(&mut a, left), (&mut b, right)] {
+                            if *tpe != target {
+                                *expr = Expr::Op(IrNode {
+                                    opcode: 0x7E,
+                                    payload: Payload::NumericCast {
+                                        input: Box::new(std::mem::replace(
+                                            expr,
+                                            Expr::Const {
+                                                tpe: SigmaType::SUnit,
+                                                val: SigmaValue::Unit,
+                                            },
+                                        )),
+                                        tpe: target.clone(),
+                                    },
+                                });
+                                *tpe = target.clone();
+                            }
+                        }
+                        if types.constructors.is_some() {
+                            let ct = types.constructor_children.last_mut().unwrap();
+                            let len = ct.len();
+                            ct[len - 2..].fill(Ok(Some(target)));
+                        }
+                    }
+                }
+            }
             check_numeric_operands(first, &children[children.len() - 2..])?;
             check_constructor_casts(first, &children[children.len() - 2..])?;
             Payload::Two(Box::new(a), Box::new(b))
@@ -591,16 +636,27 @@ fn parse_node_value(
             let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 let item = parse_typed_expr(r, next, _tree_version, types, children)?;
-                // `ConcreteCollectionSerializer.parse` asserts
-                // `v.tpe == tItem` per item. An `AssertionError` is not a
-                // `ValidationException`, so even a sized tree hard-rejects.
-                // Only types the IR states explicitly are checked (see
-                // `explicit_type`); an inferred type may differ from Scala's.
-                if let Some(tpe) = explicit_type(&item) {
+                // This assert is made after EACH item, on both ordinary and
+                // substitution parsing. Deliberately match Scala AssertionError
+                // as a hard reject, even inside a size-delimited tree.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ConcreteCollectionSerializer.scala#L33-L39
+                let tpe = if types.constructors.is_some() {
+                    types
+                        .constructor_children
+                        .last()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .as_ref()
+                        .map_err(|e| e.into_read_error())?
+                        .clone()
+                } else {
+                    children.last().cloned().flatten()
+                };
+                if let Some(tpe) = tpe {
                     if tpe != elem_type {
                         return Err(ReadError::HardReject(format!(
-                            "ConcreteCollection item has type {tpe:?}, expected {elem_type:?} \
-                             (Scala AssertionError)"
+                            "ConcreteCollection item has type {tpe:?}, expected {elem_type:?} (Scala AssertionError)"
                         )));
                     }
                 }

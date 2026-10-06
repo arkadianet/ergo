@@ -84,7 +84,7 @@ pub(crate) struct ValDefTypeStore {
 pub(crate) fn value_contains_box(val: &crate::sigma_value::SigmaValue) -> bool {
     use crate::sigma_value::{CollValue, SigmaValue};
     match val {
-        SigmaValue::OpaqueBoxBytes(_) => true,
+        SigmaValue::OpaqueBoxBytes(_) | SigmaValue::CanonicalBoxBytes { .. } => true,
         // `BoolBits` / `Bytes` collections never hold boxes; only `Values` can.
         SigmaValue::Coll(CollValue::Values(items)) | SigmaValue::Tuple(items) => {
             items.iter().any(value_contains_box)
@@ -467,6 +467,17 @@ pub(crate) fn infer_node_type(
             }
             Payload::One(input) if precise_types && matches!(node.opcode, 0xF0 | 0xF1) => {
                 child_type(input, store, constants)
+            }
+            // ArithOp.tpe is its left operand's type. Pre-v3 deserialization
+            // inserts Upcast nodes before construction; v3 preserves operands.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/trees.scala#L704-L708
+            Payload::Two(left, right)
+                if precise_types
+                    && matches!(node.opcode, 0x99..=0x9A | 0x9C..=0x9E | 0xA1..=0xA2) =>
+            {
+                let t = child_type(left, store, constants);
+                child_type(right, store, constants);
+                t
             }
             // Generic operator payloads: walk every child (store evolution),
             // then classify by opcode — relations, arithmetic, etc. whose

@@ -852,6 +852,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn canonical_methodcall_wire_forms_have_no_hermetic_codec_bug() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../test-vectors/santa/wire/v6/authored/Box.methodcall_canonicalization.json"
+        ))
+        .unwrap();
+        for entry in fixture["entries"].as_array().unwrap() {
+            let surface = match entry["kind"].as_str().unwrap() {
+                "Box" => "ergo_box",
+                "Transaction" => "transaction",
+                "Constant" => "constant",
+                "ErgoTree" => "ergo_tree",
+                _ => unreachable!(),
+            };
+            let bytes = hex::decode(entry["bytes_hex"].as_str().unwrap()).unwrap();
+            let outcome = (registry(Some(surface))[0].run)(&bytes);
+            assert!(
+                !matches!(outcome, Outcome::Bug(_)),
+                "{}: {outcome:?}",
+                entry["name"]
+            );
+        }
+    }
+
     /// Local cargo-fuzz finds (2026-09-29). Each hides a nested tree whose
     /// verdict depends on lookahead past a retained box, so a canonical
     /// rewrite after the box flipped the re-decode. sigma-state 6.0.2 rejects

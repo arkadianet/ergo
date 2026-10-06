@@ -121,22 +121,47 @@ impl<T: ParityNormalize> ParityNormalize for Vec<T> {
     }
 }
 
-fn normalize_value(value: &mut SigmaValue) {
+fn normalize_value(value: &mut SigmaValue, version: u8, after_write: bool) {
     match value {
         SigmaValue::Header(_, id) => *id = [0; 32],
+        SigmaValue::CanonicalBoxBytes {
+            bytes,
+            canonical_bytes,
+            legacy_bytes,
+        } => {
+            // The JVM structured writer canonicalizes the nested box while
+            // its received identity remains cached until the next read.
+            // Compare that one documented write effect, preserving all others.
+            let canonical = if version < 3 {
+                legacy_bytes.as_ref().unwrap_or(canonical_bytes)
+            } else {
+                canonical_bytes
+            };
+            let received = if after_write {
+                canonical.as_ref().unwrap_or(bytes)
+            } else {
+                bytes
+            };
+            *value = SigmaValue::OpaqueBoxBytes(received.clone());
+        }
         SigmaValue::Coll(CollValue::Values(items))
         | SigmaValue::Tuple(items)
         | SigmaValue::ConcreteCollection { items, .. } => {
-            items.iter_mut().for_each(normalize_value);
+            items
+                .iter_mut()
+                .for_each(|x| normalize_value(x, version, after_write));
         }
-        SigmaValue::Opt(Some(inner)) => normalize_value(inner),
+        SigmaValue::Opt(Some(inner)) => normalize_value(inner, version, after_write),
+        SigmaValue::Unevaluated(expr) => normalize_expr(expr, version, after_write),
         _ => {}
     }
 }
 impl ParityNormalize for SigmaValue {
     fn retained_boxes(&self) -> Vec<&[u8]> {
         match self {
-            SigmaValue::OpaqueBoxBytes(bytes) => vec![bytes.as_slice()],
+            SigmaValue::OpaqueBoxBytes(bytes) | SigmaValue::CanonicalBoxBytes { bytes, .. } => {
+                vec![bytes.as_slice()]
+            }
             SigmaValue::Coll(CollValue::Values(items))
             | SigmaValue::Tuple(items)
             | SigmaValue::ConcreteCollection { items, .. } => items.retained_boxes(),
@@ -144,9 +169,9 @@ impl ParityNormalize for SigmaValue {
             _ => Vec::new(),
         }
     }
-    fn parity_normalized(&self, _after_write: bool) -> impl PartialEq {
+    fn parity_normalized(&self, after_write: bool) -> impl PartialEq {
         let mut value = self.clone();
-        normalize_value(&mut value);
+        normalize_value(&mut value, 3, after_write);
         value
     }
     fn header_values(&self) -> Vec<(&Header, [u8; 32])> {
@@ -178,7 +203,7 @@ fn normalize_expr(expr: &mut Expr, version: u8, after_write: bool) {
     }
     let node = match expr {
         Expr::Const { val, .. } => {
-            normalize_value(val);
+            normalize_value(val, version, after_write);
             return;
         }
         Expr::Unparsed(opaque) => {
@@ -238,6 +263,10 @@ fn normalize_expr(expr: &mut Expr, version: u8, after_write: bool) {
     };
     for child in children {
         normalize_expr(child, version, after_write);
+    }
+    // MethodCall.companion chooses PropertyCall for an empty argument list.
+    if after_write && matches!(&node.payload, Payload::MethodCall { args, .. } if args.is_empty()) {
+        node.opcode = 0xdb;
     }
     // ByIndexSerializer.parse reinserts an Int Upcast for a byte/short index
     // before v3. Model that context after the writer's one-level stripping.
@@ -462,26 +491,35 @@ macro_rules! view {
 view!(
     RegisterValue,
     v,
-    (v.tpe.clone(), v.value.parity_normalized(false)),
+    after_write,
+    (v.tpe.clone(), v.value.parity_normalized(after_write)),
     v.value.header_values(),
-    v.value.retained_boxes()
+    v.value.retained_boxes(),
+    false,
+    None,
+    false
 );
 view!(
     AdditionalRegisters,
     v,
-    v.registers.parity_normalized(false),
+    after_write,
+    v.registers.parity_normalized(after_write),
     v.registers.header_values(),
-    v.registers.retained_boxes()
+    v.registers.retained_boxes(),
+    false,
+    None,
+    false
 );
 view!(
     ContextExtension,
     v,
+    after_write,
     {
         // IndexMap equality is key/value equality, independent of insertion order.
         let mut entries = v
             .values
             .iter()
-            .map(|(key, value)| (*key, value.parity_normalized(false)))
+            .map(|(key, value)| (*key, value.parity_normalized(after_write)))
             .collect::<Vec<_>>();
         entries.sort_by_key(|(key, _)| *key);
         entries
@@ -493,32 +531,47 @@ view!(
     v.values
         .values()
         .flat_map(ParityNormalize::retained_boxes)
-        .collect()
+        .collect(),
+    false,
+    None,
+    false
 );
 view!(
     SpendingProof,
     v,
+    after_write,
     (
         v.proof.clone(),
-        v.extension().parity_normalized(false),
+        v.extension().parity_normalized(after_write),
         v.extension_bytes().to_vec()
     ),
     v.extension().header_values(),
-    v.extension().retained_boxes()
+    v.extension().retained_boxes(),
+    false,
+    None,
+    false
 );
 view!(
     Input,
     v,
-    (v.box_id, v.spending_proof.parity_normalized(false)),
+    after_write,
+    (v.box_id, v.spending_proof.parity_normalized(after_write)),
     v.spending_proof.header_values(),
-    v.spending_proof.retained_boxes()
+    v.spending_proof.retained_boxes(),
+    false,
+    None,
+    false
 );
 view!(
     UnsignedInput,
     v,
-    (v.box_id, v.extension.parity_normalized(false)),
+    after_write,
+    (v.box_id, v.extension.parity_normalized(after_write)),
     v.extension.header_values(),
-    v.extension.retained_boxes()
+    v.extension.retained_boxes(),
+    false,
+    None,
+    false
 );
 view!(
     ErgoBoxCandidate,
@@ -537,7 +590,7 @@ view!(
         .to_vec(),
         v.creation_height,
         v.tokens.clone(),
-        v.additional_registers().parity_normalized(false),
+        v.additional_registers().parity_normalized(after_write),
         v.register_bytes().to_vec()
     ),
     {
@@ -574,7 +627,7 @@ view!(
     v,
     after_write,
     (
-        v.inputs.parity_normalized(false),
+        v.inputs.parity_normalized(after_write),
         v.data_inputs.clone(),
         v.output_candidates.parity_normalized(after_write)
     ),
@@ -597,7 +650,7 @@ view!(
     v,
     after_write,
     (
-        v.inputs.parity_normalized(false),
+        v.inputs.parity_normalized(after_write),
         v.data_inputs.clone(),
         v.output_candidates.parity_normalized(after_write)
     ),
@@ -630,7 +683,7 @@ view!(
 pub(super) fn normalized_tree(tree: &ErgoTree, after_write: bool) -> ErgoTree {
     let mut tree = tree.clone();
     for (_, value) in &mut tree.constants {
-        normalize_value(value);
+        normalize_value(value, tree.version, after_write);
     }
     normalize_expr(&mut tree.body, tree.version, after_write);
     tree

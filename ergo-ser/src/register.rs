@@ -4,7 +4,7 @@ use ergo_primitives::writer::VlqWriter;
 use crate::error::WriteError;
 use crate::opcode::{parse_expr, write_expr_versioned, Expr, IrNode, Payload};
 use crate::sigma_type::SigmaType;
-use crate::sigma_value::{write_constant, CollValue, SigmaValue};
+use crate::sigma_value::{write_constant_versioned, CollValue, SigmaValue};
 
 /// Non-mandatory register identifier (R4 through R9). The discriminant
 /// is the slot index inside [`AdditionalRegisters`] — `R4 == 0`,
@@ -118,7 +118,7 @@ fn write_register_value(
         let expr = register_value_to_expr(tpe, val)?;
         write_expr_versioned(w, &expr, version)
     } else {
-        write_constant(w, tpe, val)
+        write_constant_versioned(w, tpe, val, version)
     }
 }
 
@@ -200,15 +200,14 @@ pub(crate) fn read_register_value(r: &mut VlqReader) -> Result<(SigmaType, Sigma
         crate::sigma_value::read_constant_as_expr(r)
     } else {
         // Expression opcode — parse the full expression and extract type + value.
-        // Register bytes carry no tree header, so pass `tree_version=0`.
-        // The version does not affect method-call parsing: explicit
-        // type-args reads are keyed on `(type_id, method_id)` alone, so
-        // a v6 MethodCall here consumes its full wire shape without
-        // desyncing the stream. `expr_to_register_value` below then
-        // accepts only evaluated forms (Const, CreateTuple,
-        // ConcreteCollection), so a method-call register value is a
-        // typed error, not a mis-parse.
-        let expr = parse_expr(r, 0, 0)?;
+        // Headerless values use Scala's ambient VersionContext, including
+        // MethodCall's v3 nonempty-args assert and numeric builder upcasts.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/MethodCallSerializer.scala
+        let version = r
+            .ergo_tree_version()
+            .or(r.activated_script_version())
+            .unwrap_or(1);
+        let expr = parse_expr(r, 0, version)?;
         expr_to_register_value(&expr)
     }
 }

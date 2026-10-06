@@ -7,7 +7,7 @@ use ergo_primitives::writer::VlqWriter;
 use crate::error::WriteError;
 use crate::sigma_type::SigmaType;
 
-use super::{read_value_at_depth, write_value, CollValue, SigmaValue};
+use super::{read_value_at_depth, write_value_versioned, CollValue, SigmaValue};
 
 // -- Collection serialization --
 
@@ -15,6 +15,7 @@ pub(super) fn write_coll(
     w: &mut VlqWriter,
     elem_type: &SigmaType,
     coll: &CollValue,
+    version: u8,
 ) -> Result<(), WriteError> {
     // Scala writes Coll length as a u16 across all element-type
     // specializations; >65535-element collections silently wrap on
@@ -41,7 +42,7 @@ pub(super) fn write_coll(
         (_, CollValue::Values(vals)) => {
             w.put_u16(vals.len() as u16);
             for v in vals {
-                write_value(w, elem_type, v)?;
+                write_value_versioned(w, elem_type, v, version)?;
             }
         }
         _ => {
@@ -114,12 +115,13 @@ pub(super) fn write_option(
     w: &mut VlqWriter,
     elem_type: &SigmaType,
     opt: &Option<Box<SigmaValue>>,
+    version: u8,
 ) -> Result<(), WriteError> {
     match opt {
         None => w.put_u8(0x00),
         Some(val) => {
             w.put_u8(0x01);
-            write_value(w, elem_type, val)?;
+            write_value_versioned(w, elem_type, val, version)?;
         }
     }
     Ok(())
@@ -146,7 +148,7 @@ pub(super) fn read_option(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sigma_value::read_value;
+    use crate::sigma_value::{read_value, write_value};
 
     // ----- helpers -----
 

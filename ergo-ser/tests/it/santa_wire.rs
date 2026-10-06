@@ -35,24 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 // Independently confirmed JVM/node differences. A fix must remove its entry.
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "v6/authored/Box.tree_parse_acceptance.json",
-        "box-v0-methodcall-no-args-propertycall-accept#44",
-    ),
-    (
-        "v6/authored/Box.tree_parse_acceptance.json",
-        "box-v3-coll-long-plus-int-long-reject#32",
-    ),
-    (
-        "v6/authored/Transaction.tree_parse_acceptance.json",
-        "transaction-v0-methodcall-no-args-propertycall-accept#44",
-    ),
-    (
-        "v6/authored/Transaction.tree_parse_acceptance.json",
-        "transaction-v3-coll-long-plus-int-long-reject#32",
-    ),
-];
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 // ----- helpers -----
 
@@ -314,4 +297,115 @@ fn evaluated_output_box_bytes_and_ids_match_jvm_607() {
         ergo_ser::ergo_box::serialize_ergo_box(&output).is_err(),
         "JVM MatchError: function type cannot serialize in (1,1)"
     );
+}
+
+// Parse-context wire/message bytes and ambient-default UTXO bytes are forced
+// separately by CanonicalizationOracle.scala, using sigma-state / ergo-core 6.0.7.
+#[test]
+fn wire_canonicalization_messages_identities_and_storage_match_jvm_607() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/scala/wire_canonicalization_607.json"
+    ))
+    .unwrap();
+    for entry in fixture["entries"].as_array().unwrap() {
+        let name = entry["name"].as_str().unwrap();
+        let bytes = hex::decode(entry["bytes_hex"].as_str().unwrap()).unwrap();
+        let activated = entry["version"]["activated"].as_u64().unwrap() as u8;
+        let mut reader = VlqReader::new(&bytes).with_activated_script_version(activated);
+        if entry["kind"] == "Box" {
+            let result = read_ergo_box(&mut reader);
+            if entry.get("reject").is_some() {
+                assert!(
+                    matches!(
+                        result,
+                        Err(ergo_primitives::reader::ReadError::HardReject(_))
+                    ),
+                    "{name}"
+                );
+                continue;
+            }
+            let b = result.unwrap();
+            assert!(reader.is_empty(), "{name}");
+            let mut writer = VlqWriter::new();
+            write_ergo_box(&mut writer, &b).unwrap();
+            assert_eq!(
+                hex::encode(writer.result()),
+                entry["canonical_hex"],
+                "{name}"
+            );
+            assert_eq!(
+                hex::encode(b.box_id().unwrap().as_bytes()),
+                entry["box_id"],
+                "{name}: received identity"
+            );
+            assert_eq!(
+                hex::encode(b.candidate.ergo_tree_bytes()),
+                entry["proposition_hex"],
+                "{name}: received proposition"
+            );
+        } else {
+            let result = read_transaction(&mut reader);
+            if entry.get("reject").is_some() {
+                assert!(
+                    matches!(
+                        result,
+                        Err(ergo_primitives::reader::ReadError::HardReject(_))
+                    ),
+                    "{name}"
+                );
+                continue;
+            }
+            let tx = result.unwrap();
+            assert!(reader.is_empty(), "{name}");
+            let mut writer = VlqWriter::new();
+            write_transaction(&mut writer, &tx).unwrap();
+            assert_eq!(
+                hex::encode(writer.result()),
+                entry["canonical_hex"],
+                "{name}"
+            );
+            assert_eq!(
+                hex::encode(ergo_ser::transaction::bytes_to_sign(&tx).unwrap()),
+                entry["message_hex"],
+                "{name}: message"
+            );
+            let tx_id = ergo_ser::transaction::transaction_id(&tx).unwrap();
+            assert_eq!(
+                hex::encode(tx_id.as_bytes()),
+                entry["transaction_id"],
+                "{name}"
+            );
+            let output =
+                ergo_ser::ergo_box::ErgoBox::new(tx.output_candidates[0].clone(), tx_id, 0);
+            let stored = ergo_ser::ergo_box::serialize_ergo_box(&output).unwrap();
+            assert_eq!(
+                hex::encode(&stored),
+                entry["output_bytes_hex"],
+                "{name}: output bytes"
+            );
+            assert_eq!(
+                hex::encode(&stored),
+                entry["stored_output_hex"],
+                "{name}: stored UTXO bytes"
+            );
+            assert_eq!(
+                hex::encode(output.box_id().unwrap().as_bytes()),
+                entry["output_box_id"],
+                "{name}"
+            );
+            assert_eq!(
+                hex::encode(output.candidate.ergo_tree_bytes()),
+                entry["proposition_hex"],
+                "{name}: proposition"
+            );
+            let mut stored_reader = VlqReader::new(&stored);
+            let stored_box = read_ergo_box(&mut stored_reader).unwrap();
+            assert!(stored_reader.is_empty());
+            assert_eq!(
+                stored_box.box_id().unwrap(),
+                output.box_id().unwrap(),
+                "{name}: persisted identity"
+            );
+        }
+    }
 }

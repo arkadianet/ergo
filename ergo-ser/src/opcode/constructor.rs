@@ -1,4 +1,4 @@
-//! Type reads and constructor checks for the deserialize-substitution pass.
+//! Cached parse-time type reads and constructor checks for deserialization.
 //!
 //! A type read can fail even when construction succeeded (for example Filter).
 //! Keep that failure as metadata until a constructor or substitution requests it.
@@ -50,10 +50,24 @@ impl ConstructorTypes {
 
     /// Derive this node's type, preserving failures of deferred type reads.
     pub fn node_type(&mut self, expr: &Expr, children: &[ConstructorType]) -> ConstructorType {
+        self.node_type_with_constants(expr, children, &[])
+    }
+
+    pub(crate) fn node_type_with_constants(
+        &mut self,
+        expr: &Expr,
+        children: &[ConstructorType],
+        constants: &[(SigmaType, crate::sigma_value::SigmaValue)],
+    ) -> ConstructorType {
         let mut iter = children.iter();
-        let inferred = infer_node_type(expr, &mut self.store, &[], true, true, &mut |_, _, _| {
-            iter.next().and_then(|t| t.as_ref().ok()).cloned().flatten()
-        });
+        let inferred = infer_node_type(
+            expr,
+            &mut self.store,
+            constants,
+            true,
+            true,
+            &mut |_, _, _| iter.next().and_then(|t| t.as_ref().ok()).cloned().flatten(),
+        );
         let Expr::Op(node) = expr else {
             return Ok(inferred);
         };

@@ -186,7 +186,7 @@ fn santa_tx_vectors_match_santa_the_jvm_and_the_node() {
     let mut files = Vec::new();
     vector_files(&root, &mut files);
     files.sort();
-    assert_eq!(files.len(), 41, "transaction fixture coverage changed");
+    assert_eq!(files.len(), 42, "transaction fixture coverage changed");
     assert_eq!(
         KNOWN_DIVERGENCES
             .iter()
@@ -263,7 +263,7 @@ fn santa_tx_vectors_match_santa_the_jvm_and_the_node() {
         failures.join("\n")
     );
     assert_eq!(
-        graded, 311,
+        graded, 315,
         "transaction entry coverage changed or oracle disagrees"
     );
     assert_eq!(

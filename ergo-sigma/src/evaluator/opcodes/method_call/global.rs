@@ -541,7 +541,7 @@ fn visit_serialization_puts(
                 }
             }
         }
-        (T::SBox, Sv::OpaqueBoxBytes(bytes)) => {
+        (T::SBox, Sv::OpaqueBoxBytes(bytes) | Sv::CanonicalBoxBytes { bytes, .. }) => {
             let mut r = ergo_primitives::reader::VlqReader::new(bytes);
             let candidate =
                 ergo_ser::ergo_box::read_accepted_ergo_box_candidate(&mut r).map_err(|e| {
