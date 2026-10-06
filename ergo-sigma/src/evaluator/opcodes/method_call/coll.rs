@@ -187,7 +187,7 @@ pub(super) fn zip(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     let zip_cost = COST_ZIP;
     cx.cost.add(zip_cost.compute(n)?)?;
     // CollsOverArrays.scala:184: VersionContext.current.isJitActivated (>= 2).
-    if cx.ctx.activated_script_version < 2 {
+    if (cx.ctx.activated_script_version as i8) < 2 {
         return crate::evaluator::helpers::legacy_pair(obj_val, ys_val, cx.ctx);
     }
     // Capture each operand's element type before

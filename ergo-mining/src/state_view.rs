@@ -807,7 +807,9 @@ mod tests {
             height: header.height,
             miner_pubkey,
             pre_header_timestamp: timestamp,
-            activated_script_version: header.version - 1,
+            activated_script_version: ergo_validation::derive_activated_script_version(
+                header.version,
+            ),
             pre_header_version: header.version,
             pre_header_parent_id: *header.parent_id.as_bytes(),
             pre_header_n_bits: u64::from(header.n_bits),

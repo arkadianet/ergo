@@ -108,6 +108,8 @@ pub struct VlqReader<'a> {
     /// the block-transactions reader from the wire block version (header
     /// version >= 4 only, `BlockTransactionsSerializer.parse`), and the
     /// mempool / P2P transaction parse from the tip's activated version.
+    /// Stored as byte bits; activation comparisons must use `as i8` to match
+    /// Scala's signed `VersionContext` byte, including synthetic negatives.
     activated_script_version: Option<u8>,
     strict_method_resolution: bool,
     /// Opt-in header byte ranges for codec diagnostics; absent in node readers.

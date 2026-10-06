@@ -450,7 +450,7 @@ fn unparsed_soft_fork_tree(
 
 // Rule identity follows activation, independent of the tree's method registry.
 fn validation_rule_version(rule_id: u16, activated_version: u8) -> u16 {
-    match (rule_id, activated_version >= 3) {
+    match (rule_id, (activated_version as i8) >= 3) {
         (1007, true) => 1017,
         (1008, true) => 1018,
         (1011, true) => 1016,

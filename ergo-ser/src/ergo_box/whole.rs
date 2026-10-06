@@ -15,7 +15,7 @@ use super::{ErgoBox, ErgoBoxCandidate};
 
 /// Serialize a full ErgoBox (standalone mode).
 pub fn write_ergo_box(w: &mut VlqWriter, b: &ErgoBox) -> Result<(), WriteError> {
-    if b.candidate.box_serialization_version < 3 {
+    if (b.candidate.box_serialization_version as i8) < 3 {
         super::write_ergo_box_candidate_versioned(
             w,
             &b.candidate,

@@ -238,7 +238,7 @@ impl SigmaValidationSettings {
         matches!(rule_id, 1000..=1016 | 1019)
             && match self.0.get(&rule_id) {
                 Some(RuleStatus::Replaced(_)) => {
-                    !(activated_version >= 3 && matches!(rule_id, 1007 | 1008 | 1011))
+                    !((activated_version as i8) >= 3 && matches!(rule_id, 1007 | 1008 | 1011))
                 }
                 // SoftForkChecker.scala:35: the exact failed type byte
                 // must occur in the activated ChangedRule payload.
@@ -330,6 +330,9 @@ pub struct ReductionContext<'a> {
     /// Activated script version: block.headerVersion - 1.
     /// Controls consensus-preserving behavior differences across protocol versions.
     /// Pre-JIT (< 2): selfBoxIndex returns -1 (known bug preserved as consensus).
+    /// Stored as byte bits; activation comparisons use `as i8` deliberately,
+    /// matching Scala's `VersionContext` signed byte for consensus.
+    /// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/VersionContext.scala#L17-L34>
     pub activated_script_version: u8,
     /// ErgoTree HEADER version of the script under evaluation (the low 3 bits
     /// of the tree's header byte), NOT the activated/block version. Scala's
@@ -407,12 +410,12 @@ impl<'a> ReductionContext<'a> {
         method_id: u8,
         required: u8,
     ) -> Result<(), EvalError> {
-        if self.activated_script_version < required {
+        if (self.activated_script_version as i8) < required as i8 {
             Err(EvalError::SoftForkNotActivated {
                 type_id,
                 method_id,
                 required,
-                got: self.activated_script_version,
+                got: self.activated_script_version as i8,
             })
         } else {
             Ok(())
@@ -712,7 +715,7 @@ pub enum EvalError {
         type_id: u8,
         method_id: u8,
         required: u8,
-        got: u8,
+        got: i8,
     },
     /// A v6/EIP-50 method (`ergo_ser::opcode::is_v3_only_method`) appears in a
     /// real pre-v3 (tree-header version < 3) ErgoTree. Scala's
@@ -753,7 +756,7 @@ pub enum EvalError {
     #[error("ErgoTree version {tree_version} is higher than activated {activated_script_version}")]
     TreeVersionAboveActivated {
         tree_version: u8,
-        activated_script_version: u8,
+        activated_script_version: i8,
     },
 }
 

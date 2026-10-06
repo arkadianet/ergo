@@ -98,7 +98,12 @@ pub fn check_tree_version_supported(
     tree: &ErgoTree,
     activated_script_version: u8,
 ) -> Result<(), ReadError> {
-    if activated_script_version >= JIT_ACTIVATION_VERSION && tree.version > activated_script_version
+    // Deliberately use the JVM's signed activation: negative values leave
+    // VersionContext's JIT-only invariant inactive (spend checking is stricter).
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/VersionContext.scala#L17-L21
+    let activated_script_version = activated_script_version as i8;
+    if activated_script_version >= JIT_ACTIVATION_VERSION as i8
+        && (tree.version as i8) > activated_script_version
     {
         return Err(ReadError::HardReject(format!(
             "ErgoTree version {} exceeds the activated script version {} (VersionContext require, SerializerException)",

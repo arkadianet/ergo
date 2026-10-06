@@ -1078,6 +1078,39 @@ mod tests {
     }
 
     #[test]
+    fn candidate_selection_rejects_script_spends_under_negative_activation() {
+        let input = box_at(1_000_000_000, HEIGHT, 1);
+        let utxo = MapUtxo::new(std::slice::from_ref(&input));
+        let tx = spend_tx(&input, 1_000_000_000, HEIGHT);
+        let snapshot = MempoolReadSnapshot::from_entries(vec![entry(&tx, 0, 100, 0xA0)]);
+        for block_version in [0, 200] {
+            let mut context = ctx();
+            context.pre_header_version = block_version;
+            context.activated_script_version =
+                ergo_validation::derive_activated_script_version(block_version);
+            let params = ProtocolParams {
+                block_version,
+                ..ProtocolParams::mainnet_default()
+            };
+            let mut overlay = CandidateOverlay::new(&utxo);
+            let selected = select_user_txs(
+                &mut overlay,
+                &snapshot,
+                &context,
+                &params,
+                &[],
+                u64::MAX,
+                u64::MAX,
+                None,
+            )
+            .unwrap();
+            assert!(selected.checked.is_empty(), "block version {block_version}");
+            assert_eq!(selected.suspects.len(), 1);
+            assert!(!overlay.is_spent(&input.box_id().unwrap()));
+        }
+    }
+
+    #[test]
     fn parent_change_during_resolution_stops_before_applying_transaction() {
         struct CancelOnRead {
             base: MapUtxo,

@@ -56,9 +56,8 @@ pub struct CandidateValidationContext {
     /// Frozen pre-header. Cloned into the final Header when the
     /// candidate is finalized.
     pub pre_header: CandidatePreHeader,
-    /// Derived once from `pre_header.version` and the cumulative
-    /// validation settings at the tip. Re-deriving later would change
-    /// evaluator behavior.
+    /// Derived once from the candidate protocol version; stored as byte bits
+    /// with signed activation semantics, like `TransactionContext`.
     pub activated_script_version: u8,
     /// Up to 10 applied headers, tip-first; empty before the first block.
     pub last_headers: Vec<Header>,

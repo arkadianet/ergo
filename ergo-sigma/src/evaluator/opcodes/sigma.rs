@@ -598,7 +598,7 @@ pub(in crate::evaluator) fn eval_subst_constants(
         &pos_vec,
         &value_items,
         cx.ctx.is_v3_ergo_tree(),
-        cx.ctx.activated_script_version >= 2,
+        (cx.ctx.activated_script_version as i8) >= 2,
     )?;
     // Scala's ErgoTreeSerializer.substituteConstants returns nItems =
     // number of constants in the template ErgoTree. The evaluator

@@ -18,6 +18,7 @@ infrastructure.
 
 ### Fixed
 
+- Reject script spends whose tree version exceeds a negative activated version derived from block versions 0 or 129–255.
 - Verify Fiat–Shamir proofs for empty AND and zero-of-zero threshold propositions, including empty children nested in large conjectures.
 - Accept tuple and collection nodes with expression children in box registers and context extensions; preserve their wire forms, reject invalid runtime reads, and account for version-dependent output bytes and sizes.
 
