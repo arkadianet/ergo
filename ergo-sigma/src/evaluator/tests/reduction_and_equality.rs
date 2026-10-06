@@ -912,7 +912,9 @@ fn register_materialization_is_memoized_only_on_success() {
         read_register_option(&good, 4, 0xC6, Some(&SigmaType::SInt), &ctx).unwrap();
         assert!(good.lazy_vals.registers_materialized[class].get().is_some());
     }
-    assert!(good.lazy_vals.registers_materialized[1 - class].get().is_none());
+    assert!(good.lazy_vals.registers_materialized[1 - class]
+        .get()
+        .is_none());
 
     // R4 = Coll[Int](HEIGHT): the stored child never materializes, so every
     // read fails, even of R0, and nothing is recorded.
