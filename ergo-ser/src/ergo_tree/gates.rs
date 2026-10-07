@@ -87,9 +87,9 @@ pub fn check_header_size_bit(tree: &ErgoTree) -> Result<(), ReadError> {
 /// tip's activated version (`ErgoMemPool.scala:259`, `ErgoNodeViewSynchronizer
 /// .scala:778`), so a future-version tree is refused at admission today.
 ///
-/// As with [`check_header_size_bit`], [`crate::ergo_tree::read_ergo_tree`] stays lenient (it wraps
-/// a future-version tree so the conformance hook and template-hash paths keep
-/// working); this box-script gate supplies the hard rejection at the consensus
+/// From activated 2 on, [`crate::ergo_tree::read_ergo_tree`] wraps a future-version tree
+/// without parsing its body (below that it parses the body, as the reference
+/// does); this box-script gate supplies the hard rejection at the consensus
 /// box-parse layer. Uses [`ReadError::HardReject`] so a nested `SBox`-constant
 /// inner tree with a future version also escapes the enclosing tree's soft-fork
 /// wrap. Readers obtain `activated_script_version` from their reader's scope via

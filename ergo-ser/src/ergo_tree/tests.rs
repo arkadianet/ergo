@@ -1235,19 +1235,18 @@ fn template_hash_from_bytes_uses_scala_template_for_block_1702686() {
     ));
 }
 
-/// A v4 tree (version > MAX_SUPPORTED_TREE_VERSION = 3) is wrapped by the
-/// version-soft-fork branch. Scala rejects such a tree at deserialization at
-/// every activated version, so it never indexes one; the bytes path applies
+/// A v4 tree (version > MAX_SUPPORTED_TREE_VERSION = 3) under the default
+/// scope (activated 1) has its body parsed like the reference; a body whose
+/// root is not a SigmaProp is wrapped by rule 1001, and the bytes path applies
 /// the same header/size strip as to any other wrapped tree.
 #[test]
 fn template_hash_from_bytes_strips_v4_softfork_header_and_size() {
-    // Header: 0x0C = v=4, has_size=true, no cseg. Size VLQ(1)=0x01.
-    // Body: one arbitrary byte (0x00) — never parsed because version
-    // exceeds MAX_SUPPORTED_TREE_VERSION, so the wrap branch fires.
-    let bytes = hex::decode("0C0100").unwrap();
+    // Header: 0x0C = v=4, has_size=true, no cseg. Size VLQ(2)=0x02.
+    // Body: a Byte constant root (0x02 0x1a), wrapped by rule 1001.
+    let bytes = hex::decode("0C02021a").unwrap();
     assert_eq!(
         template_hash_from_bytes(&bytes).unwrap(),
-        *blake2b256(&[0x00]).as_bytes()
+        *blake2b256(&[0x02, 0x1a]).as_bytes()
     );
 }
 
@@ -1640,7 +1639,7 @@ fn sizeless_v0_v6_type_is_not_certified_by_an_activated_table_override() {
 /// PARSES at 3 and THROWS at 2.
 #[test]
 fn check_tree_version_supported_is_keyed_to_the_activated_version() {
-    // read_ergo_tree stays lenient: it wraps v4..=7 trees as Unparsed...
+    // read_ergo_tree accepts these v4..=7 trees (their bodies parse)...
     let future = ["0c0208d3", "0d0208d3", "0f0208d3"];
     for hex in future {
         let tree = parse_tree(hex);
@@ -1803,7 +1802,7 @@ fn unparsed_soft_fork_tree_roundtrips_byte_identical() {
     for hex_str in [
         "0b01fd",     // v3 + size, 1-byte unknown-opcode body 0xfd
         "0b03fd0102", // v3 + size, 3-byte unknown-opcode body
-        "1c020008",   // v4 (> MAX_SUPPORTED) + size, opaque body — version soft-fork
+        "1c0300021a", // v4 + size + cseg, Byte root wrapped by rule 1001 (activated 1)
     ] {
         let bytes = hex::decode(hex_str).unwrap();
         let tree = read_ergo_tree(&mut VlqReader::new(&bytes))

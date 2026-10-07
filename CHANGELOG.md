@@ -34,6 +34,7 @@ infrastructure.
 - Calculate collection slice costs from the original signed bounds.
 - Allow trailing bytes after values decoded by `Global.deserializeTo`.
 - Reject `flatMap` mappers whose static result type is not a collection, including on empty collections.
+- Parse the body of size-delimited trees with versions above 3 when the activated script version is below 2, rejecting bodies that fail outside rule validation and re-serializing parsed bodies.
 - Read header extension payloads only after version 4 and derive received node header IDs from serialized fields.
 - Insert numeric relation upcasts for scripts below version 3 and preserve the distinct received and serialized box bytes.
 - Accept supported transaction encodings that normalize on serialization, deriving transaction IDs from the serialized message.
