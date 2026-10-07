@@ -369,6 +369,16 @@ impl ErgoBoxCandidate {
             .unwrap_or(&self.ergo_tree_bytes)
     }
 
+    /// The stored canonical tree cache, exactly as kept: `Ok(None)` when the
+    /// received tree bytes are already canonical (or the tree is a soft-fork
+    /// wrap written back verbatim), `Ok(Some(bytes))` when the structured
+    /// re-serialization differs from them, and `Err` when the tree cannot be
+    /// written. [`Self::serialized_ergo_tree_bytes`] and
+    /// [`Self::checked_serialized_ergo_tree_bytes`] are derived from it.
+    pub fn canonical_tree_bytes(&self) -> &Result<Option<Vec<u8>>, WriteError> {
+        &self.canonical_tree_bytes
+    }
+
     /// Validate structured scripts before falling back to uncached wire bytes.
     /// Scala propagates script serialization failures when writing a box.
     pub fn checked_serialized_ergo_tree_bytes(&self) -> Result<&[u8], WriteError> {
@@ -655,6 +665,66 @@ mod tests {
         );
         assert_eq!(identity.index(), 2);
         assert_eq!(parsed.box_id().unwrap(), identity.id());
+    }
+
+    // ----- canonical tree cache accessor -----
+
+    fn parsed_candidate(tree_hex: &str) -> ErgoBoxCandidate {
+        let bytes = hex::decode(format!("c0843d{tree_hex}92a7210000")).unwrap();
+        let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
+        let candidate = crate::ergo_box::read_ergo_box_candidate(&mut r).unwrap();
+        assert!(r.is_empty());
+        candidate
+    }
+
+    #[test]
+    fn canonical_tree_bytes_is_none_for_canonical_trees() {
+        let built = ErgoBoxCandidate::new(
+            1,
+            size_delimited_tree(),
+            7,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        assert!(matches!(built.canonical_tree_bytes(), Ok(None)));
+        let parsed = parsed_candidate("00d191a30400");
+        assert!(matches!(parsed.canonical_tree_bytes(), Ok(None)));
+        assert_eq!(
+            parsed.ergo_tree_bytes(),
+            hex::decode("00d191a30400").unwrap()
+        );
+    }
+
+    #[test]
+    fn canonical_tree_bytes_holds_the_differing_reserialization() {
+        // HEIGHT > 0 with the constant written as a non-minimal VLQ (80 00).
+        let parsed = parsed_candidate("00d191a3048000");
+        let canonical = hex::decode("00d191a30400").unwrap();
+        assert_eq!(parsed.canonical_tree_bytes(), &Ok(Some(canonical.clone())));
+        assert_eq!(parsed.serialized_ergo_tree_bytes(), canonical.as_slice());
+        assert_eq!(
+            parsed.ergo_tree_bytes(),
+            hex::decode("00d191a3048000").unwrap()
+        );
+    }
+
+    #[test]
+    fn canonical_tree_bytes_keeps_the_write_failure() {
+        // test-vectors/reference-6.0.7/serialization/readers-avl.json
+        // `key-min-tree`: an AVL constant whose key length wraps negative is
+        // readable, but the reference cannot write it back.
+        let parsed = parsed_candidate(
+            "1b2c016400000000000000000000000000000000000000000000000000000000000000000000808080800800\
+             08d3",
+        );
+        let Err(error) = parsed.canonical_tree_bytes() else {
+            panic!("expected a cached write failure");
+        };
+        assert_eq!(
+            parsed.checked_serialized_ergo_tree_bytes().unwrap_err(),
+            error.clone()
+        );
     }
 
     // ----- atomic register replacement -----

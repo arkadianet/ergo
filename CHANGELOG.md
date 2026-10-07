@@ -16,6 +16,10 @@ infrastructure.
 
 ## [Unreleased]
 
+### Added
+
+- `ErgoBoxCandidate::canonical_tree_bytes` in `ergo-ser`: a read-only accessor returning the stored canonical tree cache exactly (`&Result<Option<Vec<u8>>, WriteError>`). No behaviour change.
+
 ## [0.12.2] - 2026-10-07
 
 A consensus release for mainnet. Upgrade every 0.12.1 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again. A 0.12.2 data directory still opens with 0.12.1.
