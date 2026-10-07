@@ -16,13 +16,20 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-10-07
+
+A consensus release for mainnet. Upgrade every 0.12.2 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.
+
+- **Group element checks in script-parsed data:** `substConstants` and `Global.deserializeTo` now reject data containing a point that is not on the curve, as the reference node does. 0.12.2 and earlier accepted it (#616).
+- **API:** a read-only `ErgoBoxCandidate::canonical_tree_bytes` accessor in `ergo-ser` (#615).
+
 ### Fixed
 
-- Reject `substConstants` and `Global.deserializeTo` calls whose parsed bytes contain an off-curve group element, including points inside SigmaProp, Box and Header values. These calls were previously accepted.
+- Reject `substConstants` and `Global.deserializeTo` calls whose parsed bytes contain an off-curve group element, including points inside SigmaProp, Box and Header values. These calls were previously accepted (#616).
 
 ### Added
 
-- `ErgoBoxCandidate::canonical_tree_bytes` in `ergo-ser`: a read-only accessor returning the stored canonical tree cache exactly (`&Result<Option<Vec<u8>>, WriteError>`). No behaviour change.
+- `ErgoBoxCandidate::canonical_tree_bytes` in `ergo-ser`: a read-only accessor returning the stored canonical tree cache exactly (`&Result<Option<Vec<u8>>, WriteError>`). No behaviour change (#615).
 
 ## [0.12.2] - 2026-10-07
 
