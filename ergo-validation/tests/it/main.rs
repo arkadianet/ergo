@@ -27,6 +27,7 @@ mod popow_header_mainnet_roundtrip;
 mod popow_level_scala_parity;
 mod popow_panic_freedom;
 mod popow_scala_fixture_validation;
+mod reference_serialization;
 mod rejection_parity;
 mod same_block_data_inputs;
 mod santa_nipopow_chain;

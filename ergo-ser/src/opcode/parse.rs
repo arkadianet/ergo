@@ -85,7 +85,21 @@ pub(crate) fn parse_body_with_constants(
         constants,
         ..Default::default()
     };
-    parse_typed_expr(r, 0, version, &mut types, &mut Vec::new())
+    let body = parse_typed_expr(r, 0, version, &mut types, &mut Vec::new())?;
+    // deserializeErgoTree(checkType = true) requests the root's tpe. Filter's
+    // receiver cast is deferred until that request; a parent with a fixed type
+    // (such as BoolToSigmaProp) need not request its child's type at all.
+    // Deliberately preserve this JVM laziness for consensus.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L169-L174
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L117-L122
+    types
+        .constructor_children
+        .last_mut()
+        .unwrap()
+        .pop()
+        .unwrap()
+        .map_err(super::ConstructorError::into_read_error)?;
+    Ok(body)
 }
 
 fn parse_typed_expr(
@@ -115,7 +129,12 @@ fn parse_typed_expr(
     );
     if let Some(constructors) = &mut types.constructors {
         let children = types.constructor_children.pop().unwrap();
-        if types.check_substitution_constructors {
+        // The cached failed type read is forced only by constructors/builders
+        // which actually inspect that child. This reuses the parser's metadata;
+        // it does not walk the subtree again.
+        let check_type_reads =
+            types.check_substitution_constructors || children.iter().any(Result::is_err);
+        if check_type_reads {
             super::check_rebuilt_constructor(&expr, &children)
                 .map_err(super::ConstructorError::into_read_error)?;
         }
@@ -131,15 +150,12 @@ fn parse_typed_expr(
                     | Payload::MethodCall { .. }
                     | Payload::ConcreteCollection { .. }
             ) || (0x8F..=0x94).contains(&node.opcode);
-            if reads_all && types.check_substitution_constructors {
+            if reads_all && check_type_reads {
                 for t in &children {
                     t.as_ref().map_err(|e| e.into_read_error())?;
                 }
             }
-            if types.check_substitution_constructors
-                && version < 3
-                && matches!(node.payload, Payload::ByIndex { .. })
-            {
+            if check_type_reads && version < 3 && matches!(node.payload, Payload::ByIndex { .. }) {
                 if let Some(Err(e)) = children.get(1) {
                     return Err(e.into_read_error());
                 }
@@ -1040,11 +1056,16 @@ fn check_numeric_operands(opcode: u8, operands: &[Option<SigmaType>]) -> Result<
 /// they are built, so an operand of the wrong kind is a `ClassCastException`,
 /// a hard reject also in a sized tree: `Append` and `Slice` take
 /// `input.tpe` as an `SCollection` (`transformers.scala:62`, `:89`; an
-/// `STuple` is one), `MapCollection` takes `mapper.tpe` as an `SFunc`
+/// `STuple` is one). `OptionGetOrElse.opType` eagerly reads its receiver's
+/// option element type. Filter's deferred cast is retained by ConstructorTypes.
+/// `MapCollection` takes `mapper.tpe` as an `SFunc`
 /// (`:38`). Only an operand whose type is known precisely is judged.
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L117-L122
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L622-L626
 fn check_constructor_casts(opcode: u8, operands: &[Option<SigmaType>]) -> Result<(), ReadError> {
     let (operand, want) = match opcode {
         0xB3 | 0xB4 => (&operands[0], "a collection"),
+        0xE5 => (&operands[0], "an option"),
         0xAD => (&operands[1], "a function"),
         _ => return Ok(()),
     };
@@ -1053,6 +1074,7 @@ fn check_constructor_casts(opcode: u8, operands: &[Option<SigmaType>]) -> Result
     };
     let fits = match opcode {
         0xAD => matches!(tpe, SigmaType::SFunc { .. }),
+        0xE5 => matches!(tpe, SigmaType::SOption(_)),
         _ => matches!(tpe, SigmaType::SColl(_) | SigmaType::STuple(_)),
     };
     if !fits {
