@@ -96,10 +96,11 @@ pub(in crate::evaluator) fn eval_global(cost: &mut CostAccumulator) -> Result<Va
     Ok(Value::Global)
 }
 
-// 0xFE CONTEXT — placeholder; context ops handled via MethodCall
+// 0xFE CONTEXT — retain the runtime receiver type for reflected methods.
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/values.scala#L1549-L1561
 pub(in crate::evaluator) fn eval_context(cost: &mut CostAccumulator) -> Result<Value, EvalError> {
     add_cost(cost, 0xFE)?;
-    Ok(Value::SelfBox)
+    Ok(Value::Context)
 }
 
 // 0x85 BoolCollection — packed-bits literal vector. The parser pre-decodes

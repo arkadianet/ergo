@@ -177,3 +177,11 @@ fn deserialize_values_match_reference() {
 fn slice_values_and_costs_match_reference() {
     check_vectors("slice");
 }
+
+#[test]
+fn reflected_method_values_and_costs_match_reference() {
+    check_vectors("methods");
+    check_vectors("methods-extra");
+    check_vectors("methods-receivers");
+    check_vectors("context-equality");
+}

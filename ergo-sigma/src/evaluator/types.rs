@@ -545,6 +545,9 @@ pub enum Value {
     BoxCollection(BoxSource),
     /// SGlobal singleton — marker for Global method dispatch.
     Global,
+    /// The executing Context, distinct from its SELF box. Reflection requires
+    /// the actual receiver type even when the context is stored in a variable.
+    Context,
     /// SPreHeader — carrier for PreHeader field access.
     PreHeader,
     /// Inline box constant — parsed from OpaqueBoxBytes in SBox constants.
@@ -644,6 +647,7 @@ impl PartialEq for Value {
             // Carrier types and functions: structural identity only
             (Value::SelfBox, Value::SelfBox) => true,
             (Value::Global, Value::Global) => true,
+            (Value::Context, Value::Context) => true,
             (Value::PreHeader, Value::PreHeader) => true,
             (
                 Value::BoxRef {

@@ -32,6 +32,13 @@ pub(crate) fn reflect_sstring_error(error: EvalError) -> EvalError {
 pub(crate) fn require_comparable(l: &Value, r: &Value) -> Result<(), EvalError> {
     // EQ/NEQ rejects each bare String immediately after evaluating that
     // operand. Nested strings remain valid for recursive comparison.
+    // A bare Context cannot yield a successful EQ/NEQ: the other operand's
+    // type check requires Context too, then left-value dispatch is unsupported.
+    // Nested Context values instead reach the asymmetric costed comparator.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/trees.scala#L1204-L1210
+    if matches!(l, Value::Context) || matches!(r, Value::Context) {
+        return Err(EvalError::RuntimeException("cannot compare a bare Context"));
+    }
     check_comparable(l)?;
     check_comparable(r)
 }
@@ -81,6 +88,10 @@ pub(crate) fn check_comparable(v: &Value) -> Result<(), EvalError> {
         | Value::CollHeader(_) => Ok(()),
         // Global is a singleton — structural identity is fine
         Value::Global => Ok(()),
+        // Context on the right can be compared as unequal by a supported left
+        // value. The costed comparator rejects it only when dispatching on left.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/DataValueComparer.scala#L310-L414
+        Value::Context => Ok(()),
         // Functions are never comparable in Ergo
         Value::Func { .. } => Err(EvalError::TypeError {
             expected: "comparable value (not function)",

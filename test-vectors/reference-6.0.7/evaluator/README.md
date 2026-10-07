@@ -16,3 +16,10 @@ scala-cli run scripts/reference_evaluator_oracle/ReferenceEvaluatorOracle.scala 
 The oracle uses testnet chain settings with re-emission disabled, as the fixture
 contract specifies. It never reads `expected`; that field mirrors the captured
 TSV for review. Diagnostics go to stderr. The dependency directives pin 6.0.7.
+
+`method-table.jvm.tsv` records the complete 6.0.7 wire method registry for
+versions 0–3, with reflection resolution through `MethodSweep.scala`. This
+inventory is distinct from transaction verdicts: a resolved method can still
+fail on its input, and the v3 parser rejects argument-free MethodCall forms.
+`methods-extra.json` pins those version-dependent wire outcomes, option None,
+context results, and multiplication with the group identity.

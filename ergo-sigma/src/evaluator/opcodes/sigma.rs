@@ -264,6 +264,12 @@ pub(in crate::evaluator) fn eval_multiply_group(
     add_cost(cx.cost, 0xA0)?;
     let lv = cx.eval_expr(left)?;
     let rv = cx.eval_expr(right)?;
+    multiply_group(lv, rv)
+}
+
+// Arithmetic is shared with reflected GroupElement.multiply; each caller
+// charges its own opcode or method cost.
+pub(in crate::evaluator) fn multiply_group(lv: Value, rv: Value) -> Result<Value, EvalError> {
     match (lv, rv) {
         (Value::GroupElement(a_bytes), Value::GroupElement(b_bytes)) => {
             use k256::elliptic_curve::group::GroupEncoding;
