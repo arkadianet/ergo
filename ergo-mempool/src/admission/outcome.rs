@@ -104,7 +104,8 @@ pub(crate) fn classify(
     let at_tip = tip_ctx.block_gap() == 0;
     match err {
         ValidationErr::Deserialize => (RejectReason::Deserialize, Some(PenaltyKind::Misbehavior)),
-        ValidationErr::NonCanonical => (RejectReason::NonCanonical, Some(PenaltyKind::Misbehavior)),
+        // A local encoding policy is not evidence of peer misbehaviour.
+        ValidationErr::NonCanonical => (RejectReason::NonCanonical, None),
         ValidationErr::Structural => (RejectReason::Structural, Some(PenaltyKind::Misbehavior)),
         ValidationErr::UnresolvedInput => (RejectReason::UnresolvedInput, None),
         ValidationErr::UnresolvedDataInput => (RejectReason::UnresolvedDataInput, None),

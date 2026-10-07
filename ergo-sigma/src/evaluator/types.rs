@@ -39,8 +39,9 @@ pub struct EvalBox {
     /// emits: `DataSerializer.serialize(SBox)` re-serializes from structure
     /// (`box_canonical_bytes`), never from `bytes`. Empty for test-only boxes.
     pub raw_bytes: Vec<u8>,
-    /// Canonical register block (count byte + concatenated per-register
-    /// entries) produced by the parser. Preserves each register's
+    /// Cached register block (count byte + concatenated per-register entries).
+    /// Canonical on successful writes, received when a write failure is deferred.
+    /// Preserves each register's
     /// node provenance — Constant vs `CreateTuple` (0x86) vs `ConcreteCollection`
     /// (0x83), including stored expression children. `bytesWithNoRef`
     /// (0xC4) re-serializes from these bytes to keep that provenance, matching
@@ -58,6 +59,10 @@ pub type DeserializeRegisterByteCache = [[std::sync::OnceLock<Option<Vec<u8>>>; 
 /// Values Scala computes once per box in `lazy val`s.
 #[derive(Debug, Default)]
 pub struct EvalBoxLazyVals {
+    /// Structured proposition serialization, when different from script_bytes
+    /// or when writing failed. Captured at box materialization, never re-parsed
+    /// during evaluation. Proposition/received-byte properties keep their bytes.
+    pub serialized_script: Option<Result<Vec<u8>, String>>,
     /// `ErgoBoxCandidate.bytesWithNoRef`: the first reader's VersionContext
     /// fixes the bytes (a constant `Upcast` is stripped below ErgoTree v3).
     pub bytes_without_ref: std::sync::OnceLock<Vec<u8>>,
@@ -72,6 +77,21 @@ pub struct EvalBoxLazyVals {
     /// SHeader/SOption gates differ between them. Only success is recorded:
     /// a failure aborts the script, so a register read never repeats it.
     pub registers_materialized: [std::sync::OnceLock<()>; 2],
+}
+
+impl EvalBoxLazyVals {
+    /// Preserve the box parser's cached tree write result for SBox serialization.
+    pub fn from_candidate(candidate: &ergo_ser::ergo_box::ErgoBoxCandidate) -> Self {
+        let serialized_script = match candidate.checked_serialized_ergo_tree_bytes() {
+            Ok(bytes) if bytes != candidate.ergo_tree_bytes() => Some(Ok(bytes.to_vec())),
+            Err(error) => Some(Err(error.to_string())),
+            _ => None,
+        };
+        Self {
+            serialized_script,
+            ..Default::default()
+        }
+    }
 }
 
 impl EvalBox {

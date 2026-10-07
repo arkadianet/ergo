@@ -85,7 +85,21 @@ pub(crate) fn parse_body_with_constants(
         constants,
         ..Default::default()
     };
-    parse_typed_expr(r, 0, version, &mut types, &mut Vec::new())
+    let body = parse_typed_expr(r, 0, version, &mut types, &mut Vec::new())?;
+    // deserializeErgoTree(checkType = true) requests the root's tpe. Filter's
+    // receiver cast is deferred until that request; a parent with a fixed type
+    // (such as BoolToSigmaProp) need not request its child's type at all.
+    // Deliberately preserve this JVM laziness for consensus.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L169-L174
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L117-L122
+    types
+        .constructor_children
+        .last_mut()
+        .unwrap()
+        .pop()
+        .unwrap()
+        .map_err(super::ConstructorError::into_read_error)?;
+    Ok(body)
 }
 
 fn parse_typed_expr(
@@ -115,7 +129,12 @@ fn parse_typed_expr(
     );
     if let Some(constructors) = &mut types.constructors {
         let children = types.constructor_children.pop().unwrap();
-        if types.check_substitution_constructors {
+        // The cached failed type read is forced only by constructors/builders
+        // which actually inspect that child. This reuses the parser's metadata;
+        // it does not walk the subtree again.
+        let check_type_reads =
+            types.check_substitution_constructors || children.iter().any(Result::is_err);
+        if check_type_reads {
             super::check_rebuilt_constructor(&expr, &children)
                 .map_err(super::ConstructorError::into_read_error)?;
         }
@@ -131,15 +150,12 @@ fn parse_typed_expr(
                     | Payload::MethodCall { .. }
                     | Payload::ConcreteCollection { .. }
             ) || (0x8F..=0x94).contains(&node.opcode);
-            if reads_all && types.check_substitution_constructors {
+            if reads_all && check_type_reads {
                 for t in &children {
                     t.as_ref().map_err(|e| e.into_read_error())?;
                 }
             }
-            if types.check_substitution_constructors
-                && version < 3
-                && matches!(node.payload, Payload::ByIndex { .. })
-            {
+            if check_type_reads && version < 3 && matches!(node.payload, Payload::ByIndex { .. }) {
                 if let Some(Err(e)) = children.get(1) {
                     return Err(e.into_read_error());
                 }
@@ -289,48 +305,15 @@ fn parse_node_value(
             if _tree_version < 3 && matches!(first, 0x99..=0x9A | 0x9C..=0x9E | 0xA1..=0xA2) {
                 let num_children = children.len();
                 let operand_types = &mut children[num_children - 2..];
-                if let [Some(left), Some(right)] = operand_types {
-                    let rank = |t: &SigmaType| match t {
-                        SigmaType::SByte => 1,
-                        SigmaType::SShort => 2,
-                        SigmaType::SInt => 3,
-                        SigmaType::SLong => 4,
-                        SigmaType::SBigInt => 5,
-                        SigmaType::SUnsignedBigInt => 6,
-                        _ => 0,
-                    };
-                    if left != right && rank(left) > 0 && rank(right) > 0 {
-                        let target = if rank(left) > rank(right) {
-                            left.clone()
-                        } else {
-                            right.clone()
-                        };
-                        for (expr, tpe) in [(&mut a, left), (&mut b, right)] {
-                            if *tpe != target {
-                                *expr = Expr::Op(IrNode {
-                                    opcode: 0x7E,
-                                    payload: Payload::NumericCast {
-                                        input: Box::new(std::mem::replace(
-                                            expr,
-                                            Expr::Const {
-                                                tpe: SigmaType::SUnit,
-                                                val: SigmaValue::Unit,
-                                            },
-                                        )),
-                                        tpe: target.clone(),
-                                    },
-                                });
-                                *tpe = target.clone();
-                            }
-                        }
-                        if types.constructors.is_some() {
-                            let ct = types.constructor_children.last_mut().unwrap();
-                            let len = ct.len();
-                            ct[len - 2..].fill(Ok(Some(target)));
-                        }
+                if let Some(target) = apply_upcast(&mut a, &mut b, operand_types) {
+                    if types.constructors.is_some() {
+                        let ct = types.constructor_children.last_mut().unwrap();
+                        let len = ct.len();
+                        ct[len - 2..].fill(Ok(Some(target)));
                     }
                 }
             }
+
             check_numeric_operands(first, &children[children.len() - 2..])?;
             check_constructor_casts(first, &children[children.len() - 2..])?;
             Payload::Two(Box::new(a), Box::new(b))
@@ -964,19 +947,40 @@ fn parse_node_value(
                     val: SigmaValue::Boolean(right),
                 });
                 let t = Some(SigmaType::SBoolean);
-                check_relation_constraints(first, _tree_version, (&a, &t), (&b, &t))?;
+                check_relation_numeric(first, &t, &t)?;
+                check_relation_constraints(first, &t, &t)?;
                 Payload::Two(a, b)
             } else {
-                let a = Box::new(parse_typed_expr(r, next, _tree_version, types, children)?);
-                let b = Box::new(parse_typed_expr(r, next, _tree_version, types, children)?);
+                let mut a = parse_typed_expr(r, next, _tree_version, types, children)?;
+                let mut b = parse_typed_expr(r, next, _tree_version, types, children)?;
                 let n = children.len();
-                let (ta, tb) = if n >= 2 {
-                    (children[n - 2].clone(), children[n - 1].clone())
-                } else {
-                    (None, None)
-                };
-                check_relation_constraints(first, _tree_version, (&a, &ta), (&b, &tb))?;
-                Payload::Two(a, b)
+                let operands = &mut children[n - 2..];
+                // These cached types preserve real SAny and composite types;
+                // the root gate's imprecision sentinel cannot check SameType.
+                // Builder check2 reads both types before applying its constraint.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L286-L294
+                if types.constructors.is_some() && (0x8F..=0x94).contains(&first) {
+                    let cached = types.constructor_children.last().unwrap();
+                    for (operand, tpe) in operands.iter_mut().zip(&cached[cached.len() - 2..]) {
+                        *operand = tpe.as_ref().map_err(|e| e.into_read_error())?.clone();
+                    }
+                }
+                // comparisonOp checks OnlyNumeric before applyUpcast; equalityOp
+                // applies Upcast directly. Both then check SameType.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L686-L701
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L750-L763
+                check_relation_numeric(first, &operands[0], &operands[1])?;
+                if _tree_version < 3 && (0x8F..=0x94).contains(&first) {
+                    if let Some(target) = apply_upcast(&mut a, &mut b, operands) {
+                        if types.constructors.is_some() {
+                            let ct = types.constructor_children.last_mut().unwrap();
+                            let len = ct.len();
+                            ct[len - 2..].fill(Ok(Some(target)));
+                        }
+                    }
+                }
+                check_relation_constraints(first, &operands[0], &operands[1])?;
+                Payload::Two(Box::new(a), Box::new(b))
             }
         }
     };
@@ -987,28 +991,54 @@ fn parse_node_value(
     }))
 }
 
-/// A node's Scala `tpe` when the IR states it outright: a constant's wire type,
-/// a numeric cast's target, `Coll[elementType]` for a collection literal, and a
-/// tuple of its items' explicit types. `None` for anything that needs
-/// inference, whose result may differ from Scala's in detail.
-fn explicit_type(e: &Expr) -> Option<SigmaType> {
-    match e {
-        Expr::Const { tpe, .. } => Some(tpe.clone()),
-        Expr::Op(IrNode { payload, .. }) => match payload {
-            Payload::NumericCast { tpe, .. } => Some(tpe.clone()),
-            Payload::ConcreteCollection { elem_type, .. } => {
-                Some(SigmaType::SColl(Box::new(elem_type.clone())))
-            }
-            Payload::BoolCollection { .. } => Some(SigmaType::SColl(Box::new(SigmaType::SBoolean))),
-            Payload::Tuple { items } => items
-                .iter()
-                .map(explicit_type)
-                .collect::<Option<Vec<_>>>()
-                .map(SigmaType::STuple),
-            _ => None,
-        },
-        Expr::Unparsed(_) => None,
+// Mirror TransformingSigmaBuilder.applyUpcast: cast only the narrower numeric
+// operand. Constants retain the cast in the AST too; the versioned writer alone
+// strips a constant's leading Upcast below tree v3.
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L674-L684
+fn apply_upcast(
+    a: &mut Expr,
+    b: &mut Expr,
+    operands: &mut [Option<SigmaType>],
+) -> Option<SigmaType> {
+    let [Some(left), Some(right)] = operands else {
+        return None;
+    };
+    let rank = |t: &SigmaType| match t {
+        SigmaType::SByte => 1,
+        SigmaType::SShort => 2,
+        SigmaType::SInt => 3,
+        SigmaType::SLong => 4,
+        SigmaType::SBigInt => 5,
+        SigmaType::SUnsignedBigInt => 6,
+        _ => 0,
+    };
+    if left == right || rank(left) == 0 || rank(right) == 0 {
+        return None;
     }
+    let target = if rank(left) > rank(right) {
+        left.clone()
+    } else {
+        right.clone()
+    };
+    for (expr, tpe) in [(a, left), (b, right)] {
+        if *tpe != target {
+            *expr = Expr::Op(IrNode {
+                opcode: 0x7E,
+                payload: Payload::NumericCast {
+                    input: Box::new(std::mem::replace(
+                        expr,
+                        Expr::Const {
+                            tpe: SigmaType::SUnit,
+                            val: SigmaValue::Unit,
+                        },
+                    )),
+                    tpe: target.clone(),
+                },
+            });
+            *tpe = target.clone();
+        }
+    }
+    Some(target)
 }
 
 /// The bitwise and negation nodes check their operands when they are built:
@@ -1040,11 +1070,16 @@ fn check_numeric_operands(opcode: u8, operands: &[Option<SigmaType>]) -> Result<
 /// they are built, so an operand of the wrong kind is a `ClassCastException`,
 /// a hard reject also in a sized tree: `Append` and `Slice` take
 /// `input.tpe` as an `SCollection` (`transformers.scala:62`, `:89`; an
-/// `STuple` is one), `MapCollection` takes `mapper.tpe` as an `SFunc`
+/// `STuple` is one). `OptionGetOrElse.opType` eagerly reads its receiver's
+/// option element type. Filter's deferred cast is retained by ConstructorTypes.
+/// `MapCollection` takes `mapper.tpe` as an `SFunc`
 /// (`:38`). Only an operand whose type is known precisely is judged.
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L117-L122
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L622-L626
 fn check_constructor_casts(opcode: u8, operands: &[Option<SigmaType>]) -> Result<(), ReadError> {
     let (operand, want) = match opcode {
         0xB3 | 0xB4 => (&operands[0], "a collection"),
+        0xE5 => (&operands[0], "an option"),
         0xAD => (&operands[1], "a function"),
         _ => return Ok(()),
     };
@@ -1053,6 +1088,7 @@ fn check_constructor_casts(opcode: u8, operands: &[Option<SigmaType>]) -> Result
     };
     let fits = match opcode {
         0xAD => matches!(tpe, SigmaType::SFunc { .. }),
+        0xE5 => matches!(tpe, SigmaType::SOption(_)),
         _ => matches!(tpe, SigmaType::SColl(_) | SigmaType::STuple(_)),
     };
     if !fits {
@@ -1070,14 +1106,30 @@ fn check_constructor_casts(opcode: u8, operands: &[Option<SigmaType>]) -> Result
 /// is not a `ValidationException`, so even a sized tree hard-rejects.
 ///
 /// Only known types are judged. The numeric check is a class test, like the
-/// other parse-time checks. Type equality is stricter, so it is applied only
-/// when both types are explicit (a constant or a numeric cast) or both are
-/// flat; a nested inferred type may differ from Scala's in detail.
+/// other parse-time checks. Cached constructor types retain exact composite
+/// types and real SAny; unknown types remain unchecked.
+fn check_relation_numeric(
+    opcode: u8,
+    ta: &Option<SigmaType>,
+    tb: &Option<SigmaType>,
+) -> Result<(), ReadError> {
+    if opcode <= 0x92 {
+        for t in [ta, tb].into_iter().flatten() {
+            if !t.is_numeric() {
+                return Err(ReadError::HardReject(format!(
+                    "relation {opcode:#04x} operands {:?} and {:?} fail the builder constraint (Scala ConstraintFailed)",
+                    ta.as_ref().unwrap_or(t), tb.as_ref().unwrap_or(t)
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_relation_constraints(
     opcode: u8,
-    tree_version: u8,
-    (a, ta): (&Expr, &Option<SigmaType>),
-    (b, tb): (&Expr, &Option<SigmaType>),
+    ta: &Option<SigmaType>,
+    tb: &Option<SigmaType>,
 ) -> Result<(), ReadError> {
     if !(0x8F..=0x94).contains(&opcode) {
         return Ok(());
@@ -1088,31 +1140,10 @@ fn check_relation_constraints(
              constraint (Scala ConstraintFailed)"
         )))
     };
-    if opcode <= 0x92 {
-        for t in [ta, tb].into_iter().flatten() {
-            if !t.is_numeric() {
-                return fail(ta.as_ref().unwrap_or(t), tb.as_ref().unwrap_or(t));
-            }
-        }
-    }
     let (Some(ta), Some(tb)) = (ta, tb) else {
         return Ok(());
     };
-    let explicit = |e: &Expr| explicit_type(e).is_some();
-    let flat = |t: &SigmaType| {
-        !matches!(
-            t,
-            SigmaType::SColl(_)
-                | SigmaType::SOption(_)
-                | SigmaType::STuple(_)
-                | SigmaType::SFunc { .. }
-                | SigmaType::STypeVar(_)
-                | SigmaType::SAny
-        )
-    };
-    let comparable = (explicit(a) && explicit(b)) || (flat(ta) && flat(tb));
-    let upcast = tree_version < 3 && ta.is_numeric() && tb.is_numeric();
-    if comparable && !upcast && ta != tb {
+    if ta != tb {
         return fail(ta, tb);
     }
     Ok(())

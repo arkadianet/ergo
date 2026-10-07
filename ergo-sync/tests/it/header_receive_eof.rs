@@ -1,6 +1,5 @@
-//! Regression: header receive must enforce end-of-input, like the reload path
-//! and the sibling receive sinks. A header delivered as `canonical ++ trailing`
-//! must be rejected, not accepted under a raw-bytes id.
+//! Standalone header receive uses the parsed header's canonical ID.
+//! Received suffix bytes do not become a separate header identity.
 
 use ergo_sync::header_proc::pre_validate_header;
 
@@ -16,7 +15,7 @@ fn mainnet_header(height: u64) -> Vec<u8> {
 }
 
 #[test]
-fn header_receive_accepts_canonical_rejects_trailing() {
+fn header_receive_normalizes_trailing_bytes() {
     let clean = mainnet_header(2);
     // A canonical mainnet header (with valid PoW) is accepted.
     assert!(
@@ -24,15 +23,12 @@ fn header_receive_accepts_canonical_rejects_trailing() {
         "canonical header must be accepted"
     );
 
-    // The same header with trailing bytes appended is rejected at parse.
+    // Scala HeaderSerializer.parseBytes accepts the parsed prefix. The ID
+    // remains bound to canonical fields; storage uses the canonical bytes.
     let mut trailing = clean.clone();
     trailing.extend_from_slice(&[0xAA, 0xBB]);
-    let err = match pre_validate_header(&trailing) {
-        Ok(_) => panic!("trailing-byte header must be rejected"),
-        Err(e) => e,
-    };
-    assert!(
-        format!("{err:?}").contains("trailing bytes"),
-        "expected a trailing-bytes error, got: {err:?}"
-    );
+    let parsed = pre_validate_header(&trailing).expect("reference accepts suffix bytes");
+    let canonical = pre_validate_header(&clean).unwrap();
+    assert_eq!(parsed.header_id(), canonical.header_id());
+    assert_eq!(parsed.header(), canonical.header());
 }

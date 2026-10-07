@@ -215,6 +215,8 @@ pub(crate) fn infer_node_type(
                 Some(SigmaType::SColl(Box::new(elem_type.clone())))
             }
             Payload::BoolCollection { .. } => Some(SigmaType::SColl(Box::new(SigmaType::SBoolean))),
+            // Scala derives tuple component types even for root validation.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/values.scala#L807-L812
             Payload::Tuple { items } => {
                 let child_types: Vec<_> = items
                     .iter()
@@ -222,7 +224,7 @@ pub(crate) fn infer_node_type(
                     .collect();
                 let types: Option<Vec<_>> = child_types.into_iter().collect();
                 match types {
-                    Some(types) if precise_types => Some(SigmaType::STuple(types)),
+                    Some(types) => Some(SigmaType::STuple(types)),
                     _ if precise_types => None,
                     _ => Some(SigmaType::SAny),
                 }
@@ -343,6 +345,9 @@ pub(crate) fn infer_node_type(
                 }
                 match t {
                     Some(SigmaType::SColl(elem)) => Some(*elem),
+                    // STuple extends SCollection[SAny], even for homogeneous tuples.
+                    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/ast/SType.scala#L838-L846
+                    Some(SigmaType::STuple(_)) => Some(SigmaType::SAny),
                     _ => None,
                 }
             }
@@ -521,11 +526,11 @@ pub(crate) fn infer_node_type(
                     op_root_non_sigma_type(node.opcode)
                 }
             }
-            // Childless payloads with no statically-tracked type here:
-            // `TaggedVar` (0x71, type-tag dependent) and `NoneValue` (0xDF,
-            // not parser-reachable) — both resolve through the opcode
-            // classifier to `None` (lenient).
-            Payload::TaggedVar { .. } | Payload::NoneValue { .. } => {
+            // TaggedVariable's type is declared on the wire, including at the root.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/TaggedVariableSerializer.scala#L15-L18
+            Payload::TaggedVar { tpe, .. } => tpe.clone(),
+            // NoneValue is not parser-reachable.
+            Payload::NoneValue { .. } => {
                 if precise_types {
                     super::type_infer::op_result_type(node.opcode)
                 } else {
@@ -539,7 +544,7 @@ pub(crate) fn infer_node_type(
 
 /// `true` when a computed type is PRECISE — i.e. contains no `SAny`, which this
 /// typer also uses as its "non-`SigmaProp`, but exact type not tracked"
-/// sentinel (a non-landmine `MethodCall`, a `Tuple` literal, a non-SigmaProp
+/// sentinel (a non-landmine `MethodCall`, a tuple with unknown components, a non-SigmaProp
 /// operator, an unknown leaf, …). A sentinel is only safe at the TOP level of a
 /// type (where [`agree`] maps it to `Unknown`); embedding one inside a
 /// constructed type (the `FuncValue` → `SFunc` range) would let it structurally
@@ -697,7 +702,7 @@ enum Unify {
 /// type, passed as `b`): equal -> `Match`, both PRECISELY determinable but different
 /// -> `Mismatch`, otherwise `Unknown`. `SAny` is the typer's "non-`SigmaProp`, but
 /// precise type not tracked" sentinel (returned for a non-landmine `MethodCall`, a
-/// `Tuple`, a non-`SigmaProp` operator, …), NOT a literal `SAny` — so it is treated
+/// a tuple with unknown components, a non-`SigmaProp` operator, …), NOT a literal `SAny` — so it is treated
 /// as `Unknown`, never a `Mismatch`. Reporting `Mismatch` for it would reject a tree
 /// Scala accepts, e.g. `Coll[SigmaProp].apply(coll.size)` whose `SInt` index the
 /// sentinel hides (a reject-valid).
@@ -1108,15 +1113,31 @@ mod tests {
                 tpe_params: vec![],
             })
         );
-        // Imprecise body (a Tuple literal types as the SAny sentinel) -> the
-        // function degrades to top-level SAny (still non-SigmaProp) rather
-        // than embedding the sentinel where `agree` could mis-compare it.
-        let imprecise = func_value(
+        // Literal tuple component types are known, including within lambdas.
+        let tuple_body = func_value(
             vec![(1, Some(SigmaType::SLong))],
             op(
                 0x86,
                 Payload::Tuple {
                     items: vec![long0(), long0()],
+                },
+            ),
+        );
+        assert_eq!(
+            root(&tuple_body),
+            Some(SigmaType::SFunc {
+                t_dom: vec![SigmaType::SLong],
+                t_range: Box::new(SigmaType::STuple(vec![SigmaType::SLong, SigmaType::SLong])),
+                tpe_params: vec![],
+            })
+        );
+        // An unbound component still makes the entire function imprecise.
+        let imprecise = func_value(
+            vec![(1, Some(SigmaType::SLong))],
+            op(
+                0x86,
+                Payload::Tuple {
+                    items: vec![val_use(2), long0()],
                 },
             ),
         );
@@ -1130,7 +1151,6 @@ mod tests {
         use ergo_primitives::reader::VlqReader;
 
         for body in [
-            "8c86020500050001",                 // tuple selection
             "dad900050000",                     // zero-argument Apply
             "b2b383010505008301050500040000",   // Append then ByIndex
             "b2b4830105050004000402040000",     // Slice then ByIndex

@@ -1,0 +1,15 @@
+nested-tuple-one-register	false	null
+nested-tuple-one-extension	false	null
+nested-tuple-one-tree	false	null
+nested-unparsed-control-register	true	12101
+nested-unparsed-control-extension	true	12101
+nested-unparsed-control-tree	true	12101
+deserialize-box-read-value	true	12129
+deserialize-box-read-value-unparsed	true	12129
+deserialize-box-write-value	false	null
+deserialize-box-write-value-unparsed	true	12137
+embedded-option-receiver	false	null
+embedded-filter-receiver	false	null
+embedded-filter-fixed-parent	true	12130
+deserialize-box-register-nested-script-read	true	12132
+deserialize-box-register-nested-script-write	false	null

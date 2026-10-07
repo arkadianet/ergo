@@ -15,7 +15,7 @@ use ergo_crypto::difficulty::{
 use ergo_primitives::digest::blake2b256;
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::difficulty::decode_compact_bits;
-use ergo_ser::header::read_header;
+use ergo_ser::header::{read_header, serialize_header};
 use ergo_state::chain::HeaderMeta;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_validation::header::{CheckedHeader, HeaderValidationError};
@@ -40,7 +40,7 @@ pub enum HeaderProcessError {
         header_id: [u8; 32],
         source: HeaderValidationError,
     },
-    #[error("header finalization bytes do not match the prevalidated ID")]
+    #[error("header finalization bytes do not match the prevalidated bytes")]
     PrevalidatedBytesMismatch,
     #[error("local header context is invalid: {0}")]
     LocalContext(String),
@@ -338,6 +338,9 @@ pub struct ProcessedHeader {
 #[derive(Clone)]
 pub struct PreValidatedHeader {
     pow_checked: ergo_validation::header::PowCheckedHeader,
+    // Bind finalization to the exact received bytes independently of the
+    // canonical header ID (accepted encodings may normalize).
+    received_digest: [u8; 32],
 }
 
 impl PreValidatedHeader {
@@ -382,6 +385,7 @@ impl PreValidatedHeader {
             },
         };
         Self {
+            received_digest: header_id,
             pow_checked: ergo_validation::header::PowCheckedHeader::for_test_unchecked(
                 header, header_id,
             ),
@@ -394,24 +398,17 @@ impl PreValidatedHeader {
 /// `DifficultyParams` — PoW dispatch is on the solution variant (Scala parity).
 #[tracing::instrument(skip_all, fields(block = tracing::field::Empty, height = tracing::field::Empty))]
 pub fn pre_validate_header(header_bytes: &[u8]) -> Result<PreValidatedHeader, HeaderProcessError> {
-    let header_id = *blake2b256(header_bytes).as_bytes();
+    let received_digest = *blake2b256(header_bytes).as_bytes();
     let mut reader = VlqReader::new(header_bytes);
     let header =
         read_header(&mut reader).map_err(|e| HeaderProcessError::Deserialize(format!("{e:?}")))?;
-    // Enforce end-of-input at receive, matching the reload path
-    // (`ergo-validation/src/header/mod.rs`) and the sibling receive sinks
-    // (transaction, block-section, NiPoPoW-proof deserializers all reject
-    // trailing bytes). Without this, a header delivered as
-    // `canonical_bytes ++ trailing_junk` is accepted, and because
-    // `header_id` is `blake2b256(header_bytes)` over the raw bytes, the same
-    // block content enters under a non-canonical id.
-    if reader.position() != header_bytes.len() {
-        return Err(HeaderProcessError::Deserialize(format!(
-            "trailing bytes after header: parsed {} of {} bytes",
-            reader.position(),
-            header_bytes.len()
-        )));
-    }
+    // Header.id hashes HeaderSerializer's reserialization, not received bytes.
+    // parseBytes does not require EOF; bytes after the parsed header do not
+    // participate in its ID or PoW message. Persist canonical bytes below.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/history/header/Header.scala#L62
+    let (_, id) = serialize_header(&header)
+        .map_err(|error| HeaderProcessError::Deserialize(error.to_string()))?;
+    let header_id = *id.as_bytes();
     let span = tracing::Span::current();
     span.record("block", hex::encode(header_id));
     span.record("height", header.height);
@@ -429,7 +426,10 @@ pub fn pre_validate_header(header_bytes: &[u8]) -> Result<PreValidatedHeader, He
     let pow_checked = ergo_validation::header::PowCheckedHeader::verify_pow(header, header_id)
         .map_err(HeaderProcessError::Validation)?;
 
-    Ok(PreValidatedHeader { pow_checked })
+    Ok(PreValidatedHeader {
+        pow_checked,
+        received_digest,
+    })
 }
 
 /// Phase 2 of header processing: chain linkage + difficulty + persist.
@@ -451,9 +451,12 @@ pub fn finalize_header<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     genesis_id: Option<[u8; 32]>,
 ) -> Result<ProcessedHeader, HeaderProcessError> {
     let header_id = *pre.pow_checked.header_id();
-    if *blake2b256(header_bytes).as_bytes() != header_id {
+    if *blake2b256(header_bytes).as_bytes() != pre.received_digest {
         return Err(HeaderProcessError::PrevalidatedBytesMismatch);
     }
+    let (canonical_bytes, _) = serialize_header(pre.header())
+        .map_err(|error| HeaderProcessError::Deserialize(error.to_string()))?;
+    let header_bytes = canonical_bytes.as_slice();
     if pre.height() == 1 && pre.parent_id() == [0u8; 32] {
         if let Some(expected) = genesis_id {
             if header_id != expected {
