@@ -185,3 +185,9 @@ fn reflected_method_values_and_costs_match_reference() {
     check_vectors("methods-receivers");
     check_vectors("context-equality");
 }
+
+#[test]
+fn numeric_byte_bit_and_zero_serialization_match_reference() {
+    check_vectors("numeric-bytes");
+    check_vectors("zero-extra");
+}

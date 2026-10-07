@@ -18,6 +18,7 @@ infrastructure.
 
 ### Fixed
 
+- Return empty byte and bit collections for unsigned big integer zero.
 - Evaluate method wire forms for context inputs, outputs and SELF, option access, and group multiplication.
 - Calculate collection slice costs from the original signed bounds.
 - Allow trailing bytes after values decoded by `Global.deserializeTo`.

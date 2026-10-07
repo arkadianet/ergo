@@ -1088,10 +1088,10 @@ pub(super) fn eval_no_arg_method(
 ///   signed two's-complement big-endian = `num_bigint::to_signed_bytes_be`.
 /// * UnsignedBigInt — `CUnsignedBigInt.toBytes` =
 ///   `BigIntegers.asUnsignedByteArray(value)` = minimal *unsigned*
-///   magnitude big-endian (no sign byte), with zero encoded as a single
-///   `0x00` byte. Bouncy Castle keeps the lone zero and strips a leading
-///   `0x00` only when more bytes follow, which is exactly
-///   `to_bytes_be().1` on the always-non-negative carrier.
+///   magnitude big-endian (no sign byte), with zero encoded as empty.
+///   The reference strips the sign byte even when it is the only byte.
+///   <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/data/CUnsignedBigInt.scala#L32>
+///   <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/crypto/BigIntegers.scala#L110-L117>
 fn numeric_big_endian_bytes(v: &Value) -> Result<Vec<u8>, EvalError> {
     Ok(match v {
         Value::Byte(x) => vec![*x as u8],
@@ -1099,6 +1099,9 @@ fn numeric_big_endian_bytes(v: &Value) -> Result<Vec<u8>, EvalError> {
         Value::Int(x) => x.to_be_bytes().to_vec(),
         Value::Long(x) => x.to_be_bytes().to_vec(),
         Value::BigInt(x) => x.to_signed_bytes_be(),
+        // Deliberately preserve the reference's empty zero magnitude for
+        // consensus; toBits consumes these same bytes and is empty too.
+        Value::UnsignedBigInt(x) if x.sign() == num_bigint::Sign::NoSign => Vec::new(),
         Value::UnsignedBigInt(x) => x.to_bytes_be().1,
         other => {
             return Err(EvalError::TypeError {
