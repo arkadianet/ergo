@@ -1,9 +1,11 @@
-use ergo_ser::difficulty::{decode_compact_bits, encode_compact_bits, normalize_difficulty};
+use ergo_ser::difficulty::{
+    decode_compact_bits, decode_compact_bits_signed, encode_compact_bits, normalize_difficulty,
+};
 use ergo_ser::header::Header;
 use num_bigint::BigUint;
 
 use crate::autolykos::v1::secp256k1_order;
-use crate::pow::DifficultyError;
+use crate::pow::{DifficultyError, PowError};
 
 pub use ergo_chain_spec::DifficultyParams;
 
@@ -19,12 +21,21 @@ const PRECISION: u64 = 1_000_000_000;
 
 /// Compute PoW target b from encoded nBits: b = q / decode_compact_bits(nBits).
 pub fn get_target(nbits: u32) -> BigUint {
-    let q = secp256k1_order();
-    let difficulty = decode_compact_bits(nbits);
-    if difficulty == BigUint::ZERO {
-        return BigUint::ZERO;
+    get_target_checked(nbits).unwrap_or_default()
+}
+
+pub(crate) fn get_target_checked(nbits: u32) -> Result<BigUint, PowError> {
+    let difficulty = decode_compact_bits_signed(nbits);
+    // Deliberately distinguish the reference's division-by-zero exception from
+    // a negative target's false PoW verdict, for consensus script evaluation.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/pow/Autolykos2PowValidation.scala#L165-L179
+    match difficulty.sign() {
+        num_bigint::Sign::NoSign => Err(PowError::ZeroDifficulty),
+        num_bigint::Sign::Minus => Err(PowError::InvalidSolution(
+            "negative difficulty from nBits".into(),
+        )),
+        num_bigint::Sign::Plus => Ok(secp256k1_order() / difficulty.into_parts().1),
     }
-    q / difficulty
 }
 
 /// Get the epoch length for a height using network-specific config.

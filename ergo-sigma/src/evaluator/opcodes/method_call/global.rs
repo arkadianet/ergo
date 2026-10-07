@@ -63,7 +63,9 @@ pub(super) fn decode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value,
         }
     };
     add_method_cost(cx.cost, COST_DECODE_NBITS)?;
-    Ok(Value::BigInt(decode_compact_bits(compact)))
+    Ok(Value::BigInt(
+        ergo_ser::difficulty::decode_compact_bits_signed(compact as u32),
+    ))
 }
 
 // SGlobal(106).some(9, value: T)[T] -> Option[T]
@@ -729,40 +731,6 @@ fn encode_compact_bits(value: &num_bigint::BigInt) -> i64 {
 /// mantissa from the lower 24 bits, sign-extends, and zero-pads
 /// out to `size` bytes. The MSB of the first mantissa byte is the
 /// MPI-style sign bit: when set, negate the resulting magnitude.
-fn decode_compact_bits(compact: i64) -> num_bigint::BigInt {
-    let size = ((compact >> 24) & 0xFF) as usize;
-    if size == 0 {
-        return num_bigint::BigInt::from(0);
-    }
-    let mut mantissa = Vec::with_capacity(size);
-    if size >= 1 {
-        mantissa.push(((compact >> 16) & 0xFF) as u8);
-    }
-    if size >= 2 {
-        mantissa.push(((compact >> 8) & 0xFF) as u8);
-    }
-    if size >= 3 {
-        mantissa.push((compact & 0xFF) as u8);
-    }
-    // Zero-pad on the right out to `size` total bytes — Scala's
-    // `decodeMPI` reads the full length, treating the unread tail
-    // as zero (this is the difference between "23 bits of
-    // mantissa" and "the mantissa scaled to size bytes").
-    while mantissa.len() < size {
-        mantissa.push(0);
-    }
-    let negative = !mantissa.is_empty() && (mantissa[0] & 0x80) != 0;
-    if !mantissa.is_empty() {
-        mantissa[0] &= 0x7F;
-    }
-    let mag = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &mantissa);
-    if negative {
-        -mag
-    } else {
-        mag
-    }
-}
-
 /// Truncate a `BigInt` to the low 64 bits, matching Java's
 /// `BigInteger.longValue()` semantics — wraps around modulo 2^64
 /// without panicking on out-of-range values.

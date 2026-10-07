@@ -27,6 +27,7 @@ mod popow_header_mainnet_roundtrip;
 mod popow_level_scala_parity;
 mod popow_panic_freedom;
 mod popow_scala_fixture_validation;
+mod reference_607_check_pow;
 mod reference_607_sigma_proofs;
 mod reference_607_tx;
 mod rejection_parity;

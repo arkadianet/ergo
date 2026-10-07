@@ -4,6 +4,7 @@ mod ergotrees_roundtrip;
 mod headers_roundtrip;
 mod mainnet_deserialization_607;
 mod nipopow_scala_oracle;
+mod reference_607_compact_bits;
 mod roundtrip_triage;
 mod santa_wire;
 mod sbigint_cap_oracle;

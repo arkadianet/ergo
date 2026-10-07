@@ -18,6 +18,9 @@ infrastructure.
 
 ### Fixed
 
+- Fail `Header.checkPow` evaluation when the decoded difficulty is zero.
+- Honor the compact difficulty sign when checking header proof of work.
+
 - Interpret sigma proof responses modulo the group order in DLog and DH-tuple verification.
 
 ## [0.12.1] - 2026-10-06
