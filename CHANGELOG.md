@@ -16,6 +16,15 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- Compare decoded header difficulty values when validating required difficulty.
+
+- Fail `Header.checkPow` evaluation when the decoded difficulty is zero.
+- Honor the compact difficulty sign when checking header proof of work.
+
+- Interpret sigma proof responses modulo the group order in DLog and DH-tuple verification.
+
 ## [0.12.1] - 2026-10-06
 
 A consensus release for mainnet. Upgrade every 0.12.0 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.

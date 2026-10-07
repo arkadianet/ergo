@@ -600,9 +600,15 @@ pub(super) fn eval_no_arg_method(
                 ));
             }
             let header = eh.to_header();
-            Ok(Some(Value::Bool(
-                ergo_crypto::pow::verify_pow_solution(&header).is_ok(),
-            )))
+            // Deliberately preserve the reference's division-by-zero failure
+            // instead of converting it to false. Reflection wraps this exception.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CHeader.scala#L73-L79
+            match ergo_crypto::pow::verify_pow_solution(&header) {
+                Err(ergo_crypto::pow::PowError::ZeroDifficulty) => Err(
+                    EvalError::InvocationTargetException("BigInteger divide by zero"),
+                ),
+                result => Ok(Some(Value::Bool(result.is_ok()))),
+            }
         }
         // SPreHeader(105) property methods 1-7                cost: 10
         (105, 1) => {
