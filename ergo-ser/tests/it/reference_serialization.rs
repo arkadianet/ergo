@@ -21,6 +21,73 @@ fn version() -> u8 {
 }
 
 #[test]
+fn reference_transaction_identifiers() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("test-vectors/reference-6.0.7/serialization");
+    for file in ["relations", "transaction-encodings"] {
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join(format!("{file}.json"))).unwrap(),
+        )
+        .unwrap();
+        let oracle = std::fs::read_to_string(root.join(format!("{file}.jvm-ids.tsv"))).unwrap();
+        let rows: std::collections::BTreeMap<_, _> = oracle
+            .lines()
+            .map(|line| {
+                let fields: Vec<_> = line.split('\t').collect();
+                (fields[0], fields)
+            })
+            .collect();
+        let entries = fixture["entries"].as_array().unwrap();
+        assert_eq!(rows.len(), entries.len());
+        for v in entries {
+            let name = v["name"].as_str().unwrap();
+            let bytes = hex::decode(v["tx_bytes_hex"].as_str().unwrap()).unwrap();
+            let expected = &rows[name];
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
+            let result = transaction::read_transaction(&mut r).and_then(|tx| {
+                transaction::bytes_to_sign(&tx)
+                    .map(|message| (tx, message))
+                    .map_err(|e| ergo_primitives::reader::ReadError::InvalidData(e.to_string()))
+            });
+            if expected[1] == "EXC" {
+                assert!(result.is_err(), "{name}");
+                continue;
+            }
+            let (tx, message) = result.unwrap();
+            let fields: std::collections::BTreeMap<_, _> = expected[2]
+                .split_whitespace()
+                .map(|field| field.split_once('=').unwrap())
+                .collect();
+            let id = transaction::transaction_id(&tx).unwrap();
+            assert_eq!(hex::encode(id.as_bytes()), fields["txid"], "{name}");
+            assert_eq!(hex::encode(message), fields["msg"], "{name}");
+            for (i, candidate) in tx.output_candidates.into_iter().enumerate() {
+                assert_eq!(
+                    hex::encode(candidate.ergo_tree_bytes()),
+                    fields[format!("out{i}.proposition").as_str()],
+                    "{name}"
+                );
+                let b = ergo_box::ErgoBox::new(candidate, id, i as u16);
+                assert_eq!(
+                    hex::encode(b.box_id().unwrap().as_bytes()),
+                    fields[format!("out{i}.id").as_str()],
+                    "{name}"
+                );
+                let mut w = VlqWriter::new();
+                ergo_box::write_ergo_box(&mut w, &b).unwrap();
+                assert_eq!(
+                    hex::encode(w.result()),
+                    fields[format!("out{i}.bytes").as_str()],
+                    "{name}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn reference_receiver_types() {
     #[derive(Deserialize)]
     struct Fixture {
@@ -31,7 +98,13 @@ fn reference_receiver_types() {
         .unwrap()
         .join("test-vectors/reference-6.0.7/serialization");
     let mut count = 0;
-    for file in ["readers-receivers", "readers-avl", "readers-nested-box"] {
+    for file in [
+        "readers-receivers",
+        "readers-avl",
+        "readers-nested-box",
+        "readers-relations",
+        "readers-encodings",
+    ] {
         let path = root.join(format!("{file}.json"));
         let fixture: Fixture =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -71,6 +144,9 @@ fn reference_receiver_types() {
                     "constant" => {
                         let (t, x) =
                             sigma_value::read_constant(&mut r).map_err(|e| e.to_string())?;
+                        if let sigma_value::SigmaValue::Header(_, id) = &x {
+                            identity = Some(hex::encode(id));
+                        }
                         sigma_value::write_constant_versioned(&mut w, &t, &x, v.version)
                             .map_err(|e| e.to_string())?;
                     }
@@ -89,6 +165,7 @@ fn reference_receiver_types() {
                     }
                     "box-read" => {
                         let b = ergo_box::read_ergo_box(&mut r).map_err(|e| e.to_string())?;
+                        assert_eq!(b.bytes().unwrap(), bytes[..r.position()], "{}", v.name);
                         identity = Some(hex::encode(
                             b.box_id().map_err(|e| e.to_string())?.as_bytes(),
                         ));
@@ -101,6 +178,7 @@ fn reference_receiver_types() {
                     }
                     "box" => {
                         let b = ergo_box::read_ergo_box(&mut r).map_err(|e| e.to_string())?;
+                        assert_eq!(b.bytes().unwrap(), bytes[..r.position()], "{}", v.name);
                         identity = Some(hex::encode(
                             b.box_id().map_err(|e| e.to_string())?.as_bytes(),
                         ));

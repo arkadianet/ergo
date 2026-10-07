@@ -41,7 +41,7 @@ enum NodeVerdict {
     Reject(String),
 }
 
-fn validate(entry: &J) -> Result<NodeVerdict, String> {
+fn validate(entry: &J, mempool: bool) -> Result<NodeVerdict, String> {
     let pre = &entry["preHeader"];
     let p = &entry["parameters"];
     let pre_version =
@@ -114,15 +114,35 @@ fn validate(entry: &J) -> Result<NodeVerdict, String> {
         // Contract blesses all entries under testnet chain settings (EIP-27 off).
         rules: TxValidationRules::default(),
     };
-    match validate_transaction_parsed_with_group_elements(
-        tx,
-        &tx_bytes,
-        &points,
-        input_boxes,
-        data_boxes,
-        false,
-        &mut cx,
-    ) {
+    let result = if mempool {
+        struct View(Vec<ErgoBox>);
+        impl ergo_validation::UtxoView for View {
+            fn get_box(&self, id: &ergo_primitives::digest::Digest32) -> Option<ErgoBox> {
+                self.0
+                    .iter()
+                    .find(|b| b.box_id().is_ok_and(|found| found == *id))
+                    .cloned()
+            }
+        }
+        let view = View(input_boxes.into_iter().chain(data_boxes).collect());
+        ergo_validation::tx::validate_transaction(
+            &tx_bytes,
+            &view,
+            &ergo_validation::LocalPolicy::default_policy(),
+            &mut cx,
+        )
+    } else {
+        validate_transaction_parsed_with_group_elements(
+            tx,
+            &tx_bytes,
+            &points,
+            input_boxes,
+            data_boxes,
+            false,
+            &mut cx,
+        )
+    };
+    match result {
         Ok(_) => Ok(NodeVerdict::Accept(cost.total_block_cost())),
         Err(e) => Ok(NodeVerdict::Reject(e.to_string())),
     }
@@ -134,7 +154,13 @@ fn reference_receiver_transactions() {
         .parent()
         .unwrap()
         .join("test-vectors/reference-6.0.7/serialization");
-    for file in ["receiver-types", "avl-lengths", "nested-boxes"] {
+    for file in [
+        "receiver-types",
+        "avl-lengths",
+        "nested-boxes",
+        "relations",
+        "transaction-encodings",
+    ] {
         let path = root.join(format!("{file}.json"));
         let fixture: J = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let oracle = std::fs::read_to_string(path.with_extension("jvm.tsv")).unwrap();
@@ -153,7 +179,7 @@ fn reference_receiver_transactions() {
         for entry in entries {
             let name = entry["name"].as_str().unwrap();
             let expected = rows[name];
-            let actual = validate(entry);
+            let actual = validate(entry, false);
             let observed = match &actual {
                 Ok(NodeVerdict::Accept(cost)) => (true, Some(*cost)),
                 Ok(NodeVerdict::Reject(reason)) => {
@@ -163,6 +189,12 @@ fn reference_receiver_transactions() {
                 Err(_) => (false, None),
             };
             assert_eq!(observed, expected, "{name}: {actual:?}");
+            let actual = validate(entry, true);
+            let observed = match &actual {
+                Ok(NodeVerdict::Accept(cost)) => (true, Some(*cost)),
+                _ => (false, None),
+            };
+            assert_eq!(observed, expected, "mempool {name}: {actual:?}");
         }
     }
 }

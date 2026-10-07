@@ -11,4 +11,5 @@ mod mode5_executor_replay;
 mod mode5_genesis_block;
 mod mode5_header_sync;
 mod prune_e2e_activation;
+mod reference_sections;
 mod restart_benchmark;

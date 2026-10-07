@@ -16,16 +16,10 @@ pub(crate) fn ergo_box_to_eval_box(b: &ErgoBox, index: usize) -> Result<EvalBox,
     // ExtractBytes (0xC3) reads `EvalBox.raw_bytes` at script-eval time;
     // a silent fallback to empty bytes here would silently change script
     // semantics. Surface the write failure as a structured ScriptError.
-    let raw_bytes = {
-        let mut w = ergo_primitives::writer::VlqWriter::new();
-        ergo_ser::ergo_box::write_ergo_box(&mut w, b).map_err(|e| {
-            ValidationError::ScriptError {
-                index,
-                reason: format!("ErgoBox serialization for ExtractBytes failed: {e}"),
-            }
-        })?;
-        w.result()
-    };
+    let raw_bytes = b.bytes().map_err(|e| ValidationError::ScriptError {
+        index,
+        reason: format!("ErgoBox bytes for ExtractBytes failed: {e}"),
+    })?;
 
     Ok(EvalBox {
         lazy_vals: std::sync::Arc::new(ergo_sigma::evaluator::EvalBoxLazyVals::from_candidate(

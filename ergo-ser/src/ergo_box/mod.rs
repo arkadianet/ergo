@@ -118,6 +118,7 @@ impl PartialEq for ErgoBoxCandidate {
 #[derive(Debug, Clone, PartialEq)]
 struct ReceivedBoxIdentity {
     id: Digest32,
+    bytes: Vec<u8>,
     value: u64,
     creation_height: u32,
     tokens: Vec<Token>,
@@ -426,6 +427,22 @@ impl ErgoBox {
         Ok(blake2b256(&bytes))
     }
 
+    /// Scala ErgoBox.bytes retains received bytes for an unchanged parsed box.
+    /// Structured serializers remain separate, and can normalize or fail.
+    /// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/ErgoBox.scala#L87-L92>
+    pub fn bytes(&self) -> Result<Vec<u8>, WriteError> {
+        if self.received_box_id().is_some() {
+            return Ok(self
+                .candidate
+                .received_box_identity
+                .as_ref()
+                .unwrap()
+                .bytes
+                .clone());
+        }
+        serialize_ergo_box(self)
+    }
+
     fn received_box_id(&self) -> Option<Digest32> {
         let original = self.candidate.received_box_identity.as_ref()?;
         (self.candidate.value == original.value
@@ -445,6 +462,7 @@ impl ErgoBox {
         }
         self.candidate.received_box_identity = Some(Box::new(ReceivedBoxIdentity {
             id: blake2b256(bytes),
+            bytes: bytes.to_vec(),
             value: self.candidate.value,
             creation_height: self.candidate.creation_height,
             tokens: self.candidate.tokens.clone(),

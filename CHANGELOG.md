@@ -18,6 +18,9 @@ infrastructure.
 
 ### Fixed
 
+- Insert numeric relation upcasts for scripts below version 3 and preserve the distinct received and serialized box bytes.
+- Accept supported transaction encodings that normalize on serialization, deriving transaction IDs from the serialized message.
+
 - Reject serialization of AVL tree values whose decoded key or value length is negative.
 - Preserve nested box script serialization errors when writing box constants.
 
