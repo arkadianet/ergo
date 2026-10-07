@@ -23,7 +23,8 @@ use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
 use ergo_ser::transaction::{transaction_id, Transaction};
 use ergo_validation::block::{
-    validate_full_block, validate_full_block_parallel, BlockValidationContext, BlockValidationError,
+    validate_full_block_parallel_with_costs, validate_full_block_with_costs,
+    BlockValidationContext, BlockValidationError, CheckedBlock,
 };
 use ergo_validation::context::{ProtocolParams, UtxoView};
 use ergo_validation::header::CheckedHeader;
@@ -145,6 +146,15 @@ pub(crate) fn validate_both(
     header_version: u8,
     params: &ProtocolParams,
 ) -> [Result<(), BlockValidationError>; 2] {
+    validate_both_with_costs(transactions, utxo, header_version, params).map(|r| r.map(|_| ()))
+}
+
+pub(crate) fn validate_both_with_costs(
+    transactions: Vec<Transaction>,
+    utxo: &MapUtxo,
+    header_version: u8,
+    params: &ProtocolParams,
+) -> [Result<(CheckedBlock, Vec<(usize, u64)>), BlockValidationError>; 2] {
     let (parent, mut header) = parent_and_header();
     header.version = header_version;
     let tx_ids: Vec<ModifierId> = transactions
@@ -197,19 +207,17 @@ pub(crate) fn validate_both(
         script_validation_checkpoint: None,
         reemission: None,
     };
-    let sequential = validate_full_block(
+    let sequential = validate_full_block_with_costs(
         CheckedHeader::trust_me(header.clone(), HEADER_ID),
         &block_transactions,
         &extension,
         &ctx,
-    )
-    .map(|_| ());
-    let parallel = validate_full_block_parallel(
+    );
+    let parallel = validate_full_block_parallel_with_costs(
         CheckedHeader::trust_me(header, HEADER_ID),
         &block_transactions,
         &extension,
         &ctx,
-    )
-    .map(|_| ());
+    );
     [sequential, parallel]
 }

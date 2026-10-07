@@ -280,6 +280,8 @@ pub fn verify_spending_proof_with_context_and_cost(
             // Preserve charged-to-failure cost, including the discarded-context
             // branch; the successful pre-A6 path keeps the original accumulator.
             *cost = substituted_cost;
+        } else {
+            cost.observe_checked_cost(substituted_cost.checked_peak());
         }
         checked.map_err(|e| VerifySpendingError::Eval(e.into()))?;
     }
@@ -344,7 +346,9 @@ pub fn verify_spending_proof_with_context_and_cost(
                     // Interpreter.scala:249 uses (TrueSigmaProp, context1), discarding
                     // partial substitution charges even before A6. The evaluator then
                     // charges the inline constant (5 JIT), NOT the trivial fast path.
-                    *cost = soft_fork_cost.expect("validation rule arises during substitution");
+                    cost.restore_cost(
+                        soft_fork_cost.expect("validation rule arises during substitution"),
+                    );
                     cost.add(crate::cost_table::INLINE_CONSTANT)
                         .map_err(|e| VerifySpendingError::Eval(e.into()))?;
                     SigmaBoolean::TrivialProp(true)
