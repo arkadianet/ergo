@@ -320,10 +320,7 @@ impl NodeConfig {
         // config-load by the `nipopow_bootstrap && genesis_id.is_none()`
         // check after genesis_id resolution below, plus a runtime pin
         // through `NipopowVerifier::new(genesis_id_opt, ...)` in the
-        // bootstrap orchestrator. R4 (mainnet mining ⇒
-        // `checkReemissionRules = true`) has no analogue here — we
-        // don't expose a `check_reemission_rules` opt-out at the
-        // config layer, so the rule is vacuous in our config space.
+        // bootstrap orchestrator.
         if nipopow_bootstrap && !(utxo_bootstrap || blocks_to_keep >= 0) {
             return Err(format!(
                 "[node.nipopow] nipopow_bootstrap = true requires either \
@@ -1167,6 +1164,11 @@ impl NodeConfig {
         };
 
         Ok(Self {
+            // Scala's non-mining default is false; miners apply rule 123.
+            // https://github.com/ergoplatform/ergo/blob/v6.0.7/src/main/resources/mainnet.conf#L44
+            // https://github.com/ergoplatform/ergo/blob/v6.0.7/src/main/scala/org/ergoplatform/settings/ErgoSettingsReader.scala#L180-L183
+            check_reemission_rules: mining_config.enabled
+                || toml_cfg.node.check_reemission_rules.unwrap_or(false),
             network,
             chain_spec,
             data_dir,

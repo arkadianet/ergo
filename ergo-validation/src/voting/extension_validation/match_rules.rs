@@ -85,7 +85,7 @@ fn mk_match_parameters_60(
 }
 
 fn field_count(p: &ActiveProtocolParameters) -> usize {
-    let mut n = 9; // ids 1..8 + 123 always present
+    let mut n = 9 - p.missing_core_parameters.count_ones() as usize; // present named ids 1..8 + 123
     if p.subblocks_per_block.is_some() {
         n += 1;
     }
@@ -144,8 +144,8 @@ fn check_named_fields(
             computed.block_version as i64,
         ),
     ];
-    for (field, p, c) in pairs {
-        if p != c {
+    for ((field, p, c), id) in pairs.iter().zip([1, 2, 3, 4, 5, 6, 7, 8, 123]) {
+        if parsed.parameter(id).is_some() && (computed.parameter(id).is_none() || p != c) {
             return Err(mk_err(field, *p, *c));
         }
     }

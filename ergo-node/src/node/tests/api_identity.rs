@@ -23,6 +23,7 @@ fn cfg_with_mode(
         mempool_config.enabled = false;
     }
     NodeConfig {
+        check_reemission_rules: false,
         network: Network::Mainnet,
         shadow_config: Default::default(),
         chain_spec: Arc::new(ChainSpec::mainnet()),

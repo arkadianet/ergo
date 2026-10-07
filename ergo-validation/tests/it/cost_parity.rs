@@ -226,6 +226,7 @@ fn replay_fixture(
         let hdr = &headers[&h];
         let p = &fixture.parameters[&h.to_string()];
         let active = ergo_validation::ActiveProtocolParameters {
+            announced_settings: None,
             storage_fee_factor: p.storage_fee_factor,
             min_value_per_byte: p.min_value_per_byte.try_into().unwrap(),
             max_block_cost: p.max_block_cost.try_into().unwrap(),

@@ -20,6 +20,21 @@ use ergo_primitives::writer::VlqWriter;
 /// as offsets from this base.
 pub const FIRST_RULE_ID: u16 = 1000;
 
+/// Rules registered with mayBeDisabled in the reference node.
+/// Rule 118 is registered but has no validation call in this version.
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/settings/ValidationRules.scala#L23>
+pub const DISABLEABLE_RULES: [u16; 24] = [
+    110, 111, 118, 120, 121, 123, 124, 125, 212, 215, 306, 400, 401, 402, 404, 405, 406, 407, 408,
+    409, 410, 411, 412, 413,
+];
+
+/// The node captures currentSettings before the later coreSettings registrations.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/validation/ValidationRules.scala#L207>
+pub const INITIAL_SIGMA_RULES: [u16; 17] = [
+    1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
+    1019,
+];
+
 /// Scala `Extension.ValidationRulesPrefix` (`Extension.scala:72`).
 /// Distinct from `SystemParametersPrefix = 0x00`. Extension entries
 /// with this prefix carry a chunked `ErgoValidationSettings`
@@ -55,13 +70,14 @@ pub fn parse_validation_settings_update(
     for (_, v) in &chunks {
         buf.extend_from_slice(v);
     }
-    ErgoValidationSettingsUpdate::deserialize(&buf)
+    let update = ErgoValidationSettingsUpdate::deserialize(&buf)?;
+    update.validate_sigma_status_ids()?;
+    Ok(update)
 }
 
-/// Maximum bytes per extension field value — Scala caps `putUByte(length)`
-/// at 255 (`ergo-ser/src/extension.rs`). A cumulative settings blob longer
-/// than this is split across consecutive `0x02` chunk entries.
-const EXTENSION_FIELD_VALUE_MAX: usize = 255;
+/// Scala Extension.FieldValueMaxSize limits each chunk to 64 bytes.
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/settings/ErgoValidationSettings.scala#L74>
+const EXTENSION_FIELD_VALUE_MAX: usize = crate::block::EXTENSION_FIELD_VALUE_MAX_SIZE;
 
 /// Serialize a cumulative `ErgoValidationSettingsUpdate` into its block-
 /// extension fields — the inverse of [`parse_validation_settings_update`],
@@ -75,7 +91,7 @@ const EXTENSION_FIELD_VALUE_MAX: usize = 255;
 /// keyed by ascending chunk index in `key[1]`. The parser concatenates chunks
 /// in index order before deserializing, so the chunk boundary is not consensus-
 /// relevant — only the concatenation is — but the chunking keeps each field
-/// within the 255-byte wire limit.
+/// within the 64-byte validation limit.
 pub fn validation_settings_update_to_extension_fields(
     update: &ErgoValidationSettingsUpdate,
 ) -> Vec<([u8; 2], Vec<u8>)> {
@@ -172,20 +188,11 @@ impl ErgoValidationSettings {
         }
     }
 
-    /// True iff `rule_id` is in `update_from_initial.rules_to_disable`
-    /// OR has a `Disabled` status update.
+    /// Node rules are deactivated only by rulesToDisable, independently of Sigma statuses.
+    /// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/settings/ErgoValidationSettings.scala#L43>
     pub fn is_rule_disabled(&self, rule_id: u16) -> bool {
-        if self.update_from_initial.rules_to_disable.contains(&rule_id) {
-            return true;
-        }
-        matches!(
-            self.update_from_initial
-                .status_updates
-                .iter()
-                .find(|(id, _)| *id == rule_id)
-                .map(|(_, s)| s),
-            Some(RuleStatus::Disabled)
-        )
+        DISABLEABLE_RULES.contains(&rule_id)
+            && self.update_from_initial.rules_to_disable.contains(&rule_id)
     }
 }
 
@@ -198,6 +205,17 @@ pub struct ErgoValidationSettingsUpdate {
 }
 
 impl ErgoValidationSettingsUpdate {
+    /// Applying a status for a missing initial-map id deliberately rejects,
+    /// matching the JVM map lookup exception. Proposed updates alone can parse it.
+    /// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/validation/SigmaValidationSettings.scala#L83>
+    pub fn validate_sigma_status_ids(&self) -> Result<(), ValidationSettingsCodecError> {
+        for (id, _) in &self.status_updates {
+            if !INITIAL_SIGMA_RULES.contains(id) {
+                return Err(ValidationSettingsCodecError::UnknownSigmaRule { rule_id: *id });
+            }
+        }
+        Ok(())
+    }
     pub fn empty() -> Self {
         Self::default()
     }
@@ -288,6 +306,9 @@ pub enum ValidationSettingsCodecError {
     /// parity with the JVM `IllegalArgumentException`).
     #[error("validation_settings: rule {rule_id} may not be disabled")]
     RuleNotDisableable { rule_id: u16 },
+    /// Cumulative settings or activation targets an absent Sigma initial-map id.
+    #[error("validation_settings: sigma rule {rule_id} is absent from initial settings")]
+    UnknownSigmaRule { rule_id: u16 },
 }
 
 impl PartialEq for ValidationSettingsCodecError {
@@ -299,7 +320,8 @@ impl PartialEq for ValidationSettingsCodecError {
             // for test assertions; not used on consensus paths.
             (Read(a), Read(b)) => format!("{a:?}") == format!("{b:?}"),
             (TrailingBytes, TrailingBytes) => true,
-            (RuleNotDisableable { rule_id: a }, RuleNotDisableable { rule_id: b }) => a == b,
+            (RuleNotDisableable { rule_id: a }, RuleNotDisableable { rule_id: b })
+            | (UnknownSigmaRule { rule_id: a }, UnknownSigmaRule { rule_id: b }) => a == b,
             _ => false,
         }
     }
@@ -699,14 +721,14 @@ mod tests {
     }
 
     #[test]
-    fn is_rule_disabled_via_status_update() {
+    fn sigma_status_update_does_not_disable_node_rule() {
         let s = ErgoValidationSettings {
             update_from_initial: ErgoValidationSettingsUpdate {
                 rules_to_disable: vec![],
                 status_updates: vec![(409u16, RuleStatus::Disabled)],
             },
         };
-        assert!(s.is_rule_disabled(409));
+        assert!(!s.is_rule_disabled(409));
         assert!(!s.is_rule_disabled(414));
     }
 }

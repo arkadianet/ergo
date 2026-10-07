@@ -68,6 +68,12 @@ pub(super) fn check_storage_rent(
     current_height: u32,
     params: &ProtocolParams,
 ) -> StorageRentCheck {
+    // Deliberately match the exception swallowed by ErgoInterpreter.verify:
+    // absent storageFeeFactor throws inside Try and falls back to the script.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-wallet/src/main/scala/org/ergoplatform/wallet/interpreter/ErgoInterpreter.scala#L75-L82
+    if !params.has_parameter(1) {
+        return StorageRentCheck::ScriptFallback;
+    }
     // Scala reads variable 127 with `asInstanceOf[Short]`; any other
     // type, `Int` included, throws `ClassCastException`.
     let output_idx = match extension.values.get(&STORAGE_INDEX_VAR_ID) {

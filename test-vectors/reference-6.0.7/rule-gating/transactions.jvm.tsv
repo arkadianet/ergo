@@ -1,0 +1,23 @@
+name	rule	disabled	tx_parse	boxes_parse	verdict	cost
+ordinary-control-active	110		True	True	Accept	12106
+ordinary-control-disabled	110	110	True	True	Accept	12106
+data-input-duplicates-active	110		True	True	Reject	-
+data-input-duplicates-disabled	110	110	True	True	Accept	12406
+output-minimum-active	111		True	True	Reject	-
+output-minimum-disabled	111	111	True	True	Accept	12206
+box-size-123-tokens-active	120		True	True	Reject	-
+box-size-123-tokens-disabled	120	120	True	True	Accept	61306
+box-size-255-tokens-active	120		True	False	Reject	-
+box-size-255-tokens-disabled	120	120	True	False	Reject	-
+box-window-register-after-tokens-active	120		True	False	Reject	-
+box-window-register-after-tokens-disabled	120	120	True	False	Reject	-
+box-window-register-after-tree-active	121	120	False	True	Reject	-
+box-window-register-after-tree-disabled	121	120,121	False	True	Reject	-
+proposition-size-active	121	120	False	True	Reject	-
+proposition-size-disabled	121	120,121	False	True	Reject	-
+reemission-payment-active	123		True	True	Reject	-
+reemission-payment-disabled	123	123	True	True	Accept	12306
+creation-height-active	124		True	True	Reject	-
+creation-height-disabled	124	124	True	True	Accept	12106
+rent-output-indices-active	125		True	True	Reject	-
+rent-output-indices-disabled	125	125	True	True	Accept	14200

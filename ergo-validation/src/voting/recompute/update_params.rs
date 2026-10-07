@@ -70,22 +70,7 @@ pub(super) fn update_params(
 // actually recomputes.
 
 pub(super) fn read_param_by_id(p: &ActiveProtocolParameters, id: u8) -> Option<i32> {
-    match id {
-        1 => Some(p.storage_fee_factor),
-        2 => Some(p.min_value_per_byte),
-        3 => Some(p.max_block_size),
-        4 => Some(p.max_block_cost),
-        5 => Some(p.token_access_cost),
-        6 => Some(p.input_cost),
-        7 => Some(p.data_input_cost),
-        8 => Some(p.output_cost),
-        9 => p.subblocks_per_block,
-        123 => Some(p.block_version as i32),
-        _ => p
-            .extra
-            .iter()
-            .find_map(|(eid, v)| (*eid == id).then_some(*v)),
-    }
+    p.parameter(id)
 }
 
 fn write_param_by_id(p: &mut ActiveProtocolParameters, id: u8, value: i32) {

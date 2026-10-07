@@ -282,6 +282,8 @@ fn mempool_admits_mainnet_corpus_1761k() {
         let spec = ergo_chain_spec::ChainSpec::mainnet();
         let r = spec.reemission.as_ref().expect("mainnet reemission");
         ergo_validation::ReemissionRuleInputs {
+            check_rules: true,
+            emission: None,
             activation_height: r.activation_height,
             reemission_token_id: *r.reemission_token_id.as_bytes(),
             pay_to_reemission_tree: spec

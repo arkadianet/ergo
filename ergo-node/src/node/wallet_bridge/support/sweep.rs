@@ -606,6 +606,8 @@ mod tests {
 
     fn rules() -> ergo_validation::ReemissionRuleInputs {
         ergo_validation::ReemissionRuleInputs {
+            check_rules: true,
+            emission: None,
             activation_height: ACTIVATION,
             reemission_token_id: REEM,
             pay_to_reemission_tree: vec![],

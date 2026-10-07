@@ -105,8 +105,9 @@ pub(crate) fn read_latest_at(
     Ok(Some(params))
 }
 
-/// Fold every `voted_params` row's `activated_update` from key 0 up to
-/// the highest row with `key <= height`, yielding the cumulative
+/// Restore complete adopted settings when present, otherwise fold legacy
+/// `activated_update` deltas, from key 0 through the last row at `height`.
+/// This yields the cumulative
 /// [`ergo_validation::ErgoValidationSettings`] active at `height`.
 ///
 /// An absent or empty table yields `ErgoValidationSettings::empty()` —
@@ -130,7 +131,12 @@ pub(crate) fn compute_validation_settings_at(
         let (_, val) = entry?;
         let row = ActiveProtocolParameters::deserialize(val.value())
             .map_err(|e| ActiveParamsReadError::Decode { height, source: e })?;
-        settings = settings.updated(&row.activated_update);
+        settings = row.announced_settings.map_or_else(
+            || settings.updated(&row.activated_update),
+            |update_from_initial| ergo_validation::ErgoValidationSettings {
+                update_from_initial,
+            },
+        );
     }
     Ok(settings)
 }

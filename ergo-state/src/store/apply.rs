@@ -598,17 +598,16 @@ impl StateStore {
                     self.chain_state.best_header_height = height;
                 }
                 if let Some(p) = cache_advance {
-                    // Fold this epoch's activated_update into the
-                    // cumulative validation settings cache. Without
-                    // this, `cached_validation_settings` only refreshes
-                    // on open()/rollback/reorg, so any in-session
-                    // forward apply across an activation epoch leaves
-                    // the cache stale and the next epoch boundary
-                    // rejects on `exMatchValidationSettings`. Mirror
-                    // of the on-disk fold in
-                    // `compute_validation_settings_at`.
-                    self.cached_validation_settings =
-                        self.cached_validation_settings.updated(&p.activated_update);
+                    // The validated extension can replace the complete settings
+                    // when its matching rule is disabled. Preserve that adoption
+                    // in the forward cache, as the persistence fold does on reopen.
+                    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/state/ErgoStateContext.scala#L248
+                    self.cached_validation_settings = p.announced_settings.as_ref().map_or_else(
+                        || self.cached_validation_settings.updated(&p.activated_update),
+                        |update| ergo_validation::ErgoValidationSettings {
+                            update_from_initial: update.clone(),
+                        },
+                    );
                     self.cached_active_params = p;
                 }
                 let t_post = t_post.elapsed();

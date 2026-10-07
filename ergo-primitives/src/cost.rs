@@ -231,6 +231,7 @@ pub enum CostError {
 #[derive(Clone)]
 pub struct CostAccumulator {
     current: JitCost,
+    checked_peak: JitCost,
     limit: JitCost,
     enforce: bool,
 }
@@ -240,6 +241,7 @@ impl CostAccumulator {
     pub fn new(limit: JitCost) -> Self {
         CostAccumulator {
             current: JitCost::ZERO,
+            checked_peak: JitCost::ZERO,
             limit,
             enforce: true,
         }
@@ -258,6 +260,7 @@ impl CostAccumulator {
     pub fn recording_only() -> Self {
         CostAccumulator {
             current: JitCost::ZERO,
+            checked_peak: JitCost::ZERO,
             limit: JitCost(SCALA_INT_MAX),
             enforce: false,
         }
@@ -273,6 +276,7 @@ impl CostAccumulator {
         // `?` here propagates JitCostError → CostError via the
         // `#[from]` derive on the Overflow variant.
         self.current = self.current.checked_add(cost)?;
+        self.observe_checked_cost(self.current);
         if self.enforce && self.current > self.limit {
             Err(CostError::LimitExceeded {
                 current: self.current.0,
@@ -305,6 +309,27 @@ impl CostAccumulator {
         let delta = self.current.0.saturating_sub(baseline.0);
         let remainder = delta % 10;
         self.current = JitCost(self.current.0 - remainder);
+    }
+
+    /// Highest cost that was checked, including subsequently discarded charges.
+    /// Parallel block validation uses this to test a transaction's budget after
+    /// adding its block prefix, without repeating successful evaluations.
+    pub fn checked_peak(&self) -> JitCost {
+        self.checked_peak
+    }
+
+    /// Retain a budget check performed on a cloned accumulator.
+    /// Pre-A6 deserialization checks its charge even when that charge is discarded.
+    /// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/interpreter/Interpreter.scala#L246-L259>
+    pub fn observe_checked_cost(&mut self, checked: JitCost) {
+        self.checked_peak = self.checked_peak.max(checked);
+    }
+
+    /// Restore charged cost after a soft-fork recovery, retaining all budget checks.
+    /// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/interpreter/Interpreter.scala#L249>
+    pub fn restore_cost(&mut self, checkpoint: Self) {
+        self.current = checkpoint.current;
+        self.observe_checked_cost(checkpoint.checked_peak);
     }
 
     /// Current accumulated cost.

@@ -31,6 +31,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
     let unreachable_peer: SocketAddr = "127.0.0.1:1".parse().unwrap();
     let chain_spec = Arc::new(ChainSpec::mainnet());
     NodeConfig {
+        check_reemission_rules: false,
         network: Network::Mainnet,
         shadow_config: Default::default(),
         chain_spec: chain_spec.clone(),

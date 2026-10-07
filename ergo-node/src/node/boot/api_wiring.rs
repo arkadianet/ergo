@@ -275,7 +275,7 @@ pub(super) async fn bind(
             is_pruned,
             // Same EIP-27 rules the validator uses, so the wallet's
             // burn-aware builder + self-verify gate share consensus.
-            super::build_reemission_rules(&config.chain_spec),
+            super::build_reemission_rules(&config.chain_spec, config.check_reemission_rules),
         )
         .with_private_queue(private_queue.clone()),
     );
@@ -326,7 +326,10 @@ pub(super) async fn bind(
         // Same EIP-27 rule inputs the block/mempool validator uses, so
         // the wallet's re-emission reserve + burn-aware builder cannot
         // drift from consensus (None off EIP-27 nets, e.g. testnet).
-        reemission: super::build_reemission_rules(&config.chain_spec),
+        reemission: super::build_reemission_rules(
+            &config.chain_spec,
+            config.check_reemission_rules,
+        ),
         min_relay_fee_nano_erg: config.mempool_config.min_relay_fee_nano_erg,
         max_tx_size_bytes: config.mempool_config.max_tx_size_bytes,
     };

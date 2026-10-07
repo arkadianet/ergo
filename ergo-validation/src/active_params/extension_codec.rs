@@ -62,17 +62,24 @@ pub fn parse_active_params(
         return Err(ActiveParamsError::EmptyMap);
     }
 
+    // Parameters.parseExtension accepts any nonempty table. Missing values
+    // fail only when their Scala Map.apply use site is reached.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/settings/Parameters.scala#L372-L390
+    let missing_core_parameters = [1, 2, 3, 4, 5, 6, 7, 8, 123]
+        .iter()
+        .enumerate()
+        .fold(0u16, |mask, (bit, id)| {
+            mask | if by_id.contains_key(id) { 0 } else { 1 << bit }
+        });
     let take_required = |m: &mut std::collections::BTreeMap<u8, i32>, id: u8| {
-        m.remove(&id).ok_or(ActiveParamsError::MissingRequired(id))
+        Ok::<_, ActiveParamsError>(m.remove(&id).unwrap_or(0))
     };
     // Non-negativity-constrained fields: parser fail-closes so
     // `ProtocolParams::from_active` stays infallible. Scala emits only
     // non-negative values for these ids; a negative here can only come
     // from storage corruption or a producer bug.
     let take_required_nonneg = |m: &mut std::collections::BTreeMap<u8, i32>, id: u8| {
-        let v = m
-            .remove(&id)
-            .ok_or(ActiveParamsError::MissingRequired(id))?;
+        let v = m.remove(&id).unwrap_or(0);
         if v < 0 {
             return Err(ActiveParamsError::NegativeProtocolParam { id, value: v });
         }
@@ -93,6 +100,8 @@ pub fn parse_active_params(
     let extra: Vec<(u8, i32)> = by_id.into_iter().collect();
 
     Ok(ActiveProtocolParameters {
+        announced_settings: None,
+        missing_core_parameters,
         epoch_start_height,
         block_version: block_version_i32 as u8,
         storage_fee_factor,
@@ -169,6 +178,9 @@ pub fn active_params_to_extension_fields(
         [p, SOFT_FORK_DISABLING_RULES_ID],
         params.proposed_update.serialize(),
     ));
+    out.retain(|(key, _)| {
+        key[1] == SOFT_FORK_DISABLING_RULES_ID || params.parameter(key[1]).is_some()
+    });
     Ok(out)
 }
 
@@ -320,11 +332,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_missing_required() {
+    fn parse_preserves_missing_named_parameter() {
         let mut fields = full_required_set();
         fields.remove(0); // drop storage_fee_factor (id=1)
-        let err = parse_active_params(&ext_with(fields), 1024).unwrap_err();
-        assert_eq!(err, ActiveParamsError::MissingRequired(1));
+        let parsed = parse_active_params(&ext_with(fields), 1024).unwrap();
+        assert_eq!(parsed.parameter(1), None);
     }
 
     #[test]

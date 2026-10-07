@@ -39,6 +39,13 @@ infrastructure.
 - Reject serialization of AVL tree values whose decoded key or value length is negative.
 - Preserve nested box script serialization errors when writing box constants.
 - Check collection and option receivers during script parsing and derive declared variable and tuple-index root types.
+- Apply activated validation settings to transaction, block and extension rules, retaining advertised settings across state reloads.
+- Reject cumulative Sigma status updates for unregistered rule identifiers.
+- Allow up to 255 tokens per output box when the box-size rule is deactivated.
+- Preserve omitted epoch parameter entries and validate required entries when their block or transaction use sites are reached.
+- Validate emission token allocation when re-emission checks are enabled; default those checks off for non-mining nodes and enable them for miners.
+- Split validation-settings extension values into chunks of at most 64 bytes.
+- Apply the running block cost to each input’s evaluation budget and keep mining candidates below the cost ceiling.
 
 ## [0.12.1] - 2026-10-06
 

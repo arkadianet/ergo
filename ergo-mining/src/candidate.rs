@@ -1027,10 +1027,12 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
             let section_size = block_transactions_section_size(&probe, pre_header.version)?;
             check_build_cancelled(should_cancel)?;
 
-            if (total_cost <= cost_ceiling && section_size <= max_block_size as usize)
+            // CandidateGenerator uses a strict cost ceiling.
+            // https://github.com/ergoplatform/ergo/blob/v6.0.7/src/main/scala/org/ergoplatform/mining/CandidateGenerator.scala#L925
+            if (total_cost < cost_ceiling && section_size <= max_block_size as usize)
                 || user_checked.is_empty()
             {
-                if total_cost > cost_ceiling || section_size > max_block_size as usize {
+                if total_cost >= cost_ceiling || section_size > max_block_size as usize {
                     return Err(MiningError::IdComputation {
                         op: "candidate_block_budget",
                         reason: "pinned block transactions exceed the block budget".into(),
@@ -1507,6 +1509,14 @@ fn compute_epoch_payload(
         op: "compute_next_params",
         reason: e.to_string(),
     })?;
+    // UpcomingStateContext applies Sigma status updates before building work.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/state/ErgoStateContext.scala#L139
+    activated_update
+        .validate_sigma_status_ids()
+        .map_err(|e| MiningError::IdComputation {
+            op: "validation_settings_update",
+            reason: e.to_string(),
+        })?;
     let cumulative = validation_settings
         .updated(&activated_update)
         .update_from_initial;

@@ -145,6 +145,8 @@ pub fn validate_transaction(
     // (earliest stateless stage) to match that deserialize-time rejection.
     ge::validate_group_elements(&group_elements)?;
 
+    cx.params.require_transaction_parameters()?;
+
     // Stage 2: structural (stateless)
     structural::validate_structural(&tx, cx.params)?;
 
@@ -180,13 +182,19 @@ pub fn validate_transaction(
     monetary::check_positive_assets(&tx)?;
     // Rule 110 (txDataInputsUnique) — Scala checks it after the data boxes
     // resolve and before the per-output loop.
-    data_inputs::validate_data_inputs_unique(&tx, cx.ctx.height)?;
+    if cx.params.is_rule_active(110) {
+        data_inputs::validate_data_inputs_unique(&tx, cx.ctx.height)?;
+    }
     heights::validate_output_heights(&tx, cx.ctx)?;
-    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
+    if cx.params.is_rule_active(124) {
+        heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
+    }
 
     // Stage 5: monetary
     monetary::validate_monetary(&tx, &resolved_inputs)?;
-    rent_outputs::validate_rent_output_indices(&tx, cx.ctx.height)?;
+    if cx.params.is_rule_active(125) {
+        rent_outputs::validate_rent_output_indices(&tx, cx.ctx.height)?;
+    }
 
     // Stage 5.5: transaction init cost
     let init_cost = script::compute_tx_init_cost(&tx, &resolved_inputs, cx.params);
@@ -213,7 +221,11 @@ pub fn validate_transaction(
     // Stage 7: EIP-27 re-emission burning (Scala `verifyReemissionSpending`,
     // run inside `validateStateful` after `verifyInput`). Network-constant rule
     // carried on `cx.rules`; a no-op when not supplied (testnet / no EIP-27).
-    if let Some(rules) = cx.rules.reemission {
+    if let Some(rules) = cx
+        .rules
+        .reemission
+        .filter(|_| cx.params.is_rule_active(123))
+    {
         verify_reemission_spending(&tx, &resolved_inputs, cx.ctx.height, rules)?;
     }
 
@@ -297,6 +309,10 @@ pub fn validate_transaction_parsed_with_group_elements(
     // root commits to parsed transaction IDs and proof hashes, not raw tx bytes.
     // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/history/BlockTransactions.scala#L49-L68
 
+    if !skip_scripts {
+        cx.params.require_transaction_parameters()?;
+    }
+
     // Structural
     structural::validate_structural(&tx, cx.params)?;
 
@@ -306,14 +322,20 @@ pub fn validate_transaction_parsed_with_group_elements(
     // Rule 108 (txPositiveAssets) — before the per-output 112/124 loop.
     monetary::check_positive_assets(&tx)?;
     // Rule 110 (txDataInputsUnique), in Scala's position.
-    data_inputs::validate_data_inputs_unique(&tx, cx.ctx.height)?;
+    if cx.params.is_rule_active(110) {
+        data_inputs::validate_data_inputs_unique(&tx, cx.ctx.height)?;
+    }
     // Per-output height constraints (Scala rules 112 + 124)
     heights::validate_output_heights(&tx, cx.ctx)?;
-    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
+    if cx.params.is_rule_active(124) {
+        heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
+    }
 
     // Monetary
     monetary::validate_monetary(&tx, &resolved_inputs)?;
-    rent_outputs::validate_rent_output_indices(&tx, cx.ctx.height)?;
+    if cx.params.is_rule_active(125) {
+        rent_outputs::validate_rent_output_indices(&tx, cx.ctx.height)?;
+    }
 
     // Compute bytes_to_sign + tx_id once. Always needed (tx_id is stored
     // on CheckedTransaction for state apply, regardless of script
@@ -349,7 +371,11 @@ pub fn validate_transaction_parsed_with_group_elements(
     // `cx.rules`; a no-op when not supplied (testnet / no EIP-27). Runs even
     // when scripts are skipped below the checkpoint — it is a stateful
     // token/monetary rule, not script evaluation.
-    if let Some(rules) = cx.rules.reemission {
+    if let Some(rules) = cx
+        .rules
+        .reemission
+        .filter(|_| cx.params.is_rule_active(123))
+    {
         verify_reemission_spending(&tx, &resolved_inputs, cx.ctx.height, rules)?;
     }
 
