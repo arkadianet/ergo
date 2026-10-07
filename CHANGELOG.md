@@ -18,6 +18,7 @@ infrastructure.
 
 ### Fixed
 
+- Enforce the signed 256-bit result range for `Global.decodeNbits`.
 - Return empty byte and bit collections for unsigned big integer zero.
 - Evaluate method wire forms for context inputs, outputs and SELF, option access, and group multiplication.
 - Calculate collection slice costs from the original signed bounds.

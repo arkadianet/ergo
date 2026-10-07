@@ -63,7 +63,16 @@ pub(super) fn decode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value,
         }
     };
     add_method_cost(cx.cost, COST_DECODE_NBITS)?;
-    Ok(Value::BigInt(decode_compact_bits(compact)))
+    let decoded = decode_compact_bits(compact);
+    // The evaluator's numeric result is signed and bounded independently of
+    // the compact codec, which is also used by difficulty / PoW callers.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L194-L197
+    if !super::super::arithmetic::fits_in_256_bits(&decoded) {
+        return Err(EvalError::RuntimeException(
+            "SGlobal.decodeNbits result out of signed 256-bit range",
+        ));
+    }
+    Ok(Value::BigInt(decoded))
 }
 
 // SGlobal(106).some(9, value: T)[T] -> Option[T]

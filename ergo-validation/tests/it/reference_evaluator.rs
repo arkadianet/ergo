@@ -191,3 +191,9 @@ fn numeric_byte_bit_and_zero_serialization_match_reference() {
     check_vectors("numeric-bytes");
     check_vectors("zero-extra");
 }
+
+#[test]
+fn compact_target_numeric_bounds_match_reference() {
+    check_vectors("decode-target");
+    check_vectors("target-extra");
+}
