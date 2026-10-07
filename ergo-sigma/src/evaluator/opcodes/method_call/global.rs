@@ -254,12 +254,9 @@ pub(super) fn deserialize_to(
             got: format!("deserialization error: {e}"),
         }
     })?;
-    if !r.is_empty() {
-        return Err(EvalError::TypeError {
-            expected: "fully consumed SGlobal.deserializeTo bytes",
-            got: format!("{} trailing bytes", r.remaining()),
-        });
-    }
+    // Deliberately ignore trailing bytes for consensus: the reference returns
+    // the parsed value without checking the reader position.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L277-L282
     crate::evaluator::helpers::sigma_to_value_versioned(target_type, &parsed, cx.ctx)
 }
 

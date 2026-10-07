@@ -16,6 +16,10 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- Allow trailing bytes after values decoded by `Global.deserializeTo`.
+
 ## [0.12.1] - 2026-10-06
 
 A consensus release for mainnet. Upgrade every 0.12.0 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.
