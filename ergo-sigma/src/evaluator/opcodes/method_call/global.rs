@@ -263,6 +263,11 @@ pub(super) fn deserialize_to(
             got: format!("deserialization error: {e}"),
         }
     })?;
+    // DataSerializer decodes every GroupElement it reads, including those in a
+    // Box's script and registers and a Header's PoW solution, so an off-curve
+    // point fails deserializeTo for every target type.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L277-L282
+    crate::evaluator::dispatch::validate_recorded_group_elements(r.group_elements())?;
     // Deliberately ignore trailing bytes for consensus: the reference returns
     // the parsed value without checking the reader position.
     // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L277-L282

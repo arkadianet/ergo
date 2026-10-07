@@ -23,6 +23,7 @@ pub(crate) use ast_walk::expr_has_deserialize;
 pub(in crate::evaluator) use eval::eval_expr;
 pub(crate) use pre_checks::pre_reduction_checks;
 pub use pre_checks::validate_group_element;
+pub(crate) use pre_checks::validate_recorded_group_elements;
 
 pub fn reduce_expr(
     expr: &Expr,

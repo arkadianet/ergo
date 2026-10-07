@@ -120,6 +120,11 @@ pub(crate) fn subst_constants_versioned(
             constants.push((tpe, val));
         }
     }
+    // substituteConstants parses every constant with the JVM serializers, which
+    // decode each GroupElement (also inside SigmaProp, Box and Header values):
+    // an off-curve point throws even when no constant is substituted.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L320-L411
+    crate::evaluator::dispatch::validate_recorded_group_elements(r.group_elements())?;
     let tree_bytes = script_bytes[r.position()..].to_vec();
     let n_constants = constants.len();
 
