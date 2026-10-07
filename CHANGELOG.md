@@ -18,6 +18,8 @@ infrastructure.
 
 ### Fixed
 
+- Read header extension payloads only after version 4 and derive received node header IDs from serialized fields.
+
 - Insert numeric relation upcasts for scripts below version 3 and preserve the distinct received and serialized box bytes.
 - Accept supported transaction encodings that normalize on serialization, deriving transaction IDs from the serialized message.
 

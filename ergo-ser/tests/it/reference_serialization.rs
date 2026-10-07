@@ -21,6 +21,52 @@ fn version() -> u8 {
 }
 
 #[test]
+fn reference_node_header_identifiers() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("test-vectors/reference-6.0.7/serialization");
+    let fixture: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("node-headers.json")).unwrap())
+            .unwrap();
+    let oracle = std::fs::read_to_string(root.join("node-headers.jvm.tsv")).unwrap();
+    let rows: std::collections::BTreeMap<_, _> = oracle
+        .lines()
+        .map(|line| {
+            let fields: Vec<_> = line.split('\t').collect();
+            (fields[0], fields)
+        })
+        .collect();
+    let entries = fixture["entries"].as_array().unwrap();
+    assert_eq!(rows.len(), entries.len());
+    for v in entries {
+        let name = v["name"].as_str().unwrap();
+        let bytes = hex::decode(v["bytes_hex"].as_str().unwrap()).unwrap();
+        let expected = &rows[name];
+        let mut r = VlqReader::new(&bytes);
+        let parsed = ergo_ser::header::read_header(&mut r);
+        if expected[1] == "false" {
+            assert!(parsed.is_err(), "{name}: {parsed:?}");
+            continue;
+        }
+        let parsed = parsed.unwrap();
+        let (serialized, id) = ergo_ser::header::serialize_header(&parsed).unwrap();
+        assert_eq!(
+            r.position(),
+            expected[2].parse::<usize>().unwrap(),
+            "{name}"
+        );
+        assert_eq!(hex::encode(id.as_bytes()), expected[3], "{name}");
+        assert_eq!(hex::encode(serialized), expected[4], "{name}");
+        assert_eq!(
+            ergo_ser::header::header_id_from_bytes(&bytes).unwrap(),
+            id,
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn reference_transaction_identifiers() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -104,6 +150,7 @@ fn reference_receiver_types() {
         "readers-nested-box",
         "readers-relations",
         "readers-encodings",
+        "readers-headers",
     ] {
         let path = root.join(format!("{file}.json"));
         let fixture: Fixture =

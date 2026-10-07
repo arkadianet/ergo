@@ -199,6 +199,24 @@ fn seed_header_1(store: &mut StateStore, headers: &[serde_json::Value]) {
 // ----- happy path -----
 
 #[test]
+fn process_header_persists_normalized_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    seed_header_1(&mut store, &headers);
+    let canonical = get_header_bytes(&headers, 2);
+    let mut received = canonical.clone();
+    received.extend_from_slice(&[0xaa, 0xbb]);
+    let result = ergo_sync::header_proc::process_header(&mut store, &received).unwrap();
+    assert_eq!(result.header_id, get_header_id(&headers, 2));
+    assert_eq!(
+        store.get_header(&result.header_id).unwrap().unwrap(),
+        canonical
+    );
+}
+
+#[test]
 fn process_header_with_real_mainnet_header() {
     // Process header 2 with header 1 as the known parent.
     // This exercises the full process_header pipeline: deserialize, parent
@@ -636,7 +654,7 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
 }
 
 #[test]
-fn hash_matching_malformed_header_rolls_back_and_allows_valid_delivery() {
+fn malformed_header_rejects_before_ack_and_allows_valid_delivery() {
     use ergo_p2p::delivery::ModifierStatus;
     use ergo_p2p::peer::Penalty;
     use ergo_p2p::types::InvData;
@@ -675,24 +693,18 @@ fn hash_matching_malformed_header_rolls_back_and_allows_valid_delivery() {
     let received = coordinator.on_modifier_received(peer, 101, malformed_id, malformed, now);
     assert_eq!(
         coordinator.delivery().status(&malformed_id),
-        ModifierStatus::Received
+        ModifierStatus::Requested
     );
-    let validate = received
-        .into_iter()
-        .find(|action| matches!(action, Action::ValidateHeader { .. }))
-        .expect("malformed header must be routed for validation");
-    let rejected = executor.execute(validate, &mut store, &mut coordinator, now, None);
-    assert!(rejected.iter().any(|action| matches!(
+    assert!(!received
+        .iter()
+        .any(|action| matches!(action, Action::ValidateHeader { .. })));
+    assert!(received.iter().any(|action| matches!(
         action,
         Action::Penalize {
             penalty: Penalty::Misbehavior,
             ..
         }
     )));
-    assert_eq!(
-        coordinator.delivery().status(&malformed_id),
-        ModifierStatus::Unknown
-    );
 
     let valid_bytes = get_header_bytes(&headers, 2);
     let valid_id = get_header_id(&headers, 2);

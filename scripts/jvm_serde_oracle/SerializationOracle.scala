@@ -71,7 +71,9 @@ object SiblingsOracle {
               val v = cs.deserialize(r)
               val w = SigmaSerializer.startWriter(); cs.serialize(v, w)
               canonical = Some(Base16.encode(w.toBytes))
-              extra = Some(v.tpe.toString)
+              extra = if (v.tpe == sigma.ast.SHeader) {
+                Some("header_id=" + Base16.encode(v.value.asInstanceOf[sigma.Header].id.toArray))
+              } else Some(v.tpe.toString)
             case "expression" => ValueSerializer.deserialize(r)
             case "tree" =>
               val t = ErgoTreeSerializer.DefaultSerializer.deserializeErgoTree(r, 4096)

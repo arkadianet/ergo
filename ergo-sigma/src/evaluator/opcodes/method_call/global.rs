@@ -254,7 +254,10 @@ pub(super) fn deserialize_to(
             got: format!("deserialization error: {e}"),
         }
     })?;
-    if !r.is_empty() {
+    // Header readers deliberately return their parsed prefix. A v2-v4
+    // new-fields size byte can leave suffix bytes that Scala ignores here.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L277-L282
+    if !r.is_empty() && *target_type != ergo_ser::sigma_type::SigmaType::SHeader {
         return Err(EvalError::TypeError {
             expected: "fully consumed SGlobal.deserializeTo bytes",
             got: format!("{} trailing bytes", r.remaining()),

@@ -160,6 +160,7 @@ fn reference_receiver_transactions() {
         "nested-boxes",
         "relations",
         "transaction-encodings",
+        "headers",
     ] {
         let path = root.join(format!("{file}.json"));
         let fixture: J = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

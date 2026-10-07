@@ -1,5 +1,5 @@
 // Fixture helper: compile ErgoScript snippets with sigma-state 6.0.7 and print bytes.
-// Usage: scala-cli run Compile.scala -- <specfile>
+// Usage: scala-cli run CompileSerializationFixtures.scala -- <specfile>
 // Spec file lines: <mode>\t<name>\t<version>\t<code>
 //   mode = tree   -> ErgoTree bytes (header version <version>; size flag set when version>0)
 //   mode = treeseg-> ErgoTree bytes with constant segregation

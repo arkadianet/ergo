@@ -62,11 +62,9 @@ impl SyncCoordinator {
                 (ids, Vec::new(), None, status)
             }
             SyncInfo::V2 { headers } => {
-                // V2 carries raw headers (newest-first). IDs from
-                // blake2b256; tip height from a real header parse when
-                // the bytes are well-formed.
-                let ids: Vec<[u8; 32]> =
-                    headers.iter().map(|h| *blake2b256(h).as_bytes()).collect();
+                // V2 carries serialized headers (newest-first). Parsed header
+                // IDs commit to canonical fields, like Header.id in Scala.
+                let ids: Vec<[u8; 32]> = headers.iter().map(|h| received_header_id(h)).collect();
                 let tip_height = headers.first().and_then(|bytes| {
                     let mut r = ergo_primitives::reader::VlqReader::new(bytes);
                     ergo_ser::header::read_header(&mut r).ok().map(|h| h.height)
@@ -203,7 +201,7 @@ impl SyncCoordinator {
                 if !peer_headers.is_empty() {
                     let continuation = find_continuation_header(&peer_headers, chain);
                     if let Some(header_bytes) = continuation {
-                        let modifier_id = *blake2b256(&header_bytes).as_bytes();
+                        let modifier_id = received_header_id(&header_bytes);
                         actions.push(Action::ValidateHeader {
                             peer,
                             modifier_id,
@@ -463,7 +461,8 @@ impl SyncCoordinator {
                 // is reset (on a late/hedge win it may differ from the
                 // original owner — correct attribution).
                 if type_id == ModifierTypeId::Header.as_byte()
-                    && blake2b256(&data).as_bytes() != &modifier_id
+                    && ergo_ser::header::header_id_from_bytes(&data)
+                        .map_or(true, |id| id.as_bytes() != &modifier_id)
                 {
                     actions.push(Action::Penalize {
                         peer,
@@ -833,6 +832,14 @@ impl SyncCoordinator {
     }
 }
 
+// Malformed sync-info bytes retain a stable comparison key; header validation
+// rejects them before admission. Well-formed headers use Scala's parsed ID.
+fn received_header_id(bytes: &[u8]) -> [u8; 32] {
+    ergo_ser::header::header_id_from_bytes(bytes)
+        .map(|id| *id.as_bytes())
+        .unwrap_or_else(|_| *blake2b256(bytes).as_bytes())
+}
+
 /// Find the continuation header from a V2 SyncInfo.
 ///
 /// Scala's continuationHeaderV2 (ErgoHistoryReader.scala:299) inspects only
@@ -851,7 +858,7 @@ pub(crate) fn find_continuation_header(
         return None;
     }
     // Check we don't already have this header
-    let header_id = *blake2b256(header_bytes).as_bytes();
+    let header_id = received_header_id(header_bytes);
     if chain.has_header(&header_id) {
         return None;
     }
