@@ -222,3 +222,8 @@ fn collection_predicate_results_match_reference() {
     check_vectors("predicate-extra");
     check_vectors("lambda-sweep");
 }
+
+#[test]
+fn flat_map_mapper_result_types_match_reference() {
+    check_vectors("flatmap-empty");
+}

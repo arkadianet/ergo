@@ -33,6 +33,7 @@ infrastructure.
 - Evaluate method wire forms for context inputs, outputs and SELF, option access, and group multiplication.
 - Calculate collection slice costs from the original signed bounds.
 - Allow trailing bytes after values decoded by `Global.deserializeTo`.
+- Reject `flatMap` mappers whose static result type is not a collection, including on empty collections.
 - Read header extension payloads only after version 4 and derive received node header IDs from serialized fields.
 - Insert numeric relation upcasts for scripts below version 3 and preserve the distinct received and serialized box bytes.
 - Accept supported transaction encodings that normalize on serialization, deriving transaction IDs from the serialized message.
