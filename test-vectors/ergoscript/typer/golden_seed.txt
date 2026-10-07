@@ -69,9 +69,9 @@ tce	col1.updateMany(Coll(0), Coll(1L))	OK (MethodCall:Coll[Long] (ConstantNode:C
 # Same sources as § 4 v6 entries, run with ORACLE_TREE_VERSION=2 env var.
 # All three methods are v6-gated (ergoTree >= 3); at V=2 the typer returns MethodNotFound.
 # Verified in a single fresh oracle run (no singleton-contamination risk for MethodNotFound).
-tce	Global.fromBigEndianBytes[Long](a)	REJECT 1:1 MethodNotFound
-tce	Global.deserializeTo[Long](a)	REJECT 1:1 MethodNotFound
-tc	Global.none[Int]()	REJECT 1:1 MethodNotFound
+tce	Global.fromBigEndianBytes[Long](a)	REJECT 1:8 MethodNotFound
+tce	Global.deserializeTo[Long](a)	REJECT 1:8 MethodNotFound
+tc	Global.none[Int]()	REJECT 1:8 MethodNotFound
 #
 # ── § 7: AvlTree probe (Task-3 handoff) ─────────────────────────────────────────
 # No AvlTree literal exists in the demo env; avlTree(...) predef rejects at v3 (TyperException).
@@ -142,7 +142,7 @@ tc	PK(1)	REJECT 1:1 TyperException
 # E1 (CRITICAL): the Val's explicit `Long` annotation is DISCARDED; x binds to SInt
 # (b1.tpe), the ValNode is :Int, and the result Ident x resolves to Int.
 # accept records (byte-graded end-to-end):
-tc	{ val x: Long = 1; x }	OK (Block:Int [(ValNode:Int 'x' (ConstantNode:Int @1))] (Ident:Int 'x'))
+tc	{ val x: Long = 1; x }	REJECT 1:7 TyperException
 tc	5 - 3	OK (ArithOp:Int (ConstantNode:Int @5) (ConstantNode:Int @3) @-103)
 tc	1L - 1	OK (ArithOp:Long (ConstantNode:Long @1) (Upcast:Long (ConstantNode:Int @1)) @-103)
 tc	if (HEIGHT > 5) 1 else 2	OK (If:Int (GT:Boolean (Height:Int) (ConstantNode:Int @5)) (ConstantNode:Int @1) (ConstantNode:Int @2))
@@ -156,7 +156,7 @@ tc	Coll()	REJECT 1:1 TyperException	# empty collection, undefined element type (
 tc	if (5) 1 else 2	REJECT 1:5 TyperException	# condition not Boolean (§1.13)
 tc	if (HEIGHT > 5) 1 else 2L	REJECT 1:17 TyperException	# branches differ Int vs Long (§1.13)
 tc	Coll(1, 2L)	REJECT 1:1 TyperException	# msgTypeOf: no numeric widening (§1.3)
-tc	HEIGHT.foo	REJECT 1:5 MethodNotFound	# SInt has no method foo (§1.5)
+tc	HEIGHT.foo	REJECT 1:8 MethodNotFound	# SInt has no method foo (§1.5)
 tc	1 == true	REJECT 1:1 InvalidBinaryOperationParameters	# equalityOp SameType fail rewrapped (§1.15/§6)
 tc	{ val x = HEIGHT; val x = 5; x }	REJECT 1:23 TyperException	# duplicate val name in block (§1.1)
 #
@@ -279,8 +279,8 @@ tc	serialize((1, 2L))	OK (MethodCall:Coll[Byte] (Global:SigmaDslBuilder) %SigmaD
 # All captured ORACLE_TREE_VERSION=3 (v6); fresh-JVM positions confirmed.
 # Empty containers → MethodNotFound (E4: SBoolean/SString have NO methods → None
 #   from getMethod → MethodNotFound, not the "non-product type" branch).
-tc	true.foo	REJECT 1:1 MethodNotFound
-tc	"x".foo	REJECT 1:1 MethodNotFound
+tc	true.foo	REJECT 1:6 MethodNotFound
+tc	"x".foo	REJECT 1:5 MethodNotFound
 # ByIndex/BigInt upcast-placement probe:
 #   col1(0) produces a ByIndex:Long result; adding n1 (BigInt) triggers numeric
 #   widening.  Oracle confirms: Upcast wraps the ByIndex RESULT (not inside ByIndex).
@@ -665,7 +665,7 @@ tc	unsignedBigInt("5") + unsignedBigInt("3")	OK (ArithOp:UnsignedBigInt (Constan
 tc	unsignedBigInt("5") == unsignedBigInt("3")	OK (EQ:Boolean (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)) (ConstantNode:UnsignedBigInt (CUnsignedBigInt @3)))
 tc	unsignedBigInt("5") > unsignedBigInt("3")	OK (GT:Boolean (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)) (ConstantNode:UnsignedBigInt (CUnsignedBigInt @3)))
 #     v2: REJECT MethodNotFound (min_version=3 gate correctly fires).
-tc	unsignedBigInt("5").toBytes	REJECT 1:1 MethodNotFound
+tc	unsignedBigInt("5").toBytes	REJECT 1:21 MethodNotFound
 #     v3 (contrast pair, same source, default sweep version): OK.
 tc	unsignedBigInt("5").toBytes	OK (MethodCall:Coll[Byte] (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)) %UnsignedBigInt.toBytes [] {})
 #

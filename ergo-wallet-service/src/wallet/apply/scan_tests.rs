@@ -7,6 +7,7 @@
 use super::*;
 use crate::wallet::types::ScanMatchRecord;
 use crate::wallet::types::{ScanBoxStatus, ScanTrackedBox, ScanTxRecord};
+use redb::ReadableDatabase;
 
 fn temp_db() -> (tempfile::TempDir, redb::Database) {
     let dir = tempfile::tempdir().unwrap();

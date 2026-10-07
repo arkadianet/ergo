@@ -54,26 +54,30 @@ const SHEADER_CODE: u8 = 104;
 const SPREHEADER_CODE: u8 = 105;
 const SGLOBAL_CODE: u8 = 106;
 
-/// Maximum nesting depth for `read_type` recursion — a stack-overflow guard,
-/// NOT a faithful consensus boundary. Scala applies NO type-descriptor depth
-/// limit: `TypeSerializer.deserialize` threads a `depth` parameter but never
-/// checks it, and the `CoreByteReader.level` / `SigmaConstants.MaxTreeDepth`
-/// (=110) mechanism is incremented only by the value/expression serializers
-/// (`ValueSerializer`, `DataSerializer`, `SigmaBoolean`), never by
-/// `TypeSerializer`. The only real Scala bound on type-descriptor nesting is
-/// the reader position limit = `SigmaConstants.MaxPropositionBytes` (4096),
-/// since each `Coll`/`Option` level costs one type byte.
+/// Maximum nesting depth of a type descriptor.
 ///
-/// We deliberately keep a *conservative* recursion bound rather than the true
-/// 4096 ceiling: `read_type` is recursive descent, and ~4096-deep recursion
-/// overflows the native stack (a worse failure than the reject-valid it would
-/// cure). So a type descriptor nested 101..4096 deep — which Scala accepts —
-/// is rejected here. That divergence is theoretical (no consensus-reachable
-/// mainnet box nests type descriptors anywhere near this deep) and strictly
-/// safer than crashing. Full parity needs an iterative (heap-stack) `read_type`
-/// that can absorb a 4 KB-deep chain without native recursion; that rewrite is
-/// tracked as a follow-up, not attempted here.
-const MAX_TYPE_DEPTH: usize = 100;
+/// Scala has no explicit limit: `TypeSerializer.deserialize` threads a `depth`
+/// parameter but never checks it, and the `CoreByteReader.level` /
+/// `SigmaConstants.MaxTreeDepth` (= 110) counter is charged only by the value
+/// serializers, never by `TypeSerializer`. Its real limit is the JVM thread
+/// stack its recursive reader runs on: with the default 1 MiB stack
+/// (the official Docker image sets none) sigma-state 6.0.6 reads a
+/// `Coll[Coll[...]]` chain about 9,800 levels deep before a
+/// `StackOverflowError`. Inside a box or a tree the 4096-byte position limit
+/// binds first, one byte per level; a context extension has no such limit.
+///
+/// The guard sits above what a default JVM accepts, so the node refuses no
+/// descriptor a default-configured reference node reads. Our reader is
+/// iterative, and the recursive walks over a parsed type (clone, equality,
+/// drop, the writer, `Debug`) each stay under ~3 MiB of stack at this depth in
+/// release builds, well inside the node's 8 MiB thread stacks. A reference node run
+/// with a larger `-Xss` reads deeper descriptors in a context extension; those
+/// remain refused here.
+///
+/// The guard counts nesting levels, not bytes: the compact `Coll[Coll[T]]`
+/// and `Option[Coll[T]]` codes are charged two levels, matching the
+/// one-byte-per-level form both writers emit.
+const MAX_TYPE_DEPTH: usize = 16_384;
 
 /// Sigma type descriptors used by the Ergo protocol for serializing
 /// typed values.
@@ -141,6 +145,11 @@ pub enum SigmaType {
     SOption(Box<SigmaType>),
     /// Heterogeneous tuple of two or more elements.
     STuple(Vec<SigmaType>),
+    /// Scala `NoType`: the type of an `Apply` whose callee is neither a
+    /// function nor a collection. It has no type code, so it is only ever
+    /// inferred, never read or written. Every cast-checking parent and rule
+    /// 1001 reject it, as Scala does.
+    NoType,
     /// Function type: a list of domain types and a single range type.
     SFunc {
         /// Domain (parameter) types in declaration order.
@@ -156,6 +165,25 @@ pub enum SigmaType {
 }
 
 impl SigmaType {
+    /// Is this one of Scala's `SNumericType`s?
+    ///
+    /// Exactly the six types that extend `SNumericType` in
+    /// `SType.scala:412-547`: `SByte`, `SShort`, `SInt`, `SLong`, `SBigInt` and
+    /// `SUnsignedBigInt`. Numeric-ness is version-independent — whether
+    /// `SUnsignedBigInt` may appear at all is decided separately, by the
+    /// embeddable type-code gate.
+    pub fn is_numeric(&self) -> bool {
+        matches!(
+            self,
+            SigmaType::SByte
+                | SigmaType::SShort
+                | SigmaType::SInt
+                | SigmaType::SLong
+                | SigmaType::SBigInt
+                | SigmaType::SUnsignedBigInt
+        )
+    }
+
     /// Returns the primitive type code if this type is embeddable (1..=11), or None.
     fn embeddable_code(&self) -> Option<u8> {
         match self {
@@ -180,22 +208,13 @@ impl SigmaType {
 /// `embeddableV5` (codes 1..=8). Matches `isV3OrLaterErgoTreeVersion`.
 const V6_EMBEDDABLE_TREE_VERSION: u8 = 3;
 
-/// The version used to gate embeddable type codes.
+/// The version used to select embeddable type-table membership.
 ///
-/// Scala's `TypeSerializer.getEmbeddableType` selects `embeddableV5` vs
-/// `embeddableV6` by `VersionContext.current.isV6Activated` — the ACTIVATED
-/// version (`VersionContext.scala:33`, `activatedVersion >= V6SoftForkVersion`),
-/// NOT the tree header. On the consensus path this crate uses the body's header
-/// version as the gate (the activated version is not threaded through the
-/// byte-level reader): a headerless register/context-var value falls back to the
-/// v6 set, and a v0/v1/v2-header tree body gates on that header version.
-///
-/// The ergo-compiler self-check needs the true activated axis: it emits a
-/// header-v0 tree whose body may carry a V6 type code that a `tree_version >= 3`
-/// (V6-activated) compile legitimately produces and Scala re-parses. It sets
-/// [`VlqReader::set_embeddable_activated_version`]; when present, that override
-/// takes precedence here, mirroring Scala's activated-version gate exactly.
-/// `None` (every consensus caller) keeps the header-version fallback — byte-inert.
+/// Scala's `TypeSerializer.embeddableIdToType` selects V5/V6 by ErgoTree version;
+/// its validation-rule identity uses activation separately. Headerless contexts
+/// default to the V6 table. The existing low-level override supports explicitly
+/// scoped typed-expression callers; it is not a whole-tree acceptance guarantee.
+/// The public activated ErgoTree helper clears it while parsing the header.
 fn embeddable_gate_version(r: &VlqReader) -> u8 {
     r.embeddable_activated_version()
         .unwrap_or_else(|| r.ergo_tree_version().unwrap_or(V6_EMBEDDABLE_TREE_VERSION))
@@ -270,13 +289,8 @@ mod tests {
         assert_eq!(embeddable_gate_version(&r), 1);
     }
 
-    /// F1: the activated-version OVERRIDE
-    /// ([`VlqReader::set_embeddable_activated_version`]) takes precedence over the
-    /// header version for embeddable-code gating — mirroring Scala
-    /// `getEmbeddableType` gating on `VersionContext.isV6Activated` (the ACTIVATED
-    /// version), NOT the tree header. A header-v0 reader with an activated
-    /// override of 3 admits code 9; the default (`None`) keeps header-version
-    /// gating (byte-inert for consensus callers).
+    /// A low-level explicit type-table override takes precedence. Whole-tree
+    /// activated parsing must clear it to preserve header-based membership.
     #[test]
     fn embeddable_activated_version_override_wins_over_header() {
         let mut r = VlqReader::new(&[]);

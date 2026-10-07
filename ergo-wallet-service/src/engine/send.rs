@@ -236,8 +236,10 @@ pub(crate) fn transaction_sign_impl_with_snapshot(
         .collect::<Result<_, _>>()?;
 
     let hints_bag: ergo_wallet::proving::hints::TransactionHintsBag = match hints {
-        Some(dto) => tx_hints_bag_from_dto(dto)
-            .map_err(|e| WalletAdminError::Internal(format!("decode hints: {e:?}")))?,
+        Some(dto) => tx_hints_bag_from_dto(dto).map_err(|e| match e {
+            WalletAdminError::BadRequest(_) => e,
+            other => WalletAdminError::Internal(format!("decode hints: {other:?}")),
+        })?,
         None => ergo_wallet::proving::hints::TransactionHintsBag::empty(),
     };
 
@@ -324,6 +326,7 @@ impl WalletEngine {
         &self,
         req: ndto::BoxSelectRequest,
     ) -> Result<ndto::BoxSelectResponse, WalletAdminError> {
+        self.require_valid_scan()?;
         if self.is_locked() {
             return Err(WalletAdminError::Locked);
         }
@@ -333,6 +336,7 @@ impl WalletEngine {
             self.store.as_ref(),
             self.chain.as_ref(),
             self.config.network,
+            self.mempool.as_ref(),
         )
     }
 
@@ -340,6 +344,7 @@ impl WalletEngine {
         &self,
         intent: ndto::TxIntent,
     ) -> Result<ndto::BuildTxResponse, WalletAdminError> {
+        self.require_valid_scan()?;
         if self.is_locked() {
             return Err(WalletAdminError::Locked);
         }
@@ -349,6 +354,7 @@ impl WalletEngine {
             self.store.as_ref(),
             self.chain.as_ref(),
             self.config.network,
+            self.mempool.as_ref(),
         )
     }
 
@@ -356,6 +362,7 @@ impl WalletEngine {
         &self,
         req: ndto::SignTxRequest,
     ) -> Result<ndto::SignTxResponse, WalletAdminError> {
+        self.require_valid_scan()?;
         // No `Locked` precondition: signing succeeds while locked when
         // external secrets cover every input; otherwise the prover's missing-secret
         // surfaces as `missing_secret`, never `wallet_locked`.
@@ -365,6 +372,7 @@ impl WalletEngine {
             &self.state,
             self.store.as_ref(),
             self.chain.as_ref(),
+            self.mempool.as_ref(),
         )
     }
 
@@ -372,6 +380,7 @@ impl WalletEngine {
         &self,
         req: ndto::SendTxRequest,
     ) -> Result<ndto::SendTxResponse, WalletAdminError> {
+        self.require_valid_scan()?;
         // `intent` builds + signs with the wallet's own secrets → needs unlock;
         // `signed` submits caller-supplied bytes → no unlock needed.
         if matches!(req, ndto::SendTxRequest::Intent { .. }) && self.is_locked() {
@@ -385,6 +394,7 @@ impl WalletEngine {
             self.chain.as_ref(),
             self.submitter.as_ref(),
             self.config.network,
+            self.mempool.as_ref(),
         )
         .await
     }
@@ -393,6 +403,7 @@ impl WalletEngine {
         &self,
         requests: Vec<PaymentRequestDto>,
     ) -> Result<String, WalletAdminError> {
+        self.require_valid_scan()?;
         super::send::payment_send_impl(
             &requests,
             None,
@@ -412,6 +423,7 @@ impl WalletEngine {
         &self,
         req: ndto::RetrieveRewardsRequest,
     ) -> Result<ndto::RetrieveRewardsResultDto, WalletAdminError> {
+        self.require_valid_scan()?;
         // Fee arrives as a decimal nanoErg string (native amount convention) — parse
         // it before building so an out-of-range/garbage fee is a clean 400, not a 500.
         let fee = match req.fee.as_deref().map(str::parse::<u64>).transpose() {
@@ -463,6 +475,7 @@ impl WalletEngine {
         &self,
         request: TransactionGenerateRequest,
     ) -> Result<TransactionGenerateResponse, WalletAdminError> {
+        self.require_valid_scan()?;
         let result = super::send::transaction_generate_impl(
             &request.requests,
             request.inputs.as_deref(),
@@ -488,6 +501,7 @@ impl WalletEngine {
         &self,
         request: TransactionGenerateUnsignedRequest,
     ) -> Result<TransactionGenerateUnsignedResponse, WalletAdminError> {
+        self.require_valid_scan()?;
         let result = super::send::transaction_generate_unsigned_impl(
             &request.requests,
             request.inputs.as_deref(),
@@ -515,6 +529,7 @@ impl WalletEngine {
         &self,
         request: TransactionSignRequest,
     ) -> Result<TransactionSignResponse, WalletAdminError> {
+        self.require_valid_scan()?;
         let result = super::send::transaction_sign_impl(
             &request.unsigned_tx.bytes,
             request.external_secrets.as_deref(),
@@ -538,6 +553,7 @@ impl WalletEngine {
         &self,
         request: TransactionSendRequest,
     ) -> Result<String, WalletAdminError> {
+        self.require_valid_scan()?;
         super::send::payment_send_impl(
             &request.requests,
             request.inputs.as_deref(),
@@ -557,6 +573,7 @@ impl WalletEngine {
         &self,
         request: BoxesCollectRequest,
     ) -> Result<BoxesCollectResponse, WalletAdminError> {
+        self.require_valid_scan()?;
         super::send::boxes_collect_impl(
             &request,
             &self.storage,

@@ -16,6 +16,43 @@ Generates and mutates bytes, runs them through the decoders, and checks:
 * **parse → serialize fixed point** — decode, re-encode, re-decode must reach a
   byte-stable fixed point (catches non-canonical / echo-trap re-encoding).
 
+The structural comparison checks each serialization step against two Scala
+behaviours, without normalizing either serialized byte sequence:
+
+* In trees with version **< 3**, an opcode `0x7e` with `NumericCast` payload and
+  an immediate `Expr::Const` input is stripped by Scala's serializer. A chain
+  ending in a constant converges one level per round trip; comparison predicts
+  exactly one pass and compares it with the next decoded structure. Remaining
+  cast targets and premature removal of multiple levels stay observable. Extra rounds run
+  only while the decoded tree still has a pending direct Upcast(Const) strip,
+  checking normalized structure each round, with a 110-round bound matching
+  Scala's MaxTreeDepth. Otherwise `b1 == b2` stays mandatory. Other casts/nodes,
+  Unparsed bodies and all v3+ casts remain compared as-is
+  (`ValueSerializer.scala:154-166,359-370`).
+* Every `SigmaValue::Header` first has its ID independently checked against
+  Blake2b256 of a consumed header slice observed by the header parser. Missing,
+  mismatched or ambiguous wire provenance is a Bug. Verified IDs are then zeroed for comparison, including
+  constants nested in collections, tuples, options, trees, registers and context
+  extensions. All header fields remain compared. Scala hashes the retained input
+  slice (`ErgoHeader.scala:132-140,167-180`), so canonicalizing an identity-point
+  encoding can change this derived id without changing the header.
+
+Known-bug-catalog **#19** retains the existing `WriteRejected` classification
+when re-decoding a value containing an opaque tree fails. A successful
+opaque-to-structural transition gets no exemption. Opaque trees compare their
+bytes exactly, excluding only validation-error provenance; unrelated fields in
+the containing value remain compared. Byte fixed point `b1 == b2` remains
+mandatory except for the bounded pending-Upcast convergence described above.
+The existing type-depth guard exclusion is unchanged. Structural comparison applies through
+every containing surface, including boxes,
+transactions, block transactions and `ctx_expr`; cached bytes remain compared.
+Only ErgoTree AST codecs (`ergo_tree` and `sigma_expr`) follow extra strip rounds;
+boxes, transactions and blocks re-emit retained tree bytes verbatim.
+The `parity_*` corpus seeds and the embedded `surfaces.rs` regressions cover
+the nightly failures. JVM captures reject the invalid block-item and unknown-method
+seeds; their expectations are Rejected, not normalized acceptance. The candidate
+seed still yields WriteRejected because its re-decode fails the SelectField check.
+
 Phase 1 covers **every standalone** `ergo-ser` wire decoder: the block/header
 sections (`header`, `block_transactions`, `extension`, `popow_header`,
 `nipopow_proof`), the transaction tree (`transaction`, `unsigned_transaction`,
@@ -30,13 +67,14 @@ Codecs that only ever appear *nested* inside another (`data_input`,
 surface, not standalone.
 
 ```bash
-cargo run -p ergo-difftest -- --iters 1000000 --seed 7
-cargo run -p ergo-difftest -- --surface ergo_tree --corpus test-vectors/mainnet
-cargo run -p ergo-difftest -- --repro 1b1501040a…     # triage one input
-cargo run -p ergo-difftest -- --selftest              # prove the detector has teeth
+cargo run --locked -p ergo-difftest -- --iters 1000000 --seed 7
+cargo run --locked -p ergo-difftest -- --surface ergo_tree --corpus test-vectors/mainnet
+cargo run --locked -p ergo-difftest -- --repro 1b1501040a…     # triage one input
+cargo run --locked -p ergo-difftest -- --selftest              # prove the detector has teeth
 ```
 
-Determinism: a `(seed, iter)` pair reproduces an identical input; every finding
+Determinism: a `(seed, iter)` pair reproduces an identical input when the mode,
+surface and corpus contents match. Corpus files load in lexical path order; every finding
 prints a `--repro <hex>`. `tests/it/smoke.rs` and `tests/it/selftest.rs` are the CI
 regression guards (no `scala-cli` needed).
 
@@ -52,12 +90,12 @@ node's verdict against the JVM's:
   node retains the original ergoTree slice).
 
 ```bash
-cargo run -p ergo-difftest -- --oracle --iters 2000 --corpus test-vectors/mainnet
+cargo run --locked -p ergo-difftest -- --oracle --iters 2000 --corpus test-vectors/mainnet
 ```
 
-Differential surfaces (context-complete consensus units):
+Differential surfaces (each has its own parse, dummy-context reduction or verifier contract):
 `ergo_tree`, `ergo_box_candidate`, `transaction`, `header`, `reduce`,
-`reduce_ctx`, `validate`, `verify_avl`. Bare `sigma_type` /
+`reduce_ctx`, `verify`, `validate`, `verify_avl`. Bare `sigma_type` /
 `constant` are intentionally **not** differential surfaces — the node's type/value
 codec is version-gated *inside a tree*, so testing it context-free over-reports;
 those codecs are exercised in-context via `ergo_tree`/`ergo_box_candidate`.
@@ -65,11 +103,11 @@ those codecs are exercised in-context via `ergo_tree`/`ergo_box_candidate`.
 ### Oracle setup (one-time)
 
 `scripts/jvm_serde_oracle/ErgoSerdeOracle.scala` runs the real `sigma-state` +
-`ergo-core` the node mirrors (version 6.0.2). `sigma-state` is on Maven;
+`ergo-core` the node mirrors (version 6.0.6). `sigma-state` is on Maven;
 `ergo-core` (transaction/header) is not, so publish it locally first:
 
 ```bash
-cd <ergo reference checkout>
+cd <ergo reference checkout, tag v6.0.6>
 sbt "avldb/publishLocal" "ergoWallet/publishLocal" "ergoCore/publishLocal"
 ```
 
@@ -77,13 +115,53 @@ sbt "avldb/publishLocal" "ergoWallet/publishLocal" "ergoCore/publishLocal"
 `using repository` directive.) Needs `scala-cli` on `PATH`; the first `--oracle`
 run resolves deps and compiles (~1 min), then queries are fast.
 
+The oracle executes a private copy of the selected standalone Scala source.
+Relative project files and resources from its original checkout are not copied.
+`Oracle::provenance()` records the exact source text and SHA-256, command arguments,
+and actual executing JVM properties and resolved classpath JAR hashes after a
+query. A declared dependency directive alone is not execution evidence.
+
+The first response has a 180-second deadline, including compilation and dependency
+resolution. Later responses have a 10-second deadline. Override these with
+`DIFFTEST_ORACLE_STARTUP_TIMEOUT_MS` and `DIFFTEST_ORACLE_QUERY_TIMEOUT_MS`; each
+must be an integer in `1..=1800000`. The deadline includes request writes and
+response reads. Request and response lines are limited to 16 MiB. Retained stderr
+is limited to its first 64 KiB and last 8 KiB, with the total byte count recorded.
+Timeouts, incomplete responses and transport errors terminate that oracle; it
+cannot be reused for later requests. Cleanup kills the owned Unix process group
+and attempts to reap the direct child within two seconds. Windows cleanup covers
+the direct child; descendant termination is not certified. Descendants that
+escape the owned Unix group are also outside this cleanup contract.
+
 ## Corpus
 
-`--corpus <dir>` loads seeds for mutation: `.hex` files (one hex string),
-`.json` files (every quoted hex value — covers the test-vector `bytes`/`ergoTree`
-fields), or raw bytes otherwise. Pointing at `test-vectors/mainnet` mutates real
-mainnet trees/boxes/txs/headers — the high-yield mode (bugs cluster near the
-valid manifold).
+`--corpus <dir>` loads regular files in lexical path order: `.hex` files
+(one UTF-8 hex string), `.json` files (decoded string values of at least eight
+hex characters, recursively through arrays and objects), or raw bytes otherwise.
+JSON object keys are excluded. Missing or unreadable directories/files, malformed
+JSON/hex and a corpus with no usable seeds fail with harness exit 3. Markdown and
+text files are skipped; directories and symlinks are not followed. Decompress
+JSON archives into a separate corpus directory first; `.json.gz` is otherwise
+raw seed data. Mutation reproducibility requires identical ordered seed contents.
+
+`--structured` uses its grammar generators and refuses `--corpus`, which would
+otherwise be ignored. `--min-coverage` requires a hermetic structured campaign,
+a finite threshold in 0..=1 and positive iterations. It measures constructor
+labels, not semantic branch coverage or known-bug rediscovery.
+
+`--structured --oracle` requires a supported `--surface`: `ergo_tree`,
+`ergo_box_candidate`, `transaction`, `header`, `reduce`, `reduce_ctx` or
+`validate`. `reduce` maps to `sigma_expr`, `reduce_ctx` to the context/box frame,
+and `validate` to transaction bytes. The framed `verify` and `verify_avl`
+protocols have no matching structured generator and are refused before a JVM
+starts; use existing explicit requests with `--repro` for those surfaces.
+
+`--check-canonical` requires a completely parsed ErgoTree and valid expected
+hex. A rejection or trailing input returns harness exit 3 because no complete
+tree was compared. A byte mismatch returns 1, and so does a writer error after
+a complete decode, which re-encodes nothing that could match. `catch_unwind`
+reports unwind panics as `Bug` while preserving the caller's process-wide panic
+hook. It does not catch aborts, allocation failure or stack overflow.
 
 ## Promote findings to regression tests
 
@@ -106,9 +184,15 @@ scripts/difftest-guard.sh --surfaces "reduce_ctx transaction"
 
 It runs the structure-aware generators against the live oracle on `reduce`,
 `reduce_ctx`, `transaction`, `ergo_box_candidate` and `validate`, minimizes and
-classifies every unique divergence, and prints a per-surface table. Records land
-under `ergo-difftest/regressions/` (gitignored); `QUEUE.md` lists the pending
-ones.
+files every observed divergence class as pending, and prints a per-surface
+table. Classes retain their first concrete generating iteration and actual
+structured/mutation mode. The guard uses a fresh, gitignored
+`ergo-difftest/regressions-run.*` directory by default. An explicit
+`--regressions-dir` must be new, or kept deliberately with `--keep-regressions`;
+existing output is never cleared. Each invocation preserves separate logs.
+`QUEUE.md` is a derived view of immutable pending records. If shrinking fails, the original
+input/verdicts are saved with `minimized: false` and `processing_error`; that
+failure still returns harness exit 3. A failed file write also returns 3.
 
 | exit | meaning |
 |---|---|
@@ -118,23 +202,43 @@ ones.
 | 3 | **harness error** — the oracle died, or a surface checked fewer inputs than it planned |
 
 Exit 3 exists because the failure mode that matters most is a guard that passes
-having checked almost nothing. Three independent assertions guard against it: the
+having checked almost nothing. Independent assertions guard against it: the
 campaign's own exit code (`difftest` returns 3 on a spawn or pipe failure, never
 folding one into a clean summary), an `oracle: HARNESS ERROR:` marker grep over
-the log, and a `checks == iters` count per surface. To see it work, set
+the log, a `checks == iters` count per surface, and complete pending-record
+accounting for every observed divergence class, plus validated execution
+journals and record identities. Runtime identity that could not be captured
+makes the run incomplete, including a run with no findings. To inspect the
+existing failure-path mechanism, see
 `DIFFTEST_ORACLE_DIE_AFTER=<n>` — a fault-injection knob in the oracle script that
 answers `n` queries and exits.
 
 ### The accepted baseline
 
-A guard that is red on day one teaches nobody anything: a new finding is
-indistinguishable from the ones already known, and the red becomes wallpaper.
-`known_bugs/baseline.toml` lists the divergences that are present on `main`
-right now, each keyed by its content-addressed record identity
-(`<surface>/sha256(input_hex)[..16]`, the same key `auto_file` writes to) and
-each carrying a **required** `ref` matching `(PR|issue) #<number>`. An entry
-without a tracking reference is refused — that is a muted divergence, not an
-accepted one.
+`known_bugs/baseline.toml` retains historical tracked divergences. New baseline
+keys are `<surface>/<64-character semantic SHA-256>` and require a `ref`
+matching `(PR|issue) #<number>`. The semantic digest includes surface, kind,
+input, both verdicts, compiled-source/compiler configuration, archived oracle
+sources, executing JVM/JAR identities, and the surface/context policy. Seed,
+iteration and temporary paths remain in the evidence without changing this
+comparison key. Compiled source is the workspace manifest, lockfile and
+toolchain pin plus each crate's manifest, build script and `src/` tree. Editing
+this baseline, records, docs, scripts or test vectors keeps every key; any
+compiled-source change gives new keys. The journal still records the whole
+source snapshot. Historical 16-character input keys remain visible as stale
+entries and cannot mute a comparison under unbound authority.
+
+The separate record filename hashes the complete canonical JSON, so different
+processing or execution evidence is preserved. Records are published atomically
+under a filing lock; identical records are idempotent. `runs/` holds immutable
+execution journals and exact primary/verify Scala source archives. Every
+`--oracle` campaign writes one, with or without `--minimize`, under
+`--regressions-dir` (default `ergo-difftest/regressions`, relative to the
+current directory). Repro commands
+select those archives, including `DIFFTEST_VERIFY_ORACLE_SCRIPT` for the sidecar.
+The build-script source inventory and running executable hash are diagnostic
+provenance, not a signed build attestation. File synchronization and atomic
+publication do not establish power-loss durability.
 
 The guard fails only on pendings that are *not* listed; baselined ones print in
 their own table, and a baseline entry the run did not reproduce is called out
@@ -142,7 +246,9 @@ too (either the fix landed and the entry should be deleted, or coverage was
 lost). When a referenced fix merges, delete the entry: the guard going red on
 the next run is the signal that the fix did not close the class.
 
-`KnownArtifact` records are reported and never fail the run.
+An explicit reviewed `KnownArtifact` disposition is stored separately. Refile
+reviewed records through the filing API; editing immutable JSON in place breaks
+its identity. Dummy-context agreement never assigns that disposition automatically.
 
 ### The `EvaluatedValue` vocabulary (`src/gen/evaluated_value.rs`)
 
@@ -191,19 +297,11 @@ of a lockstep type-mismatch reject.
 
 ### Triage: which divergences fail the guard
 
-A parse-surface divergence is reconciled against the surface that actually
-*evaluates* the same bytes:
-
-| parse surface | reduction channel |
-|---|---|
-| `ergo_tree` | `reduce` (the bytes are a script) |
-| `ergo_box_candidate` | `reduce_ctx`, prefixed with an empty extension (`00`) |
-| `transaction`, `header` | none — the bytes are not a script |
-
-If the reduction agrees, the finding is a `KnownArtifact` (the node retains
-original wire bytes / defers the curve check). If it persists, or the surface has
-no channel, the record is `PENDING` and a human decides. The harness never sets a
-which-side-is-right verdict.
+Every new divergence stays `PENDING`. Agreement under one fixed dummy context,
+including rejection by both reductions, does not explain a parse difference or
+prove it benign in other contexts. `KnownArtifact` is reserved for explicit
+human review backed by a specific source/fixture explanation. The harness
+never assigns which side is right or automatically certifies no consensus impact.
 
 ### Known coverage gap — `CONTEXT.headers`
 
@@ -215,7 +313,9 @@ divergence family (#238: 10 headers in Rust vs 9 in Scala) **cannot** surface
 here. Closing it needs a header window on both sides — a fixed agreed set of
 serialized headers, or a third `ctx_expr` frame field carrying them on the wire.
 That is an oracle-contract change, deliberately not folded into the guard; the
-replay driver reaches the class in the meantime.
+early replay supplies Rust parent headers, but has no independent scripted
+reference reduction with a matched nonempty window. It does not close that
+comparison by itself.
 
 ### Debugging the pipe
 
@@ -229,14 +329,25 @@ evidence.
 
 ### CI
 
-The nightly `consensus-guard` job in `.github/workflows/fuzz.yml` runs the same
-set, uploads `regressions/` plus the per-surface oracle transcripts as an artifact,
-fails on any unbaselined `PENDING`, and fails louder (exit 3) if the run did not
-check what it planned to. It is `workflow_dispatch`-only rather than scheduled, because
-`ergo-core 6.0.2` is not on Maven Central: a cold GitHub-hosted runner has to
-clone the Scala node and `sbt avldb/publishLocal ergoWallet/publishLocal
-ergoCore/publishLocal`, which does not fit the ~20 min budget. The job caches
-`~/.ivy2/local` + `~/.cache/coursier` keyed on the oracle script hash, so a warm
-runner skips that entirely — point the `runner` input at a self-hosted label (or
-an operator cron) for the green path. The hermetic PR-time `difftest` job in
-`ci.yml` needs none of this and is unchanged.
+The `consensus-guard` job in `.github/workflows/fuzz.yml` runs the same set every
+night at 02:00 UTC and on `workflow_dispatch`. It fails on any unbaselined
+`PENDING`, and fails louder (exit 3) if the run did not check what it planned to.
+Scheduled campaigns use the workflow run ID as their seed, so successive runs
+exercise different inputs. Reproduce a recorded campaign by supplying its
+`guard_seed` and `guard_iters` through manual dispatch or the local command.
+
+The artifact preserves the source SHA, seed, iteration count, reference version,
+full guard output, oracle warm-up output, minimized `regressions/`, and per-surface
+oracle transcripts. Bootstrap or oracle failures remain failed steps; an empty
+or incomplete campaign cannot pass. Runs on the same ref are serialized without
+cancelling an active campaign.
+
+`ergo-core 6.0.6` is not on Maven Central: a cold hosted runner publishes
+`avldb`, `ergoWallet`, and `ergoCore` from the pinned reference tag locally. The
+120-minute job budget allows this cold path. The job caches `~/.ivy2/local` and
+`~/.cache/coursier`, keyed on the oracle script hash and reference version, so
+subsequent runs reuse those dependencies. Set the repository Actions variable
+`CONSENSUS_GUARD_RUNNER` to a warm runner label to use an existing local cache;
+otherwise runs use `ubuntu-latest`. A manual `runner` input overrides that
+variable. This job runs scheduled or manually selected repository code, never
+untrusted pull-request code. The hermetic PR-time `difftest` job remains separate.

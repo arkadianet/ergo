@@ -12,6 +12,7 @@ use super::{
 };
 use crate::wallet::scan::RescanReadError;
 use crate::wallet::WalletStoreError;
+use redb::ReadableDatabase;
 
 pub(crate) enum WalletBlockSections {
     MissingHeader,

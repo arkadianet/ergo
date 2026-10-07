@@ -73,6 +73,7 @@ impl WalletEngine {
         scan_id: u16,
         filter: ScanBoxFilter,
     ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
+        self.require_valid_scan()?;
         // The chain accessor supplies the committed tip used for confirmations;
         // the wallet store supplies the box snapshot. The live mempool view feeds
         // the off-chain overlay (minConfirmations=-1).
@@ -91,6 +92,7 @@ impl WalletEngine {
         scan_id: u16,
         filter: ScanBoxFilter,
     ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
+        self.require_valid_scan()?;
         // spentBoxes has no off-chain component (Scala `getScanSpentBoxes`), but the
         // view is threaded through uniformly; the overlay self-gates on want_spent.
         read_scan_boxes(
@@ -1190,6 +1192,7 @@ mod tests {
             version: 0,
             has_size: true,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
             body: Expr::Const {
                 tpe: SigmaType::SBoolean,
@@ -1506,7 +1509,7 @@ mod tests {
 
     /// The tracked row for `(scan_id, box)` if present.
     fn tracked(db: &redb::Database, scan_id: u16, box_fill: u8) -> Option<ScanTrackedBox> {
-        let r = db.begin_read().unwrap();
+        let r = redb::ReadableDatabase::begin_read(db).unwrap();
         let t = match r.open_table(WALLET_SCAN_BOXES) {
             Ok(t) => t,
             Err(_) => return None,
@@ -1529,7 +1532,7 @@ mod tests {
     }
 
     fn index_ids(db: &redb::Database, box_fill: u8) -> Option<Vec<u16>> {
-        let r = db.begin_read().unwrap();
+        let r = redb::ReadableDatabase::begin_read(db).unwrap();
         let t = match r.open_table(WALLET_SCAN_BOX_INDEX) {
             Ok(t) => t,
             Err(_) => return None,
@@ -1540,7 +1543,7 @@ mod tests {
     }
 
     fn box_row_exists(db: &redb::Database, scan_id: u16, box_fill: u8) -> bool {
-        let r = db.begin_read().unwrap();
+        let r = redb::ReadableDatabase::begin_read(db).unwrap();
         let t = match r.open_table(WALLET_SCAN_BOXES) {
             Ok(t) => t,
             Err(_) => return false,
@@ -1671,7 +1674,7 @@ mod tests {
 
     /// The tracked row for `(scan_id, box_id)` (explicit 32-byte id).
     fn tracked_id(db: &redb::Database, scan_id: u16, box_id: &[u8; 32]) -> Option<ScanTrackedBox> {
-        let r = db.begin_read().unwrap();
+        let r = redb::ReadableDatabase::begin_read(db).unwrap();
         let t = match r.open_table(WALLET_SCAN_BOXES) {
             Ok(t) => t,
             Err(_) => return None,
@@ -1682,7 +1685,7 @@ mod tests {
     }
 
     fn index_ids_id(db: &redb::Database, box_id: &[u8; 32]) -> Option<Vec<u16>> {
-        let r = db.begin_read().unwrap();
+        let r = redb::ReadableDatabase::begin_read(db).unwrap();
         let t = match r.open_table(WALLET_SCAN_BOX_INDEX) {
             Ok(t) => t,
             Err(_) => return None,
@@ -1812,7 +1815,7 @@ mod tests {
         ));
         // Nothing persisted by the rejected calls.
         use redb::ReadableTableMetadata;
-        let r = db.begin_read().unwrap();
+        let r = redb::ReadableDatabase::begin_read(&db).unwrap();
         let empty = match r.open_table(WALLET_SCAN_BOXES) {
             Ok(t) => t.len().unwrap() == 0,
             Err(_) => true,
@@ -2039,6 +2042,66 @@ mod tests {
             .insert(key, serde_json::to_vec(&value).unwrap())
             .unwrap();
         txn.commit().unwrap();
+    }
+
+    #[test]
+    fn rescan_matcher_rejects_unparseable_box_and_invalidates_rescan() {
+        use crate::wallet::scan::{
+            OwnedBlockOutput, RescanBlock, RescanTx, ScanRescanMatcher, WalletScanService,
+        };
+        use std::sync::Arc;
+
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        let matcher = build_rescan_matcher(&db).unwrap().unwrap();
+        let bad: &[u8] = &[0xFF, 0xFF, 0xFF];
+
+        assert!(matcher.match_boxes(&[bad]).is_err());
+
+        let block = RescanBlock {
+            block_id: [0xE1; 32],
+            txs: vec![RescanTx {
+                tx_id: [0x01; 32],
+                inputs: vec![],
+                outputs: vec![OwnedBlockOutput {
+                    box_id: [0xA1; 32],
+                    output_index: 0,
+                    ergo_tree_bytes: vec![0x00],
+                    value: 1_000_000,
+                    assets: vec![],
+                    miner_reward_pubkey: None,
+                    box_bytes: bad.to_vec(),
+                }],
+            }],
+        };
+        let db = Arc::new(db);
+        let store = crate::wallet::RedbWalletStore::new(db.clone());
+        let read_block = move |h: u32| -> Result<
+            Option<RescanBlock>,
+            crate::wallet::scan::RescanReadError,
+        > { Ok((h == 1).then_some(block.clone())) };
+
+        let result = WalletScanService::rescan_full_rebuild_store(
+            &store,
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeMap::new(),
+            0,
+            1,
+            read_block,
+            || Ok(1),
+            || false,
+            Some(&matcher),
+        );
+
+        assert!(result.is_err());
+        let txn = redb::ReadableDatabase::begin_read(db.as_ref()).unwrap();
+        let table = txn
+            .open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)
+            .unwrap();
+        assert_eq!(
+            table.get(()).unwrap().map(|value| value.value()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -2339,7 +2402,7 @@ mod tests {
     }
 
     fn scan_tx_records(db: &redb::Database) -> Vec<ScanTxRecord> {
-        let read = db.begin_read().unwrap();
+        let read = redb::ReadableDatabase::begin_read(db).unwrap();
         let t = read.open_table(WALLET_SCAN_TXS).unwrap();
         t.iter()
             .unwrap()
@@ -2435,7 +2498,7 @@ mod reserved_scan_read_tests {
     }
 
     #[test]
-    fn reserved_id_reads_return_reserved_projections() {
+    fn reserved_id_reads_bridge_wallet_boxes() {
         let (_d, db) = temp_db();
         put_wallet_box(
             &db,
@@ -2473,6 +2536,7 @@ mod reserved_scan_read_tests {
         assert_eq!(mining_unspent[0].inclusion_height, Some(100));
         assert_eq!(mining_unspent[0].confirmations_num, Some(100));
         assert!(!mining_unspent[0].spent);
+        assert_eq!(mining_unspent[0].bytes, hex::encode([0x91u8, 0xAA]));
 
         let mining_spent =
             read_scan_boxes(&db, Some(200), MINING_SCAN_ID, true, &filter(), None).unwrap();

@@ -35,7 +35,9 @@ use ergo_sync::executor::SyncExecutor;
 use ergo_validation::context::ProtocolParams;
 
 /// Seeded chain tip: the fed headers descend from it, so it is the only
-/// ancestor the pipeline has to resolve.
+/// ancestor the pipeline has to resolve. Its own parent is deliberately
+/// absent: an executor attaching to this tip must not need more stored
+/// ancestry than difficulty does.
 const SEED_HEIGHT: u32 = 1_795_073;
 /// First fed header.
 const FEED_LO: u32 = 1_795_074;
@@ -169,6 +171,7 @@ fn mode5_inbound_header_advances_the_digest_header_tip() {
         let actions = executor.execute(
             Action::ValidateHeader {
                 peer,
+                modifier_id: id,
                 header_bytes: bytes,
             },
             &mut store,
@@ -223,17 +226,34 @@ fn mode5_unlinked_header_is_buffered_not_fatal() {
     );
 
     let orphan = headers[&(FEED_LO + 1)].clone();
+    let orphan_id = header_id(&orphan);
+    let peer: PeerId = "127.0.0.1:9030".parse().expect("peer addr");
+    let now = Instant::now();
+    coordinator.delivery_mut_for_test().request(
+        peer,
+        ergo_p2p::types::ModifierTypeId::Header.as_byte(),
+        &[orphan_id],
+        now,
+    );
+    coordinator
+        .delivery_mut_for_test()
+        .mark_received(&orphan_id);
     executor.execute(
         Action::ValidateHeader {
-            peer: "127.0.0.1:9030".parse().expect("peer addr"),
+            peer,
+            modifier_id: orphan_id,
             header_bytes: orphan,
         },
         &mut store,
         &mut coordinator,
-        Instant::now(),
+        now,
         None,
     );
 
+    assert_eq!(
+        coordinator.delivery().status(&orphan_id),
+        ergo_p2p::delivery::ModifierStatus::Received
+    );
     assert_eq!(
         executor.orphan_headers_len(),
         1,
@@ -254,7 +274,7 @@ fn mode5_validation_verdict_durably_invalidates_the_branch() {
     // header-by-header after every restart — the node would never converge.
     //
     // The verdict classes the executor routes to `invalidate_validation_branch`
-    // (`Validation`, `HeaderMeta`, `EpochExtension`, `AdProofsHashMismatch`)
+    // (`Validation`, `EpochExtension`, `AdProofsHashMismatch`)
     // are mode-independent, so this path IS reachable in Mode 5; only the
     // stale-root-ambiguous digest apply failure takes the session-mark path.
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -271,10 +291,13 @@ fn mode5_validation_verdict_durably_invalidates_the_branch() {
 
     // Sync two headers so FEED_LO + 1 is the tip and FEED_LO + 2 is unseen.
     for h in FEED_LO..=FEED_LO + 1 {
+        let bytes = headers[&h].clone();
+        let id = header_id(&bytes);
         executor.execute(
             Action::ValidateHeader {
                 peer,
-                header_bytes: headers[&h].clone(),
+                modifier_id: id,
+                header_bytes: bytes,
             },
             &mut store,
             &mut coordinator,

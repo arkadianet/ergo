@@ -40,7 +40,7 @@ GROUPS = {
         # 4.3 / 5.7 / 7.3 / 11.5 min because ergo-api, ergo-indexer and
         # ergo-sync carry large `it` binaries. They move onto the two
         # node shards, which had the headroom.
-        ("ergo-node --lib", "ergo-node --bin ergo-node", "ergo-api"),
+        ("ergo-node --lib", "ergo-node --bin ergo-node", "ergo-node --example ge_soak", "ergo-api"),
         (
             "ergo-node --test it", "ergo-wallet", "ergo-wallet-service", "ergo-wallet-protocol",
             "ergo-difftest", "ergo-rest-json", "ergo-indexer", "ergo-sync",
@@ -55,7 +55,8 @@ GROUPS = {
     ),
     "macOS": (
         (
-            "ergo-node --lib", "ergo-node --bin ergo-node", "ergo-state",
+            "ergo-node --lib", "ergo-node --bin ergo-node", "ergo-node --example ge_soak",
+            "ergo-state",
             "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
             "ergo-mining", "ergo-p2p", "ergo-sigma", "ergo-compiler",
             "ergo-wallet", "ergo-wallet-service", "ergo-wallet-protocol",
@@ -129,7 +130,7 @@ def nextest_commands(group, platform):
         ["-p", package, *selection] for package, selection in selectors.items()
     ]
     threads = ["--test-threads", "8"] if platform == "Windows" else []
-    return [["cargo", "nextest", "run", *selection, *threads] for selection in selections]
+    return [["cargo", "nextest", "run", "--locked", *selection, *threads] for selection in selections]
 
 
 def main():
@@ -143,7 +144,8 @@ def main():
     if args.shards != len(groups) or not 1 <= args.shard <= len(groups):
         parser.error("matrix shard count/index does not match configured crate groups")
     metadata = json.loads(subprocess.check_output(
-        ["cargo", "metadata", "--no-deps", "--format-version", "1"], text=True,
+        ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+        text=True, encoding="utf-8",
     ))
     member_ids = set(metadata["workspace_members"])
     members = {p["name"]: test_targets(p) for p in metadata["packages"] if p["id"] in member_ids}

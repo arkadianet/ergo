@@ -1,0 +1,30 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.context_extension_depth_bound",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "ext-depth-coll109-accept#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-context-extension-parse",
+      "description" : "Spending-proof extension {1: Coll^109[Byte]}, each outer collection holding one element and the innermost Coll[Byte] empty. getValue takes one level and each collection level one more, so the value uses exactly MaxTreeDepth = 110 (ValueSerializer.scala:396-398, CoreDataSerializer.scala:95-96). Round-trip identity.",
+      "bytes_hex" : "01a05d90c50251aea28100ccaa1da38004fb5a04154bfa300a600f3c10d130816a0001010c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c1a010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101000000018094ebdc030008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-depth-coll110-reject#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-context-extension-parse",
+      "description" : "Spending-proof extension {1: Coll^110[Byte]}: one level deeper, 111 > 110, and the JVM throws DeserializeCallDepthExceeded at parse (CoreByteReader.scala:127-129). An impl with a higher depth limit, or none, round-trips it: the over-accept.",
+      "bytes_hex" : "01a05d90c50251aea28100ccaa1da38004fb5a04154bfa300a600f3c10d130816a0001010c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c1a01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101000000018094ebdc030008d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

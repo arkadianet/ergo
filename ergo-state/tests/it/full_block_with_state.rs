@@ -203,7 +203,11 @@ fn full_block_pipeline_blocks_1_5() {
     let digests_data =
         std::fs::read_to_string("../test-vectors/mainnet/utxo_digests_1_10.json").unwrap();
     let digests: Vec<DigestJson> = serde_json::from_str(&digests_data).unwrap();
-    let params = ProtocolParams::mainnet_default();
+    // Blocks 1-5 ran under the launch parameters' block version 1.
+    let params = ProtocolParams {
+        block_version: 1,
+        ..ProtocolParams::mainnet_default()
+    };
 
     // Block 1: apply unchecked (no parent to validate against)
     let b1 = &blocks[0];
@@ -231,6 +235,7 @@ fn full_block_pipeline_blocks_1_5() {
             parent: &checked_parent,
             utxo: &store,
             params: &params,
+            rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
             parent_extension: None,

@@ -14,20 +14,68 @@
 //! file. After rehydration, the wallet is in Locked state regardless
 //! of how it shut down — operator must Unlock to populate the prover.
 
-/// Storage-backed callers first load a fallible `wallet::hydration::HydrationSnapshot`.
 pub trait HydrationSource {
-    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_>;
+    /// Iterate tracked pubkeys in `(derivation_path_index, pubkey)`
+    /// ASC order — the BTreeMap order from `WALLET_TRACKED_PUBKEYS`.
+    fn tracked_pubkeys(&self) -> Result<Vec<(u64, [u8; 33])>, String>;
 
-    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_>;
+    /// Iterate persisted visible-pubkeys in index-ASC order — the
+    /// BTreeMap order from `WALLET_VISIBLE_ADDRESSES` (u32 → [u8; 33]).
+    /// THIS is the source of truth for `/wallet/addresses` at boot.
+    /// Returns the raw pubkey bytes — address rendering happens at
+    /// REST read time (so we don't bake the network prefix into
+    /// persistent state).
+    fn visible_pubkeys(&self) -> Result<Vec<(u32, [u8; 33])>, String>;
 
-    fn change_address_pubkey(&self) -> Option<[u8; 33]>;
+    /// The persisted change-address pubkey from
+    /// `WALLET_CHANGE_ADDRESS` (one row, value = `[u8; 33]`).
+    /// Returns `None` if never set or table is empty.
+    /// Rendered to a base58 address at REST read time.
+    fn change_address_pubkey(&self) -> Result<Option<[u8; 33]>, String>;
 }
 
 use ergo_wallet::storage::UnlockedSecret;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// `WalletState`. Fields are public within the service so apply and
-/// persistence integrations can read them through their reader traits.
+/// Public-key visibility for tracked `(index, pubkey, path)` entries, listed as
+/// Scala lists them after a restart or unlock. `WalletStorage.readAllKeys`
+/// walks LevelDB keys in bytewise order, and each key ends in the
+/// public-branch `DerivationPathSerializer` bytes (see `scala_path_key`), so
+/// the master comes first and same-depth indices compare as unsigned
+/// integers. Scala WalletCache then hides that master only when the following
+/// key has the EIP-3 account prefix. The number of later keys does not affect
+/// that rule.
+pub fn visible_pubkeys_with_paths(tracked: &[(u64, [u8; 33], Vec<u32>)]) -> Vec<[u8; 33]> {
+    let mut ordered: Vec<_> = tracked.iter().collect();
+    ordered.sort_by_cached_key(|(_, _, path)| scala_path_key(path));
+    let eip3_prefix = [44 | 0x8000_0000, 429 | 0x8000_0000, 0x8000_0000];
+    let hide_master =
+        ordered.len() > 1 && ordered[0].2.is_empty() && ordered[1].2.starts_with(&eip3_prefix);
+    ordered
+        .iter()
+        .skip(usize::from(hide_master))
+        .map(|(_, pk, _)| *pk)
+        .collect()
+}
+
+/// Scala `DerivationPathSerializer` bytes of a public-branch path: `0x01`,
+/// the depth (`decodedPath.length`, counting the leading `0`) as a ZigZag VLQ
+/// `putInt`, then every index including that leading `0` as 4 big-endian
+/// bytes.
+fn scala_path_key(path: &[u32]) -> Vec<u8> {
+    let mut key = ergo_primitives::writer::VlqWriter::new();
+    key.put_u8(0x01);
+    key.put_i32(i32::try_from(path.len() + 1).unwrap_or(i32::MAX));
+    for index in std::iter::once(&0).chain(path) {
+        key.put_bytes(&index.to_be_bytes());
+    }
+    key.result()
+}
+
+/// `WalletState`. Fields are public-within-crate so the apply hook (in
+/// `ergo-state`) can read them through a reader trait; public API for
+/// outside-crate access goes through the `WalletReader` abstraction in
+/// `ergo-state/src/wallet/reader.rs`.
 pub struct WalletState {
     /// Tracked HD pubkeys, ordered by their derivation-path index
     /// (mirrors the persisted `WALLET_TRACKED_PUBKEYS` table).
@@ -40,11 +88,10 @@ pub struct WalletState {
     /// Rebuilt from `cached_pubkeys` on every modification.
     pub(crate) tracked_p2pk_trees: BTreeSet<Vec<u8>>,
 
-    /// Public addresses for `/wallet/addresses` — filtered per
-    /// Scala `WalletCache.publicKeyAddresses`: when the wallet has
-    /// exactly two tracked pubkeys (master + EIP-3 first child),
-    /// the master pubkey is HIDDEN. Otherwise all pubkeys' addresses
-    /// are surfaced. Rebuilt atomically with cached_pubkeys.
+    /// Public addresses from the persisted visibility table. Low-level
+    /// insert/remove calls lack derivation paths and expose all tracked keys;
+    /// production writers persist the path-based WalletCache filter and hydrate
+    /// from that complete snapshot.
     pub(crate) visible_addresses: Vec<String>,
 
     /// Persisted change address (None if never set; defaults to
@@ -161,6 +208,8 @@ impl WalletState {
     }
 
     /// Insert a tracked HD pubkey at the given derivation-path index.
+    /// This low-level method has no derivation path metadata and exposes every
+    /// tracked key. Production HD writers use persisted path-based visibility.
     /// Rebuilds `tracked_p2pk_trees` and `visible_addresses`
     /// atomically. Returns error if the pubkey's P2PK encoding fails
     /// (which means the pubkey isn't a valid SEC1 compressed point —
@@ -171,105 +220,94 @@ impl WalletState {
         pubkey: [u8; 33],
         network: ergo_ser::address::NetworkPrefix,
     ) -> Result<(), ergo_wallet::error::WalletError> {
-        // Insert into the ordered cache.
-        self.cached_pubkeys.insert(derivation_path_index, pubkey);
-
-        // Compute the canonical P2PK ErgoTree bytes that the apply
-        // hook will compare against.
-        let tree_bytes = ergo_ser::address::build_p2pk_tree_bytes(&pubkey).map_err(|e| {
-            ergo_wallet::error::WalletError::InvalidPublicKey(format!(
-                "p2pk tree build failed: {e:?}"
-            ))
-        })?;
-        self.tracked_p2pk_trees.insert(tree_bytes);
-
-        // Rebuild visible_addresses (cheaper to rebuild than diff).
-        self.rebuild_visible_addresses(network)?;
-        Ok(())
+        let mut pubkeys = self.cached_pubkeys.clone();
+        pubkeys.insert(derivation_path_index, pubkey);
+        self.replace_cached_pubkeys(pubkeys, network)
     }
 
-    /// Remove a tracked pubkey by derivation-path index. Used during
-    /// rescan recovery where the redb table is the source of truth
-    /// and we re-sync `cached_pubkeys` from it.
+    /// Remove a tracked pubkey by index, preserving trees referenced by another
+    /// index. All derived caches are replaced only after validation succeeds.
     pub fn remove_tracked_pubkey(
         &mut self,
         derivation_path_index: u64,
         network: ergo_ser::address::NetworkPrefix,
     ) -> Result<(), ergo_wallet::error::WalletError> {
-        if let Some(pubkey) = self.cached_pubkeys.remove(&derivation_path_index) {
-            let tree_bytes = ergo_ser::address::build_p2pk_tree_bytes(&pubkey).map_err(|e| {
-                ergo_wallet::error::WalletError::InvalidPublicKey(format!(
-                    "p2pk tree build failed: {e:?}"
-                ))
-            })?;
-            self.tracked_p2pk_trees.remove(&tree_bytes);
-            self.rebuild_visible_addresses(network)?;
+        if !self.cached_pubkeys.contains_key(&derivation_path_index) {
+            return Ok(());
         }
-        Ok(())
+        let mut pubkeys = self.cached_pubkeys.clone();
+        pubkeys.remove(&derivation_path_index);
+        self.replace_cached_pubkeys(pubkeys, network)
     }
 
-    /// Rebuild the visible-address list from `cached_pubkeys`.
-    /// Implements the Scala `WalletCache.publicKeyAddresses` filter:
-    /// when there are exactly 2 tracked pubkeys, hide the lowest-index
-    /// one (the master at index 0); for 1 or 3+, show all.
-    fn rebuild_visible_addresses(
+    fn replace_cached_pubkeys(
         &mut self,
+        pubkeys: BTreeMap<u64, [u8; 33]>,
         network: ergo_ser::address::NetworkPrefix,
     ) -> Result<(), ergo_wallet::error::WalletError> {
-        let total = self.cached_pubkeys.len();
-        let skip_first = total == 2;
-        self.visible_addresses.clear();
-        for (idx, (_path_index, pubkey)) in self.cached_pubkeys.iter().enumerate() {
-            if skip_first && idx == 0 {
-                continue;
-            }
-            let addr = ergo_wallet::address::pubkey_to_p2pk_address(pubkey, network)?;
-            self.visible_addresses.push(addr);
+        let mut trees = BTreeSet::new();
+        let mut visible = Vec::new();
+        for pubkey in pubkeys.values() {
+            let tree = ergo_ser::address::build_p2pk_tree_bytes(pubkey).map_err(|e| {
+                ergo_wallet::error::WalletError::InvalidPublicKey(format!("p2pk tree build: {e:?}"))
+            })?;
+            trees.insert(tree);
+            // Validate every key, including keys hidden from the public list.
+            let address = ergo_wallet::address::pubkey_to_p2pk_address(pubkey, network)?;
+            visible.push(address);
         }
+        self.cached_pubkeys = pubkeys;
+        self.tracked_p2pk_trees = trees;
+        self.visible_addresses = visible;
         Ok(())
     }
 
     /// Boot-time rehydration: rebuild in-memory caches from the
-    /// persistence layer. After this call, the wallet is in
-    /// Locked state (no prover yet); operator must call Unlock
-    /// to populate `prover`.
+    /// persistence layer. This replaces cache fields only; the caller owns
+    /// the unlock/prover lifecycle.
     ///
     /// Atomicity: the caller wraps this in a single redb read
-    /// transaction so the snapshot is consistent.
+    /// transaction so the snapshot is consistent. Read or encoding failures
+    /// leave the previous caches and change address unchanged.
     pub fn hydrate_from_reader<R: HydrationSource + ?Sized>(
         &mut self,
         reader: &R,
         network: ergo_ser::address::NetworkPrefix,
     ) -> Result<(), ergo_wallet::error::WalletError> {
-        self.cached_pubkeys.clear();
-        self.tracked_p2pk_trees.clear();
-        self.visible_addresses.clear();
-
-        for (path_idx, pubkey) in reader.tracked_pubkeys() {
-            self.cached_pubkeys.insert(path_idx, pubkey);
-            let tree_bytes = ergo_ser::address::build_p2pk_tree_bytes(&pubkey).map_err(|e| {
-                ergo_wallet::error::WalletError::InvalidPublicKey(format!(
-                    "p2pk tree build during hydration: {e:?}"
-                ))
-            })?;
-            self.tracked_p2pk_trees.insert(tree_bytes);
-        }
-
-        // Read visible-pubkeys from the persisted table (the source
-        // of truth, written atomically with tracked_pubkeys).
-        // Render to addresses here — the persisted table is
-        // network-neutral pubkey bytes; the address rendering
-        // happens with the current network prefix.
-        for (_idx, pubkey) in reader.visible_pubkeys() {
-            let addr = ergo_wallet::address::pubkey_to_p2pk_address(&pubkey, network)?;
-            self.visible_addresses.push(addr);
-        }
-
-        // Same for change address: persisted as pubkey, rendered at read.
-        self.persisted_change_address = match reader.change_address_pubkey() {
-            Some(pk) => Some(ergo_wallet::address::pubkey_to_p2pk_address(&pk, network)?),
-            None => None,
+        let mut pubkeys = BTreeMap::new();
+        let mut trees = BTreeSet::new();
+        let mut visible = Vec::new();
+        let read_error = |error| {
+            ergo_wallet::error::WalletError::SecretFile(format!("wallet hydration: {error}"))
         };
+        for (path_idx, pubkey) in reader.tracked_pubkeys().map_err(read_error)? {
+            let tree = ergo_ser::address::build_p2pk_tree_bytes(&pubkey).map_err(|e| {
+                ergo_wallet::error::WalletError::InvalidPublicKey(format!("p2pk hydration: {e:?}"))
+            })?;
+            // The tree builder accepts compressed bytes; address encoding
+            // validates their SEC1 point even when this key is not visible.
+            ergo_wallet::address::pubkey_to_p2pk_address(&pubkey, network)?;
+            if pubkeys.insert(path_idx, pubkey).is_some() {
+                return Err(ergo_wallet::error::WalletError::SecretFile(
+                    "duplicate tracked key index during hydration".into(),
+                ));
+            }
+            trees.insert(tree);
+        }
+        for (_, pubkey) in reader.visible_pubkeys().map_err(read_error)? {
+            visible.push(ergo_wallet::address::pubkey_to_p2pk_address(
+                &pubkey, network,
+            )?);
+        }
+        let change = reader
+            .change_address_pubkey()
+            .map_err(read_error)?
+            .map(|pk| ergo_wallet::address::pubkey_to_p2pk_address(&pk, network))
+            .transpose()?;
+        self.cached_pubkeys = pubkeys;
+        self.tracked_p2pk_trees = trees;
+        self.visible_addresses = visible;
+        self.persisted_change_address = change;
         Ok(())
     }
 }
@@ -288,6 +326,44 @@ mod tests {
         assert!(s.change_address().is_none());
         assert!(!s.is_unlocked());
         assert!(!s.use_pre_1627);
+    }
+
+    #[test]
+    fn visibility_follows_scala_storage_key_order() {
+        const H: u32 = 0x8000_0000;
+        let eip3 = |account: u32, index: u32| vec![H | 44, H | 429, H | account, 0, index];
+        // `WalletStorage.pubKeyPrefixKey` suffixes, after the `00 02` prefix.
+        assert_eq!(hex::encode(scala_path_key(&[])), "010200000000");
+        assert_eq!(hex::encode(scala_path_key(&[1])), "01040000000000000001");
+        assert_eq!(
+            hex::encode(scala_path_key(&eip3(0, 0))),
+            "010c000000008000002c800001ad800000000000000000000000"
+        );
+        // Entries in insertion order; pubkey `[n; 33]` marks the n-th inserted.
+        let visible = |paths: Vec<Vec<u32>>| -> Vec<u8> {
+            let tracked: Vec<_> = paths
+                .into_iter()
+                .zip(1u8..)
+                .map(|(path, n)| (u64::from(n), [n; 33], path))
+                .collect();
+            visible_pubkeys_with_paths(&tracked)
+                .iter()
+                .map(|pk| pk[0])
+                .collect()
+        };
+        // A pre-EIP-3 key sorts before the EIP-3 address: the master shows.
+        assert_eq!(visible(vec![vec![], eip3(0, 0), vec![1]]), [1, 3, 2]);
+        // Indices compare as unsigned integers, not by insertion.
+        assert_eq!(
+            visible(vec![vec![], eip3(0, 0), eip3(0, 256), eip3(0, 128)]),
+            [2, 4, 3]
+        );
+        assert_eq!(
+            visible(vec![vec![], eip3(0, 0), eip3(1, 0), eip3(0, 1)]),
+            [2, 4, 3]
+        );
+        // Hardened indices sort after non-hardened ones of the same depth.
+        assert_eq!(visible(vec![vec![], vec![H], vec![1]]), [1, 3, 2]);
     }
 
     #[test]
@@ -321,15 +397,97 @@ mod tests {
     }
 
     #[test]
-    fn insert_two_pubkeys_master_hidden() {
-        // Scala WalletCache.publicKeyAddresses filter: when there are
-        // exactly two tracked pubkeys AND the shape is master +
-        // EIP-3 first child, the master is HIDDEN from
-        // /wallet/addresses. We don't try to detect that exact shape;
-        // the simpler heuristic is: with exactly 2 cached
-        // pubkeys, hide index 0 (master) and show only index 1+. This
-        // matches the auto-derive case at unlock. For 1 pubkey or 3+,
-        // show all.
+    fn replacement_removal_and_rejected_insert_keep_caches_coherent() {
+        let network = ergo_ser::address::NetworkPrefix::Mainnet;
+        let first: [u8; 33] =
+            hex::decode("0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let second: [u8; 33] =
+            hex::decode("02387003b02747904c5aec88f2de54872c60fca0880661f3449727314b10267338")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let first_tree = ergo_ser::address::build_p2pk_tree_bytes(&first).unwrap();
+        let second_tree = ergo_ser::address::build_p2pk_tree_bytes(&second).unwrap();
+        let mut state = WalletState::empty(false);
+        state.insert_tracked_pubkey(0, first, network).unwrap();
+        let before = format!("{state:?}");
+        let addresses = state.visible_addresses().to_vec();
+        assert!(state.insert_tracked_pubkey(0, [0; 33], network).is_err());
+        assert_eq!(format!("{state:?}"), before);
+        assert_eq!(state.cached_pubkeys(), &BTreeMap::from([(0, first)]));
+        assert_eq!(state.visible_addresses(), addresses);
+        assert!(state.is_tracked_tree(&first_tree));
+
+        state.insert_tracked_pubkey(0, second, network).unwrap();
+        assert!(!state.is_tracked_tree(&first_tree));
+        assert!(state.is_tracked_tree(&second_tree));
+        state.insert_tracked_pubkey(1, second, network).unwrap();
+        state.remove_tracked_pubkey(0, network).unwrap();
+        assert!(state.is_tracked_tree(&second_tree));
+        assert_eq!(state.cached_pubkeys(), &BTreeMap::from([(1, second)]));
+    }
+
+    #[test]
+    fn hydration_read_and_encoding_failures_preserve_the_previous_snapshot() {
+        let pk: [u8; 33] =
+            hex::decode("0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        struct Failing {
+            stage: u8,
+            pk: [u8; 33],
+        }
+        impl HydrationSource for Failing {
+            fn tracked_pubkeys(&self) -> Result<Vec<(u64, [u8; 33])>, String> {
+                if self.stage == 0 {
+                    Err("tracked read failed".into())
+                } else {
+                    Ok(vec![(1, self.pk)])
+                }
+            }
+            fn visible_pubkeys(&self) -> Result<Vec<(u32, [u8; 33])>, String> {
+                if self.stage == 1 {
+                    Err("visible read failed".into())
+                } else {
+                    Ok(vec![(0, if self.stage == 3 { [0; 33] } else { self.pk })])
+                }
+            }
+            fn change_address_pubkey(&self) -> Result<Option<[u8; 33]>, String> {
+                if self.stage == 2 {
+                    Err("change read failed".into())
+                } else {
+                    Ok(Some(if self.stage == 4 { [0; 33] } else { self.pk }))
+                }
+            }
+        }
+        let network = ergo_ser::address::NetworkPrefix::Mainnet;
+        let mut state = WalletState::empty(true);
+        state.insert_tracked_pubkey(0, pk, network).unwrap();
+        state.set_change_address(
+            ergo_wallet::address::pubkey_to_p2pk_address(&pk, network).unwrap(),
+        );
+        state.set_unlocked(true);
+        let before = format!("{state:?}");
+        let pubkeys = state.cached_pubkeys().clone();
+        let trees = state.tracked_p2pk_trees().clone();
+        let addresses = state.visible_addresses().to_vec();
+        for stage in 0..5 {
+            assert!(state
+                .hydrate_from_reader(&Failing { stage, pk }, network)
+                .is_err());
+            assert_eq!(format!("{state:?}"), before);
+            assert_eq!(state.cached_pubkeys(), &pubkeys);
+            assert_eq!(state.tracked_p2pk_trees(), &trees);
+            assert_eq!(state.visible_addresses(), addresses);
+        }
+    }
+
+    #[test]
+    fn raw_insert_does_not_infer_hd_paths_from_key_count() {
         let mut s = WalletState::empty(false);
         let master_pk: [u8; 33] =
             hex::decode("0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2")
@@ -352,8 +510,52 @@ mod tests {
         assert_eq!(s.cached_pubkeys().len(), 2);
         assert_eq!(
             s.visible_addresses().len(),
-            1,
-            "with master + first-child shape, master is hidden",
+            2,
+            "raw inserts have no path metadata for hiding a master",
+        );
+    }
+
+    #[test]
+    fn path_based_visibility_retains_the_wallet_cache_shape_rule() {
+        let master = (10, [1; 33], vec![]);
+        let pre_eip3 = (11, [2; 33], vec![1]);
+        let eip3 = (
+            11,
+            [2; 33],
+            vec![44 | 0x8000_0000, 429 | 0x8000_0000, 0x8000_0000, 0, 0],
+        );
+        let later = (
+            12,
+            [3; 33],
+            vec![44 | 0x8000_0000, 429 | 0x8000_0000, 0x8000_0000, 0, 1],
+        );
+        assert_eq!(
+            visible_pubkeys_with_paths(std::slice::from_ref(&master)),
+            vec![[1; 33]]
+        );
+        assert_eq!(
+            visible_pubkeys_with_paths(&[master.clone(), pre_eip3.clone()]),
+            vec![[1; 33], [2; 33]]
+        );
+        assert_eq!(
+            visible_pubkeys_with_paths(&[master.clone(), eip3.clone(), later]),
+            vec![[2; 33], [3; 33]]
+        );
+        // A shorter path tracked later sorts second in Scala's storage order.
+        let shorter = (12, [3; 33], vec![2]);
+        assert_eq!(
+            visible_pubkeys_with_paths(&[master.clone(), eip3.clone(), shorter]),
+            vec![[1; 33], [3; 33], [2; 33]]
+        );
+        assert_eq!(
+            visible_pubkeys_with_paths(&[pre_eip3, eip3.clone()]),
+            vec![[2; 33], [2; 33]]
+        );
+        // SDK DerivationPath.isEip3 accepts the account prefix itself.
+        let account = (11, [2; 33], eip3.2[..3].to_vec());
+        assert_eq!(
+            visible_pubkeys_with_paths(&[master, account]),
+            vec![[2; 33]]
         );
     }
 
@@ -378,14 +580,14 @@ mod tests {
             change_pk: Option<[u8; 33]>,
         }
         impl HydrationSource for Mock {
-            fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_> {
-                Box::new(self.pks.iter().copied())
+            fn tracked_pubkeys(&self) -> Result<Vec<(u64, [u8; 33])>, String> {
+                Ok(self.pks.clone())
             }
-            fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_> {
-                Box::new(self.visible.iter().copied())
+            fn visible_pubkeys(&self) -> Result<Vec<(u32, [u8; 33])>, String> {
+                Ok(self.visible.clone())
             }
-            fn change_address_pubkey(&self) -> Option<[u8; 33]> {
-                self.change_pk
+            fn change_address_pubkey(&self) -> Result<Option<[u8; 33]>, String> {
+                Ok(self.change_pk)
             }
         }
         let pk1: [u8; 33] = pks[1].1.clone().try_into().unwrap();

@@ -2,7 +2,7 @@
   "_note": [
     "JVM parse verdicts for SelectField (0x8C) field indexes, recorded 2026-09-17 with",
     "`cargo run -p ergo-difftest -- --oracle --repro <hex> --surface ergo_tree` against",
-    "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala (sigma-state 6.0.2). Scala constructs",
+    "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala (sigma-state 6.0.6; re-run 2026-09-30). Scala constructs",
     "`SelectField(input, fieldIndex)` whose `tpe = input.tpe.items(fieldIndex - 1)`",
     "(data/shared/src/main/scala/sigma/ast/transformers.scala:291-294) at deserialization,",
     "so an index of 0 or above the tuple arity throws IndexOutOfBoundsException and the",
@@ -158,17 +158,17 @@
   ],
   "manifest": {
     "scala": {
-      "sigmastate_version": "6.0.2",
-      "ergo_version": "6.0.2"
+      "sigmastate_version": "6.0.6",
+      "ergo_version": "6.0.6"
     },
     "tool": {
       "generator": "ergo-difftest/src/gen/parser_type_store.py",
       "oracle_script": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala",
-      "oracle_sha256": "e656cc2045c8ff6c95e4f64224d987e353a4da85be5c4ac8fcaaceec015eec77"
+      "oracle_sha256": "7035ee2453e49c171951dedb192458034e4b276bf603a7f8d3746f6a7083ae88"
     },
     "run": {
       "command": "PYTHONDONTWRITEBYTECODE=1 python3 ergo-difftest/src/gen/parser_type_store.py",
-      "timestamp": "2026-09-20T02:03:40.686587+00:00",
+      "timestamp": "2026-09-29T17:41:57.645359+00:00",
       "selected": 24,
       "executed": 24,
       "skipped": 0

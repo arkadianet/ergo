@@ -18,14 +18,21 @@
 use std::panic::{self, AssertUnwindSafe};
 
 pub mod avl_frame;
+pub mod delivery_fuzz;
+pub mod execution_fuzz;
+pub mod execution_metadata;
 pub mod fuzz;
 pub mod gen;
 pub mod generate;
 pub mod methodcall;
 pub mod minimize;
+pub mod network_fuzz;
 pub mod oracle;
 pub mod regressions;
 pub mod rng;
+// Compiled by build.rs; the crate builds it only to test that inventory.
+#[cfg(test)]
+mod source_inventory;
 pub mod surfaces;
 
 use rng::Rng;
@@ -42,7 +49,8 @@ pub enum Outcome {
     ///   (JVM throws on the same overflow), or
     /// * re-decode of own output failed for a **documented Scala-shared**
     ///   reshape hazard (Bug #19 size-delimited soft-fork wrap / type-depth
-    ///   soft cap). Not a Rust-only codec inconsistency.
+    ///   soft cap), or #19 re-decode succeeded but flipped opaque to structural.
+    ///   Not a Rust-only codec inconsistency.
     WriteRejected,
     /// An invariant was violated (or the decode panicked). Carries a
     /// human-readable detail including the offending bytes.
@@ -89,8 +97,6 @@ pub fn run_campaign(
     let mut rng = Rng::new(seed);
     let mut stats = Stats::default();
     let mut findings = Vec::new();
-
-    let _silent = SilencePanics::install();
 
     for iter in 0..iters {
         let input = generate::gen_input(&mut rng, corpus);
@@ -145,7 +151,6 @@ pub fn run_structured_campaign(
         None => gen::SURFACES.to_vec(),
     };
 
-    let _silent = SilencePanics::install();
     let mut stats = Stats::default();
     let mut findings = Vec::new();
     let mut touched: std::collections::BTreeMap<&'static str, gen::FeatureSet> =
@@ -198,7 +203,6 @@ pub fn run_structured_campaign(
 /// Run every surface over a single explicit input (for `--repro` / triage).
 pub fn run_input(input: &[u8], only: Option<&str>) -> Vec<(&'static str, Outcome)> {
     let surfaces = surfaces::registry(only);
-    let _silent = SilencePanics::install();
     surfaces
         .iter()
         .map(|s| (s.name, run_one(s, input)))
@@ -215,13 +219,12 @@ fn run_one(s: &surfaces::Surface, input: &[u8]) -> Outcome {
 }
 
 /// Self-check that the harness's bug-detection machinery actually has teeth,
-/// run the same way a campaign runs (hook silenced + `catch_unwind`). A decode
+/// run the same way a campaign runs (`catch_unwind`). The caller's process-wide
+/// panic hook remains installed; a decode
 /// panic MUST be caught and reported as a [`Outcome::Bug`], never abort the
 /// process. Invoked out-of-process via `difftest --selftest` (see
-/// `tests/selftest.rs`) so it does not fight the libtest panic hook.
+/// `tests/it/selftest.rs`) to exercise the actual CLI exit path.
 pub fn selftest() -> Result<(), String> {
-    let _silent = SilencePanics::install();
-
     let boom = surfaces::Surface {
         name: "boom",
         run: Box::new(|_| panic!("kaboom")),
@@ -274,34 +277,11 @@ pub fn from_hex(s: &str) -> Option<Vec<u8>> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     };
-    s.chunks_exact(2)
+    s.as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
         .collect()
-}
-
-/// RAII guard that silences the default panic hook for the duration of a
-/// campaign (the decoders' panics are expected to be caught and reported, not
-/// printed). Restores the prior hook on drop.
-type PanicHook = Box<dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
-
-struct SilencePanics {
-    prev: Option<PanicHook>,
-}
-
-impl SilencePanics {
-    fn install() -> Self {
-        let prev = panic::take_hook();
-        panic::set_hook(Box::new(|_| {}));
-        SilencePanics { prev: Some(prev) }
-    }
-}
-
-impl Drop for SilencePanics {
-    fn drop(&mut self) {
-        if let Some(prev) = self.prev.take() {
-            panic::set_hook(prev);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -309,8 +289,8 @@ mod tests {
     use super::*;
 
     // NB: the panic-catching path is verified out-of-process by
-    // `tests/selftest.rs` (`difftest --selftest`). Triggering a real panic
-    // inside a `#[test]` fights the libtest panic hook, so it is not done here.
+    // `tests/it/selftest.rs` (`difftest --selftest`). No campaign or replay
+    // changes the process-wide hook owned by its caller.
 
     #[test]
     fn clean_surface_passes_through() {

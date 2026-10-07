@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+// ---- wire DTOs ----
+
+/// A single token amount carried in a payment request or response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetDto {
@@ -7,6 +10,7 @@ pub struct AssetDto {
     pub amount: u64,
 }
 
+/// One payment target: address + nanoERG value + optional tokens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaymentRequestDto {
@@ -16,24 +20,35 @@ pub struct PaymentRequestDto {
     pub assets: Vec<AssetDto>,
 }
 
+/// Hex-encoded bytes of a signed transaction (binary via hex wire shape).
+/// The current wire shape is binary-via-hex; Scala-style nested JSON may be
+/// added later.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedTxDto {
+    /// Hex-encoded serialised transaction bytes.
     pub bytes: String,
 }
 
+/// Hex-encoded bytes of an unsigned transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnsignedTxDto {
+    /// Hex-encoded serialised unsigned transaction bytes.
     pub bytes: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Wire enum for an externally supplied secret. Distinct from
+/// `ergo_wallet::proving::external::ProverExternalSecret` (internal type
+/// carrying decoded `k256::Scalar`s). This type carries hex strings and
+/// is deserialized from JSON; the writer task decodes hex → scalar on use.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ExternalSecretDto {
-    Dlog {
-        dlog: String,
-    },
+    /// Discrete log secret: `dlog` is a big-endian hex scalar.
+    Dlog { dlog: String },
+    /// Diffie-Hellman tuple: four compressed SEC1 group element points +
+    /// the scalar secret.
     DhTuple {
         g: String,
         h: String,
@@ -43,69 +58,204 @@ pub enum ExternalSecretDto {
     },
 }
 
+impl std::fmt::Debug for ExternalSecretDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dlog { .. } => f.debug_struct("Dlog").field("dlog", &"[REDACTED]").finish(),
+            Self::DhTuple { g, h, u, v, .. } => f
+                .debug_struct("DhTuple")
+                .field("g", g)
+                .field("h", h)
+                .field("u", u)
+                .field("v", v)
+                .field("x", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+/// Wire shape for a transaction hint bag.
+///
+/// Mirrors Scala `TransactionHintsBag(secretHints, publicHints)`. The map key
+/// is the input index serialised as a decimal string (Scala JSON shape).
+/// Secret hints carry `OwnCommitment`; public hints carry everything else
+/// (`RealCommitment`, `SimulatedCommitment`, `RealSecretProof`,
+/// `SimulatedSecretProof`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TxHintsBagDto {
+    /// Per-input secret hints keyed by input index (decimal string).
     #[serde(default)]
     pub secret_hints: std::collections::BTreeMap<String, Vec<HintDto>>,
+    /// Per-input public hints keyed by input index (decimal string).
     #[serde(default)]
     pub public_hints: std::collections::BTreeMap<String, Vec<HintDto>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A single sigma-protocol hint.
+///
+/// The `hint` field acts as the serde tag and uses the canonical Scala/sigma-rust
+/// names: `cmtReal`, `cmtSimulated`, `cmtWithSecret`, `proofReal`, `proofSimulated`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "hint", rename_all = "camelCase")]
 pub enum HintDto {
+    /// Real commitment — public; shared with co-signers.
+    /// Scala: `RealCommitment`.
     #[serde(rename = "cmtReal")]
     RealCommitment {
         image: SigmaBooleanJson,
         commitment: FirstProverMessageJson,
         position: String,
     },
+    /// Simulated commitment — for OR-branches the prover can't prove.
+    /// Scala: `SimulatedCommitment`.
     #[serde(rename = "cmtSimulated")]
     SimulatedCommitment {
         image: SigmaBooleanJson,
         commitment: FirstProverMessageJson,
+        /// Fiat-Shamir challenge (24 bytes, hex-encoded).
         challenge: String,
         position: String,
     },
+    /// Own commitment — private; contains the secret randomness scalar.
+    /// Scala: `OwnCommitment` / `cmtWithSecret`.
     #[serde(rename = "cmtWithSecret")]
     OwnCommitment {
         image: SigmaBooleanJson,
+        /// Secret randomness scalar `r` (32 bytes, hex-encoded).
+        /// Must never be logged or returned to untrusted callers.
         secret: String,
         commitment: FirstProverMessageJson,
         position: String,
     },
+    /// Real secret proof — challenge + response for a leaf the prover knows.
+    /// Scala: `RealSecretProof`.
     #[serde(rename = "proofReal")]
     RealSecretProof {
         image: SigmaBooleanJson,
+        /// Fiat-Shamir challenge (24 bytes, hex-encoded).
         challenge: String,
+        /// Schnorr/DHT response scalar (32 bytes, hex-encoded).
         response: String,
         position: String,
     },
+    /// Simulated proof — for OR-branches the prover simulates.
+    /// Scala: `SimulatedSecretProof`.
     #[serde(rename = "proofSimulated")]
     SimulatedSecretProof {
         image: SigmaBooleanJson,
+        /// Fiat-Shamir challenge (24 bytes, hex-encoded).
         challenge: String,
+        /// Simulated response scalar (32 bytes, hex-encoded).
         response: String,
         position: String,
     },
 }
 
+impl std::fmt::Debug for HintDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RealCommitment {
+                image,
+                commitment,
+                position,
+            } => f
+                .debug_struct("RealCommitment")
+                .field("image", image)
+                .field("commitment", commitment)
+                .field("position", position)
+                .finish(),
+            Self::SimulatedCommitment {
+                image,
+                commitment,
+                challenge,
+                position,
+            } => f
+                .debug_struct("SimulatedCommitment")
+                .field("image", image)
+                .field("commitment", commitment)
+                .field("challenge", challenge)
+                .field("position", position)
+                .finish(),
+            Self::OwnCommitment {
+                image,
+                commitment,
+                position,
+                ..
+            } => f
+                .debug_struct("OwnCommitment")
+                .field("image", image)
+                .field("secret", &"[REDACTED]")
+                .field("commitment", commitment)
+                .field("position", position)
+                .finish(),
+            Self::RealSecretProof {
+                image,
+                challenge,
+                response,
+                position,
+            } => f
+                .debug_struct("RealSecretProof")
+                .field("image", image)
+                .field("challenge", challenge)
+                .field("response", response)
+                .field("position", position)
+                .finish(),
+            Self::SimulatedSecretProof {
+                image,
+                challenge,
+                response,
+                position,
+            } => f
+                .debug_struct("SimulatedSecretProof")
+                .field("image", image)
+                .field("challenge", challenge)
+                .field("response", response)
+                .field("position", position)
+                .finish(),
+        }
+    }
+}
+
+/// First-prover message: the public commitment broadcast at the start of a
+/// sigma protocol round. The `op` field tags the variant.
+///
+/// Scala: `FirstProverMessage` hierarchy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum FirstProverMessageJson {
+    /// Schnorr commitment `A = g^r` (SEC1-compressed, hex-encoded).
     #[serde(rename = "dlogA")]
-    Dlog { a: String },
+    Dlog {
+        /// `g^r` — 33-byte compressed point, hex-encoded.
+        a: String,
+    },
+    /// DH-tuple commitment `(A, B) = (g^r, h^r)` — two compressed points.
     #[serde(rename = "dhtABab")]
-    DhTuple { a: String, b: String },
+    DhTuple {
+        /// `g^r` — 33-byte compressed point, hex-encoded.
+        a: String,
+        /// `h^r` — 33-byte compressed point, hex-encoded.
+        b: String,
+    },
 }
 
+/// Opaque JSON representation of a `SigmaBoolean` proposition.
+///
+/// The inner value is kept as a `serde_json::Value` so the API layer
+/// can forward it without needing to parse the full sigma-boolean tree.
+/// Callers supply the Scala-compatible JSON object verbatim; typed
+/// conversion helpers may be added later.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SigmaBooleanJson {
     #[serde(flatten)]
     pub inner: serde_json::Value,
 }
 
+/// Serialise a `NodePosition` to its hyphen-joined wire string.
+///
+/// Example: `NodePosition { positions: [1, 0, 2] }` → `"1-0-2"`.
+/// The root-level crypto-tree prefix `[1]` serialises as `"1"` (no hyphen).
 pub fn node_position_to_str(positions: &[u32]) -> String {
     positions
         .iter()
@@ -114,6 +264,9 @@ pub fn node_position_to_str(positions: &[u32]) -> String {
         .join("-")
 }
 
+/// Parse a hyphen-joined position string back into a `Vec<u32>`.
+///
+/// Returns `Err` if any segment is not a valid `u32`.
 pub fn node_position_from_str(s: &str) -> Result<Vec<u32>, String> {
     s.split('-')
         .map(|seg| {
@@ -123,12 +276,18 @@ pub fn node_position_from_str(s: &str) -> Result<Vec<u32>, String> {
         .collect()
 }
 
+// ---- request/response DTOs ----
+
+/// `POST /wallet/transaction/generate` — build + sign, no submit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionGenerateRequest {
     pub requests: Vec<PaymentRequestDto>,
+    /// Override box selection with explicit box IDs (hex).
     pub inputs: Option<Vec<String>>,
+    /// Data-input box IDs (hex).
     pub data_inputs: Option<Vec<String>>,
+    /// Explicit fee in nanoERG (uses MinFee when omitted).
     pub fee: Option<u64>,
 }
 
@@ -138,6 +297,7 @@ pub struct TransactionGenerateResponse {
     pub transaction: SignedTxDto,
 }
 
+/// `POST /wallet/transaction/generateUnsigned` — build only, no sign.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionGenerateUnsignedRequest {
@@ -153,6 +313,8 @@ pub struct TransactionGenerateUnsignedResponse {
     pub unsigned_tx: UnsignedTxDto,
 }
 
+/// `POST /wallet/transaction/sign` — sign an already-built unsigned tx.
+/// Works even when wallet is locked if `external_secrets` cover all inputs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionSignRequest {
@@ -169,6 +331,10 @@ pub struct TransactionSignResponse {
     pub transaction: SignedTxDto,
 }
 
+/// `POST /wallet/transaction/send` — build + sign + submit.
+/// Mirrors `TransactionGenerateRequest` per Scala's `sendTransactionR`
+/// (RequestsHolder path: build + sign + verify + submit with explicit
+/// input/dataInput overrides).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionSendRequest {
@@ -178,13 +344,20 @@ pub struct TransactionSendRequest {
     pub fee: Option<u64>,
 }
 
+// ---- boxes/collect DTOs (needed by WalletAdmin trait before boxes_collect.rs) ----
+
+/// `POST /wallet/boxes/collect` request: target value + optional token targets.
+/// Used by `WalletAdmin::boxes_collect` which calls the box selector without
+/// submitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxesCollectRequest {
+    /// Target nanoERG amount to collect.
     pub target_assets: Vec<AssetDto>,
     pub target_balance: u64,
 }
 
+/// Response to `POST /wallet/boxes/collect`: selected boxes + change boxes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxesCollectResponse {

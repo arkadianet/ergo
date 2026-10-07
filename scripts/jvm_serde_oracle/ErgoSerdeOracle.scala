@@ -11,15 +11,16 @@
 // diffs the verdicts. An ACCEPT/REJECT mismatch is a consensus divergence — the
 // class the UTF-8 STypeVar and off-curve-GroupElement findings belong to.
 //
-// Dependencies are pinned to the node's versions (see `/info` appVersion = 6.0.2).
+// Dependencies are pinned to the reference node's versions: the Scala node v6.0.6 and
+// v6.1.6 both ship sigma-state 6.0.6.
 // `ergo-core` (transaction/header) is not on Maven Central — publish it locally:
 //   cd <ergo reference>; sbt "avldb/publishLocal" "ergoWallet/publishLocal" "ergoCore/publishLocal"
 // avldb pulls leveldbjni-all from the GitLab repo declared below.
 //
 //> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
 //> using scala 2.12
-//> using dep org.scorexfoundation::sigma-state:6.0.2
-//> using dep org.ergoplatform::ergo-core:6.0.2
+//> using dep org.scorexfoundation::sigma-state:6.0.6
+//> using dep org.ergoplatform::ergo-core:6.0.6
 
 import scala.io.StdIn
 import scorex.util.encode.Base16
@@ -178,7 +179,7 @@ object ErgoSerdeOracle {
   // historical `VersionContext` — the `ergoTreeVersion <= activatedVersion`
   // require is inert below JitActivationVersion (2), so the same bytes flip
   // between ACCEPT and REJECT across activated versions (#327). A bare surface
-  // name keeps the mainnet 6.0.2 default of 3.
+  // name keeps the mainnet default of 3.
   def handle(surfaceSpec: String, hexStr: String): String = {
     val (surface, activated): (String, Byte) = surfaceSpec.split("@", 2) match {
       case Array(s, v) => (s, v.toByte)
@@ -189,7 +190,7 @@ object ErgoSerdeOracle {
       case scala.util.Success(bytes) =>
         try
           // Match the consensus node's runtime: activatedVersion = 3 (mainnet
-          // 6.0.2, = MAX_SUPPORTED_TREE_VERSION) unless the surface spec says
+          // 6.0.x, = MAX_SUPPORTED_TREE_VERSION) unless the surface spec says
           // otherwise. WITHOUT this the oracle runs at the default
           // activatedVersion = 1, whose `withVersions` require short-circuits, so
           // a tree whose header version exceeds the activated version is NEVER
@@ -200,7 +201,18 @@ object ErgoSerdeOracle {
           surface match {
             case "ergo_tree" =>
               val t = tree.deserializeErgoTree(bytes)
-              acc(t.bytesHex)
+              // Re-serialize from the parsed structure, like every other
+              // surface below. `t.bytesHex` is the RETAINED input slice, so
+              // reporting it compares Rust's fresh serialization against bytes
+              // the reference never re-encoded: any tree that reads in a
+              // non-canonical form (a declared size that is not the body's
+              // length, a pre-v3 Upcast, a compact Coll[Coll[T]] prefix) then
+              // reads as a canonical divergence when both writers in fact
+              // agree. Retained-input-byte parity is a real property, but it
+              // is `propositionBytes` parity, not canonical re-encoding, and
+              // it is checked by comparing the input to the reference's own
+              // parse rather than by this line.
+              acc(hex(tree.serializeErgoTree(t)))
             case "sigma_type" =>
               val tpe = TypeSerializer.deserialize(SigmaSerializer.startReader(bytes))
               acc {

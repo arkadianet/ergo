@@ -1,0 +1,227 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Box.tree_degrade_gate",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "box-gate-placeholder-out-of-store-reject#0",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A bare box whose size-flagged v0 tree is 08 02 73 05: the body is ConstantPlaceholder(5) and the tree has no constants, so ConstantStore.get(5) indexes past the empty store (ArrayIndexOutOfBoundsException). deserializeErgoTree degrades a size-flagged tree only on a ValidationException (ErgoTreeSerializer.scala:197), so the JVM rejects. An impl that degrades any body failure round-trips it: the over-accept.",
+      "bytes_hex" : "c0843d080273050100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-placeholder-in-store-accept#1",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A bare box whose size-flagged, segregated v0 tree 18 05 01 08 d3 73 00 has constant 0 = SigmaProp(true) and the body ConstantPlaceholder(0). It parses. Round-trip identity.",
+      "bytes_hex" : "c0843d18050108d373000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-type-code-zero-reject#2",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A bare box whose size-flagged v0 tree is 08 01 00: a constant of type code 0. TypeSerializer throws InvalidTypePrefix, a SerializerException, which does not degrade the tree: the JVM rejects.",
+      "bytes_hex" : "c0843d0801000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-sigmaboolean-opcode-reject#3",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A bare box whose size-flagged v0 tree is 08 02 08 01: a SigmaProp constant whose SigmaBoolean opcode is 0x01. The SigmaBoolean parser matches the opcode with no default case: a MatchError, and the JVM rejects.",
+      "bytes_hex" : "c0843d080208010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-sigmaprop-control-accept#4",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The control for #2 and #3: A bare box whose size-flagged v0 tree is 08 02 08 d3, SigmaProp(true). It parses. Round-trip identity.",
+      "bytes_hex" : "c0843d080208d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-bigint-size-33-reject#5",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A bare box whose size-flagged v0 tree is a BigInt constant of declared size 33 (06 21), followed by 33 value bytes: 00 01 and 31 zeros, 2^248, which fits 256 bits. So an impl without the size bound parses it whole. CoreDataSerializer throws a SerializerException for any size over 32: the JVM rejects.",
+      "bytes_hex" : "c0843d082306210001000000000000000000000000000000000000000000000000000000000000000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-bigint-size-32-degrade-accept#6",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A bare box whose tree holds the same value in 32 bytes (06 20 01, then 31 zeros). It parses, but the root is a BigInt: rule 1001 (CheckDeserializedScriptIsSigmaProp), a ValidationException, degrades the tree, so the object is accepted. Round-trip identity.",
+      "bytes_hex" : "c0843d0822062001000000000000000000000000000000000000000000000000000000000000000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-valdef-id-overflow-reject#7",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A bare box whose size-flagged v0 tree is BlockValue(ValDef(2^31, SigmaProp(true)), ValUse(2^31)). ValDefSerializer reads the id with getUIntExact, which throws ArithmeticException (Int overflow) past Int.MaxValue: the JVM rejects. An impl that reads ids as u32 parses the whole tree (the ValUse names the same id): the over-accept.",
+      "bytes_hex" : "c0843d0810d801d6808080800808d37280808080080100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-valdef-id-int-max-accept#8",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A bare box whose tree is the same with id 2^31 - 1 (ff ff ff ff 07), which fits. It parses. Round-trip identity.",
+      "bytes_hex" : "c0843d0810d801d6ffffffff0708d372ffffffff070100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-fundef-negative-tpe-count-reject#9",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A bare box whose size-flagged v0 tree is BlockValue(FunDef(1, ...), ValUse(1)) with the FunDef (d7) type-argument count 0xff, the signed byte -1. safeNewArray(-1) throws NegativeArraySizeException: the JVM rejects.",
+      "bytes_hex" : "c0843d0809d801d701ff08d372010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-fundef-tpe-arg-not-typevar-reject#10",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A bare box whose tree is the same FunDef with one type argument, Int (04), which is not a type variable. The cast to STypeVar throws ClassCastException: the JVM rejects. An impl that takes any type there parses the tree.",
+      "bytes_hex" : "c0843d080ad801d701010408d372010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-fundef-tpe-arg-typevar-accept#11",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin for #9 and #10: A bare box whose FunDef has one type argument, the type variable T (67 01 54). It parses. Round-trip identity.",
+      "bytes_hex" : "c0843d080cd801d7010167015408d372010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-sfunc-tpe-param-not-typevar-reject#12",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A bare box whose size-flagged, segregated v3 tree (header 1b) has a constant typed SFunc(Int => Int) with one type parameter, Int (70 01 04 04 01 04). TypeSerializer's require(ident.isInstanceOf[STypeVar]) throws IllegalArgumentException, and deserializeErgoTree rethrows it as a SerializerException (with the message 'Tree version (3) is above activated script version (3)'): the JVM rejects. An impl that takes any type as the parameter degrades the tree on the function's data (rule 1009) instead.",
+      "bytes_hex" : "c0843d1b0a017001040401040273000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-sfunc-tpe-param-typevar-degrade-accept#13",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A bare box whose type parameter is T (67 01 54). The type parses and the function's data cannot (rule 1009, a ValidationException), so the tree degrades and the object is accepted. Round-trip identity.",
+      "bytes_hex" : "c0843d1b0c0170010404016701540273000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-box-const-height-overflow-reject#14",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A bare box whose size-flagged, segregated v0 tree has constant 0 = a Box (type 63), constant 1 = SigmaProp(true) and the body ConstantPlaceholder(1). The nested box is created at height 2^31, and ErgoBoxCandidate's parse reads the height with getUIntExact (ErgoBoxCandidate.scala:195): ArithmeticException, and the JVM rejects. An impl that reads it as u32 parses the tree.",
+      "bytes_hex" : "c0843d18340263c0843d0008d38080808008000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-box-const-height-int-max-accept#15",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin: A bare box whose nested box is created at height 2^31 - 1. The tree parses. Round-trip identity.",
+      "bytes_hex" : "c0843d18340263c0843d0008d3ffffffff07000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-box-const-register-not-constant-reject#16",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A bare box whose tree has the same Box constant, created at height 1, with R4 = Height (a3), an expression and not a constant. ErgoBoxCandidate's parse casts each register to EvaluatedValue (ErgoBoxCandidate.scala:231): ClassCastException, and the JVM rejects.",
+      "bytes_hex" : "c0843d18310263c0843d0008d3010001a300000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-box-const-seven-registers-reject#17",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "A bare box whose nested box has 7 registers (Int 1 each). There are 6 non-mandatory register ids, R4 to R9, so looking up the seventh (ErgoBoxCandidate.scala:230) throws ArrayIndexOutOfBoundsException: the JVM rejects.",
+      "bytes_hex" : "c0843d183e0263c0843d0008d3010007040204020402040204020402040200000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-gate-box-const-six-registers-accept#18",
+      "kind" : "Box",
+      "source" : "santa:authored-box-tree-parse",
+      "description" : "The twin for #16 and #17: A bare box whose nested box has 6 registers, R4 to R9 = Int 1. The tree parses. Round-trip identity.",
+      "bytes_hex" : "c0843d183c0263c0843d0008d301000604020402040204020402040200000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

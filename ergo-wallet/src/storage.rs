@@ -8,7 +8,7 @@
 //! - directory-scan rule: if exactly one file in `<data_dir>/wallet/`,
 //!   load any name; if multiple files, filter to `.json` and load first.
 //! - wire shape: see `EncryptedSecret` struct below.
-//! - `usePre1627KeyDerivation` defaults to `true` when MISSING (tier-1
+//! - `usePre1627KeyDerivation` defaults to `true` when missing or null (tier-1
 //!   wallet-import compatibility for pre-Sigma-5.0 secret files).
 
 use serde::{Deserialize, Serialize};
@@ -24,11 +24,11 @@ pub struct CipherParams {
     /// Derived-key length in BITS (not bytes). Scala = 256.
     #[serde(rename = "dkLen")]
     pub dk_len: u32,
-    /// Cipher algorithm. Always `"AES"`.
-    #[serde(rename = "encryptionAlgorithm")]
+    /// Cipher algorithm. Defaults to `"AES"` for Scala files that omit it.
+    #[serde(rename = "encryptionAlgorithm", default = "default_algorithm")]
     pub encryption_algorithm: String,
-    /// Cipher mode. Always `"GCM"`.
-    #[serde(rename = "encryptionMode")]
+    /// Cipher mode. Defaults to `"GCM"` for Scala files that omit it.
+    #[serde(rename = "encryptionMode", default = "default_mode")]
     pub encryption_mode: String,
 }
 
@@ -49,29 +49,33 @@ impl CipherParams {
 /// The on-disk encrypted secret file. All byte fields hex-encoded
 /// (base16 lowercase, matching Scala `Base16.encode` / `Hex.encode`).
 ///
-/// Field name order matters for stable JSON serialization across
-/// Scala / Rust implementations: serde respects struct field order
-/// by default.
+/// JSON field order is not significant to either implementation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedSecret {
-    /// AES-256-GCM ciphertext (excluding auth tag). Hex-encoded.
+    /// Encrypted stream after its first 16 bytes, including the GCM tag.
+    /// Scala's historical field split is preserved. Hex-encoded.
     #[serde(rename = "cipherText")]
     pub cipher_text: String,
     /// PBKDF2 salt. Hex-encoded.
     pub salt: String,
     /// AES-GCM IV (96 bits / 12 bytes). Hex-encoded.
     pub iv: String,
-    /// AES-GCM authentication tag (128 bits / 16 bytes). Hex-encoded.
+    /// First 16 bytes of the encrypted stream; despite its historical name,
+    /// this is not the cryptographic GCM tag. Hex-encoded.
     #[serde(rename = "authTag")]
     pub auth_tag: String,
     /// PBKDF2 + AES-GCM parameters.
     #[serde(rename = "cipherParams")]
     pub cipher_params: CipherParams,
     /// Pre-1627 derivation switch (tier-1 wallet-import compatibility).
-    /// Missing field deserializes to `true` — matching Scala
+    /// Missing or null field deserializes to `true` — matching Scala
     /// `JsonSecretStorageSpec.scala:80` ("legacy wallets predate the
     /// field; defaulting to `true` is the only safe option").
-    #[serde(rename = "usePre1627KeyDerivation", default = "default_use_pre_1627")]
+    #[serde(
+        rename = "usePre1627KeyDerivation",
+        default = "default_use_pre_1627",
+        deserialize_with = "deserialize_use_pre_1627"
+    )]
     pub use_pre_1627_key_derivation: bool,
 }
 
@@ -81,6 +85,19 @@ pub struct EncryptedSecret {
 /// on this.
 fn default_use_pre_1627() -> bool {
     true
+}
+
+fn deserialize_use_pre_1627<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    Option::<bool>::deserialize(deserializer).map(|flag| flag.unwrap_or(true))
+}
+
+fn default_algorithm() -> String {
+    "AES".into()
+}
+fn default_mode() -> String {
+    "GCM".into()
 }
 
 /// Compute the filename UUID for an encrypted secret file. Matches
@@ -172,7 +189,7 @@ pub enum UnlockedMaster {
 }
 
 impl UnlockedMaster {
-    /// Walk a [`DerivationPath`] in the appropriate mode. Returns
+    /// Walk a [`crate::DerivationPath`] in the appropriate mode. Returns
     /// the leaf's compressed-SEC1 public key bytes.
     pub fn derive_pubkey_at_path(
         &self,
@@ -220,6 +237,58 @@ impl UnlockedMaster {
         let wide = k256::U256::from_be_slice(&bytes);
         Ok(<k256::Scalar as Reduce<k256::U256>>::reduce(wide))
     }
+
+    /// Derive the scalar at `path` and require that it controls `pubkey`.
+    /// Persisted keys can come from another derivation, so every pairing of
+    /// a stored public key with a derived secret goes through this check.
+    pub fn derive_scalar_for_pubkey(
+        &self,
+        path: &crate::derivation::DerivationPath,
+        pubkey: &[u8; 33],
+    ) -> Result<k256::Scalar, WalletError> {
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        let scalar = self.derive_scalar_at_path(path)?;
+        let derived = (k256::ProjectivePoint::GENERATOR * scalar)
+            .to_affine()
+            .to_encoded_point(true);
+        if derived.as_bytes() != pubkey.as_slice() {
+            return Err(WalletError::TrackedKeyMismatch(path.to_string()));
+        }
+        Ok(scalar)
+    }
+
+    /// The earlier Rust legacy encoding of this master, when it derives
+    /// different keys (a legacy master beginning with a zero byte).
+    fn legacy_rust_trimmed(&self) -> Option<Self> {
+        match self {
+            Self::Modern(_) => None,
+            Self::Legacy(master) => master.legacy_rust_trimmed_master().map(Self::Legacy),
+        }
+    }
+
+    /// Path of the first `(pubkey, path)` entry this master does not derive.
+    fn first_mismatch(
+        &self,
+        tracked: &[([u8; 33], Vec<u32>)],
+    ) -> Result<Option<crate::derivation::DerivationPath>, WalletError> {
+        for (pubkey, components) in tracked {
+            let path = crate::derivation::DerivationPath::from_components(components.clone());
+            if self.derive_pubkey_at_path(&path)? != *pubkey {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Master encoding that derives a wallet's persisted keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MasterDerivation {
+    /// The secret file's mode with the complete master, as Scala derives.
+    Standard,
+    /// Pre-1627 derivation from a master whose leading zero bytes the earlier
+    /// Rust node dropped. Its addresses differ from Scala's for the same file.
+    LegacyRustTrimmed,
 }
 
 /// In-memory unlocked secret state. Held only while `LockState ==
@@ -296,6 +365,17 @@ impl SecretStorage {
         Self::find_secret_file(&self.secret_dir).is_ok()
     }
 
+    fn require_uninitialized(&self) -> Result<(), WalletError> {
+        if self.unlocked.is_some() || self.cached_secret_file.is_some() {
+            return Err(WalletError::WalletAlreadyInitialized);
+        }
+        match Self::find_secret_file(&self.secret_dir) {
+            Err(WalletError::WalletUninitialized) => Ok(()),
+            Ok(_) => Err(WalletError::WalletAlreadyInitialized),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Scala-parity directory scan rule per
     /// `JsonSecretStorage.scala:133-144`:
     /// - If exactly one file in `secret_dir`, load it regardless of
@@ -303,14 +383,23 @@ impl SecretStorage {
     /// - If multiple files, filter to `.json` and load the first match.
     /// - If zero files, return an error.
     pub fn find_secret_file(secret_dir: &Path) -> Result<PathBuf, WalletError> {
-        if !secret_dir.exists() {
+        if !secret_dir
+            .try_exists()
+            .map_err(|e| WalletError::SecretFile(format!("inspect {secret_dir:?}: {e}")))?
+        {
             return Err(WalletError::WalletUninitialized);
         }
         let entries: Vec<PathBuf> = std::fs::read_dir(secret_dir)
             .map_err(|e| WalletError::SecretFile(format!("read_dir {secret_dir:?}: {e}")))?
-            .filter_map(|r| r.ok())
-            .map(|e| e.path())
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WalletError::SecretFile(format!("read_dir entry {secret_dir:?}: {e}")))?
+            .into_iter()
             .filter(|p| p.is_file())
+            .filter(|p| {
+                !p.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".ergo-wallet-pending-"))
+            })
             .collect();
         match entries.len() {
             0 => Err(WalletError::WalletUninitialized),
@@ -332,6 +421,9 @@ impl SecretStorage {
     /// is what gets encrypted). Creates `secret_dir` if it doesn't
     /// exist; writes `<uuid>.json` containing the encrypted BIP39
     /// SEED (NOT the phrase — Scala parity).
+    /// Requires uninitialized storage; existing on-disk, cached, or unlocked
+    /// state is never replaced. Callers must exclusively own this directory
+    /// while initializing; this handle does not provide a cross-process lock.
     ///
     /// Post-conditions:
     /// - Exactly one file in `secret_dir`.
@@ -346,11 +438,12 @@ impl SecretStorage {
         password: &str,
         mnemonic_pass: &str,
     ) -> Result<String, WalletError> {
+        self.require_uninitialized()?;
         let mnemonic = crate::mnemonic::Mnemonic::generate(strength)?;
-        let phrase = mnemonic.phrase();
+        let phrase = zeroize::Zeroizing::new(mnemonic.phrase());
         let seed = mnemonic.to_seed(mnemonic_pass);
         self.persist_seed(&seed, password, /* use_pre_1627 */ false)?;
-        Ok(phrase)
+        Ok(phrase.to_string())
     }
 
     /// Restore an existing wallet from a known mnemonic + BIP39
@@ -359,6 +452,7 @@ impl SecretStorage {
     /// BIP39 passphrase is mixed into the seed here and discarded —
     /// you don't need it at unlock time because the seed is what
     /// gets encrypted.
+    /// Requires uninitialized storage under the same ownership contract as init.
     pub fn restore(
         &mut self,
         mnemonic_phrase: &str,
@@ -366,6 +460,7 @@ impl SecretStorage {
         password: &str,
         use_pre_1627: bool,
     ) -> Result<(), WalletError> {
+        self.require_uninitialized()?;
         let mnemonic = crate::mnemonic::Mnemonic::import(mnemonic_phrase)?;
         let seed = mnemonic.to_seed(mnemonic_pass);
         self.persist_seed(&seed, password, use_pre_1627)
@@ -453,10 +548,7 @@ impl SecretStorage {
                 crate::extended_key::ExtendedSecretKeyLegacy::derive_master_key(seed.as_slice())?,
             )
         } else {
-            UnlockedMaster::Modern(ExtendedSecretKey::derive_master_key(
-                seed.as_slice(),
-                false,
-            )?)
+            UnlockedMaster::Modern(ExtendedSecretKey::derive_master_key(seed.as_slice())?)
         };
 
         self.unlocked = Some(UnlockedSecret {
@@ -464,6 +556,31 @@ impl SecretStorage {
             use_pre_1627,
         });
         Ok(())
+    }
+
+    /// Bind the unlocked master to the wallet's persisted `(pubkey, path)`
+    /// keys before anything derives from it. The complete-master derivation is
+    /// used when it reproduces every key. A legacy wallet whose keys were all
+    /// written by the earlier Rust trimmed-master derivation keeps that
+    /// derivation for this unlock, so signing, key export and new addresses
+    /// stay on the tree that holds its funds. The persisted keys determine the
+    /// choice at every unlock. Any other mismatch is
+    /// [`WalletError::TrackedKeyMismatch`].
+    pub fn bind_tracked_keys(
+        &mut self,
+        tracked: &[([u8; 33], Vec<u32>)],
+    ) -> Result<MasterDerivation, WalletError> {
+        let unlocked = self.unlocked.as_mut().ok_or(WalletError::WalletLocked)?;
+        let Some(mismatch) = unlocked.master.first_mismatch(tracked)? else {
+            return Ok(MasterDerivation::Standard);
+        };
+        if let Some(trimmed) = unlocked.master.legacy_rust_trimmed() {
+            if trimmed.first_mismatch(tracked)?.is_none() {
+                unlocked.master = trimmed;
+                return Ok(MasterDerivation::LegacyRustTrimmed);
+            }
+        }
+        Err(WalletError::TrackedKeyMismatch(mismatch.to_string()))
     }
 
     /// Drop the in-memory master key. Idempotent; calling lock() on
@@ -493,10 +610,10 @@ impl SecretStorage {
         };
         let seed = mnemonic.to_seed(mnemonic_pass);
         let Ok(candidate_pk) = (if unlocked.use_pre_1627 {
-            crate::extended_key::ExtendedSecretKeyLegacy::derive_master_key(&seed)
+            crate::extended_key::ExtendedSecretKeyLegacy::derive_master_key(&seed[..])
                 .and_then(|m| m.public_key().map(|p| p.compressed_bytes()))
         } else {
-            ExtendedSecretKey::derive_master_key(&seed, false)
+            ExtendedSecretKey::derive_master_key(&seed[..])
                 .map(|m| m.public_key().compressed_bytes())
         }) else {
             return false;
@@ -528,8 +645,10 @@ impl SecretStorage {
         password: &str,
         use_pre_1627: bool,
     ) -> Result<(), WalletError> {
-        std::fs::create_dir_all(&self.secret_dir)
-            .map_err(|e| WalletError::SecretFile(format!("create_dir_all: {e}")))?;
+        // Recheck after seed derivation, before touching the directory or cache.
+        self.require_uninitialized()?;
+        create_secret_directory(&self.secret_dir)
+            .map_err(|e| WalletError::SecretFile(format!("create secret directory: {e}")))?;
 
         // Generate random 32-byte salt + 12-byte IV. Salt size matches
         // Scala `AES.encrypt` (32 bytes).
@@ -559,29 +678,7 @@ impl SecretStorage {
         let path = self.secret_dir.join(&filename);
         let json = serde_json::to_string_pretty(&secret)
             .map_err(|e| WalletError::SecretFile(format!("serialize: {e}")))?;
-        // create_new + mode(0o600) closes the write-then-chmod window
-        // where the file briefly exists with default permissions;
-        // restricted ACL on Windows is more involved, skip for now
-        // (plain write).
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-                .map_err(|e| WalletError::SecretFile(format!("create {path:?}: {e}")))?;
-            file.write_all(json.as_bytes())
-                .map_err(|e| WalletError::SecretFile(format!("write {path:?}: {e}")))?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(&path, json)
-                .map_err(|e| WalletError::SecretFile(format!("write {path:?}: {e}")))?;
-        }
+        publish_secret_file(&path, json.as_bytes())?;
 
         // Cache so subsequent unlock() doesn't re-read the file.
         self.cached_secret_file = Some(secret);
@@ -589,9 +686,172 @@ impl SecretStorage {
     }
 }
 
+/// Newly created parent names need their own durability barriers; syncing
+/// only the final wallet directory would not persist its entry in its parent.
+fn create_secret_directory(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let missing: Vec<_> = dir
+        .ancestors()
+        .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !ancestor.exists())
+        .map(Path::to_path_buf)
+        .collect();
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)?;
+    #[cfg(unix)]
+    for created in missing.iter().rev() {
+        std::fs::File::open(created)?.sync_all()?;
+        let parent = created
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Publish only complete encrypted files. NamedTempFile creates owner-only
+/// files on Unix; persist_noclobber never overwrites an existing wallet.
+/// The file is synced before publication and the containing directory is
+/// synced on Unix. Windows retains file sync + no-replace publication; Rust does
+/// not expose a portable directory durability barrier there.
+fn publish_secret_file(path: &Path, bytes: &[u8]) -> Result<(), WalletError> {
+    publish_secret_file_with(path, bytes, |_| Ok(()))
+}
+
+fn publish_secret_file_with(
+    path: &Path,
+    bytes: &[u8],
+    mut checkpoint: impl FnMut(&str) -> std::io::Result<()>,
+) -> Result<(), WalletError> {
+    use std::io::Write;
+    let mut publish = || -> std::io::Result<()> {
+        let dir = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("missing secret directory"))?;
+        let mut pending = tempfile::Builder::new()
+            .prefix(".ergo-wallet-pending-")
+            .tempfile_in(dir)?;
+        pending.write_all(bytes)?;
+        checkpoint("write")?;
+        pending.as_file().sync_all()?;
+        checkpoint("sync")?;
+        let published = pending
+            .persist_noclobber(path)
+            .map_err(|error| error.error)?;
+        published.sync_all()?;
+        checkpoint("publish")?;
+        #[cfg(unix)]
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    };
+    publish().map_err(|error| WalletError::SecretFile(format!("publish {path:?}: {error}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn new_secret_directory_parents_are_private_and_wallet_reopens() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("new-parent");
+        let path = parent.join("wallet");
+        let mut storage = SecretStorage::open(path.clone());
+        storage
+            .restore(
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                "",
+                "test-password",
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        SecretStorage::open(path).unlock("test-password").unwrap();
+    }
+
+    // ----- helpers -----
+
+    #[test]
+    fn secret_publication_failures_before_publish_leave_retryable_directory() {
+        for failed_stage in ["write", "sync"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("complete.json");
+            let result = publish_secret_file_with(&path, b"complete encrypted wallet", |stage| {
+                if stage == failed_stage {
+                    Err(std::io::Error::other("injected publication failure"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err());
+            assert!(!path.exists());
+            assert!(matches!(
+                SecretStorage::find_secret_file(directory.path()),
+                Err(WalletError::WalletUninitialized)
+            ));
+            publish_secret_file(&path, b"complete encrypted wallet").unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), b"complete encrypted wallet");
+        }
+    }
+
+    #[test]
+    fn secret_publication_never_replaces_existing_file_or_discovers_pending_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let pending = directory.path().join(".ergo-wallet-pending-crashed-writer");
+        std::fs::write(&pending, b"partial").unwrap();
+        assert!(matches!(
+            SecretStorage::find_secret_file(directory.path()),
+            Err(WalletError::WalletUninitialized)
+        ));
+        let path = directory.path().join("wallet.json");
+        publish_secret_file(&path, b"first wallet").unwrap();
+        assert!(publish_secret_file(&path, b"replacement").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"first wallet");
+        assert_eq!(
+            SecretStorage::find_secret_file(directory.path()).unwrap(),
+            path
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn secret_publication_failure_after_publish_retains_complete_recoverable_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wallet.json");
+        assert!(
+            publish_secret_file_with(&path, b"complete wallet", |stage| {
+                if stage == "publish" {
+                    Err(std::io::Error::other("injected directory sync failure"))
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"complete wallet");
+    }
 
     // ----- happy path -----
 
@@ -790,6 +1050,80 @@ mod tests {
         // The basename is a v3 UUID hash of the ciphertext — we don't
         // know it in advance, but it should be 36 chars (UUID format).
         assert_eq!(name_str.len(), 36 + ".json".len());
+    }
+
+    #[test]
+    fn repeated_init_and_restore_preserve_locked_unlocked_and_reopened_wallets() {
+        const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        for mode in ["locked", "unlocked", "reopened"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut storage = SecretStorage::open(dir.path().to_path_buf());
+            storage
+                .restore(PHRASE, "", "original-password", false)
+                .unwrap();
+            let path = SecretStorage::find_secret_file(dir.path()).unwrap();
+            let original_bytes = fs::read(&path).unwrap();
+            if mode == "unlocked" {
+                storage.unlock("original-password").unwrap();
+            } else if mode == "reopened" {
+                storage = SecretStorage::open(dir.path().to_path_buf());
+            }
+            let original_state = storage.lock_state();
+            let cached_before = storage
+                .cached_file()
+                .map(|s| serde_json::to_string(s).unwrap());
+            assert!(matches!(
+                storage.init(
+                    crate::mnemonic::MnemonicStrength::Words12,
+                    "new-password",
+                    ""
+                ),
+                Err(WalletError::WalletAlreadyInitialized)
+            ));
+            assert!(matches!(
+                storage.restore(PHRASE, "different-seed", "new-password", true),
+                Err(WalletError::WalletAlreadyInitialized)
+            ));
+            assert_eq!(storage.lock_state(), original_state);
+            assert_eq!(
+                storage
+                    .cached_file()
+                    .map(|s| serde_json::to_string(s).unwrap()),
+                cached_before
+            );
+            assert_eq!(fs::read(&path).unwrap(), original_bytes);
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+            if mode == "unlocked" {
+                assert!(
+                    storage.check_seed(PHRASE, ""),
+                    "the original unlocked master survives refusal"
+                );
+            }
+            storage.lock();
+            SecretStorage::open(dir.path().to_path_buf())
+                .unlock("original-password")
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn initialization_refuses_corrupt_existing_files_and_directory_read_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        fs::write(&path, b"existing malformed wallet").unwrap();
+        let mut storage = SecretStorage::open(dir.path().to_path_buf());
+        assert!(matches!(
+            storage.init(crate::mnemonic::MnemonicStrength::Words12, "pw", ""),
+            Err(WalletError::WalletAlreadyInitialized)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"existing malformed wallet");
+
+        let mut wrong_directory = SecretStorage::open(path.clone());
+        assert!(matches!(
+            wrong_directory.init(crate::mnemonic::MnemonicStrength::Words12, "pw", ""),
+            Err(WalletError::SecretFile(_))
+        ));
+        assert_eq!(fs::read(path).unwrap(), b"existing malformed wallet");
     }
 
     #[cfg(unix)]

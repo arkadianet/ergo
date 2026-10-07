@@ -92,6 +92,61 @@ pub trait SigningView: Send + Sync {
     fn lookup_utxo(&self, box_id: &[u8; 32]) -> Result<Option<ErgoBox>, ChainAccessError>;
 }
 
+/// A committed signing view extended with a retained pool-parent snapshot.
+/// Consensus context remains pinned to the committed chain; pool inputs are
+/// resolved only from the publication captured during selection.
+pub(crate) struct PoolSigningView {
+    inner: Box<dyn SigningView>,
+    outputs: std::sync::Arc<std::collections::HashMap<ergo_primitives::digest::Digest32, ErgoBox>>,
+}
+
+impl PoolSigningView {
+    pub(crate) fn new(
+        inner: Box<dyn SigningView>,
+        outputs: std::sync::Arc<
+            std::collections::HashMap<ergo_primitives::digest::Digest32, ErgoBox>,
+        >,
+    ) -> Self {
+        Self { inner, outputs }
+    }
+}
+
+impl SigningView for PoolSigningView {
+    fn tip(&self) -> CommittedTip {
+        self.inner.tip()
+    }
+    fn headers(&self) -> &[Header] {
+        self.inner.headers()
+    }
+    fn header_ids(&self) -> &[[u8; 32]] {
+        self.inner.header_ids()
+    }
+    fn state_context(&self) -> &BlockchainStateContext {
+        self.inner.state_context()
+    }
+    fn active_params(&self) -> &ActiveProtocolParameters {
+        self.inner.active_params()
+    }
+    fn signing_params(&self) -> &BlockchainParameters {
+        self.inner.signing_params()
+    }
+    fn protocol_params(&self) -> &ProtocolParams {
+        self.inner.protocol_params()
+    }
+    fn reemission_rules(&self) -> Option<&ReemissionRuleInputs> {
+        self.inner.reemission_rules()
+    }
+    fn lookup_utxo(&self, box_id: &[u8; 32]) -> Result<Option<ErgoBox>, ChainAccessError> {
+        match self.inner.lookup_utxo(box_id)? {
+            Some(value) => Ok(Some(value)),
+            None => Ok(self
+                .outputs
+                .get(&ergo_primitives::digest::Digest32::from_bytes(*box_id))
+                .cloned()),
+        }
+    }
+}
+
 /// Read-only chain access for the wallet engine. The engine uses it for:
 /// (a) `walletHeight` in `/wallet/status`, (b) the pruning check in
 /// `/wallet/restore`, (c) block fetch during `/wallet/rescan`, and (d) the

@@ -19,11 +19,11 @@
 //!   accounts subsystem is built — honest seam, never a fabricated balance).
 //! * **T2** (admin api-key + loopback-preferred): `accounts/private-key`
 //!   (exports the raw secret scalar). Gated by the fail-closed
-//!   [`require_tier`](crate::v1::auth::require_tier) at `Tier::Admin` — a secret
+//!   [`require_tier`] at `Tier::Admin` — a secret
 //!   export is unreachable at T0/T1 and, under `admin_hard_deny_nonloopback`,
 //!   from any non-loopback caller.
 //!
-//! Every backed endpoint reuses the existing [`WalletAdmin`](crate::wallet::WalletAdmin)
+//! Every backed endpoint reuses the existing [`WalletAdmin`]
 //! machinery (scan trait methods, `scan_p2s_rule`, `get_private_key`); nothing
 //! here reimplements scan matching or key derivation.
 
@@ -70,6 +70,11 @@ pub struct AccountsState {
 pub(super) fn map_wallet_err(e: WalletAdminError) -> Response {
     use WalletAdminError as E;
     let (reason, message, detail): (Reason, &str, String) = match e {
+        E::ShuttingDown => (
+            Reason::ShuttingDown,
+            "the wallet is shutting down",
+            String::new(),
+        ),
         E::Uninitialized => (
             Reason::WalletUninitialized,
             "the wallet is not initialized",
@@ -135,6 +140,11 @@ pub(super) fn map_wallet_err(e: WalletAdminError) -> Response {
             Reason::BadRequest,
             "the address is not tracked by this wallet",
             "derive or import the address before using it".into(),
+        ),
+        E::ScanInvalidated => (
+            Reason::StateUnavailable,
+            "wallet scan invalidated",
+            E::ScanInvalidated.to_string(),
         ),
         E::RescanUnavailable(d) => (
             Reason::RouteUnavailable,
@@ -606,4 +616,29 @@ pub fn accounts_router(
     ));
 
     t0.merge(t1).merge(t2).with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- error paths -----
+
+    #[tokio::test]
+    async fn wallet_scan_invalidated_maps_to_unavailable_with_recovery_detail() {
+        let response = map_wallet_err(WalletAdminError::ScanInvalidated);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["reason"], "state_unavailable");
+        assert!(body["error"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("fromHeight=0"));
+    }
 }

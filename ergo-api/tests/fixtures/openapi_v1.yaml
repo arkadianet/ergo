@@ -5,7 +5,7 @@ info:
   license:
     name: MIT OR Apache-2.0
     identifier: MIT OR Apache-2.0
-  version: 0.8.0
+  version: 0.11.0
 paths:
   /api/v1/accounts:
     get:
@@ -278,7 +278,7 @@ paths:
         `GET /api/v1/addresses/{address}/balance`. `unconfirmed` is strictly
         additive (Scala parity) — pool outputs add; pool spends do NOT subtract from
         `confirmed`.
-      operationId: balance
+      operationId: v1_addresses_address_balance_get
       parameters:
       - name: address
         in: path
@@ -305,8 +305,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -319,7 +331,7 @@ paths:
         `GET /api/v1/addresses/{address}/transactions` — a small tx summary
         projected DOWN from the shared indexed-tx builder (never re-derives the
         confirmation math).
-      operationId: transactions
+      operationId: v1_addresses_address_transactions_get
       parameters:
       - name: address
         in: path
@@ -367,13 +379,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the address transaction summary
+          description: Failed to assemble the address transaction summary; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable, or extra index syncing/halted
+          description: 'Chain reader unavailable, or extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -478,8 +496,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -542,8 +572,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -608,8 +650,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -672,8 +726,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -747,8 +813,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -825,8 +903,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -901,8 +991,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -977,8 +1079,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1053,8 +1167,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1066,7 +1192,7 @@ paths:
       summary: |-
         `GET /api/v1/boxes/{box_id}` — a single box. `404 box_not_found` on miss (a
         real absent resource, not a disabled subsystem).
-      operationId: box_by_id
+      operationId: v1_boxes_box_id_get
       parameters:
       - name: box_id
         in: path
@@ -1106,13 +1232,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the box response
+          description: Failed to assemble the box response; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1159,8 +1291,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1263,8 +1407,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1299,8 +1455,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1338,13 +1506,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Block is stored but could not be serialised
+          description: Block is stored but could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1384,13 +1558,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Block is stored but could not be serialised
+          description: Block is stored but could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1493,8 +1673,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1529,8 +1721,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1567,8 +1771,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1608,8 +1824,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1650,13 +1878,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Block is stored but could not be serialised
+          description: Block is stored but could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: AD-proofs pruned in UTXO/non-archival mode, or chain reader unavailable
+          description: 'AD-proofs pruned in UTXO/non-archival mode, or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1701,8 +1935,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1952,13 +2198,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Proof failed to serialize
+          description: Proof failed to serialize; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: This node cannot build a NiPoPoW proof (pruned), or chain reader unavailable
+          description: 'This node cannot build a NiPoPoW proof (pruned), or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -2008,8 +2260,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Interlink data not retained on this node (pruned), or chain reader unavailable
+          description: 'Interlink data not retained on this node (pruned), or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -2058,8 +2322,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -2072,7 +2348,7 @@ paths:
         `GET /api/v1/light/status`. `serves_*` are derived from whether the node
         wires a chain reader at all (the prover hooks live on it); a node without
         one honestly advertises `false` rather than 404.
-      operationId: status
+      operationId: v1_light_status_get
       responses:
         '200':
           description: Light-client serving capability advertisement
@@ -2344,7 +2620,7 @@ paths:
       summary: |-
         `GET /api/v1/mempool/transactions` — cursor-paginated pool listing,
         priority-weight descending by default (mining order).
-      operationId: transactions
+      operationId: v1_mempool_transactions_get
       parameters:
       - name: order
         in: query
@@ -2387,7 +2663,7 @@ paths:
         `GET /api/v1/mempool/transactions/{tx_id}` — one pooled tx: the `mempool_tx`
         row plus resolved `io_box` inputs/outputs (best-effort, from the extra index
         + the pool-output overlay). `404 tx_not_found` when not pooled.
-      operationId: transaction_by_id
+      operationId: v1_mempool_transactions_tx_id_get
       parameters:
       - name: tx_id
         in: path
@@ -2414,6 +2690,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Read capacity busy (overloaded, Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
   /api/v1/mining/candidate:
     get:
       tags:
@@ -2423,8 +2717,8 @@ paths:
         (longpoll semantics preserved). Bare `WorkMessageJson` (reused verbatim —
         already snake_case + Scala-parity). `503 candidate_unavailable` when no
         candidate can be built. This CLOSES the finding-3 gap: the flat compat
-        `/mining/candidate` mounts ungated; this v1 path is api_key-gated.
-      operationId: candidate
+        Both `/mining/candidate` and this v1 path require a configured API key.
+      operationId: v1_mining_candidate_get
       parameters:
       - name: longpoll
         in: query
@@ -2497,8 +2791,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiMinerStats'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -2608,7 +2914,7 @@ paths:
         `GET /api/v1/mining/status` — T0. Composed from existing snapshot reads
         (`identity().mining` + `status().sync_state`); never triggers a `candidate()`
         build just to health-check.
-      operationId: status
+      operationId: v1_mining_status_get
       responses:
         '200':
           description: Mining capability + template freshness (nulls until the template-cache seam is wired)
@@ -2679,7 +2985,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
@@ -2762,7 +3068,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
@@ -2798,7 +3104,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
@@ -2834,7 +3140,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
@@ -2983,7 +3289,7 @@ paths:
       tags:
       - node
       summary: '`GET /api/v1/node/status` — T0. Bare `ApiStatus` (reused verbatim).'
-      operationId: status
+      operationId: v1_node_status_get
       responses:
         '200':
           description: Dashboard status snapshot
@@ -3073,13 +3379,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Price discovery index read failed
+          description: Price discovery index read failed; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index unavailable or price discovery incomplete
+          description: 'Extra index unavailable or price discovery incomplete; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3178,13 +3490,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Registry data bug (bad identifying-token key), or box assembly failed
+          description: Registry data bug (bad identifying-token key), or box assembly failed; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: No unspent box currently holds the singleton NFT (mid-reorg/uninitialized), or extra index syncing/halted
+          description: 'No unspent box currently holds the singleton NFT (mid-reorg/uninitialized), or extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3196,7 +3514,7 @@ paths:
       summary: |-
         `GET /api/v1/scan/scans?limit=&cursor=` — every registered scan, ascending
         by `scan_id`, cursor-paginated on that natural key.
-      operationId: list
+      operationId: v1_scan_scans_get
       parameters:
       - name: limit
         in: query
@@ -3236,7 +3554,7 @@ paths:
       tags:
       - scan
       summary: '`POST /api/v1/scan/scans` — register a scan, returning its allocated id.'
-      operationId: register
+      operationId: v1_scan_scans_post
       requestBody:
         content:
           application/json:
@@ -3425,7 +3743,7 @@ paths:
         `GET /api/v1/scan/scans/{scan_id}/transactions` — wallet transactions tagged
         with this scan id. An unknown/deregistered id is an empty page, not 404
         (trait contract). Item = the wallet tx summary + `scan_ids`.
-      operationId: transactions
+      operationId: v1_scan_scans_scan_id_transactions_get
       parameters:
       - name: scan_id
         in: path
@@ -3575,8 +3893,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
-        '413':
-          description: Source exceeds the size cap
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
           content:
             application/json:
               schema:
@@ -3609,8 +3961,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
-        '413':
-          description: Source exceeds the size cap
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
           content:
             application/json:
               schema:
@@ -3644,8 +4030,48 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '501':
           description: No Scala reference oracle configured on this node
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation or Scala oracle timed out (timeout)
           content:
             application/json:
               schema:
@@ -3678,8 +4104,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
-        '413':
-          description: Source exceeds the size cap
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
           content:
             application/json:
               schema:
@@ -3713,14 +4173,48 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '404':
           description: No unspent box with that id
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable, compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
           content:
             application/json:
               schema:
@@ -3752,6 +4246,46 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
   /api/v1/script/simulate:
     post:
       tags:
@@ -3760,7 +4294,7 @@ paths:
         `POST /script/simulate` — resolve a REAL on-chain box and reduce its guard
         against real chain state. `box_id` missing ⇒ `box_not_found`; the chain
         reader unwired ⇒ `chain_reader_unavailable` (never a bare 404).
-      operationId: simulate
+      operationId: v1_script_simulate_post
       requestBody:
         content:
           application/json:
@@ -3780,14 +4314,48 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '404':
           description: No unspent box with that id
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable, compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
           content:
             application/json:
               schema:
@@ -3851,8 +4419,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3984,8 +4564,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4052,8 +4644,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4143,8 +4747,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Emission schedule not wired on this node
+          description: 'Emission schedule not wired on this node; chain_reader_unavailable on a failed header read; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4211,8 +4827,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4263,8 +4891,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4309,8 +4949,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4492,7 +5144,7 @@ paths:
       summary: |-
         `POST /api/v1/transactions/simulate` — dry-run an assembled tx: accept/reject
         + cost + conflicts, NO broadcast and NO mempool mutation.
-      operationId: simulate
+      operationId: v1_transactions_simulate_post
       requestBody:
         content:
           application/json:
@@ -4623,13 +5275,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the transaction response
+          description: Failed to assemble the transaction response; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4642,7 +5300,7 @@ paths:
         `GET /api/v1/transactions/{tx_id}/status` — lifecycle + ETA. Confirmed
         (extra-index) wins over pooled; a well-formed unknown id is a 200
         `state:"unknown"` (a legitimate polled answer), only a malformed id is a 400.
-      operationId: status
+      operationId: v1_transactions_tx_id_status_get
       parameters:
       - name: tx_id
         in: path
@@ -4664,7 +5322,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the confirmed transaction status
+          description: Failed to assemble the confirmed transaction status; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Read capacity busy (overloaded, Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4678,7 +5348,7 @@ paths:
         preview has no projection in `ergo-api` and needs a read threaded
         through the candidate-builder crate; until then it answers the honest
         `route_unavailable` rather than fabricating vote bytes.
-      operationId: candidate
+      operationId: v1_voting_candidate_get
       responses:
         '503':
           description: Next-block vote-byte preview not wired on this node
@@ -4702,8 +5372,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/VotesHistory'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4806,7 +5488,7 @@ paths:
       tags:
       - webhooks
       summary: '`GET /api/v1/webhooks` — list subscriptions (T1), cursor-paginated.'
-      operationId: list
+      operationId: v1_webhooks_get
       parameters:
       - name: limit
         in: query
@@ -4848,7 +5530,7 @@ paths:
       summary: |-
         `POST /api/v1/webhooks` — register a subscription (T1). Returns 201 with the
         subscription **and** the secret echoed exactly once.
-      operationId: register
+      operationId: v1_webhooks_post
       requestBody:
         content:
           application/json:
@@ -5118,6 +5800,7 @@ components:
         [`ApiBootstrapStatus`]. UI maps each variant to a human label and
         phase indicator.
       enum:
+      - halted
       - discovery
       - manifest_requested
       - manifest_verified
@@ -5165,7 +5848,7 @@ components:
               bootstrapped history. Absent when the store reports the
               default (Dense) and no NiPoPoW bootstrap is in progress.
 
-              Distinct from [`ApiIdentity::history_mode`] — that field is the
+              Distinct from [`crate::ApiIdentity::history_mode`] — that field is the
               operator-configured chain-retention policy (archive / pruned /
               utxo-bootstrapped / headers-only), this field is the on-disk
               header-section shape (dense from genesis vs sparse with a
@@ -5182,6 +5865,11 @@ components:
           description: |-
             Current bootstrap phase. UI maps each variant to its human
             label and phase indicator.
+        popow_abandon_reason:
+          type:
+          - string
+          - 'null'
+          description: Reason NiPoPoW bootstrap was abandoned, when application failed.
         popow_dense_from_height:
           type:
           - integer
@@ -5487,7 +6175,7 @@ components:
         identity strip. Rust-native — Scala's `/info` has no equivalent.
 
         Field contract:
-        - `state_type`, `verify_transactions`, `history_mode`, `mining`,
+        - `state_type`, `verify_transactions`, `history_mode`, `mining`, `mempool_enabled`,
           `extra_index_enabled`, `declared_addr`, `bind_addr` are
           config-intent: what `NodeConfig` asked for at boot. Scala parity
           for the wire-visible fields lives here.
@@ -5513,6 +6201,7 @@ components:
       - utxo_bootstrap
       - nipopow_bootstrap
       - mining
+      - mempool_enabled
       - extra_index_enabled
       properties:
         bind_addr:
@@ -5536,6 +6225,9 @@ components:
           description: |-
             How the operator configured chain-history retention. Tagged
             union — clients switch on `kind`. See [`ApiHistoryMode`].
+        mempool_enabled:
+          type: boolean
+          description: Whether the configured node admits and maintains mempool transactions.
         mining:
           type: boolean
         mode:
@@ -5707,12 +6399,22 @@ components:
             Peer's declared public address (`ip:port`) from its `PeerSpec`,
             what it advertises as reachable. `None` when the peer declared no
             address (anonymous / not gossipable).
+        details:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiPeerDetails'
+            description: Additional local observations and peer-reported handshake metadata.
         direction:
           $ref: '#/components/schemas/ApiPeerDirection'
         last_seen_seconds:
           type: integer
           format: int64
           minimum: 0
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiPeerNetwork'
+            description: IP metadata, resolved independently of the P2P/sync loop.
         node_name:
           type:
           - string
@@ -5723,8 +6425,8 @@ components:
           - 'null'
           format: int32
           description: |-
-            Peer's own best-block height as advertised in the most recent
-            `SyncInfo` exchange. `None` until the sync layer plumbs it through.
+            Height parsed from a peer tip header or inferred from shared header IDs.
+            The latter can understate the remote tip. `None` without an observation.
           minimum: 0
         rest_api_url:
           type:
@@ -5746,12 +6448,221 @@ components:
           type:
           - string
           - 'null'
+          description: Version advertised in the peer handshake (not a verified build version).
+    ApiPeerDetails:
+      type: object
+      required:
+      - last_progress_seconds
+      - effective_score
+      - delivery_failure_streak
+      - preferred_for_downloads
+      - sampled_at_unix_ms
+      - feature_ids
+      properties:
+        chain_status:
+          type:
+          - string
+          - 'null'
+        connection_setup_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            TCP connection/accept through completed handshake, including scheduling.
+            This is connection setup time, NOT ping or request round-trip latency.
+          minimum: 0
+        delivery_failure_streak:
+          type: integer
+          format: int32
+          minimum: 0
+        effective_score:
+          type: integer
+          format: int32
+          description: Score after time decay; lower is better. `ApiPeer.score` is the raw score.
+        feature_ids:
+          type: array
+          items:
+            type: integer
+            format: int32
+            minimum: 0
+        height_source:
+          type:
+          - string
+          - 'null'
+          description: '`reported_header` or `inferred_from_overlap`, only with a known height.'
+        last_progress_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+        last_sync_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        local_address:
+          type:
+          - string
+          - 'null'
+        mode:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiPeerMode'
+        network_magic:
+          type:
+          - string
+          - 'null'
+        preferred_for_downloads:
+          type: boolean
+        sampled_at_unix_ms:
+          type: integer
+          format: int64
+          description: Clock for comparing successive traffic snapshots.
+          minimum: 0
+        session_id:
+          type:
+          - string
+          - 'null'
+          description: Decimal string preserves all signed 64-bit session IDs in JavaScript.
     ApiPeerDirection:
       type: string
       description: Which side initiated the peer connection.
       enum:
       - inbound
       - outbound
+    ApiPeerMode:
+      type: object
+      description: Peer-reported settings, not independently verified capabilities.
+      required:
+      - state_type
+      - verifies_transactions
+      - blocks_to_keep
+      properties:
+        blocks_to_keep:
+          type: integer
+          format: int32
+          description: -1 = all, -2 = UTXO bootstrap, positive = retained suffix.
+        nipopow_bootstrap:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        state_type:
+          type: integer
+          format: int32
+          description: 'Wire value: 0 = UTXO, 1 = digest; unknown values are preserved.'
+          minimum: 0
+        verifies_transactions:
+          type: boolean
+    ApiPeerNetwork:
+      type: object
+      required:
+      - ip
+      - ip_version
+      - scope
+      - hostname_status
+      - geo_status
+      - asn_status
+      properties:
+        accuracy_radius_km:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        asn:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        asn_database:
+          type:
+          - string
+          - 'null'
+        asn_database_built_at_unix_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        asn_status:
+          type: string
+        city:
+          type:
+          - string
+          - 'null'
+        continent:
+          type:
+          - string
+          - 'null'
+        country:
+          type:
+          - string
+          - 'null'
+        country_code:
+          type:
+          - string
+          - 'null'
+        geo_database:
+          type:
+          - string
+          - 'null'
+        geo_database_built_at_unix_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        geo_status:
+          type: string
+          description: '`available`, `not_found`, `not_configured`, `downloading`, `error`, `not_public`.'
+        hostname:
+          type:
+          - string
+          - 'null'
+        hostname_checked_at_unix_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        hostname_status:
+          type: string
+          description: '`pending`, `resolved`, `unavailable`, `timeout`, `disabled`, `not_public`.'
+        ip:
+          type: string
+        ip_version:
+          type: string
+        latitude:
+          type:
+          - number
+          - 'null'
+          format: double
+        longitude:
+          type:
+          - number
+          - 'null'
+          format: double
+        network_cidr:
+          type:
+          - string
+          - 'null'
+        organization:
+          type:
+          - string
+          - 'null'
+        region:
+          type:
+          - string
+          - 'null'
+        scope:
+          type: string
+        time_zone:
+          type:
+          - string
+          - 'null'
     ApiPeerState:
       type: string
       description: Connection lifecycle state observed by the peer manager.
@@ -5771,6 +6682,7 @@ components:
       - requesting
       - quorum_met
       - applied
+      - abandoned
       - catchup
     ApiReorgHistory:
       type: object
@@ -5920,7 +6832,7 @@ components:
         Single-call dashboard view: collapses sync + tip + peer count.
         Polled at 1 Hz by the UI header strip.
 
-        Derives `Default` (like [`ApiIdentity`]) so test stubs can write
+        Derives `Default` (like [`crate::ApiIdentity`]) so test stubs can write
         `ApiStatus { <overrides>, ..Default::default() }` and stop breaking
         on every added field.
       required:
@@ -5989,8 +6901,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            Free bytes on the filesystem holding the data dir, probed per
-            status read. `None` when the mount could not be determined. The
+            Free bytes on the filesystem holding the data dir, from the
+            background storage sampler. `None` before the first sample or when
+            the mount could not be determined. The
             `ergo_disk_free_bytes` Prometheus gauge source.
           minimum: 0
         disk_total_bytes:
@@ -5999,8 +6912,8 @@ components:
           - 'null'
           format: int64
           description: |-
-            Total bytes on the filesystem holding the data dir, probed per
-            status read. The `ergo_disk_total_bytes` Prometheus gauge source.
+            Total bytes on the filesystem holding the data dir, from the
+            background storage sampler. The `ergo_disk_total_bytes` Prometheus gauge source.
           minimum: 0
         headers_ahead_of_full_blocks:
           type: integer
@@ -6012,9 +6925,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            On-disk size of the indexer redb in bytes, probed per status
-            read. `None` when `[indexer] enabled = false` or the file is
-            absent. The `ergo_index_db_bytes` Prometheus gauge source.
+            On-disk size of the indexer redb in bytes, from the background
+            storage sampler. `None` before the first sample, when
+            `[indexer] enabled = false`, or when the file is absent. The `ergo_index_db_bytes` Prometheus gauge source.
           minimum: 0
         last_applied_height:
           type: integer
@@ -6046,8 +6959,9 @@ components:
             description: |-
               The most recent block this node REJECTED during apply — a consensus
               fork-from-network signal (the node refused a block its peers may have
-              accepted). `None` when no rejection has occurred this session. A
-              persistent `Some(_)` is an operator page.
+              accepted). `None` when no rejection has occurred this session. Retained
+              after recovery for diagnosis: a known nonzero rejected height below
+              `best_full_block_height` is historical, not an active rejection alarm.
         last_reorg_depth:
           type:
           - integer
@@ -6151,8 +7065,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            On-disk size of `state.redb` in bytes, probed per status read.
-            `None` when the file is absent (never synced / failed to open).
+            On-disk size of `state.redb` in bytes, from the background storage
+            sampler (refreshed every 10 s). `None` before the first sample or
+            when the file is absent (never synced / failed to open).
             The `ergo_state_db_bytes` Prometheus gauge source.
           minimum: 0
         storage_errors_indexer_total:
@@ -6792,12 +7707,22 @@ components:
                   Peer's declared public address (`ip:port`) from its `PeerSpec`,
                   what it advertises as reachable. `None` when the peer declared no
                   address (anonymous / not gossipable).
+              details:
+                oneOf:
+                - type: 'null'
+                - $ref: '#/components/schemas/ApiPeerDetails'
+                  description: Additional local observations and peer-reported handshake metadata.
               direction:
                 $ref: '#/components/schemas/ApiPeerDirection'
               last_seen_seconds:
                 type: integer
                 format: int64
                 minimum: 0
+              network:
+                oneOf:
+                - type: 'null'
+                - $ref: '#/components/schemas/ApiPeerNetwork'
+                  description: IP metadata, resolved independently of the P2P/sync loop.
               node_name:
                 type:
                 - string
@@ -6808,8 +7733,8 @@ components:
                 - 'null'
                 format: int32
                 description: |-
-                  Peer's own best-block height as advertised in the most recent
-                  `SyncInfo` exchange. `None` until the sync layer plumbs it through.
+                  Height parsed from a peer tip header or inferred from shared header IDs.
+                  The latter can understate the remote tip. `None` without an observation.
                 minimum: 0
               rest_api_url:
                 type:
@@ -6831,6 +7756,7 @@ components:
                 type:
                 - string
                 - 'null'
+                description: Version advertised in the peer handshake (not a verified build version).
         page:
           $ref: '#/components/schemas/Page'
     Collection_BlacklistedPeer:

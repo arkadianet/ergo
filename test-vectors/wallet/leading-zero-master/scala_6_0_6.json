@@ -1,0 +1,101 @@
+{
+  "seed" : "4b381541583be4423346c643850da4b320e46a87ae3d2a4e6da11eba819cd4acba45d239319ac14f863b8d5ab5a0d0c64d2e8a1e7d1457df2e5a3c51c73235be",
+  "vectors" : [
+    {
+      "mode" : "modern",
+      "path" : "m",
+      "secret" : "00ddb80b067e0d4993197fe10f2657a844a384589847602d56f0c629c81aae32",
+      "publicKey" : "03683af1ba5743bdfc798cf814efeeab2735ec52d95eced528e692b8e34c4e5669",
+      "chainCode" : "01d28a3e53cffa419ec122c968b3259e16b65076495494d97cae10bbfec3c36f",
+      "address" : "9hFi7XR3faH45inESBESZ4y5oyk27Lf1bAfT7zV8JHALgwwXM18"
+    },
+    {
+      "mode" : "modern",
+      "path" : "m/0'",
+      "secret" : "491f7a2eebc7b57028e0d3faa0acda02e75c33b03c48fb288c41e2ea44e1daef",
+      "publicKey" : "026557fdda1d5d43d79611f784780471f086d58e8126b8c40acb82272a7712e7f2",
+      "chainCode" : "e5fea12a97b927fc9dc3d2cb0d1ea1cf50aa5a1fdc1f933e8906bb38df3377bd",
+      "address" : "9fHhCoQ1SA1Dp6qtaxiF6jh8eB6SigyPuNTjPumeUqjgvHHY1kt"
+    },
+    {
+      "mode" : "modern",
+      "path" : "m/1",
+      "secret" : "a9374df85163d1ac55548634e540ddba034bef59e17f1a0b2d2271de637bc068",
+      "publicKey" : "0257429505c6ad42ea9410a2e749027e5c11f829e9fb77b5e24b8833c989e5bee8",
+      "chainCode" : "0954c208a0c4fa7a2985ab0c2e0876b8d646f4f299ce1e4c12076e07b7ad7f5e",
+      "address" : "9fBVTSz7azgeN87T14XHzeft4bUz91JE5NprXYBWpNUSbzh4Dhq"
+    },
+    {
+      "mode" : "modern",
+      "path" : "m/44'/429'/0'/0/0",
+      "secret" : "ae16bd73ee862f862d81b535de90973aaddd977449f880e2691ff07b1abbdd37",
+      "publicKey" : "023fc3b5e994222d2061c80db3f2dbe454c0f3a1e3f5ac5433ef61cd0ed155d102",
+      "chainCode" : "d14f0dbe7d08fb0f4fb934d6010eade8f298ba2e54b9167caf0325ff4092041a",
+      "address" : "9f19HySXxsrVyG1C6xwCdpMYkM7mHCzv3VocVpdNx51vxcXCuVp"
+    },
+    {
+      "mode" : "legacy",
+      "path" : "m",
+      "secret" : "00ddb80b067e0d4993197fe10f2657a844a384589847602d56f0c629c81aae32",
+      "publicKey" : "03683af1ba5743bdfc798cf814efeeab2735ec52d95eced528e692b8e34c4e5669",
+      "chainCode" : "01d28a3e53cffa419ec122c968b3259e16b65076495494d97cae10bbfec3c36f",
+      "address" : "9hFi7XR3faH45inESBESZ4y5oyk27Lf1bAfT7zV8JHALgwwXM18"
+    },
+    {
+      "mode" : "legacy",
+      "path" : "m/0'",
+      "secret" : "491f7a2eebc7b57028e0d3faa0acda02e75c33b03c48fb288c41e2ea44e1daef",
+      "publicKey" : "026557fdda1d5d43d79611f784780471f086d58e8126b8c40acb82272a7712e7f2",
+      "chainCode" : "e5fea12a97b927fc9dc3d2cb0d1ea1cf50aa5a1fdc1f933e8906bb38df3377bd",
+      "address" : "9fHhCoQ1SA1Dp6qtaxiF6jh8eB6SigyPuNTjPumeUqjgvHHY1kt"
+    },
+    {
+      "mode" : "legacy",
+      "path" : "m/1",
+      "secret" : "a9374df85163d1ac55548634e540ddba034bef59e17f1a0b2d2271de637bc068",
+      "publicKey" : "0257429505c6ad42ea9410a2e749027e5c11f829e9fb77b5e24b8833c989e5bee8",
+      "chainCode" : "0954c208a0c4fa7a2985ab0c2e0876b8d646f4f299ce1e4c12076e07b7ad7f5e",
+      "address" : "9fBVTSz7azgeN87T14XHzeft4bUz91JE5NprXYBWpNUSbzh4Dhq"
+    },
+    {
+      "mode" : "legacy",
+      "path" : "m/44'/429'/0'/0/0",
+      "secret" : "ae16bd73ee862f862d81b535de90973aaddd977449f880e2691ff07b1abbdd37",
+      "publicKey" : "023fc3b5e994222d2061c80db3f2dbe454c0f3a1e3f5ac5433ef61cd0ed155d102",
+      "chainCode" : "d14f0dbe7d08fb0f4fb934d6010eade8f298ba2e54b9167caf0325ff4092041a",
+      "address" : "9f19HySXxsrVyG1C6xwCdpMYkM7mHCzv3VocVpdNx51vxcXCuVp"
+    },
+    {
+      "mode" : "legacy-rust-trimmed-master",
+      "path" : "m",
+      "secret" : "ddb80b067e0d4993197fe10f2657a844a384589847602d56f0c629c81aae32",
+      "publicKey" : "03683af1ba5743bdfc798cf814efeeab2735ec52d95eced528e692b8e34c4e5669",
+      "chainCode" : "01d28a3e53cffa419ec122c968b3259e16b65076495494d97cae10bbfec3c36f",
+      "address" : "9hFi7XR3faH45inESBESZ4y5oyk27Lf1bAfT7zV8JHALgwwXM18"
+    },
+    {
+      "mode" : "legacy-rust-trimmed-master",
+      "path" : "m/0'",
+      "secret" : "9f239a6344f37eea433ad7019c08a7403b0d2a3128ddc668f01de4656f5de7d9",
+      "publicKey" : "03051ed19cb2672c3c5ae362096939b4f69ca26db10dd077962d304dd0f812e8e0",
+      "chainCode" : "738e567089cd235eec5886a9fddc53574d695dba3271a78fdd0c3c4f8a1f1720",
+      "address" : "9gW4V5CSdsz7pRUYKmM2sSwWsEGTZRLj99uy3HkNuom74nE5nk3"
+    },
+    {
+      "mode" : "legacy-rust-trimmed-master",
+      "path" : "m/1",
+      "secret" : "a9374df85163d1ac55548634e540ddba034bef59e17f1a0b2d2271de637bc068",
+      "publicKey" : "0257429505c6ad42ea9410a2e749027e5c11f829e9fb77b5e24b8833c989e5bee8",
+      "chainCode" : "0954c208a0c4fa7a2985ab0c2e0876b8d646f4f299ce1e4c12076e07b7ad7f5e",
+      "address" : "9fBVTSz7azgeN87T14XHzeft4bUz91JE5NprXYBWpNUSbzh4Dhq"
+    },
+    {
+      "mode" : "legacy-rust-trimmed-master",
+      "path" : "m/44'/429'/0'/0/0",
+      "secret" : "79215cf8acd6a9cf498c3abed03401aefbd63c1d763f424fa376878acd54f057",
+      "publicKey" : "0339a8136b611fab1a0a212338725f68c625aa8fdc6d476bd4d79da2563998e308",
+      "chainCode" : "6132f7cf9397e30de65ca0f17e19c61917d87ba6a6effc781c01505ae4dbccaa",
+      "address" : "9guCT5qJtP1sH1nhqiize3U77VjcKumsMrVmZTQzb9m7X6rDGxk"
+    }
+  ]
+}

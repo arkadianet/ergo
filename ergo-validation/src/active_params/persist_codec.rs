@@ -10,8 +10,8 @@ use crate::voting::validation_settings::ErgoValidationSettingsUpdate;
 /// { u8 id, i32 value (BE) } * field_count
 /// ```
 ///
-/// Validate that `extra` does not collide with any named parameter
-/// id and contains no internal duplicates. The codec's deserialize
+/// Validate the nonnegative named numeric fields, the one-byte field count,
+/// and that `extra` does not collide with named IDs or contain duplicates. The codec's deserialize
 /// path rejects duplicate ids; without this check, a caller-supplied
 /// `extra` could produce a row that is unreadable on the next open.
 impl ActiveProtocolParameters {
@@ -28,6 +28,22 @@ impl ActiveProtocolParameters {
             ids::SUBBLOCKS_PER_BLOCK,
             ids::BLOCK_VERSION,
         ];
+        for (id, value) in [
+            (ids::STORAGE_FEE_FACTOR, self.storage_fee_factor),
+            (ids::MIN_VALUE_PER_BYTE, self.min_value_per_byte),
+            (ids::MAX_BLOCK_SIZE, self.max_block_size),
+            (ids::MAX_BLOCK_COST, self.max_block_cost),
+            (ids::TOKEN_ACCESS_COST, self.token_access_cost),
+            (ids::INPUT_COST, self.input_cost),
+            (ids::DATA_INPUT_COST, self.data_input_cost),
+            (ids::OUTPUT_COST, self.output_cost),
+        ] {
+            if value < 0 {
+                return Err(ActiveParamsError::NegativeProtocolParam { id, value });
+            }
+        }
+        let count = 9 + usize::from(self.subblocks_per_block.is_some()) + self.extra.len();
+        u8::try_from(count).map_err(|_| ActiveParamsError::TooManyParameters(count))?;
         let mut seen = std::collections::BTreeSet::<u8>::new();
         for (id, _) in &self.extra {
             if RESERVED.contains(id) {
@@ -41,8 +57,8 @@ impl ActiveProtocolParameters {
     }
 
     /// Encode for storage. Returns an error if the type's invariant is
-    /// violated (`extra` colliding with a reserved id, or duplicates in
-    /// `extra`); see [`Self::validate`].
+    /// violated (negative constrained fields, excessive field count, or
+    /// duplicate/reserved extra IDs); see [`Self::validate`].
     ///
     /// Wire format **v2** (current writer):
     ///
@@ -83,7 +99,8 @@ impl ActiveProtocolParameters {
         entries.extend(self.extra.iter().copied());
         entries.sort_by_key(|(id, _)| *id);
 
-        let count: u8 = entries.len() as u8;
+        let count = u8::try_from(entries.len())
+            .map_err(|_| ActiveParamsError::TooManyParameters(entries.len()))?;
         let proposed_blob = self.proposed_update.serialize();
         let activated_blob = self.activated_update.serialize();
         let mut out = Vec::with_capacity(
@@ -169,7 +186,7 @@ impl ActiveProtocolParameters {
         };
 
         let mut by_id: std::collections::BTreeMap<u8, i32> = std::collections::BTreeMap::new();
-        for chunk in body.chunks_exact(5) {
+        for chunk in body.as_chunks::<5>().0 {
             let id = chunk[0];
             let v = i32::from_be_bytes(
                 chunk[1..5]
@@ -271,6 +288,50 @@ mod tests {
     }
 
     #[test]
+    fn writer_rejects_every_negative_constrained_field() {
+        type Field = fn(&mut ActiveProtocolParameters) -> &mut i32;
+        let fields: [(u8, Field); 8] = [
+            (1, |p| &mut p.storage_fee_factor),
+            (2, |p| &mut p.min_value_per_byte),
+            (3, |p| &mut p.max_block_size),
+            (4, |p| &mut p.max_block_cost),
+            (5, |p| &mut p.token_access_cost),
+            (6, |p| &mut p.input_cost),
+            (7, |p| &mut p.data_input_cost),
+            (8, |p| &mut p.output_cost),
+        ];
+        for (id, field) in fields {
+            let mut params = scala_launch();
+            *field(&mut params) = -1;
+            assert_eq!(
+                params.serialize(),
+                Err(ActiveParamsError::NegativeProtocolParam { id, value: -1 })
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_field_count_boundary_roundtrips_or_rejects() {
+        let mut params = scala_launch();
+        params.subblocks_per_block = Some(30);
+        params.extra = (0..=255)
+            .filter(|id| !matches!(id, 1..=9 | 123))
+            .map(|id| (id, 42))
+            .collect();
+        assert_eq!(
+            params.serialize(),
+            Err(ActiveParamsError::TooManyParameters(256))
+        );
+        params.extra.remove(0);
+        let bytes = params.serialize().unwrap();
+        assert_eq!(bytes[4], 255);
+        assert_eq!(
+            ActiveProtocolParameters::deserialize(&bytes).unwrap(),
+            params
+        );
+    }
+
+    #[test]
     fn codec_roundtrip_required_only() {
         let p = parse_active_params(&ext_with(full_required_set()), 1024).unwrap();
         let bytes = p.serialize().unwrap();
@@ -357,7 +418,7 @@ mod tests {
         let count = bytes[4] as usize;
         let entries_end = 5 + count * 5;
         let body = &bytes[5..entries_end];
-        let ids: Vec<u8> = body.chunks_exact(5).map(|c| c[0]).collect();
+        let ids: Vec<u8> = body.as_chunks::<5>().0.iter().map(|c| c[0]).collect();
         let mut sorted = ids.clone();
         sorted.sort();
         assert_eq!(ids, sorted);

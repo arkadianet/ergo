@@ -61,6 +61,8 @@ transitional `ergo-state -> ergo-wallet-service` integration
   - `admin.rs` — status, init/restore, unlock/lock, seed check, change
     address, and the failed-attempt budget (`AttemptLimiter`).
   - `reads.rs` — compat and native balance/address/box/transaction reads.
+  - `scan_guard.rs` — durable scan-invalidation gate for reads and spending;
+    direct engine callers receive the same refusals as node API callers.
   - `build.rs` — the shared burn-aware unsigned-tx builder + native
     `boxes/select` / `transactions/build`.
   - `sign.rs` — native `transactions/sign` / `transactions/send` and the

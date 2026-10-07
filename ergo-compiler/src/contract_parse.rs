@@ -15,7 +15,7 @@
 //!   Types.scala:63).
 //! - the contract body → [`crate::parse::parse`] (`parse/mod.rs`,
 //!   `SigmaParser(body).get.value`, ContractParser.scala:138).
-//! - identifier char classes → [`crate::token::is_id_start`]/[`is_id_char`]
+//! - identifier char classes → `crate::token::is_id_start`/`is_id_char`
 //!   (the same predicates the core lexer uses, `Identifiers.Id`).
 //!
 //! ## Deviations (reject-side-safe / accept-parity doctrine)
@@ -23,7 +23,7 @@
 //!   position, NOT the uncategorised `NoSuchElementException` Scala's `.get`
 //!   throws (ContractParser.scala:138 unwraps the body parse via `.get`). This
 //!   is the same "prefer information over faithful reproduction of a reference
-//!   rough edge" doctrine `lib.rs`'s stray-brace deviation documents.
+//!   rough edge" doctrine the compiler design ledger's stray-brace deviation documents.
 //! - Parameter/contract names accept the core `Id` PLAIN-identifier form only;
 //!   backtick/operator identifiers in NAME position are rejected (no real
 //!   `@contract` source uses them). Types and literal defaults are parsed by the

@@ -1,0 +1,54 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.context_extension_id_bound",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "ext-id-0x80-reject#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-context-extension-bounds",
+      "description" : "Spending-proof extension {0x80: IntConstant(1)}. sigmastate >= 6.0.5 reads the id as a signed byte and rejects a negative one at parse, before reading its value (ContextExtension.scala:58-60, commit e4ef1b203, not version-gated). An impl reading the id as u8 parses it: the over-accept.",
+      "bytes_hex" : "0114db43174f498723e4acb7e056e309f446b02c3da0c2572f3ab77ce86ec581160001800402000002c0ecfab5120008d3c094400000c0f79c1a0008d3c094400000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 0
+      }
+    },
+    {
+      "name" : "ext-id-0xff-reject#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-context-extension-bounds",
+      "description" : "Spending-proof extension {0xFF: IntConstant(1)}: the top of the id byte, rejected at parse like 0x80.",
+      "bytes_hex" : "0114db43174f498723e4acb7e056e309f446b02c3da0c2572f3ab77ce86ec581160001ff0402000002c0ecfab5120008d3c094400000c0f79c1a0008d3c094400000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 0
+      }
+    },
+    {
+      "name" : "ext-rent-shaped-id-0x80-reject#2",
+      "kind" : "Transaction",
+      "source" : "santa:authored-context-extension-bounds",
+      "description" : "A storage-rent spend (empty proof, var 127 = Short(0) indexing a correct recreation) whose extension also holds {0x80: IntConstant(1)}. The JVM rejects the whole tx at parse. Before 6.0.5 it accepted this spend (the rent path never evaluates the script, so no context-var check ran); an impl that only guards ids at evaluation time still accepts it.",
+      "bytes_hex" : "0114db43174f498723e4acb7e056e309f446b02c3da0c2572f3ab77ce86ec5811600027f0300800402000002c0ecfab5120008d3c094400000c0f79c1a0008d3c094400000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 0
+      }
+    },
+    {
+      "name" : "ext-id-0x7f-accept#3",
+      "kind" : "Transaction",
+      "source" : "santa:authored-context-extension-bounds",
+      "description" : "Spending-proof extension {0x7F: Short(0)}: the largest valid id — the storage-rent index variable (StorageIndexVarId = Byte.MaxValue). Round-trip identity.",
+      "bytes_hex" : "0114db43174f498723e4acb7e056e309f446b02c3da0c2572f3ab77ce86ec5811600017f0300000002c0ecfab5120008d3c094400000c0f79c1a0008d3c094400000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 0
+      }
+    }
+  ]
+}

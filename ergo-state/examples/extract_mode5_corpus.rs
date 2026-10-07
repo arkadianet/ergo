@@ -45,7 +45,11 @@
 //! bytes) MUST equal the node-reported boxId. A mismatch aborts the run —
 //! a wrong byte string would make the corpus a false consensus oracle.
 //!
-//! Run: `cargo run -p ergo-state --example extract_mode5_corpus`
+//! Run: `cargo run -p ergo-state --example extract_mode5_corpus`.
+//! `NODE_URL`, `MODE5_FROM`, `MODE5_TO` and `MODE5_OUT` select additional
+//! reference captures. A custom output records ten context headers and the
+//! committed epoch parameters in `context.json`; it must stay within one
+//! voting epoch. The default corpus retains its voting-boundary coverage.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -73,6 +77,18 @@ const NODE: &str = "http://localhost:9053";
 const WINDOW_LO: u32 = 1_795_968;
 const WINDOW_HI: u32 = 1_796_160;
 const EPOCH_BOUNDARY: u32 = 1_796_096;
+
+fn node_url() -> String {
+    std::env::var("NODE_URL").unwrap_or_else(|_| NODE.into())
+}
+
+fn configured_height(name: &str, fallback: u32) -> Result<u32, String> {
+    match std::env::var(name) {
+        Ok(value) => value.parse().map_err(|_| format!("{name} must be a u32")),
+        Err(std::env::VarError::NotPresent) => Ok(fallback),
+        Err(error) => Err(format!("{name}: {error}")),
+    }
+}
 
 fn main() {
     // Some mainnet ErgoTree / register expressions parse with deep recursion
@@ -109,13 +125,34 @@ struct Counters {
 }
 
 fn run() -> Result<(), String> {
-    const {
-        assert!(
-            WINDOW_LO <= EPOCH_BOUNDARY && EPOCH_BOUNDARY <= WINDOW_HI,
-            "window must cross the epoch boundary"
+    let window_lo = configured_height("MODE5_FROM", WINDOW_LO)?;
+    let window_hi = configured_height("MODE5_TO", WINDOW_HI)?;
+    if window_lo < 2 || window_lo > window_hi {
+        return Err("MODE5_FROM..MODE5_TO must be a nonempty range above genesis".into());
+    }
+    let node = node_url();
+    let info = curl_json(&format!("{node}/info"))?;
+    let network = json_str(&info, "network")?;
+    if std::env::var_os("MODE5_OUT").is_none()
+        && (window_lo != WINDOW_LO || window_hi != WINDOW_HI || network != "mainnet")
+    {
+        return Err("MODE5_OUT is required for a custom window or testnet capture".into());
+    }
+    if network != "mainnet" && network != "testnet" {
+        return Err(format!("unsupported oracle network {network}"));
+    }
+    let voting_length = if network == "testnet" { 128 } else { 1024 };
+    let epoch_start = window_lo / voting_length * voting_length;
+    if std::env::var_os("MODE5_OUT").is_some() && (window_lo <= 10 || epoch_start == 0) {
+        return Err(
+            "breadth windows require ten context headers and a committed voting epoch".into(),
         );
     }
-
+    if (window_lo == epoch_start || window_hi >= epoch_start + voting_length)
+        && std::env::var_os("MODE5_OUT").is_some()
+    {
+        return Err("breadth windows must stay inside one voting epoch".into());
+    }
     let out_dir = corpus_dir();
     fs::create_dir_all(&out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
 
@@ -130,15 +167,15 @@ fn run() -> Result<(), String> {
     };
 
     // parent_state_root for the first height comes from h0-1's header.
-    let mut prev_state_root: Option<String> = Some(fetch_state_root(WINDOW_LO - 1)?);
+    let mut prev_state_root: Option<String> = Some(fetch_state_root(window_lo - 1)?);
     let mut prev_header_id: Option<String> = None;
 
-    let n = WINDOW_HI - WINDOW_LO + 1;
+    let n = window_hi - window_lo + 1;
     println!(
-        "Extracting Mode 5 ADProof-replay corpus for heights {WINDOW_LO}..={WINDOW_HI} ({n} blocks)"
+        "Extracting Mode 5 ADProof-replay corpus for heights {window_lo}..={window_hi} ({n} blocks)"
     );
 
-    for h in WINDOW_LO..=WINDOW_HI {
+    for h in window_lo..=window_hi {
         let block = fetch_block_at(h)?;
         let header = &block["header"];
 
@@ -169,6 +206,10 @@ fn run() -> Result<(), String> {
             .to_string();
         if proof_bytes.is_empty() {
             return Err(format!("h{h}: empty adProofs.proofBytes — ABORT"));
+        }
+        let proof = hex::decode(&proof_bytes).map_err(|e| format!("h{h}: ADProofs hex: {e}"))?;
+        if *blake2b256(&proof).as_bytes() != hex32(header, "adProofsRoot")? {
+            return Err(format!("h{h}: ADProofs do not match the header commitment"));
         }
 
         let txs = block["blockTransactions"]["transactions"]
@@ -279,7 +320,7 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("serialize {h}.json: {e}"))?;
         fs::write(&path, serialized).map_err(|e| format!("write {}: {e}", path.display()))?;
 
-        if h.is_multiple_of(16) || h == WINDOW_HI {
+        if h.is_multiple_of(16) || h == window_hi {
             println!(
                 "  h{h}  removes={:>3}  inserts={:>3}  txs={:>2}  (byIdBinary={} json={}) sections OK",
                 remove_list.len(),
@@ -294,12 +335,16 @@ fn run() -> Result<(), String> {
         prev_header_id = Some(header_id);
     }
 
-    write_provisioning(&out_dir)?;
+    if std::env::var("MODE5_OUT").is_ok() {
+        write_context(&out_dir, &info, window_lo, window_hi, epoch_start)?;
+    } else {
+        write_provisioning(&out_dir)?;
+    }
 
     println!("\n=== DONE ===");
     println!(
         "  files written:        {} ({}.json .. {}.json)",
-        n, WINDOW_LO, WINDOW_HI
+        n, window_lo, window_hi
     );
     println!("  total inserted boxes: {}", counters.total_boxes);
     println!("  total removed boxes:  {}", counters.total_removes);
@@ -321,10 +366,16 @@ fn run() -> Result<(), String> {
         "  extension root gate:  100% passed ({} extensions)",
         counters.extension_gates
     );
-    println!("  epoch boundary {EPOCH_BOUNDARY} crossed: yes");
+    println!("  voting epoch starts at {epoch_start}");
     println!(
-        "  PROVISIONING.md:      {}",
-        out_dir.join("PROVISIONING.md").display()
+        "  context/provenance:   {}",
+        out_dir
+            .join(if std::env::var_os("MODE5_OUT").is_some() {
+                "context.json"
+            } else {
+                "PROVISIONING.md"
+            })
+            .display()
     );
     Ok(())
 }
@@ -788,11 +839,11 @@ fn reconstruct_extension_bytes(
 
 fn fetch_block_at(h: u32) -> Result<Value, String> {
     let id = fetch_block_id_at(h)?;
-    curl_json(&format!("{NODE}/blocks/{id}"))
+    curl_json(&format!("{}/blocks/{id}", node_url()))
 }
 
 fn fetch_block_id_at(h: u32) -> Result<String, String> {
-    let arr = curl_json(&format!("{NODE}/blocks/at/{h}"))?;
+    let arr = curl_json(&format!("{}/blocks/at/{h}", node_url()))?;
     arr.as_array()
         .and_then(|a| a.first())
         .and_then(Value::as_str)
@@ -807,7 +858,15 @@ fn fetch_state_root(h: u32) -> Result<String, String> {
 
 fn curl_json(url: &str) -> Result<Value, String> {
     let out = Command::new("curl")
-        .args(["-s", "--fail-with-body", url])
+        .args([
+            "-s",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "30",
+            "--fail-with-body",
+            url,
+        ])
         .output()
         .map_err(|e| format!("curl spawn failed for {url}: {e}"))?;
     if !out.status.success() {
@@ -831,9 +890,18 @@ fn curl_json(url: &str) -> Result<Value, String> {
 /// HTTP status or transport failure. The HTTP code is captured out-of-band
 /// via `-w` so a 404 body is distinguishable from a real error.
 fn fetch_utxo_bytes_hex(box_id: &str) -> Result<Option<String>, String> {
-    let url = format!("{NODE}/utxo/byIdBinary/{box_id}");
+    let url = format!("{}/utxo/byIdBinary/{box_id}", node_url());
     let out = Command::new("curl")
-        .args(["-s", "-w", "\n%{http_code}", &url])
+        .args([
+            "-s",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "30",
+            "-w",
+            "\n%{http_code}",
+            &url,
+        ])
         .output()
         .map_err(|e| format!("curl spawn failed for {url}: {e}"))?;
     if !out.status.success() {
@@ -899,12 +967,73 @@ fn hex32(v: &Value, key: &str) -> Result<[u8; 32], String> {
 // ----- output paths + docs -----
 
 fn corpus_dir() -> PathBuf {
+    if let Some(directory) = std::env::var_os("MODE5_OUT") {
+        return directory.into();
+    }
     // CARGO_MANIFEST_DIR = ergo-state/; corpus lives at repo-root test-vectors/.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("test-vectors")
         .join("mode5")
         .join("ad_proofs_replay")
+}
+
+/// Record the independently captured epoch parameters and ten context headers.
+/// These smaller windows do not cross an epoch boundary; the standing replay
+/// corpus retains that separate coverage.
+fn write_context(
+    dir: &Path,
+    info: &Value,
+    lo: u32,
+    hi: u32,
+    epoch_start: u32,
+) -> Result<(), String> {
+    use ergo_validation::active_params::parse_active_params;
+    use ergo_validation::voting::validation_settings::parse_validation_settings_update;
+    let epoch = fetch_block_at(epoch_start)?;
+    let header = build_header(&epoch["header"])?;
+    let mut counters = Counters {
+        by_id_binary_hits: 0,
+        json_reconstructs: 0,
+        total_boxes: 0,
+        total_removes: 0,
+        header_gates: 0,
+        tx_gates: 0,
+        extension_gates: 0,
+    };
+    let epoch_id = json_str(&epoch["header"], "id")?;
+    let epoch_header_bytes = reconstruct_header_bytes(&header, &epoch_id, &mut counters)?;
+    let extension_bytes =
+        reconstruct_extension_bytes(&epoch["extension"], &header, &epoch_id, &mut counters)?;
+    let extension = read_extension(&mut VlqReader::new(&extension_bytes))
+        .map_err(|e| format!("epoch extension: {e}"))?;
+    let mut params = parse_active_params(&extension, epoch_start).map_err(|e| e.to_string())?;
+    params.activated_update =
+        parse_validation_settings_update(&extension).map_err(|e| e.to_string())?;
+    let mut context_headers = serde_json::Map::new();
+    for height in lo.saturating_sub(10)..lo {
+        let block = fetch_block_at(height)?;
+        let id = json_str(&block["header"], "id")?;
+        let bytes = reconstruct_header_bytes(&build_header(&block["header"])?, &id, &mut counters)?;
+        context_headers.insert(
+            height.to_string(),
+            serde_json::json!({ "id": id, "bytes": hex::encode(bytes) }),
+        );
+    }
+    let record = serde_json::json!({
+        "source": node_url(), "reference_info": info, "network": info["network"],
+        "from": lo, "to": hi, "epoch_start": epoch_start,
+        "captured_unix_seconds": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs(),
+        "epoch_header": { "id": epoch_id, "bytes": hex::encode(epoch_header_bytes) },
+        "epoch_extension_bytes": hex::encode(extension_bytes),
+        "active_params_hex": hex::encode(params.serialize().map_err(|e| e.to_string())?),
+        "context_headers": context_headers,
+    });
+    fs::write(
+        dir.join("context.json"),
+        serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn write_provisioning(dir: &Path) -> Result<(), String> {
@@ -1108,7 +1237,7 @@ an epoch boundary).
         hi = WINDOW_HI,
         n = WINDOW_HI - WINDOW_LO + 1,
         boundary = EPOCH_BOUNDARY,
-        node = NODE,
+        node = node_url(),
     );
     let path = dir.join("PROVISIONING.md");
     fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))

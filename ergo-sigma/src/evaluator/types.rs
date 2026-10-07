@@ -367,7 +367,7 @@ impl<'a> ReductionContext<'a> {
         self.ergo_tree_version >= 3
     }
 
-    /// Like [`minimal`], but activated at EIP-50 / Sigma 6.0 (block
+    /// Like [`Self::minimal`], but activated at EIP-50 / Sigma 6.0 (block
     /// header version 4, `activatedScriptVersion = 3`). Used by tests
     /// that exercise v6 MethodCall arms; the activation gate in those
     /// arms rejects when `activated_script_version < 3`.
@@ -455,7 +455,7 @@ pub enum Value {
     /// kept as a distinct carrier rather than lowered to `Coll[Byte]` so
     /// its type survives the value layer. This is load-bearing for
     /// `SGlobal.serialize`, whose Scala cost model charges SString (length
-    /// via putUInt-no-info, 0 cost) strictly less than Coll[Byte] (length
+    /// via putUInt-no-info, 0 cost) strictly less than `Coll[Byte]` (length
     /// via putUShort, 3 cost); aliasing to `Coll[Byte]` would over-charge.
     Str(String),
     SigmaProp(SigmaBoolean),
@@ -464,7 +464,7 @@ pub enum Value {
     /// this carrier — tuples are immutable in Scala-sigma.
     /// Constructed by `binding.rs` (`Tuple` opcode) and by
     /// `helpers.rs::sigma_to_value`'s `STuple` arm. NEVER use for
-    /// "boxed-element Coll[X]"; use `CollGeneric` for that.
+    /// "boxed-element `Coll[X]`"; use `CollGeneric` for that.
     Tuple(Vec<Value>),
     /// Boxed-element `Coll[X]` for non-primitive element types
     /// (Coll of tuple, Coll of Box-like via `CollBox`, etc.). The
@@ -703,7 +703,7 @@ pub enum EvalError {
     /// `deserializeErgoTree` resolves the method table against the TREE-HEADER
     /// version and throws a `ValidationException` for a v3-only method id in a
     /// v0/v1/v2 tree — eagerly over the whole AST, so even a dead `If`-branch
-    /// method rejects. Distinct from [`SoftForkNotActivated`], which gates on
+    /// method rejects. Distinct from [`Self::SoftForkNotActivated`], which gates on
     /// the *activated* script version, not the tree-header version.
     #[error(
         "method ({type_id}, {method_id}) requires ErgoTree version >= 3, got tree version {tree_version}"

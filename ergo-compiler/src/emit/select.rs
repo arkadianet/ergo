@@ -20,13 +20,14 @@ impl Scope {
     ///   on the wire (`putType(obj.tpe.elemType)`,
     ///   ExtractRegisterAsSerializer.scala serialize);
     /// - tuple `_i` → `SelectField` (:551-553);
-    /// - anything else → [`EmitError::UnsupportedNode`] naming the field.
+    /// - anything else → [`EmitError::GraphBuildingReject`] naming the field.
     pub(crate) fn emit_select(
         &mut self,
         obj: &TypedExpr,
         field: &str,
         res_type: Option<&SType>,
         tpe: &SType,
+        pos: crate::span::Pos,
     ) -> Result<Expr, EmitError> {
         let obj_tpe = node_tpe(obj);
 
@@ -89,7 +90,7 @@ impl Scope {
             }
             // `box.R$i[T]` with a resolved Option result → ExtractRegisterAs.
             // A bare `SELF.R4` (no `[T]`) keeps its polymorphic SFunc type and
-            // falls through to the UnsupportedNode below, matching Scala's
+            // falls through to the GraphBuildingReject below, matching Scala's
             // graph-build error for an unresolved register read.
             if let Some(reg_digit) = field.strip_prefix('R') {
                 if let (Ok(reg_id), Some(SType::SOption(inner))) =
@@ -130,8 +131,11 @@ impl Scope {
             }
         }
 
-        Err(EmitError::UnsupportedNode(format!(
-            "Select '{field}' on a receiver of type {obj_tpe:?}"
-        )))
+        // GraphBuilding.scala:1315-1316 (v6.0.6): throwError cites the node.
+        Err(EmitError::GraphBuildingReject {
+            class: "GraphBuildingException",
+            what: format!("Cannot select field '{field}' on receiver of type {obj_tpe:?}"),
+            pos: Some(pos),
+        })
     }
 }

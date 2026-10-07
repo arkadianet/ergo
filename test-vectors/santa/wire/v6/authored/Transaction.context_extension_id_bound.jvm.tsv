@@ -1,0 +1,4 @@
+ext-id-0x80-reject#0	REJECT SerializerException
+ext-id-0xff-reject#1	REJECT SerializerException
+ext-rent-shaped-id-0x80-reject#2	REJECT SerializerException
+ext-id-0x7f-accept#3	ACCEPT 0114db43174f498723e4acb7e056e309f446b02c3da0c2572f3ab77ce86ec5811600017f0300000002c0ecfab5120008d3c094400000c0f79c1a0008d3c094400000

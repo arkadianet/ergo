@@ -12,13 +12,15 @@
 //! for its lifetime and sources everything from it, giving a frozen,
 //! MVCC-consistent view immune to commits that land after it opened.
 //!
-//! Consensus parity: [`CommittedSnapshot::candidate_dry_run`] hydrates a
-//! throwaway `BatchAVLProver` from this transaction's `AVL_NODES` (no
-//! copy-on-write, no persistent tree — the spec forbids both) and then
-//! runs the exact same `apply_change_set_to_prover` sequence the on-loop
-//! [`StateStore::candidate_dry_run`] uses, so for the same parent and
-//! change-set the two produce byte-identical results.
+//! Consensus parity: [`CommittedSnapshot::candidate_dry_run`] expands only
+//! authenticated operation paths from this transaction's `AVL_NODES`, runs
+//! the same canonical prover operation sequence as the on-loop builder, and
+//! self-verifies the resulting proof. No node graph survives a build. Full
+//! hydration remains available as an oracle and for the opt-in base cache.
 
+mod lazy;
+
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
@@ -213,8 +215,8 @@ impl CommittedSnapshot {
 
     /// Canonical best-header-chain id at `height`, or `None` if absent.
     /// Reads `HEADER_CHAIN_INDEX` in the held transaction; mirrors
-    /// `StateStore::get_header_id_at_height`. Used by the difficulty
-    /// retarget's epoch-header lookup.
+    /// `StateStore::get_header_id_at_height`. Candidate ancestry instead uses
+    /// [`Self::applied_header_id_at_height`].
     pub fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
         let table = match self.txn.open_table(HEADER_CHAIN_INDEX) {
             Ok(t) => t,
@@ -239,6 +241,12 @@ impl CommittedSnapshot {
         }
     }
 
+    /// Fully applied chain ID from `CHAIN_INDEX` in this snapshot's held
+    /// transaction. Header-only fork selection cannot change this ancestry.
+    pub fn applied_header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
+        crate::reader::applied_header_id_in_txn(&self.txn, height)
+    }
+
     /// Serialized block-section bytes by modifier_id (extension /
     /// block-transactions / AD-proofs section), or `None` if absent.
     /// Reads `BLOCK_SECTIONS` in the held transaction; mirrors
@@ -258,7 +266,7 @@ impl CommittedSnapshot {
 
     /// Look up the serialized bytes of an unspent box by id within this
     /// snapshot's one held read transaction. Delegates to the shared
-    /// [`crate::reader::lookup_box_in_txn`] so the descent is **byte-identical**
+    /// `crate::reader::lookup_box_in_txn` so the descent is **byte-identical**
     /// to `ChainStoreReader::lookup_box` (same `parse_walk_node`, which ignores
     /// balance/label bytes irrelevant to descent). `Ok(None)` for an empty tree
     /// or absent key; `Err(DbCorruption)` for a missing/malformed node or a
@@ -503,19 +511,14 @@ impl CommittedSnapshot {
     /// return `(new_state_root, raw_ad_proof_bytes, snapshot_tip_id)` —
     /// the off-loop twin of [`StateStore::candidate_dry_run`]. Byte-for-
     /// byte identical to the on-loop result for the same parent + txs.
+    /// Loads authenticated AVL paths on demand; never retains a full-tree base.
     pub fn candidate_dry_run(
         &self,
         checked: &[CheckedTransaction],
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
         let (to_remove, to_insert) = StateStore::build_utxo_changes_checked(checked)?;
         let to_lookup = StateStore::build_data_input_lookups_checked(checked);
-        let mut prover = self.hydrate_prover()?;
-        let (new_root, proof) = super::dry_run::apply_change_set_to_prover(
-            &mut prover,
-            &to_lookup,
-            &to_remove,
-            &to_insert,
-        )?;
+        let (new_root, proof, nodes_read) = lazy::prove(self, &to_lookup, &to_remove, &to_insert)?;
         // Pre-broadcast self-check (see self_check_candidate_proof).
         super::dry_run::self_check_candidate_proof(
             &self.state_root(),
@@ -525,6 +528,7 @@ impl CommittedSnapshot {
             &proof,
             &new_root,
         )?;
+        tracing::debug!(nodes_read, "candidate proof loaded committed AVL paths");
         Ok((new_root, proof, self.chain_state.best_full_block_id))
     }
 

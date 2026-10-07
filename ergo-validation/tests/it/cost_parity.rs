@@ -761,6 +761,7 @@ mod ranges {
         let mut txs: Vec<TxVector> =
             serde_json::from_str(&read(&format!("transactions_{start}_{end}.json"))).unwrap();
         txs.sort_by_key(|tx| tx.height);
+        assert!(!txs.is_empty(), "{start}-{end}: no replay transactions");
         assert_eq!(
             txs.len(),
             expected.len(),
@@ -1133,6 +1134,7 @@ mod ranges {
 
     // ledger: TX-voted-params
     #[test]
+    #[ignore = "requires hash-pinned L4 inputs; run scripts/fetch-l4-inputs.sh, then diagnostics --ignored"]
     fn cost_parity_stratified_ranges_match_jvm() {
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
@@ -1152,6 +1154,7 @@ mod ranges {
 
     // ledger: VERSION-tree-version-gate, VERSION-G019, VERSION-G020
     #[test]
+    #[ignore = "requires hash-pinned L4 inputs; run scripts/fetch-l4-inputs.sh, then diagnostics --ignored"]
     fn cost_parity_required_selection_matches_jvm() {
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)

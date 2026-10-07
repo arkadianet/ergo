@@ -6,157 +6,167 @@ state, P2P, sync, mempool, mining, indexer, API, wallet cryptography, and
 lifecycle, the single-writer chain action loop, and the embedded wallet writer
 that adapts the service's wallet engine to the API and chain runtime.
 
-The node is not being replaced by the service: it remains the embedded host
-and API adapter. All wallet orchestration — command logic, transaction build,
-signing, sweep, multi-sig, key derivation, rescan orchestration, the
-chain-apply hook and the rescan fences — lives in
-`ergo_wallet_service::engine::WalletEngine`. The node keeps a thin adapter:
-configuration, the command channel and writer task, the in-process chain
-seams over `ergo-state`, the submission and mempool adapters, the `ergo_api`
-`WalletAdmin` impl, and the wallet session/task lifecycle.
-
-**Depends on (workspace):** `ergo-primitives`, `ergo-ser`, `ergo-chain-spec`,
-`ergo-crypto`, `ergo-validation`, `ergo-wallet`, `ergo-wallet-service`,
-`ergo-state`, `ergo-p2p`, `ergo-sync`, `ergo-mempool`, `ergo-mining`,
-`ergo-indexer`, `ergo-api`, `ergo-rest-json`, `ergo-sigma`
-**Depended on by:** (see codemap index — top of the stack)
-**Approx LOC:** ~44K (`src/**/*.rs`)
+**Depends on (workspace):** ergo-primitives, ergo-ser, ergo-chain-spec,
+ergo-crypto, ergo-validation, ergo-wallet, ergo-state, ergo-p2p, ergo-sync,
+ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma,
+ergo-wallet-service, ergo-wallet-protocol
+**Depended on by:** (see codemap index — top of the stack; nothing depends on it)
 
 ## Start here
-- `src/node/boot/` — production bring-up and `RunHandle` lifecycle.
-- `src/node/boot/api_wiring.rs` — constructs the shared wallet store, the
-  in-process `ChainClient`, `ergo_wallet_service::runtime::WalletService`, the
-  wallet's `RescanCoordinator` (boot recovery runs on it), the
-  `EmbeddedWallet` (admin, writer task owning the `WalletEngine`, chain-apply
-  `WalletStateHook`), and the API adapters.
-- `src/node/action_loop.rs` — the chain-state single-writer event loop.
-- `src/node/state.rs` — `NodeState`, the runtime god-struct mutated by loop
-  handlers.
-- `src/node/wallet_bridge.rs` — the wallet adapter: `EmbeddedWallet`,
-  `WalletCommand`, `NodeWalletAdmin`, the `WalletWriter` loop that dispatches
-  each command to the `WalletEngine`, and the node-side seam implementations
-  (`ChainStateAccessorImpl`, `NodeSubmitAdapter`, `MempoolViewOverlay`).
-- `src/node/wallet_bridge/chain_client.rs` — `InProcessChainClient`, adapting
-  committed `ChainStoreReader` and node submission into the service's
-  `ChainClient` port.
-- `src/snapshot.rs` — lock-free `NodeSnapshot` projection served to the API.
+- `node::boot::run_inner` (`src/node/boot/mod.rs:185`) — the whole bring-up
+  sequence: store/genesis/AVL, handshake + peer manager, sync executor +
+  coordinator, indexer, wallet boot, API bind, mining wire-up, action-loop
+  spawn. Returns the live `RunHandle`. `run` (`:65`) wraps it with signals.
+- `node::action_loop::action_loop` (`src/node/action_loop.rs:41`) — the
+  single-writer event loop: four timers (dial/sync/mempool/memory) + inbound
+  event coalescing + API submit drain + mining dispatch + clean shutdown.
+- `node::state::NodeState` (`src/node/state.rs:73`) — the runtime god-struct
+  every loop handler mutates; reading its fields is the fastest map of what the
+  node owns at runtime.
+- `snapshot::NodeSnapshot` (`src/snapshot/mod.rs:44`) + `api_bridge` — the read
+  boundary: per-tick projection of node state into API DTOs, parked in an
+  `ArcSwap`, served lock-free to the axum task.
 
 ## Modules
-- `src/main.rs`, `src/lib.rs` — CLI/bin and library facade.
-- `src/config/` — TOML/CLI parsing, precedence, resolved configuration, mode
-  selection, and validation.
-- `src/node/boot.rs`, `src/node/boot/api_wiring.rs` — process startup and API
-  plus wallet wiring.
-- `src/node/action_loop.rs`, `sync_tick.rs`, `events.rs`, `messaging.rs` — the
-  single-writer chain loop and event ingestion.
-- `src/node/state.rs`, `handle.rs`, `admission.rs`, `peer_actions.rs` — runtime
-  state, shutdown, transaction admission, and peer command plumbing.
-- `src/node/sync_tick.rs`, `src/node/boot/sync_setup.rs` — applied-tip advancement and
-  snapshot/NiPoPoW bootstrap state machines.
-- `src/node/wallet_bridge.rs` — the embedded wallet adapter: command channel,
-  rescan fences and control policy, engine dispatch, rescan-job spawning, the
-  `/scan/addBox` box-JSON decode, and the seam implementations over
-  `ergo-state` / `NodeSubmit` / the API mempool view.
-- `src/node/wallet_bridge/chain_client.rs` — the node's concrete
-  `ChainClient` implementation over committed state and `NodeSubmit`.
-- `src/node/wallet_bridge/chain_snapshot.rs` — `ChainSnapshot`, the committed
-  `SigningView` over an `ergo-state` `CommittedSnapshot`.
-- `src/wallet_boot.rs` — wallet session ids, per-session task tracking, and
-  routing a node shutdown, by session id, to that session's
-  `RescanCoordinator`.
-- `src/api_bridge.rs` (+ siblings) — API trait implementations backed by the
-  node snapshot and submission channels.
-- `src/mining_bridge.rs`, `src/node/mining_dispatch.rs`,
-  `src/node/mining_engine.rs` — external-miner adapter and off-loop candidate
-  engine.
-- `src/snapshot.rs`, `src/node/snapshot_emit.rs`, `snapshot_state.rs` — API
-  snapshot construction and publication.
-- `src/peer_loop.rs` — peer connection tasks and `PeerEvent` production.
-- `src/indexer_chain.rs` — indexer reader adapter over `ChainStoreReader`.
-- `src/notifier.rs` — committed-tip notifier for mempool reconciliation.
-- `src/genesis.rs`, `anchor_map.rs`, `anchor_scheduler.rs` — genesis loading
-  and header-anchor support.
-- `src/node/event_feed.rs`, `first_deliverer.rs`, `heartbeat.rs`,
-  `memory_sampler.rs` — operator feed, attribution, and diagnostics.
+- `src/main.rs` — thin binary: parse `Cli`, load `NodeConfig`, init tracing
+  (stderr always + optional non-lossy rolling file appender), install the
+  panic-to-tracing hook, call `run`.
+- `src/lib.rs` — library facade; re-exports `run`, `run_inner`, `RunHandle`.
+- `src/config/` — TOML + CLI → resolved `NodeConfig`. `cli.rs` (clap parser),
+  `toml_sections.rs` (raw TOML shapes), `load.rs` (precedence + all validation
+  + Mode-3/5/6 activation gates), `resolved.rs` (`NodeConfig`/`StateType`/
+  logging), `mod.rs` (canonical-mode predicates + `validate_supported`).
+- `src/node/boot/mod.rs` — boot orchestration (start here).
+- `src/node/action_loop.rs` — the action loop body + `handle_mempool_tick`.
+- `src/node/state.rs` — `NodeState` + `PeerRegistry`/`PeerRuntime`.
+- `src/node/handle.rs` — `RunHandle`: shutdown ordering + task-leak-safe `Drop`.
+- `src/node/sync_tick.rs` — the 1 s sync cycle: delivery timeouts, peer
+  eviction, block-apply advance, missing-section re-request, SyncInfo dispatch,
+  heartbeat, snapshot publish; drives popow/utxo bootstrap state machines.
+- `src/node/events.rs` — peer-event dispatcher; coalesces header-modifier
+  batches; handles `LocalFullBlock` (mined-block apply pipeline).
+- `src/node/event_feed.rs` — operator event-feed ring: bounded FIFO of
+  `FeedEvent` entries (block applied, sync-state transitions, peer-count
+  changes, indexer status) derived by diffing successive snapshot
+  observations; served lock-free via `GET /api/v1/events`.
+- `src/node/first_deliverer.rs` — bounded `header_id → FirstDeliverer`
+  ring; records the first peer to deliver each validated header for miner
+  attribution (served via mining UI and `GET /api/v1/mining/minerStats`).
+- `src/node/messaging/mod.rs` — inbound per-frame `message::CODE_*` dispatcher
+  (throttle → deserialize → coordinator/executor/mempool routing).
+- `src/node/admission.rs` — peer + API tx admission through `Mempool::process`;
+  maps `MempoolAction`s to outer-loop `Action`s and shapes `SubmitError`.
+- `src/node/peer_actions.rs` — outbound plumbing: dial scheduler, action flush,
+  penalty application, disconnect cleanup, channel sends.
+- `src/node/identity.rs` — mode-label / `NodeMode` classification, `/identity`
+  payload build, NiPoPoW resume classification, runtime activation gate.
+- `src/node/mining_dispatch.rs` / `mining_engine.rs` — bridge dispatch (serve
+  cached candidate, apply submitted solution) + the off-loop candidate engine
+  task fed `BuildIntent`s over a `watch` channel.
+- `src/node/wallet_bridge.rs` — the `EmbeddedWallet` / `WalletWriter` adapter:
+  serialize `WalletCommand`s into the service's `WalletEngine`, expose
+  `NodeWalletAdmin`, and adapt node chain, submission and mempool capabilities.
+  The service owns command logic and the shared rescan/apply coordinator.
+- `src/node/wallet_bridge/chain_client.rs` — in-process chain protocol adapter.
+- `src/node/wallet_bridge/chain_snapshot.rs` — committed signing snapshot adapter.
+- `src/node/heartbeat.rs` — per-tick operator stderr heartbeat (diagnostics).
+- `src/node/snapshot_emit/mod.rs` / `snapshot_state.rs` — assemble `SnapshotParts`
+  from `NodeState`; Mode-2 snapshot-server cache state.
+- `src/node/tip_context.rs` / `sync_helpers.rs` / `util.rs` / `memory_sampler.rs`
+  — admission tip context, anchor sync-info helpers, misc, mem sampling.
+- `src/api_bridge.rs` (+ `scala_compat.rs`, `block_reassembly.rs`, `compat.rs`,
+  `error.rs`, `emission.rs`) — implements `ergo-api`'s `NodeReadState`/`NodeSubmit`/
+  `MempoolView`/`NodeAdmin` against the snapshot + submission channels; hosts
+  the load-bearing Scala-vs-Rust JSON byte-parity oracle tests.
+- `src/mining_bridge.rs` — `NodeMining` impl: `MiningRequest` channel bridge,
+  work-message JSON projection, candidate longpoll.
+- `src/snapshot/mod.rs` — `NodeSnapshot` DTO bundle, `SnapshotPublisher`,
+  `SnapshotHandle` (`Arc<ArcSwap<NodeSnapshot>>`), recent-blocks tip cache.
+- `src/peer_loop.rs` (+ `peer_loop/outbound.rs`) — per-peer dial/accept +
+  read/write tasks; `PeerEvent` enum. The outbound channel is bounded
+  (`MAX_MESSAGES = 2048`, 16 MiB payload budget, 30 s write timeout); an
+  overflow, oversized payload, or stalled write stops the socket task rather
+  than buffering unboundedly.
+- `src/notifier.rs` — `MempoolNotifier`: polls committed tip identity
+  `(height, header_id)`, emits `TxDiff` so the mempool reconciles off the
+  consensus path; generic over `DiffSource`.
+- `src/indexer_chain.rs` — `IndexerChainSource` adapter over `ChainStoreReader`.
+- `src/genesis.rs` — genesis-box JSON loading for state init.
+- `src/anchor_map.rs` / `anchor_scheduler.rs` — REST-sourced header-anchor map
+  (Step B observation) + per-peer SyncInfo crafting (Step C).
+- `src/wallet_boot.rs` — service boot adapter and session-scoped rescan worker supervision.
+- `src/mem_*.rs` — optional memory-observability sampler (`ERGO_MEM_CSV`).
 
 ## Key types, traits & functions
-- `RunHandle`, `run`, `run_inner` — live process lifecycle and graceful
-  shutdown.
-- `NodeState`, `action_loop` — chain runtime ownership and serialized mutation.
-- `NodeSnapshot`, `SnapshotPublisher`, `SnapshotHandle` — per-tick API read
-  projection.
-- `NodeWalletAdmin` — API-to-wallet-command adapter (with the pre-enqueue
-  rescan fence).
-- `ChainStateAccessorImpl`, `ChainSnapshot` — the node's `WalletChainAccess` /
-  `SigningView` over committed `ergo-state`.
-- `NodeSubmitAdapter`, `MempoolViewOverlay` — the engine's `TxSubmitter` and
-  `MempoolOverlay` over `NodeSubmit` and the API mempool view.
-- `WalletStateHook` — the service's `WalletApplyHook`, re-exported; built from
-  the engine by `EmbeddedWallet` and wired into block apply / rollback (its
-  `wiring()` supplies the rollback guard).
-- `InProcessChainClient` / `NodeChainClient` — committed-state and submission
-  adapter for the service `ChainClient`.
-- `WalletService` — service-owned runtime core embedded at boot and handed
-  to the engine, which uses it for selected reads and for rescans.
-- `EmbeddedWallet`, `WalletWriter`, `WalletCommand` — the embedded wallet.
-  `EmbeddedWallet::new(parts)` builds the engine, begins the wallet session and
-  returns the admin, the writer task (one engine per writer, commands executed
-  in arrival order) and the chain-apply hook, all on the engine's
-  `RescanCoordinator`.
-- `PeerEvent`, `MempoolNotifier`, `DiffSource` — peer ingestion and mempool
-  reconciliation contracts.
-- `NodeConfig`, `StateType`, `NodeMode` — resolved configuration and operating
-  mode taxonomy.
-- `is_canonical_mode_5_combo`, `is_canonical_mode_6_combo` — shared runtime
-  capability gates.
+- `RunHandle` (struct) — live owned interface to a running node; `shutdown`/
+  `Drop` enforce bounded graceful drain then durable close — `src/node/handle.rs:39`
+- `NodeState` (struct) — action-loop god-struct (store, sync, peers, mempool,
+  snapshot, wallet hook, bootstrap state machines) — `src/node/state.rs:73`
+- `run` / `run_inner` (async fn) — production entry / handle-returning entry —
+  `src/node/boot/mod.rs:65` / `:185`
+- `action_loop` (async fn) — the single-writer select loop — `src/node/action_loop.rs:41`
+- `NodeSnapshot` (struct) + `SnapshotPublisher` (struct) + `SnapshotHandle`
+  (type alias) — per-tick read projection — `src/snapshot/mod.rs:44` / `:280` / `:276`
+- `SnapshotReadState` / `SnapshotMempoolView` / `ShutdownAdmin` / `SubmitBridge`
+  — the `ergo-api` trait impls + submission channel — `src/api_bridge.rs:58/469/125/558`
+- `MiningRequest` (enum) + `MINING_TIMEOUT`/`LONGPOLL_TIMEOUT` — mining bridge —
+  `src/mining_bridge.rs:62`
+- `PeerEvent` (enum) — peer-task → action-loop messages incl. `LocalFullBlock` —
+  `src/peer_loop.rs:21`
+- `MempoolNotifier` (struct) + `DiffSource` (trait) + `PollOutcome` (enum) —
+  `src/notifier.rs:60/24/39`
+- `WalletCommand`, `NodeWalletAdmin`, `EmbeddedWallet`, `WalletWriter` —
+  embedded single-writer adapter over `ergo-wallet-service::engine::WalletEngine`.
+- `NodeConfig` / `StateType` (struct/enum) + `NodeConfig::load` — `src/config/resolved.rs` / `src/config/load.rs`
+- `NodeMode` (enum) + `classify_node_mode` / `validate_runtime_mode_support` —
+  mode taxonomy + activation gate — `src/node/identity.rs:100/240/584`
+- `is_canonical_mode_5_combo` / `is_canonical_mode_6_combo` /
+  `mempool_force_off_for_mode` — single-source mode predicates — `src/config/mod.rs:80/52/109`
 
 ## Invariants & contracts
-- **One chain-state writer.** All `StateStore` and mempool mutation happens on
-  the action-loop task. Service-owned wallet persistence is invoked through a
-  wallet apply payload in the same state redb transaction on both synchronous
-  and background-persist paths.
-- **Thin wallet adapter.** The wallet's behavior lives in the service's
-  `WalletEngine`; the node moves commands and replies, enforces the rescan
-  fences (before enqueue in `NodeWalletAdmin`, at execution in the writer),
-  runs a rescan's `RescanJob` with `spawn_blocking` tracked by the wallet
-  session, and implements the chain / submit / mempool seams. One
-  `RescanCoordinator` per wallet session is shared by the engine, the admin
-  fence and the chain-apply hook by construction — `EmbeddedWallet::new`
-  derives all three from the one engine, and none takes a coordinator of its
-  own; there are no process-global rescan flags.
-- **Derived keys track forward.** Deriving a key persists it (tracked key,
-  visible addresses and — for `deriveNextKey` — the derivation head in one
-  write) and tracks it from the next applied block; it does not rescan
-  history.
-- **In-process chain adapter.** `InProcessChainClient` returns owned,
-  identity-checked block data from the committed state reader and routes
-  submission through `NodeSubmit`; the service itself has no node/API
-  dependency.
-- **Atomic durable shutdown.** Clean shutdown drains the API before the action
-  loop performs the final durable state commit. `RunHandle::Drop` is
-  best-effort and embedders must await `shutdown()` before reopening a data
-  directory.
-- **Reorg-detecting mempool reconcile.** `MempoolNotifier` keys on
-  `(height, header_id)`, so equal-height reorgs are detected without putting
-  channels on the consensus commit path.
-- **Epoch-boundary revalidation.** A tip change with different active params
-  or validation settings demotes active mempool transactions and re-admits
-  them under the new rules.
-- **IP bans evict every connection.** A banned peer tears down all registered
-  runtime entries for that IP, including other ports and pending handshakes.
-- **Change-address updates are unlocked-only and ownership-checked.** The
-  recorded path is re-derived with the active master key before persistence.
-- **Mode gates are enforced twice.** Config loading and the programmatic
-  runtime backstop share the canonical mode predicates; mining and the
-  extra-index force off in incompatible state modes.
-- **PoW is verified at the API boundary.** Submitted full blocks receive an
-  Autolykos precheck before waking the action loop.
-- **Lock-free API reads.** The API loads the `ArcSwap` snapshot and never
-  blocks the chain writer on ordinary reads.
-- **Task ownership is explicit.** Shutdown signals and aborts every task
-  registered by `RunHandle`; wallet writer/rescan tasks are tracked by
-  `wallet_boot` so they cannot outlive the embedded wallet session silently.
-  A node's shutdown is routed by its wallet session id to that session's
-  `RescanCoordinator`, so it cancels its own running rescan even when another
-  session has begun in the same process since, and never reaches another
-  session's wallet.
+- **Single-writer state.** All `StateStore` mutation and mempool mutation
+  happen on the one action-loop task; the mempool needs no locking because it
+  is owned there. Cross-task work (API submit, mining, wallet) crosses bounded
+  mpsc channels with per-request oneshot replies.
+- **Atomic durable shutdown.** Clean shutdown is bounded (5 s API drain cap)
+  precisely so the action loop's terminal `StateStore::shutdown_cleanly()` runs
+  the undo_log + AVL + chain_index + state_meta atomic commit; `RunHandle::Drop`
+  is best-effort only and does NOT guarantee durable close — embedders must
+  `shutdown().await` before reopening a `data_dir` (`src/node/handle.rs`,
+  `src/node/action_loop.rs:325`).
+- **Reorg-detecting mempool reconcile.** `MempoolNotifier` tracks
+  `(height, header_id)` not just height, so equal-height reorgs are detected;
+  consensus commit touches no channels (`src/notifier.rs`).
+- **Epoch-boundary revalidation.** On a tip change whose active voted params or
+  validation settings differ from last-seen, every active mempool tx is demoted
+  into the revalidation queue and re-admitted under the new rules
+  (`src/node/action_loop.rs:370`).
+- **IP bans evict every connection.** After a penalty bans a peer, every
+  registered runtime from that IP — other ports and pending handshakes — is
+  torn down, not just the penalized connection (`cleanup_banned_ip`,
+  `src/node/peer_actions.rs:379`).
+- **Change-address updates are unlocked-only and ownership-checked.**
+  `WalletAdmin::update_change_address` requires an unlocked wallet and
+  re-derives the recorded path with the active master key before persisting, so
+  a change address can never point at a key this wallet cannot sign for
+  (`../ergo-wallet-service/src/engine/admin.rs`).
+- **Anti-DoS recording survives a dropped reply.** A submission's mempool
+  admission outcome is recorded even if the API handler already timed out and
+  dropped its oneshot (`src/node/action_loop.rs:202`).
+- **Mode-support gating is enforced twice.** `NodeConfig::load` (TOML path) and
+  `validate_runtime_mode_support` (programmatic-construction backstop) share the
+  `is_canonical_mode_*` predicates so the two gates cannot drift; the mining /
+  indexer / mempool subsystems force-off on `state_type == Digest`
+  (`src/config/load.rs`, `src/node/identity.rs:584`, `src/config/mod.rs`).
+- **PoW verified at the API boundary.** `submit_full_block` verifies the
+  Autolykos solution in the axum task so an invalid-PoW block never wakes the
+  action loop (`src/api_bridge.rs:606`).
+- **Lock-free reads.** The API never blocks the action loop: reads load an
+  `Arc<ArcSwap<NodeSnapshot>>` rebuilt once per sync tick; snapshot construction
+  is bounded and the recent-blocks tail is cached by full-block tip id
+  (`src/snapshot/mod.rs`, `src/node/snapshot_emit/mod.rs`).
+- **Supervised shutdown.** `RunHandle` cancels wallet command admission and
+  joins wallet/rescan workers before signalling the action loop to close the
+  store. `Drop` schedules the same wallet-before-store cleanup and cancels or
+  aborts its other background tasks; explicit `shutdown().await` provides the
+  completion guarantee (`src/node/handle.rs`).

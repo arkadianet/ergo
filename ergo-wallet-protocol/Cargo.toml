@@ -3,6 +3,7 @@ name = "ergo-wallet-protocol"
 description = "Transport-neutral wallet and node-chain wire protocol types."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
@@ -11,3 +12,6 @@ publish = false
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 hex = { workspace = true }
+
+[lints]
+workspace = true

@@ -65,7 +65,15 @@ impl Validator for ErgoValidator {
         // disagree for the same bytes.
         let message = bytes_to_sign(&tx).map_err(|_| ValidationErr::Deserialize)?;
         let tx_id = Digest32::from_bytes(*blake2b256(&message).as_bytes());
-        Ok(PeekedTx { tx_id, fee })
+        let contains_storage_rent_claim = tx.inputs.iter().any(|input| {
+            input.spending_proof.proof.is_empty()
+                && input.spending_proof.extension().values.contains_key(&127)
+        });
+        Ok(PeekedTx {
+            tx_id,
+            fee,
+            contains_storage_rent_claim,
+        })
     }
 
     fn peek_structure(&self, tx_bytes: &[u8]) -> Result<PeekedStructure, ValidationErr> {
@@ -276,7 +284,8 @@ fn map_validation_error(err: ValidationError) -> ValidationErr {
         | E::BoxTooLarge { .. }
         | E::PropositionTooLarge { .. }
         | E::OutputFromFuture { .. }
-        | E::OutputCreationHeightBelowInputs { .. } => ValidationErr::Structural,
+        | E::OutputCreationHeightBelowInputs { .. }
+        | E::DuplicateStorageRentOutput { .. } => ValidationErr::Structural,
         E::InputBoxNotFound { .. } => ValidationErr::UnresolvedInput,
         E::DataInputBoxNotFound { .. } => ValidationErr::UnresolvedDataInput,
         E::ResolvedInputsMismatch { .. }

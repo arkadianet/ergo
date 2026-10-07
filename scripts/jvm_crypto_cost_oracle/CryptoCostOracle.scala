@@ -1,8 +1,8 @@
 //> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
 //> using scala 2.12
-//> using dep org.scorexfoundation::sigma-state:6.0.2
-//> using dep org.ergoplatform::ergo-core:6.0.2
-//> using dep org.ergoplatform::ergo-wallet:6.0.2
+//> using dep org.scorexfoundation::sigma-state:6.0.6
+//> using dep org.ergoplatform::ergo-core:6.0.6
+//> using dep org.ergoplatform::ergo-wallet:6.0.6
 
 // Usage: scala-cli run scripts/jvm_crypto_cost_oracle/CryptoCostOracle.scala -- <ergo src/main/resources> <output.json>
 // Fresh secrets and prover randomness are deliberately regenerated; captured bytes are the replay inputs.

@@ -11,6 +11,7 @@
 //! lookups against historical heights this is irrelevant; for tip-only
 //! reads, prefer the snapshot path.
 
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use redb::Database;
@@ -19,9 +20,32 @@ use crate::avl::node::NULL_NODE;
 use crate::chain::{ChainStateMeta, HeaderMeta};
 use crate::store::{
     difficulty_headers_needed, read_height_index_ids, CommittedSnapshot, PopowByIdLookup,
-    PopowMissingAt, StateError, AVL_NODES, BLOCK_SECTIONS, CHAIN_STATE_META, HEADERS,
+    PopowMissingAt, StateError, AVL_NODES, BLOCK_SECTIONS, CHAIN_INDEX, CHAIN_STATE_META, HEADERS,
     HEADERS_BY_HEIGHT, HEADER_CHAIN_INDEX, HEADER_META, MODIFIER_TYPE_INDEX, STATE_META,
 };
+
+pub(crate) fn applied_header_id_in_txn(
+    txn: &redb::ReadTransaction,
+    height: u32,
+) -> Result<Option<[u8; 32]>, StateError> {
+    let table = match txn.open_table(CHAIN_INDEX) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    match table.get(u64::from(height))? {
+        Some(row) => row
+            .value()
+            .try_into()
+            .map(Some)
+            .map_err(|_| StateError::DbCorruption {
+                table: "chain_index",
+                key: hex::encode(u64::from(height).to_be_bytes()),
+                reason: format!("row has len {} (expected 32)", row.value().len()),
+            }),
+        None => Ok(None),
+    }
+}
 
 /// Lock-free read handle over the chain state. Cloning is cheap — the
 /// underlying redb [`Database`] is shared via `Arc`, and every method
@@ -61,6 +85,21 @@ pub fn committed_tip_in(
 }
 
 impl ChainStoreReader {
+    /// Check full-block availability in one snapshot without copying payloads.
+    pub fn block_sections_exist(&self, ids: &[[u8; 32]]) -> Result<bool, StateError> {
+        let txn = self.db.begin_read()?;
+        let table = match txn.open_table(BLOCK_SECTIONS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        for id in ids {
+            if table.get(id.as_slice())?.is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     /// Construct from an `Arc<Database>` shared with the owning
     /// [`crate::store::StateStore`]. Crate-private so external callers
     /// always go through `StateStore::reader()`.
@@ -194,7 +233,7 @@ impl ChainStoreReader {
     /// route. First entry (when non-empty) is always the best-chain
     /// header id at `height`; subsequent entries are orphans.
     /// Mirrors Scala's `headerIdsAtHeight` in
-    /// `HeadersProcessor.scala:274` and the [`HEADERS_BY_HEIGHT`]
+    /// `HeadersProcessor.scala:274` and the `HEADERS_BY_HEIGHT`
     /// invariant documented on the table definition.
     pub fn header_ids_at_height_all(&self, height: u32) -> Result<Vec<[u8; 32]>, StateError> {
         let read_txn = self.db.begin_read()?;
@@ -231,6 +270,15 @@ impl ChainStoreReader {
             }
             None => Ok(None),
         }
+    }
+
+    /// Header ID on the fully applied block chain. Header-only fork choice
+    /// cannot replace this index; each call reads committed `CHAIN_INDEX`.
+    pub fn get_applied_header_id_at_height(
+        &self,
+        height: u32,
+    ) -> Result<Option<[u8; 32]>, StateError> {
+        applied_header_id_in_txn(&self.db.begin_read()?, height)
     }
 
     /// Active voted-protocol parameters at `height` — the latest row in

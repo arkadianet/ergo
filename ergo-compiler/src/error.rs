@@ -25,7 +25,7 @@ pub enum ParseError {
     /// exposure, it is just never REST-adjacent the way this node's
     /// compile-on-request surface is. The threshold is a
     /// conservative, non-oracle-pinned constant -- the compiler's own limits
-    /// are explicitly not consensus-critical (`lib.rs` D-note) -- so this
+    /// are explicitly not consensus-critical (`compiler-design-ledger.md` D-note) -- so this
     /// exists purely to bound stack use once REST exposes untrusted source
     /// text to this parser.
     #[error("expression/type nested too deeply (depth {depth} exceeds the parser's limit) at offset {pos}")]

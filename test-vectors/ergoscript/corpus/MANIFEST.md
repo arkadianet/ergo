@@ -10,7 +10,7 @@ verdict (and, on reject, the exact 1-based `line:col`) equals the committed
 ## Oracle
 
 `verdicts.json` is produced by the **JVM reference parser**, `sigmastate.lang.SigmaParser`
-(sigma-state 6.0.2 — the version the consensus node runs), via
+(sigma-state 6.0.6 — the version the consensus node runs), via
 `scripts/jvm_parser_oracle/ParserOracle.scala`. It is an external ORACLE: the
 Rust parser is graded against it; it is never adjusted to make the Rust parser
 pass (the repo's oracle-parity rule). The parser runs under
@@ -77,7 +77,7 @@ These are noted for a later milestone; none are consensus surfaces.
 ## Regeneration
 
 Refresh `verdicts.json` from the live JVM oracle (needs `scala-cli` on PATH and,
-first run, network to resolve `sigma-state:6.0.2` from Maven Central):
+first run, network to resolve `sigma-state:6.0.6` from Maven Central):
 
 ```bash
 cargo test -p ergo-compiler --test it corpus_smoke -- --ignored --nocapture

@@ -10,6 +10,7 @@
 //! observed HTTP status codes, so a regression fails here even if the snapshot
 //! stays green.
 
+use ergo_indexer_types::IndexerReadError;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -242,32 +243,43 @@ impl IndexerQuery for StubIndexer {
         IndexerStatus::CaughtUp
     }
 
-    fn box_by_id(&self, _box_id: &BoxId) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_id(&self, _box_id: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
 
-    fn box_by_global_index(&self, _n: u64) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_global_index(&self, _n: u64) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
 
-    fn boxes_by_global_range(&self, _lo: u64, _hi: u64) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn boxes_by_global_range(
+        &self,
+        _lo: u64,
+        _hi: u64,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn tx_by_id(&self, _tx_id: &TxId) -> Option<IndexedTxDto> {
-        None
+    fn tx_by_id(&self, _tx_id: &TxId) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
     }
 
-    fn tx_by_global_index(&self, _n: u64) -> Option<IndexedTxDto> {
-        None
+    fn tx_by_global_index(&self, _n: u64) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok(None)
     }
 
-    fn txs_by_global_range(&self, _lo: u64, _hi: u64) -> Vec<IndexedTxDto> {
-        Vec::new()
+    fn txs_by_global_range(
+        &self,
+        _lo: u64,
+        _hi: u64,
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn address_balance(&self, _tree_hash: &TreeHash) -> Option<BalanceDto> {
-        None
+    fn address_balance(
+        &self,
+        _tree_hash: &TreeHash,
+    ) -> Result<Option<BalanceDto>, IndexerReadError> {
+        Ok(None)
     }
 
     fn address_txs_paged(
@@ -275,8 +287,8 @@ impl IndexerQuery for StubIndexer {
         _tree_hash: &TreeHash,
         _p: Page,
         _dir: SortDir,
-    ) -> Vec<IndexedTxDto> {
-        Vec::new()
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
     fn address_boxes_paged(
@@ -284,8 +296,8 @@ impl IndexerQuery for StubIndexer {
         _tree_hash: &TreeHash,
         _p: Page,
         _dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
     fn address_unspent_paged(
@@ -293,20 +305,24 @@ impl IndexerQuery for StubIndexer {
         _tree_hash: &TreeHash,
         _p: Page,
         _dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn address_total_txs(&self, _tree_hash: &TreeHash) -> u64 {
-        0
+    fn address_total_txs(&self, _tree_hash: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 
-    fn address_total_boxes(&self, _tree_hash: &TreeHash) -> u64 {
-        0
+    fn address_total_boxes(&self, _tree_hash: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 
-    fn template_boxes_paged(&self, _template_hash: &TemplateHash, _p: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn template_boxes_paged(
+        &self,
+        _template_hash: &TemplateHash,
+        _p: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
     fn template_unspent_paged(
@@ -314,24 +330,31 @@ impl IndexerQuery for StubIndexer {
         _template_hash: &TemplateHash,
         _p: Page,
         _dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn template_total_boxes(&self, _template_hash: &TemplateHash) -> u64 {
-        0
+    fn template_total_boxes(&self, _template_hash: &TemplateHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 
-    fn token_by_id(&self, _token_id: &TokenId) -> Option<IndexedTokenDto> {
-        None
+    fn token_by_id(
+        &self,
+        _token_id: &TokenId,
+    ) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
+        Ok(None)
     }
 
-    fn tokens_by_ids(&self, _ids: &[TokenId]) -> Vec<IndexedTokenDto> {
-        Vec::new()
+    fn tokens_by_ids(&self, _ids: &[TokenId]) -> Result<Vec<IndexedTokenDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn token_boxes_paged(&self, _token_id: &TokenId, _p: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn token_boxes_paged(
+        &self,
+        _token_id: &TokenId,
+        _p: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
     fn token_unspent_paged(
@@ -339,12 +362,12 @@ impl IndexerQuery for StubIndexer {
         _token_id: &TokenId,
         _p: Page,
         _dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn token_total_boxes(&self, _token_id: &TokenId) -> u64 {
-        0
+    fn token_total_boxes(&self, _token_id: &TokenId) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 }
 
@@ -462,6 +485,9 @@ fn ctx(submit: Option<Arc<dyn NodeSubmit>>) -> ServerCtx {
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
+        local_reverse_proxy: false,
+        services: Arc::new(ergo_api::ApiServices::new()),
+        script_config: Default::default(),
     }
 }
 
@@ -483,6 +509,9 @@ fn fully_wired_ctx() -> ServerCtx {
             pay2_reemission: String::new(),
         })),
         utxo_reads_supported: true,
+        local_reverse_proxy: false,
+        services: Arc::new(ergo_api::ApiServices::new()),
+        script_config: Default::default(),
     }
 }
 
@@ -641,7 +670,7 @@ async fn canonical_family_inventories_are_bidirectional_and_fully_mounted() {
     let scala_documented = scala_openapi_operations();
     assert_eq!(inventory.rust, rust_documented);
     assert_eq!(inventory.scala, scala_documented);
-    assert_eq!(inventory.rust.len(), 185);
+    assert_eq!(inventory.rust.len(), 186);
     assert_eq!(inventory.scala.len(), 125);
     assert!(inventory.rust.is_disjoint(&inventory.scala));
 
@@ -856,7 +885,7 @@ async fn runtime_mount_submit_wired_mounts_submit_and_check() {
 }
 
 #[tokio::test]
-async fn runtime_mount_admin_wired_mounts_unauthed_shutdown_202() {
+async fn runtime_mount_admin_wired_unconfigured_shutdown_denied() {
     let app = router_with_mempool(ctx(None), Some(admin()));
     assert_all_gets_mounted(&app).await;
     for path in SUBMIT_ROUTES {
@@ -866,14 +895,14 @@ async fn runtime_mount_admin_wired_mounts_unauthed_shutdown_202() {
             "submit/check mount unconditionally; 409 submit_disabled without a bridge",
         );
     }
-    // Admin wired, no security gate: shutdown accepts unauthenticated.
+    // Admin wiring never bypasses the missing-key gate.
     let (status, body) = post(&app, SHUTDOWN_ROUTE, None).await;
     assert_eq!(
         status,
-        StatusCode::ACCEPTED,
-        "shutdown 202 when admin wired, no security"
+        StatusCode::FORBIDDEN,
+        "shutdown stays closed without a configured key"
     );
-    assert_eq!(body, "shutdown_requested");
+    assert!(body.contains("api-key-not-configured"));
 }
 
 #[tokio::test]

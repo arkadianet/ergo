@@ -226,7 +226,7 @@ impl WalletAdmin for RecordingAdmin {
 
 fn app(admin: Arc<RecordingAdmin>) -> axum::Router {
     let admin: Arc<dyn WalletAdmin> = admin;
-    ergo_api::wallet::router_with_security(admin, None)
+    ergo_api::wallet::router_with_security(admin, Some(super::auth::security()))
 }
 
 /// POST a JSON body to `path`, returning the status. Each call clones the
@@ -236,6 +236,7 @@ async fn post(router: &axum::Router, path: &str, body: serde_json::Value) -> Sta
         .clone()
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::POST)
                 .uri(path)
                 .header("content-type", "application/json")

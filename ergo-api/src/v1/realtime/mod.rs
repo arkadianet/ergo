@@ -15,13 +15,11 @@
 //! * [`ws`] — the thin axum [`WebSocketUpgrade`](axum::extract::ws::WebSocketUpgrade)
 //!   adapter + the server-seam coarse-ring bridge feeder.
 //!
-//! **Upstream tap:** the bus is fed by [`ws::spawn_event_bridge`], which bridges
-//! the node's existing coarse operator event ring (`GET /api/v1/events`) into
-//! the bus `blocks` channel — one push path, no second event source. The
-//! fine-grained `address:`/`box:`/`token:`/`tx:` taps live in node internals and
-//! are a follow-up; until they land those classes are gated
-//! `channel_unavailable`. Webhooks (the durable sibling) are a separate
-//! follow-up and are NOT built here.
+//! **Upstream taps:** [`ws::spawn_event_bridge`] carries coarse block/reorg/peer
+//! observations; node adapters publish mempool/transaction observations and
+//! committed indexer box/token changes directly. Address/box/token classes
+//! become available only when a real indexer writer observer is activated.
+//! Webhooks subscribe to this same bus and share its cursor and event bodies.
 
 pub mod bus;
 pub mod model;
@@ -31,9 +29,11 @@ pub mod ws;
 use std::sync::Arc;
 
 pub use bus::{BackfillPage, BusSubscription, ConnGuard, ConnLimiter, RealtimeBus, RealtimeEvent};
-pub use model::{parse_channel, ChannelClass, ParsedChannel, RealtimeEventBody};
+pub use model::{
+    parse_channel, ChannelClass, IndexedBoxEventKind, ParsedChannel, RealtimeEventBody,
+};
 pub use protocol::{ClientFrame, ServerFrame, Session};
-pub use ws::{spawn_event_bridge, spawn_event_bridge_once, ws_handler, DEFAULT_BRIDGE_INTERVAL};
+pub use ws::{spawn_event_bridge, ws_handler, DEFAULT_BRIDGE_INTERVAL};
 
 /// The shared realtime handle threaded through [`V1State`](crate::v1::V1State):
 /// the fan-out bus plus the connection limiter. Absent (`None`) ⇒ the

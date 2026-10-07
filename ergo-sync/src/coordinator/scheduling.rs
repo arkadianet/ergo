@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use ergo_p2p::delivery::ModifierStatus;
 use ergo_p2p::message;
@@ -35,7 +35,7 @@ const CAUGHT_UP_PEER_FRESHNESS: Duration = Duration::from_secs(30);
 impl SyncCoordinator {
     /// Level-triggered "caught up to peers" fallback for the headers-synced
     /// latch. **Deliberate, consensus-safe divergence from Scala** (whose
-    /// latch — like ours in [`SyncState::check_headers_synced`] — flips ONLY
+    /// latch — like ours in `SyncState::check_headers_synced` — flips ONLY
     /// on the edge of validating a header fresh per `header.isNew`).
     ///
     /// On an idle / stale tip (e.g. a quiet testnet synced from genesis) the
@@ -43,12 +43,12 @@ impl SyncCoordinator {
     /// the freshness edge never fires and block download never starts — the
     /// node sits at header-tip applying zero blocks. This fallback flips the
     /// latch when we have demonstrably caught up to the network instead:
-    ///   * at least [`MIN_CAUGHT_UP_EQUAL_PEERS`] distinct peers report our
+    ///   * at least `MIN_CAUGHT_UP_EQUAL_PEERS` distinct peers report our
     ///     exact CURRENT tip (`Equal` whose `observed_best_header_id` equals
     ///     `current_best_header_id` — a header-id match under V2, not a bare
     ///     height compare, so forks/cumulative-difficulty ambiguity can't fake
     ///     it, and a stale `Equal` from before a tip advance/reorg doesn't
-    ///     count), observed within [`CAUGHT_UP_PEER_FRESHNESS`], AND
+    ///     count), observed within `CAUGHT_UP_PEER_FRESHNESS`, AND
     ///   * those `Equal` peers are a strict MAJORITY of all peers heard from
     ///     within that window.
     ///
@@ -696,7 +696,8 @@ impl SyncCoordinator {
     /// missing parents arrive, so this does nothing more than register
     /// the request with the delivery tracker and emit the wire message.
     ///
-    /// Returns at most one `SendToPeer(RequestModifier, Header, ids)` action.
+    /// Returns one `SendToPeer(RequestModifier, Header, ids)` action per
+    /// nonempty wire-sized chunk.
     /// Empty when all requested ids are already in-flight or received.
     /// Previously failed IDs are revived here: orphan roots are required to
     /// stitch a fork back to a known ancestor, and later peers may deliver
@@ -707,30 +708,28 @@ impl SyncCoordinator {
         parent_ids: &[[u8; 32]],
         now: Instant,
     ) -> Vec<Action> {
-        if parent_ids.is_empty() {
-            return Vec::new();
-        }
         let type_id = ModifierTypeId::Header.as_byte();
-        let registered = self
-            .delivery
-            .request_allow_failed(peer, type_id, parent_ids, now);
-        if registered.is_empty() {
-            return Vec::new();
-        }
-        let request = InvData {
-            type_id,
-            ids: registered,
-        };
-        match message::serialize_inv(&request) {
-            Ok(payload) => vec![Action::SendToPeer {
+        let mut actions = Vec::new();
+        // Bound before delivery registration: every registered request must
+        // have an encodable wire message, including parent walks above 400 IDs.
+        for chunk in parent_ids.chunks(message::MAX_INV_OBJECTS) {
+            let registered = self
+                .delivery
+                .request_allow_failed(peer, type_id, chunk, now);
+            if registered.is_empty() {
+                continue;
+            }
+            let payload = message::serialize_inv(&InvData {
+                type_id,
+                ids: registered,
+            })
+            .expect("known header type and wire-sized delivery chunk");
+            actions.push(Action::SendToPeer {
                 peer,
                 code: message::CODE_REQUEST_MODIFIER,
                 payload,
-            }],
-            Err(e) => {
-                warn!(error = %e, "failed to serialize RequestModifier(Header, parents)");
-                Vec::new()
-            }
+            });
         }
+        actions
     }
 }

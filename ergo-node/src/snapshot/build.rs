@@ -59,10 +59,17 @@ pub(super) fn build_snapshot(
         difficulty: decode_compact_bits(best_full_block_n_bits).to_string(),
     };
 
-    // An outstanding block-apply rejection overrides the sync-derived
-    // health below (a node refusing blocks its peers accept is not healthy,
-    // however it looks on the sync axis).
-    let rejecting = p.last_block_apply_error.is_some();
+    // Retain the rejection for diagnosis, but stop treating it as an active
+    // fault once committed blocks pass its height or a sibling applies there.
+    // At equal height the applied tip is the chain-index ID. Elapsed time or
+    // downloaded headers alone never establish recovery. A rollback below
+    // that height makes the rejection unresolved again.
+    let rejecting = p.last_block_apply_error.as_ref().is_some_and(|error| {
+        error.height == 0
+            || p.best_full_block_height < error.height
+            || (p.best_full_block_height == error.height
+                && hex32(&p.best_full_block_id) == error.block_id)
+    });
     // Terminal deep-fork wedge: strictly worse than Rejecting (nothing can
     // ever apply again without a resync), so it wins the overlay.
     let wedged = p.sync_wedged.is_some();
@@ -102,8 +109,8 @@ pub(super) fn build_snapshot(
         uptime_seconds_live: None,
         apply_age_ms: None,
         apply_wedged: false,
-        // Storage probes are per-request only (SnapshotReadState::status());
-        // absent from the published snapshot by design.
+        // Storage probes run in the background sampler; requests read its
+        // cached sample. These fields stay absent from the published snapshot.
         state_db_bytes: None,
         index_db_bytes: None,
         disk_free_bytes: None,
@@ -256,11 +263,69 @@ fn project_peer(
     let connected_seconds = now.saturating_duration_since(pi.connected_at).as_secs();
     let last_seen_seconds = now.saturating_duration_since(pi.last_seen).as_secs();
     // peer_height comes from the per-peer sync-info projection
-    // populated by SyncCoordinator::on_sync_info. V1 SyncInfo
-    // carries the height directly; V2 SyncInfo infers it from the
-    // newest peer-header that overlaps our best chain. `None` until
-    // we've processed a SyncInfo from this peer.
+    // populated by SyncCoordinator::on_sync_info, including the actual
+    // height source rather than assuming it from the negotiated version.
     let peer_height = peer_sync.get(&pi.addr).and_then(|s| s.peer_height);
+    use ergo_api::types::{ApiPeerDetails, ApiPeerMode};
+    use ergo_p2p::handshake::PeerFeature;
+    let mut details = ApiPeerDetails {
+        last_progress_seconds: now.saturating_duration_since(pi.last_progress).as_secs(),
+        effective_score: pi.score.effective_score(now),
+        delivery_failure_streak: pi.delivery_failure_streak(),
+        preferred_for_downloads: pi.is_connected()
+            && pi.score.effective_score(now) < ergo_p2p::peer::DEGRADED_THRESHOLD
+            && pi.delivery_failure_streak() < ergo_p2p::peer::DELIVERY_DEGRADE_STREAK,
+        connection_setup_ms: pi
+            .connection_setup
+            .map(|d| d.as_millis().min(u64::MAX as u128) as u64),
+        chain_status: peer_sync.get(&pi.addr).map(|s| s.status.to_string()),
+        last_sync_seconds: peer_sync.get(&pi.addr).map(|s| s.last_sync_seconds),
+        height_source: peer_sync
+            .get(&pi.addr)
+            .and_then(|s| s.height_source)
+            .map(str::to_string),
+        sampled_at_unix_ms: super::unix_now_ms(),
+        mode: None,
+        local_address: None,
+        session_id: None,
+        network_magic: None,
+        feature_ids: Vec::new(),
+    };
+    if let Some(spec) = &pi.peer_spec {
+        for feature in &spec.features {
+            let id = match feature {
+                PeerFeature::LocalAddress { addr, port } => {
+                    details.local_address = u16::try_from(*port).ok().map(|port| {
+                        std::net::SocketAddr::new(std::net::Ipv4Addr::from(*addr).into(), port)
+                            .to_string()
+                    });
+                    ergo_p2p::handshake::FEATURE_LOCAL_ADDRESS
+                }
+                PeerFeature::SessionId { magic, session_id } => {
+                    details.session_id = Some(session_id.to_string());
+                    details.network_magic = Some(hex::encode(magic));
+                    ergo_p2p::handshake::FEATURE_SESSION_ID
+                }
+                PeerFeature::RestApiUrl { .. } => ergo_p2p::handshake::FEATURE_REST_API_URL,
+                PeerFeature::Mode {
+                    state_type,
+                    verify_tx,
+                    nipopow,
+                    blocks_to_keep,
+                } => {
+                    details.mode = Some(ApiPeerMode {
+                        state_type: *state_type,
+                        verifies_transactions: *verify_tx,
+                        nipopow_bootstrap: *nipopow,
+                        blocks_to_keep: *blocks_to_keep,
+                    });
+                    ergo_p2p::handshake::FEATURE_MODE
+                }
+                PeerFeature::Unknown { feature_id, .. } => *feature_id,
+            };
+            details.feature_ids.push(id);
+        }
+    }
     ApiPeer {
         addr,
         direction,
@@ -279,6 +344,8 @@ fn project_peer(
         peer_height,
         rest_api_url,
         declared_address,
+        details: Some(details),
+        network: None,
     }
 }
 
@@ -316,6 +383,75 @@ fn format_declared_address(d: &ergo_p2p::handshake::DeclaredAddress) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_details_keep_precise_identity_and_observed_health() {
+        use ergo_p2p::handshake::{PeerFeature, PeerSpec, Version};
+        let start = Instant::now();
+        let mut peer = PeerInfo::new_outbound("8.8.8.8:9030".parse().unwrap(), start);
+        peer.complete_handshake(
+            PeerSpec {
+                agent_name: "client".into(),
+                node_name: "name".into(),
+                version: Version::CURRENT,
+                declared_address: None,
+                features: vec![
+                    PeerFeature::SessionId {
+                        magic: [1, 0, 2, 4],
+                        session_id: i64::MAX,
+                    },
+                    PeerFeature::Mode {
+                        state_type: 1,
+                        verify_tx: true,
+                        nipopow: Some(1),
+                        blocks_to_keep: 1024,
+                    },
+                    PeerFeature::LocalAddress {
+                        addr: [10, 0, 0, 2],
+                        port: 9030,
+                    },
+                    PeerFeature::Unknown {
+                        feature_id: 250,
+                        data: vec![9],
+                    },
+                ],
+            },
+            start + std::time::Duration::from_millis(120),
+        )
+        .unwrap();
+        for _ in 0..ergo_p2p::peer::DELIVERY_DEGRADE_STREAK {
+            peer.note_delivery_outcome(false);
+        }
+        let observations = std::collections::HashMap::from([(
+            peer.addr,
+            super::super::PeerSyncProjection {
+                status: "Older",
+                peer_height: Some(123),
+                height_source: Some("reported_header"),
+                last_sync_seconds: 3,
+            },
+        )]);
+        let api = project_peer(
+            &peer,
+            start + std::time::Duration::from_secs(10),
+            &observations,
+        );
+        let detail = api.details.unwrap();
+        assert_eq!(detail.session_id.as_deref(), Some("9223372036854775807"));
+        assert_eq!(detail.network_magic.as_deref(), Some("01000204"));
+        assert_eq!(detail.connection_setup_ms, Some(120));
+        assert_eq!(detail.last_progress_seconds, 9);
+        assert!(!detail.preferred_for_downloads);
+        assert_eq!(detail.chain_status.as_deref(), Some("Older"));
+        assert_eq!(detail.last_sync_seconds, Some(3));
+        assert_eq!(detail.height_source.as_deref(), Some("reported_header"));
+        assert_eq!(detail.feature_ids, vec![3, 16, 2, 250]);
+        assert_eq!(detail.local_address.as_deref(), Some("10.0.0.2:9030"));
+        let mode = detail.mode.unwrap();
+        assert_eq!(mode.state_type, 1);
+        assert_eq!(mode.blocks_to_keep, 1024);
+        assert!(mode.verifies_transactions);
+    }
 
     #[test]
     fn project_peer_surfaces_byte_counters() {
@@ -391,6 +527,12 @@ mod tests {
         let api = project_peer(&pi, std::time::Instant::now(), &HashMap::new());
         assert_eq!(api.rest_api_url, None);
         assert_eq!(api.declared_address, None);
+        let detail = api.details.unwrap();
+        assert!(detail.mode.is_none());
+        assert!(detail.connection_setup_ms.is_none());
+        assert!(detail.chain_status.is_none());
+        assert!(detail.height_source.is_none());
+        assert!(!detail.preferred_for_downloads);
     }
 
     /// The declared port is a peer-advertised wire `u32`.

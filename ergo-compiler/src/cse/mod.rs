@@ -83,9 +83,9 @@
 //!    thunk hash-cons isolation (`findDef`, `Thunks.scala:219-226`). This is the
 //!    SOLE such bypass; every non-projection node obeys thunk isolation.
 //!
-//! We port this as [`Interner::pair_projections`], a process-wide
+//! We port this as `Interner::pair_projections`, a process-wide
 //! `BTreeMap<SymId, (SymId, SymId)>` keyed by the pair RECEIVER's `SymId`, never
-//! reset at scope push/pop ([`Interner::pair_projection`]). Because a root-shared
+//! reset at scope push/pop (`Interner::pair_projection`). Because a root-shared
 //! pair has ONE receiver `SymId` across branches (global hash-cons) while a
 //! thunk-local pair gets a DISTINCT one, sharing happens IFF the receiver is
 //! root-shared — reproducing the `basis-token` cross-branch `SELF.tokens(1)._2`
@@ -106,23 +106,23 @@
 //! up to the enclosing scope, a bound-var-dependent node belongs to the body
 //! (`AstGraphs.scala:56-85,111-121` `freeVars`/`domain`).
 //!
-//! This module keeps the [`cse`] entry point and the opcode constants; the
+//! This module keeps the `cse` entry point and the opcode constants; the
 //! substrate is split across submodules, each contributing its own
 //! `impl Interner` block:
-//! - [`key`] — the type definitions ([`SymId`], `KeyTag`, `ExprKey`, `Node`,
+//! - `key` — the type definitions ([`SymId`], `KeyTag`, `ExprKey`, `Node`,
 //!   `ScopeId`, `ScopeKind`) that key and describe an interned symbol.
-//! - [`interner`] — the [`Interner`] struct itself (owns the scope stack,
+//! - `interner` — the [`Interner`] struct itself (owns the scope stack,
 //!   symbol table, and bindings) plus its constructor and read-only
 //!   introspection accessors.
-//! - [`intern`] — Phase A interning (`intern`/`intern_op`/`pair_projection`
+//! - `intern` — Phase A interning (`intern`/`intern_op`/`pair_projection`
 //!   and friends).
-//! - [`gate`] — Phase B usage counting and the 4-predicate admission gate
+//! - `gate` — Phase B usage counting and the 4-predicate admission gate
 //!   (`flat_usage`/`is_context_property`/`is_internal`/`is_const`/
 //!   `should_hoist`).
-//! - [`materialize`] — schedule + materialize (`materialize`/
+//! - `materialize` — schedule + materialize (`materialize`/
 //!   `process_scope`/`schedule_order`/`build_value`/`build_op`), plus the
 //!   `val_def`/`val_use`/`wrap_block` tree-rebuilding helpers.
-//! - [`codec`] — the mutually-inverse `decompose`/`recompose` payload pair.
+//! - `codec` — the mutually-inverse `decompose`/`recompose` payload pair.
 
 use std::collections::BTreeSet;
 

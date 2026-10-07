@@ -11,9 +11,8 @@
 //! - `GET  /mining/rewardAddress`    → `{ rewardAddress: "9..." }`
 //! - `GET  /mining/rewardPublicKey`  → `{ rewardPubkey: "02..." }`
 //!
-//! All four routes sit behind the api_key gate when the server is built
-//! with `[api.security] api_key_hash` (production always does — the hash
-//! is mandatory whenever the API is enabled). This is a deliberate
+//! All four routes sit behind the api_key gate; an absent
+//! `[api.security] api_key_hash` keeps them closed. This is a deliberate
 //! hardening over Scala, which leaves `/mining/*` open; see
 //! `server/scala_api.rs::auxiliary_router`.
 
@@ -72,9 +71,10 @@ pub enum MiningApiError {
     /// Posted nonce doesn't satisfy the cached candidate's target.
     #[error("invalid pow")]
     InvalidPow,
-    /// Cached candidate's parent_id no longer equals the live best-full
-    /// block id. 400 "stale candidate (best-full flipped)".
-    #[error("stale candidate (best-full flipped)")]
+    /// The solved candidate is no longer current: its parent_id no longer
+    /// equals the live best-full block id, or the node withdrew it after a
+    /// block mined on its parent failed to apply. 400 `stale_candidate`.
+    #[error("stale candidate (best-full flipped or candidate withdrawn)")]
     StaleParent,
     /// Mining subsystem disabled or node not synced. 503.
     #[error("mining not available: {0}")]

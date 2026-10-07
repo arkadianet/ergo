@@ -3,6 +3,7 @@ name        = "ergo-wallet"
 description = "Ergo HD wallet — BIP39 mnemonic, post-1627 BIP32 HD derivation, P2PK addresses, secret storage, sigma-proof production for transaction signing, and CLI tooling."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -33,6 +34,7 @@ thiserror   = { workspace = true }
 serde       = { workspace = true, features = ["derive"] }
 serde_json  = { workspace = true }
 rand        = { workspace = true }
+tempfile    = { workspace = true }
 clap        = { workspace = true, features = ["derive"] }
 
 [features]
@@ -49,7 +51,6 @@ num-bigint      = { workspace = true }
 serde           = { workspace = true, features = ["derive"] }
 serde_json      = { workspace = true }
 sha2            = { workspace = true }
-tempfile        = { workspace = true }
 assert_cmd      = "2"
 predicates      = "3"
 
@@ -72,3 +73,6 @@ required-features = ["test-utils"]
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

@@ -8,7 +8,6 @@ no AVL+ state, no wire codecs — those live elsewhere.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-chain-spec
 **Depended on by:** (see codemap index) — ergo-sigma, ergo-validation, ergo-state, ergo-sync, ergo-mining, ergo-node
-**Approx LOC:** ~1,950 (src) + ~1,400 (tests)
 
 ## Start here
 - `src/pow.rs` — the public façade; `verify_pow_solution` and `verify_header_difficulty` are the two header-verification entry points the rest of the node calls.
@@ -25,13 +24,14 @@ no AVL+ state, no wire codecs — those live elsewhere.
 - `src/autolykos/v2.rs` — Autolykos v2: memory-hard Blake2b-only hit computation (`hit_for_v2`, general `hit_for_v2_pow`) and the `check_pow_v2` target comparison.
 - `src/difficulty.rs` — chain-aware retarget: epoch-length selection, predictive linear interpolation (`calculate`), EIP-37 predictive∪classic with ±50% cap (`eip37_calculate`), v2-activation special case, `get_target`, `next_n_bits`, `verify_nbits`. Re-exports `DifficultyParams` from `ergo-chain-spec`.
 - `src/merkle/mod.rs` — scorex-layout Blake2b256 Merkle trees: roots, single-leaf proofs (`MerkleProofRaw`), batch multiproofs (`merkle_proof_by_indices` → `IndexedBatchProof`), and verification.
-- `tests/` — mainnet/sigmastate oracle parity: `pow_mainnet.rs` (~9k-header corpus), `difficulty_mainnet.rs`, `merkle_mainnet.rs`, `merkle_proof_for_tx_oracle.rs`.
+- `tests/it/` — captured PoW, difficulty, root and transaction-proof parity. Curated fixtures run by default; large historical corpora are separately provisioned ignored tests. Every requested transaction witness is required, and extension roots are checked against the captured header commitment.
+- `test-vectors/ergo-crypto/batch-merkle/scrypto-3.1.1/` — ten official-library captures and pinned provenance, consumed by `ergo-validation/tests/it/batch_merkle_oracle.rs`; three cases cover duplicate leaf positions.
 
 ## Key types, traits & functions
 - `verify_pow_solution` (fn) — verify Autolykos solution against the header's own nBits target; dispatches v1/v2 by `header.solution` variant — `src/pow.rs:41`
 - `verify_header_difficulty` (fn) — verify a header's nBits matches the value derived from ancestor epoch headers — `src/pow.rs:108`
 - `PowError` (enum) — `InvalidSolution` / `HeaderEncode`; the PoW-equation failure surface — `src/pow.rs:13`
-- `DifficultyError` (enum) — `NbitsMismatch` / `HeightMismatch` / `MissingEpochHeaders` — `src/pow.rs:71`
+- `DifficultyError` (enum) — `NbitsMismatch` / `HeightMismatch` / `MissingEpochHeaders` / `HeightOverflow` / `InvalidConfiguration` / `InvalidEpochWindow` — `src/pow.rs:71`
 - `calc_n` (fn) — height+version → Autolykos table size N (v1 = NBase; v2 grows 5% per period from height 614,400, capped at 4,198,400) — `src/autolykos/common.rs:49`
 - `gen_indexes` / `gen_indexes_k` (fn) — k indices in `[0, N)` from a seed via the 35-byte extended hash and a sliding 4-byte window — `src/autolykos/common.rs:80` / `:92`
 - `M_BYTES` (const) — 8192-byte `(0..1024)` big-endian table; const-evaluated — `src/autolykos/common.rs:27`
@@ -58,6 +58,6 @@ no AVL+ state, no wire codecs — those live elsewhere.
 - **secp256k1 order q is pinned** to the SEC2/Bitcoin-Core constant; guards BigUint construction drift (`src/autolykos/v1.rs:162` test).
 - **Difficulty retarget matches Scala `DifficultyAdjustment`**: USE_LAST_EPOCHS=8, PRECISION=1e9, signed-BigInt least-squares interpolation; EIP-37 = average(classic, ±50%-capped predictive), capped again at ±50%.
 - **v2-activation special case returns fixed initial difficulty** when parent IS or precedes the v2-activation block; networks with no v1→v2 hardfork carry `v2_activation = None` and skip it (`src/difficulty.rs:280-284`).
-- **Difficulty math returns structured errors, never panics on caller misuse.** Empty/undersized epoch windows and height mismatches surface as `DifficultyError` (the EIP-37 ≥2-header precondition is intercepted before the inner `debug_assert!`).
+- **Difficulty arithmetic is checked; ancestry remains the caller's contract.** Entry points return typed errors for missing/undersized windows, child-height overflow/mismatch, zero used epoch/interval, non-increasing retarget heights/timestamps and an unrepresentable interpolation height. Valid-window formulas are unchanged and captured mainnet/EIP-37 nBits regressions still run. Callers must supply the correct chain ancestors at the selected epoch heights; order/range checks do not authenticate that relation. The public height selectors return false/empty for height-zero or epoch-zero input and omit unrepresentable older offsets.
 - **Merkle layout matches scorex**: leaf = `Blake2b256(0x00 ++ data)`, internal = `Blake2b256(0x01 ++ left ++ right)`, odd-trailing node paired with `EmptyNode` (hash `[]`), empty tree = `Blake2b256([])` (the `Algos.emptyMerkleTreeRoot` special case, not a prefixed empty leaf).
 - **Proofs and roots come from one reduction.** `merkle_proof_by_index` and `merkle_tree_root` share `build_levels`; empty siblings are synthesized at proof time from out-of-range lookups, never materialized as phantom nodes — every honest leaf is provable (proptest at `src/merkle/mod.rs:548`).

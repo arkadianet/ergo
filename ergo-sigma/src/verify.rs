@@ -5,6 +5,8 @@ use super::schnorr;
 use super::{GROUP_SIZE, SOUNDNESS_BYTES};
 use crate::blake2b256;
 
+use ergo_ser::sigma_value::is_valid_cthreshold_shape;
+
 pub use ergo_ser::sigma_value::SigmaBoolean;
 
 /// Per-leaf data extracted from a fully-parsed sigma proof tree.
@@ -37,6 +39,11 @@ pub struct ProofLeaf {
 /// can populate a `HintsBag` for multi-sig protocols.
 ///
 /// Uses `[0]` as the position root, matching Scala `NodePosition.CryptoTreePrefix`.
+///
+/// This is an unmetered protocol primitive. Callers must bound the logical
+/// proposition size or precharge its crypto cost before passing untrusted
+/// inputs. Shared storage does not bound the expanded proof/leaf output. Use
+/// [`extract_proof_leaves_with_cost`] when an enforcing budget is available.
 pub fn extract_proof_leaves(
     proposition: &SigmaBoolean,
     proof_bytes: &[u8],
@@ -59,124 +66,105 @@ pub fn extract_proof_leaves(
     Ok(leaves)
 }
 
-/// Recursively collect leaf nodes from the parsed+computed tree into `out`.
+/// Collect leaves in depth-first order without recursive traversal or copying
+/// every intermediate path. Only a returned leaf owns a position vector.
 fn collect_leaves(
-    node: &UncheckedTree,
-    sigma_node: &SigmaBoolean,
-    position: &[u32],
+    tree: &UncheckedTree,
+    proposition: &SigmaBoolean,
+    root_position: &[u32],
     out: &mut Vec<ProofLeaf>,
 ) {
-    match (node, sigma_node) {
-        (
-            UncheckedTree::Schnorr {
-                challenge,
-                z,
-                commitment,
-                ..
-            },
-            prop @ SigmaBoolean::ProveDlog(_),
-        ) => {
-            let commitment_bytes = commitment
-                .clone()
-                .expect("commitment populated by compute_commitments");
-            let mut ch = [0u8; SOUNDNESS_BYTES];
-            let src = if challenge.len() >= SOUNDNESS_BYTES {
-                &challenge[..SOUNDNESS_BYTES]
-            } else {
-                challenge
-            };
-            ch[SOUNDNESS_BYTES - src.len()..].copy_from_slice(src);
-            let mut resp = [0u8; GROUP_SIZE];
-            let zsrc = if z.len() >= GROUP_SIZE {
-                &z[..GROUP_SIZE]
-            } else {
-                z
-            };
-            resp[GROUP_SIZE - zsrc.len()..].copy_from_slice(zsrc);
-            out.push(ProofLeaf {
-                proposition: prop.clone(),
-                commitment_bytes,
-                challenge: ch,
-                response: resp,
-                position: position.to_vec(),
-            });
-        }
-        (
-            UncheckedTree::DhTuple {
-                challenge,
-                z,
-                commitment,
-                ..
-            },
-            prop @ SigmaBoolean::ProveDHTuple { .. },
-        ) => {
-            let commitment_bytes = commitment
-                .clone()
-                .expect("commitment populated by compute_commitments");
-            let mut ch = [0u8; SOUNDNESS_BYTES];
-            let src = if challenge.len() >= SOUNDNESS_BYTES {
-                &challenge[..SOUNDNESS_BYTES]
-            } else {
-                challenge
-            };
-            ch[SOUNDNESS_BYTES - src.len()..].copy_from_slice(src);
-            let mut resp = [0u8; GROUP_SIZE];
-            let zsrc = if z.len() >= GROUP_SIZE {
-                &z[..GROUP_SIZE]
-            } else {
-                z
-            };
-            resp[GROUP_SIZE - zsrc.len()..].copy_from_slice(zsrc);
-            out.push(ProofLeaf {
-                proposition: prop.clone(),
-                commitment_bytes,
-                challenge: ch,
-                response: resp,
-                position: position.to_vec(),
-            });
-        }
-        (UncheckedTree::And { children, .. }, SigmaBoolean::Cand(sigma_children))
-        | (UncheckedTree::Or { children, .. }, SigmaBoolean::Cor(sigma_children)) => {
-            for (idx, (child_node, child_sigma)) in
-                children.iter().zip(sigma_children.iter()).enumerate()
-            {
-                let mut child_pos = position.to_vec();
-                child_pos.push(idx as u32);
-                collect_leaves(child_node, child_sigma, &child_pos, out);
+    enum Walk<'a> {
+        Enter(usize, &'a SigmaBoolean, Option<u32>),
+        Leave(bool),
+    }
+    let mut position = root_position.to_vec();
+    let mut pending = vec![Walk::Enter(0, proposition, None)];
+    while let Some(step) = pending.pop() {
+        let (index, sigma_node, child_index) = match step {
+            Walk::Leave(pushed) => {
+                if pushed {
+                    position.pop();
+                }
+                continue;
             }
+            Walk::Enter(index, prop, child_index) => (index, prop, child_index),
+        };
+        if let Some(child_index) = child_index {
+            position.push(child_index);
         }
-        (
-            UncheckedTree::Threshold { children, .. },
-            SigmaBoolean::Cthreshold {
-                children: sigma_children,
-                ..
-            },
-        ) => {
-            for (idx, (child_node, child_sigma)) in
-                children.iter().zip(sigma_children.iter()).enumerate()
-            {
-                let mut child_pos = position.to_vec();
-                child_pos.push(idx as u32);
-                collect_leaves(child_node, child_sigma, &child_pos, out);
+        pending.push(Walk::Leave(child_index.is_some()));
+        match (&tree.nodes[index], sigma_node) {
+            (
+                UncheckedNode::Schnorr {
+                    challenge,
+                    z,
+                    commitment,
+                    ..
+                },
+                prop @ SigmaBoolean::ProveDlog(_),
+            )
+            | (
+                UncheckedNode::DhTuple {
+                    challenge,
+                    z,
+                    commitment,
+                    ..
+                },
+                prop @ SigmaBoolean::ProveDHTuple { .. },
+            ) => {
+                let commitment_bytes = commitment
+                    .clone()
+                    .expect("commitment populated by compute_commitments");
+                let mut ch = [0u8; SOUNDNESS_BYTES];
+                let src = &challenge[..challenge.len().min(SOUNDNESS_BYTES)];
+                ch[SOUNDNESS_BYTES - src.len()..].copy_from_slice(src);
+                let mut resp = [0u8; GROUP_SIZE];
+                let src = &z[..z.len().min(GROUP_SIZE)];
+                resp[GROUP_SIZE - src.len()..].copy_from_slice(src);
+                out.push(ProofLeaf {
+                    proposition: prop.clone(),
+                    commitment_bytes,
+                    challenge: ch,
+                    response: resp,
+                    position: position.clone(),
+                });
             }
-        }
-        _ => {
-            // Structure mismatch: proposition and proof tree don't align.
-            // Silently skip — the verifier's Fiat-Shamir check would have
-            // caught a genuine mismatch; here we're extracting hints, so
-            // a best-effort walk is appropriate.
+            (UncheckedNode::And { children, .. }, SigmaBoolean::Cand(sigma_children))
+            | (UncheckedNode::Or { children, .. }, SigmaBoolean::Cor(sigma_children))
+            | (
+                UncheckedNode::Threshold { children, .. },
+                SigmaBoolean::Cthreshold {
+                    children: sigma_children,
+                    ..
+                },
+            ) => {
+                for (idx, (&child, prop)) in
+                    children.iter().zip(sigma_children.iter()).enumerate().rev()
+                {
+                    pending.push(Walk::Enter(child, prop, Some(idx as u32)));
+                }
+            }
+            _ => {}
         }
     }
 }
 
-/// Parsed proof tree with challenges and responses.
+/// Proof nodes are stored in depth-first preorder. Child indices keep parsing,
+/// commitment computation, serialization and destruction independent of the
+/// native call stack, including when parsing fails partway through a deep tree.
 #[derive(Debug, Clone)]
-enum UncheckedTree {
+struct UncheckedTree {
+    nodes: Vec<UncheckedNode>,
+}
+
+#[derive(Debug, Clone)]
+enum UncheckedNode {
     Schnorr {
         pk: [u8; 33],
         challenge: Vec<u8>,
         z: Vec<u8>,
-        commitment: Option<Vec<u8>>, // filled after compute_commitments
+        commitment: Option<Vec<u8>>,
     },
     DhTuple {
         g: [u8; 33],
@@ -189,31 +177,43 @@ enum UncheckedTree {
     },
     And {
         challenge: Vec<u8>,
-        children: Vec<UncheckedTree>,
+        children: Vec<usize>,
     },
     Or {
         challenge: Vec<u8>,
-        children: Vec<UncheckedTree>,
+        children: Vec<usize>,
     },
     Threshold {
         challenge: Vec<u8>,
-        children: Vec<UncheckedTree>,
-        // `u16` to match `SigmaBoolean::Cthreshold.k`: a k-of-n threshold above
-        // 255 must not truncate through verification.
+        children: Vec<usize>,
         k: u16,
-        polynomial: Option<gf2_192::gf2_192poly::Gf2_192Poly>,
     },
+}
+
+impl UncheckedNode {
+    fn challenge(&self) -> &[u8] {
+        match self {
+            Self::Schnorr { challenge, .. }
+            | Self::DhTuple { challenge, .. }
+            | Self::And { challenge, .. }
+            | Self::Or { challenge, .. }
+            | Self::Threshold { challenge, .. } => challenge,
+        }
+    }
+
+    fn children_mut(&mut self) -> &mut Vec<usize> {
+        match self {
+            Self::And { children, .. }
+            | Self::Or { children, .. }
+            | Self::Threshold { children, .. } => children,
+            _ => unreachable!("only conjectures own child frames"),
+        }
+    }
 }
 
 impl UncheckedTree {
     fn challenge(&self) -> &[u8] {
-        match self {
-            UncheckedTree::Schnorr { challenge, .. } => challenge,
-            UncheckedTree::DhTuple { challenge, .. } => challenge,
-            UncheckedTree::And { challenge, .. } => challenge,
-            UncheckedTree::Or { challenge, .. } => challenge,
-            UncheckedTree::Threshold { challenge, .. } => challenge,
-        }
+        self.nodes[0].challenge()
     }
 }
 
@@ -239,6 +239,8 @@ pub enum SigmaVerifyError {
     /// proof is structurally invalid.
     #[error("empty children in conjecture")]
     EmptyChildren,
+    #[error("invalid Cthreshold: k={k}, n={n}")]
+    InvalidThreshold { k: u16, n: usize },
     /// A `TrivialProp` appeared as a conjecture child during proof parsing.
     /// Reduction (`AtLeast.reduce`, `SigmaOr` / `SigmaAnd`) must fold these
     /// out before verification; reaching the parser means that invariant was
@@ -248,10 +250,93 @@ pub enum SigmaVerifyError {
     UnexpectedTrivialChild,
 }
 
+/// Failure when metering a proposition before verification or hint extraction.
+#[derive(Debug, Error)]
+pub enum BudgetedSigmaError {
+    /// The proposition's reference crypto charge exceeds the caller's budget.
+    #[error(transparent)]
+    Cost(#[from] ergo_primitives::cost::CostError),
+    /// Metering succeeded, but proof parsing or commitment computation failed.
+    #[error(transparent)]
+    Verification(#[from] SigmaVerifyError),
+}
+
+fn charge_crypto(
+    proposition: &SigmaBoolean,
+    cost: &mut ergo_primitives::cost::CostAccumulator,
+) -> Result<(), ergo_primitives::cost::CostError> {
+    cost.add(ergo_primitives::cost::JitCost::from_jit_block_aligned(
+        crate::crypto_cost::estimate_crypto_cost(proposition),
+    ))
+}
+
+/// Charge reference crypto cost before expanding a proof tree, then verify it.
+///
+/// The caller supplies the enforcing budget. The charge is block-aligned like
+/// Scala's per-input crypto charge; it does not include expression reduction.
+/// A recording-only accumulator deliberately provides no resource ceiling.
+pub fn verify_sigma_proof_with_cost(
+    proposition: &SigmaBoolean,
+    proof_bytes: &[u8],
+    message: &[u8],
+    cost: &mut ergo_primitives::cost::CostAccumulator,
+) -> Result<bool, BudgetedSigmaError> {
+    charge_crypto(proposition, cost)?;
+    Ok(verify_sigma_proof(proposition, proof_bytes, message)?)
+}
+
+/// Charge reference crypto cost before expanding proof leaves for multisig.
+///
+/// Use an enforcing accumulator for untrusted propositions. Returned leaf
+/// positions and commitments count logical occurrences, including shared ones.
+pub fn extract_proof_leaves_with_cost(
+    proposition: &SigmaBoolean,
+    proof_bytes: &[u8],
+    cost: &mut ergo_primitives::cost::CostAccumulator,
+) -> Result<Vec<ProofLeaf>, BudgetedSigmaError> {
+    charge_crypto(proposition, cost)?;
+    Ok(extract_proof_leaves(proposition, proof_bytes)?)
+}
+
+fn validate_cthreshold_shape(k: u16, children: &[SigmaBoolean]) -> Result<usize, SigmaVerifyError> {
+    let n = children.len();
+    if is_valid_cthreshold_shape(k, n) {
+        Ok(n)
+    } else {
+        Err(SigmaVerifyError::InvalidThreshold { k, n })
+    }
+}
+
+fn validate_cthreshold_tree(proposition: &SigmaBoolean) -> Result<(), SigmaVerifyError> {
+    let mut pending = vec![proposition];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(proposition) = pending.pop() {
+        if !visited.insert(proposition as *const SigmaBoolean) {
+            continue;
+        }
+        match proposition {
+            SigmaBoolean::Cthreshold { k, children } => {
+                validate_cthreshold_shape(*k, children)?;
+                pending.extend(children.iter().rev());
+            }
+            SigmaBoolean::Cand(children) | SigmaBoolean::Cor(children) => {
+                pending.extend(children.iter().rev());
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Verify a sigma proof against a proposition and message.
 ///
 /// This is the top-level entry point that handles AND/OR composition.
 /// For standalone DLog/DHT, delegates to the leaf verifiers.
+///
+/// This unmetered protocol primitive assumes the caller has bounded the
+/// logical proposition size or already charged its crypto cost. Prefer
+/// [`verify_sigma_proof_with_cost`] for untrusted reduced propositions, or
+/// [`crate::reduce::verify_spending_proof_with_context_and_cost`] for scripts.
 pub fn verify_sigma_proof(
     proposition: &SigmaBoolean,
     proof_bytes: &[u8],
@@ -265,6 +350,7 @@ pub fn verify_sigma_proof(
     }
 
     if proof_bytes.is_empty() {
+        validate_cthreshold_tree(proposition)?;
         return Ok(false);
     }
 
@@ -286,217 +372,191 @@ pub fn verify_sigma_proof(
     Ok(with_commitments.challenge() == expected)
 }
 
-/// Parse proof bytes and compute challenges for the tree.
-/// Matches Scala `SigSerializer.parseAndComputeChallenges`.
+/// Parse proof bytes in Scala's depth-first order. OR frames retain the XOR
+/// of preceding children; threshold frames retain the reference polynomial.
 fn parse_and_compute_challenges(
     prop: &SigmaBoolean,
     proof: &[u8],
     offset: &mut usize,
     challenge_opt: Option<&[u8]>,
 ) -> Result<UncheckedTree, SigmaVerifyError> {
-    // Read or use provided challenge
-    let challenge = if let Some(c) = challenge_opt {
-        c.to_vec()
-    } else {
-        read_bytes(proof, offset, SOUNDNESS_BYTES)?
-    };
-
-    match prop {
-        SigmaBoolean::TrivialProp(_) => {
-            // A reduced tree must not carry a nested TrivialProp child:
-            // AtLeast.reduce / SigmaOr / SigmaAnd fold them out. Reaching here
-            // means an upstream reduction invariant broke — reject, never
-            // panic (this runs on the consensus verification path, with no
-            // catch_unwind above it).
-            Err(SigmaVerifyError::UnexpectedTrivialChild)
+    enum ChildChallenges {
+        And,
+        Or(Vec<u8>),
+        Threshold(gf2_192::gf2_192poly::Gf2_192Poly),
+    }
+    struct Frame<'a> {
+        node: usize,
+        children: &'a [SigmaBoolean],
+        next: usize,
+        challenges: ChildChallenges,
+    }
+    let mut nodes: Vec<UncheckedNode> = Vec::new();
+    let mut frames: Vec<Frame<'_>> = Vec::new();
+    let mut pending = Some((prop, challenge_opt.map(<[u8]>::to_vec)));
+    while let Some((prop, provided_challenge)) = pending.take() {
+        if let SigmaBoolean::Cthreshold { k, children } = prop {
+            validate_cthreshold_shape(*k, children)?;
         }
-        SigmaBoolean::ProveDlog(ge) => {
-            // Scala reads z with getBytesUnsafe — accepts fewer bytes than GROUP_SIZE
-            let z = read_bytes_padded(proof, offset, GROUP_SIZE);
-            Ok(UncheckedTree::Schnorr {
+        let challenge = if let Some(challenge) = provided_challenge {
+            challenge
+        } else {
+            read_bytes(proof, offset, SOUNDNESS_BYTES)?
+        };
+        let index = nodes.len();
+        let mut frame = None;
+        let node = match prop {
+            SigmaBoolean::TrivialProp(_) => return Err(SigmaVerifyError::UnexpectedTrivialChild),
+            SigmaBoolean::ProveDlog(ge) => UncheckedNode::Schnorr {
                 pk: *ge.as_bytes(),
                 challenge,
-                z,
+                z: read_bytes_padded(proof, offset, GROUP_SIZE),
                 commitment: None,
-            })
-        }
-        SigmaBoolean::ProveDHTuple { g, h, u, v } => {
-            let z = read_bytes_padded(proof, offset, GROUP_SIZE);
-            Ok(UncheckedTree::DhTuple {
+            },
+            SigmaBoolean::ProveDHTuple { g, h, u, v } => UncheckedNode::DhTuple {
                 g: *g.as_bytes(),
                 h: *h.as_bytes(),
                 u: *u.as_bytes(),
                 v: *v.as_bytes(),
                 challenge,
-                z,
+                z: read_bytes_padded(proof, offset, GROUP_SIZE),
                 commitment: None,
-            })
-        }
-        SigmaBoolean::Cand(children) => {
-            if children.is_empty() {
-                return Err(SigmaVerifyError::EmptyChildren);
-            }
-            // AND: all children get the same challenge as the parent
-            let mut parsed_children = Vec::with_capacity(children.len());
-            for child in children {
-                let parsed = parse_and_compute_challenges(child, proof, offset, Some(&challenge))?;
-                parsed_children.push(parsed);
-            }
-            Ok(UncheckedTree::And {
-                challenge,
-                children: parsed_children,
-            })
-        }
-        SigmaBoolean::Cor(children) => {
-            if children.is_empty() {
-                return Err(SigmaVerifyError::EmptyChildren);
-            }
-            // OR: each child except the last reads its own challenge from proof.
-            // Last child's challenge = XOR of parent challenge with all other children's challenges.
-            let mut parsed_children = Vec::with_capacity(children.len());
-            let mut xor_buf = challenge.clone();
-
-            for (i, child) in children.iter().enumerate() {
-                if i < children.len() - 1 {
-                    // Non-last children: read challenge from proof
-                    let parsed = parse_and_compute_challenges(child, proof, offset, None)?;
-                    xor_bytes(&mut xor_buf, parsed.challenge());
-                    parsed_children.push(parsed);
+            },
+            SigmaBoolean::Cand(children) | SigmaBoolean::Cor(children) => {
+                if children.is_empty() {
+                    return Err(SigmaVerifyError::EmptyChildren);
+                }
+                let is_and = matches!(prop, SigmaBoolean::Cand(_));
+                frame = Some(Frame {
+                    node: index,
+                    children,
+                    next: 0,
+                    challenges: if is_and {
+                        ChildChallenges::And
+                    } else {
+                        ChildChallenges::Or(challenge.clone())
+                    },
+                });
+                let children = Vec::with_capacity(children.len());
+                if is_and {
+                    UncheckedNode::And {
+                        challenge,
+                        children,
+                    }
                 } else {
-                    // Last child: challenge = accumulated XOR
-                    let parsed =
-                        parse_and_compute_challenges(child, proof, offset, Some(&xor_buf))?;
-                    parsed_children.push(parsed);
+                    UncheckedNode::Or {
+                        challenge,
+                        children,
+                    }
                 }
             }
-
-            Ok(UncheckedTree::Or {
-                challenge,
-                children: parsed_children,
-            })
+            SigmaBoolean::Cthreshold { k, children } => {
+                let n = validate_cthreshold_shape(*k, children)?;
+                if children.is_empty() {
+                    return Err(SigmaVerifyError::EmptyChildren);
+                }
+                let n_coeffs = n
+                    .checked_sub(usize::from(*k))
+                    .ok_or(SigmaVerifyError::InvalidThreshold { k: *k, n })?;
+                let coeff_size = SOUNDNESS_BYTES
+                    .checked_mul(n_coeffs)
+                    .ok_or(SigmaVerifyError::ProofTooShort { offset: *offset })?;
+                let coeff_bytes = read_bytes(proof, offset, coeff_size)?;
+                let coeff0: [u8; SOUNDNESS_BYTES] = challenge
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| SigmaVerifyError::ProofTooShort { offset: *offset })?;
+                let polynomial = gf2_192::gf2_192poly::Gf2_192Poly::try_from(
+                    gf2_192::gf2_192poly::CoefficientsByteRepr {
+                        coeff0,
+                        more_coeffs: &coeff_bytes,
+                    },
+                )
+                .map_err(|_| SigmaVerifyError::ProofTooShort { offset: *offset })?;
+                frame = Some(Frame {
+                    node: index,
+                    children,
+                    next: 0,
+                    challenges: ChildChallenges::Threshold(polynomial),
+                });
+                UncheckedNode::Threshold {
+                    challenge,
+                    children: Vec::with_capacity(n),
+                    k: *k,
+                }
+            }
+        };
+        nodes.push(node);
+        if let Some(parent) = frames.last_mut() {
+            if let ChildChallenges::Or(xor) = &mut parent.challenges {
+                if parent.next < parent.children.len() {
+                    xor_bytes(xor, nodes[index].challenge());
+                }
+            }
+            nodes[parent.node].children_mut().push(index);
         }
-        SigmaBoolean::Cthreshold { k, children } => {
-            if children.is_empty() {
-                return Err(SigmaVerifyError::EmptyChildren);
+        if let Some(frame) = frame {
+            frames.push(frame);
+        }
+        while let Some(frame) = frames.last_mut() {
+            if frame.next == frame.children.len() {
+                frames.pop();
+                continue;
             }
-            let n = children.len();
-            let n_coeffs = n - *k as usize;
-
-            // Read polynomial coefficients (n-k coefficients, each SOUNDNESS_BYTES)
-            let coeff_bytes = read_bytes(proof, offset, SOUNDNESS_BYTES * n_coeffs)?;
-
-            // Build polynomial: zero coefficient = challenge, rest from proof
-            let challenge_arr: [u8; SOUNDNESS_BYTES] = challenge
-                .clone()
-                .try_into()
-                .map_err(|_| SigmaVerifyError::ProofTooShort { offset: *offset })?;
-            let c0 = gf2_192::gf2_192::Gf2_192::from(challenge_arr);
-            let coeff0: [u8; 24] = c0.into();
-            let cc = gf2_192::gf2_192poly::CoefficientsByteRepr {
-                coeff0,
-                more_coeffs: &coeff_bytes,
+            let child_index = frame.next;
+            let challenge = match &frame.challenges {
+                ChildChallenges::And => Some(nodes[frame.node].challenge().to_vec()),
+                ChildChallenges::Or(xor) if child_index + 1 == frame.children.len() => {
+                    Some(xor.clone())
+                }
+                ChildChallenges::Or(_) => None,
+                ChildChallenges::Threshold(poly) => {
+                    let bytes: [u8; SOUNDNESS_BYTES] =
+                        poly.evaluate((child_index + 1) as u8).into();
+                    Some(bytes.to_vec())
+                }
             };
-            let polynomial = gf2_192::gf2_192poly::Gf2_192Poly::try_from(cc)
-                .map_err(|_| SigmaVerifyError::ProofTooShort { offset: *offset })?;
-
-            // Evaluate polynomial at 1, 2, ..., n to get children's challenges
-            let mut parsed_children = Vec::with_capacity(n);
-            for (i, child) in children.iter().enumerate() {
-                let child_challenge_gf = polynomial.evaluate((i + 1) as u8);
-                let child_challenge_bytes: [u8; 24] = child_challenge_gf.into();
-                let parsed = parse_and_compute_challenges(
-                    child,
-                    proof,
-                    offset,
-                    Some(&child_challenge_bytes),
-                )?;
-                parsed_children.push(parsed);
-            }
-
-            Ok(UncheckedTree::Threshold {
-                challenge,
-                children: parsed_children,
-                k: *k,
-                polynomial: Some(polynomial),
-            })
+            pending = Some((&frame.children[child_index], challenge));
+            frame.next += 1;
+            break;
         }
     }
+    Ok(UncheckedTree { nodes })
 }
 
-/// Compute commitments for all leaf nodes.
-fn compute_commitments(tree: UncheckedTree) -> Result<UncheckedTree, SigmaVerifyError> {
-    match tree {
-        UncheckedTree::Schnorr {
-            pk, challenge, z, ..
-        } => {
-            let commitment = schnorr::compute_dlog_commitment(&pk, &challenge, &z)
-                .map_err(|_| SigmaVerifyError::InvalidPoint("DLog commitment".into()))?;
-            Ok(UncheckedTree::Schnorr {
+/// Compute leaf commitments in the same depth-first order as the parser.
+fn compute_commitments(mut tree: UncheckedTree) -> Result<UncheckedTree, SigmaVerifyError> {
+    for node in &mut tree.nodes {
+        match node {
+            UncheckedNode::Schnorr {
                 pk,
                 challenge,
                 z,
-                commitment: Some(commitment),
-            })
-        }
-        UncheckedTree::DhTuple {
-            g,
-            h,
-            u,
-            v,
-            challenge,
-            z,
-            ..
-        } => {
-            let commitment = dht::compute_dht_commitment(&g, &h, &u, &v, &challenge, &z)
-                .map_err(|_| SigmaVerifyError::InvalidPoint("DHT commitment".into()))?;
-            Ok(UncheckedTree::DhTuple {
+                commitment,
+            } => {
+                *commitment = Some(
+                    schnorr::compute_dlog_commitment(pk, challenge, z)
+                        .map_err(|_| SigmaVerifyError::InvalidPoint("DLog commitment".into()))?,
+                );
+            }
+            UncheckedNode::DhTuple {
                 g,
                 h,
                 u,
                 v,
                 challenge,
                 z,
-                commitment: Some(commitment),
-            })
-        }
-        UncheckedTree::And {
-            challenge,
-            children,
-        } => {
-            let new_children: Result<Vec<_>, _> =
-                children.into_iter().map(compute_commitments).collect();
-            Ok(UncheckedTree::And {
-                challenge,
-                children: new_children?,
-            })
-        }
-        UncheckedTree::Or {
-            challenge,
-            children,
-        } => {
-            let new_children: Result<Vec<_>, _> =
-                children.into_iter().map(compute_commitments).collect();
-            Ok(UncheckedTree::Or {
-                challenge,
-                children: new_children?,
-            })
-        }
-        UncheckedTree::Threshold {
-            challenge,
-            children,
-            k,
-            polynomial,
-        } => {
-            let new_children: Result<Vec<_>, _> =
-                children.into_iter().map(compute_commitments).collect();
-            Ok(UncheckedTree::Threshold {
-                challenge,
-                children: new_children?,
-                k,
-                polynomial,
-            })
+                commitment,
+            } => {
+                *commitment = Some(
+                    dht::compute_dht_commitment(g, h, u, v, challenge, z)
+                        .map_err(|_| SigmaVerifyError::InvalidPoint("DHT commitment".into()))?,
+                );
+            }
+            _ => {}
         }
     }
+    Ok(tree)
 }
 
 /// Serialize the proof tree for Fiat-Shamir hashing.
@@ -509,79 +569,74 @@ fn fiat_shamir_tree_to_bytes(tree: &UncheckedTree) -> Vec<u8> {
 
     let mut buf = Vec::new();
 
-    match tree {
-        UncheckedTree::Schnorr { pk, commitment, .. } => {
-            let prop_bytes = schnorr::build_prove_dlog_ergo_tree(pk);
-            // Always Some: compute_commitments() ran before this and
-            // populated every leaf's commitment field.
-            let commit = commitment
-                .as_ref()
-                .expect("commitment populated by compute_commitments");
-            buf.push(LEAF_PREFIX);
-            buf.extend_from_slice(&(prop_bytes.len() as i16).to_be_bytes());
-            buf.extend_from_slice(&prop_bytes);
-            buf.extend_from_slice(&(commit.len() as i16).to_be_bytes());
-            buf.extend_from_slice(commit);
-        }
-        UncheckedTree::DhTuple {
-            g,
-            h,
-            u,
-            v,
-            commitment,
-            ..
-        } => {
-            let prop_bytes = dht::build_prove_dht_ergo_tree(g, h, u, v);
-            // Always Some: compute_commitments() ran before this and
-            // populated every leaf's commitment field.
-            let commit = commitment
-                .as_ref()
-                .expect("commitment populated by compute_commitments");
-            buf.push(LEAF_PREFIX);
-            buf.extend_from_slice(&(prop_bytes.len() as i16).to_be_bytes());
-            buf.extend_from_slice(&prop_bytes);
-            buf.extend_from_slice(&(commit.len() as i16).to_be_bytes());
-            buf.extend_from_slice(commit);
-        }
-        UncheckedTree::And { children, .. } => {
-            buf.push(INTERNAL_NODE_PREFIX);
-            buf.push(AND_CONJECTURE);
-            buf.extend_from_slice(&(children.len() as i16).to_be_bytes());
-            for child in children {
-                buf.extend_from_slice(&fiat_shamir_tree_to_bytes(child));
+    for node in &tree.nodes {
+        match node {
+            UncheckedNode::Schnorr { pk, commitment, .. } => {
+                let prop_bytes = schnorr::build_prove_dlog_ergo_tree(pk);
+                // Always Some: compute_commitments() ran before this and
+                // populated every leaf's commitment field.
+                let commit = commitment
+                    .as_ref()
+                    .expect("commitment populated by compute_commitments");
+                buf.push(LEAF_PREFIX);
+                buf.extend_from_slice(&(prop_bytes.len() as i16).to_be_bytes());
+                buf.extend_from_slice(&prop_bytes);
+                buf.extend_from_slice(&(commit.len() as i16).to_be_bytes());
+                buf.extend_from_slice(commit);
             }
-        }
-        UncheckedTree::Or { children, .. } => {
-            buf.push(INTERNAL_NODE_PREFIX);
-            buf.push(OR_CONJECTURE);
-            buf.extend_from_slice(&(children.len() as i16).to_be_bytes());
-            for child in children {
-                buf.extend_from_slice(&fiat_shamir_tree_to_bytes(child));
+            UncheckedNode::DhTuple {
+                g,
+                h,
+                u,
+                v,
+                commitment,
+                ..
+            } => {
+                let prop_bytes = dht::build_prove_dht_ergo_tree(g, h, u, v);
+                // Always Some: compute_commitments() ran before this and
+                // populated every leaf's commitment field.
+                let commit = commitment
+                    .as_ref()
+                    .expect("commitment populated by compute_commitments");
+                buf.push(LEAF_PREFIX);
+                buf.extend_from_slice(&(prop_bytes.len() as i16).to_be_bytes());
+                buf.extend_from_slice(&prop_bytes);
+                buf.extend_from_slice(&(commit.len() as i16).to_be_bytes());
+                buf.extend_from_slice(commit);
             }
-        }
-        UncheckedTree::Threshold { children, k, .. } => {
-            const THRESHOLD_CONJECTURE: u8 = 2;
-            buf.push(INTERNAL_NODE_PREFIX);
-            buf.push(THRESHOLD_CONJECTURE);
-            // Fiat-Shamir tree encodes k as a single byte (Scala UnprovenTree.toBytes:
-            // `w.put(unchecked.k.toByte)`), independent of the u16 wire width elsewhere.
-            buf.push(*k as u8);
-            buf.extend_from_slice(&(children.len() as i16).to_be_bytes());
-            for child in children {
-                buf.extend_from_slice(&fiat_shamir_tree_to_bytes(child));
+            UncheckedNode::And { children, .. } => {
+                buf.push(INTERNAL_NODE_PREFIX);
+                buf.push(AND_CONJECTURE);
+                buf.extend_from_slice(&(children.len() as i16).to_be_bytes());
+            }
+            UncheckedNode::Or { children, .. } => {
+                buf.push(INTERNAL_NODE_PREFIX);
+                buf.push(OR_CONJECTURE);
+                buf.extend_from_slice(&(children.len() as i16).to_be_bytes());
+            }
+            UncheckedNode::Threshold { children, k, .. } => {
+                const THRESHOLD_CONJECTURE: u8 = 2;
+                buf.push(INTERNAL_NODE_PREFIX);
+                buf.push(THRESHOLD_CONJECTURE);
+                // Fiat-Shamir tree encodes k as a single byte (Scala UnprovenTree.toBytes:
+                // `w.put(unchecked.k.toByte)`), independent of the u16 wire width elsewhere.
+                buf.push(*k as u8);
+                buf.extend_from_slice(&(children.len() as i16).to_be_bytes());
             }
         }
     }
-
     buf
 }
 
 fn read_bytes(proof: &[u8], offset: &mut usize, n: usize) -> Result<Vec<u8>, SigmaVerifyError> {
-    if *offset + n > proof.len() {
+    let end = (*offset)
+        .checked_add(n)
+        .ok_or(SigmaVerifyError::ProofTooShort { offset: *offset })?;
+    if end > proof.len() {
         return Err(SigmaVerifyError::ProofTooShort { offset: *offset });
     }
-    let bytes = proof[*offset..*offset + n].to_vec();
-    *offset += n;
+    let bytes = proof[*offset..end].to_vec();
+    *offset = end;
     Ok(bytes)
 }
 
@@ -592,9 +647,11 @@ fn read_bytes_padded(proof: &[u8], offset: &mut usize, n: usize) -> Vec<u8> {
     let remaining = proof.len().saturating_sub(*offset);
     let to_read = remaining.min(n);
     let pad = n - to_read;
+    let start = (*offset).min(proof.len());
+    let end = start.checked_add(to_read).unwrap_or(proof.len());
     let mut result = vec![0u8; pad];
-    result.extend_from_slice(&proof[*offset..*offset + to_read]);
-    *offset += to_read;
+    result.extend_from_slice(&proof[start..end]);
+    *offset = end;
     result
 }
 
@@ -608,6 +665,145 @@ fn xor_bytes(buf: &mut [u8], other: &[u8]) {
 mod tests {
     use super::*;
     use ergo_primitives::group_element::GroupElement;
+
+    #[test]
+    fn deep_proof_paths_and_partial_failure_fit_a_bounded_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                use k256::elliptic_curve::group::GroupEncoding;
+                let point = k256::ProjectivePoint::GENERATOR.to_affine().to_bytes();
+                let mut prop = SigmaBoolean::ProveDlog(GroupElement::from_bytes(point.into()));
+                for depth in 0..10_000 {
+                    prop = match depth % 3 {
+                        0 => SigmaBoolean::Cand(vec![prop].into()),
+                        1 => SigmaBoolean::Cor(vec![prop].into()),
+                        _ => SigmaBoolean::Cthreshold {
+                            k: 1,
+                            children: vec![prop].into(),
+                        },
+                    };
+                }
+                // A single-child conjecture forwards its challenge. Parsing,
+                // commitments, Fiat-Shamir bytes, leaf positions and cleanup
+                // must all tolerate depth independently of the native stack.
+                let proof = [0u8; SOUNDNESS_BYTES + GROUP_SIZE];
+                assert!(!verify_sigma_proof(&prop, &proof, b"depth regression").unwrap());
+                let leaves = extract_proof_leaves(&prop, &proof).unwrap();
+                assert_eq!(leaves.len(), 1);
+                assert_eq!(leaves[0].position, vec![0; 10_001]);
+                assert!(leaves[0].challenge.iter().all(|byte| *byte == 0));
+
+                // OR needs an explicit challenge for its first child. This
+                // error occurs below the entire valid prefix; dropping the
+                // partially populated proof arena must also stay iterative.
+                let mut failing = SigmaBoolean::Cor(vec![prop.clone(), prop.clone()].into());
+                for _ in 0..10_000 {
+                    failing = SigmaBoolean::Cand(vec![failing].into());
+                }
+                assert!(matches!(
+                    verify_sigma_proof(&failing, &[0; SOUNDNESS_BYTES], b""),
+                    Err(SigmaVerifyError::ProofTooShort {
+                        offset: SOUNDNESS_BYTES
+                    })
+                ));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn empty_proof_threshold_validation_visits_shared_nodes_once() {
+        let mut prop = threshold_prop(2, 1);
+        for _ in 0..64 {
+            prop = SigmaBoolean::Cand(vec![prop.clone(), prop].into());
+        }
+        assert!(matches!(
+            verify_sigma_proof(&prop, &[], b""),
+            Err(SigmaVerifyError::InvalidThreshold { k: 2, n: 1 })
+        ));
+    }
+
+    #[test]
+    fn enforcing_budget_rejects_shared_proof_expansion_before_parsing() {
+        use ergo_primitives::cost::{CostAccumulator, JitCost};
+        let mut prop = SigmaBoolean::ProveDlog(GroupElement::from_bytes([2; 33]));
+        for _ in 0..64 {
+            prop = SigmaBoolean::Cand(vec![prop.clone(), prop].into());
+        }
+        let mut budget = CostAccumulator::new(JitCost::from_jit(100_000));
+        let proof = [0; SOUNDNESS_BYTES];
+        assert!(matches!(
+            verify_sigma_proof_with_cost(&prop, &proof, b"", &mut budget),
+            Err(BudgetedSigmaError::Cost(_))
+        ));
+        let mut budget = CostAccumulator::new(JitCost::from_jit(100_000));
+        assert!(matches!(
+            extract_proof_leaves_with_cost(&prop, &proof, &mut budget),
+            Err(BudgetedSigmaError::Cost(_))
+        ));
+    }
+
+    fn threshold_prop(k: u16, n: usize) -> SigmaBoolean {
+        SigmaBoolean::Cthreshold {
+            k,
+            children: vec![SigmaBoolean::ProveDlog(GroupElement::from_bytes([2u8; 33])); n].into(),
+        }
+    }
+
+    #[test]
+    fn cthreshold_invalid_shapes_return_typed_errors() {
+        for (k, n) in [(2u16, 1usize), (u16::MAX, 1), (0, 256)] {
+            let prop = threshold_prop(k, n);
+            let result = verify_sigma_proof(&prop, &[], b"msg");
+            assert!(matches!(
+                result,
+                Err(SigmaVerifyError::InvalidThreshold {
+                    k: actual_k,
+                    n: actual_n,
+                }) if actual_k == k && actual_n == n
+            ));
+        }
+    }
+
+    #[test]
+    fn cand_and_cor_reject_nested_invalid_cthreshold_with_empty_proof() {
+        let invalid = threshold_prop(2, 1);
+        for prop in [
+            SigmaBoolean::Cand(vec![SigmaBoolean::Cor(vec![invalid.clone()].into())].into()),
+            SigmaBoolean::Cor(vec![SigmaBoolean::Cand(vec![invalid].into())].into()),
+        ] {
+            assert!(matches!(
+                verify_sigma_proof(&prop, &[], b"msg"),
+                Err(SigmaVerifyError::InvalidThreshold { k: 2, n: 1 })
+            ));
+        }
+    }
+
+    #[test]
+    fn cthreshold_valid_boundaries_are_not_invalid() {
+        for n in [1usize, 255] {
+            let prop = threshold_prop(n as u16, n);
+            let result = verify_sigma_proof(&prop, &[0u8; SOUNDNESS_BYTES + GROUP_SIZE], b"msg");
+            assert!(!matches!(
+                result,
+                Err(SigmaVerifyError::InvalidThreshold { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn read_bytes_rejects_offset_overflow() {
+        let mut offset = usize::MAX;
+        let result = read_bytes(&[0], &mut offset, 1);
+        assert!(matches!(
+            result,
+            Err(SigmaVerifyError::ProofTooShort { offset: pos })
+                if pos == usize::MAX
+        ));
+        assert_eq!(offset, usize::MAX);
+    }
 
     // A reduced sigma tree must never carry a nested TrivialProp child —
     // `AtLeast.reduce` / `SigmaOr` / `SigmaAnd` fold them out before proof
@@ -623,7 +819,8 @@ mod tests {
                 SigmaBoolean::TrivialProp(true),
                 SigmaBoolean::ProveDlog(GroupElement::from_bytes([2u8; 33])),
                 SigmaBoolean::ProveDlog(GroupElement::from_bytes([3u8; 33])),
-            ],
+            ]
+            .into(),
         };
         // Non-empty proof so we pass the empty-proof early return in
         // verify_sigma_proof and actually reach the parser.
@@ -666,7 +863,8 @@ mod tests {
                 SigmaBoolean::TrivialProp(true),
                 SigmaBoolean::ProveDlog(GroupElement::from_bytes([2u8; 33])),
                 SigmaBoolean::ProveDlog(GroupElement::from_bytes([3u8; 33])),
-            ],
+            ]
+            .into(),
         };
         let proof = vec![0u8; 64];
         let result = extract_proof_leaves(&prop, &proof);

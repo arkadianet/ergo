@@ -197,12 +197,16 @@ fn fundef_ntpeargs_high_bit(rng: &mut Rng) -> GenOutput {
 /// `FunDef` carrying one `STypeVar` whose name bytes are ill-formed UTF-8
 /// (`ED A0 80`). Bug #1: a strict decoder rejects, the JVM lossy-decodes. Our
 /// port matches the JVM, so the bare codec accepts and round-trips (via U+FFFD).
+/// The FunDef sits in a block whose result is `sigmaProp(true)`, so the tree
+/// also passes rule 1001; a bare FunDef root is an `SInt` and sigma-state
+/// 6.0.2 rejects it, while it accepts this block.
 fn stypevar_illformed_utf8(_rng: &mut Rng) -> GenOutput {
-    // 00 D7 01 (FunDef id=1) 01 (nTpeArgs=1) 67 03 ED A0 80 (STypeVar "<ill>")
-    // 04 00 (rhs = Const(SInt, 0)).
-    let mut bytes = vec![0x00, 0xD7, 0x01, 0x01, asm::STYPEVAR_CODE, 0x03];
+    // 00 D8 01 (BlockValue, 1 item) D7 01 (FunDef id=1) 01 (nTpeArgs=1)
+    // 67 03 ED A0 80 (STypeVar "<ill>") 04 00 (rhs = Const(SInt, 0))
+    // 08 D3 (result = Const(SSigmaProp, true)).
+    let mut bytes = vec![0x00, 0xD8, 0x01, 0xD7, 0x01, 0x01, asm::STYPEVAR_CODE, 0x03];
     bytes.extend_from_slice(&asm::ILL_FORMED_UTF8_NAME);
-    bytes.extend_from_slice(&[0x04, 0x00]);
+    bytes.extend_from_slice(&[0x04, 0x00, 0x08, 0xD3]);
     out(
         bytes,
         true,
@@ -240,19 +244,13 @@ fn unsigned_bigint_pre_v3(_rng: &mut Rng) -> GenOutput {
 
 /// A `Relation2` operator over two boolean constants in the compact `0x85`
 /// form. Bug #12: `93 85 03` = `Eq(Const(true), Const(true))`. Both node and
-/// reference emit/read this packed form, so it round-trips.
+/// reference emit/read this packed form, so it round-trips. Only `Eq` / `Neq`
+/// accept boolean operands (`Lt`..`Ge` fail the builder's numeric constraint),
+/// and `sigmaProp(..)` makes the root pass rule 1001.
 fn relation2_compact_bool_pair(rng: &mut Rng) -> GenOutput {
-    // Relation2 opcodes: 0x8F..0x94 (Lt..Neq), 0xEC/0xED (BinOr/BinAnd), 0xF4.
-    let op = match rng.below(6) {
-        0 => 0x8F,
-        1 => 0x90,
-        2 => 0x91,
-        3 => 0x92,
-        4 => 0x93,
-        _ => 0x94,
-    };
+    let op = if rng.below(2) == 0 { 0x93 } else { 0x94 };
     let packed = rng.byte() & 0x03; // low 2 bits = (left, right)
-    let bytes = vec![0x00, op, 0x85, packed];
+    let bytes = vec![0x00, 0xD1, op, 0x85, packed];
     out(
         bytes,
         true,

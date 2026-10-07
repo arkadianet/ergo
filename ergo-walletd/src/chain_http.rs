@@ -1010,6 +1010,7 @@ mod tests {
     fn sample_box(tx_id: [u8; 32], index: u16) -> (Vec<u8>, [u8; 32]) {
         let tree = ErgoTree {
             version: 0,
+            reserved_header_bits: 0,
             has_size: true,
             constant_segregation: true,
             constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],

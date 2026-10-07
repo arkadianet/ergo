@@ -51,6 +51,27 @@ impl Prover {
         Self { secrets, params }
     }
 
+    /// Native commitment-signing entry point. Consume the commitments and
+    /// reject a different transaction before any nonce response is produced.
+    pub fn sign_bound(
+        &self,
+        unsigned_tx: &UnsignedTransaction,
+        boxes_to_spend: &[ErgoBox],
+        data_boxes: &[ErgoBox],
+        state_context: &BlockchainStateContext,
+        commitments: crate::proving::hints::BoundTransactionHints,
+    ) -> Result<Transaction, WalletError> {
+        let message = Self::bytes_to_sign_for_tx(unsigned_tx)?;
+        let hints = commitments.into_for_message(&message)?;
+        self.sign(
+            unsigned_tx,
+            boxes_to_spend,
+            data_boxes,
+            state_context,
+            &hints,
+        )
+    }
+
     /// Sign `unsigned_tx`. `boxes_to_spend` MUST be in the same order as
     /// `unsigned_tx.inputs`; `hints` defaults to empty for single-sig.
     ///
@@ -65,6 +86,9 @@ impl Prover {
     /// lifted once the context is derived from committed chain state.
     ///
     /// Returns the fully-signed `Transaction` or a `WalletError`.
+    /// This low-level Scala-compatible API accepts reusable bags. An own
+    /// commitment nonce MUST be used for only one signing operation. Prefer
+    /// [`Self::sign_bound`] for native commitment ownership.
     pub fn sign(
         &self,
         unsigned_tx: &UnsignedTransaction,
@@ -104,7 +128,7 @@ impl Prover {
             }
         }
 
-        let message = self.bytes_to_sign_for_tx(unsigned_tx)?;
+        let message = Self::bytes_to_sign_for_tx(unsigned_tx)?;
 
         // Collect all input extensions once; `build_reduction_owned`
         // borrows the full slice for `input_extensions`.
@@ -181,8 +205,7 @@ impl Prover {
     /// Compute the Fiat-Shamir message for `unsigned_tx`.
     ///
     /// Mirrors Scala: `bytes_to_sign(Transaction(inputs.map(_.bytesWithoutProof), ...))`.
-    fn bytes_to_sign_for_tx(
-        &self,
+    pub(crate) fn bytes_to_sign_for_tx(
         unsigned_tx: &UnsignedTransaction,
     ) -> Result<Vec<u8>, WalletError> {
         let placeholder_tx = Transaction {

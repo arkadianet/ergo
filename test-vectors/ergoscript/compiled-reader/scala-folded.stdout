@@ -1,0 +1,22 @@
+{
+  "source" : "{ val u = Coll[UnsignedBigInt](); sigmaProp(u.size.toLong == SELF.value) }",
+  "frontend_version" : 3,
+  "tree_hex" : "10010400d1937e730005c1a7",
+  "reader_results" : [
+    {
+      "activated_version" : 1,
+      "outcome" : "READ_RIGHT",
+      "consumed" : 12
+    },
+    {
+      "activated_version" : 2,
+      "outcome" : "READ_RIGHT",
+      "consumed" : 12
+    },
+    {
+      "activated_version" : 3,
+      "outcome" : "READ_RIGHT",
+      "consumed" : 12
+    }
+  ]
+}

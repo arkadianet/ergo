@@ -1,11 +1,11 @@
 {
   "_comment": [
-    "Ground truth from the live JVM oracle (sigmastate-interpreter 6.0.2,",
+    "Ground truth from the live JVM oracle (sigmastate-interpreter 6.0.6,",
     "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala via",
     "`difftest --oracle --repro <tree_hex> --surface reduce`) for JIT cost of",
     "AND / OR / XorOf over boolean-collection literals -- issue #311.",
     "",
-    "Derivation (sigmastate 6.0.x source):",
+    "Derivation (sigmastate source; line numbers cite the v6.0.2 tag):",
     " * ConcreteCollectionBooleanConstantSerializer.parse (data/shared/src/main/",
     "   scala/sigma/serialization/ConcreteCollectionBooleanConstantSerializer.scala:35-48)",
     "   rebuilds the packed 0x85 form as ConcreteCollection(BooleanConstant.fromBoolean(bit)...),",
@@ -35,7 +35,7 @@
     "oracle) and is recorded for the record only."
   ],
   "source": {
-    "sigma_state": "6.0.2",
+    "sigma_state": "6.0.6",
     "oracle": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala",
     "surface": "reduce"
   },

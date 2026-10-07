@@ -1,0 +1,48 @@
+{
+  "command": [
+    "$HOME/.local/kdex-toolchain/bin/scala-cli",
+    "run",
+    "CapturePositive.scala",
+    "--server=false",
+    "--jvm",
+    "system",
+    "--main-class",
+    "CompilerFoldedControl"
+  ],
+  "cwd": "$HOME/Coding/worktrees/ergo-reference-audit-20261004-sigma/test-vectors/ergoscript/compiled-reader",
+  "start": "2026-10-03T17:56:25.851468+00:00",
+  "elapsed_seconds": 8.524840930011123,
+  "exit_code": 0,
+  "environment_overrides": {
+    "JAVA_HOME": "$HOME/.local/kdex-toolchain/amazon-corretto-17.0.17.10.1-linux-x64",
+    "COURSIER_REPOSITORIES": "ivy2Local|https://repo.maven.apache.org/maven2"
+  },
+  "PATH_prefix": "$HOME/.local/kdex-toolchain/bin",
+  "artifacts": [
+    {
+      "path": "CapturePositive.scala",
+      "sha256": "5fd8d1031c97559760c4417b57d198918980fe0519dfcf5acabba693c344874f",
+      "bytes": 1896
+    },
+    {
+      "path": "scala-folded.stdout",
+      "sha256": "73dfc397bd56254119cf45a94ee9a40a67cf91f25e277647472401f3236cc2bb",
+      "bytes": 484
+    },
+    {
+      "path": "scala-folded.stderr",
+      "sha256": "2c840e0bac83800a4a3e463eda8320a8cf38b3e4d81d58d820ec6341dbdd22bc",
+      "bytes": 2411
+    },
+    {
+      "path": "ergo-core_2.12.jar",
+      "sha256": "382da71e318f662da713dc7a6542b0e4527e7d035aaa65aea97545d85f9ece9f",
+      "bytes": 989547
+    },
+    {
+      "path": "sigma-state_2.12-6.0.6.jar",
+      "sha256": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898",
+      "bytes": 6251429
+    }
+  ]
+}

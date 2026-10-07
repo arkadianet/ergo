@@ -59,12 +59,27 @@ fn roundtrip_bytes(tree: &ErgoTree) -> Vec<u8> {
 
 // ----- round-trips -----
 
+/// Scala keeps the whole header byte and writes it back; only the version,
+/// size and constant-segregation bits carry meaning. sigma-state 6.0.2
+/// re-serializes each of these byte-identically.
+#[test]
+fn reserved_header_bits_round_trip_like_scala() {
+    for hex in ["2008d3", "e008d3", "280208d3"] {
+        let bytes = hex::decode(hex).unwrap();
+        let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+        let mut w = VlqWriter::new();
+        write_ergo_tree(&mut w, &tree).unwrap();
+        assert_eq!(hex::encode(w.result()), hex);
+    }
+}
+
 #[test]
 fn header_byte_version_only() {
     let tree = ErgoTree {
         version: 3,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -79,6 +94,7 @@ fn header_byte_all_flags() {
         version: 1,
         has_size: true,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![],
         body: sigma_prop_body(),
     };
@@ -94,6 +110,7 @@ fn header_byte_size_flag_only() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: sigma_prop_body(),
     };
@@ -108,6 +125,7 @@ fn header_byte_cseg_flag_only() {
         version: 0,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -122,6 +140,7 @@ fn no_constants_no_size() {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -134,6 +153,7 @@ fn cseg_no_constants_no_size() {
         version: 0,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -146,6 +166,7 @@ fn cseg_with_constants_no_size() {
         version: 0,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![
             (SigmaType::SInt, SigmaValue::Int(42)),
             (SigmaType::SLong, SigmaValue::Long(1_000_000)),
@@ -166,6 +187,7 @@ fn cseg_with_constants_and_size() {
         version: 1,
         has_size: true,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![
             (
                 SigmaType::SSigmaProp,
@@ -182,27 +204,41 @@ fn cseg_with_constants_and_size() {
     roundtrip(&tree);
 }
 
+/// A sizeless, constant-segregated v0 tree of `count` SInt constants
+/// (`0, 1, ..`) under the root `BoolToSigmaProp(TrueLeaf)` (`d1 7f`).
+fn sizeless_int_constants_tree(count: u32) -> Vec<u8> {
+    let mut w = VlqWriter::new();
+    w.put_u8(CONSTANT_SEGREGATION_FLAG);
+    w.put_u32(count);
+    for i in 0..count {
+        w.put_u8(0x04);
+        w.put_i32(i as i32);
+    }
+    w.put_u8(0xD1);
+    w.put_u8(0x7F);
+    w.result()
+}
+
+/// `deserializeErgoTree` bounds a sizeless tree to `MaxPropositionSize`
+/// bytes from its start, as it does a sized one
+/// (ErgoTreeSerializer.scala:143-144). A 1,300-constant tree (3,841 bytes)
+/// parses; a 1,400-constant one (4,141 bytes) reads its constants past the
+/// window, and a sizeless tree cannot degrade, so it is rejected. JVM
+/// verdicts (ErgoSerdeOracle `ergo_tree`, sigma-state 6.0.6): ACCEPT and
+/// REJECT SerializerException.
 #[test]
-fn read_ergo_tree_constant_count_above_soft_cap_still_parses() {
-    // CONSTANTS_VEC_SOFT_CAP bounds only the initial Vec reservation; it must
-    // NOT reject a tree the Scala node would accept. A cseg tree with more
-    // constants than the cap round-trips — the Vec grows past the cap on
-    // push and parsing succeeds. Pins the consensus-acceptance claim of the
-    // soft cap (contrast `read_ergo_tree_huge_constant_count_does_not_oom`,
-    // which checks the hostile short-payload path returns an error).
-    let n = CONSTANTS_VEC_SOFT_CAP + 904; // 5000, comfortably above the cap
-    assert!(n > CONSTANTS_VEC_SOFT_CAP);
-    let constants: Vec<(SigmaType, SigmaValue)> = (0..n)
-        .map(|i| (SigmaType::SInt, SigmaValue::Int(i as i32)))
-        .collect();
-    let tree = ErgoTree {
-        version: 0,
-        has_size: false,
-        constant_segregation: true,
-        constants,
-        body: placeholder_body(),
-    };
-    roundtrip(&tree);
+fn read_ergo_tree_sizeless_constants_past_proposition_window_rejected() {
+    let inside = sizeless_int_constants_tree(1300);
+    assert_eq!(inside.len(), 3841);
+    let mut r = VlqReader::new(&inside);
+    let tree = read_ergo_tree(&mut r).expect("within the window");
+    assert_eq!(tree.constants.len(), 1300);
+    assert!(r.is_empty());
+
+    let past = sizeless_int_constants_tree(1400);
+    assert_eq!(past.len(), 4141);
+    let mut r = VlqReader::new(&past);
+    assert!(read_ergo_tree(&mut r).is_err());
 }
 
 #[test]
@@ -211,6 +247,7 @@ fn size_delimited_no_cseg() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: sigma_prop_body(),
     };
@@ -224,6 +261,7 @@ fn multiple_constants_roundtrip() {
         version: 0,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![
             (SigmaType::SInt, SigmaValue::Int(0)),
             (SigmaType::SLong, SigmaValue::Long(i64::MAX)),
@@ -345,10 +383,9 @@ fn trace_block_1160831_tx35_options() {
     trace_tree("00d836d601db6308a7d60286028300020500d603b272010400017202d6048c720301d605e4c6a70763d606ed937204c5720593c2a7c27205d6079572067205a7d608e4c67207091ad609ef7206d60ac57207d60bb0dc0c0fa501d9010b63addb6308720bd9010d4d0e95938c720d01720a8c720d0205000500d9010b599a8c720b018c720b02d60cb27208040200d60db27208040400d60eb27208040600d60fb27208040800d610b2a5040000d611c27210d612e4c672070811d613b27212040c00d6149a72130580897ad615e4c67207050ed61695937211c2a7edededed92c17210721493e4c67210040ee4c67207040e93e4c67210050e721593e4c67210060ee4c67207060e93e4c67210076372070100d617b27212040600d618db6903db6503fed619c1a7d61ab27212040a00d61bdb63087210d61cb2721b0400017202d61d8c720302d61eb27212040400d61fb27212040800d62093b272120400000500d6218c721c02d622b2721b0402017202d623b2a5040200d6240e20e540cceffd3b8dd0f401193576cc413467039695969427df94454193dddfb375d6259172187217d626ed720693721d0502d6279593b272120402000500eded722672258f72189a72170580f0b252ed72269072187217d628b272010402017202d6298c722802d62a8c722202d62b8c722201d62cdb63087223d62db2722c0400017202d62e8c722d01d62f8c722d02d630b2a5040400d631db63087230d632b272310400017202d633957206e4c6a7081183020505000500d634b27233040000d635b27233040200d6368c721c01eb02ea02cdeeb27208040000d1ed720993720b0500d1ececec95eded720993b1a4040493b1a50406d804d637b2a4040200d638c17237d6399a999972197213721a7238d63a9572209d721d721e9d9972399c050472149c721f721eedededededededededededededededed927238058092f40193cbb2e4c67237091a040200720c93cbb2e4c67237091a040400720d93cbb2e4c67237091a040600720e93cbb2e4c67237091a040800720f72168f99721772180580909cf1c00593c17210723992c172109c05047214d801d63b723693723bc5a79372219a723a0502ecededed7220d801d63b722b93723b7215937222720393b1721b0404edef722093b1721b040293b2e4c672100811040000723a93b2e4c672100811040200050093cbc27223720c93c17223721a93cbc2b2a50404007224010095eded722793b1a4040493b1a50408d807d637957220997229722a997219c17210d6389572209d7237721e9d72379c721f721ed639b2db6308b2a40402000400017202d63a95938c723901720a8c7239020500d63b7230d63c7231d63d7232ededededededed937238723a7216ecedededededededed7220937203721c93c172107219ec93722b721593722a050093722e721593722f723793b1722c040292c1723b9c9c7238721f721e93b1723c0400edededededef722092c17223723793b1722c0400938c723d017215928c723d029c7238721e93b1723c040293b2e4c672100811040000723493b2e4c6721008110402009a7235723a93cbc2723b720e93cbc2b2a5040600722490c1b2a50406007213010095eded720693b1a4040293b1a50406edededededededededededed93c172109999721972130580897a721693723672049372210502937222722893b2e4c672100811040000723493b2e4c672100811040200050093cbc27223720d93c172230580897a93b1722c0402d801d637722e937237720493722f99721d050293cbc2b2a50404007224010095eced7225ef722795720693723572340100ededededededed93b1a4040293b1a5040493cb7211720f92c1721099721972139372368c722801937221722993720b050093cbc2722372240100");
 }
 
-#[test]
-fn trace_block_1160831_tx35_out1() {
-    trace_tree("00d806d601e4c6a7091ad602b27201040000d603b27201040a00d604937203cbc2b2a5040000d605e4c6a7050ed606e4c6a70711eb02ea02cdee7202d1ef7204d195eded93b1a4040493b1a5040493cbc2b2a40400007203d801d607b2a4040000ededed93c2a7c27207ed93c17207c1a793e4c67207050e7205938cb27206040000017203ec93720672019683020193e4c67207060ee4c6a7060e93e4c67207070e7206d801d607b2a4040000ededededed93c2a7c27207ed93c17207c1a793e4c67207050e720593e4c67207060ee4c6a7060e93e4c67207070e7206d801d608e4c672070811eded93b27208040000720293b27208040200720493c172079c9c997208c17207050472039c72040502");
-}
+// The former trace_block_1160831_tx35_out1 bytes contain SelectField(Long).
+// sigma-state 6.0.2 rejects them; they are now pinned as legacy_trace_fixture
+// in numeric_select_validation.tsv rather than asserted to parse here.
 
 // ----- error paths -----
 
@@ -502,17 +539,24 @@ fn getuintexact_index_overflow_hard_rejects_not_wrapped() {
 }
 
 /// A `ValUse` id past i32::MAX is read non-exact (Scala `getUInt.toInt`):
-/// accepted, kept as the raw u32 so it round-trips byte-identically.
+/// accepted when bound, kept as the raw u32 so it round-trips byte-identically.
 #[test]
 fn valuse_id_overflow_roundtrips() {
     let tree = ErgoTree {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: crate::opcode::Expr::Op(crate::opcode::IrNode {
-            opcode: 0x72, // ValUse
-            payload: crate::opcode::Payload::ValUse { id: 0xFFFF_FFFF },
+            opcode: 0xd9,
+            payload: crate::opcode::Payload::FuncValue {
+                args: vec![(0xffff_ffff, Some(SigmaType::SSigmaProp))],
+                body: Box::new(crate::opcode::Expr::Op(crate::opcode::IrNode {
+                    opcode: 0x72,
+                    payload: crate::opcode::Payload::ValUse { id: 0xffff_ffff },
+                })),
+            },
         }),
     };
     roundtrip(&tree);
@@ -526,6 +570,7 @@ fn funcvalue_arg_id_overflow_roundtrips() {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: crate::opcode::Expr::Op(crate::opcode::IrNode {
             opcode: 0xD9, // FuncValue
@@ -542,6 +587,65 @@ fn funcvalue_arg_id_overflow_roundtrips() {
 }
 
 // ----- oracle parity -----
+
+/// Issue #436: a constant whose nested box carries a sized version-6 tree that
+/// fails on a `SerializerException` must be rejected at activated version 1
+/// too, where the version gate is inert and the body is parsed: only a
+/// `ValidationException` degrades a sized tree. JVM (`ErgoSerdeOracle.scala`,
+/// sigma-state 6.0.6): `constant@1` -> `REJECT InvalidTypePrefix`,
+/// `constant@3` -> `REJECT SerializerException`.
+#[test]
+fn issue_436_nested_v6_sized_tree_rejects_at_every_activated_version() {
+    let bytes = hex::decode(
+        "4d4d4d4d4f4d6300f83c4d4d4d6300f83c3c0e0e0e0e0e0e0e0e0e0e0e5454571f4d4d4d4d4d6300f84d4d4d630e0e4d00000e2500000e0e0e000045450100d40000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000000",
+    )
+    .unwrap();
+    for activated in [None, Some(1u8), Some(3)] {
+        let mut r = VlqReader::new(&bytes);
+        if let Some(a) = activated {
+            r = r.with_activated_script_version(a);
+        }
+        assert!(
+            crate::sigma_value::read_constant(&mut r).is_err(),
+            "activated {activated:?}: the JVM rejects"
+        );
+    }
+}
+
+/// Below tree v3 an Option's data is refused by `CheckSerializableTypeCode`
+/// (rule 1009, a `ValidationException`) before its content is read, so a
+/// size-flagged tree degrades even when that content is malformed. At v3 the
+/// content is read and a malformed point is a hard reject. JVM
+/// (`ErgoSerdeOracle.scala`, sigma-state 6.0.6, `ergo_tree`, activated 3):
+///
+/// ```text
+/// 1926012b01c4(11 x32)7300   (v1, segregated Some(bad point))  ACCEPT, wrapped
+/// 09232b01c4(11 x32)         (v1, inline Some(bad point))      ACCEPT, wrapped
+/// 1b26012b01c4(11 x32)7300   (v3, the same)                    REJECT SerializerException
+/// ```
+#[test]
+fn pre_v3_option_constant_degrades_before_its_content_is_read() {
+    let point = format!("c4{}", "11".repeat(32));
+    for (tree, wraps) in [
+        (format!("1926012b01{point}7300"), true),
+        (format!("09232b01{point}"), true),
+        (format!("1b26012b01{point}7300"), false),
+    ] {
+        let bytes = hex::decode(&tree).unwrap();
+        let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
+        let result = read_ergo_tree(&mut r);
+        if wraps {
+            let parsed = result.unwrap_or_else(|e| panic!("{tree}: {e:?}"));
+            assert!(matches!(parsed.body, Expr::Unparsed(_)), "{tree}: wraps");
+            assert!(r.is_empty(), "{tree}");
+        } else {
+            assert!(
+                result.is_err(),
+                "{tree}: a v3 tree reads the point and rejects"
+            );
+        }
+    }
+}
 
 // -- Size-flagged malformed tree (Scala UnparsedErgoTree parity) --
 
@@ -607,6 +711,7 @@ fn size_flagged_const_placeholder_non_sigmaprop_root_wraps_as_unparsed() {
         version: 0,
         has_size: true,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![(SigmaType::SInt, SigmaValue::Int(7))],
         body: placeholder_body(), // ConstPlaceholder(0) → SInt (non-SigmaProp)
     };
@@ -628,6 +733,7 @@ fn size_flagged_const_placeholder_non_sigmaprop_root_wraps_as_unparsed() {
         version: 0,
         has_size: true,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![(
             SigmaType::SSigmaProp,
             SigmaValue::SigmaProp(crate::sigma_value::SigmaBoolean::TrivialProp(true)),
@@ -802,6 +908,9 @@ fn check_sigma_prop_root_matches_jvm_on_sizeless_trees() {
         "007d050004",     // Downcast (numeric)
         "00d40500",       // deserializeContext[Long]
         "00d5040500",     // deserializeRegister[Long]
+        "00da010100",     // Apply(true)(): non-function callee -> NoType
+        // Apply(Upcast(2: Int))(..): an explicit cast callee -> NoType.
+        "00da7e040404040404040404040404dada040404040404dada7fffffffffdf11ffffff0405",
     ] {
         assert!(
             check_sigma_prop_root(&parse(op)).is_err(),
@@ -816,6 +925,7 @@ fn check_sigma_prop_root_matches_jvm_on_sizeless_trees() {
             "00d40801",   // deserializeContext[SigmaProp] — type tag = SigmaProp
             "00d5040800", // deserializeRegister[SigmaProp]
             "00710108",   // TaggedVar[SigmaProp] (type-tag dependent → lenient)
+            "00da1401d3010400", // Coll[SigmaProp] literal applied to 0 -> element type
             // P2PK (ProveDlog) root.
             "0008cd02000a518dc9761306f048c70ad44e1a7fc9e4ce2ceeea529646f73aada1ea6640",
             // SigmaAnd / SigmaOr / AtLeast of ProveDlogs — common multisig roots.
@@ -1032,6 +1142,7 @@ fn template_bytes_excludes_header_for_simple_tree() {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -1056,6 +1167,7 @@ fn template_bytes_excludes_constants_table_for_segregated_tree() {
         version: 0,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
         body: placeholder_body(),
     };
@@ -1075,6 +1187,7 @@ fn template_hash_is_blake2_of_template_bytes() {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -1102,33 +1215,40 @@ fn template_hash_self_consistent_for_emission_contract() {
     assert_eq!(from_parsed, from_bytes);
 }
 
-/// Block 1,702,686 size-flagged non-SigmaProp tree must surface as
-/// `Unparseable` from the bytes path so the indexer can skip
-/// recording an entry rather than emitting a hash that would
-/// collide across every soft-fork-wrapped tree on the chain.
+/// Block 1,702,686 size-flagged non-SigmaProp tree is wrapped, yet Scala's
+/// cached `template` is defined: the bytes after its header (0x09) and size
+/// (0x2f), as it has no segregated constants. The bytes path hashes that
+/// slice, the key a Scala indexer records (see the sigma-state 6.0.6 table in
+/// `hash.rs`). The structured path has no template for the wrapped body.
 #[test]
-fn template_hash_from_bytes_unparseable_for_block_1702686() {
+fn template_hash_from_bytes_uses_scala_template_for_block_1702686() {
     let hex = "092f0204a00b08cd021dde34603426402615658f1d970cfa7c7bd92ac81a8b16ee20427901040404040004020504040402";
     let bytes = hex::decode(hex).unwrap();
-    match template_hash_from_bytes(&bytes) {
-        Err(TemplateHashError::Unparseable) => {}
-        other => panic!("expected Unparseable, got {other:?}"),
-    }
+    assert_eq!(
+        template_hash_from_bytes(&bytes).unwrap(),
+        *blake2b256(&bytes[2..]).as_bytes()
+    );
+    let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+    assert!(matches!(
+        template_hash(&tree),
+        Err(TemplateHashError::Unparseable)
+    ));
 }
 
-/// A v4 tree (version > MAX_SUPPORTED_TREE_VERSION = 3) is wrapped
-/// by the version-soft-fork branch and must also surface as
-/// `Unparseable`.
+/// A v4 tree (version > MAX_SUPPORTED_TREE_VERSION = 3) is wrapped by the
+/// version-soft-fork branch. Scala rejects such a tree at deserialization at
+/// every activated version, so it never indexes one; the bytes path applies
+/// the same header/size strip as to any other wrapped tree.
 #[test]
-fn template_hash_from_bytes_unparseable_for_v4_softfork() {
+fn template_hash_from_bytes_strips_v4_softfork_header_and_size() {
     // Header: 0x0C = v=4, has_size=true, no cseg. Size VLQ(1)=0x01.
     // Body: one arbitrary byte (0x00) — never parsed because version
     // exceeds MAX_SUPPORTED_TREE_VERSION, so the wrap branch fires.
     let bytes = hex::decode("0C0100").unwrap();
-    match template_hash_from_bytes(&bytes) {
-        Err(TemplateHashError::Unparseable) => {}
-        other => panic!("expected Unparseable for v4 tree, got {other:?}"),
-    }
+    assert_eq!(
+        template_hash_from_bytes(&bytes).unwrap(),
+        *blake2b256(&[0x00]).as_bytes()
+    );
 }
 
 /// Every mainnet vector that the existing roundtrip test exercises
@@ -1256,6 +1376,7 @@ fn pre_v3_v6_method_size_flagged_wraps_and_forwards_only_pre_method_ges() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body,
     };
@@ -1391,6 +1512,7 @@ fn unknown_method_size_flagged_wraps_and_drops_trailing_ge() {
             version,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             // Plus(unknown_method, off_curve_ge): the off-curve GE is decoded
             // AFTER the method, so Scala never reaches it.
@@ -1495,39 +1617,19 @@ fn pre_v3_unsigned_bigint_embeddable_type_wraps_unparsed() {
     assert_eq!(w.result(), bytes);
 }
 
-/// F1: a SIZELESS header-v0 tree whose body carries a V6-embeddable TYPE code
-/// (`SUnsignedBigInt` = code 9, here `SELF.R4[UnsignedBigInt].isDefined` →
-/// `1000d1e6c6a70409`) is REJECTED by the default header-version-gated
-/// [`read_ergo_tree`] but ACCEPTED by
-/// [`read_ergo_tree_with_activated_version`] at activated version 3 — mirroring
-/// Scala `getEmbeddableType` gating on the ACTIVATED version, not the header.
-/// The compile self-check uses the activated-version reader so a
-/// `tree_version >= 3` compile's header-v0 output round-trips (oracle:
-/// `cc sigmaProp(SELF.R4[UnsignedBigInt].isDefined)`, ORACLE_TREE_VERSION=3 →
-/// `OK 1000d1e6c6a70409`; sigma-state 6.0.2).
+/// The independently captured6.0.6 compiler emits this header0 type9 tree,
+/// but its reader refuses it at every tested activation. Activation cannot
+/// replace the header's embeddable table; the full seven-case fixture is also
+/// checked in the activated reader tests.
 #[test]
-fn sizeless_v0_v6_embeddable_type_accepts_only_under_activated_v6() {
+fn sizeless_v0_v6_type_is_not_certified_by_an_activated_table_override() {
     let bytes = hex::decode("1000d1e6c6a70409").unwrap();
-    // Default reader: header-version (0) gate rejects code 9.
-    let err = read_ergo_tree(&mut VlqReader::new(&bytes))
-        .expect_err("header-v0 reader must reject the v6 embeddable code");
-    assert!(
-        matches!(&err, ReadError::SigmaValidation { rule_id: 1007, args, .. } if args == &[9]),
-        "{err:?}"
-    );
-    // Activated-version reader at v3: accepts, round-trips byte-identically.
-    let mut r = VlqReader::new(&bytes);
-    let tree = read_ergo_tree_with_activated_version(&mut r, 3)
-        .expect("activated-v6 reader must accept the v6 embeddable code");
-    assert!(r.is_empty(), "no trailing bytes");
-    let mut w = VlqWriter::new();
-    write_ergo_tree(&mut w, &tree).unwrap();
-    assert_eq!(w.result(), bytes, "re-serialize is byte-identical");
-    // Below-v3 activated override stays strict (an activated < V6 network).
-    assert!(
-        read_ergo_tree_with_activated_version(&mut VlqReader::new(&bytes), 2).is_err(),
-        "activated v2 must still reject code 9"
-    );
+    assert!(read_ergo_tree(&mut VlqReader::new(&bytes)).is_err());
+    for activation in 1..=3 {
+        assert!(
+            read_ergo_tree_with_activated_version(&mut VlqReader::new(&bytes), activation).is_err()
+        );
+    }
 }
 
 /// `check_tree_version_supported` is Scala's `VersionContext` require
@@ -1633,6 +1735,7 @@ fn nested_box_constant_v6_in_size_delimited_outer_hard_rejects() {
         version: 0,
         has_size: true, // SIZE-DELIMITED outer — the soft-fork-wrap path
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![(SigmaType::SBox, SigmaValue::OpaqueBoxBytes(inner_box))],
         body: placeholder_body(),
     };
@@ -1669,6 +1772,7 @@ fn nested_box_constant_rule1012_in_size_delimited_outer_wraps() {
         version: 0,
         has_size: true, // SIZE-DELIMITED outer — must WRAP a nested ValidationException
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![(SigmaType::SBox, SigmaValue::OpaqueBoxBytes(inner_box))],
         body: placeholder_body(),
     };
@@ -1748,6 +1852,7 @@ fn size_delimited_body_nested_high_version_sbox_trusted_vs_strict() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: crate::sigma_type::SigmaType::SBox,

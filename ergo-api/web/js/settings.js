@@ -34,22 +34,29 @@ export function initSettings(dialog, openBtn) {
   const p = prefs();
   // Static template only — no untrusted interpolation. Field values are
   // assigned via the DOM below (.value is not parsed as HTML).
-  const opts = (list) => list.map((v) => `<option>${v}</option>`).join('');
+  const opts = (list) => list.map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
   dialog.innerHTML = `
     <form method="dialog" class="dialog__body">
-      <h3 class="micro-label">Settings</h3>
+      <h2 class="panel__title">Workspace appearance</h2>
+      <p class="settings-help">Choose the look and spacing that suit your screen.</p>
       <label>Theme
-        <select id="set-theme">${opts(['dark', 'light', 'hc'])}</select></label>
+        <select id="set-theme">${opts([['dark', 'Graphite'], ['light', 'Light'], ['hc', 'High contrast']])}</select></label>
       <label>Density
-        <select id="set-den">${opts(['normal', 'compact'])}</select></label>
+        <select id="set-den" aria-describedby="density-help">${opts([['normal', 'Comfortable'], ['compact', 'Compact']])}</select></label>
+      <p class="settings-help" id="density-help">Compact reduces spacing to show more data. Browser zoom remains under your control.</p>
       <div class="dialog__actions">
         <button class="btn btn--primary" value="save" type="submit">Save</button>
-        <button class="btn" value="cancel" type="submit">Close</button>
+        <button class="btn" value="cancel" type="submit">Cancel</button>
       </div>
     </form>`;
   dialog.querySelector('#set-theme').value = p.theme;
   dialog.querySelector('#set-den').value = p.density;
-  openBtn.addEventListener('click', () => dialog.showModal());
+  openBtn.addEventListener('click', () => {
+    const current = prefs();
+    dialog.querySelector('#set-theme').value = current.theme;
+    dialog.querySelector('#set-den').value = current.density;
+    dialog.showModal();
+  });
   dialog.addEventListener('close', () => {
     if (dialog.returnValue !== 'save') return;
     setPref('theme', dialog.querySelector('#set-theme').value);

@@ -19,10 +19,9 @@
 //!   verifies. Pins that the proof is genuinely Merkle-bound to the
 //!   interlinks vector, not accepted on shape alone.
 //!
-//! The synthetic `Header` field on the constructed `PoPowHeader` is
-//! ignored by `check_popow_header_interlinks_proof` (it consults
-//! only `p.interlinks` and `p.interlinks_proof`), so any zero-filled
-//! shell suffices.
+//! The synthetic `Header` field on the constructed `PoPowHeader` supplies
+//! the height used by the production check's genesis exception; these
+//! fixtures use height 1 and all carry non-empty interlinks.
 
 use ergo_crypto::merkle::merkle_tree_root;
 use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
@@ -72,9 +71,8 @@ fn hex_decode_32(s: &str) -> [u8; 32] {
         .expect("32 bytes")
 }
 
-/// Zero-filled `Header` shell. `check_popow_header_interlinks_proof`
-/// only reads `interlinks` and `interlinks_proof`, so the header
-/// contents are irrelevant to the test.
+/// Zero-filled `Header` shell. The fixtures use height 1; the production
+/// check reads that height for the empty-interlinks genesis exception.
 fn dummy_header() -> Header {
     Header {
         version: 1,

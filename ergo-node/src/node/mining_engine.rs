@@ -11,7 +11,7 @@
 //! - The worker is a dedicated [`std::thread`] that owns the
 //!   [`ChainStoreReader`], the [`MiningHandle`] clone, and the indexer handle.
 //!   It receives [`BuildRequest`]s over a `std::sync::mpsc` channel, runs the
-//!   synchronous [`ergo_mining::engine::build_and_publish`] for each, and
+//!   synchronous [`ergo_mining::engine::build_and_publish_cached`] for each, and
 //!   returns the result over the request's `oneshot`.
 //!
 //! ## Lifecycle: spawner owns the thread, the future owns the sender
@@ -32,12 +32,13 @@
 //! shutdown. Pre-split the worker handle lived inside the future and was dropped
 //! (detached) on abort — exactly the regression this ownership inversion closes.
 //!
-//! The worker is a plain OS thread, not a tokio task, by design: it will own
+//! The worker is a plain OS thread, not a tokio task, by design: it owns
 //! the per-tip dry-run base cache — an `Rc<RefCell<Node>>` AVL graph that is
 //! `!Send` and therefore cannot live in a tokio-spawned (`Send`-bound) future.
 //! Keeping the build on a single owning thread is what lets that graph be
-//! reused across same-tip builds. With no cache yet (this phase) the thread is
-//! pure topology: every build full-hydrates exactly as the inline build did.
+//! reused across same-tip builds. With the base cache disabled, fresh builds
+//! load only the authenticated paths touched by the selected transactions.
+//! A separate proof cache can reuse a verified result for an identical list.
 //!
 //! Each build opens one committed redb snapshot and CAS-publishes the result
 //! into the served cache; the action loop owns tip invalidation
@@ -64,19 +65,21 @@
 //! build byte-equivalent to the minimal one (modulo timestamp), so that
 //! redundant refresh is skipped — one publish per tip, no template-ring churn.
 //!
-//! A build in flight is never preempted — a tip arriving mid-build is observed
-//! at the next loop iteration (the stale build's publish CAS-drops), so the
-//! worst-case serve gap for a new tip is the in-flight build's remainder plus
-//! the new tip's minimal build.
+//! A changed applied parent cooperatively stops obsolete builds between phases
+//! and transaction boundaries. An active AVL operation finishes and restores its
+//! pristine base before stopping. The coordinator still awaits exactly one reply
+//! per request, then takes the latest intent and publishes its minimal template.
+//! Same-parent mempool updates leave the current build publishable.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ergo_indexer::StorageRentEligibleDto;
 use ergo_mining::candidate::BuildMode;
-use ergo_mining::engine::{build_and_publish, BuildIntent, BuildOutcome};
+use ergo_mining::engine::{build_and_publish_cached, BuildIntent, BuildOutcome};
 use ergo_mining::error::MiningError;
 use ergo_mining::handle::MiningHandle;
+use ergo_mining::state_view::CandidateProofCache;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
 use ergo_state::store::{BaseDisposition, CommittedSnapshot, DryRunBase};
@@ -124,7 +127,11 @@ fn resolve_eligible_rent_boxes(
     snapshot: &CommittedSnapshot,
     candidate_height: u32,
     max_claims: u32,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Vec<ErgoBox> {
+    if should_cancel() {
+        return Vec::new();
+    }
     let Some(store_idx) = indexer.and_then(|h| h.store()) else {
         // Boot-time config validation requires the indexer when rent claiming
         // is enabled, so an absent store here means the indexer halted —
@@ -140,7 +147,7 @@ fn resolve_eligible_rent_boxes(
     let Some(height_cutoff) = candidate_height.checked_sub(STORAGE_PERIOD_BLOCKS) else {
         return Vec::new();
     };
-    page_rent_boxes(
+    page_rent_boxes_cancellable(
         |off, lim| {
             store_idx.read_storage_rent_eligible_paged(
                 height_cutoff,
@@ -151,6 +158,7 @@ fn resolve_eligible_rent_boxes(
         },
         |id| snapshot.get_box(id),
         max_claims,
+        should_cancel,
     )
 }
 
@@ -182,10 +190,20 @@ fn resolve_eligible_rent_boxes(
 ///   that move across the page boundary mid-scan; the worst case is collecting
 ///   fewer boxes than `max_claims`, which is fine — rent is opt-in policy and
 ///   correctness never depends on collecting every eligible box.
+#[cfg(test)]
 fn page_rent_boxes<E: std::fmt::Debug>(
+    fetch_page: impl FnMut(u32, u32) -> Result<Vec<StorageRentEligibleDto>, E>,
+    resolve_box: impl Fn(&ergo_primitives::digest::Digest32) -> Option<ErgoBox>,
+    max_claims: u32,
+) -> Vec<ErgoBox> {
+    page_rent_boxes_cancellable(fetch_page, resolve_box, max_claims, &|| false)
+}
+
+fn page_rent_boxes_cancellable<E: std::fmt::Debug>(
     mut fetch_page: impl FnMut(u32, u32) -> Result<Vec<StorageRentEligibleDto>, E>,
     resolve_box: impl Fn(&ergo_primitives::digest::Digest32) -> Option<ErgoBox>,
     max_claims: u32,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Vec<ErgoBox> {
     // A zero claim cap collects nothing — short-circuit before issuing any
     // (zero-limit) indexer reads.
@@ -196,6 +214,9 @@ fn page_rent_boxes<E: std::fmt::Debug>(
     let mut seen = std::collections::HashSet::new();
     let mut offset = 0u32;
     for _ in 0..MAX_RENT_PAGES {
+        if should_cancel() {
+            return Vec::new();
+        }
         let rows = match fetch_page(offset, max_claims) {
             Ok(rows) => rows,
             Err(e) => {
@@ -208,6 +229,9 @@ fn page_rent_boxes<E: std::fmt::Debug>(
         };
         let page_len = rows.len() as u32;
         for row in rows {
+            if should_cancel() {
+                return Vec::new();
+            }
             // Skip a `box_id` already claimed — a duplicate from the
             // moving-index race (see fn doc), never a second claim of the
             // same box.
@@ -286,7 +310,7 @@ pub(super) struct BuildRequest {
 ///
 /// Owns the redb [`ChainStoreReader`], the [`MiningHandle`] clone, and the
 /// indexer handle for the engine's lifetime, executing one
-/// [`build_and_publish`] per [`BuildRequest`]. The wall-clock `now_ms` closure
+/// [`build_and_publish_cached`] per [`BuildRequest`]. The wall-clock `now_ms` closure
 /// and the storage-rent resolver both live here (they capture only `Send`
 /// things — the indexer and mining handles) so the coordinator stays clock-
 /// and indexer-free, exactly as the inline build did.
@@ -307,8 +331,9 @@ pub(super) struct BuildRequest {
 /// re-hydrating the whole UTXO graph; on a tip change or any mid-apply failure
 /// the slot self-invalidates (the `ergo-state` poison contract). The slot is
 /// `!Send`, which is exactly why the worker is a plain OS thread and not a
-/// tokio task. Off (the default), the slot stays `None` and every build
-/// full-hydrates — bit-for-bit today's behaviour.
+/// tokio task. Off (the default), the slot stays `None` and a fresh dry-run
+/// expands only the authenticated operation paths. The worker also owns a
+/// single-entry proof cache for an unchanged ordered transaction list.
 pub(super) fn run_build_worker(
     reader: ChainStoreReader,
     handle: MiningHandle,
@@ -319,8 +344,9 @@ pub(super) fn run_build_worker(
     // The per-tip pristine dry-run base, owned across requests so a same-tip
     // rebuild reuses it. `!Send` (an `Rc<RefCell<Node>>` graph) — sound here
     // because this worker is the single serial consumer. `None` when the cache
-    // is disabled; then every build full-hydrates exactly as before.
+    // is disabled; then builds expand only authenticated operation paths.
     let mut base: Option<DryRunBase> = None;
+    let mut proof_cache = CandidateProofCache::default();
     while let Ok(BuildRequest {
         intent,
         mode,
@@ -345,12 +371,13 @@ pub(super) fn run_build_worker(
         // the disposition stays `None` and we fall back to a sensible wire
         // label.
         let mut raw_disposition: Option<BaseDisposition> = None;
-        let result = build_and_publish(
+        let result = build_and_publish_cached(
             &reader,
             &handle,
             &intent,
             mode,
             use_base_cache.then_some(&mut base),
+            &mut proof_cache,
             now_ms,
             |snapshot, h| {
                 resolve_eligible_rent_boxes(
@@ -358,6 +385,10 @@ pub(super) fn run_build_worker(
                     snapshot,
                     h,
                     handle.max_storage_rent_claims(),
+                    &|| {
+                        let tip = handle.best_tip();
+                        !tip.synced || tip.parent_id != intent.expected_parent
+                    },
                 )
             },
             &mut raw_disposition,
@@ -491,12 +522,11 @@ pub(super) async fn run_mining_engine(
             // counter (`DroppedStale`) and `attempts` as the commit-visibility
             // retry count.
             //
-            // We deliberately do NOT `select!` cancel against the reply: a build
-            // in flight is never preempted (the worker shares one serial
-            // request→reply protocol with this loop, and abandoning a reply
-            // mid-build would desync it — and later dirty the dry-run base). A
-            // cancel that arrives mid-build is observed at the next loop
-            // boundary, exactly as when the build ran inline.
+            // We deliberately do NOT `select!` cancel against the reply: the
+            // worker finishes its serial request→reply protocol even when it
+            // cooperatively stops stale-parent work. Abandoning the reply
+            // would desynchronize the channel. Shutdown cancellation is
+            // observed at the next loop boundary.
             let build_start = Instant::now();
             let (reply_tx, reply_rx) = oneshot::channel();
             if req_tx
@@ -533,6 +563,16 @@ pub(super) async fn run_mining_engine(
                     }
                 }
                 Ok(BuildOutcome::Published { timings: t }) => {
+                    let accounted = t.setup
+                        + t.rent_resolve
+                        + t.assembly
+                        + t.publish
+                        + t.emission
+                        + t.rent
+                        + t.select
+                        + t.dryrun
+                        + t.roots;
+                    let worker_overhead_ms = build_ms.saturating_sub(accounted.as_millis() as u64);
                     // One message key for fast and slow builds: the level carries
                     // the slow/fast dimension, so a scraper aggregating build_ms
                     // by message template sees the whole population.
@@ -546,6 +586,12 @@ pub(super) async fn run_mining_engine(
                                 build_ms,
                                 mode = ?mode,
                                 base_cache,
+                                proof_reused = t.proof_reused,
+                                setup_ms = t.setup.as_millis() as u64,
+                                rent_resolve_ms = t.rent_resolve.as_millis() as u64,
+                                assembly_ms = t.assembly.as_millis() as u64,
+                                publish_ms = t.publish.as_millis() as u64,
+                                worker_overhead_ms,
                                 emission_ms = t.emission.as_millis() as u64,
                                 rent_ms = t.rent.as_millis() as u64,
                                 select_ms = t.select.as_millis() as u64,
@@ -570,7 +616,9 @@ pub(super) async fn run_mining_engine(
                         // Re-borrows the latest intent; the ring now holds this
                         // parent's minimal template, so the probe yields Full
                         // (no infinite Minimal loop — this task is the only
-                        // publisher and set_best_tip never evicts).
+                        // publisher and set_best_tip never evicts; only a failed
+                        // mined block withdraws a parent's templates, which costs
+                        // one more Minimal build per failure).
                         continue;
                     }
                     break;
@@ -653,6 +701,7 @@ mod tests {
             version: 0,
             has_size: true,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
             body: Expr::Const {
                 tpe: SigmaType::SBoolean,
@@ -728,6 +777,27 @@ mod tests {
         let out = page_rent_boxes(pager(&rows, &fetches), resolver(&[1, 2, 3]), 4);
         // Short page (3 < cap 4) exhausts the index in one fetch.
         assert_eq!(out.len(), 3);
+        assert_eq!(fetches.get(), 1);
+    }
+
+    #[test]
+    fn page_parent_change_stops_without_returning_partial_rent_boxes() {
+        let cancelled = Cell::new(false);
+        let resolved = Cell::new(0);
+        let fetches = Cell::new(0);
+        let rows = [row(1), row(2), row(3), row(4)];
+        let boxes = page_rent_boxes_cancellable(
+            pager(&rows, &fetches),
+            |id| {
+                resolved.set(resolved.get() + 1);
+                cancelled.set(true);
+                resolver(&[1, 2, 3, 4])(id)
+            },
+            4,
+            &|| cancelled.get(),
+        );
+        assert!(boxes.is_empty());
+        assert_eq!(resolved.get(), 1);
         assert_eq!(fetches.get(), 1);
     }
 
@@ -939,6 +1009,92 @@ mod tests {
             !full_refresh_adds_nothing(&intent, &handle),
             "rent on means the full build may add a rent self-claim tx",
         );
+    }
+
+    #[tokio::test]
+    async fn stale_reply_is_drained_before_latest_parent_minimal_dispatch() {
+        let handle = plain_handle();
+        let (req_tx, req_rx) = mpsc::channel::<BuildRequest>();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker = std::thread::spawn(move || {
+            let old = req_rx.recv().expect("old-parent request");
+            seen_tx
+                .send((old.intent.expected_parent, old.mode))
+                .unwrap();
+            release_rx.recv().expect("release obsolete build");
+            assert!(
+                matches!(req_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                "coordinator must retain one request/reply in flight"
+            );
+            old.reply
+                .send((Ok(BuildOutcome::DroppedStale), "cold"))
+                .unwrap();
+
+            let latest = req_rx.recv().expect("latest-parent request");
+            seen_tx
+                .send((latest.intent.expected_parent, latest.mode))
+                .unwrap();
+            latest
+                .reply
+                .send((
+                    Ok(BuildOutcome::Published {
+                        timings: Default::default(),
+                    }),
+                    "advanced",
+                ))
+                .unwrap();
+            assert!(
+                req_rx.recv().is_err(),
+                "shutdown must close the worker channel"
+            );
+        });
+        let (intent_tx, intent_rx) = watch::channel(None);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(run_mining_engine(
+            handle.clone(),
+            req_tx,
+            intent_rx,
+            cancel_rx,
+        ));
+        let intent_for = |seed: u8| {
+            let mut intent = minimal_intent(ergo_mempool::MempoolReadSnapshot::empty());
+            intent.expected_parent = [seed; 32];
+            intent.expected_height = u32::from(seed);
+            intent.reason = ergo_mining::engine::BuildReason::Tip;
+            intent
+        };
+        handle.set_best_tip(ergo_mining::engine::BestTip {
+            parent_id: [1; 32],
+            chain_seq: 1,
+            synced: true,
+        });
+        intent_tx.send(Some(intent_for(1))).unwrap();
+        let seen = tokio::time::timeout(Duration::from_secs(2), seen_rx.recv())
+            .await
+            .unwrap();
+        assert_eq!(seen, Some(([1; 32], BuildMode::Minimal)));
+
+        // While the worker still owes its old reply, two tip intents collapse
+        // to the newest parent. No second request may be sent before that reply.
+        intent_tx.send(Some(intent_for(2))).unwrap();
+        handle.set_best_tip(ergo_mining::engine::BestTip {
+            parent_id: [3; 32],
+            chain_seq: 3,
+            synced: true,
+        });
+        intent_tx.send(Some(intent_for(3))).unwrap();
+        release_tx.send(()).unwrap();
+        let seen = tokio::time::timeout(Duration::from_secs(2), seen_rx.recv())
+            .await
+            .unwrap();
+        assert_eq!(seen, Some(([3; 32], BuildMode::Minimal)));
+        cancel_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
     }
 
     // ----- error paths -----

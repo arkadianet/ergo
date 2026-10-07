@@ -157,23 +157,21 @@ pub(super) struct TomlIndexer {
 
 /// `[api]` TOML section: operator HTTP API.
 ///
-/// Bind address is loopback by enforcement: a non-loopback `bind`
-/// requires `public_bind = true` plus a configured
-/// `[api.security].api_key_hash`, and a loud warning is logged.
-/// `/wallet/*` and `/node/shutdown` are wrapped with API-key
-/// middleware whenever the API is enabled; every other route stays
-/// unauthenticated.
+/// A non-loopback bind requires `public_bind = true`. API credentials are
+/// optional; privileged routes fail closed without a configured hash. Supplied
+/// hashes are validated even when the API is disabled. See the route inventory
+/// in `docs/configuration.md` for public reads/submission and privileged paths.
 #[derive(serde::Deserialize, Default, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub(super) struct TomlApi {
+    pub(super) peer_details: crate::peer_details::PeerLookupConfig,
     /// Bind address for the HTTP API. Default `127.0.0.1:9099`.
     pub(super) bind: Option<String>,
     /// Disable the API server entirely.
     pub(super) disabled: Option<bool>,
     /// Permit binding a non-loopback address. Default false. Setting
-    /// this to true while exposing the port publicly requires
-    /// `[api.security].api_key_hash`; auth gates `/wallet/*` and
-    /// `/node/shutdown`.
+    /// this to true does not authenticate public routes; configure the
+    /// credential and a reverse proxy according to the API security notes.
     pub(super) public_bind: Option<bool>,
     /// Devnet-only POST /blocks opt-in; defaults to false.
     pub(super) allow_direct_block_submit: Option<bool>,
@@ -184,21 +182,31 @@ pub(super) struct TomlApi {
     /// non-empty. Each entry may include a port (`"example.com:9099"`)
     /// to pin it, or omit one to match any port.
     pub(super) allowed_hosts: Option<Vec<String>>,
-    /// `[api.security]` subsection. Optional in TOML but its
-    /// `api_key_hash` field must be present when the API server is
-    /// enabled — checked at load.
+    /// Declare a loopback reverse proxy in front of the API. Default `false`.
+    pub(super) local_reverse_proxy: Option<bool>,
+    /// Optional `[api.security]` subsection. Without a hash, privileged
+    /// routes stay closed; supplied hashes are validated at load.
     pub(super) security: Option<TomlApiSecurity>,
+    pub(super) script: TomlApiScript,
 }
 
 /// `[api.security]` TOML subsection. Carries the operator's
 /// `api_key_hash` used by `ergo_api::auth::ApiSecurity`.
 #[derive(serde::Deserialize, Default, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub(super) struct TomlApiSecurity {
     /// Lowercase Base16 (hex) of `Blake2b256(api_key_plaintext)`.
     /// 64 chars. Generate a RANDOM secret first, then hash it, e.g.:
     /// `secret=$(openssl rand -hex 32); printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1`.
     pub(super) api_key_hash: Option<String>,
+}
+
+/// Native script playground policy, validated before binding the API.
+#[derive(serde::Deserialize, Default, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct TomlApiScript {
+    pub(super) require_api_key: Option<bool>,
+    pub(super) max_cost: Option<u64>,
 }
 
 /// `[mempool]` TOML section: unconfirmed transaction pool configuration.
@@ -225,6 +233,8 @@ pub(super) struct TomlMempool {
     pub(super) max_pool_size: Option<usize>,
     pub(super) max_pool_bytes: Option<usize>,
     pub(super) min_relay_fee_nano_erg: Option<u64>,
+    /// Defaults to true on mainnet, false on testnet/devnet.
+    pub(super) reject_storage_rent_txs: Option<bool>,
     pub(super) max_tx_size_bytes: Option<usize>,
     pub(super) max_tx_cost: Option<u64>,
     pub(super) ibd_gate_block_lag: Option<u32>,
@@ -264,6 +274,10 @@ pub(super) struct TomlMempool {
 pub(super) struct TomlChain {
     /// Private devnet genesis cost cap; forbidden on public networks.
     pub(super) devnet_max_block_cost: Option<u32>,
+    /// Private devnet wire magic (four bytes), replacing the built-in
+    /// `[7, 7, 7, 7]`, so several devnets can coexist or one can join
+    /// another private network's magic; forbidden on public networks.
+    pub(super) devnet_magic: Option<[u8; 4]>,
     /// Override the network's default script-validation checkpoint
     /// height. Use 0 to disable.
     pub(super) script_validation_checkpoint_height: Option<u32>,
@@ -271,12 +285,12 @@ pub(super) struct TomlChain {
     /// Defaults to the network's hardcoded value if only the height is
     /// overridden.
     pub(super) script_validation_checkpoint_block_id: Option<String>,
-    /// Hex-encoded genesis header id (32 bytes). Required for NiPoPoW
-    /// proof verification: the verifier rejects any proof whose first
-    /// header's id does not match this value. If omitted, the network's baked-in default
-    /// is used (mainnet / testnet hardcoded ids). Pass an empty
-    /// string to disable genesis-id checking entirely — accepted
-    /// **only** in development; production runs MUST keep the default.
+    /// Hex-encoded genesis header id (32 bytes). Ordinary header validation
+    /// and NiPoPoW proof verification reject a first header whose id differs.
+    /// If omitted, the network's baked-in default is used (mainnet / testnet
+    /// hardcoded ids). Pass an empty string to disable genesis-id checking
+    /// entirely — accepted **only** in development; production runs MUST keep
+    /// the default.
     pub(super) genesis_id: Option<String>,
     /// Header-level checkpoint (Scala `ergo.node.checkpoint`): the header at
     /// exactly `height` MUST have id `block_id`, enforced during HEADER
@@ -302,9 +316,12 @@ pub(super) struct TomlHeaderCheckpoint {
 #[derive(serde::Deserialize, Default, Debug)]
 #[serde(default)]
 pub(super) struct TomlStore {
-    /// redb + AVL arena page cache, in bytes. Override
+    /// AVL arena clean-node LRU budget (separate from redb caches), in bytes. Override
     /// `StateStore::DEFAULT_CACHE_BYTES`.
     pub(super) cache_bytes: Option<usize>,
+    pub(super) state_redb_cache_bytes: Option<usize>,
+    pub(super) indexer_redb_cache_bytes: Option<usize>,
+    pub(super) peers_redb_cache_bytes: Option<usize>,
 }
 
 #[derive(serde::Deserialize, Default, Debug)]

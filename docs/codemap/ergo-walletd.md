@@ -9,7 +9,7 @@ route that can spend.
 **Depends on (workspace):** `ergo-wallet`, `ergo-wallet-service`,
 `ergo-wallet-protocol`, `ergo-primitives`, `ergo-ser`
 **Normal dependency boundary:** the five workspace crates above plus `axum`,
-`hyper`, `hyper-util`, `tower`, `clap`, `hex`, `libc`, `reqwest`, `serde`,
+`hyper`, `hyper-util`, `tower`, `clap`, `hex`, Unix-only `rustix`, `reqwest`, `serde`,
 `serde_json`, `thiserror`, `tokio`, `toml`, `tracing`, and
 `tracing-subscriber`. It deliberately does **not** depend on `ergo-node`,
 `ergo-api`, `ergo-state`, `ergo-mempool`, `ergo-sync`, or `ergo-chain-spec`: the
@@ -101,7 +101,7 @@ private-key routes return `404`.
 | `/boxes`, `/boxes/:id`, `/api/v1/wallet/boxes[/:id]` | `BoxPage` / `WalletBoxSummary` — confirmed only |
 | `/transactions`, `/transactions/:id`, `/api/v1/wallet/transactions[/:id]` | `TxPage` / `WalletTransactionSummary` |
 | `/addresses`, `/api/v1/wallet/addresses` | `AddressPage` of `WalletAddressDto` |
-| `/scans`, `/scan/listAll`, `/api/v1/scans`, `/api/v1/scan/listAll` | `Vec<ScanDto>` — always `[]`; see "No scan registry" |
+| `/scans`, `/scan/listAll`, `/api/v1/scans`, `/api/v1/scan/listAll` | `Vec<ScanDto>` — persisted registrations; see "Scan registry reads" |
 
 `offset` (default 0) and `limit` (default 50, max 16384) are the only query
 parameters; anything else is a `400`.
@@ -232,22 +232,18 @@ of a bug. What *is* exact is the box layer: box ids and box bytes are validated
 against canonical ErgoBox serialization on the way in, so a box the daemon
 reports is a box it re-derived.
 
-## No scan registry
+## Scan registry reads
 
-`WalletService`'s backing store implements the node's `/scan/*` registry, and
-`sync::scan_records` feeds it whenever `WalletScanMatcher::registry()` is
-non-empty. The daemon's *only* input for that registry is the descriptor file,
-whose strict schema admits public keys, derivation paths, and labels — no
-tracking rule. So the registry is always empty in production: `/scans` returns
-`[]` and `WALLET_SCAN_BOXES` / `_INDEX` / `_TXS` are never written. Scan
-registration stays a node capability; a tracking rule is a predicate over
-arbitrary box contents, a different trust decision from "watch these public
-keys".
+The backing store supports scan registries, and the read API returns persisted
+registrations. The descriptor schema accepts public keys, derivation paths and
+labels, but no tracking rules. A fresh descriptor-only store therefore has no
+registered scans. The daemon has no registration or mutation route; scan
+management remains a separate completion task. `sync::scan_records` applies
+any registry already persisted in the wallet store.
 
 `tests/it/scan_registry_rewind.rs` registers a scan through the store's own
 `put_scan` write API so the rewind path — `rewind_to_ancestor` →
-`rewind_scans_from_height`, which is otherwise only ever reached against empty
-tables — runs against non-empty `WALLET_SCAN_BOXES`, `WALLET_SCAN_BOX_INDEX`,
+`rewind_scans_from_height`, which would otherwise be reached against an initially empty registry — runs against non-empty `WALLET_SCAN_BOXES`, `WALLET_SCAN_BOX_INDEX`,
 and `WALLET_SCAN_TXS`.
 
 ## Tests

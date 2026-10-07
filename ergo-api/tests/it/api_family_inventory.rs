@@ -116,6 +116,59 @@ fn checked_openapi_merge_accepts_only_structurally_equal_duplicate_components() 
 }
 
 #[test]
+fn checked_openapi_merge_rejects_reused_ids_before_mutation() {
+    let mut base = one_operation_doc("/first", HttpMethod::Get);
+    base.paths
+        .paths
+        .get_mut("/first")
+        .unwrap()
+        .get
+        .as_mut()
+        .unwrap()
+        .operation_id = Some("shared".into());
+    let mut incoming = one_operation_doc("/second", HttpMethod::Post);
+    incoming
+        .paths
+        .paths
+        .get_mut("/second")
+        .unwrap()
+        .post
+        .as_mut()
+        .unwrap()
+        .operation_id = Some("shared".into());
+    let before = base.clone();
+    assert_eq!(
+        merge_openapi_checked(&mut base, incoming),
+        Err(OpenApiMergeError::DuplicateOperationId {
+            operation_id: "shared".into()
+        })
+    );
+    assert!(base == before);
+}
+
+#[test]
+fn published_rust_documents_have_globally_unique_operation_ids() {
+    for document in [
+        legacy_rust_openapi(),
+        v1_openapi_fragment(),
+        rust_openapi().unwrap(),
+    ] {
+        let json = serde_json::to_value(document).unwrap();
+        let mut ids = BTreeSet::new();
+        for item in json["paths"].as_object().unwrap().values() {
+            for method in [
+                "get", "put", "post", "delete", "options", "head", "patch", "trace",
+            ] {
+                if let Some(id) = item[method]["operationId"].as_str() {
+                    assert!(ids.insert(id), "duplicate operationId {id}");
+                }
+            }
+        }
+        assert!(!ids.is_empty());
+    }
+}
+
+#[test]
 fn canonical_rust_openapi_is_the_union_of_both_fragments_and_known_aliases() {
     let canonical = rust_openapi().expect("canonical RUST OpenAPI must merge");
     let operations = openapi_operations(&canonical);
@@ -255,13 +308,13 @@ fn canonical_rust_openapi_preserves_prices_contract() {
 
     assert_eq!(
         response_statuses(operation),
-        BTreeSet::from(["200", "400", "409", "500", "503"])
+        BTreeSet::from(["200", "400", "409", "500", "503", "504"])
     );
     assert_eq!(
         response_schema_ref(operation, "200"),
         "#/components/schemas/PricesResponse"
     );
-    for status in ["400", "409", "500", "503"] {
+    for status in ["400", "409", "500", "503", "504"] {
         assert_eq!(
             response_schema_ref(operation, status),
             "#/components/schemas/V1Error"
@@ -489,7 +542,7 @@ fn canonical_scala_and_rust_operation_inventories_are_disjoint() {
     let scala = scala_openapi_operations();
     let rust = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI must merge"));
     assert_eq!(scala.len(), 125);
-    assert_eq!(rust.len(), 185);
+    assert_eq!(rust.len(), 186);
     assert_operation_inventory_matches_fixture(&scala, "api_family_scala_operations.txt");
     assert_operation_inventory_matches_fixture(&rust, "api_family_rust_operations.txt");
 

@@ -1,6 +1,7 @@
 use ergo_p2p::message;
 use ergo_p2p::peer::{PeerId, Penalty};
 use ergo_sync::coordinator::Action;
+use ergo_sync::popow_bootstrap::PopowProofOutcome;
 use tracing::{info, warn};
 
 use super::super::NodeState;
@@ -8,11 +9,10 @@ use super::super::NodeState;
 /// Handle an inbound NiPoPoW proof (message code 91). Decode the
 /// wire frame, parse the proof bytes, hand to the
 /// `popow_bootstrap` reducer's `on_proof_received`, and penalize on
-/// `ValidationError` / `WrongGenesis` (strong signals of malicious
+/// bootstrap rejection or verifier errors (strong signals of malicious
 /// or misconfigured peers).
 ///
-/// No-op when `popow_bootstrap` is `None` (either feature disabled
-/// or already terminal). Silent drop on decode errors plus a
+/// No-op when bootstrap is disabled or the reducer is terminal. Silent drop on decode errors plus a
 /// telemetry warn; the wire codec is byte-strict, so a parse
 /// failure is either a malicious peer (penalize) or a peer running
 /// an incompatible protocol version (degrade).
@@ -23,7 +23,11 @@ pub(super) fn handle_inbound_popow_proof(
 ) -> Vec<Action> {
     use ergo_validation::popow::NipopowVerificationResult;
 
-    if state.popow_bootstrap.is_none() {
+    if state
+        .popow_bootstrap
+        .as_ref()
+        .is_none_or(|popow| popow.is_terminal())
+    {
         // Either NiPoPoW disabled or reducer already terminal —
         // silently drop. A peer responding late after we've already
         // applied a proof is not misbehavior.
@@ -77,13 +81,22 @@ pub(super) fn handle_inbound_popow_proof(
     // Step 3: hand to reducer + verifier.
     let result = match state.popow_bootstrap.as_mut() {
         Some(popow) => match popow.on_proof_received(peer, proof) {
-            Some(r) => r,
-            None => {
-                // Scala parity (ErgoNodeViewSynchronizer.scala:1066): a
-                // duplicate proof from a peer already counted toward quorum
-                // is dropped before the verifier with no penalty.
-                info!(peer = %peer, "NiPoPoW: duplicate proof from already-counted peer, dropping");
+            PopowProofOutcome::Verified(r) => r,
+            // Late proof after apply/abandon: not misbehavior (see the
+            // terminal check above).
+            PopowProofOutcome::Ignored => return Vec::new(),
+            PopowProofOutcome::Duplicate => {
+                // Scala parity (ErgoNodeViewSynchronizer.scala:1082-1093):
+                // a peer gets one response, regardless of its validity.
+                info!(peer = %peer, "NiPoPoW: duplicate proof from peer that already answered, dropping");
                 return Vec::new();
+            }
+            PopowProofOutcome::Rejected(reason) => {
+                warn!(peer = %peer, error = %reason, "NiPoPoW: bootstrap proof rejected");
+                return vec![Action::Penalize {
+                    peer,
+                    penalty: Penalty::Misbehavior,
+                }];
             }
         },
         None => return Vec::new(),

@@ -25,8 +25,8 @@
 //! acceptance policy living above. This reader is the exception — it
 //! applies two defense-in-depth guards on the peer-controlled
 //! `prefix_size` and `suffix_size` counts before passing them to
-//! `Vec::with_capacity` (see [`POPOW_PROOF_MAX_PREFIX`] and
-//! [`POPOW_PROOF_MAX_SUFFIX`]). The DoS must be caught at the alloc
+//! `Vec::with_capacity` (see `POPOW_PROOF_MAX_PREFIX` and
+//! `POPOW_PROOF_MAX_SUFFIX`). The DoS must be caught at the alloc
 //! site (no upstream layer sees per-field counts before bytes are
 //! interpreted); honest-input semantics are unchanged.
 

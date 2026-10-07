@@ -10,37 +10,191 @@ use super::{
     SPREHEADER_CODE, SSTRING_CODE, STYPEVAR_CODE, SUNIT_CODE, TUPLE_CODE,
 };
 
-/// Deserialize a Sigma type descriptor. Public entry — starts the
-/// recursion-depth counter at 0; nested calls go through
-/// `read_type_at_depth` which enforces `MAX_TYPE_DEPTH`.
+/// Deserialize a Sigma type descriptor.
+///
+/// Iterative: nesting is tracked on a heap stack of `Frame`s rather than the
+/// native stack, so a descriptor as deep as `MAX_TYPE_DEPTH` allows cannot
+/// overflow the reader. Items are read in exactly the order Scala's recursive
+/// `TypeSerializer.deserialize` reads them, and every error is raised at the
+/// same point of that order.
 pub fn read_type(r: &mut VlqReader) -> Result<SigmaType, ReadError> {
-    read_type_at_depth(r, 0)
-}
-
-/// Internal: decoding entry that propagates the recursion-depth
-/// counter. All recursive `read_type` calls inside `decode_type` and
-/// `decode_constructor` use this so the depth check fires before a
-/// malicious payload exhausts the stack.
-fn read_type_at_depth(r: &mut VlqReader, depth: usize) -> Result<SigmaType, ReadError> {
-    if depth > MAX_TYPE_DEPTH {
-        return Err(ReadError::InvalidData(format!(
-            "type recursion depth exceeds maximum ({MAX_TYPE_DEPTH})"
-        )));
-    }
     let byte = r.get_u8()?;
-    decode_type_at_depth(r, byte, depth)
+    decode_type(r, byte)
 }
 
 /// Decode a type descriptor given the first byte already consumed.
 /// Public so the opcode parser can decode inline constant types.
-/// Starts a fresh depth counter; for nested decodes within an
-/// already-recursing parse, use `decode_type_at_depth` (private).
-pub fn decode_type(r: &mut VlqReader, byte: u8) -> Result<SigmaType, ReadError> {
-    decode_type_at_depth(r, byte, 0)
+pub fn decode_type(r: &mut VlqReader, first: u8) -> Result<SigmaType, ReadError> {
+    let gate_v = embeddable_gate_version(r);
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut byte = first;
+    let mut depth = 0usize;
+    loop {
+        let mut done = match decode_one(r, byte, depth, gate_v)? {
+            Step::Done(t) => t,
+            Step::Open(frame) => {
+                depth = frame.child_depth;
+                stack.push(frame);
+                byte = read_type_byte(r, depth)?;
+                continue;
+            }
+        };
+        // Hand the finished type to its parent; close every parent it completes.
+        loop {
+            let Some(mut frame) = stack.pop() else {
+                return Ok(done);
+            };
+            match frame.accept(r, done, gate_v)? {
+                Some(t) => done = t,
+                None => {
+                    depth = frame.child_depth;
+                    stack.push(frame);
+                    byte = read_type_byte(r, depth)?;
+                    break;
+                }
+            }
+        }
+    }
 }
 
-fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<SigmaType, ReadError> {
+/// Read the byte that starts a nested type at `depth`, after checking the
+/// depth guard.
+fn read_type_byte(r: &mut VlqReader, depth: usize) -> Result<u8, ReadError> {
+    if depth > MAX_TYPE_DEPTH {
+        // Past the guard Scala's recursive reader overflows its thread stack,
+        // a `StackOverflowError` that is not a `ValidationException`: a
+        // size-delimited tree does not degrade on it, so neither does ours.
+        return Err(ReadError::HardReject(format!(
+            "type recursion depth exceeds maximum ({MAX_TYPE_DEPTH})"
+        )));
+    }
+    r.get_u8()
+}
+
+/// The outcome of decoding one type byte: a complete type, or a compound
+/// type still waiting for its children.
+enum Step {
+    Done(SigmaType),
+    Open(Frame),
+}
+
+/// A compound type whose children are still being read.
+struct Frame {
+    /// Depth at which this frame's children are read.
+    child_depth: usize,
+    kind: FrameKind,
+}
+
+enum FrameKind {
+    /// `Coll[T]` (0x0C), `Coll[Coll[T]]` (0x18), `Option[T]` (0x24) or
+    /// `Option[Coll[T]]` (0x30) with a non-embeddable `T`: wrap the one child.
+    Wrap(fn(SigmaType) -> SigmaType),
+    /// A tuple collecting `remaining` more items. `then_prim` is the compact
+    /// pair `(T, prim)` (0x48 + prim): its embeddable second item is decoded
+    /// only after the first item has been read.
+    Tuple {
+        items: Vec<SigmaType>,
+        remaining: usize,
+        then_prim: Option<u8>,
+    },
+    /// `SFunc`: domain items, then the range, then the type parameters.
+    Func {
+        t_dom: Vec<SigmaType>,
+        remaining_dom: usize,
+        t_range: Option<Box<SigmaType>>,
+        tpe_params: Vec<SigmaType>,
+        remaining_params: usize,
+    },
+}
+
+impl Frame {
+    /// Take one finished child. Returns the completed type when this was the
+    /// frame's last child, or `None` when another child must be read.
+    fn accept(
+        &mut self,
+        r: &mut VlqReader,
+        child: SigmaType,
+        gate_v: u8,
+    ) -> Result<Option<SigmaType>, ReadError> {
+        match &mut self.kind {
+            FrameKind::Wrap(wrap) => Ok(Some(wrap(child))),
+            FrameKind::Tuple {
+                items,
+                remaining,
+                then_prim,
+            } => {
+                items.push(child);
+                *remaining -= 1;
+                if *remaining > 0 {
+                    return Ok(None);
+                }
+                if let Some(prim_id) = then_prim.take() {
+                    items.push(prim_from_code(prim_id, gate_v)?);
+                }
+                Ok(Some(SigmaType::STuple(std::mem::take(items))))
+            }
+            FrameKind::Func {
+                t_dom,
+                remaining_dom,
+                t_range,
+                tpe_params,
+                remaining_params,
+            } => {
+                if *remaining_dom > 0 {
+                    t_dom.push(child);
+                    *remaining_dom -= 1;
+                    return Ok(None);
+                }
+                if t_range.is_none() {
+                    *t_range = Some(Box::new(child));
+                    *remaining_params = r.get_u8()? as usize;
+                } else {
+                    if !matches!(child, SigmaType::STypeVar(_)) {
+                        return Err(ReadError::InvalidData(
+                            "SFunc tpeParam must be an STypeVar".into(),
+                        ));
+                    }
+                    tpe_params.push(child);
+                    *remaining_params -= 1;
+                }
+                if *remaining_params > 0 {
+                    return Ok(None);
+                }
+                Ok(Some(SigmaType::SFunc {
+                    t_dom: std::mem::take(t_dom),
+                    t_range: t_range
+                        .take()
+                        .expect("the range is read before the parameters"),
+                    tpe_params: std::mem::take(tpe_params),
+                }))
+            }
+        }
+    }
+}
+
+/// A tuple frame expecting `count` items, or the empty tuple at once.
+fn open_tuple(child_depth: usize, count: usize) -> Step {
+    if count == 0 {
+        return Step::Done(SigmaType::STuple(Vec::new()));
+    }
+    // The items grow as they are read, so an untrusted count reserves
+    // nothing up front: a chain of frames each declaring 255 items and
+    // opening the next as its first costs the bytes it reads, not
+    // 255 slots per level.
+    Step::Open(Frame {
+        child_depth,
+        kind: FrameKind::Tuple {
+            items: Vec::new(),
+            remaining: count,
+            then_prim: None,
+        },
+    })
+}
+
+/// Decode one type byte at `depth`.
+fn decode_one(r: &mut VlqReader, byte: u8, depth: usize, gate_v: u8) -> Result<Step, ReadError> {
     let next = depth + 1;
+    let done = |t| Ok(Step::Done(t));
     match byte {
         // Scala `TypeSerializer.deserialize` guards `if (c <= 0) throw new
         // InvalidTypePrefix(...)` on EVERY type byte it reads (`getUByte`, so
@@ -60,15 +214,15 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
         // Primitive embeddable types (1..=11), version-gated exactly like Scala's
         // `getEmbeddableType` (embeddableV5 = codes 1..=8 pre-v3; embeddableV6 adds
         // SUnsignedBigInt = code 9 at v3+).
-        1..=11 => prim_from_code(byte, embeddable_gate_version(r)),
+        1..=11 => done(prim_from_code(byte, gate_v)?),
 
         // Special non-embeddable
-        SANY_CODE => Ok(SigmaType::SAny),
-        SUNIT_CODE => Ok(SigmaType::SUnit),
-        SBOX_CODE => Ok(SigmaType::SBox),
-        SAVL_TREE_CODE => Ok(SigmaType::SAvlTree),
-        SCONTEXT_CODE => Ok(SigmaType::SContext),
-        SSTRING_CODE => Ok(SigmaType::SString),
+        SANY_CODE => done(SigmaType::SAny),
+        SUNIT_CODE => done(SigmaType::SUnit),
+        SBOX_CODE => done(SigmaType::SBox),
+        SAVL_TREE_CODE => done(SigmaType::SAvlTree),
+        SCONTEXT_CODE => done(SigmaType::SContext),
+        SSTRING_CODE => done(SigmaType::SString),
         STYPEVAR_CODE => {
             // Scala TypeSerializer.scala:203-204 reads the name length as an
             // unsigned byte (anything 0..=255) and decodes the bytes with
@@ -79,14 +233,14 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
             // for byte. See [`crate::jvm_utf8`].
             let name_len = r.get_u8()? as usize;
             let name_bytes = r.get_bytes(name_len)?;
-            Ok(SigmaType::STypeVar(crate::jvm_utf8::decode(name_bytes)))
+            done(SigmaType::STypeVar(crate::jvm_utf8::decode(name_bytes)))
         }
-        SHEADER_CODE => Ok(SigmaType::SHeader),
-        SPREHEADER_CODE => Ok(SigmaType::SPreHeader),
-        SGLOBAL_CODE => Ok(SigmaType::SGlobal),
+        SHEADER_CODE => done(SigmaType::SHeader),
+        SPREHEADER_CODE => done(SigmaType::SPreHeader),
+        SGLOBAL_CODE => done(SigmaType::SGlobal),
 
         // ConstrId-based ranges (12..=95)
-        b @ 12..=95 => decode_constructor_at_depth(r, b, depth),
+        b @ 12..=95 => decode_constructor(b, depth, gate_v),
 
         // General tuple. Scala TypeSerializer.scala:189-192 reads count as a
         // single unsigned byte (max 255) and then reads exactly that many
@@ -103,18 +257,16 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
         //     containing such a tree would be wrongly rejected).
         //   - accept-invalid: because that same check fired before the item
         //     loop ran, a zero type-prefix inside a 1-element (or 0-element)
-        //     tuple never reached the per-item `read_type_at_depth` call that
-        //     hard-rejects byte 0 (see the `0 =>` arm above), so it fell
-        //     through as a soft `InvalidData` — accepted-and-wrapped on a
-        //     size-delimited tree the reference hard-rejects
-        //     (`InvalidTypePrefix`, a `SerializerException` outside
-        //     `deserializeErgoTree`'s catch).
+        //     tuple never reached the per-item read that hard-rejects byte 0
+        //     (see the `0 =>` arm above), so it fell through as a soft
+        //     `InvalidData` — accepted-and-wrapped on a size-delimited tree the
+        //     reference hard-rejects (`InvalidTypePrefix`, a
+        //     `SerializerException` outside `deserializeErgoTree`'s catch).
         //
         // Reading every item unconditionally, with no arity floor, fixes
         // both at once: `count` in 0..=255 is always accepted structurally,
         // and a zero prefix at ANY item position (including the only item of
-        // a 1-tuple) hits the hard reject via the recursive call before this
-        // arm ever returns `Ok`.
+        // a 1-tuple) hits the hard reject before this tuple completes.
         //
         // The writer (`write_tuple`) keeps its own `count >= 2` floor — Scala
         // is asymmetric here: `TypeSerializer.serialize` itself throws
@@ -123,11 +275,7 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
         // existing tree) while still refusing to ORIGINATE one on WRITE.
         TUPLE_CODE => {
             let count = r.get_u8()? as usize;
-            let mut elems = Vec::with_capacity(count);
-            for _ in 0..count {
-                elems.push(read_type_at_depth(r, next)?);
-            }
-            Ok(SigmaType::STuple(elems))
+            Ok(open_tuple(next, count))
         }
 
         // SFunc: 0x70 + 1-byte domain count + domain types + range type
@@ -144,27 +292,17 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
         }
         FUNC_CODE => {
             let dom_count = r.get_u8()? as usize;
-            let mut t_dom = Vec::with_capacity(dom_count);
-            for _ in 0..dom_count {
-                t_dom.push(read_type_at_depth(r, next)?);
-            }
-            let t_range = read_type_at_depth(r, next)?;
-            let params_count = r.get_u8()? as usize;
-            let mut tpe_params = Vec::with_capacity(params_count);
-            for _ in 0..params_count {
-                let ident = read_type_at_depth(r, next)?;
-                if !matches!(ident, SigmaType::STypeVar(_)) {
-                    return Err(ReadError::InvalidData(format!(
-                        "SFunc tpeParam must be an STypeVar, got {ident:?}"
-                    )));
-                }
-                tpe_params.push(ident);
-            }
-            Ok(SigmaType::SFunc {
-                t_dom,
-                t_range: Box::new(t_range),
-                tpe_params,
-            })
+            Ok(Step::Open(Frame {
+                child_depth: next,
+                kind: FrameKind::Func {
+                    // Grows as read, like a tuple's items (`open_tuple`).
+                    t_dom: Vec::new(),
+                    remaining_dom: dom_count,
+                    t_range: None,
+                    tpe_params: Vec::new(),
+                    remaining_params: 0,
+                },
+            }))
         }
 
         _ => Err(ReadError::SigmaValidation {
@@ -175,102 +313,75 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
     }
 }
 
-fn decode_constructor_at_depth(
-    r: &mut VlqReader,
-    byte: u8,
-    depth: usize,
-) -> Result<SigmaType, ReadError> {
+fn decode_constructor(byte: u8, depth: usize, gate_v: u8) -> Result<Step, ReadError> {
     let constr_id = byte / PRIM_RANGE;
     let prim_id = byte % PRIM_RANGE;
     let next = depth + 1;
-    let gate_v = embeddable_gate_version(r);
+    let wrap = |child_depth, wrap| {
+        Ok(Step::Open(Frame {
+            child_depth,
+            kind: FrameKind::Wrap(wrap),
+        }))
+    };
+    let prim = || prim_from_code(prim_id, gate_v);
+    let coll = |t| SigmaType::SColl(Box::new(t));
+    let option = |t| SigmaType::SOption(Box::new(t));
 
-    match constr_id {
+    match (constr_id, prim_id) {
         // constrId 1: Coll[T]
-        1 => {
-            let elem = if prim_id == 0 {
-                read_type_at_depth(r, next)?
-            } else {
-                prim_from_code(prim_id, gate_v)?
-            };
-            Ok(SigmaType::SColl(Box::new(elem)))
-        }
+        (1, 0) => wrap(next, |t| SigmaType::SColl(Box::new(t))),
+        (1, _) => Ok(Step::Done(coll(prim()?))),
 
-        // constrId 2: Coll[Coll[T]]
-        2 => {
-            let inner = if prim_id == 0 {
-                read_type_at_depth(r, next)?
-            } else {
-                prim_from_code(prim_id, gate_v)?
-            };
-            Ok(SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(
-                inner,
-            )))))
-        }
+        // constrId 2: Coll[Coll[T]]. Two levels in one byte; both writers
+        // expand the non-embeddable form to one byte per level, so charge both
+        // to keep the guard's verdict.
+        (2, 0) => wrap(depth + 2, |t| {
+            SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(t))))
+        }),
+        (2, _) => Ok(Step::Done(coll(coll(prim()?)))),
 
         // constrId 3: Option[T]
-        3 => {
-            let elem = if prim_id == 0 {
-                read_type_at_depth(r, next)?
-            } else {
-                prim_from_code(prim_id, gate_v)?
-            };
-            Ok(SigmaType::SOption(Box::new(elem)))
+        (3, 0) => wrap(next, |t| SigmaType::SOption(Box::new(t))),
+        (3, _) => Ok(Step::Done(option(prim()?))),
+
+        // constrId 4: Option[Coll[T]], charged two levels like constrId 2.
+        (4, 0) => wrap(depth + 2, |t| {
+            SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(t))))
+        }),
+        (4, _) => Ok(Step::Done(option(coll(prim()?)))),
+
+        // constrId 5: general pair (primId 0), or `(prim, T)`: the embeddable
+        // first item is decoded before the second is read.
+        (5, 0) => Ok(open_tuple(next, 2)),
+        (5, _) => {
+            let first = prim()?;
+            Ok(Step::Open(Frame {
+                child_depth: next,
+                kind: FrameKind::Tuple {
+                    items: vec![first],
+                    remaining: 1,
+                    then_prim: None,
+                },
+            }))
         }
 
-        // constrId 4: Option[Coll[T]]
-        4 => {
-            let inner = if prim_id == 0 {
-                read_type_at_depth(r, next)?
-            } else {
-                prim_from_code(prim_id, gate_v)?
-            };
-            Ok(SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(
-                inner,
-            )))))
-        }
+        // constrId 6: triple (primId 0), or `(T, prim)`: the embeddable second
+        // item is decoded only after the first is read.
+        (6, 0) => Ok(open_tuple(next, 3)),
+        (6, _) => Ok(Step::Open(Frame {
+            child_depth: next,
+            kind: FrameKind::Tuple {
+                items: Vec::with_capacity(2),
+                remaining: 1,
+                then_prim: Some(prim_id),
+            },
+        })),
 
-        // constrId 5: Pair — first element embeddable, or general pair (primId=0)
-        5 => {
-            if prim_id == 0 {
-                let t1 = read_type_at_depth(r, next)?;
-                let t2 = read_type_at_depth(r, next)?;
-                Ok(SigmaType::STuple(vec![t1, t2]))
-            } else {
-                let t1 = prim_from_code(prim_id, gate_v)?;
-                let t2 = read_type_at_depth(r, next)?;
-                Ok(SigmaType::STuple(vec![t1, t2]))
-            }
-        }
-
-        // constrId 6: Pair — second element embeddable (primId>0), or Triple (primId=0)
-        6 => {
-            if prim_id == 0 {
-                // Triple: read 3 types
-                let t1 = read_type_at_depth(r, next)?;
-                let t2 = read_type_at_depth(r, next)?;
-                let t3 = read_type_at_depth(r, next)?;
-                Ok(SigmaType::STuple(vec![t1, t2, t3]))
-            } else {
-                let t1 = read_type_at_depth(r, next)?;
-                let t2 = prim_from_code(prim_id, gate_v)?;
-                Ok(SigmaType::STuple(vec![t1, t2]))
-            }
-        }
-
-        // constrId 7: Symmetric pair (primId>0) or Quad (primId=0)
-        7 => {
-            if prim_id == 0 {
-                // Quad: read 4 types
-                let t1 = read_type_at_depth(r, next)?;
-                let t2 = read_type_at_depth(r, next)?;
-                let t3 = read_type_at_depth(r, next)?;
-                let t4 = read_type_at_depth(r, next)?;
-                Ok(SigmaType::STuple(vec![t1, t2, t3, t4]))
-            } else {
-                let t = prim_from_code(prim_id, gate_v)?;
-                Ok(SigmaType::STuple(vec![t.clone(), t]))
-            }
+        // constrId 7: quad (primId 0), or the symmetric pair `(prim, prim)`.
+        (7, 0) => Ok(open_tuple(next, 4)),
+        (7, _) => {
+            let t = prim()?;
+            Ok(Step::Done(SigmaType::STuple(vec![t.clone(), t])))
         }
 
         _ => Err(ReadError::InvalidData(format!(
@@ -544,33 +655,110 @@ mod tests {
     // NB: type code 0 is covered by `read_type_prefix_zero_hard_rejects` in the
     // oracle-parity section — it is a HARD reject, not a soft `InvalidData`.
 
+    /// `Coll[Coll[T]]` (24) and `Option[Coll[T]]` (48) with a non-embeddable
+    /// `T` hold two levels in one byte. Neither writer emits them: both expand
+    /// to one `Coll` byte per level. The depth guard must give the compact
+    /// form the verdict of that canonical form, or a re-encode flips it.
     #[test]
-    fn read_type_above_max_depth_returns_error_not_stack_overflow() {
-        // Construct wire bytes for a deeply-nested
-        // `Coll[Coll[Coll[...Coll[SBoolean]]]]`:
-        //   - Each `Coll[T]` (with non-embeddable T) is byte
-        //     `0x0C` (`COLL_CODE` = 1*PRIM_RANGE = 12, primId 0).
-        //   - Final inner type can be the embeddable SBoolean (0x01).
-        //
-        // Past MAX_TYPE_DEPTH our recursive reader must error gracefully
-        // rather than overflow the native stack. The cap is a conservative
-        // stack-safety bound, not the true Scala ceiling (= MaxPropositionBytes
-        // = 4096) — see the constant's doc. The relative `MAX_TYPE_DEPTH + 5`
-        // keeps this honest if the constant changes.
-        let mut bytes = vec![0x0Cu8; MAX_TYPE_DEPTH + 5];
-        // Inner type after the chain: SBoolean (1).
-        bytes.push(0x01);
-        let mut r = VlqReader::new(&bytes);
-        let err = read_type(&mut r).expect_err("must not stack-overflow");
-        match err {
-            ReadError::InvalidData(msg) => {
-                assert!(
-                    msg.contains("recursion depth"),
-                    "expected depth error, got: {msg}"
+    fn compact_two_level_codes_count_both_levels() {
+        for (compact, expanded) in [(0x18u8, [0x0Cu8, 0x0C]), (0x30, [0x24, 0x0C])] {
+            for pairs in [50, 51] {
+                let mut short = vec![compact; pairs];
+                short.push(0x01);
+                let mut long: Vec<u8> = std::iter::repeat_n(expanded, pairs).flatten().collect();
+                long.push(0x01);
+                assert_eq!(
+                    read_type(&mut VlqReader::new(&short)).is_ok(),
+                    read_type(&mut VlqReader::new(&long)).is_ok(),
+                    "code {compact:#x} x{pairs}"
                 );
             }
-            other => panic!("expected depth error, got: {other:?}"),
         }
+    }
+
+    /// Run `f` on a thread with a stack large enough for the recursive walks
+    /// (writer, equality, drop) over a type `MAX_TYPE_DEPTH` levels deep in an
+    /// unoptimized test build.
+    fn on_big_stack<F: FnOnce() + Send + 'static>(f: F) {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// `Coll^n[Byte]`: `n - 1` generic `Coll` bytes (0x0C), then `Coll[Byte]`.
+    fn nested_coll_bytes(n: usize) -> Vec<u8> {
+        let mut bytes = vec![0x0Cu8; n - 1];
+        bytes.push(0x0E);
+        bytes
+    }
+
+    #[test]
+    fn read_type_nested_to_max_depth_round_trips() {
+        // Scala reads a `Coll` chain until its JVM stack overflows, about
+        // 9,800 levels with the default 1 MiB stack. The guard sits above
+        // that, and the iterative reader needs no deep native stack to get
+        // there.
+        on_big_stack(|| {
+            let bytes = nested_coll_bytes(MAX_TYPE_DEPTH + 1);
+            let mut r = VlqReader::new(&bytes);
+            let t = read_type(&mut r).expect("a chain at the guard parses");
+            assert!(r.is_empty());
+            // The writer, like Scala's, folds the innermost `Coll[Coll[Byte]]`
+            // into its compact code 0x1A.
+            let mut canonical = vec![0x0Cu8; MAX_TYPE_DEPTH - 1];
+            canonical.push(0x1A);
+            assert_eq!(encode(&t), canonical);
+            let mut r = VlqReader::new(&canonical);
+            assert_eq!(read_type(&mut r).unwrap(), t);
+        });
+    }
+
+    #[test]
+    fn read_type_past_max_depth_hard_rejects() {
+        // One level past the guard. A JVM overflowing its stack throws a
+        // `StackOverflowError`, not a `ValidationException`, so the refusal is
+        // hard: a size-delimited tree must not degrade on it.
+        let bytes = nested_coll_bytes(MAX_TYPE_DEPTH + 2);
+        let mut r = VlqReader::new(&bytes);
+        match read_type(&mut r) {
+            Err(ReadError::HardReject(msg)) => {
+                assert!(msg.contains("type recursion depth"), "got: {msg}")
+            }
+            other => panic!("expected a hard depth reject, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_type_wide_tuple_chain_past_max_depth_hard_rejects() {
+        // Each `STuple` of 255 items (`60 ff`) opens the next as its first
+        // item: two bytes per level, so this runs past the guard in 32 KiB.
+        // The reader must not reserve 255 item slots per open frame before
+        // the items arrive, or the chain costs hundreds of MiB before the
+        // reject.
+        let bytes = [0x60u8, 0xFF].repeat(MAX_TYPE_DEPTH + 2);
+        let mut r = VlqReader::new(&bytes);
+        match read_type(&mut r) {
+            Err(ReadError::HardReject(msg)) => {
+                assert!(msg.contains("type recursion depth"), "got: {msg}")
+            }
+            other => panic!("expected a hard depth reject, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_type_compact_nested_coll_charges_two_levels() {
+        // `Coll[Coll[T]]` (0x18) with a non-embeddable T is two levels in one
+        // byte and is charged both, like the one-byte-per-level form.
+        let mut bytes = vec![0x18u8; MAX_TYPE_DEPTH / 2];
+        bytes.push(0x0E);
+        let mut r = VlqReader::new(&bytes);
+        assert!(read_type(&mut r).is_ok(), "the last item sits at the guard");
+        bytes.insert(0, 0x18);
+        let mut r = VlqReader::new(&bytes);
+        assert!(matches!(read_type(&mut r), Err(ReadError::HardReject(_))));
     }
 
     // ----- oracle parity -----

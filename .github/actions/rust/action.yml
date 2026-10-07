@@ -1,0 +1,51 @@
+name: Repository Rust toolchain
+description: Install the compiler from rust-toolchain.toml and expose pinned CI tool versions
+inputs:
+  nightly:
+    description: Install the pinned fuzz nightly instead of stable
+    default: 'false'
+  targets:
+    description: Additional compilation targets
+    default: ''
+  components:
+    description: Additional Rust components
+    default: clippy, rustfmt
+outputs:
+  node:
+    value: ${{ steps.versions.outputs.node }}
+    description: Node.js release for browser-model tests
+  nightly:
+    value: ${{ steps.versions.outputs.nightly }}
+    description: Pinned fuzz nightly
+  channel:
+    value: ${{ steps.versions.outputs.channel }}
+    description: Stable compiler release
+  audit:
+    value: ${{ steps.versions.outputs.audit }}
+    description: cargo-audit release
+  deny:
+    value: ${{ steps.versions.outputs.deny }}
+    description: cargo-deny release
+  machete:
+    value: ${{ steps.versions.outputs.machete }}
+    description: cargo-machete release
+  nextest:
+    value: ${{ steps.versions.outputs.nextest }}
+    description: cargo-nextest release
+  fuzz:
+    value: ${{ steps.versions.outputs.fuzz }}
+    description: cargo-fuzz release
+  scala_cli:
+    value: ${{ steps.versions.outputs.scala_cli }}
+    description: Scala CLI release for JVM oracle checks
+runs:
+  using: composite
+  steps:
+    - id: versions
+      shell: bash
+      run: python scripts/ci-policy.py --github-output
+    - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master, 2026-10-03
+      with:
+        toolchain: ${{ inputs.nightly == 'true' && steps.versions.outputs.nightly || steps.versions.outputs.channel }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}

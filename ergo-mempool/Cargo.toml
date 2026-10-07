@@ -3,6 +3,7 @@ name        = "ergo-mempool"
 description = "Mempool for the Ergo Rust node: single-writer admission with anti-DoS budgeting, weighted ordering, invalidation + unresolved caches, pool-aware UTXO overlays, and reorg-driven revalidation. Drives the validator under the same active-protocol-parameters as block validation."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -11,7 +12,7 @@ publish    = false
 # Exposes `MockValidator` and `MockPlan` to integration tests in
 # `ergo-mempool/tests/`. Production code never sets this.
 test-support = []
-# Gates `tests/m7_scala_oracle.rs`, which needs a running Scala node
+# Gates `tests/it/m7_scala_oracle.rs`, which needs a running Scala node
 # at NODE_URL (default http://localhost:9053) to compare live mempool
 # admission behavior. Default `cargo test` does not compile it; the
 # diagnostics CI lane runs it only when the infrastructure is set up.
@@ -23,6 +24,7 @@ ergo-ser        = { workspace = true }
 ergo-validation = { workspace = true }
 ergo-state      = { workspace = true }
 hex             = { workspace = true }
+lru             = { workspace = true }
 thiserror       = { workspace = true }
 tracing         = { workspace = true }
 
@@ -38,3 +40,6 @@ tracing-subscriber = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

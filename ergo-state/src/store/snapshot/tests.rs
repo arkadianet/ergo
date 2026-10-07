@@ -504,9 +504,20 @@ fn make_and_store_block_transactions_section(
     use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
 
     let section_id = compute_section_id(TYPE_BLOCK_TRANSACTIONS, header_id, transactions_root);
+    // A synthetic transaction with no UTXO effects keeps these unchecked
+    // state fixtures non-empty, as required by BlockTransactions.scala:42.
+    let transactions = if transactions.is_empty() {
+        vec![ergo_ser::transaction::Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        }]
+    } else {
+        transactions.to_vec()
+    };
     let bt = BlockTransactions {
         header_id: ModifierId::from_bytes(*header_id),
-        transactions: transactions.to_vec(),
+        transactions,
     };
     let mut w = VlqWriter::new();
     write_block_transactions(&mut w, &bt).expect("write_block_transactions");
@@ -557,7 +568,7 @@ fn advanced_base_dry_run_matches_rehydrated_oracle() {
         .store_header(&hdr_n_id_bytes, &hdr_n_bytes)
         .expect("store hdr_n");
     let expected_n = store.root_digest();
-    // Store empty BlockTransactions for block N.
+    // Store a BlockTransactions section with no UTXO effects for block N.
     make_and_store_block_transactions_section(
         &store,
         &hdr_n_id_bytes,
@@ -1176,6 +1187,7 @@ fn advance_failure_drops_base_then_recovers() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SBoolean,
@@ -1260,15 +1272,11 @@ fn advance_failure_drops_base_then_recovers() {
     );
 }
 
-/// Non-empty block advance: apply block N+1 with a real transaction
-/// (spends genesis box_id(1), creates box_id(10)). The stored
-/// BlockTransactions section carries that transaction; `try_advance_base`
-/// replays it through the cached prover, verifies the resulting digest
-/// equals the committed state root, and returns `Advanced`.
-///
-/// This pins: tx-id recomputation, create+spend UTXO netting, and the
-/// replay path on a non-empty section — a risk surface the empty-block-only
-/// advance tests leave unpinned.
+/// Replay a non-empty N+1 that removes an output created by N, inserts a new
+/// output and reads a surviving data-input key. Fresh hydration supplies the
+/// comparison root/proof. These unchecked synthetic state fixtures do not
+/// establish script or whole-block consensus acceptance; captured blocks 1→2
+/// separately pin real roots through the public cached entry point.
 #[test]
 fn advanced_base_non_empty_block_mutations_match_oracle() {
     use ergo_primitives::digest::{Digest32, ModifierId};
@@ -1292,6 +1300,7 @@ fn advanced_base_non_empty_block_mutations_match_oracle() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SBoolean,
@@ -1362,7 +1371,12 @@ fn advanced_base_non_empty_block_mutations_match_oracle() {
         std::slice::from_ref(&spend_tx),
     );
     store
-        .apply_block_unchecked(1, &hdr_n_id_b, &root_after_n, &[spend_tx])
+        .apply_block_unchecked(
+            1,
+            &hdr_n_id_b,
+            &root_after_n,
+            std::slice::from_ref(&spend_tx),
+        )
         .expect("apply N with UTXO mutation");
 
     // Seed the base at tip N.
@@ -1377,13 +1391,49 @@ fn advanced_base_non_empty_block_mutations_match_oracle() {
         "base keyed to tip N"
     );
 
-    // Block N+1 (height 2): empty transactions.
+    // N+1 spends N's output and reads an unchanged seeded box.
+    let created = ergo_ser::ergo_box::ErgoBox {
+        candidate: spend_tx.output_candidates[0].clone(),
+        transaction_id: ergo_ser::transaction::transaction_id(&spend_tx).unwrap(),
+        index: 0,
+    };
+    let next_tx = Transaction {
+        inputs: vec![Input {
+            box_id: created.box_id().unwrap(),
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![ergo_ser::input::DataInput {
+            box_id: Digest32::from_bytes(box_id(2)),
+        }],
+        output_candidates: vec![ErgoBoxCandidate::new(
+            1_000_000,
+            true_tree,
+            2,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap()],
+    };
+    let (remove_next, insert_next) = StateStore::build_utxo_changes_raw(&[&next_tx]).unwrap();
+    let root_np1 = {
+        let fresh = store.committed_snapshot().unwrap().unwrap();
+        let mut prover = fresh.hydrate_prover().unwrap();
+        crate::store::dry_run::apply_change_set_to_prover(
+            &mut prover,
+            &[box_id(2)],
+            &remove_next,
+            &insert_next,
+        )
+        .unwrap()
+        .0
+    };
+    assert_ne!(root_after_n, root_np1, "N+1 must change the tree");
     let hdr_np1 = ergo_ser::header::Header {
         version: 2,
         parent_id: hdr_n_id,
         ad_proofs_root: Digest32::from_bytes([0u8; 32]),
         transactions_root: Digest32::from_bytes([0u8; 32]),
-        state_root: store.root_digest(), // unchanged (no new UTXO changes)
+        state_root: root_np1,
         timestamp: 7_000_002,
         extension_root: Digest32::from_bytes([0u8; 32]),
         n_bits: 16842752,
@@ -1395,7 +1445,6 @@ fn advanced_base_non_empty_block_mutations_match_oracle() {
             nonce: [0u8; 8],
         },
     };
-    let root_np1 = store.root_digest();
     let (hdr_np1_bytes, hdr_np1_id) = serialize_header(&hdr_np1).expect("serialize hdr_np1");
     let hdr_np1_id_b: [u8; 32] = *hdr_np1_id.as_bytes();
     store.store_header(&hdr_np1_id_b, &hdr_np1_bytes).unwrap();
@@ -1403,11 +1452,11 @@ fn advanced_base_non_empty_block_mutations_match_oracle() {
         &store,
         &hdr_np1_id_b,
         hdr_np1.transactions_root.as_bytes(),
-        &[],
+        std::slice::from_ref(&next_tx),
     );
     store
-        .apply_block_unchecked(2, &hdr_np1_id_b, &root_np1, &[])
-        .expect("apply N+1 empty");
+        .apply_block_unchecked(2, &hdr_np1_id_b, &root_np1, &[next_tx])
+        .expect("apply non-empty N+1");
 
     // Oracle: fresh uncached dry-run at N+1.
     let oracle_snap = store.committed_snapshot().unwrap().expect("oracle snap");
@@ -1416,9 +1465,8 @@ fn advanced_base_non_empty_block_mutations_match_oracle() {
         .expect("oracle");
 
     // Advance path: stale base at N (contains N's post-mutation tree),
-    // snapshot at N+1. Block N+1 has empty BT section, so the advance
-    // replays no UTXO changes and leaves the digest unchanged — matching
-    // root_np1 (the committed state root at N+1). Must report Advanced.
+    // snapshot at N+1. The stored section must replay the data lookup,
+    // remove and insert to reach the committed root. Must report Advanced.
     let snap_np1 = store.committed_snapshot().unwrap().expect("snap N+1");
     let mut disp = None;
     let got = snap_np1
@@ -1500,6 +1548,7 @@ fn advance_digest_mismatch_falls_back_to_rehydrate() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SBoolean,

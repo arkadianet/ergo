@@ -3,6 +3,7 @@ name        = "ergo-wallet-service"
 description = "Transport-neutral wallet orchestration and persistence core."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -33,6 +34,8 @@ k256                 = { workspace = true, features = ["arithmetic"] }
 zeroize              = { workspace = true }
 
 [dev-dependencies]
+# Verify legacy standalone stores are refused without modifying their files.
+redb_legacy = { workspace = true }
 tempfile = { workspace = true }
 # TEST-ONLY: the `/scan/addBox` tests decode their Scala box JSON with the same
 # decoder the node uses in production. Kept out of the normal graph so the
@@ -42,3 +45,6 @@ ergo-rest-json = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

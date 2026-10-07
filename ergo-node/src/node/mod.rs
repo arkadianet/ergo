@@ -3,10 +3,10 @@
 //! `RunHandle`, identity helpers) used by the binary entry point and
 //! library embedders.
 //!
-//! Boot sequence lives in [`boot`]; the action loop body in
-//! [`action_loop`]; per-event/message handlers in [`events`] /
-//! [`messaging`]; mempool admission in [`admission`]; peer
-//! plumbing in [`peer_actions`].
+//! Boot sequence lives in `boot`; the action loop body in
+//! `action_loop`; per-event/message handlers in `events` /
+//! `messaging`; mempool admission in `admission`; peer
+//! plumbing in `peer_actions`.
 
 /// Panic-safe stderr write used inside the shutdown sequence.
 ///
@@ -27,6 +27,7 @@ macro_rules! shutdown_log {
 
 mod action_loop;
 mod admission;
+mod block_relay;
 mod boot;
 mod event_feed;
 mod events;
@@ -41,10 +42,12 @@ mod mining_engine;
 mod peer_actions;
 mod prune_activation;
 mod reorg_history;
+mod section_serving;
 mod shadow_watch;
 mod snapshot_emit;
 mod snapshot_state;
 mod state;
+pub(crate) mod storage_probe;
 mod sync_helpers;
 mod sync_tick;
 pub(crate) mod telemetry;
@@ -57,14 +60,14 @@ pub use self::boot::{run, run_inner};
 pub use self::handle::RunHandle;
 #[cfg(test)]
 pub(super) use self::identity::mode_label_for;
-pub(in crate::node) use self::messaging::handle_message;
+pub(in crate::node) use self::messaging::{admit_frame, handle_message};
 pub(in crate::node) use self::peer_actions::{
     cleanup_disconnected_peer, flush_actions, penalize_peer, send_to_peer,
 };
 pub(crate) use self::shadow_watch::ShadowConfig;
 pub(in crate::node) use self::state::{NodeState, PeerRuntime};
 pub(in crate::node) use self::sync_helpers::{
-    hedge_request_modifiers, maybe_exit_ibd, try_send_anchor_sync_info,
+    hedge_request_modifiers, maybe_exit_ibd, send_post_header_sync_info,
 };
 
 /// Type alias used across the node runtime. `Send + Sync` is

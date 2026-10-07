@@ -26,9 +26,10 @@ mod load;
 mod resolved;
 mod toml_sections;
 
-pub use cli::Cli;
+pub use cli::{Cli, Command};
 pub use resolved::{
-    LoggingConfig, LoggingFileConfig, LoggingFormat, NodeConfig, StateType, WalletMode,
+    LoggingConfig, LoggingFileConfig, LoggingFormat, NodeConfig, RedbCacheBudgets, StateType,
+    WalletMode,
 };
 
 #[cfg(test)]

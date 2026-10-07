@@ -158,6 +158,8 @@ fn check_timeouts_sweeps_abandoned_shadow_but_keeps_the_live_set() {
         "a just-released shadow must NOT be swept — it is the live set"
     );
     assert_eq!(tracker.modifier_type(&id(2)), Some(102));
+    assert!(!tracker.retry_count.contains_key(&id(1)));
+    assert_eq!(tracker.retry_count.get(&id(2)), Some(&1));
 }
 
 #[test]
@@ -178,6 +180,7 @@ fn cancel_peer_abandoned_shadow_swept_after_ttl() {
         !tracker.recently_released.contains_key(&id(7)),
         "disconnect-originated abandoned shadow must be swept after the TTL"
     );
+    assert!(!tracker.retry_count.contains_key(&id(7)));
 }
 
 #[test]
@@ -584,5 +587,87 @@ fn reassign_capped_at_max_hedges_so_stuck_section_can_time_out() {
         result.retryable.len(),
         1,
         "a hedge-capped section must fall through to the timeout/retry path"
+    );
+}
+
+#[test]
+fn retry_metadata_sweeps_abandoned_but_preserves_active_cycles() {
+    let mut tracker = DeliveryTracker::new();
+    let t0 = Instant::now();
+    let p = peer(9030);
+    tracker.request(p, 102, &[id(1), id(2), id(3)], t0);
+    tracker.check_timeouts(t0 + Duration::from_secs(4));
+    tracker.request(p, 102, &[id(2)], t0 + Duration::from_secs(5));
+    tracker.check_timeouts(t0 + Duration::from_secs(9));
+    assert_eq!(tracker.retry_count.get(&id(1)), Some(&1));
+    assert_eq!(tracker.retry_count.get(&id(2)), Some(&2));
+    let later = t0 + Duration::from_secs(70);
+    tracker.request(p, 102, &[id(3)], later - Duration::from_secs(1));
+    tracker.request(p, 102, &[id(4)], later - Duration::from_secs(4));
+    tracker.check_timeouts(later);
+    assert!(!tracker.retry_count.contains_key(&id(1)));
+    assert!(!tracker.retry_count.contains_key(&id(2)));
+    assert_eq!(tracker.retry_count.get(&id(3)), Some(&1));
+    assert_eq!(tracker.status(&id(3)), ModifierStatus::Requested);
+    assert_eq!(tracker.retry_count.get(&id(4)), Some(&1));
+    assert_eq!(tracker.modifier_type(&id(4)), Some(102));
+}
+
+#[test]
+fn primary_disconnect_preserves_another_asked_hedge() {
+    let mut tracker = DeliveryTracker::new();
+    let now = Instant::now();
+    let primary = peer(9030);
+    let hedge = peer(9031);
+    let new_owner = peer(9032);
+    tracker.request(primary, 102, &[id(1)], now);
+    tracker.register_hedge_peers(&[id(1)], &[hedge, new_owner], now);
+    let cancelled = tracker.cancel_peer(&primary, now);
+    assert_eq!(cancelled.retryable, vec![id(1)]);
+    assert!(cancelled.exhausted.is_empty());
+    assert_eq!(tracker.request(new_owner, 102, &[id(1)], now), vec![id(1)]);
+    assert_eq!(tracker.on_received(&id(1), &hedge), DeliveryAction::Accept);
+    assert_eq!(
+        tracker.on_received(&id(1), &primary),
+        DeliveryAction::RejectSpam
+    );
+    assert_eq!(tracker.inflight_count(&primary), 0);
+    assert_eq!(tracker.inflight_count(&new_owner), 1);
+    assert_eq!(tracker.total_inflight(), 1);
+    tracker.mark_received(&id(1));
+    assert_eq!(tracker.total_inflight(), 0);
+    assert_eq!(tracker.inflight_count(&new_owner), 0);
+    assert!(tracker.late_acceptable.is_empty());
+    assert!(tracker.retry_count.is_empty());
+    assert_eq!(tracker.on_received(&id(1), &hedge), DeliveryAction::Ignore);
+    assert_eq!(
+        tracker.on_received(&id(1), &new_owner),
+        DeliveryAction::Ignore
+    );
+}
+
+#[test]
+fn hedge_disconnect_revokes_only_that_peer() {
+    let mut tracker = DeliveryTracker::new();
+    let now = Instant::now();
+    let primary = peer(9030);
+    let disconnected = peer(9031);
+    let surviving = peer(9032);
+    tracker.request(primary, 102, &[id(1)], now);
+    tracker.register_hedge_peers(&[id(1)], &[disconnected, surviving], now);
+    let cancelled = tracker.cancel_peer(&disconnected, now);
+    assert!(cancelled.retryable.is_empty() && cancelled.exhausted.is_empty());
+    assert_eq!(tracker.total_inflight(), 1);
+    assert_eq!(
+        tracker.on_received(&id(1), &primary),
+        DeliveryAction::Accept
+    );
+    assert_eq!(
+        tracker.on_received(&id(1), &surviving),
+        DeliveryAction::Accept
+    );
+    assert_eq!(
+        tracker.on_received(&id(1), &disconnected),
+        DeliveryAction::RejectSpam
     );
 }

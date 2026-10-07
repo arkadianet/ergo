@@ -22,9 +22,10 @@
 //! Note: this is *not* VLQ — value-length is raw BE for historical
 //! AVL+ codec parity.
 //!
-//! This module is the node-level codec only. Manifest framing
-//! (rootHeight + manifestDepth prefix, tree walk to manifest depth)
-//! lands alongside the manifest-assembly commit (Mode 2 part 2c).
+//! `node_codec` handles individual nodes. `manifest` implements framing
+//! (rootHeight + manifestDepth prefix), subtree walks, chunk labels and
+//! reconstruction; `server` serves the committed tree. A codec/root match
+//! still requires a caller-authenticated snapshot root before installation.
 
 use crate::avl::node::AvlNode;
 use crate::store::StateError;
@@ -111,8 +112,9 @@ mod node_codec;
 mod server;
 
 pub use manifest::{
-    enumerate_chunk_roots, enumerate_expected_chunk_ids, recompute_chunk_root_label,
-    reconstruct_tree, serialize_chunk, serialize_manifest, ReconstructedNode, ReconstructedTree,
+    enumerate_chunk_roots, enumerate_expected_chunk_ids, manifest_tree_height,
+    recompute_chunk_root_label, recompute_manifest_root_label, reconstruct_tree, serialize_chunk,
+    serialize_manifest, ReconstructedNode, ReconstructedTree,
 };
 pub use node_codec::{parse_prover_node, serialize_prover_node, ParsedProverNode};
 pub use server::SnapshotServer;

@@ -2,23 +2,23 @@
 //!
 //! Wires the full pipeline source → bytes → address: parse → bind →
 //! typecheck ([`crate::typecheck_with_network`]) → root coercion → emit
-//! ([`crate::emit`]) → [`build_tree`] → wire write → P2S/P2SH address
+//! ([`fn@crate::emit`]) → `build_tree` → wire write → P2S/P2SH address
 //! construction. Mirrors the node's compile surface,
 //! `ScriptApiRoute.compileSource`
 //! (`ergo/src/main/scala/org/ergoplatform/http/api/ScriptApiRoute.scala:56-67`).
 //!
-//! This module keeps [`graph_build`] and [`compile`] centralized — the pass
+//! This module keeps `graph_build` and [`compile`] centralized — the pass
 //! ordering rationale for the nine-pass `graph_build` pipeline is dense and
 //! interdependent, so it stays attached to that one function rather than
 //! scattered across files. The rest is split across submodules:
-//! - [`assemble`] — [`CompileResult`], [`build_tree`], and constant
+//! - `assemble` — [`CompileResult`], `build_tree`, and constant
 //!   segregation.
-//! - [`v0_gate`] — the v0-header-unserializable-data walker.
-//! - [`lambda_gate`] — the GraphBuilding lambda/application verdict-parity
+//! - `v0_gate` — the v0-header-unserializable-data walker.
+//! - `lambda_gate` — the GraphBuilding lambda/application verdict-parity
 //!   reject gate.
-//! - [`walk`] — `push_children`, the `Payload` child-walker shared by both
+//! - `walk` — `push_children`, the `Payload` child-walker shared by both
 //!   gates (and by a test helper).
-//! - [`cast_fold`] — the direct-constant-cast folding subsystem.
+//! - `cast_fold` — the direct-constant-cast folding subsystem.
 
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::address::{encode_p2s, encode_p2sh, NetworkPrefix};
@@ -58,13 +58,13 @@ pub(crate) use walk::*;
 /// only difference between the two callers is whether the emitted root carried
 /// `ConstantPlaceholder` nodes for named params.
 pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
-    // GraphBuilding verdict-parity gates (lib.rs D-C5): reject the emitted
+    // GraphBuilding verdict-parity gates (compiler-design-ledger.md D-C5): reject the emitted
     // shapes Scala's full compiler rejects — lambda/application rules first.
     if let Some(e) = graph_building_lambda_reject(&root) {
         return Err(CompileError::Emit(e));
     }
 
-    // Explicit-cast folds, BOTH directions (lib.rs D-C7 cast bullet): fold
+    // Explicit-cast folds, BOTH directions (compiler-design-ledger.md D-C7 cast bullet): fold
     // `Downcast`/`Upcast` of a DIRECT constant (range-checked), while leaving
     // a cast-of-cast CHAIN's outer casts unfolded, exactly like Scala. MUST
     // run BEFORE `crate::fold::fold` below: a direct-constant `Upcast` (e.g.
@@ -238,7 +238,7 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
 /// Compile ErgoScript `source` end-to-end: typecheck, lower to opcode IR,
 /// assemble the ErgoTree, serialize, and derive the P2S/P2SH addresses.
 ///
-/// Pipeline: parse → bind → typecheck → root-coerce → emit → [`build_tree`] →
+/// Pipeline: parse → bind → typecheck → root-coerce → emit → `build_tree` →
 /// `write_ergo_tree` → addresses. Mirrors `ScriptApiRoute.compileSource`
 /// (`ScriptApiRoute.scala:56-67`).
 ///
@@ -251,7 +251,7 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
 ///    `VersionContext.withVersions` — never into the tree header.
 /// 2. **Wire header version (axis 2):** fixed at 0 (matching the route's
 ///    `ErgoTree.defaultHeaderWithVersion(0.toByte)` unconditionally). See
-///    [`build_tree`].
+///    `build_tree`.
 /// 3. **Activated script version (axis 3):** the EVALUATOR's
 ///    block-consensus version; a compile-time no-op here — it decides how a
 ///    node executes the tree, not what bytes we produce.
@@ -293,16 +293,16 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
 ///   ([`CompileError::Serializer`], mirroring Scala's
 ///   `SerializerException`).
 /// - Residual `SigmaPropIsProven` in mixed `Bool`/`SigmaProp` logical
-///   contexts: coercion-cancellation (lib.rs D-C3) —
-///   [`crate::isproven`] cancels the `BoolToSigmaProp`/`SigmaPropIsProven`
+///   contexts: coercion-cancellation (compiler-design-ledger.md D-C3) —
+///   `crate::isproven` cancels the `BoolToSigmaProp`/`SigmaPropIsProven`
 ///   round trips before the fold and after the lowering block. The
 ///   surviving-sigma `HasSigmas` `SigmaAnd`/`SigmaOr` reconstruction (a
 ///   residual `0xCF` in some corpus outputs) stays open.
-/// - The GraphBuilding reject-gate family (lib.rs D-C5): bit ops,
+/// - The GraphBuilding reject-gate family (compiler-design-ledger.md D-C5): bit ops,
 ///   zero-arg/non-1-arg lambda applications, SFunc-typed lambda params,
 ///   postfix `size`, out-of-range `getReg` literals, pre-v3 SNumericType
 ///   methods, and the constant-fold overflow check
-///   ([`graph_building_lambda_reject`] below + [`crate::fold`]'s
+///   (`graph_building_lambda_reject` below + `crate::fold`'s
 ///   arithmetic-overflow reject arm + the emit-arm gates).
 ///
 /// # Examples
@@ -383,7 +383,7 @@ fn compile_inner(
     // still inline here, no placeholders yet), so hashing it is byte-equal to
     // Scala's re-inlining step AND cheaper than segregating then substituting
     // back. For a bare-constant root this is the body itself — equivalent. This
-    // is why segregation leaves the P2SH address INVARIANT (lib.rs D-C1/D-C7).
+    // is why segregation leaves the P2SH address INVARIANT (compiler-design-ledger.md D-C1/D-C7).
     let mut pw = VlqWriter::new();
     write_expr(&mut pw, &root, false)?;
     let proposition_bytes = pw.result();
@@ -400,22 +400,13 @@ fn compile_inner(
     write_ergo_tree(&mut w, &ergo_tree)?;
     let tree_bytes = w.result();
 
-    // Post-write self-check (lib.rs D-C6): the bytes about to be used to
-    // derive addresses must round-trip through our own deserializer. A
-    // failure means compile() would hand out a P2S address whose script no
-    // deserializer accepts — funds sent there would be stranded.
-    //
-    // The re-read runs under the ACTIVATED-version axis (`tree_version`), NOT
-    // the emitted header version (always 0). Scala gates V6-embeddable TYPE
-    // codes (`SUnsignedBigInt`, …) on the ACTIVATED version
-    // (`TypeSerializer.getEmbeddableType` → `VersionContext.isV6Activated`,
-    // `VersionContext.scala:33`; deser under `withVersions(activatedVersion,
-    // treeVersion)`, `ErgoTreeSerializer.scala:148-154`), so a header-v0 tree
-    // carrying a code-9 type that a `tree_version >= 3` compile produces DOES
-    // re-parse on a V6-activated network — `read_ergo_tree_with_activated_version`
-    // mirrors that. A genuinely unrepresentable emission (a real serializer
-    // failure) still rejects reject-side-safely: a wrong-reject surfaces a
-    // user error, a wrong-accept strands funds.
+    // Post-write self-check: reject outputs our header-scoped reader refuses
+    // before deriving addresses. The frontend version sets ambient activation;
+    // it cannot replace the emitted header0 type table. Pinned6.0.6 examples
+    // in compiled-reader compile successfully in Scala but their header0 type9
+    // outputs fail its independent reader. This local validation policy refuses
+    // those outputs without changing the header or incoming consensus gates.
+    // A local successful parse is not a proof of arbitrary spendability.
     {
         use ergo_primitives::reader::VlqReader;
         use ergo_ser::ergo_tree::read_ergo_tree_with_activated_version;
@@ -425,7 +416,7 @@ fn compile_inner(
             return Err(CompileError::Serializer {
                 what: format!(
                     "emitted tree is not self-readable ({e:?}): refusing to derive an \
-                     address for a script no deserializer accepts"
+                     address for a locally unreadable script"
                 ),
             });
         }
@@ -542,15 +533,6 @@ mod tests {
     fn reparse(bytes: &[u8]) -> ErgoTree {
         let mut r = VlqReader::new(bytes);
         read_ergo_tree(&mut r).expect("compiled tree must reparse")
-    }
-
-    /// Reparse under a V6-activated deserializer — the axis the compile
-    /// self-check uses for a `tree_version >= 3` build. Mirrors Scala
-    /// re-reading a header-v0 tree on a V6-activated network.
-    fn reparse_v6(bytes: &[u8]) -> ErgoTree {
-        let mut r = VlqReader::new(bytes);
-        ergo_ser::ergo_tree::read_ergo_tree_with_activated_version(&mut r, 3)
-            .expect("compiled tree must reparse under V6 activation")
     }
 
     // ----- happy path -----
@@ -764,6 +746,28 @@ mod tests {
         assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
     }
 
+    #[test]
+    fn val_bound_unsigned_collection_folds_to_header0_readable_output() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/ergoscript/compiled-reader/scala-folded.stdout"
+        ))
+        .unwrap();
+        let source = fixture["source"].as_str().unwrap();
+        let compiled = compile(&ScriptEnv::new(), source, 3, NetworkPrefix::Testnet).unwrap();
+        assert_eq!(
+            hex::encode(&compiled.tree_bytes),
+            fixture["tree_hex"].as_str().unwrap()
+        );
+        for activation in 1..=3 {
+            let mut reader = VlqReader::new(&compiled.tree_bytes);
+            let parsed =
+                ergo_ser::ergo_tree::read_ergo_tree_with_activated_version(&mut reader, activation)
+                    .unwrap();
+            assert!(reader.is_empty());
+            assert_eq!(parsed, compiled.ergo_tree);
+        }
+    }
+
     // ----- error paths -----
 
     #[test]
@@ -834,7 +838,36 @@ mod tests {
         assert_eq!(err.class(), "SerializerException");
     }
 
-    // ----- error paths: GraphBuilding parity gates (lib.rs D-C5) -----
+    // ----- error paths -----
+
+    #[test]
+    fn serialize_mismatched_if_branches_rejects_assertion_error() {
+        // compile_seed.json (6.0.6): REJECT 0:0 AssertionError.
+        let err = compile(
+            &ScriptEnv::new(),
+            "serialize(if (HEIGHT > 5) SELF.value else SELF.id)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .unwrap_err();
+        assert_eq!(err.class(), "AssertionError");
+        assert_eq!(err.pos(), 0);
+    }
+
+    #[test]
+    fn graph_building_missing_method_reports_selector_position() {
+        // compile_seed.json (6.0.6): the graph phase inherits Select's context.
+        for (src, version, col) in [
+            ("Coll(1, 2, 3).map", 3, 15),
+            ("sigmaProp(1.toBytes.size == 1)", 2, 13),
+        ] {
+            let err = compile(&ScriptEnv::new(), src, version, NetworkPrefix::Testnet).unwrap_err();
+            assert_eq!(err.class(), "GraphBuildingException", "{src}");
+            assert_eq!(crate::span::line_col(src, err.pos()), (1, col), "{src}");
+        }
+    }
+
+    // ----- error paths: GraphBuilding parity gates (compiler-design-ledger.md D-C5) -----
     // Every oracle fact below: captured 2026-07-07, 3 identical runs,
     // committed as compile_seed.json vectors (except the ACCEPT boundaries
     // that byte-mismatch pending val-inline/pruning — the unused/aliased
@@ -1225,11 +1258,11 @@ mod tests {
         // The P2SH address hashes the constant-INLINED proposition
         // (`d191a304c801`) — segregation-invariant, so it matches regardless
         // of the D-C1 flip. Wherever Scala's IR reshapes the proposition
-        // itself, the P2SH diverges (lib.rs D-C7).
+        // itself, the P2SH diverges (compiler-design-ledger.md D-C7).
         assert_eq!(r.p2sh_address, ORACLE_HGT_P2SH);
     }
 
-    // ----- oracle parity: lowerings/folds (lib.rs D-C6) -----
+    // ----- oracle parity: lowerings/folds (compiler-design-ledger.md D-C6) -----
     // Every oracle fact below: TyperOracle cc/ccs verbs, sigma-state 6.0.2,
     // ORACLE_TREE_VERSION=3, ORACLE_NETWORK=testnet
     // (committed as compile_seed.json vectors).
@@ -1573,85 +1606,26 @@ mod tests {
     }
 
     #[test]
-    fn compile_v6_embeddable_type_code_under_v0_header_accepts_at_tv3_matching_oracle() {
-        // The post-write self-check (D-C6) re-reads compile()'s own bytes and
-        // refuses to derive an address for a script no deserializer accepts.
-        // Scala gates the V6-embeddable TYPE codes (`SUnsignedBigInt` = code
-        // 9, …) on the ACTIVATED version (`TypeSerializer.getEmbeddableType` →
-        // `VersionContext.isV6Activated`, `VersionContext.scala:33`; deser
-        // under `withVersions(activatedVersion, treeVersion)`,
-        // `ErgoTreeSerializer.scala:148-154`), NOT the tree header (always 0).
-        // The self-check reads via
-        // `read_ergo_tree_with_activated_version(tree_version)` and ACCEPTS
-        // these at tv=3, byte-identical to the oracle (verified live vs
-        // sigma-state 6.0.2, ORACLE_TREE_VERSION=3).
-        //
-        // All 7 captured blast-radius shapes (bare + val-bound; every target
-        // type + Coll/tuple/Option container) accept byte-exact at tv=3:
-        for (src, want) in [
-            (
-                "sigmaProp(SELF.R4[UnsignedBigInt].isDefined)",
-                "1000d1e6c6a70409",
-            ),
-            (
-                "sigmaProp(getVar[UnsignedBigInt](1).isDefined)",
-                "1000d1e6e30109",
-            ),
-            (
-                "sigmaProp(SELF.R4[Coll[UnsignedBigInt]].isDefined)",
-                "1000d1e6c6a70415",
-            ),
-            (
-                "sigmaProp(SELF.R4[(UnsignedBigInt,Int)].isDefined)",
-                "1000d1e6c6a7044504",
-            ),
-            (
-                "sigmaProp(SELF.R4[Option[UnsignedBigInt]].isDefined)",
-                "1000d1e6c6a7042d",
-            ),
-            (
-                "sigmaProp(getVar[Coll[UnsignedBigInt]](1).isDefined)",
-                "1000d1e6e30115",
-            ),
-            (
-                "sigmaProp(SELF.R4[(Int,UnsignedBigInt)].isDefined)",
-                "1000d1e6c6a7044009",
-            ),
-        ] {
-            let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet)
-                .unwrap_or_else(|e| panic!("{src}: self-check must accept at tv=3: {e:?}"));
-            assert_eq!(hex::encode(&r.tree_bytes), want, "{src}");
-            // The accepted bytes must round-trip through the SAME activated-version
-            // reader (defends the self-check's own invariant).
-            assert_eq!(reparse_v6(&r.tree_bytes), r.ergo_tree, "{src}");
+    fn compiled_header0_v6_type_outputs_refused_by_pinned_reader_do_not_get_addresses() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/ergoscript/compiled-reader/cases.json"
+        ))
+        .unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 7);
+        for case in cases {
+            assert_eq!(case["compile_outcome"], "COMPILE_ACCEPT");
+            for result in case["reader_results"].as_array().unwrap() {
+                assert_eq!(result["outcome"], "READ_ERROR");
+            }
+            let source = case["source"].as_str().unwrap();
+            let result = compile(&ScriptEnv::new(), source, 3, NetworkPrefix::Testnet);
+            assert!(
+                matches!(result, Err(CompileError::Serializer { .. })),
+                "{}: {result:?}",
+                case["id"]
+            );
         }
-
-        // At tree_version 0 these shapes reject at the PARSER on BOTH sides —
-        // `UnsignedBigInt` is not a known type name under v5 (oracle:
-        // `REJECT <pos> ParserException`; parity holds, the self-check axis is
-        // never reached). Class-exact.
-        for src in [
-            "sigmaProp(SELF.R4[UnsignedBigInt].isDefined)",
-            "sigmaProp(getVar[UnsignedBigInt](1).isDefined)",
-            "sigmaProp(SELF.R4[Coll[UnsignedBigInt]].isDefined)",
-        ] {
-            let err = compile(&ScriptEnv::new(), src, 0, NetworkPrefix::Testnet)
-                .expect_err("v6 type name must reject at tv=0");
-            assert_eq!(err.class(), "ParserException", "{src}");
-        }
-
-        // A VAL-BOUND
-        // `Coll[UnsignedBigInt]()` under `.size` folds the UBI data OFF the wire
-        // before the self-check ever sees a code-9 type, so it stays byte- and
-        // address-identical to the oracle (`10010400d1937e730005c1a7`).
-        let r = compile(
-            &ScriptEnv::new(),
-            "{ val u = Coll[UnsignedBigInt](); sigmaProp(u.size.toLong == SELF.value) }",
-            3,
-            NetworkPrefix::Testnet,
-        )
-        .expect("val-inline + SizeOf fold erases the UBI data before the v0 gate");
-        assert_eq!(hex::encode(&r.tree_bytes), "10010400d1937e730005c1a7");
     }
 
     #[test]

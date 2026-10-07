@@ -249,6 +249,7 @@ mod invalidation_failure_tests {
 mod scan_invalidation_tests {
     use super::*;
     use crate::wallet::tables::{WALLET_SCANS, WALLET_SCAN_INVALIDATED};
+    use redb::ReadableDatabase;
 
     fn temp_db() -> (tempfile::TempDir, Arc<redb::Database>) {
         let dir = tempfile::tempdir().unwrap();

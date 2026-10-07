@@ -1,14 +1,10 @@
 //! `assignType` dispatch — the structural arms of `SigmaTyper.assignType`.
 //!
-//! Port of `SigmaTyper.assignType` (pinned v6.0.2 worktree
-//! `ergo-core/sigmastate-interpreter-v6.0.2/
-//!   sc/shared/src/main/scala/sigma/compiler/phases/SigmaTyper.scala:53-543`).
-//! See the E1 correction below for the one deliberate deviation from the
-//! reference.
+//! Port of sigma-state v6.0.6 SigmaTyper.scala.
 //!
 //! # Scope (the complete `assignType` accept surface)
 //!
-//! Implemented (source order matters, first-match): §1.1 Block (E1-lenient),
+//! Implemented (source order matters, first-match): §1.1 Block,
 //! §1.2 Tuple, §1.3 ConcreteCollection, §1.4 Ident, §1.5 Select (resolver),
 //! §1.6 Lambda, §1.7 Apply(ApplyTypes(Select…)) explicit type args, §1.8
 //! Apply(Select…) method call, §1.9 Apply(Ident) SGlobal method, §1.10 generic
@@ -20,17 +16,17 @@
 //!
 //! The dispatch arms live here (`assign_type`/`dispatch`); the grammar is split
 //! across submodules:
-//! - [`simple_arms`] — §1.1-1.6/1.13/1.14/1.19/1.20: block, concrete-collection,
+//! - `simple_arms` — §1.1-1.6/1.13/1.14/1.19/1.20: block, concrete-collection,
 //!   ident, select, lambda, if, and/or, exponentiate, byindex.
-//! - [`apply`] — §1.7-1.10/1.12: the `assign_apply*`/`assign_apply_types` routing
+//! - `apply` — §1.7-1.10/1.12: the `assign_apply*`/`assign_apply_types` routing
 //!   family and its arg-adaptation/numeric-const helpers.
-//! - [`method_call_like`] — §1.11: the `mcl_*` receiver-family functions and the
+//! - `method_call_like` — §1.11: the `mcl_*` receiver-family functions and the
 //!   `assign_method_call_like` dispatcher.
-//! - [`lower_method`] — the shared method/property irBuilder lowering catalog,
+//! - `lower_method` — the shared method/property irBuilder lowering catalog,
 //!   a single receiver/name-keyed dispatch table kept as one function.
-//! - [`arith_bitop`] — §1.16/1.17: `ArithOp`/`BitOp` arms plus the relation/
+//! - `arith_bitop` — §1.16/1.17: `ArithOp`/`BitOp` arms plus the relation/
 //!   equality node builders.
-//! - [`harness`] — §6: the `bimap`/`bimap2`/`unmap` shared numeric-op harness.
+//! - `harness` — §6: the `bimap`/`bimap2`/`unmap` shared numeric-op harness.
 //!
 //! `expr_contains_untyped_node` (a generic `TypedExpr` tree-walk, not
 //! typer-specific logic) lives in `typed.rs` alongside the type it walks. The
@@ -40,14 +36,6 @@
 //! entry point `assign_type` `debug_assert!`s that no returned node is either.  Every
 //! arm is now ported: no deferred-arm markers or panics remain, and the accept
 //! surface is complete.
-//!
-//! # E1 (CRITICAL) — lenient v6.0.2 Block rule
-//!
-//! In v6.0.2 the Block `Val`'s explicit annotation is **DISCARDED**: bind
-//! `n -> b1.tpe`, `mkVal(n, b1.tpe, b1)`.  The typer-dossier §1.1's
-//! `isAssignableTo`/`getResultType` explicit-type check is HEAD-only (a
-//! post-6.0.2 commit) and is **NOT** implemented here.  `{ val x: Long = 1; x }`
-//! ACCEPTS with `x: SInt` (oracle-confirmed, golden_seed §11).
 //!
 //! # Positions (D-T7 lifted)
 //!
@@ -63,7 +51,7 @@
 //! graded fact and reject `line:col` stays advisory (E5). Positions ride on
 //! [`TypedExpr`] (typed.rs); rebuilt nodes inherit the position of the node
 //! being rewritten (Scala's `currentSrcCtx` pinning), so typed children carry
-//! their bound-tree offsets. Ledger: `lib.rs` § "Known M2 deviations" D-T7.
+//! their bound-tree offsets. Ledger: `compiler-design-ledger.md` § "Known M2 deviations" D-T7.
 
 use crate::span::Pos;
 use crate::stype::SType;
@@ -241,7 +229,18 @@ pub(crate) fn collect_type_vars(t: &SType, acc: &mut Vec<String>) {
 /// `pub` (re-exported from `typer`), matching the crate's convention of
 /// exposing each phase's entry point (see `unify`/`methods`).
 pub fn assign_type(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, TyperError> {
-    let result = dispatch(env, e, ctx)?;
+    assign_type_expected(env, e, ctx, None)
+}
+
+/// Context is consumed only by Block, If, and bare None
+/// (SigmaTyper.scala:78-127,491-508, v6.0.6).
+fn assign_type_expected(
+    env: &TypeEnv,
+    e: TypedExpr,
+    ctx: &TyperCtx,
+    expected: Option<&SType>,
+) -> Result<TypedExpr, TyperError> {
+    let result = dispatch(env, e, ctx, expected)?;
     // §7 post-condition: the typer eliminates `MethodCallLike` (§1.11) and
     // `ApplyTypes` (§1.12) on EVERY node — they never survive into typed output.
     // `assign_type` is the recursion point, so this covers the whole tree.
@@ -270,16 +269,21 @@ pub fn assign_type(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedE
 // dispatch — the ordered `assignType` match (§1.1-1.25)
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, TyperError> {
+fn dispatch(
+    env: &TypeEnv,
+    e: TypedExpr,
+    ctx: &TyperCtx,
+    expected: Option<&SType>,
+) -> Result<TypedExpr, TyperError> {
     use TypedExpr::*;
     match e {
-        // §1.1 Block (E1-lenient) — SigmaTyper.scala:54-66
+        // §1.1 Block — SigmaTyper.scala:54-66
         Block {
             bindings,
             result,
             pos,
             ..
-        } => assign_block(env, bindings, *result, pos, ctx),
+        } => assign_block(env, bindings, *result, pos, ctx, expected),
 
         // §1.2 Tuple — SigmaTyper.scala:68-69
         Tuple { items, pos, .. } => {
@@ -301,6 +305,9 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
         } => assign_concrete_collection(env, items, elem_type, pos, ctx),
 
         // §1.4 Ident — SigmaTyper.scala:75-86
+        Ident { name, pos, .. } if name == "None" && ctx.tree_version >= 3 => {
+            assign_bare_none(pos, expected)
+        }
         Ident { name, pos, .. } => assign_ident(&name, pos, env, ctx),
 
         // §1.5 Select(obj, n, None) — the resolver — SigmaTyper.scala:88-122.
@@ -341,7 +348,15 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             false_branch,
             pos,
             ..
-        } => assign_if(env, *condition, *true_branch, *false_branch, pos, ctx),
+        } => assign_if(
+            env,
+            *condition,
+            *true_branch,
+            *false_branch,
+            pos,
+            ctx,
+            expected,
+        ),
 
         // §1.14 AND/OR — SigmaTyper.scala:451-461
         AND { input, pos, .. } => assign_and_or(env, *input, true, pos, ctx),
@@ -777,32 +792,161 @@ mod tests {
         }
     }
 
-    // ----- happy path — E1 (CRITICAL, SigmaTyper.scala:54-66) -----
+    // ----- happy path -----
 
-    /// E1: `{ val x: Long = 1; x }` ACCEPTS with x:SInt — the Val's explicit
-    /// `Long` annotation is DISCARDED (bind n->b1.tpe; mkVal(n, b1.tpe, b1)).
-    /// Oracle-captured: golden_seed §11.  SigmaTyper.scala:60,62 (v6.0.2).
+    // SigmaTyper.scala:89-94; SType.scala:215-229 (v6.0.6).
     #[test]
-    fn block_val_explicit_annotation_discarded_e1_accepts_x_as_int() {
-        let typed = type_env_res("{ val x: Long = 1; x }", &TypeEnv::new()).expect("E1 accepts");
-        // Structural: the ValNode and the result Ident are :Int (NOT Long).
-        match &typed {
-            TypedExpr::Block {
-                bindings, result, ..
-            } => {
-                assert_eq!(node_tpe(&bindings[0]), &SType::SInt, "ValNode binds x:Int");
-                if let TypedExpr::ValNode { given_type, .. } = &bindings[0] {
-                    assert_eq!(*given_type, SType::SInt, "givenType discarded -> b1.tpe");
-                } else {
-                    panic!("expected ValNode");
-                }
-                assert_eq!(node_tpe(result), &SType::SInt, "result Ident x:Int");
-            }
-            other => panic!("expected Block, got {other:?}"),
+    fn block_val_matching_primitive_annotations_accepts() {
+        for (src, tpe) in [
+            ("{ val x: Int = 1; x }", SType::SInt),
+            ("{ val x: Long = 1L; x }", SType::SLong),
+            ("{ val x: Boolean = true; x }", SType::SBoolean),
+            ("{ val x: String = \"x\"; x }", SType::SString),
+            ("{ val x: Int = { (n: Int) => n }; x(1) }", SType::SInt),
+            (
+                "{ val x: Coll[Long] = Coll(1); x }",
+                SType::SColl(Box::new(SType::SInt)),
+            ),
+        ] {
+            assert_eq!(
+                node_tpe(&type_env_res(src, &tenv(&[])).unwrap()),
+                &tpe,
+                "{src}"
+            );
         }
-        // Byte-exact vs the oracle.
-        assert_eq!(print_typed(&typed), seed_expected("{ val x: Long = 1; x }"));
     }
+
+    // SigmaTyperTest.scala:926-940 (v6.0.6).
+    #[test]
+    fn bare_none_val_ascription_infers_option_method_call() {
+        for (annotation, elem) in [
+            ("Int", SType::SInt),
+            ("Long", SType::SLong),
+            ("Coll[Byte]", SType::SColl(Box::new(SType::SByte))),
+        ] {
+            let src = format!("{{val X: Option[{annotation}] = None; X}}");
+            let typed = type_env_res(&src, &tenv(&[])).unwrap();
+            assert_eq!(node_tpe(&typed), &SType::SOption(Box::new(elem.clone())));
+            let TypedExpr::Block { bindings, .. } = typed else {
+                panic!("expected block")
+            };
+            let TypedExpr::ValNode { body, .. } = &bindings[0] else {
+                panic!("expected val")
+            };
+            let TypedExpr::MethodCall {
+                method,
+                args,
+                type_subst,
+                ..
+            } = body.as_ref()
+            else {
+                panic!("expected method")
+            };
+            assert_eq!(method.owner, "SigmaDslBuilder");
+            assert_eq!(method.name, "none");
+            assert!(args.is_empty());
+            assert_eq!(type_subst, &vec![("T".into(), elem)]);
+        }
+    }
+
+    // SigmaTyperTest.scala:943-957 (v6.0.6).
+    #[test]
+    fn bare_none_if_sibling_infers_option_type() {
+        for (src, elem) in [
+            (
+                "if (SELF.R5[Int].isDefined) None else SELF.R5[Int]",
+                SType::SInt,
+            ),
+            (
+                "if (SELF.R5[Int].isDefined) SELF.R5[Int] else None",
+                SType::SInt,
+            ),
+            ("if (HEIGHT > 0) None else getVar[Long](1)", SType::SLong),
+            (
+                "{ val x: Option[Int] = { if (HEIGHT > 0) None else None }; x }",
+                SType::SInt,
+            ),
+        ] {
+            assert_eq!(
+                node_tpe(&type_env_res(src, &tenv(&[])).unwrap()),
+                &SType::SOption(Box::new(elem)),
+                "{src}"
+            );
+        }
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn block_val_mismatched_primitive_annotation_rejects_at_val() {
+        // golden_seed.txt: tc { val x: Long = 1; x } REJECT 1:7 TyperException.
+        let src = "{ val x: Long = 1; x }";
+        let err = type_err(src);
+        assert_eq!(err.class_tag(), "TyperException");
+        assert_eq!(crate::span::line_col(src, err.pos()), (1, 7));
+        for src in [
+            "{ val x: Boolean = 1; x }",
+            "{ val x: String = 1; x }",
+            "{ val x: Byte = 1; x }",
+            "{ val x: Short = 1; x }",
+            "{ val x: BigInt = 1; x }",
+            "{ val x: Int = 1L; x }",
+        ] {
+            assert_eq!(type_err(src).class_tag(), "TyperException", "{src}");
+        }
+    }
+
+    #[test]
+    fn bare_none_v2_tree_uses_unresolved_identifier_error() {
+        // SigmaTyperTest.scala:928-932,945-950 (v6.0.6).
+        for src in [
+            "{val X: Option[Int] = None; X}",
+            "if (SELF.R5[Int].isDefined) None else SELF.R5[Int]",
+            "None",
+        ] {
+            let ast = parse(src, 2).unwrap();
+            let bound = bind(&ScriptEnv::new(), &ast, NetworkPrefix::Testnet, 2).unwrap();
+            let err = assign_type(&tenv(&[]), bound, &TyperCtx::new(2)).unwrap_err();
+            assert_eq!(err.class_tag(), "TyperException");
+            assert!(err
+                .to_string()
+                .contains("Cannot assign type for variable 'None'"));
+        }
+    }
+
+    #[test]
+    fn bare_none_missing_option_context_rejects_with_hint() {
+        // SigmaTyperTest.scala:974-983 (v6.0.6).
+        for src in [
+            "None",
+            "if (HEIGHT > 0) None else 1",
+            "if (HEIGHT > 0) None else None",
+        ] {
+            assert!(
+                type_err(src)
+                    .to_string()
+                    .contains("Cannot infer the type of `None`"),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_missing_method_reports_selector_position() {
+        // golden_seed.txt and SigmaTyperTest.scala:903-923 (v6.0.6).
+        for (src, col) in [
+            ("true.foo", 6),
+            ("HEIGHT.foo", 8),
+            ("INPUTS.size.nonexistent", 13),
+            ("SELF.R4[Coll[Long]].get.remove(0)", 25),
+        ] {
+            let err = type_err(src);
+            assert_eq!(err.class_tag(), "MethodNotFound", "{src}");
+            assert_eq!(crate::span::line_col(src, err.pos()), (1, col), "{src}");
+        }
+    }
+
+    // ----- oracle parity -----
 
     /// PK passes through unchanged (§1.24 EvaluatedValue).  NOT byte-compared to
     /// golden_seed §10: the printer renders ProveDlog with an M2 hex placeholder
@@ -1122,7 +1266,7 @@ mod tests {
     /// Scala `SByte.downcast` / `SShort.downcast` = `toByteExact` / `toShortExact`:
     /// throw `ArithmeticException` on overflow.  We reject with `TyperError`.
     /// Verdict parity is exact; class-tag differs (ArithmeticException vs TyperError
-    /// — see lib.rs Known M2 deviations).
+    /// — see compiler-design-ledger.md Known M2 deviations).
     #[test]
     fn id_narrowing_overflow_rejects() {
         // getVar[Int](200): 200 > i8::MAX (127) → ArithmeticException (oracle §13).
@@ -1509,7 +1653,7 @@ mod tests {
 
     /// D-T12 residual: an opaque env-lifted `ConstPayload::SigmaProp(String)` (no
     /// real curve bytes in our representation — only a label) stays a NAMED
-    /// reject (documented in the lib.rs deviation ledger) — the still-open half
+    /// reject (documented in the compiler design ledger) — the still-open half
     /// of D-T12, distinct from the now-closed GroupElement/ProveDlog arms above.
     #[test]
     fn mcl_string_const_plus_opaque_sigmaprop_const_rejects_residual() {
@@ -1969,7 +2113,7 @@ mod tests {
         assert!(matches!(is_empty_typed, TypedExpr::LogicalNot { .. }));
         assert_eq!(
             node_pos(&is_empty_typed),
-            1,
+            16,
             "isEmpty's desugared LogicalNot must keep the binder's pos"
         );
     }

@@ -2,13 +2,14 @@
 //!
 //! Algorithm: greedy, sort candidates by ERG value DESC, accumulate until
 //! the target ERG and all required tokens are covered. When the natural
-//! change would fall below `min_change_value`, continue accumulating until
-//! change reaches zero (exact) or >= min_change_value (acceptable change box).
+//! change would fall below `min_change_value`, prefer additional inputs until
+//! change reaches zero or the minimum. If all inputs still leave dust, return
+//! the funded selection for the transaction builder to handle.
 
 use super::{BoxSelector, BoxSummary, SelectionResult, SelectionTarget};
 use ergo_wallet::error::WalletError;
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct DefaultBoxSelector;
 
@@ -18,6 +19,16 @@ impl BoxSelector for DefaultBoxSelector {
         candidates: &[BoxSummary],
         target: &SelectionTarget,
     ) -> Result<SelectionResult, WalletError> {
+        // A summary identifies one spendable box. Check the entire input before
+        // an early funded return can hide repeated or conflicting summaries.
+        let mut unique_ids = BTreeSet::new();
+        for candidate in candidates {
+            if !unique_ids.insert(candidate.box_id) {
+                return Err(WalletError::BoxSelection(
+                    "duplicate candidate box id".into(),
+                ));
+            }
+        }
         // Sort by value DESC (greedy pick largest first — minimises input count).
         let mut sorted: Vec<&BoxSummary> = candidates.iter().collect();
         sorted.sort_by_key(|b| Reverse(b.value));
@@ -28,12 +39,14 @@ impl BoxSelector for DefaultBoxSelector {
 
         for candidate in sorted {
             selected_ids.push(candidate.box_id);
-            total_erg = total_erg.saturating_add(candidate.value);
+            total_erg = total_erg.checked_add(candidate.value).ok_or_else(|| {
+                WalletError::BoxSelection("selected ERG total exceeds u64".into())
+            })?;
             for (token_id, amount) in &candidate.tokens {
-                *total_tokens.entry(*token_id).or_insert(0) = total_tokens
-                    .get(token_id)
-                    .unwrap_or(&0)
-                    .saturating_add(*amount);
+                let total = total_tokens.entry(*token_id).or_insert(0);
+                *total = total.checked_add(*amount).ok_or_else(|| {
+                    WalletError::BoxSelection("selected token total exceeds u64".into())
+                })?;
             }
 
             if is_covered(total_erg, &total_tokens, target) {
@@ -118,4 +131,71 @@ fn compute_change_tokens(
         }
     }
     change
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(id: u8, value: u64, token: u64) -> BoxSummary {
+        BoxSummary {
+            box_id: [id; 32],
+            value,
+            tokens: if token == 0 {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([([7; 32], token)])
+            },
+        }
+    }
+
+    fn target(erg_amount: u64) -> SelectionTarget {
+        SelectionTarget {
+            erg_amount,
+            tokens: BTreeMap::new(),
+            min_change_value: 0,
+        }
+    }
+
+    #[test]
+    fn duplicate_candidate_ids_reject_even_after_an_early_funded_prefix() {
+        for second in [candidate(1, 10, 0), candidate(1, 5, 2)] {
+            let error = DefaultBoxSelector
+                .select(&[candidate(1, 10, 0), second], &target(1))
+                .unwrap_err();
+            assert!(matches!(error, WalletError::BoxSelection(_)));
+            assert!(error.to_string().contains("duplicate candidate"));
+        }
+    }
+
+    #[test]
+    fn selected_erg_and_token_totals_must_be_exactly_representable() {
+        let error = DefaultBoxSelector
+            .select(
+                &[candidate(1, u64::MAX - 1, 0), candidate(2, 2, 0)],
+                &target(u64::MAX),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("ERG total exceeds"));
+
+        let error = DefaultBoxSelector
+            .select(
+                &[candidate(1, 10, u64::MAX - 1), candidate(2, 5, 2)],
+                &target(15),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("token total exceeds"));
+    }
+
+    #[test]
+    fn distinct_candidates_retain_greedy_selection_and_exact_change() {
+        let mut target = target(12);
+        target.tokens.insert([7; 32], 3);
+        let result = DefaultBoxSelector
+            .select(&[candidate(2, 5, 2), candidate(1, 10, 2)], &target)
+            .unwrap();
+        assert_eq!(result.selected_ids, vec![[1; 32], [2; 32]]);
+        assert_eq!(result.change_erg, 3);
+        assert_eq!(result.change_tokens, BTreeMap::from([([7; 32], 1)]));
+    }
 }

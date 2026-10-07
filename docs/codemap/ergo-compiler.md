@@ -1,33 +1,30 @@
 # ergo-compiler
 
 **Purpose:** ErgoScript source → ErgoTree compiler, production-faithful to
-Scala's `sigmastate.lang.SigmaCompiler` (sigma-state 6.0.2). Full pipeline:
+Scala's `sigmastate.lang.SigmaCompiler` against version-pinned fixtures. Full pipeline:
 parse → bind → typecheck → root-coerce (`BoolToSigmaProp`) → emit to
 `ergo_ser` opcode IR → nine-pass graph build → constant segregation → wire
 write → P2S/P2SH addresses, plus `@contract` template compilation
 (`SigmaTemplateCompiler` parity). Explicitly **not a consensus surface**
-(`src/lib.rs:9-11`): a compiler bug yields a wrong tree or address, never a
-fork — but a wrong address strands funds, so correctness is held to the
-oracle-parity bar anyway.
+(`src/lib.rs`): its outputs become inputs to consensus validation. Wrong trees
+or addresses can be unusable, so compiler byte parity and parser acceptance
+are checked separately.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-crypto
 (dev-only: ergo-sigma as a semantic-smoke oracle)
 **Depended on by:** `ergo-api` (the only workspace dependent — `/script/*` and
 the native `/api/v1/script/*` surface)
-**Approx LOC:** ~24,700 production (~40,400 src incl. in-file tests;
-+7,400 integration tests)
 
 ## Start here
-- `src/lib.rs:1` — the crate charter + module map (`:1259`) + public
-  re-exports (`:1300`); the deviation ledger (`D-T*` typer, `D-E*` emit,
-  `D-C*` tree/compile) inside the doc comment is the single source of truth for
-  every known parity gap and its Scala citation.
+- `src/lib.rs` — current public pipeline, module map, re-exports and examples.
+- [`compiler-design-ledger.md`](../compiler-design-ledger.md) — oracle versions,
+  known residuals and closure evidence (`D-T*` typer, `D-E*` emit, `D-C*` tree).
 - `src/tree/mod.rs:60` — `graph_build`, the oracle-pinned nine-pass ordering
   (cast fold → isProven fusion → fold → dead-val prune → v0 gate → lower →
   re-fold → isProven strip → tuple → CSE → re-fold); `compile` at `:318`.
-- `src/parse/mod.rs:83` — `parse` / `parse_type` (`:130`); hand-written
+- `src/parse/mod.rs:83` — `parse` / `parse_type`; hand-written
   scannerless parser mirroring Scala's `SigmaParser`, `MAX_PARSE_DEPTH = 128`
-  (`:74`, deliberately above the wire bound of 110).
+  (deliberately above the wire bound of 110).
 - `src/typed.rs:160` — `TypedExpr`, the typed vocabulary every later phase
   walks; `ConstPayload` at `:74`.
 - `src/emit/mod.rs:153` — `emit` / `emit_with_version` (`:160`), typed AST →
@@ -45,7 +42,8 @@ the native `/api/v1/script/*` surface)
 - `src/stype.rs` — parser-domain `SType` (includes `NoType`/`STypeApply`);
   `is_predef_available` (`:111`) version-gates `SUnsignedBigInt` below v3.
 - `src/parse/` — `mod.rs` (entry points), `cursor.rs` (token cursor),
-  `types.rs` (type grammar), `expr_atoms.rs` (atoms + postfix suffixes),
+  `types.rs` (type grammar), `depth.rs` (constructed-tree limits),
+  `expr_atoms.rs` (atoms + postfix suffixes),
   `operators.rs` (precedence), `block/` (block/val/def/lambda grammar).
 - `src/typer/` — `unify.rs` (unification + numeric ladder), `methods.rs`
   (`SMethod` tables, `SMethodDesc` `:52`), `predef_ir.rs` (`SigmaPredef`
@@ -134,7 +132,8 @@ the native `/api/v1/script/*` surface)
 - `SourceMap` (struct) — IR-node → source-offset map — `src/source_map.rs:80`
 
 ## Invariants & contracts
-- **Oracle-pinned to sigma-state 6.0.2.** Every phase mirrors a cited Scala
+- **Version-pinned references.** Historical 6.0.2 fixtures and selected
+  6.0.6 captures identify their own authority; the pipeline mirrors cited Scala
   source (`sigmastate.lang.SigmaCompiler`); live JVM oracles grade parser
   verdicts + positions (`scripts/jvm_parser_oracle/`), typed s-expressions,
   compiled bytes, and contract templates (`scripts/jvm_typer_oracle/`).
@@ -170,13 +169,19 @@ the native `/api/v1/script/*` surface)
   (3) the activated script version is the evaluator's, not the compiler's
   (`src/tree/mod.rs:245-257`, `src/tree/assemble.rs:100-107`).
 - **Post-write self-check.** After writing `tree_bytes`, `compile` re-reads
-  them under the activated version and rejects with `CompileError::Serializer`
-  if they fail to parse or leave trailing bytes — a P2S address must be
-  spendable by a real deserializer.
+  them using the header-selected type table and an activated rule version,
+  rejecting `CompileError::Serializer` on unreadable or trailing output. The
+  frontend can compile seven v6 type examples into header0 trees that the
+  pinned Scala reader rejects; this local output check deliberately refuses
+  them before address derivation. It is not a whole-spend verification. See
+  `test-vectors/ergoscript/compiled-reader` and ledger D-C6.
 - **Determinism.** `ScriptEnv`, CSE tables, and type substitutions use
   `BTreeMap`/sorted `Vec`, never randomized `HashMap`; CSE identity is decided
   solely by first-build scope, sibling thunks never share, and the
   pair-projection memo is the sole documented bypass of thunk isolation
   (`src/cse/mod.rs:16-100`).
-- **Depth bound.** Parser recursion is capped at `MAX_PARSE_DEPTH = 128`,
-  deliberately above the consensus wire bound of 110.
+- **Depth bound.** Parser expressions, types, discarded patterns and nested
+  type-parameter lists share `MAX_PARSE_DEPTH = 128`. Structural checks also
+  bound trees built by iterative folds before later compiler walks. This is a
+  local policy with representative 512KiB-stack boundary/error-cleanup tests,
+  not a universal platform stack guarantee or a consensus acceptance limit.

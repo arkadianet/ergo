@@ -3,8 +3,8 @@
 # IMPORTANT: this crate is intentionally EXCLUDED from the stable workspace.
 # The [workspace] declaration below makes it a detached workspace so that
 # `cargo clippy --workspace` from the repo root does NOT try to build these
-# targets with the pinned stable 1.95.0 toolchain (libfuzzer-sys requires
-# nightly). See ergo-difftest/fuzz/README.md for how to run fuzz targets.
+# targets with the pinned stable 1.99.0 toolchain (cargo-fuzz sanitizer/coverage instrumentation uses
+# unstable Rust compiler options). See ergo-difftest/fuzz/README.md for how to run fuzz targets.
 [workspace]
 
 [package]
@@ -21,9 +21,10 @@ libfuzzer-sys = "0.4"
 ergo-difftest = { path = ".." }
 
 # ── Fuzz targets ─────────────────────────────────────────────────────────────
-# One target per structured SER surface. The ENTIRE body of each target is a
-# single call to `ergo_difftest::fuzz::fuzz_one("<surface>", data)`. All real
-# logic is in that stable function; the targets are 3-line nightly shims.
+# Twelve thin native shims call stable parent helpers: six codec surfaces via
+# fuzz_one, four production P2P/state-machine helpers via network_fuzz, and two
+# bounded compiler/evaluator helpers via execution_fuzz. Native execution is
+# separate from stable helper tests and independent reference parity.
 
 [[bin]]
 name = "ergo_tree"
@@ -60,3 +61,39 @@ name = "sigma_expr"
 path = "fuzz_targets/sigma_expr.rs"
 test = false
 doc  = false
+
+[[bin]]
+name = "p2p_frame"
+path = "fuzz_targets/p2p_frame.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "p2p_handshake"
+path = "fuzz_targets/p2p_handshake.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "p2p_message"
+path = "fuzz_targets/p2p_message.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "p2p_delivery"
+path = "fuzz_targets/p2p_delivery.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "compiler_source"
+path = "fuzz_targets/compiler_source.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "bounded_evaluator"
+path = "fuzz_targets/bounded_evaluator.rs"
+test = false
+doc = false

@@ -133,7 +133,8 @@ struct OffsetCursor {
 
 /// `POST /api/v1/scan/scans` — register a scan, returning its allocated id.
 #[utoipa::path(
-    post, path = "/api/v1/scan/scans", tag = "scan",
+    post, path = "/api/v1/scan/scans",
+    operation_id = "v1_scan_scans_post", tag = "scan",
     request_body = ScanRegisterRequest,
     responses(
         (status = 201, description = "Registered — `{ scan_id }`", body = serde_json::Value),
@@ -166,7 +167,8 @@ pub async fn register(
 /// `GET /api/v1/scan/scans?limit=&cursor=` — every registered scan, ascending
 /// by `scan_id`, cursor-paginated on that natural key.
 #[utoipa::path(
-    get, path = "/api/v1/scan/scans", tag = "scan",
+    get, path = "/api/v1/scan/scans",
+    operation_id = "v1_scan_scans_get", tag = "scan",
     params(
         ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 500)"),
         ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
@@ -354,7 +356,8 @@ pub async fn unspent(
 /// with this scan id. An unknown/deregistered id is an empty page, not 404
 /// (trait contract). Item = the wallet tx summary + `scan_ids`.
 #[utoipa::path(
-    get, path = "/api/v1/scan/scans/{scan_id}/transactions", tag = "scan",
+    get, path = "/api/v1/scan/scans/{scan_id}/transactions",
+    operation_id = "v1_scan_scans_scan_id_transactions_get", tag = "scan",
     params(
         ("scan_id" = u16, Path, description = "Registered scan id (unknown/deregistered id → empty page)"),
         ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 500)"),

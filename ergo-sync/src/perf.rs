@@ -2,12 +2,12 @@
 //!
 //! Aggregates wall-clock and CPU-time spent in each header-processing
 //! phase. Reset by the node heartbeat (~3s) which formats a `[perf-hdr]`
-//! line. Cheap (a handful of `Instant::now()` calls per header) but
-//! still feature-flagged so a future release build can drop it.
+//! line. Counters are compiled into the current crate; there is no feature
+//! gate around these timing calls.
 //!
 //! Design notes:
 //! - `pow_wall_ns` is wall time spent in Phase 1 (parse + PoW). For the
-//!   batched / orphan paths this is the rayon `par_iter` wall — i.e.
+//!   batched path this is the rayon `par_iter` wall — i.e.
 //!   the time the action loop is blocked, not the sum of per-header
 //!   work. `pow_cpu_ns` carries the per-header sum so we can derive
 //!   parallel efficiency = pow_cpu_ns / (pow_wall_ns * cores).
@@ -15,9 +15,9 @@
 //!   walk + per-header persist if not batched).
 //! - `flush_ns` is the deferred batch flush at the end of
 //!   `batch_validate_headers`.
-//! - Orphan rerun is tracked separately because it is wasted work — the
-//!   same headers re-PoW'd on every drain pass — and we want to see it
-//!   independent of forward-progress headers.
+//! - Orphan retries reuse the cached PoW result and measure finalization
+//!   separately. The orphan PoW counters remain for telemetry compatibility;
+//!   cached non-genesis retries do not add PoW work.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -117,6 +117,7 @@ pub struct BlockPerfCounters {
     pub txs: AtomicU64,
     pub header_load_ns: AtomicU64,
     pub sections_load_ns: AtomicU64,
+    pub proof_ns: AtomicU64,
     pub parent_ctx_ns: AtomicU64,
     pub validate_ns: AtomicU64,
     pub apply_ns: AtomicU64,
@@ -133,6 +134,7 @@ pub struct BlockPerfSnapshot {
     pub txs: u64,
     pub header_load_ns: u64,
     pub sections_load_ns: u64,
+    pub proof_ns: u64,
     pub parent_ctx_ns: u64,
     pub validate_ns: u64,
     pub apply_ns: u64,
@@ -184,6 +186,7 @@ impl BlockPerfCounters {
             txs: self.txs.swap(0, Ordering::Relaxed),
             header_load_ns: self.header_load_ns.swap(0, Ordering::Relaxed),
             sections_load_ns: self.sections_load_ns.swap(0, Ordering::Relaxed),
+            proof_ns: self.proof_ns.swap(0, Ordering::Relaxed),
             parent_ctx_ns: self.parent_ctx_ns.swap(0, Ordering::Relaxed),
             validate_ns: self.validate_ns.swap(0, Ordering::Relaxed),
             apply_ns: self.apply_ns.swap(0, Ordering::Relaxed),

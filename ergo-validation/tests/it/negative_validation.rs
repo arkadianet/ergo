@@ -34,6 +34,7 @@ fn simple_tree() -> ErgoTree {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,
@@ -89,6 +90,79 @@ fn serialize_tx(tx: &Transaction) -> Vec<u8> {
 }
 
 // --- Structural validation tests ---
+
+#[test]
+fn raw_and_parsed_routes_reject_wrong_resolved_box_identity_before_cost() {
+    use ergo_validation::tx::validate_transaction_parsed;
+    let input = make_ergo_box(1_000_000_000, 1);
+    let data = make_ergo_box(1_000_000_000, 2);
+    let wrong = make_ergo_box(1_000_000_000, 3);
+    for wrong_data in [false, true] {
+        let tx = Transaction {
+            inputs: vec![Input {
+                box_id: input.box_id().unwrap(),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![DataInput {
+                box_id: data.box_id().unwrap(),
+            }],
+            output_candidates: vec![make_candidate(1_000_000_000)],
+        };
+        let inputs = vec![if wrong_data {
+            input.clone()
+        } else {
+            wrong.clone()
+        }];
+        let data_inputs = vec![if wrong_data {
+            wrong.clone()
+        } else {
+            data.clone()
+        }];
+        let view = TestUtxo(HashMap::from([
+            (tx.inputs[0].box_id, inputs[0].clone()),
+            (tx.data_inputs[0].box_id, data_inputs[0].clone()),
+        ]));
+        let bytes = serialize_tx(&tx);
+        let ctx = default_ctx();
+        let params = ProtocolParams::mainnet_default();
+        let policy = LocalPolicy::default_policy();
+        for parsed in [false, true] {
+            let mut cost = CostAccumulator::recording_only();
+            let mut cx = ergo_validation::TxValidationCtx {
+                ctx: &ctx,
+                params: &params,
+                cost: &mut cost,
+                last_headers: &[],
+                rules: ergo_validation::TxValidationRules::default(),
+            };
+            let error = if parsed {
+                validate_transaction_parsed(
+                    tx.clone(),
+                    &bytes,
+                    inputs.clone(),
+                    data_inputs.clone(),
+                    false,
+                    &mut cx,
+                )
+                .unwrap_err()
+            } else {
+                validate_transaction(&bytes, &view, &policy, &mut cx).unwrap_err()
+            };
+            if wrong_data {
+                assert!(matches!(
+                    error,
+                    ValidationError::ResolvedDataInputIdMismatch { index: 0, .. }
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    ValidationError::ResolvedInputIdMismatch { index: 0, .. }
+                ));
+            }
+            assert_eq!(cost.total_block_cost(), 0);
+        }
+    }
+}
 
 #[test]
 fn reject_no_inputs() {

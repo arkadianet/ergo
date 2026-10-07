@@ -1,4 +1,5 @@
 //! Oracle: test-vectors/ergo-sigma/verify/cases.json (JVM ErgoInterpreter.verify).
+//! Oracle: test-vectors/ergo-sigma/verify/rent-cases.json (JVM ErgoInterpreter.verify, storage-rent branch).
 
 use ergo_primitives::cost::{CostAccumulator, JitCost};
 use ergo_primitives::reader::{ReadError, VlqReader};
@@ -16,6 +17,31 @@ fn fixtures() -> Vec<Value> {
         "../../../test-vectors/ergo-sigma/verify/cases.json"
     ))
     .expect("JVM verify fixtures")
+}
+
+/// Runs the named `rent-cases.json` case and compares it with the JVM.
+/// A failed `checkExpiredBox` makes the JVM `verify` return
+/// `Success((false,50))`, but `verifyInput` rejects the input before it
+/// adds the 50, so only the verdict is compared for those cases.
+fn assert_rent_case_matches_jvm(name: &str) {
+    let cases: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../test-vectors/ergo-sigma/verify/rent-cases.json"
+    ))
+    .expect("JVM rent fixtures");
+    let case = cases
+        .iter()
+        .find(|case| case["name"] == name)
+        .unwrap_or_else(|| panic!("missing rent case {name}"));
+    let expected = &case["expected"];
+    let (verdict, total) = verify_case(case);
+    assert_eq!(verdict, expected["verdict"], "{name}");
+    if !(verdict == "RejectScript" && expected["rent_block_cost"] == 50) {
+        assert_eq!(
+            total,
+            expected["total_block_cost"].as_u64().unwrap(),
+            "{name}"
+        );
+    }
 }
 
 fn decode<T>(value: &Value, read: fn(&mut VlqReader) -> Result<T, ReadError>) -> T {
@@ -108,6 +134,7 @@ fn verify_case(case: &Value) -> (&'static str, u64) {
     ) {
         Ok(()) => "Accept",
         Err(ValidationError::ProofFailed { .. }) => "RejectScript",
+        Err(ValidationError::CostExceeded { .. }) => "RejectCost",
         Err(error) => panic!("{}: {error}", case["name"]),
     };
     (verdict, cost.total_block_cost())
@@ -145,4 +172,53 @@ fn storage_rent_fallback_block_total_matches_jvm() {
         total,
         case["expected"]["total_block_cost"].as_u64().unwrap()
     );
+}
+
+// ledger: TX-storage-rent
+#[test]
+fn storage_rent_int_index_verifies_script_like_jvm() {
+    // Scala reads var 127 with `asInstanceOf[Short]`, which throws on an
+    // Int, so `recoverWith` verifies the box script: P2PK rejects (403 BC)
+    // and `sigmaProp(true)` accepts (5 BC) where a Short index would take
+    // the 50 BC rent path.
+    assert_rent_case_matches_jvm("rent-int-index-p2pk");
+    assert_rent_case_matches_jvm("rent-int-index-true-box");
+}
+
+// ledger: TX-storage-rent
+#[test]
+fn storage_rent_failed_expired_box_check_rejects_without_script() {
+    // A false `checkExpiredBox` is final: `recoverWith` never runs, so
+    // `sigmaProp(true)` cannot rescue an output one nanoErg below the fee
+    // floor. The at-floor recreate is the positive control; factor 0 with
+    // a script-changing output is the oracle's
+    // `rent_uncovered_fee_bad_output_reject_script`.
+    assert_rent_case_matches_jvm("rent-true-box-below-floor");
+    assert_rent_case_matches_jvm("rent-true-box-at-floor");
+    assert_rent_case_matches_jvm("rent-factor-zero-bad-output");
+}
+
+// ledger: TX-storage-rent
+#[test]
+fn storage_rent_failed_check_at_low_cost_limit_rejects_script() {
+    // Scala `verifyInput` fails `txScriptValidation` before its
+    // `bsBlockTransactionsCost` check and validation is fail-fast, so a
+    // limit below init + 50 BC (17 / 49) must not turn the rejection into
+    // a cost one.
+    assert_rent_case_matches_jvm("rent-true-box-below-floor-low-limit");
+}
+
+// ledger: TX-storage-rent
+#[test]
+fn storage_rent_unreadable_short_index_verifies_script_like_jvm() {
+    // `outputCandidates(idx)` throws for index 1 of one output and for -1,
+    // so `recoverWith` verifies the box script.
+    for name in [
+        "rent-short-index-1-p2pk",
+        "rent-short-index-1-true-box",
+        "rent-short-index-minus-1-p2pk",
+        "rent-short-index-minus-1-true-box",
+    ] {
+        assert_rent_case_matches_jvm(name);
+    }
 }

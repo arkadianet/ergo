@@ -113,11 +113,14 @@ pub(super) fn unix_secs(t: Option<SystemTime>) -> u64 {
         .unwrap_or(0)
 }
 
-pub(super) fn from_unix_secs(secs: u64) -> Option<SystemTime> {
+pub(super) fn from_unix_secs(secs: u64) -> Result<Option<SystemTime>, DecodeError> {
     if secs == 0 {
-        None
+        Ok(None)
     } else {
-        Some(UNIX_EPOCH + Duration::from_secs(secs))
+        UNIX_EPOCH
+            .checked_add(Duration::from_secs(secs))
+            .map(Some)
+            .ok_or(DecodeError)
     }
 }
 
@@ -173,9 +176,9 @@ pub(super) fn decode_persisted_peer(
     if tag != SCHEMA_TAG_PEER {
         return Err(DecodeError);
     }
-    let last_handshake = from_unix_secs(r.read_u64().ok_or(DecodeError)?);
-    let last_seen = from_unix_secs(r.read_u64().ok_or(DecodeError)?);
-    let last_failure = from_unix_secs(r.read_u64().ok_or(DecodeError)?);
+    let last_handshake = from_unix_secs(r.read_u64().ok_or(DecodeError)?)?;
+    let last_seen = from_unix_secs(r.read_u64().ok_or(DecodeError)?)?;
+    let last_failure = from_unix_secs(r.read_u64().ok_or(DecodeError)?)?;
     let consecutive_failures = r.read_u32().ok_or(DecodeError)?;
     let flags = r.read_u8().ok_or(DecodeError)?;
     let agent_version: [u8; 3] = r.read_bytes(3).ok_or(DecodeError)?.try_into().unwrap();
@@ -240,7 +243,9 @@ pub(super) fn decode_ban(ip: IpAddr, bytes: &[u8]) -> Result<BanRecord, DecodeEr
     let permanent_byte = r.read_u8().ok_or(DecodeError)?;
     Ok(BanRecord {
         ip,
-        until: UNIX_EPOCH + Duration::from_secs(until_secs),
+        until: UNIX_EPOCH
+            .checked_add(Duration::from_secs(until_secs))
+            .ok_or(DecodeError)?,
         count,
         permanent: permanent_byte != 0,
     })
@@ -289,5 +294,71 @@ impl<'a> Cursor<'a> {
         let slice = self.buf.get(self.pos..end)?;
         self.pos = end;
         Some(slice)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_decoding_obeys_native_representable_range() {
+        assert_eq!(from_unix_secs(0).unwrap(), None);
+        assert_eq!(
+            from_unix_secs(1).unwrap(),
+            Some(UNIX_EPOCH + Duration::from_secs(1))
+        );
+        let expected = UNIX_EPOCH.checked_add(Duration::from_secs(u64::MAX));
+        let peer = PersistedPeer {
+            addr: "1.2.3.4:9030".parse().unwrap(),
+            last_handshake: None,
+            last_seen: None,
+            last_failure: None,
+            consecutive_failures: 0,
+            origin: PeerOrigin::Gossip,
+            handshaked: false,
+            last_direction: None,
+            agent_name: String::new(),
+            agent_version: [0; 3],
+            node_name: String::new(),
+        };
+        // Each persisted timestamp must fail with DecodeError on a platform
+        // where u64::MAX seconds is unrepresentable, rather than unwinding.
+        for offset in [1, 9, 17] {
+            let mut bytes = encode_persisted_peer(&peer);
+            bytes[offset..offset + 8].copy_from_slice(&u64::MAX.to_be_bytes());
+            let decoded = decode_persisted_peer(peer.addr, &bytes);
+            match expected {
+                None => assert!(decoded.is_err()),
+                Some(time) => {
+                    let decoded = decoded.unwrap();
+                    assert_eq!(
+                        match offset {
+                            1 => decoded.last_handshake,
+                            9 => decoded.last_seen,
+                            _ => decoded.last_failure,
+                        },
+                        Some(time)
+                    );
+                }
+            }
+        }
+        let ban = BanRecord {
+            ip: "1.2.3.4".parse().unwrap(),
+            until: UNIX_EPOCH,
+            count: 1,
+            permanent: false,
+        };
+        let mut bytes = encode_ban(&ban);
+        bytes[1..9].copy_from_slice(&u64::MAX.to_be_bytes());
+        match expected {
+            None => assert!(decode_ban(ban.ip, &bytes).is_err()),
+            Some(time) => assert_eq!(decode_ban(ban.ip, &bytes).unwrap().until, time),
+        }
+        // Zero is the peer's None sentinel but a valid epoch time for bans.
+        assert_eq!(
+            decode_ban(ban.ip, &encode_ban(&ban)).unwrap().until,
+            UNIX_EPOCH
+        );
     }
 }

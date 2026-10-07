@@ -344,7 +344,7 @@ fn cor_normalized(children: Vec<SigmaBoolean>) -> SigmaBoolean {
     match real.len() {
         0 => SigmaBoolean::TrivialProp(false),
         1 => real.into_iter().next().unwrap(),
-        _ => SigmaBoolean::Cor(real),
+        _ => SigmaBoolean::Cor(real.into()),
     }
 }
 
@@ -365,7 +365,7 @@ fn cand_normalized(children: Vec<SigmaBoolean>) -> SigmaBoolean {
     match real.len() {
         0 => SigmaBoolean::TrivialProp(true),
         1 => real.into_iter().next().unwrap(),
-        _ => SigmaBoolean::Cand(real),
+        _ => SigmaBoolean::Cand(real.into()),
     }
 }
 
@@ -428,7 +428,7 @@ fn at_least_reduce(bound: i32, children: Vec<SigmaBoolean>) -> SigmaBoolean {
     }
     SigmaBoolean::Cthreshold {
         k: cur_bound as u16,
-        children: sigmas,
+        children: sigmas.into(),
     }
 }
 
@@ -640,7 +640,7 @@ pub(in crate::evaluator) fn eval_sigma_prop_bytes(
     let val = cx.eval_expr(inner)?;
     // Scala charges PerItem based on number of sigma tree nodes
     let n_nodes = match &val {
-        Value::SigmaProp(sb) => count_sigma_nodes(sb) as u32,
+        Value::SigmaProp(sb) => u32::try_from(count_sigma_nodes(sb)).unwrap_or(u32::MAX),
         _ => 0,
     };
     add_cost_per_item(cx.cost, 0xD0, n_nodes)?;

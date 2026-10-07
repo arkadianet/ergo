@@ -1,0 +1,5 @@
+[[33mhint[0m] ./audit/reports/20261003T085740Z-5d62fd58/shared-evidence/box-reference/AuditBoxReference.scala:2:15
+[[33mhint[0m] "sigma-state is outdated, update to 6.0.7"
+[[33mhint[0m]      sigma-state 6.0.6 -> org.scorexfoundation::sigma-state:6.0.7
+[[33mhint[0m] //> using dep org.scorexfoundation::sigma-state:6.0.6
+[[33mhint[0m]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

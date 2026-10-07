@@ -375,13 +375,19 @@ mod tests {
         (h, *id.as_bytes(), bytes)
     }
 
-    /// Canonical bytes of an empty `BlockTransactions` — valid input for
-    /// `read_block_transactions` (tx count 0), enough to exercise the
-    /// section read + parse + size path.
+    /// A non-empty section using a mainnet transaction to exercise the
+    /// section read + parse + size path (BlockTransactions.scala:42).
     fn tx_section(header_id: [u8; 32]) -> Vec<u8> {
         let bt = BlockTransactions {
             header_id: ModifierId::from_bytes(header_id),
-            transactions: vec![],
+            transactions: vec![{
+                let corpus: serde_json::Value = serde_json::from_str(include_str!(
+                    "../../../../test-vectors/mainnet/transactions_1_10.json"
+                ))
+                .unwrap();
+                let bytes = hex::decode(corpus[0]["bytes"].as_str().unwrap()).unwrap();
+                ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap()
+            }],
         };
         let mut w = VlqWriter::new();
         write_block_transactions(&mut w, &bt).unwrap();
@@ -457,7 +463,7 @@ mod tests {
         assert_eq!(out[2].height, 1);
         assert_eq!(out[0].header_id, hex::encode(id3));
         assert_eq!(out[0].ts_unix_ms, 1_700_000_000_003);
-        assert_eq!(out[0].txs, 0);
+        assert_eq!(out[0].txs, 1);
         // h3 has adProofs → size includes all four sections.
         assert_eq!(
             out[0].size_bytes,

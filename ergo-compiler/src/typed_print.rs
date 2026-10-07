@@ -17,7 +17,7 @@
 //!   N5 — String fields render as `'text'`; numeric scalars as `@n`; SType
 //!        fields as `#TypeTermString`; MethodRef as `%Owner.name`; node
 //!        sequences as `[n1 n2 …]`; primitive arrays as `<@v1 @v2 …>`;
-//!        Option[SValue] as "None" or the unwrapped node; lambda args as
+//!        `Option[SValue]` as "None" or the unwrapped node; lambda args as
 //!        `[name:#Type …]`.
 
 use ergo_crypto::group_element::{decompress_to_affine_hex, strip_leading_zero_hex};
@@ -100,6 +100,13 @@ pub fn to_term_string(t: &SType) -> String {
 ///
 /// Exactly matches the output of `TyperOracle.scala renderNode` for the same
 /// AST. Use the `golden_seed.txt` expected-output strings as the test oracle.
+/// Manual values must satisfy [`ConstPayload`] and [`TypedExpr`] invariants.
+///
+/// # Panics
+///
+/// Panics if a manually constructed GroupElement/ProveDlog constant contains
+/// invalid or identity compressed point bytes that cannot render affine coordinates.
+/// The typecheck/lift pipeline validates these point encodings.
 pub fn print_typed(e: &TypedExpr) -> String {
     let prefix = product_prefix(e);
     let tpe_str = to_term_string(node_tpe(e));

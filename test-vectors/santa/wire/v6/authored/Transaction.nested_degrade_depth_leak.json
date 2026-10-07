@@ -1,0 +1,30 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.nested_degrade_depth_leak",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "nested-degrade-leak-coll99-accept#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-parse-depth",
+      "description" : "Output 0's tree is size-flagged and segregated (header 0x18) and parses: constants [Box, SigmaProp(true)], body placeholder 1. The Box constant's own tree is 0b0ad1efefefefefefefeffd, which degrades at depth 10 as in degraded_tree_depth_leak. Nested inside a tree that parses, the degrade still leaves its 10 levels on the reader: every enclosing frame lowers the level by one from wherever it is. Output 1 R4 = Coll^99[Byte] then takes 10 + 1 + 99 = 110. Round-trip identity.",
+      "bytes_hex" : "0155e925cba0a46aaee2ccbf49d5fa861ec5978b4810d3506e996e1d4e70ee0d980000000002c0843d18390263c0843d0b0ad1efefefefefefefeffd01000032ca6976fbe2b468153b69333fd16ea1110d0b6f39a6f7f89b7e17e35c66353a0008d37301010000c08faedc030008d30100010c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c1a010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010100",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "nested-degrade-leak-coll100-reject#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-parse-depth",
+      "description" : "The same tx with output 1 R4 = Coll^100[Byte]: 111, rejected at parse. An impl that restores the level once the outer tree parses (for instance a forked reader for the sized body that hands back only its own level) round-trips the tx: the over-accept.",
+      "bytes_hex" : "0155e925cba0a46aaee2ccbf49d5fa861ec5978b4810d3506e996e1d4e70ee0d980000000002c0843d18390263c0843d0b0ad1efefefefefefefeffd01000032ca6976fbe2b468153b69333fd16ea1110d0b6f39a6f7f89b7e17e35c66353a0008d37301010000c08faedc030008d30100010c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c1a01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010100",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

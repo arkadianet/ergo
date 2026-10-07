@@ -178,6 +178,42 @@ pub fn write_transaction(w: &mut VlqWriter, tx: &Transaction) -> Result<(), Writ
 
 /// Decode the wire form produced by [`write_transaction`].
 pub fn read_transaction(r: &mut VlqReader) -> Result<Transaction, ReadError> {
+    // A transaction is always a top-level parse, so the nesting budget must
+    // start unconsumed. The base is scoped state restored by the nested box
+    // reader on both its paths; this catches a future path that sets it without
+    // restoring, where the symptom would otherwise be a node that rejects valid
+    // input with a depth error it can never explain.
+    debug_assert_eq!(
+        r.nesting_depth_base(),
+        0,
+        "nesting depth base leaked into a top-level transaction parse"
+    );
+    // The new reader also starts at level 0: levels a degraded tree leaked
+    // in an earlier transaction of the same block do not count here.
+    let saved_leaked = r.leaked_levels();
+    r.set_leaked_levels(0);
+    let result = with_fresh_binding_store(r, read_transaction_parts);
+    r.set_leaked_levels(saved_leaked);
+    result
+}
+
+/// `ErgoTransactionSerializer.parse` wraps every transaction in a new
+/// `SigmaByteReader`, standalone or inside a block section, so each one starts
+/// with an empty `valDefTypeStore`: a binding in an earlier tree or context
+/// extension of the same transaction resolves a later `ValUse`, one from
+/// another transaction does not. The caller's store is restored afterwards.
+pub(crate) fn with_fresh_binding_store<T>(
+    r: &mut VlqReader,
+    read: impl FnOnce(&mut VlqReader) -> Result<T, ReadError>,
+) -> Result<T, ReadError> {
+    let saved = r.val_bindings().cloned();
+    r.set_val_bindings(Some(Default::default()));
+    let result = read(r);
+    r.set_val_bindings(saved);
+    result
+}
+
+fn read_transaction_parts(r: &mut VlqReader) -> Result<Transaction, ReadError> {
     let input_count = r.get_u16()? as usize;
     let mut inputs = Vec::with_capacity(input_count);
     for _ in 0..input_count {
@@ -214,6 +250,10 @@ pub fn write_unsigned_transaction(
 
 /// Decode the wire form produced by [`write_unsigned_transaction`].
 pub fn read_unsigned_transaction(r: &mut VlqReader) -> Result<UnsignedTransaction, ReadError> {
+    with_fresh_binding_store(r, read_unsigned_transaction_parts)
+}
+
+fn read_unsigned_transaction_parts(r: &mut VlqReader) -> Result<UnsignedTransaction, ReadError> {
     let input_count = r.get_u16()? as usize;
     let mut inputs = Vec::with_capacity(input_count);
     for _ in 0..input_count {
@@ -307,6 +347,7 @@ mod tests {
             version: 0,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             // Root must be SSigmaProp: under `has_size`, a non-SigmaProp root
             // (e.g. `Const(SBoolean, true)`) fails Scala's
@@ -336,6 +377,54 @@ mod tests {
             tokens,
             AdditionalRegisters::empty(),
         )
+        .unwrap()
+    }
+
+    /// SANTA's `degraded_tree_depth_leak` tree: size-flagged v3,
+    /// `BoolToSigmaProp(LogicalNot^8(<0xfd>))`. The unknown opcode throws a
+    /// `ValidationException` with 10 levels open, and the tree degrades.
+    const LEAKS_10: &str = "0b0ad1efefefefefefefeffd";
+
+    /// `sigmaProp(true)`, sizeless v0.
+    const TRUE_TREE: &str = "0008d3";
+
+    /// A size-flagged tree of `version` over `body` (under 128 bytes).
+    fn sized_tree(version: u8, body: &str) -> String {
+        format!("{:02x}{:02x}{body}", 0x08 | version, body.len() / 2)
+    }
+
+    /// A `Coll^n[Byte]` register constant, one element per level and the
+    /// innermost collection empty: reading it takes `1 + n` levels.
+    fn nested_byte_coll(n: usize) -> String {
+        format!("{}1a{}00", "0c".repeat(n - 2), "01".repeat(n - 1))
+    }
+
+    /// An `SBox` constant: an output (txid 0, index 0) under `tree`.
+    fn box_constant(tree: &str) -> String {
+        format!("63c0843d{tree}010000{}00", "00".repeat(32))
+    }
+
+    fn output(tree: &str, registers: &[String]) -> String {
+        format!(
+            "c0843d{tree}0100{:02x}{}",
+            registers.len(),
+            registers.concat()
+        )
+    }
+
+    /// One input (SANTA's box id, empty proof) whose context extension holds
+    /// `extension`, then the outputs.
+    fn transaction_hex(extension: &[String], outputs: &[String]) -> Vec<u8> {
+        let values: String = (0..)
+            .zip(extension)
+            .map(|(id, value): (u8, _)| format!("{id:02x}{value}"))
+            .collect();
+        hex::decode(format!(
+            "0155e925cba0a46aaee2ccbf49d5fa861ec5978b4810d3506e996e1d4e70ee0d9800{:02x}{values}0000{:02x}{}",
+            extension.len(),
+            outputs.len(),
+            outputs.concat()
+        ))
         .unwrap()
     }
 
@@ -694,6 +783,64 @@ mod tests {
 
     // ----- oracle parity -----
 
+    /// Scala writes a transaction's outputs back from their parsed trees and
+    /// registers, so its id commits to the canonical bytes even when the wire
+    /// carries a non-canonical form the reference accepts. Vectors from SANTA
+    /// `Transaction.tree_count_wrap` #0-#2 and `Transaction.tree_parse_acceptance`
+    /// #2/#3 (https://github.com/mwaddip/santa, MIT), plus a TrueLeaf register;
+    /// every expected value is our own sigma-state 6.0.6 JVM run
+    /// (`SantaWireOracle.scala`, and `ErgoTransactionSerializer` for the id).
+    #[test]
+    fn transaction_with_non_canonical_outputs_writes_and_hashes_the_canonical_form() {
+        let prefix =
+            "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d";
+        for (name, output, canonical) in [
+            (
+                "constants count 2^32-1",
+                "1807ffffffff0f08d3010000",
+                "18030008d3010000",
+            ),
+            (
+                "constants count 2^31",
+                "1807808080800808d3010000",
+                "18030008d3010000",
+            ),
+            (
+                "unsized count 2^32-1",
+                "10ffffffff0f08d3010000",
+                "100008d3010000",
+            ),
+            ("TrueLeaf body", "00d17f010000", "00d10101010000"),
+            ("FalseLeaf body", "00d180010000", "00d10100010000"),
+            (
+                "EQ(TrueLeaf, FalseLeaf)",
+                "00d1937f80010000",
+                "00d1938501010000",
+            ),
+            ("TrueLeaf R4", "0008d30100017f", "0008d30100010101"),
+        ] {
+            let bytes = hex::decode(format!("{prefix}{output}")).unwrap();
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
+            let tx = read_transaction(&mut r).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert!(r.is_empty(), "{name}");
+            let mut w = VlqWriter::new();
+            write_transaction(&mut w, &tx).unwrap();
+            assert_eq!(
+                hex::encode(w.result()),
+                format!("{prefix}{canonical}"),
+                "{name}"
+            );
+        }
+        // The TrueLeaf-register transaction's id, as the JVM computes it.
+        let bytes = hex::decode(format!("{prefix}0008d30100017f")).unwrap();
+        let tx =
+            read_transaction(&mut VlqReader::new(&bytes).with_activated_script_version(3)).unwrap();
+        assert_eq!(
+            hex::encode(transaction_id(&tx).unwrap().as_bytes()),
+            "9aa2fdeccef1976c7b7dd004a38a51d74429fd9f47486121c8b204b0d6f5650c"
+        );
+    }
+
     /// Scala oracle vector: a 1-in / 1-out transaction whose input's
     /// ContextExtension carries a `Tuple` node (`0x86`) at var 1 and a
     /// `ConcreteCollection` (`0x83`) at var 2. `ErgoTransactionSerializer`
@@ -970,6 +1117,129 @@ mod tests {
                 "output {idx}: box_id mismatch\n  serialized box bytes: {}",
                 hex::encode(&box_bytes),
             );
+        }
+    }
+
+    /// Scala's reader level (`MaxTreeDepth` = 110) goes up on entering a
+    /// value, a data value or a `SigmaBoolean` and down only when it returns.
+    /// A size-delimited tree that degrades keeps every level open at the
+    /// throw for the rest of the transaction's reader. Each case puts
+    /// `Coll^n[Byte]` (`1 + n` levels) in a later register, at the boundary.
+    /// JVM (`ErgoSerdeOracle.scala`, sigma-state 6.0.6, `transaction@3`): the
+    /// accepted twin ACCEPT, the rejected one REJECT
+    /// DeserializeCallDepthExceeded.
+    ///
+    /// - degrades in one of its own outputs' trees: after an unknown opcode
+    ///   (10 levels), an unresolvable method (`BoolToSigmaProp`, 8 `LogicalNot`
+    ///   and the `MethodCall` itself: 10; its receiver and argument returned),
+    ///   or a constant of type `Int => Int`, which has no data serializer
+    ///   (`CheckSerializableTypeCode`, rule 1009: `BoolToSigmaProp`, 7
+    ///   `LogicalNot`, the constant's value and data frames: 10);
+    /// - a pre-v3 tree whose `Option` constant Scala refuses before reading
+    ///   it (`CheckSerializableTypeCode`, rule 1009: `BoolToSigmaProp`, 7
+    ///   `LogicalNot`, the constant's value and data frames: 10), also when
+    ///   the option holds a box whose own tree would leak 10 more;
+    /// - a tree wrapped only for its non-`SigmaProp` root has returned every
+    ///   level (0: 109 accepts);
+    /// - two degraded outputs add up (20: 89 accepts);
+    /// - the degraded box's own registers count it too;
+    /// - so does a tree degrading inside an `SBox` register constant or
+    ///   context-extension value: its box's frames return, the tree's 10 stay.
+    #[test]
+    fn degraded_tree_leaves_its_open_levels_on_the_transaction_reader() {
+        let method = sized_tree(3, &format!("d1{}dc01017f017f", "ef".repeat(8)));
+        let func = sized_tree(3, &format!("d1{}7001040400", "ef".repeat(7)));
+        let root = sized_tree(3, &format!("{}7f", "ef".repeat(9)));
+        let option = sized_tree(2, &format!("d1{}28", "ef".repeat(7)));
+        // `Some(<box whose tree leaks 10>)`: its content is never read.
+        let option_box = sized_tree(
+            2,
+            &format!("d1{}246301{}", "ef".repeat(7), &box_constant(LEAKS_10)[2..]),
+        );
+        let reg = |n| vec![nested_byte_coll(n)];
+        let mut cases = Vec::new();
+        for (n, accept) in [(99, true), (100, false)] {
+            let later = output(TRUE_TREE, &reg(n));
+            cases.extend([
+                (
+                    "opcode",
+                    transaction_hex(&[], &[output(LEAKS_10, &[]), later.clone()]),
+                    accept,
+                ),
+                (
+                    "method",
+                    transaction_hex(&[], &[output(&method, &[]), later.clone()]),
+                    accept,
+                ),
+                (
+                    "function",
+                    transaction_hex(&[], &[output(&func, &[]), later.clone()]),
+                    accept,
+                ),
+                (
+                    "same box",
+                    transaction_hex(&[], &[output(LEAKS_10, &reg(n))]),
+                    accept,
+                ),
+                (
+                    "register box",
+                    transaction_hex(
+                        &[],
+                        &[output(TRUE_TREE, &[box_constant(LEAKS_10)]), later.clone()],
+                    ),
+                    accept,
+                ),
+                (
+                    "extension box",
+                    transaction_hex(&[box_constant(LEAKS_10)], &[later]),
+                    accept,
+                ),
+            ]);
+        }
+        for (n, accept) in [(99, true), (100, false)] {
+            let later = output(TRUE_TREE, &reg(n));
+            cases.push((
+                "option",
+                transaction_hex(&[], &[output(&option, &[]), later.clone()]),
+                accept,
+            ));
+            cases.push((
+                "option box",
+                transaction_hex(&[], &[output(&option_box, &[]), later]),
+                accept,
+            ));
+        }
+        for (n, accept) in [(109, true), (110, false)] {
+            let later = output(TRUE_TREE, &reg(n));
+            cases.push((
+                "root",
+                transaction_hex(&[], &[output(&root, &[]), later]),
+                accept,
+            ));
+        }
+        for (n, accept) in [(89, true), (90, false)] {
+            let outputs = [
+                output(LEAKS_10, &[]),
+                output(LEAKS_10, &[]),
+                output(TRUE_TREE, &reg(n)),
+            ];
+            cases.push(("two trees", transaction_hex(&[], &outputs), accept));
+        }
+        for (name, bytes, accept) in cases {
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
+            let result = read_transaction(&mut r);
+            if accept {
+                let tx = result.unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert!(r.is_empty(), "{name}");
+                let mut w = VlqWriter::new();
+                write_transaction(&mut w, &tx).unwrap();
+                assert_eq!(w.result(), bytes, "{name}: round trip");
+            } else {
+                assert!(
+                    matches!(result, Err(ReadError::DepthLimitExceeded { .. })),
+                    "{name}: {result:?}"
+                );
+            }
         }
     }
 }

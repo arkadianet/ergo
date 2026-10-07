@@ -1,4 +1,4 @@
-//! Webhook data model: the durable-ish subscription + delivery records, their
+//! Webhook data model: the durable subscription + delivery records, their
 //! wire DTOs, the HMAC-SHA256 signing recipe, and the SSRF URL policy.
 //!
 //! A [`Subscription`] is the operator-registered target: a URL, the set of
@@ -22,7 +22,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use utoipa::ToSchema;
 
 use hmac::{Mac, SimpleHmac};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
 
@@ -32,7 +32,7 @@ use crate::v1::routes::dto::unix_ms_to_iso;
 pub const SIGNATURE_PREFIX: &str = "sha256=";
 
 /// Live delivery-health of a subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookHealth {
     /// Last delivery succeeded (or none attempted yet).
@@ -44,7 +44,7 @@ pub enum WebhookHealth {
 }
 
 /// Status of one delivery attempt-group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryStatus {
     /// Enqueued, not yet attempted.
@@ -65,16 +65,15 @@ impl DeliveryStatus {
 }
 
 /// The reason a subscription was auto-disabled. `None` while active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoDisabledReason {
     /// `consecutive_failures` crossed `MAX_CONSECUTIVE_FAILURES`.
     MaxConsecutiveFailures,
 }
 
-/// An operator-registered webhook subscription (in-memory; durable
-/// persistence is DEFERRED — see the module docs on `super`).
-#[derive(Debug, Clone)]
+/// An operator-registered webhook subscription, including persisted signing and retry state.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
     /// Server-assigned stable id (`wh_<hex>`).
     pub webhook_id: String,
@@ -84,7 +83,8 @@ pub struct Subscription {
     /// event's routes intersect this set.
     pub channels: Vec<String>,
     /// The HMAC signing secret. `None` = unsigned deliveries (allowed, but the
-    /// signature header is then omitted). Never serialized after creation.
+    /// signature header is then omitted). Persisted privately; omitted from public DTOs
+    /// after the creation response.
     pub secret: Option<String>,
     /// `false` when paused (by the operator) or auto-disabled.
     pub active: bool,
@@ -102,6 +102,15 @@ pub struct Subscription {
     pub last_delivery_at_unix_ms: Option<u64>,
     /// Set when `active` was flipped off automatically.
     pub auto_disabled_reason: Option<AutoDisabledReason>,
+}
+
+impl std::fmt::Debug for Subscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Public DTOs expose only whether a secret is set, never its value.
+        f.debug_struct("Subscription")
+            .field("public", &self.to_dto())
+            .finish()
+    }
 }
 
 impl Subscription {
@@ -140,7 +149,7 @@ impl Subscription {
 
     /// The registration/rotation response DTO: the public DTO **plus** the
     /// secret, echoed exactly once. Callers use this ONLY on the
-    /// create/rotate path and never persist the returned value server-side.
+    /// create/rotate path. Durable storage serializes the private subscription directly.
     pub fn to_dto_with_secret(&self) -> serde_json::Value {
         let mut v = self.to_dto();
         if let (Some(obj), Some(secret)) = (v.as_object_mut(), self.secret.as_ref()) {
@@ -151,7 +160,7 @@ impl Subscription {
 }
 
 /// One delivery attempt-group for one matched (webhook, event) pair.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delivery {
     /// Stable id across retries (`dl_<hex>`); the consumer dedupe key.
     pub delivery_id: String,
@@ -162,7 +171,7 @@ pub struct Delivery {
     /// The channel key this delivery fired on (the first matched route).
     pub channel: String,
     /// The event-kind token (`block_applied`, `box_spent`, …).
-    pub event_kind: &'static str,
+    pub event_kind: String,
     /// The rendered JSON body (stable across retries).
     pub body: String,
     /// Wall-clock of the source event, unix ms (signed into the payload).
@@ -221,8 +230,8 @@ pub struct UrlPolicy {
     /// Require the `https` scheme (reject `http` with `insecure_url`). Default
     /// `true`. An operator may allow `http` for loopback/dev targets.
     pub require_https: bool,
-    /// Allow loopback targets (`127.0.0.0/8`, `::1`, `localhost`). Default
-    /// `false`.
+    /// Allow local-host targets: loopback (`127.0.0.0/8`, `::1`, `localhost`),
+    /// unspecified addresses and IPv4 `0.0.0.0/8`. Default `false`.
     pub allow_loopback: bool,
     /// Allow RFC1918 / ULA / link-local private targets. Default `false`.
     pub allow_private: bool,
@@ -252,34 +261,12 @@ pub enum UrlReject {
     ForbiddenTarget,
 }
 
-/// Split a URL into `(scheme, authority, has_userinfo)` without pulling in a
-/// URL crate. Authority is everything between `://` and the first `/`, `?`,
-/// or `#`. Returns `None` for anything that is not `scheme://…`.
-fn split_url(url: &str) -> Option<(&str, &str, bool)> {
-    let (scheme, rest) = url.split_once("://")?;
-    if scheme.is_empty() {
-        return None;
-    }
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .filter(|a| !a.is_empty())?;
-    let has_userinfo = authority.contains('@');
-    Some((scheme, authority, has_userinfo))
-}
-
-/// Extract the bare host from an authority (`host`, `host:port`,
-/// `[ipv6]`, `[ipv6]:port`). Userinfo must already be stripped by the caller.
-fn host_of(authority: &str) -> &str {
-    if let Some(rest) = authority.strip_prefix('[') {
-        // `[ipv6]` or `[ipv6]:port`
-        return rest.split(']').next().unwrap_or(rest);
-    }
-    authority.split(':').next().unwrap_or(authority)
-}
-
 fn ipv4_is_forbidden(ip: Ipv4Addr) -> bool {
-    ip.is_loopback()
+    ip.octets()[0] == 0
+        || ip.octets()[0] >= 240
+        || ip.is_documentation()
+        || (ip.octets()[0] == 198 && (18..=19).contains(&ip.octets()[1]))
+        || ip.is_loopback()
         || ip.is_private()
         || ip.is_link_local()
         || ip.is_unspecified()
@@ -293,6 +280,9 @@ fn ipv6_is_forbidden(ip: Ipv6Addr) -> bool {
     ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
+        || (ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8)
+        // fec0::/10 deprecated site-local
+        || (ip.segments()[0] & 0xffc0) == 0xfec0
         // fc00::/7 unique-local
         || (ip.segments()[0] & 0xfe00) == 0xfc00
         // fe80::/10 link-local
@@ -304,59 +294,61 @@ fn ipv6_is_forbidden(ip: Ipv6Addr) -> bool {
 fn ip_is_forbidden(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => ipv4_is_forbidden(v4),
-        IpAddr::V6(v6) => ipv6_is_forbidden(v6),
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map_or_else(|| ipv6_is_forbidden(v6), ipv4_is_forbidden),
     }
 }
 
-/// Validate a registration URL against the SSRF guard policy.
-///
-/// **Scope + honest limitation:** this validates the URL's *literal* host. A
-/// literal private/loopback IP or `localhost` is rejected; a hostname that
-/// *resolves* to a private IP (DNS-rebinding) is NOT caught here — the real
-/// network sink, when it lands, must re-check the resolved socket address
-/// before connecting. Documented so the guard is not mistaken for complete.
+/// Check both literal URLs and resolved socket destinations against one policy.
+/// IPv4-mapped IPv6 addresses use the embedded IPv4 address's policy.
+/// Multicast and IPv4 broadcast destinations are always denied.
+pub(crate) fn address_allowed(ip: IpAddr, policy: &UrlPolicy) -> bool {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        _ => ip,
+    };
+    if ip.is_multicast() || matches!(ip, IpAddr::V4(v4) if v4.is_broadcast()) {
+        return false;
+    }
+    let local_host = ip.is_loopback()
+        || ip.is_unspecified()
+        || matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 0);
+    if local_host {
+        policy.allow_loopback
+    } else {
+        !ip_is_forbidden(ip) || policy.allow_private
+    }
+}
+
+/// Validate the canonical URL that the HTTP client will use. The delivery
+/// resolver separately checks every resolved address before connecting.
 pub fn validate_url(url: &str, policy: &UrlPolicy) -> Result<(), UrlReject> {
-    let (scheme, authority, has_userinfo) = split_url(url).ok_or(UrlReject::Malformed)?;
-    if has_userinfo {
-        // `http://user:pass@host` — an SSRF/confusion vector; reject outright.
+    let parsed = reqwest::Url::parse(url).map_err(|_| UrlReject::Malformed)?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(UrlReject::ForbiddenTarget);
     }
-    let scheme = scheme.to_ascii_lowercase();
-    let is_http = match scheme.as_str() {
+    let is_http = match parsed.scheme() {
         "https" => false,
         "http" => true,
         _ => return Err(UrlReject::Malformed),
     };
-
-    let host = host_of(authority);
-    if host.is_empty() {
-        return Err(UrlReject::Malformed);
-    }
-
-    // Plaintext HTTP is only ever excused for loopback dev targets — the
-    // loopback opt-in must not waive `require_https` for public hosts.
-    let loopback_host = host.eq_ignore_ascii_case("localhost")
-        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
-    if is_http && policy.require_https && !(loopback_host && policy.allow_loopback) {
+    let host = parsed.host_str().ok_or(UrlReject::Malformed)?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let ip = host.parse::<IpAddr>().ok();
+    let localhost = host.trim_end_matches('.').eq_ignore_ascii_case("localhost");
+    let loopback = localhost
+        || ip.is_some_and(|ip| match ip {
+            IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map_or(ip.is_loopback(), |v4| v4.is_loopback()),
+            _ => ip.is_loopback(),
+        });
+    if is_http && policy.require_https && !(loopback && policy.allow_loopback) {
         return Err(UrlReject::Insecure);
     }
-
-    // Literal-host SSRF checks.
-    if host.eq_ignore_ascii_case("localhost") {
-        return if policy.allow_loopback {
-            Ok(())
-        } else {
-            Err(UrlReject::ForbiddenTarget)
-        };
-    }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if ip_is_forbidden(ip) {
-            let allowed = (ip.is_loopback() && policy.allow_loopback)
-                || (!ip.is_loopback() && policy.allow_private);
-            if !allowed {
-                return Err(UrlReject::ForbiddenTarget);
-            }
-        }
+    if (localhost && !policy.allow_loopback) || ip.is_some_and(|ip| !address_allowed(ip, policy)) {
+        return Err(UrlReject::ForbiddenTarget);
     }
     Ok(())
 }
@@ -460,6 +452,90 @@ mod tests {
     // ----- SSRF url policy -----
 
     #[test]
+    fn address_policy_permission_matrix() {
+        // Columns: neither opt-in, private only, loopback only, both opt-ins.
+        let cases = [
+            ("127.0.0.1", [false, false, true, true]),
+            ("::1", [false, false, true, true]),
+            ("0.0.0.0", [false, false, true, true]),
+            ("0.1.2.3", [false, false, true, true]),
+            ("0.255.255.255", [false, false, true, true]),
+            ("::", [false, false, true, true]),
+            ("::ffff:127.0.0.1", [false, false, true, true]),
+            ("::ffff:0.0.0.0", [false, false, true, true]),
+            ("::ffff:0.1.2.3", [false, false, true, true]),
+            ("10.0.0.1", [false, true, false, true]),
+            ("172.16.0.1", [false, true, false, true]),
+            ("192.168.0.1", [false, true, false, true]),
+            ("169.254.1.1", [false, true, false, true]),
+            ("100.64.0.1", [false, true, false, true]),
+            ("192.0.2.1", [false, true, false, true]),
+            ("198.18.0.1", [false, true, false, true]),
+            ("240.0.0.1", [false, true, false, true]),
+            ("fc00::1", [false, true, false, true]),
+            ("fe80::1", [false, true, false, true]),
+            ("fec0::1", [false, true, false, true]),
+            ("2001:db8::1", [false, true, false, true]),
+            ("::ffff:10.0.0.1", [false, true, false, true]),
+            ("8.8.8.8", [true, true, true, true]),
+            ("2001:4860:4860::8888", [true, true, true, true]),
+            ("::ffff:8.8.8.8", [true, true, true, true]),
+            ("224.0.0.1", [false, false, false, false]),
+            ("239.255.255.255", [false, false, false, false]),
+            ("255.255.255.255", [false, false, false, false]),
+            ("ff02::1", [false, false, false, false]),
+            ("::ffff:224.0.0.1", [false, false, false, false]),
+            ("::ffff:255.255.255.255", [false, false, false, false]),
+        ];
+        for require_https in [false, true] {
+            for (column, (allow_loopback, allow_private)) in
+                [(false, false), (false, true), (true, false), (true, true)]
+                    .into_iter()
+                    .enumerate()
+            {
+                let policy = UrlPolicy {
+                    require_https,
+                    allow_loopback,
+                    allow_private,
+                };
+                for (address, expected) in cases {
+                    let ip = address.parse::<IpAddr>().unwrap();
+                    assert_eq!(
+                        address_allowed(ip, &policy),
+                        expected[column],
+                        "{address}: {policy:?}"
+                    );
+                    let url = format!("https://{}/h", std::net::SocketAddr::new(ip, 443));
+                    let result = if expected[column] {
+                        Ok(())
+                    } else {
+                        Err(UrlReject::ForbiddenTarget)
+                    };
+                    assert_eq!(validate_url(&url, &policy), result, "{url}: {policy:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_and_mapped_private_hosts_are_rejected() {
+        for url in [
+            "https://2130706433/h",
+            "https://0x7f000001/h",
+            "https://127.1/h",
+            "https://[::ffff:127.0.0.1]/h",
+            "https://[::ffff:10.0.0.1]/h",
+            "https://localhost./h",
+        ] {
+            assert_eq!(
+                validate_url(url, &UrlPolicy::default()),
+                Err(UrlReject::ForbiddenTarget),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
     fn url_https_public_is_accepted() {
         assert!(validate_url("https://dapp.example/hook", &UrlPolicy::default()).is_ok());
         assert!(validate_url("https://93.184.216.34/hook", &UrlPolicy::default()).is_ok());
@@ -557,7 +633,7 @@ mod tests {
             webhook_id: "wh_1".into(),
             event_seq: 42,
             channel: "blocks".into(),
-            event_kind: "block_applied",
+            event_kind: "block_applied".into(),
             body: "{}".into(),
             event_unix_ms: 1,
             status: DeliveryStatus::Retrying,

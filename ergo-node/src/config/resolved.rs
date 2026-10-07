@@ -95,6 +95,26 @@ impl std::str::FromStr for WalletMode {
     }
 }
 
+/// Independent redb page-cache budgets. These exclude the AVL arena, dirty
+/// nodes, queued jobs and the mining prover; they do not bound process RSS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RedbCacheBudgets {
+    pub state: usize,
+    pub indexer: usize,
+    pub peers: usize,
+}
+
+impl Default for RedbCacheBudgets {
+    fn default() -> Self {
+        let bytes = ergo_state::DEFAULT_REDB_CACHE_BYTES;
+        Self {
+            state: bytes,
+            indexer: bytes,
+            peers: bytes,
+        }
+    }
+}
+
 // ---- NodeConfig ----
 
 #[derive(Debug)]
@@ -175,8 +195,9 @@ pub struct NodeConfig {
     /// Global SyncInfo broadcast cadence once stable (headers caught up).
     /// Default [`ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE`] (15 s).
     pub sync_interval_stable: std::time::Duration,
-    /// redb + AVL arena page cache, in bytes. None → use store default.
+    /// AVL arena clean-node LRU budget (separate from redb caches), in bytes. None → use store default.
     pub cache_bytes: Option<usize>,
+    pub redb_cache_budgets: RedbCacheBudgets,
     /// Script-validation checkpoint: blocks at or below this height skip
     /// per-input ErgoScript evaluation. `None` → fully validate every block.
     /// `Some((h, id))` → skip below `h`, assert observed header_id at `h`
@@ -191,21 +212,20 @@ pub struct NodeConfig {
     /// Sourced from `[chain] checkpoint`; there is deliberately no network
     /// default, so an anchored node is always an operator decision.
     pub header_checkpoint: Option<ergo_sync::header_proc::HeaderCheckpoint>,
-    /// Genesis header id (32 bytes) used for NiPoPoW R5 enforcement.
-    /// `Some(id)` → verifier rejects proofs whose first header id
-    /// does not match. `None` → open verification (development only).
-    /// Resolved from `[chain] genesis_id` config override or the
-    /// network's baked-in default; an explicit empty string in TOML
-    /// disables the check.
+    /// Genesis header id (32 bytes) used for ordinary header validation and
+    /// NiPoPoW R5 enforcement. `Some(id)` → a height-1 header whose id does
+    /// not match is rejected. `None` → open verification (development only).
+    /// Resolved from `[chain] genesis_id` config override or the network's
+    /// baked-in default; an explicit empty string in TOML disables the check.
     pub genesis_id: Option<[u8; 32]>,
     /// Operator HTTP API bind address. `None` disables the API server.
     /// Default: `127.0.0.1:9099`.
     pub api_bind: Option<SocketAddr>,
+    /// Optional local IP databases and background reverse DNS for peer details.
+    pub peer_details: crate::peer_details::PeerLookupConfig,
     /// `[api.security].api_key_hash` — lowercase Base16 (hex) of the
-    /// Blake2b-256 of the operator's secret API key. Always required
-    /// when the API is enabled (`api_bind = Some(_)`), mirroring the
-    /// Scala node's `ErgoApp.scala:40-43`
-    /// `require(apiKeyHash.isDefined, "API key hash must be set")`.
+    /// Blake2b-256 of the operator's secret API key. Optional: absence
+    /// keeps public routes available and privileged routes closed.
     /// Validated at load: 64 chars, lowercase hex only. Used by
     /// `ergo_api::auth::ApiSecurity` to gate `/wallet/*` and
     /// `/node/shutdown`.
@@ -219,12 +239,18 @@ pub struct NodeConfig {
     /// may include a port (`"example.com:9099"`) to pin it, or omit one
     /// to match any port.
     pub api_allowed_hosts: Vec<String>,
+    /// `[api] local_reverse_proxy` — withdraw loopback trust when a reverse
+    /// proxy terminates on loopback. Default `false`.
+    pub api_local_reverse_proxy: bool,
+    /// Native script authentication and execution cost policy.
+    pub api_script: ergo_api::v1::ScriptConfig,
     /// Devnet-only POST /blocks opt-in; defaults to false.
     pub allow_direct_block_submit: bool,
     /// Private devnet genesis cost cap; validated at configuration load.
     pub devnet_max_block_cost: Option<u32>,
     /// Resolved mempool configuration. All fields populated from `[mempool]`
-    /// section + CLI overrides. Defaults match `MempoolConfig::default()`.
+    /// section + CLI overrides. Defaults match `MempoolConfig::default()`
+    /// except `reject_storage_rent_txs`, which defaults to true on mainnet.
     pub mempool_config: MempoolConfig,
     /// Mempool sort policy string: "cost" | "size" | "min". Validated at
     /// load time — `from_config(sort_policy)` will always succeed.

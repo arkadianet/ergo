@@ -70,8 +70,9 @@ impl SecretRegistry {
     /// `tracked` maps `derivation_path_index → (pubkey, derivation_path_components)`.
     /// Each entry's leaf secret is derived and cached for O(log n) lookup.
     ///
-    /// Returns `Err(WalletError::...)` only if derivation fails for a path
-    /// (e.g., an invalid hardened path component).
+    /// Returns `Err(WalletError::...)` if derivation fails for a path (e.g.,
+    /// an invalid hardened path component) or if a derived secret does not
+    /// control its stored pubkey ([`WalletError::TrackedKeyMismatch`]).
     pub fn from_master_key(
         master: &UnlockedMaster,
         tracked: &BTreeMap<u64, ([u8; 33], Vec<u32>)>,
@@ -79,7 +80,7 @@ impl SecretRegistry {
         let mut dlog_secrets = BTreeMap::new();
         for (pubkey, derivation_path_components) in tracked.values() {
             let path = DerivationPath::from_components(derivation_path_components.clone());
-            let scalar = master.derive_scalar_at_path(&path)?;
+            let scalar = master.derive_scalar_for_pubkey(&path, pubkey)?;
             dlog_secrets.insert(*pubkey, Zeroizing::new(scalar));
         }
         Ok(Self {

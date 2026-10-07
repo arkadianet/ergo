@@ -67,13 +67,17 @@ pub(crate) fn subst_constants_versioned(
     let has_size = header & 0x08 != 0;
     let constant_segregation = header & 0x10 != 0;
     if has_size {
-        // Original declared size; recomputed on output for v3+ trees and
-        // dropped pre-v3 (bug-for-bug with Scala's pre-v6 substituteConstants).
-        r.get_u32_exact().map_err(parse_err)?;
+        // Original declared size, read like Scala's `deserializeHeaderAndSize`
+        // (`getUInt().toInt`): anything up to u32::MAX parses, and the value is
+        // never used. It is recomputed on output for v3+ trees and dropped
+        // pre-v3 (bug-for-bug with Scala's pre-v6 substituteConstants).
+        r.get_uint_to_i32().map_err(parse_err)?;
     }
     let mut constants: Vec<(SigmaType, SigmaValue)> = Vec::new();
     if constant_segregation {
-        let n = r.get_u32_exact().map_err(parse_err)? as usize;
+        // Scala `deserializeConstants` reads the count as `getUInt().toInt`
+        // and treats a count that wraps negative as no constants.
+        let n = r.get_uint_to_i32().map_err(parse_err)?.max(0) as usize;
         for _ in 0..n {
             let (tpe, val) = read_constant(&mut r).map_err(parse_err)?;
             // Scala deserializes the constants under the executing

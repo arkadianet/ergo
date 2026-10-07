@@ -13,10 +13,10 @@ pub(super) fn determinable_root_type(tree: &ErgoTree) -> Option<crate::sigma_typ
     determinable_root_type_of(&tree.body, &tree.constants)
 }
 
-/// [`determinable_root_type`] over a raw `(body, constants)` pair — so the nested
+/// `determinable_root_type` over a raw `(body, constants)` pair — so the nested
 /// `SBox`-constant inner-script path (which parses a body + constants without
 /// building an [`ErgoTree`]) can run the same rule-1001 root-type judgement.
-/// Entry point: the root is typed with an EMPTY [`ValDefTypeStore`].
+/// Entry point: the root is typed with an EMPTY `ValDefTypeStore`.
 /// `Some(SSigmaProp)` accepts, `Some(other)` is the wrap/reject verdict, and
 /// `None` is lenient (the root type is not statically determinable). Public so
 /// the `difftest --methodcall` harness can diff this exact verdict against the
@@ -30,12 +30,12 @@ pub(super) fn determinable_root_type(tree: &ErgoTree) -> Option<crate::sigma_typ
 /// read it (the body's `ValDef` write is the last write, both here and in
 /// Scala), and an id the body never binds misses our store and resolves `None`
 /// (lenient — Scala reads the polluted type, or throws for a genuinely unbound
-/// id; see [`infer_type`] on both residuals).
+/// id; see `infer_type` on both residuals).
 pub fn determinable_root_type_of(
     body: &crate::opcode::Expr,
     constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
 ) -> Option<crate::sigma_type::SigmaType> {
-    let mut store = ValDefTypeStore::new();
+    let mut store = ValDefTypeStore::default();
     infer_type(body, &mut store, constants)
 }
 
@@ -69,8 +69,11 @@ pub fn determinable_root_type_of(
 ///    store\[y\]=SigmaProp; then store\[x\]=SLong (rebind); the result
 ///    `ValUse(y)` reads SigmaProp → ACCEPT (Scala accepts — `y` was fixed
 ///    BEFORE the rebind; rejecting this shape would be a reject-valid = stall).
-pub(crate) type ValDefTypeStore =
-    std::collections::HashMap<u32, Option<crate::sigma_type::SigmaType>>;
+#[derive(Default)]
+pub(crate) struct ValDefTypeStore {
+    pub(crate) bindings: std::collections::HashMap<u32, Option<crate::sigma_type::SigmaType>>,
+    constants_invalidated: bool,
+}
 
 /// `true` if `val` MATERIALIZES at least one box value (possibly nested in a
 /// collection / option / tuple). A box value is the only constant whose bytes embed
@@ -78,7 +81,7 @@ pub(crate) type ValDefTypeStore =
 /// box can pollute `valDefTypeStore`. We key on the VALUE, not the type: an empty
 /// `Coll[SBox]` has a box-bearing type but materializes no box and changes nothing,
 /// so it must NOT trigger `ValUse` leniency (which would be an accept-invalid).
-pub(super) fn value_contains_box(val: &crate::sigma_value::SigmaValue) -> bool {
+pub(crate) fn value_contains_box(val: &crate::sigma_value::SigmaValue) -> bool {
     use crate::sigma_value::{CollValue, SigmaValue};
     match val {
         SigmaValue::OpaqueBoxBytes(_) => true,
@@ -111,8 +114,8 @@ pub(super) fn value_contains_box(val: &crate::sigma_value::SigmaValue) -> bool {
 ///    `deserializeErgoTree` does not wrap it: a hard reject even under
 ///    `has_size`. That is a PARSE-layer verdict this rule-1001 typer cannot
 ///    express (`Some(non-sigma)` would wrap-accept a has_size tree Scala hard
-///    rejects); the node's parser accepts an unbound `ValUse` (pre-existing),
-///    so the typer stays lenient rather than mis-classify. (When a box
+///    rejects); the parser rejects an unbound use when its store is complete,
+///    while this typer stays lenient rather than mis-classify. (When a box
 ///    constant precedes the `ValUse`, lenient is also the CORRECT direction:
 ///    the box's nested script may have bound the id to any type.)
 ///  - A constant that MATERIALIZES a box value ([`value_contains_box`]).
@@ -155,15 +158,25 @@ pub(crate) fn infer_node_type(
                 // id — every entry written so far is now untrusted. (An id it
                 // may have FRESHLY bound stays absent here and resolves
                 // lenient, which is the same safe direction.)
-                for t in store.values_mut() {
+                for t in store.bindings.values_mut() {
                     *t = None;
                 }
+                // ErgoTreeSerializer restores constantStore only on a successful
+                // structural parse. A sized inner tree that wraps a validation
+                // failure can leave its constants installed on Scala's reader.
+                // Our retained box bytes do not expose that store, so subsequent
+                // placeholders must not be inferred from the outer constants.
+                store.constants_invalidated = true;
             }
             Some(tpe.clone())
         }
         crate::opcode::Expr::Op(node) => match &node.payload {
             Payload::ConstPlaceholder { index } => {
-                constants.get(*index as usize).map(|(tpe, _)| tpe.clone())
+                if store.constants_invalidated {
+                    None
+                } else {
+                    constants.get(*index as usize).map(|(tpe, _)| tpe.clone())
+                }
             }
             // Payloads carrying their result type EXPLICITLY in the IR.
             // `Deserialize{Context,Register}[T]` return `T` DIRECTLY, so they CAN
@@ -266,13 +279,13 @@ pub(crate) fn infer_node_type(
             // SigmaProp-RHS binding accepting (oracle-verified).
             Payload::ValDef { id, rhs, .. } | Payload::FunDef { id, rhs, .. } => {
                 let t = child_type(rhs, store, constants);
-                store.insert(*id, t.clone());
+                store.bindings.insert(*id, t.clone());
                 t
             }
             // ValUse: `store(id)` at this parse position (see
             // [`ValDefTypeStore`]). An untrusted (`None`) entry or an id with
             // no prior write resolves lenient (see [`infer_type`] residuals).
-            Payload::ValUse { id } => store.get(id).cloned().flatten(),
+            Payload::ValUse { id } => store.bindings.get(id).cloned().flatten(),
             // FuncValue (`FuncValueSerializer.parse`): each arg's DECLARED
             // type is written to the store BEFORE the body is parsed — and
             // never popped. Scala `FuncValue.tpe = SFunc(args.map(_.tpe),
@@ -288,7 +301,7 @@ pub(crate) fn infer_node_type(
             Payload::FuncValue { args, body } => {
                 if !parse_time {
                     for (id, tpe) in args {
-                        store.insert(*id, tpe.clone());
+                        store.bindings.insert(*id, tpe.clone());
                     }
                 }
                 let body_t = child_type(body, store, constants);
@@ -375,15 +388,35 @@ pub(crate) fn infer_node_type(
                     )
                 }
             }
-            // Apply's result is the callee's range; kept lenient (as before the
-            // store rework) — the children are still walked for their bindings.
+            // Scala `Apply.tpe`: a function callee gives its range, a
+            // collection callee its element type, and any other callee
+            // `NoType`. Otherwise only a precise parse-time type is trusted.
             Payload::FuncApply { func, args } => {
                 let t = child_type(func, store, constants);
                 for a in args {
                     child_type(a, store, constants);
                 }
+                // A constant's wire type and a numeric cast's target are
+                // explicit, so either callee's type is exact in both modes.
+                let exact = precise_types
+                    || matches!(
+                        &**func,
+                        crate::opcode::Expr::Const { .. }
+                            | crate::opcode::Expr::Op(crate::opcode::IrNode {
+                                payload: Payload::NumericCast { .. },
+                                ..
+                            })
+                    );
                 match t {
                     Some(SigmaType::SFunc { t_range, .. }) if precise_types => Some(*t_range),
+                    Some(SigmaType::SColl(elem)) if exact => Some(*elem),
+                    Some(t)
+                        if exact
+                            && type_is_precise(&t)
+                            && !matches!(t, SigmaType::SFunc { .. }) =>
+                    {
+                        Some(SigmaType::NoType)
+                    }
                     _ => None,
                 }
             }
@@ -730,6 +763,8 @@ fn op_root_non_sigma_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
         0x9F | 0xA0 | 0xEE => Some(SGroupElement),
         0x74 | 0x7A | 0x9B | 0xC2..=0xC5 | 0xCB | 0xCC | 0xD0 => Some(SColl(Box::new(SByte))),
         0xC7 => Some(STuple(vec![SInt, SColl(Box::new(SByte))])),
+        // CreateAvlTree has a fixed SAvlTree result, regardless of its operands.
+        0xB6 => Some(SAvlTree),
         0xB7 => Some(SOption(Box::new(SColl(Box::new(SByte))))),
         _ => None,
     };
@@ -1109,11 +1144,19 @@ mod tests {
             read_ergo_tree(&mut reader).unwrap();
             assert_eq!(reader.position(), sized.len() - 1, "{body}");
         }
-        for body in ["d9007201", "860272010500"] {
-            let bytes = hex::decode(format!("00{body}")).unwrap();
-            let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
-            assert_eq!(root(&tree.body), Some(SigmaType::SAny));
-            assert_eq!(substitution_type_of(&tree.body), None);
+        // The wire parser now rejects these unbound references. The typer
+        // still needs a conservative answer for directly constructed ASTs.
+        for body in [
+            func_value(vec![], val_use(1)),
+            op(
+                0x86,
+                Payload::Tuple {
+                    items: vec![val_use(1), long0()],
+                },
+            ),
+        ] {
+            assert_eq!(root(&body), Some(SigmaType::SAny));
+            assert_eq!(substitution_type_of(&body), None);
         }
     }
 
@@ -1134,9 +1177,9 @@ mod tests {
         for (case, expected) in cases.iter().zip(responses.lines()) {
             let bytes = hex::decode(case["hex"].as_str().unwrap()).unwrap();
             let mut reader = VlqReader::new(&bytes);
-            let tree = read_ergo_tree(&mut reader).unwrap();
+            let result = read_ergo_tree(&mut reader).and_then(|tree| check_sigma_prop_root(&tree));
             assert_eq!(
-                check_sigma_prop_root(&tree).is_ok(),
+                result.is_ok(),
                 expected.starts_with("ACCEPT"),
                 "{}: {expected}",
                 case["name"]

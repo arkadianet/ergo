@@ -10,7 +10,7 @@ use ergo_primitives::writer::VlqWriter;
 use crate::error::WriteError;
 use crate::opcode::{parse_expr, write_expr, Expr, IrNode, Payload};
 use crate::sigma_type::SigmaType;
-use crate::sigma_value::{read_constant, write_constant, CollValue, SigmaValue};
+use crate::sigma_value::{write_constant, CollValue, SigmaValue};
 
 /// Context variables supplied to script evaluation alongside an input.
 ///
@@ -43,6 +43,9 @@ impl ContextExtension {
     }
 }
 
+/// Scala's signed count byte permits at most 127 context variables.
+const MAX_CONTEXT_EXTENSION_ENTRIES: usize = i8::MAX as usize;
+
 /// Serialize a context extension as a raw `u8` count followed by
 /// `key + serialized_constant` for each entry.
 ///
@@ -68,14 +71,11 @@ pub fn write_context_extension(
     w: &mut VlqWriter,
     ext: &ContextExtension,
 ) -> Result<(), WriteError> {
-    // Scala writes the entry count as a single unsigned byte; a
-    // ContextExtension with >255 entries would silently wrap on
-    // `as u8`. Surface as a structured error so REST/JSON callers
-    // (decode_context_extension_with_mode) see a recoverable failure
-    // instead of a panic.
-    if ext.values.len() > u8::MAX as usize {
+    // ContextExtension.serializer.serialize rejects sizes above Byte.MaxValue
+    // before writing anything. Share the bound with both reader entry points.
+    if ext.values.len() > MAX_CONTEXT_EXTENSION_ENTRIES {
         return Err(WriteError::InvalidData(format!(
-            "ContextExtension entry count too large for Scala wire format: {} (max 255)",
+            "ContextExtension entry count too large for Scala wire format: {} (max {MAX_CONTEXT_EXTENSION_ENTRIES})",
             ext.values.len()
         )));
     }
@@ -132,13 +132,40 @@ pub fn write_context_extension(
 /// exactly as before.
 fn read_extension_count(r: &mut VlqReader) -> Result<usize, ReadError> {
     let raw = r.get_u8()?;
-    if raw > 0x7f {
+    if usize::from(raw) > MAX_CONTEXT_EXTENSION_ENTRIES {
         return Err(ReadError::InvalidData(format!(
             "negative context-extension value count: {} (Scala reads the count as a signed byte and rejects the high bit)",
             raw as i8
         )));
     }
     Ok(raw as usize)
+}
+
+/// Read one ContextExtension variable id with Scala's SIGNED semantics.
+///
+/// Consensus parity (sigma-state 6.0.6): Scala
+/// `ContextExtension.serializer.parse`
+/// (`data/.../sigma/interpreter/ContextExtension.scala:58-60`) reads each id
+/// with `r.getByte()` — a signed byte — and rejects a negative one before
+/// reading its value (`if (k < 0) error("Negative id of context extension
+/// variable: $k")` → `SerializerException`). An id byte in `0x80..=0xFF`
+/// decodes to `-128..=-1` and rejects the whole transaction at parse. The
+/// guard landed in sigma-state 6.0.5 (commit e4ef1b203) and is not
+/// version-gated: it applies at every height and activated version. Before it,
+/// Scala accepted these ids; `getVar` could never reach them, since its id is
+/// a non-negative `Byte` too.
+///
+/// Scala's writer does not refuse a negative id, so the writer here keeps
+/// accepting any `u8` key; only the read side rejects.
+fn read_extension_key(r: &mut VlqReader) -> Result<u8, ReadError> {
+    let raw = r.get_u8()?;
+    if usize::from(raw) > MAX_CONTEXT_EXTENSION_ENTRIES {
+        return Err(ReadError::InvalidData(format!(
+            "negative context-extension variable id: {} (Scala reads the id as a signed byte and rejects a negative one)",
+            raw as i8
+        )));
+    }
+    Ok(raw)
 }
 
 /// Read one ContextExtension entry value — any `EvaluatedValue` encoding the
@@ -190,7 +217,7 @@ fn read_extension_value(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), Re
     // (`ValueSerializer.deserialize` makes the same split). Same discrimination
     // the register reader uses — see `crate::register::read_register_value`.
     if r.peek_u8()? <= 0x70 {
-        return read_constant(r);
+        return crate::sigma_value::read_constant_as_expr(r);
     }
     // Extension bytes carry no tree header, so parse at `tree_version = 0`
     // (as the register reader does — the version does not affect the wire
@@ -429,7 +456,7 @@ fn extension_value_to_expr(tpe: &SigmaType, val: &SigmaValue) -> Result<Expr, Wr
 /// v6 activation. It throws for any value whose type IS or CONTAINS
 /// (recursing tuple items / collection element) `SOption`, `SHeader`,
 /// or `SUnsignedBigInt`. We apply the identical predicate
-/// ([`crate::register::type_has_v6_only_type`], the same one the
+/// (`crate::register::type_has_v6_only_type`, the same one the
 /// register reader uses) here, returning the same rejection class the
 /// register path returns.
 ///
@@ -448,7 +475,7 @@ pub fn read_context_extension(r: &mut VlqReader) -> Result<ContextExtension, Rea
     let count = read_extension_count(r)?;
     let mut values = IndexMap::with_capacity(count);
     for _ in 0..count {
-        let key = r.get_u8()?;
+        let key = read_extension_key(r)?;
         let (tpe, val) = read_extension_value(r)?;
         // Rule 1019 CheckV6Type: reject at parse, matching Scala's
         // per-entry `CheckV6Type(v)`. Version-independent, fires whether
@@ -482,7 +509,7 @@ pub fn split_context_extension_bytes(
     let count = read_extension_count(&mut r)?;
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
-        let key = r.get_u8()?;
+        let key = read_extension_key(&mut r)?;
         let (tpe, val) = read_extension_value(&mut r)?;
         let mut w = VlqWriter::new();
         write_extension_value(&mut w, &tpe, &val)
@@ -632,7 +659,7 @@ mod tests {
         // the ascending-min: they MUST diverge for some test keyset
         // (otherwise we'd silently regress to ascending).
         let mut ext = ContextExtension::empty();
-        for key in [3u8, 17, 42, 99, 200] {
+        for key in [3u8, 17, 42, 99, 120] {
             ext.values
                 .insert(key, (SigmaType::SInt, SigmaValue::Int(key as i32)));
         }
@@ -665,7 +692,7 @@ mod tests {
         // order), and the writer must reproduce the same HAMT-
         // ordered bytes — otherwise `bytes_to_sign(tx)` desyncs.
         let mut ext = ContextExtension::empty();
-        for key in [11u8, 23, 47, 89, 137, 199, 251] {
+        for key in [11u8, 23, 47, 89, 101, 113, 127] {
             ext.values
                 .insert(key, (SigmaType::SInt, SigmaValue::Int(key as i32)));
         }
@@ -689,13 +716,14 @@ mod tests {
     }
 
     #[test]
-    fn context_extension_n_5_high_bit_keys_round_trip() {
+    fn context_extension_n_5_high_bit_keys_write_in_hamt_order_and_fail_to_parse() {
         // Sign-extension regression: keys ≥ 128 (i8 negative when
-        // cast `as i8`). If `hamt_sort_key_for_byte_key` ever drops
-        // the `as i8` cast, the order changes for high-bit keys but
-        // the idempotency property here still holds. To distinguish:
-        // assert the high-bit-only and low-bit-only key sets produce
-        // DIFFERENT first-on-wire keys.
+        // cast `as i8`). Scala's writer still emits them (it never checks
+        // the id), so the writer must order them as Scala's HAMT does; if
+        // `hamt_sort_key_for_byte_key` ever drops the `as i8` cast, the
+        // order changes for high-bit keys. To distinguish: assert the
+        // high-bit-only and low-bit-only key sets produce DIFFERENT
+        // first-on-wire keys.
         let mut low_only = ContextExtension::empty();
         for key in [3u8, 17, 42, 65, 99] {
             low_only
@@ -717,32 +745,67 @@ mod tests {
         let high_bytes = w2.result();
 
         // First key on wire for each set — must be present in the
-        // respective input keyset (sanity), and round-trip cleanly.
+        // respective input keyset (sanity).
         let low_first = low_bytes[1];
         let high_first = high_bytes[1];
         assert!([3u8, 17, 42, 65, 99].contains(&low_first));
         assert!([131u8, 145, 170, 193, 227].contains(&high_first));
 
-        // Round-trip idempotency for the high-bit set (the case the
-        // sign-extension would break first).
-        let mut r = VlqReader::new(&high_bytes);
+        // The low-bit set round-trips; the high-bit set is refused on read,
+        // because each of its ids is negative as a signed byte.
+        let mut r = VlqReader::new(&low_bytes);
         let parsed = read_context_extension(&mut r).unwrap();
         let mut w3 = VlqWriter::new();
         write_context_extension(&mut w3, &parsed).unwrap();
-        assert_eq!(w3.result(), high_bytes);
+        assert_eq!(w3.result(), low_bytes);
+        let mut r = VlqReader::new(&high_bytes);
+        assert!(read_context_extension(&mut r).is_err());
+    }
+
+    #[test]
+    fn context_extension_writer_and_constructor_match_scala_count_boundary() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/scala/context_extension_count_boundary.json"
+        ))
+        .unwrap();
+        for case in oracle["cases"].as_array().unwrap() {
+            let count = case["count"].as_u64().unwrap() as usize;
+            let extension = ContextExtension {
+                values: (0..count)
+                    .map(|key| (key as u8, (SigmaType::SInt, SigmaValue::Int(0))))
+                    .collect(),
+            };
+            let mut writer = VlqWriter::new();
+            writer.put_u8(0x42);
+            let result = write_context_extension(&mut writer, &extension);
+            let proof = crate::input::SpendingProof::new(Vec::new(), extension);
+            if case["verdict"] == "ACCEPT" {
+                result.unwrap();
+                let expected = hex::decode(case["hex"].as_str().unwrap()).unwrap();
+                assert_eq!(&writer.result()[1..], expected, "count {count}");
+                assert_eq!(proof.unwrap().extension_bytes(), expected, "count {count}");
+            } else {
+                assert!(result.is_err(), "Scala rejects count {count}");
+                assert!(proof.is_err(), "constructor must reject count {count}");
+                assert_eq!(
+                    writer.result(),
+                    [0x42],
+                    "count rejection must not write bytes"
+                );
+            }
+        }
     }
 
     // ----- error paths -----
 
     #[test]
-    fn write_context_extension_above_255_returns_invalid_data() {
-        // Scala writes the entry count as a single unsigned byte
-        // (cap 255). REST callers can construct ContextExtension
+    fn write_context_extension_above_127_returns_invalid_data() {
+        // Scala refuses counts above Byte.MaxValue. REST callers can construct ContextExtension
         // directly via the public `values` field; the writer must
         // surface this as `WriteError`, not panic.
         //
         // 256 distinct u8 keys exhausts the keyspace exactly — already
-        // one past the cap. IndexMap dedupes on key, so 257 is
+        // past the cap. IndexMap dedupes on key, so 257 is
         // unreachable, but 256 suffices to trigger the bound.
         let values: indexmap::IndexMap<u8, (SigmaType, SigmaValue)> = (0u16..=255)
             .map(|k| (k as u8, (SigmaType::SInt, SigmaValue::Int(k as i32))))
@@ -757,7 +820,7 @@ mod tests {
             "message should name the count, got: {msg}"
         );
         assert!(
-            msg.contains("255"),
+            msg.contains("127"),
             "message should name the cap, got: {msg}"
         );
     }
@@ -1036,6 +1099,41 @@ mod tests {
     }
 
     // ----- oracle parity -----
+
+    /// A spending proof whose extension holds `{1: Coll^5000[Byte]()}`, a type
+    /// fifty times deeper than the node's former 100-level guard. sigma-state
+    /// 6.0.6 has no type-depth limit of its own, only its JVM stack: with
+    /// `-Xss16m` (`ErgoSerdeOracle.scala`, `transaction` surface) it accepts
+    /// this transaction and writes it back with the innermost `Coll[Coll[Byte]]`
+    /// folded into 0x1A, while a cold JVM on a 1 MiB stack overflows. A warm
+    /// default JVM reads about 9,800 levels, so a node that stopped at 100 split
+    /// from the reference on a few kilobytes of unused extension data.
+    #[test]
+    fn transaction_with_5000_deep_extension_type_round_trips_canonically() {
+        let tx = |ext_type: &str| {
+            from_hex(&format!(
+                "01{}000101{ext_type}00{}",
+                "14db43174f498723e4acb7e056e309f446b02c3da0c2572f3ab77ce86ec58116",
+                "000002c0ecfab5120008d3c094400000c0f79c1a0008d3c094400000"
+            ))
+        };
+        let input = tx(&format!("{}0e", "0c".repeat(4999)));
+        let canonical = tx(&format!("{}1a", "0c".repeat(4998)));
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                let mut r = VlqReader::new(&input).with_activated_script_version(3);
+                let parsed = crate::transaction::read_transaction(&mut r)
+                    .expect("sigma-state 6.0.6 accepts a 5000-deep extension type");
+                assert!(r.is_empty());
+                let mut w = VlqWriter::new();
+                crate::transaction::write_transaction(&mut w, &parsed).unwrap();
+                assert_eq!(w.result(), canonical);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
     //
     // The ATTACK/CONTROL verdicts below come from the sigma-state 6.0.2
     // Scala reference (scripts/jvm_serde_oracle, surface `transaction`).
@@ -1086,17 +1184,11 @@ mod tests {
         // ("Negative amount of context extension values: -128"). Rust used to
         // accept it (get_u8() -> 128, read 128 entries). Post-fix Rust must
         // reject AT the count byte, before reading any entry.
-        let mut ext = ContextExtension::empty();
+        // Deliberately malformed wire data must not use the valid writer.
+        let mut bytes = vec![0x80];
         for key in 0u8..128 {
-            ext.values
-                .insert(key, (SigmaType::SInt, SigmaValue::Int(key as i32)));
+            bytes.extend_from_slice(&[key, 0x04, 0x00]);
         }
-        assert_eq!(ext.values.len(), 128, "test setup: 128 entries");
-        let bytes = serialize_ext(&ext);
-        assert_eq!(
-            bytes[0], 0x80,
-            "count byte must be 128 (0x80, high bit set)"
-        );
         let mut r = VlqReader::new(&bytes);
         let err = read_context_extension(&mut r).unwrap_err();
         match &err {
@@ -1126,14 +1218,10 @@ mod tests {
         let entries = split_context_extension_bytes(&bytes127).unwrap();
         assert_eq!(entries.len(), 127, "127 must split cleanly");
 
-        let mut ext128 = ContextExtension::empty();
+        let mut bytes128 = vec![0x80];
         for key in 0u8..128 {
-            ext128
-                .values
-                .insert(key, (SigmaType::SInt, SigmaValue::Int(0)));
+            bytes128.extend_from_slice(&[key, 0x04, 0x00]);
         }
-        let bytes128 = serialize_ext(&ext128);
-        assert_eq!(bytes128[0], 0x80);
         let err = split_context_extension_bytes(&bytes128).unwrap_err();
         match &err {
             ReadError::InvalidData(msg) => assert!(
@@ -1328,28 +1416,39 @@ mod tests {
         );
     }
 
-    /// sigma-state 6.0.2 has NO `k < 0` guard in
-    /// `ContextExtension.serializer.parse` (the check exists only in later
-    /// revisions), so a key byte with the high bit set parses fine and lands
-    /// as a negative Scala `Byte`. Oracle: `ACCEPT keys=-128 01800405`. The
-    /// rejection happens later, when `toSigmaContext` sizes the var array from
-    /// `keys.max` and throws `NegativeArraySizeException(-127)` — which the
-    /// evaluator's pre-reduction check mirrors
-    /// (`reduce.rs::trivial_p2pk_extension_key_high_bit_rejects`). Parse must
-    /// therefore ACCEPT, or the node would stall on a block the reference
-    /// merely fails to spend.
+    /// sigma-state 6.0.5 added a `k < 0` guard to
+    /// `ContextExtension.serializer.parse` (commit e4ef1b203): an id byte with
+    /// the high bit set is a negative Scala `Byte` and rejects at parse, before
+    /// its value is read. JVM oracle (`EvaluatedValueOracle.scala`,
+    /// `ctxext_negative_key_parse`): 6.0.2 `ACCEPT keys=-128 01800405`,
+    /// 6.0.6 rejects. The top id 0x7f still parses.
     #[test]
-    fn context_extension_high_bit_key_parses_and_round_trips() {
-        let bytes = from_hex("01800405");
+    fn read_context_extension_negative_id_rejects() {
+        for hex in ["01800405", "01ff0405"] {
+            let bytes = from_hex(hex);
+            let mut r = VlqReader::new(&bytes);
+            match read_context_extension(&mut r) {
+                Err(ReadError::InvalidData(msg)) => assert!(
+                    msg.contains("negative context-extension variable id"),
+                    "{hex}: got {msg}"
+                ),
+                other => panic!("{hex}: expected a negative-id reject, got {other:?}"),
+            }
+            let err = split_context_extension_bytes(&bytes).unwrap_err();
+            assert!(
+                matches!(&err, ReadError::InvalidData(m) if m.contains("negative context-extension variable id")),
+                "{hex}: split must refuse the same id, got {err:?}"
+            );
+        }
+        let bytes = from_hex("017f0405");
         let mut r = VlqReader::new(&bytes);
-        let ext = read_context_extension(&mut r).expect("6.0.2 parses a high-bit key");
+        let ext = read_context_extension(&mut r).expect("id 0x7f is the largest valid id");
         assert!(r.is_empty());
-        assert_eq!(ext.values.len(), 1);
         assert_eq!(
-            ext.values.get(&0x80),
+            ext.values.get(&0x7f),
             Some(&(SigmaType::SInt, SigmaValue::Int(-3)))
         );
-        assert_eq!(to_hex(&serialize_ext(&ext)), "01800405");
+        assert_eq!(to_hex(&serialize_ext(&ext)), "017f0405");
     }
 
     /// A node that is not an `EvaluatedValue` — `Height` (`0xa3`) — must be

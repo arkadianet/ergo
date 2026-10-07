@@ -1,6 +1,10 @@
 #![cfg(feature = "diagnostics")]
 //! Triage test: captures full error messages for all eval_errors across
 //! all cost parity ranges and writes frequency analysis to /tmp/.
+//!
+//! Extract at least one listed transaction range and covering headers first.
+//! Run with `cargo test --locked -p ergo-validation --features diagnostics
+//! --test eval_error_triage -- --ignored --nocapture`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -145,6 +149,11 @@ fn collect_errors(
 ) -> Vec<ErrorRecord> {
     let tx_raw = std::fs::read_to_string(&range.tx_file).unwrap();
     let tx_data: Vec<TxVector> = serde_json::from_str(&tx_raw).unwrap();
+    assert!(
+        !tx_data.is_empty(),
+        "{}: no transactions to triage",
+        range.label
+    );
 
     let hdr_raw = std::fs::read_to_string(&range.header_file).unwrap();
     let header_data: Vec<HeaderVector> = serde_json::from_str(&hdr_raw).unwrap();
@@ -270,6 +279,7 @@ fn normalize_error(msg: &str) -> String {
 }
 
 #[test]
+#[ignore = "manual report; requires extracted mainnet transaction ranges and covering headers"]
 fn eval_error_triage() {
     let result = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
@@ -319,8 +329,9 @@ fn eval_error_triage_inner() {
                 all_errors.extend(errs);
                 ranges_processed += 1;
             }
-            Err(_) => {
+            Err(payload) => {
                 eprintln!("{}: PANIC during collection", range.label);
+                std::panic::resume_unwind(payload);
             }
         }
     }

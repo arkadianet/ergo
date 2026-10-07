@@ -134,6 +134,10 @@ pub enum ValidationError {
         max_input_height: u32,
     },
 
+    /// Scala rule 125: repeated context-extension variable 127 value after activation.
+    #[error("repeated storage rent var-127 value at input {index} (rule 125)")]
+    DuplicateStorageRentOutput { index: usize },
+
     // --- State-dependent (UTXO resolution) ---
     /// A spending input references a box that the UTXO view does not
     /// know about.
@@ -244,7 +248,9 @@ pub enum ValidationError {
         /// Evaluator error message.
         reason: String,
     },
-    /// Script reduced cleanly but the spending proof did not verify.
+    /// Input verification returned false: the script reduced but the proof
+    /// did not verify, or a storage-rent claim failed `checkExpiredBox`
+    /// (Scala `Success((false, _))`, rule 119).
     #[error("input {index}: spending proof verification failed")]
     ProofFailed {
         /// Failing input index.

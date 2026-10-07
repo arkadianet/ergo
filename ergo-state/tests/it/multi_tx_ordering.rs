@@ -1,8 +1,8 @@
-//! Multi-tx block ordering analysis.
+//! Captured multi-transaction box-change classification.
 //!
 //! Examines real multi-tx blocks to determine whether the collect-sort-batch
-//! model (from Scala boxChanges) differs from per-tx sequential for any
-//! blocks in the test corpus.
+//! model removes outputs consumed later in the captured block. These tests
+//! compare change sets, not AVL operation order, state roots or script verdicts.
 
 use ergo_primitives::digest::blake2b256;
 use ergo_primitives::reader::VlqReader;
@@ -33,6 +33,7 @@ fn analyze_multi_tx_blocks_for_dependencies() {
     let data =
         std::fs::read_to_string("../test-vectors/mainnet/blocks_700000_700010.json").unwrap();
     let blocks: Vec<BlockJson> = serde_json::from_str(&data).unwrap();
+    assert_eq!(blocks.len(), 11, "complete advertised height range");
 
     let mut blocks_with_deps = 0;
     let mut blocks_without_deps = 0;
@@ -52,8 +53,10 @@ fn analyze_multi_tx_blocks_for_dependencies() {
             let tx_bytes = hex::decode(&tx_json.bytes).unwrap();
             let mut r = VlqReader::new(&tx_bytes);
             let tx = read_transaction(&mut r).unwrap();
+            assert_eq!(r.remaining(), 0);
             let bts = bytes_to_sign(&tx).unwrap();
             let tx_id = blake2b256(&bts);
+            assert_eq!(hex::encode(tx_id.as_bytes()), tx_json.id);
 
             // Check inputs against previously created outputs
             for input in &tx.inputs {
@@ -97,8 +100,11 @@ fn analyze_multi_tx_blocks_for_dependencies() {
         "\nSummary: {blocks_with_deps} blocks WITH intra-block deps, {blocks_without_deps} WITHOUT"
     );
 
-    // This test doesn't assert pass/fail — it's diagnostic.
-    // The output tells us whether the ordering model matters for these blocks.
+    assert_eq!(
+        blocks_with_deps + blocks_without_deps,
+        10,
+        "every multi-transaction block must be classified"
+    );
 }
 
 /// Compare the two ordering models on multi-tx blocks.
@@ -106,16 +112,17 @@ fn analyze_multi_tx_blocks_for_dependencies() {
 /// Model A (collect-sort-batch): Collect all removes and inserts across all txs,
 ///   deduplicate (created-then-spent excluded), apply removes sorted, then inserts sorted.
 ///
-/// Model B (per-tx sequential): For each tx in block order,
-///   remove inputs then insert outputs.
+/// Model B (unnetted collection): collect every input and output without
+/// cancelling created-then-spent entries. This is not an AVL sequential apply.
 ///
 /// If a block has no intra-block dependencies, both models produce the same
 /// set of (removes, inserts). If it does, Model A's dedup differs from Model B.
 #[test]
-fn compare_ordering_models_on_multi_tx_blocks() {
+fn captured_net_box_changes_match_production_collection() {
     let data =
         std::fs::read_to_string("../test-vectors/mainnet/blocks_700000_700010.json").unwrap();
     let blocks: Vec<BlockJson> = serde_json::from_str(&data).unwrap();
+    let mut compared = 0;
 
     for block in &blocks {
         if block.transactions.len() < 2 {
@@ -127,6 +134,7 @@ fn compare_ordering_models_on_multi_tx_blocks() {
             let tx_bytes = hex::decode(&tx_json.bytes).unwrap();
             let mut r = VlqReader::new(&tx_bytes);
             txs.push(read_transaction(&mut r).unwrap());
+            assert_eq!(r.remaining(), 0);
         }
 
         // Model A: collect-sort-batch (Scala boxChanges style)
@@ -155,7 +163,22 @@ fn compare_ordering_models_on_multi_tx_blocks() {
             }
         }
 
-        // Model B: per-tx sequential
+        let refs: Vec<_> = txs.iter().collect();
+        let (actual_remove, actual_insert) =
+            ergo_state::store::StateStore::build_utxo_changes_raw(&refs).unwrap();
+        assert_eq!(
+            actual_remove, model_a_remove,
+            "net removes at {}",
+            block.height
+        );
+        assert_eq!(
+            actual_insert, model_a_insert,
+            "net inserts at {}",
+            block.height
+        );
+        compared += 1;
+
+        // Model B: unnetted collection, for diagnostics only.
         let mut model_b_remove: BTreeMap<[u8; 32], ()> = BTreeMap::new();
         let mut model_b_insert: BTreeMap<[u8; 32], Vec<u8>> = BTreeMap::new();
 
@@ -205,4 +228,8 @@ fn compare_ordering_models_on_multi_tx_blocks() {
             );
         }
     }
+    assert_eq!(
+        compared, 10,
+        "complete captured multi-transaction denominator"
+    );
 }

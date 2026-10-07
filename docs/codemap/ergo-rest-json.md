@@ -1,23 +1,21 @@
 # ergo-rest-json
 
-**Purpose:** The shared JSON ↔ canonical-wire-bytes layer for Scala-compatible Ergo REST. Hosts the JSON DTOs that mirror the Scala node's encoders (`Header.jsonEncoder`, `BlockTransactions.jsonEncoder`, `Extension.jsonEncoder`, `JsonCodecs`, etc.), the `/mining/*` wire DTOs, and the canonicalizing *decoders* that turn parsed JSON back into the exact wire bytes the indexer / validator / persistence layer expect. The decoders are the harder half: they must reproduce Scala's canonical bytes byte-for-byte so content-addressed IDs (tx_id, box_id, section_id) verify.
+**Purpose:** Shared Scala-compatible REST JSON shapes and conversion through the
+production wire codecs. Parsing JSON does not establish transaction validity,
+proof validity or authenticated chain provenance.
 
-**Depends on (workspace):** ergo-primitives, ergo-ser
-**Depended on by:** (see codemap index) — ergo-api, ergo-node, ergo-difftest, ergo-validation (tests only)
-**Approx LOC:** ~1441 (src, incl. tests)
+**Workspace dependencies:** ergo-primitives and ergo-ser.
+**Consumers:** ergo-api, ergo-node, ergo-difftest and validation tests.
 
 ## Start here
-- `src/lib.rs` — module tree + the flat re-export surface. Note the re-exports cover `decode::*` and `types::*` only; the `mining` DTOs are reached via the `mining` module path (`ergo_rest_json::mining::WorkMessageJson`).
-- `DecodeMode` (enum) — `src/decode.rs:444` — the central contract: `Submit` (wallet→node, strict + canonicalize) vs `Preserve` (on-chain bytes, verbatim). Every decoder branches on this; read it before any decoder.
-- `decode_scala_transaction` / `decode_scala_full_block` — `src/decode.rs:49,833` — the two top-level entry points (JSON tx-submit, and `POST /blocks` full-block ingest).
-- `ScalaFullBlock` / `ScalaHeader` — `src/types.rs:23,42` — the read-side DTO shapes; field order mirrors Scala emission so captured-fixture diffs read cleanly.
-- `WorkMessageJson` — `src/mining.rs:37` — the `/mining/candidate` wire shape; Scala `WorkMessage` fields plus this node's `template_seq`/`clean_jobs` pool extensions.
 
-## Modules
-- `src/lib.rs` — crate root: declares the 3 modules and re-exports `decode::*` + `types::*` at the crate top level.
-- `src/types.rs` — the Scala-compat JSON DTOs (read-side `ScalaFullBlock`/`ScalaHeader`/`ScalaTransaction`/… and submit-side `ScalaTransactionInput`/`ScalaOutputInput`). Pure serde shapes; no bytes logic.
-- `src/decode.rs` — the canonicalizing decoders: JSON DTO → canonical wire `Vec<u8>` via `ergo-ser` readers/writers. Owns `DecodeMode`, `DecodeError`, the per-section decoders, and the soft-fork/non-canonical reject policy.
-- `src/mining.rs` — `/mining/*` JSON DTOs (`WorkMessageJson`, `AutolykosSolutionJson`, `RewardAddressResponse`, `RewardPublicKeyResponse`) plus decimal-BigInt serde helpers. Lives here (not `ergo-mining`) so `ergo-api` can mount `/mining/*` without the storage/sync/mempool transitives.
+- `src/lib.rs` re-exports `decode` and `types`; mining DTOs use the `mining` module.
+- `src/types.rs` defines the block, transaction, output and proof DTOs, plus exact
+  nonnegative numeric conversion. Derived IDs and sizes on submit DTOs are ignored.
+- `src/decode.rs` defines `DecodeMode`, field validation, independent value
+  framing, section conversion and full-block header-ID consistency checks.
+- `src/mining.rs` defines work messages, PoW solutions, reward responses and the
+  decimal BigInt helpers shared with header decoding.
 
 ## Key types, traits & functions
 - `DecodeMode` (enum: `Submit` | `Preserve`) — strictness/canonicalization switch threaded through every decoder — `src/decode.rs:444`
@@ -37,14 +35,72 @@
 - `ScalaTransactionInput`, `ScalaOutputInput` (submit-side DTOs) — read only the consensus-bearing fields; derived `id`/`size`/`boxId` are accepted-and-ignored — `src/types.rs:188,204`
 - `WorkMessageJson` / `AutolykosSolutionJson` / `RewardAddressResponse` / `RewardPublicKeyResponse` (mining DTOs) — `src/mining.rs:37,91,118,126`
 
-## Invariants & contracts
-- **Byte-parity is the contract.** `Submit`-mode JSON must reconstruct canonical wire bytes byte-identical to what an honest wallet/Scala node would produce; `Preserve`-mode (on-chain bytes) must re-emit verbatim so tx_id/box_id/section_id (all `blake2b256` over wire bytes) verify. Anchored by the `b4_*` oracle in `ergo-node/src/api_bridge.rs::tests`.
-- **ergoTree bytes are passed through, never re-emitted.** `decode_ergo_tree_canonicalize_*` always returns the input bytes — the `ergo-ser` writer is lossy for some opcode encodings (e.g. `1000d1ed8501` → `1000d1ed01010100` at block 303967, which caused a tx_id divergence / IBD wedge). Re-serialization is used only as a `Submit`-mode roundtrip check.
-- **Context-extension wire ordering matches Scala's `Map[Byte,T]`.** ≤4 entries keep JSON/wallet insertion order (`Map1`-`Map4`); ≥5 entries are sorted by `ergo_ser::scala_hamt` depth-first key order. Backed by `IndexMap` (not `BTreeMap`) on `ScalaSpendingProof.extension` so wallet emit-order survives deserialization and the signature still verifies.
-- **Register / context-extension `Preserve` passthrough.** Re-serializing would normalize legitimate `Constant[STuple]` forms into the writer's `CreateTuple` form (Scala accepts both; AST-driven, not type-driven), breaking byte fidelity — so `Preserve` keeps original hex verbatim while still running gap/trailing-byte/unknown-register validation.
-- **Register density + range.** `additionalRegisters` must be densely packed from R4 upward with no gaps; any key outside R4..R9 is rejected (mirrors Scala `registersDecoder`).
-- **Soft-fork reject policy is `Submit`-only.** `version > MAX_SUPPORTED_TREE_VERSION` (3) is rejected on submission with `NON_CANONICAL`; `Preserve` accepts it (already validated on chain).
-- **Bounded numeric decodes.** `nBits` (u64 JSON) rejects values `> u32::MAX` rather than truncating; context-extension entry count rejects `> u8::MAX`; fixed-length fields (digest32, stateRoot 33B, votes 3B, PoW pk/w 33B, nonce 8B) length-check before copy.
-- **Full-block boundary check.** `decode_scala_full_block` rejects a body whose blockTransactions/extension/adProofs `headerId` does not match the computed header id (case-insensitive hex compare) before any section reaches the apply path.
-- **PoW solution layout is version-keyed.** v1 headers decode `AutolykosSolution::V1{pk,w,nonce,d}` with `d` as a signed-two's-complement BigInt (mirrors `BigInt::to_signed_bytes_be`, preserving the leading `0x00` disambiguator); everything else decodes `V2{pk,nonce}` and ignores the Scala `w`/`d` artifacts.
-- **Mining DTO Scala parity.** `WorkMessageJson` keeps Scala's `msg`/`b`/`h`/`pk`/`proof` names/types/encoding (`b` is decimal-BigInt string; `proof` omitted when `None`); the node-only `template_seq`/`clean_jobs` are appended and `#[serde(default)]` so legacy/Scala candidates still deserialize.
+Every mode parses its inputs. Callers choose serialization policy independently
+of how they obtained or validated those inputs.
+
+| Surface | Submit | Preserve |
+|---|---|---|
+| ErgoTree | Parse, reject unsupported/unparsed trees, retain received bytes | Parse structurally, allow readable opaque soft-fork representation, retain received bytes |
+| Additional registers | Decode each value independently, then write its parsed form | Decode each value independently and retain its consumed prefix |
+| Spending-proof context extension | Cache canonical parsed writer bytes | Validate the raw aggregate and cache canonical parsed writer bytes |
+| Standalone context helper | Return canonical writer bytes | Return independently consumed value prefixes in Scala map order |
+
+`decode_ergo_tree_canonicalize_with_mode` retains the original tree bytes; its
+historical name does not imply a writer round trip. Submit acceptance gates
+are distinct from consensus validation. Preserve does not authenticate a box
+or bypass structural parsing.
+
+Each register/context JSON field has its own value reader, matching the pinned
+SDK decoder. Unused suffix bytes are tolerated and omitted. A truncated field
+cannot borrow bytes from its neighbor, and a suffix cannot become another key
+or value when fields are joined. The resulting aggregate must be fully consumed.
+The register writer preserves ConstantTuple, CreateTuple and ConcreteCollection
+node forms; scalar encodings can normalize. Preserve retains the consumed scalar
+spelling as well.
+
+Output conversion constructs candidates with the selected tree/register byte
+policy. Parsed whole-box cached identity and newly sealed candidate identity
+are separate `ergo-ser` contracts. JSON conversion is not a general promise to
+preserve every input spelling in transaction or box IDs.
+
+## Fields and bounds
+
+- `additionalRegisters` must contain dense R4..R9 names starting at R4.
+- Context-extension decimal keys fit a byte; duplicate byte keys are rejected.
+  At most 127 entries fit the Scala signed-byte count. Up to four entries retain
+  JSON insertion order; larger maps use Scala 2.12 HAMT iteration order.
+- Magnitude fields accept exact integral decimal/exponent notation in JSON
+  numbers or numeric strings. Nonzero negative or fractional values are rejected;
+  negative zero is accepted as zero. Conversion never rounds through a float.
+- Output value and token amount fields must also fit Scala `Long.MAX_VALUE`,
+  including DTOs constructed directly in Rust. Monetary rules are validated later.
+- Nonzero BigInt conversion has the pinned Circe 2^18 decimal-digit bound, checked
+  before exponent expansion. Zero does not require scale expansion.
+- `nBits` must fit u32. Digest/ID, state root, votes, public key and nonce fields
+  are length-checked before conversion to fixed-size representations.
+- Header version 1 uses the V1 PoW solution; later versions use V2. The V1 `d`
+  field accepts an exact nonnegative number/string magnitude and serializes it
+  as unsigned big-endian bytes without a sign-disambiguation byte.
+- Full-block conversion requires each present section's `headerId` to match the
+  computed header ID before returning its wire bytes.
+
+## Entry points and evidence
+
+`decode_scala_transaction(_with_mode)` and the block-transaction decoder share
+`build_transaction_from_input`. `decode_input_with_mode` uses checked
+`SpendingProof` constructors. `decode_registers_with_mode` and
+`decode_context_extension_with_mode` return parsed values plus mode-specific
+aggregate bytes. Header, extension and AD-proof conversion feed
+`decode_scala_full_block`, which returns `DecodedFullBlock`.
+
+Tests under `tests/it/` cover modes, numeric bounds and independent field framing.
+`test-vectors/ergo-rest-json/json-contracts/` retains actual pinned SDK numeric,
+canonical-write and consumed-prefix observations with command/dependency/source
+hashes. Header fixtures and the node's existing `b4_*` tests cover additional
+captured conversion paths. These finite fixtures do not establish full-chain
+acceptance parity.
+
+Mining DTOs retain the Scala `msg`, `b`, `h`, `pk` and `proof` field conventions;
+optional node fields default when absent. Served-job metrics reflect frozen
+selection/trimming results, with exact nanoERG fee strings and block-cost units.
+Reading those metrics does not trigger another validation or scan.

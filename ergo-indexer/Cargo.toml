@@ -3,6 +3,7 @@ name        = "ergo-indexer"
 description = "Opt-in extra-index parity for the Ergo Rust node: address / template / token / global-index segment apply, balance bookkeeping, polling task that follows the chain tip, and the redb-backed store. Read-side trait + DTOs live in ergo-indexer-types; this crate is the writer half."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -16,13 +17,16 @@ hex                = { workspace = true }
 redb               = { workspace = true, features = ["logging", "cache_metrics"] }
 serde              = { workspace = true, features = ["derive"] }
 thiserror          = { workspace = true }
-tokio              = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing            = { workspace = true }
 
 [dev-dependencies]
+tokio      = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 serde_json = { workspace = true }
 tempfile   = { workspace = true }
 
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

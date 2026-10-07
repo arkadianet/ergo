@@ -6,8 +6,9 @@
 //! tx-ids / box-ids, global-index range view (not the full
 //! `IndexedErgoTransaction` / `IndexedErgoBox` objects).
 //!
-//! Both ranges are `[lo, hi)` upper-exclusive, matching Scala's
-//! `getTxRange(offset, limit)` and `getBoxRange` slicing semantics.
+//! Offset counts backwards from the indexed global counter and results are
+//! newest-first, matching Scala's `getTxRange` and `getBoxRange`. The indexer
+//! resolves the counter and records in a single read snapshot.
 //! Box ids are derived from `box_data.box_id()` rather than a stored
 //! field (the indexer keys boxes by id, but doesn't keep a separate
 //! id field on `IndexedErgoBox`). A computation failure there surfaces
@@ -26,9 +27,12 @@ fn render_transaction_range(state: &BlockchainState, q: PagedQuery) -> Response 
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let lo = page.offset as u64;
-    let hi = lo.saturating_add(page.limit as u64);
-    let txs = state.indexer.txs_by_global_range(lo, hi);
+    let txs = match state.indexer.txs_latest_paged(page) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
     let ids: Vec<String> = txs.iter().map(|tx| hex::encode(tx.id.as_bytes())).collect();
     Json(ids).into_response()
 }
@@ -52,9 +56,12 @@ fn render_box_range(state: &BlockchainState, q: PagedQuery) -> Response {
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let lo = page.offset as u64;
-    let hi = lo.saturating_add(page.limit as u64);
-    let boxes = state.indexer.boxes_by_global_range(lo, hi);
+    let boxes = match state.indexer.boxes_latest_paged(page) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
     let ids: Result<Vec<String>, String> = boxes
         .iter()
         .map(|b| {

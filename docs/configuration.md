@@ -17,8 +17,9 @@ Values are resolved from three sources, highest precedence first:
 
 The config file path is `--config <path>`; when that flag is absent the
 node looks for `ergo-node.toml` inside the data directory
-(`<data_dir>/ergo-node.toml`). A missing config file is not an error —
-the node falls back to built-in defaults. All validation runs at load
+(`<data_dir>/ergo-node.toml`). If `--config` is omitted and that file does
+not exist, built-in defaults apply; a path given with `--config` must exist
+and be readable, or the node refuses to start. All validation runs at load
 time: any failure returns an error and the node refuses to start rather
 than booting into a misconfigured state.
 
@@ -27,6 +28,9 @@ A ready-to-use default config ships at
 full-archival node with the `/blockchain/*` extra-index enabled — and a
 fully-commented operator template lives next to it at
 [`../ergo-node/ergo-node.toml.example`](../ergo-node/ergo-node.toml.example).
+Both templates enable the API on loopback with no credential. The dashboard,
+swagger and public REST work immediately; privileged routes stay closed until
+the operator configures their own key.
 
 ### Unknown-key handling is per-section
 
@@ -38,13 +42,18 @@ section rejects typos:
 
 | Strict (unknown key = error) | Lenient (unknown key ignored) |
 |---|---|
-| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[voting]`, `[logging]`, `[logging.file]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[api]`, `[api.security]`, `[mining]` |
+| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[voting]`, `[logging]`, `[logging.file]`, `[api]`, `[api.security]`, `[api.script]`, `[api.peer_details]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[mining]` |
+
+**Upgrade:** Formerly ignored unknown keys in `[api]`, `[api.security]` and
+`[api.script]` now fail configuration loading and prevent startup. Remove
+unsupported keys or rename misspelled keys to their documented names in
+existing configs before upgrading.
 
 ## Top-level keys
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `network` | string | `"mainnet"` | Selects the chain spec. `"mainnet"` or `"testnet"`. The network must have an embedded genesis or the node fails fast. CLI: `--network`. |
+| `network` | string | `"mainnet"` | Selects the chain spec. `"mainnet"`, `"testnet"` or `"devnet"` (the private conformance chain of `scripts/devnet-mixed/`). The network must have an embedded genesis or the node fails fast. CLI: `--network`. |
 | `data_dir` | string (path) | `"./ergo-data"` | Root directory for the state database, logs, wallet, and the default config-file location. CLI: `--data-dir`. |
 
 ## `[node]`
@@ -55,14 +64,17 @@ section rejects typos:
 | `node_name` | string | `"ergo-rust-node"` | Node name advertised in the handshake. |
 | `blocks_to_keep` | i32 | `-1` | Pruning suffix length. `-1` = full archive (keep every block). `N > 0` = retain a pruned suffix of `N` blocks. `0` is reserved for the headers-only combo (see below). Values below `-1` are rejected. A positive `N` must be at least the rollback-window floor (`keep_versions + SAFETY_MARGIN`); a smaller value is rejected because a reorg could otherwise need evicted block sections. |
 | `keep_versions` | u32 | `200` | Undo-retention window = the deepest chain reorg the node can serve (Scala `keepVersions` parity — same default). Raising it lets the node follow deeper best-chain reorgs at a linear undo-log disk cost; the same value is wired into the extra-index store so the indexer can follow any reorg the state performs. `0` is rejected (a store that can never roll back would wedge on any reorg). Prospective only: undo entries already pruned under a smaller window stay gone, so a raise takes full effect `keep_versions` blocks later. If the best-header chain ever forks deeper than this window, the node cannot reorg onto it and reports a terminal `sync_wedged` state (`/health` = `wedged`, HTTP 503) — the only recovery is a resync. |
-| `state_type` | string | `"utxo"` | State backend. `"utxo"` keeps the full UTXO set on disk (wire byte 0); `"digest"` keeps only the authenticated root digest and a header window (wire byte 1). Case-insensitive. `"digest"` is accepted only in the headers-only combo below; any other digest configuration is rejected at load. |
+| `state_type` | string | `"utxo"` | State backend. `"utxo"` keeps the full UTXO set on disk (wire byte 0); `"digest"` keeps only the authenticated root digest and a header window (wire byte 1). Case-insensitive. `"digest"` supports the digest-verifier and headers-only combinations below. |
 | `verify_transactions` | bool | `true` | When `false`, the node syncs headers only and downloads no block sections. Requires `state_type = "digest"` (Scala rule R1) and is accepted only in the headers-only combo below. |
 
-**Headers-only combo.** The only currently-bootable non-UTXO
-configuration is `state_type = "digest"` + `verify_transactions = false`
-+ `blocks_to_keep = 0` + `utxo_bootstrap = false` (this mirrors Scala
-`application.conf`). Other digest or `blocks_to_keep = 0` combinations
-are rejected with an explicit error so the conflicting key is obvious.
+**Digest combinations.** Mode 5 verifies full blocks with AD proofs:
+`state_type = "digest"`, `verify_transactions = true`, `blocks_to_keep = -1`,
+`utxo_bootstrap = false`, `nipopow_bootstrap = false`. Mode 6 verifies headers
+only: `state_type = "digest"`, `verify_transactions = false`,
+`blocks_to_keep = 0`, `utxo_bootstrap = false`. Other digest combinations are
+rejected. Both modes reject mining and the extra-index because they keep no
+UTXO box store. Mode-specific compatibility limits remain in
+[`compatibility.md`](compatibility.md).
 
 ### `[node.utxo]`
 
@@ -89,7 +101,7 @@ the fast clean-database boot path.
 | `target_outbound` | usize | `96` | Outbound-connection target. Must be at least 1 and no greater than `max_connections`. When omitted, the default is clamped down to `max_connections` if that value is smaller, so a config that pins a low `max_connections` is not broken by a binary upgrade that raises the default. An explicit value above `max_connections` is a hard error. |
 | `max_inbound` | usize | `256` | Maximum inbound connections accepted. Decoupled from `target_outbound`: a full outbound set never reduces inbound capacity. `0` = outbound-only. The hard ceiling `max_connections` still applies on top of this budget. |
 | `per_ip_limit` | usize | `1` | Maximum connections per peer IP. Must be at least 1. |
-| `per_subnet_limit` | usize | `3` | Maximum connections per /16 subnet. Must be at least 1. |
+| `per_subnet_limit` | usize | `3` | Maximum connections per IPv4 /16 or IPv6 /48 group, across inbound/outbound and pending handshakes. IPv4-mapped IPv6 shares IPv4 limits. Must be at least 1. |
 | `bind_addr` | string | none | Inbound TCP listen address. Absent or empty string = outbound-only (no inbound listener). Parsed as a socket address at load; a malformed value is rejected. |
 | `declared_addr` | string | none | Address advertised in the handshake and peer gossip so others can dial this node. Independent of `bind_addr` (a NAT'd host binds privately and declares its public address). Absent or empty = the handshake omits it. |
 | `allow_local` | bool | `false` | Allow local-network addresses — loopback, RFC1918 / site-local, link-local, IPv6 unique-local, and carrier-grade NAT — to be learned from gossip, dialed, shared with peers, and kept in `peers.redb`. Off by default so a NAT'd peer advertising e.g. `10.0.0.8:9030` does not enter every other node's dial pool. Turn it on for a LAN devnet, where peers must find each other by gossip over private addresses. Mirrors Scala `scorex.network.allowLocal`. Entries in `known` are unaffected: an operator-configured address is always dialable, including `127.0.0.1:9020`. |
@@ -107,7 +119,38 @@ the fast clean-database boot path.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `cache_bytes` | usize | 1 GiB (`1073741824`) | redb + AVL arena page-cache budget, in bytes. When omitted, the store uses its built-in default. CLI flag `--cache-bytes` overrides this. Note that redb's own per-database page cache is separate from this AVL-arena budget; account for several gibibytes of resident memory across the state, indexer, peers, and wallet databases. |
+| `cache_bytes` | usize | 1 GiB (`1073741824`) | AVL arena clean-node LRU budget, in bytes. CLI flag `--cache-bytes` overrides this. Dirty/pinned nodes and redb's per-database caches are separate; this is not a process RSS limit. |
+| `state_redb_cache_bytes` | usize | 1 GiB | redb page-cache budget for `state.redb`, including digest mode. Independent of `cache_bytes`; zero disables this cache. |
+| `indexer_redb_cache_bytes` | usize | 1 GiB | redb page-cache budget for the optional indexer database. Used on creation, resume and schema rebuild. |
+| `peers_redb_cache_bytes` | usize | 1 GiB | redb page-cache budget for `peers.redb`, including replacement after corruption. |
+
+Defaults preserve the previous per-database budgets. Each redb budget covers
+its read/write page caches (approximately 90%/10%); it is neither a resident
+memory measurement nor a process-wide hard limit. Startup logs report the
+requested budgets. `ERGO_MEM_CSV` samples append the effective per-database
+budgets, cumulative active eviction counters, and unpersisted pinned AVL bytes.
+An unavailable peer/indexer database reports zero budget; zero evictions can
+mean no pressure. Choose a new CSV path when upgrading its column schema.
+
+For a constrained comparison, an AVL/state/indexer/peer cache allocation of
+16/16/16/1 MiB is a starting experiment, not an optimal mainnet profile. Replay
+the same owned snapshot and interval with identical validation and persistence
+settings, verifying final roots and reopen before comparing throughput and RSS.
+
+Start with the 1 GiB default for full-mainnet replay, then compare the same
+height interval and validation settings before changing it. The
+[measured cache comparison](perf/ibd-baseline-2026-09-30.md) found no material
+benefit from 16, 128 or 1024 MiB budgets on blocks 851..1000: that small AVL
+working set fit all three. This supports a smaller budget for that workload,
+but does not establish a full-mainnet minimum or optimal budget.
+
+Reserve memory for redb caches, dirty/pinned AVL nodes, download/persist queues
+and enabled indexer, wallet and mining work. A live full-validation archive
+node with a 2 GiB AVL budget reached approximately 3.9 GiB RSS during the
+recorded window. Increasing the budget does not bound these other allocations.
+Use RSS/anonymous/file samples, AVL occupancy and queue observations together;
+raise the budget only if a matched replay improves performance and the host
+has headroom. The linked baseline includes commands for repeating that check.
 
 ## `[chain]`
 
@@ -116,6 +159,7 @@ the fast clean-database boot path.
 | `script_validation_checkpoint_height` | u32 | network default | Blocks at or below this height skip per-input ErgoScript evaluation (UTXO mutations and the per-block state-root check still run). `0` disables the checkpoint (full validation everywhere). Precedence: CLI `--checkpoint-height` > TOML > the network's embedded default. |
 | `script_validation_checkpoint_block_id` | string (hex) | network default | The 32-byte block id pinned at the checkpoint height; asserted on apply, and a mismatch is a hard error. Must decode to exactly 32 bytes. If a height is set with no id and the network has no default, load fails. CLI: `--checkpoint-block-id`. |
 | `checkpoint` | table `{ height, block_id }` | absent | **Header-level trust anchor** (Scala `ergo.node.checkpoint`, enforced in header validation by `HeadersProcessor.checkpointCondition`). The header at exactly `height` must have id `block_id`; a header at that height with any other id is rejected as invalid and the peer that sent it is penalised. Headers at every other height are unaffected — the anchor skips **no** validation. Absent by default, matching Scala's `checkpoint = null`; there is deliberately no network default, so an anchored node is always an operator decision. Distinct from `script_validation_checkpoint_*` above, which governs *skipping* ErgoScript evaluation during full-block validation. `height` must be >= 2 (genesis takes its own validation path and is never checked against the anchor) and `block_id` must decode to exactly 32 bytes (an optional `0x` prefix is allowed). Also gates Mode 2 snapshot installs — see [operating.md](operating.md). |
+| `devnet_magic` | array of 4 integers | `[7, 7, 7, 7]` | **Devnet only.** The P2P wire magic of the private chain, so several devnets can run side by side or one can join another private network's magic. Rejected for mainnet and testnet, whose magic is fixed. |
 | `genesis_id` | string (hex) | network genesis id | The 32-byte genesis header id used for NiPoPoW R5 enforcement. An optional `0x` prefix is allowed; must decode to 32 bytes. The empty string `""` disables the check (development against synthetic chains only) — mainnet runs must leave this at the default. Combining `genesis_id = ""` with `nipopow_bootstrap = true` is rejected. |
 
 ## `[api]`
@@ -126,41 +170,172 @@ beyond loopback.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `bind` | string (socket addr) | `"127.0.0.1:9099"` | HTTP API bind address. Parsed at load; a malformed value is rejected. A non-loopback bind is rejected unless `public_bind = true`. |
-| `disabled` | bool | `false` | When `true`, the API server is not started and no `api_key_hash` is required. |
+| `disabled` | bool | `false` | When `true`, the API server is not started. Both shipped templates use `false`. |
 | `public_bind` | bool | `false` | Permits binding a non-loopback address. A non-loopback `bind` without `public_bind = true` is rejected at load. See the security note below. |
+| `local_reverse_proxy` | bool | `false` | Declares a reverse proxy terminating on loopback in front of the API. When `true`, loopback peers lose the v1 rate-limit exemption, Admin requests use the remote warn-and-allow policy, and API transaction submissions use the public mempool budget. Proxied clients share limits by peer IP; see the security notes below. `X-Forwarded-For` is not trusted. |
 | `allowed_hosts` | array of string | `[]` | Extra `Host` header values the DNS-rebinding guard accepts, beyond `localhost` / `127.0.0.1` / `::1` / the literal `bind` address (always accepted on a loopback bind). An entry may include a port (`"example.com:9099"`) to pin it, or omit one to match any port. On a non-loopback bind, the guard only activates when this list is non-empty — see the security note below. |
+
+### Webhook state
+
+Operator webhook registrations, HMAC secrets, bounded delivery history and pending
+retry state are stored in `<data_dir>/webhooks.redb`. The file uses owner-only
+permissions on Unix. Back up this private database with the node data directory.
+A failed open, corrupt snapshot or failed commit disables webhook management and
+outbound deliveries until restart; other API routes remain available.
+On a commit error, RAM changes are rolled back, but a failed disk flush may leave
+either atomic snapshot visible after restart. A failed API request can therefore
+have persisted; reconcile registrations and delivery history after reopening.
+
+Webhook storage and response serialization run on one owned blocking thread,
+started on first use. Up to eight management operations are admitted, including
+the running operation; additional requests receive `503 overloaded` with
+`Retry-After: 1`. Accepted work finishes even if its HTTP caller disconnects.
+Scheduling has separate admission, and each of the 64 possible in-flight sends
+reserves capacity for its outcome. Graceful node shutdown joins these writes
+and releases the database before returning.
+
+Delivery attempt reservations and acknowledgements commit before they are
+reported. After a crash, an attempt whose outcome is unknown may be retried with
+the same delivery ID and body, within the 12-attempt delivery budget. A crash
+on the final reserved attempt parks its unknown outcome as failed. Consumers
+should deduplicate on `delivery_id`.
+The delivery ring retains at most 4,096 entries, evicts terminal entries first,
+and rejects new deliveries when every retained entry is pending. Realtime cursors
+resume above persisted delivery cursors, but event backfill remains in memory;
+WS clients receive backfill gap reports. Webhook consumers receive no marker
+for pre-admission fanout drops or a saturated backlog, and should periodically
+reconcile their state through REST queries.
+
+### `[api.peer_details]`
+
+The Peers dashboard shows handshake identity and mode, sync relationship,
+delivery health, connection setup time, traffic totals/rates, and IP metadata.
+Handshake values are peer-reported. Connection setup includes TCP/accept through
+handshake completion and is not ping latency. V2 supplies a tip-header height;
+V1 heights (and V2 fallback observations) are inferred from shared header IDs,
+which can understate the remote tip. The drawer shows the actual height source
+and age of the last sync observation.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `auto_download` | bool | `false` | Opt in to HTTPS downloads of the free DB-IP Lite City and ASN databases when the API is enabled. Checks on startup and every 24 hours; downloads each monthly release once per dataset. Validated updates take effect without restarting. Explicit file overrides are never downloaded or overwritten. |
+| `reverse_dns` | bool | `false` | Separately opt in to resolving public peer IPs using the OS DNS resolver when the peer API is read. This discloses peer IPs to the resolver. Four concurrent workers, a five-second response deadline, and a bounded 1,024-IP cache. Successful results expire after 24 hours; failures after 15 minutes. |
+| `geoip_db` | path | absent | Local DB-IP or compatible MaxMind City/Country `.mmdb` override. City adds region, city and approximate coordinates; time zone and accuracy radius appear only when supplied by the database. Relative paths use the node data directory. Without an override, uses an existing `geoip/dbip-city-lite.mmdb` cache. |
+| `asn_db` | path | absent | Local DB-IP or compatible MaxMind ASN `.mmdb` override for ASN, network organization and network prefix. Relative paths use the node data directory. Without an override, uses an existing `geoip/dbip-asn-lite.mmdb` cache. |
+
+**Default privacy behavior:** native peer details and installed local database
+lookups remain available. Neither dataset downloads nor reverse-DNS queries run
+unless explicitly enabled. No peer IP is sent to a geolocation service. Turning
+downloads off and restarting stops update requests while keeping cached local
+data usable. Other normal node networking (P2P, seed discovery, etc.) is unaffected.
+
+To enable free location and ASN data, edit the settings in your existing config
+and restart (in the shipped templates these are dotted keys under `[api]`):
+
+```toml
+[api.peer_details]
+auto_download = true
+reverse_dns = false
+```
+
+The [DB-IP Lite City](https://db-ip.com/db/download/ip-to-city-lite) and
+[DB-IP Lite ASN](https://db-ip.com/db/download/ip-to-asn-lite) datasets require no
+account or API key and are distributed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The Peers dashboard
+includes the required DB-IP attribution link when showing their data. Applications
+reusing this data from the peer API must also retain attribution. The data is
+optional and is not bundled with the node binary.
+
+Downloads contact `download.db-ip.com` over HTTPS, revealing the node's outbound
+IP to the provider, but never include peer addresses. Redirects are rejected.
+Compressed/decompressed size caps are 128/512 MiB for City and 32/128 MiB for ASN;
+each request has a three-minute deadline. Gzip integrity, MMDB structure, database
+type and build-date regression are checked before atomic replacement. Temporary
+files share the cache directory, so allow space for old and new copies during
+updates. The `.release` sidecars record the installed month. Failed updates keep
+the prior database and retry after 24 hours; the node continues syncing throughout.
+If there is no prior data, the WebUI shows downloading or unavailable status.
+
+For offline setup, configure `geoip_db` and `asn_db` to files you install yourself,
+leaving both booleans false. Local overrides also support
+[MaxMind databases](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
+obtained under their terms. Overrides load at startup; restart after replacing
+them or changing config. An invalid override reports an error and does not fall
+back to a network download. Local/special IPs are excluded from DNS and database
+lookups. Database type and build date appear in the peer drawer. Country and city
+describe an approximate network endpoint, not a verified operator location. An
+ASN organization is the network operator and need not be the node operator or
+retail ISP. These display-only details never affect peer selection or scoring.
+
+Realtime subscriptions, mempool-depth sampling, and the webhook registry belong
+to one node, including when several nodes run in one process. Router construction
+starts no background workers; the API listener owns them and stops them at
+shutdown. Delivery permits only public
+DNS destinations by default, checks every resolved address before connecting,
+and disables redirects and environment HTTP proxies so those checks also apply
+to retries and cannot be bypassed by alternate routing.
 
 ### `[api.security]`
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `api_key_hash` | string (hex) | none | Lowercase Base16 of `Blake2b256(<secret>)`. **Mandatory whenever the API server is enabled** (mirroring Scala `ErgoApp.scala`). Must be exactly 64 lowercase hex characters (`0-9`, `a-f`); uppercase or mixed case is rejected for canonical-form parity. Not required when `[api] disabled = true`. |
+| `api_key_hash` | string (hex) | none | Lowercase Base16 of `Blake2b256(<secret>)`. Optional; privileged routes fail closed when absent. Must be exactly 64 lowercase hex characters (`0-9`, `a-f`); uppercase or mixed case is rejected for canonical-form parity. Supplied hashes are validated even when the API is disabled. |
+
+### `[api.script]`
+
+Native script endpoints under `/api/v1/script/*` use this policy. It does not
+change authentication on the Scala-compatible `/script/p2sAddress` and
+`/script/p2shAddress` routes.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `require_api_key` | bool | `false` | Require a configured API credential for all seven native script endpoints. When enabled without a configured hash, those endpoints fail closed. |
+| `max_cost` | u64 | `8001091` | Maximum native reduction cost; accepts `1..=8001091`. A request can lower the limit, and cannot raise it above this policy. Invalid values reject configuration even when the API is disabled. |
+
+Compilation and reduction use a per-node compute pool with two running jobs,
+eight waiting jobs, a two-second queue wait and a thirty-second response
+deadline. Scala-compatible P2S/P2SH compilation shares that pool. Queue pressure
+returns HTTP 503 with `Retry-After: 1`. A response timeout or disconnected client
+does not stop an accepted blocking job: it retains its slot until execution
+finishes, and shutdown drains accepted jobs. Point and scan read lanes use
+sixteen/four running jobs and sixty-four/sixteen waiting jobs respectively.
+These resource limits are code defaults rather than TOML keys.
 
 ### Security notes for the API
 
-The `api_key` gate is narrow by design, matching the Scala reference
-node: it protects the `/wallet/*` routes, the `/node/shutdown` route, and
-the authenticated wallet-facing `/api/v1/chain/{tip,snapshot,boxes,blocks-since,transactions}`
-routes. The legacy gate covers the whole `/wallet/` and `/node/` path
-prefixes — an unknown subpath under those prefixes rejects on the key
-first (mirroring Scala's `pathPrefix(...) & withAuth`), while any other
-unmatched path is a plain, ungated `404`. The v1 chain router applies its
-T1 key check to its five concrete routes; loopback policy remains the
-existing auth-layer policy. Other routes are unauthenticated regardless
-of bind scope — including transaction submission
-(`POST /transactions*`, `POST /api/v1/mempool/{submit,check}`),
-`POST /blocks`, `/mining/*`, `/emission/*`, all other read endpoints, and
-`/metrics`.
+The API distinguishes public routes from privileged routes:
+
+| Privileged (require a configured hash and valid `api_key`) | Public (no key required) |
+|---|---|
+| `/wallet/*`, `/scan/*`, `/api/v1/wallet/*` | Dashboard `/`, `/wallet/ui*` redirects, swagger |
+| `POST /node/shutdown`, `POST /api/v1/node/shutdown`, `POST /peers/connect`, `POST /api/v1/votes`, `POST /blocks` | Read REST, including `GET /api/v1/votes`, `/info`, `/blocks/*`, `/peers/*`, `/blockchain/*` |
+| `/mining/*` (candidate, solution, reward address/public key) | Transaction submission/checks: `POST /transactions`, `/transactions/bytes`, `/transactions/check`, `/transactions/checkBytes`, `/api/v1/mempool/{submit,check}` |
+| `/api/v1/chain/{tip,snapshot,boxes,blocks-since,transactions}`; v1 Operator/Admin routes (node config, network controls, mining controls, operator votes, scans, account management/PSBT, watch writes, private-key export, webhooks); script compute when configured to require a key | Public v1 queries including watch-only account reads, `/emission/*`, `/utils/*`, `/metrics` |
+
+The whole wallet, scan and node prefixes are gated, including unknown subpaths;
+other unmatched paths return `404`. Public means no API-key authentication;
+normal validation, subsystem availability and admission policies still apply.
+
+Use `POST /wallet/lock` and `POST /wallet/deriveNextKey` for these wallet
+mutations. Their GET forms remain available for Scala-compatible clients;
+both methods use the same handlers and require the configured API key.
+
+Transaction submission is public in Scala (`TransactionsApiRoute.scala:174-209`).
+Block submission requires an API key, matching Scala (`BlocksApiRoute.scala:127`). This node gates all four mining routes above;
+Scala leaves those four open (`MiningApiRoute.scala:45,77,86,98`).
 
 Consequences:
 
-- **`api_key_hash` is required even on a loopback bind** whenever the API
-  is enabled — it is keyed off whether the API server runs, not off the
-  bind address. The header name is `api_key` (lowercase, underscore);
-  the value is compared in constant time against the configured hash.
+- **Absent hash means privileged routes are closed, including on loopback.**
+  Compat/native privileged mounts return `403` with reason
+  `api-key-not-configured` and detail
+  "API key not configured: set [api.security] api_key_hash (see docs/configuration.md)".
+  The v1 tier gate returns its `401 unauthorized` envelope with the same guidance.
+  Once configured, the header name is `api_key` (lowercase, underscore), checked
+  in constant time; a missing/wrong key retains the existing invalid-key response.
 - **`public_bind = true` exposes the submission and read surface to the
   network.** Binding `0.0.0.0` with `public_bind = true` makes
-  transaction submission, block submission, and `/metrics` world-callable.
+  transaction submission and `/metrics` world-callable.
   For remote operator access, prefer binding loopback and fronting the
   node with an authenticated reverse proxy. On a public bind, transaction
   submissions are automatically charged against the shared
@@ -170,16 +345,42 @@ Consequences:
   `local_reserved_cost_budget` below.
 - **`/metrics` is not authenticated.** Keep it on loopback or behind a
   proxy.
+- **Set `local_reverse_proxy = true` when a reverse proxy connects to a
+  loopback API bind.** This flag does not authenticate clients or unlock privileged
+  routes; configure client authentication at the proxy separately. Client identity comes only from the real peer socket;
+  the node never trusts `X-Forwarded-For`. All clients through the same proxy
+  peer IP (usually `127.0.0.1`, or `::1`) share **one v1 governor bucket**:
+  default burst 40 tokens, refill 20 tokens/second, Compute requests costing
+  10 tokens each. Direct local operator access also loses its loopback
+  exemption and shares that bucket when using the same peer IP. Apply
+  per-client rate limits at the proxy and size aggregate traffic for this
+  budget. Raising governor limits requires changing the server's
+  `GovernorConfig`; these limits are not currently exposed in TOML.
+- **Realtime connections also share the proxy's peer IP.** The fixed
+  `MAX_SOCKETS_PER_IP = 16` cap applies across all proxied clients using that
+  IP, including direct local connections from that IP. This socket cap uses
+  peer identity regardless of `local_reverse_proxy`; budget concurrent
+  WebSocket clients accordingly. Proxy rate limiting does not raise the cap.
+- **A declared proxy routes all API transaction submissions through the
+  public mempool budget**, including direct local submissions. At boot,
+  `api_publicly_bound` becomes true and admission uses `TxSource::PublicApi`
+  (shared `global_cost_budget`) rather than `TxSource::Api`
+  (`local_reserved_cost_budget`), even though the API binds to loopback.
+- **Admin operations remain authenticated and warn-and-allow in production.**
+  With `local_reverse_proxy = true`, loopback requests use the remote Admin
+  policy and emit a warning after a valid API key is supplied. The setting
+  does not enable `admin_hard_deny_nonloopback` or block authenticated Admin
+  operations; restrict remote Admin access at the proxy if needed.
 - **The `Host` header is checked to close the DNS-rebinding read path.**
   A loopback bind (the default) rejects any request whose `Host` header
   isn't `localhost`, `127.0.0.1`, `[::1]`, the literal `bind` address, or
   an `allowed_hosts` entry, with `421 Misdirected Request` — this stops
   attacker-controlled JavaScript on a rebound domain from reading the
   unauthenticated surface (`/info`, `/blocks/*`, `/peers/*`, …) via a
-  victim's browser hitting `127.0.0.1:9099`. Key-gated routes were never
-  at risk (the `api_key` header can't be forged cross-origin), so this
-  is a hardening measure for the public routes, not a fix for a gap in
-  the api-key gate. A request with no `Host` header at all is allowed
+  victim's browser hitting `127.0.0.1:9099`. A rebinding page can also
+  send an `api_key` header under its same-origin hostname: privileged routes
+  rely on a secret key, with the Host guard adding defense in depth.
+  A request with no `Host` header or HTTP/2 `:authority` is allowed
   (HTTP/1.0 tooling). On a non-loopback bind the guard only activates
   when `allowed_hosts` is non-empty — most public deployments front the
   API with a reverse proxy that already validates `Host`/SNI, and
@@ -196,10 +397,13 @@ printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
 
 Save `$secret` somewhere safe — it is the plaintext `api_key` clients send;
 the hash above is what goes in `api_key_hash`. The shipped
-`ergo-node.toml` template ships with `api_key_hash` set to
-`Blake2b256("hello")` — the node's boot-warn fires for this value on
-every boot, loopback bind included, because anything with local shell
-access already has it. Rotate it before relying on the API for anything.
+templates contain no credential. Add the generated hash under `[api.security]`
+and restart to unlock privileged routes; the API is already enabled.
+
+**Upgrade:** operators running the bundled file directly lose the old known
+`hello` key. Privileged calls using it now fail until they set their own
+`[api.security] api_key_hash`. Existing explicitly configured hashes keep their
+behavior.
 
 ## `[mempool]`
 
@@ -246,6 +450,7 @@ times it.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `disabled` | bool | `false` | When `true`, skip transaction relay (useful for archival or sync-test runs). CLI flag: `--mempool-disabled`. |
+| `reject_storage_rent_txs` | bool | `true` on mainnet; `false` on testnet/devnet | Decline transactions with any empty-proof input carrying extension variable 127, including mixed transactions. Set `false` to relay rent claims. Admission policy only: valid claims in blocks and miner self-claims remain allowed. |
 | `sort_policy` | string | `"cost"` | Pool priority ordering: `"cost"`, `"size"`, or `"min"`. An unknown value is rejected at load. CLI flag: `--mempool-sort`. |
 | `max_pool_size` | usize | `1000` | Maximum transaction count. Must be at least 1. |
 | `max_pool_bytes` | usize | `67108864` (64 MiB) | Maximum total pool size in bytes. Must be at least 1. |
@@ -287,11 +492,13 @@ either way.
 |---|---|---|---|
 | `enabled` | bool | `false` | Enables the external-miner subsystem and mounts `/mining/*`. Rejected when `state_type = "digest"` (candidate generation needs UTXO state). CLI flag `--mining-enabled` forces it on. |
 | `miner_public_key_hex` | string (hex) | none | 33-byte compressed secp256k1 public key (66 hex chars) for the reward output. **Optional in embedded mode**: when set, it is the pinned reward pubkey; when omitted, the wallet's EIP-3 first-address key is resolved at candidate time. It is **required when `[wallet] mode = "external"` and mining is enabled**, because external mode has no wallet tables to resolve. A value that is present must be well-formed (66 hex chars → 33 bytes) or load fails. CLI flag: `--mining-public-key`. |
-| `block_candidate_generation_interval_ms` | u64 | `1000` | Debounce window (ms) for same-parent mempool-refresh rebuilds. When the mempool changes but the tip has not, the node coalesces the burst and regenerates the candidate at most once per window. Lower = fresher candidates but faster churn of the retained template ring. |
+| `block_candidate_generation_interval_ms` | u64 | `250` | Minimum interval (ms) between same-parent mempool-refresh signals; must be at least 50. The first pool change after a quiet interval signals immediately. Changes within the interval share a deadline and refresh the latest pool snapshot when it expires, independently of the mempool polling tick. Applied-parent changes bypass this interval; header-only changes do not rebuild work once mining has started. Lower values refresh transaction contents sooner but increase build load and churn of the 16 retained templates. |
 | `use_external_miner` | bool | `true` | Must be `true` — an internal CPU miner is not supported, so `false` is rejected at load. |
-| `candidate_base_cache` | bool | `false` | Caches the hydrated AVL working set between candidate builds, keyed on the committed tip. Same-tip rebuilds (enriched refresh, mempool-driven rebuilds) are near-instant. When the tip advances by exactly one block, the engine attempts a single-step incremental advance of the cached tree (replaying the new block's UTXO changes, verifying the resulting digest) before falling back to full rehydration. Full rehydration is always the fallback on multi-block jumps, reorgs, decode errors, or digest mismatches. Holds the full UTXO AVL node graph resident — multi-GB on a mainnet archival node, scaling with the UTXO-set size — so enable it only on a mining node with RAM headroom. |
+| `candidate_base_cache` | bool | `false` | With the default `false`, candidate proofs load only authenticated AVL operation paths from the committed snapshot and retain no full-tree graph between builds. Legacy v1 nodes without child labels may require subtree reads. Setting `true` enables the alternative cache of the hydrated AVL working set between candidate builds, keyed on the committed tip. Same-tip rebuilds reuse the tree and loaded paths; transaction validation and proof generation for changed transaction sets still run. Independently of this setting, the worker can reuse a prior state root and proof for an identical applied parent and ordered transaction bytes after fresh transaction validation. When the tip advances by exactly one block, the engine attempts a single-step incremental advance of the cached tree (replaying the new block's UTXO changes, verifying the resulting digest) before falling back to full rehydration. Full rehydration is always the fallback on multi-block jumps, reorgs, decode errors, or digest mismatches. Holds the full UTXO AVL node graph resident — multi-GB on a mainnet archival node, scaling with the UTXO-set size — so enable it only on a mining node with RAM headroom. |
 | `claim_storage_rent` | bool | `false` | When `true`, the node sweeps storage-rent-eligible boxes into a self-claim transaction paid to the miner's reward key, inserted ahead of mempool selection so any conflicting fee-bearing claim on the same box is excluded. Opt-in: it changes block contents and seizes rent to the miner. Requires `[indexer] enabled = true` (see cross-section rules). While the index backfills, enumeration may be partial but never claims an invalid box — a lagging index only under-collects. |
 | `max_storage_rent_claims` | u32 | `4096` | Safety ceiling on the number of storage-rent boxes swept into one block's self-claim. The block's cost and size budgets are the real binding limit (typically ~3,700 boxes by cost on mainnet); this cap prevents unbounded iteration. Lower it to leave more room for fee-paying user transactions. Only meaningful when `claim_storage_rent = true`. |
+
+Storage-rent claims enforce distinct context-extension variable 127 values from height 1,885,000 on every network, matching Scala 6.0.7. This consensus check applies to blocks regardless of `reject_storage_rent_txs`. The self-collector gives each fully consumed input a separate miner output from that height; if proceeds cannot cover the additional outputs' dust floors, the batch is skipped. Earlier blocks retain the historical rules.
 
 ## `[voting]`
 
@@ -386,8 +593,7 @@ checks and are enforced at load:
 - **R5** — `nipopow_bootstrap = true` requires a configured genesis id
   (cannot use `genesis_id = ""`).
 - The digest backend additionally rejects `[mining] enabled = true` and
-  `[indexer] enabled = true`, and `state_type = "digest"` boots only in
-  the headers-only combo.
+  `[indexer] enabled = true`, and requires one of the Mode 5 or Mode 6 combinations above.
 - `[mining] claim_storage_rent = true` requires `[indexer] enabled = true`
   (the eligible-box scan reads the extra-index).
 - `[voting.targets]` set with `[mining] enabled = false` is rejected — the
@@ -398,7 +604,7 @@ checks and are enforced at load:
 
 ## Minimal example
 
-A minimal mainnet full-archive node with the operator API enabled:
+A minimal mainnet full-archive node with public API enabled and privileged routes locked:
 
 ```toml
 network = "mainnet"
@@ -408,11 +614,13 @@ network = "mainnet"
 known = ["213.239.193.208:9030", "159.65.11.55:9030"]
 
 [api]
+disabled = false
 bind = "127.0.0.1:9099"
 
-[api.security]
-# lowercase Base16 of Blake2b256(<your-secret>)
-api_key_hash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
+# To unlock privileged routes, generate a random secret and hash it as
+# described above, then add the generated value here and restart:
+# [api.security]
+# api_key_hash = "<64 lowercase hex characters>"
 ```
 
 For the full set of keys, comments, and a fast clean-database boot

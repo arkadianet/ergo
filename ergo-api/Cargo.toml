@@ -3,6 +3,7 @@ name        = "ergo-api"
 description = "Operator-facing read-mostly HTTP API for the Ergo Rust node. Hosts the axum router that serves the Scala API (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/blockchain/*`, `/mining/*`, `/wallet/*`) plus the RUST API `/api/v1/*` dashboard, including mutating routes (transaction + block submission, `/node/shutdown`, and wallet lifecycle/sending). Traits-only contract: the node implements the reader / submit / admin / chain-query traits against its runtime state and hands them in as trait objects — no concrete-type coupling."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -10,7 +11,7 @@ publish    = false
 [dependencies]
 axum               = { workspace = true, features = ["ws"] }
 tower-http         = { workspace = true, features = ["trace"] }
-tokio              = { workspace = true, features = ["rt", "macros", "net", "sync"] }
+tokio              = { workspace = true, features = ["rt", "macros", "net", "sync", "time"] }
 serde              = { workspace = true, features = ["derive"] }
 serde_json         = { workspace = true }
 hex                = { workspace = true }
@@ -66,8 +67,13 @@ ergo-indexer    = { workspace = true }
 # bytes through the indexer apply path before replaying captured Scala
 # responses through the router.
 tempfile        = { workspace = true }
+# Corruption regressions inject malformed persisted rows into a real indexer.
+redb            = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

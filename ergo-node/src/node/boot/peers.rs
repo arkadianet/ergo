@@ -1,29 +1,33 @@
 //! Boot phase: peer manager construction, address-book restore, and
 //! known-peer seeding.
 
-use ergo_p2p::address_book::AddressBook;
+use ergo_p2p::address_book::{AddressBook, AddressBookError};
 use ergo_p2p::peer_manager::{KnownPeer, PeerManager, PeerOrigin};
 
 use super::super::util::{rand_session_id, wall_to_instant};
 use crate::config::NodeConfig;
+use crate::node::NodeError;
 
 /// Build the peer manager: a fresh session id, restore of the persistent
-/// address book (best-effort — a failure to open/load leaves the node
-/// running with empty in-memory peer state rather than failing boot), and
+/// address book (unsupported file formats fail boot; other open/load failures
+/// keep the existing best-effort in-memory fallback), and
 /// seeding of `[peers] known_peers` from config.
 ///
 /// Restore happens before configured-peer seeding so persisted dial state
 /// (`last_seen`, backoff, `from_seed`) is preserved; configured seeds
 /// re-asserting `from_seed = true` go through the normal write-through path
 /// (`book.add_known`) only when novel.
-pub(super) fn setup(config: &NodeConfig) -> (i64, PeerManager) {
+pub(super) fn setup(config: &NodeConfig) -> Result<(i64, PeerManager), NodeError> {
     let session_id: i64 = rand_session_id();
     let mut peer_manager = PeerManager::new_with_limits(session_id, config.peer_limits);
     // Set before any address is restored, learned, or dialed: it decides
     // which addresses the routability filter admits.
     peer_manager.set_allow_local(config.allow_local);
 
-    match AddressBook::open(&config.data_dir) {
+    match AddressBook::open_at_with_cache(
+        &config.data_dir.join("peers.redb"),
+        config.redb_cache_budgets.peers,
+    ) {
         Ok(book) => {
             let book = std::sync::Arc::new(book);
             match book.load_all(config.allow_local) {
@@ -64,6 +68,7 @@ pub(super) fn setup(config: &NodeConfig) -> (i64, PeerManager) {
             }
             peer_manager.set_address_book(book);
         }
+        Err(e @ AddressBookError::UnsupportedFileFormat { .. }) => return Err(e.into()),
         Err(e) => {
             tracing::warn!(error = %e, "address_book open failed; running without persistence");
         }
@@ -86,5 +91,5 @@ pub(super) fn setup(config: &NodeConfig) -> (i64, PeerManager) {
         "peer limits",
     );
 
-    (session_id, peer_manager)
+    Ok((session_id, peer_manager))
 }

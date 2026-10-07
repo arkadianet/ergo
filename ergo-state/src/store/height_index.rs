@@ -43,7 +43,7 @@ where
                 });
             }
             let mut out = Vec::with_capacity(bytes.len() / 32);
-            for chunk in bytes.chunks_exact(32) {
+            for chunk in bytes.as_chunks::<32>().0 {
                 let mut id = [0u8; 32];
                 id.copy_from_slice(chunk);
                 out.push(id);

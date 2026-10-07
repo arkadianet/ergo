@@ -7,9 +7,11 @@
 //! - PeerManager (penalties, peer state)
 //!
 //! The executor owns:
-//! - ProtocolParams (mainnet defaults; epoch-boundary updates not yet implemented)
-//! - Recent validated header window (last 10 CheckedHeaders for CONTEXT.headers)
-//!   Must be hydrated from store on startup via hydrate_from_store().
+//! - Fallback ProtocolParams; block processing derives runtime numeric and
+//!   cumulative validation settings from state, including target epoch updates.
+//! - Best-header window (50 entries) for SyncInfo V2, hydrated on startup.
+//! - Applied-block context window (10 entries); block scripts receive 9
+//!   ancestors, while upcoming candidate/mempool contexts receive 10.
 //! - The feedback loop: action results → coordinator state updates
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -38,6 +40,7 @@ mod startup;
 pub(crate) use header_pipeline::{ORPHAN_HEADER_IBD_LOOKAHEAD, ORPHAN_HEADER_LIMIT};
 #[cfg(test)]
 pub(crate) use reorg::ForkPoint;
+#[cfg(test)]
 pub(crate) use reorg::ReorgOutcome;
 pub use reorg::{DeepForkWedge, LastBlockApplyError};
 pub use startup::{HydrationError, StartupError};
@@ -74,12 +77,14 @@ fn report_sync_storage_failure(
 /// apply — versus a transient/IO/consistency failure that must NOT poison
 /// the branch (it might be our bug, a stale local root, or missing data).
 ///
-/// Only the consensus-rule verdicts qualify: `Validation`, `HeaderMeta`,
-/// `EpochExtension`, and `AdProofsHashMismatch` (the regenerated proof
+/// Only the consensus-rule verdicts qualify: `Validation`,
+/// `TransactionValidation`, `EpochExtension`, and
+/// `AdProofsHashMismatch` (the regenerated proof
 /// hash contradicting the header's declared `adProofsRoot` is exactly
 /// Scala's "Regenerated proofHash is not equal to the declared one"
-/// reject). `Deserialize`, `HeaderNotFound`, `ParentNotFound`, and `State`
-/// are data/IO/consistency paths (a stored section that won't parse could
+/// reject). `TransactionValidation` has the same durable-invalidation semantics
+/// as `Validation`. `Deserialize`, `HeaderNotFound`, `ParentNotFound`, `State`,
+/// and `HeaderMeta` are data/IO/consistency paths (a stored section that won't parse could
 /// be disk corruption, not a bad block); `DigestApply` is session-scoped by
 /// its own contract. When in doubt we do NOT invalidate — the conservative
 /// direction, since a wrongly persisted invalidity would permanently orphan
@@ -95,14 +100,14 @@ fn is_validation_verdict(e: &BlockProcessError) -> bool {
     matches!(
         e,
         BlockProcessError::Validation(_)
-            | BlockProcessError::HeaderMeta(_)
+            | BlockProcessError::TransactionValidation { .. }
             | BlockProcessError::EpochExtension(_)
             | BlockProcessError::AdProofsHashMismatch { .. }
     )
 }
 
-/// Maximum number of recent headers kept for CONTEXT.headers and SyncInfo cache.
-/// Sized to cover SyncInfo V2's 50-header requirement plus script evaluation.
+/// Number of best-header ancestors cached for SyncInfo V2. Applied-block
+/// script context uses the separately aligned `block_context_headers`.
 const LAST_HEADERS_WINDOW: usize = 50;
 
 /// Sync-S2 low-watermark for drain-triggered download refill.
@@ -147,6 +152,11 @@ pub struct SyncExecutor {
     /// CONTEXT.headers sees [H, H-1, ..., H-9]. Max 10 entries.
     /// Updated after each successful block apply. Rebuilt on rollback.
     block_context_headers: Vec<CheckedHeader>,
+    /// Available replacement suffix selected by cumulative full-chain work.
+    reorg_blocks: VecDeque<[u8; 32]>,
+    /// An assembled block outside the best-header branch may complete a
+    /// better full chain even while the best-header branch withholds bodies.
+    full_candidate_height: Option<u32>,
     /// Header IDs installed since the last `drain_orphans` call. Used by
     /// the orphan drain to filter the buffer down to "orphans whose parent
     /// MIGHT have just appeared" without doing a full per-orphan
@@ -169,6 +179,9 @@ pub struct SyncExecutor {
     /// because `finalize_header` consumes the `PreValidatedHeader`
     /// and storage needs the bytes.
     orphan_headers: HashMap<[u8; 32], Vec<OrphanHeaderEntry>>,
+    /// Buckets containing headers blocked on older epoch ancestors, rather
+    /// than their immediate parent. Retry once on subsequent header progress.
+    context_retry_parents: HashSet<[u8; 32]>,
     /// Total entries across all `orphan_headers` values — kept in
     /// sync on insert/remove so `cap_orphan_buffer` and the
     /// `mem_csv` reporter don't have to recount on every read.
@@ -194,6 +207,7 @@ pub struct SyncExecutor {
     /// `script_validation_checkpoint` above: this one binds one header id on
     /// the header chain (Scala `hdrCheckpoint`) and skips nothing.
     header_checkpoint: Option<header_proc::HeaderCheckpoint>,
+    genesis_id: Option<[u8; 32]>,
     /// EIP-27 re-emission rule inputs for this node's network, plumbed
     /// through to `validate_full_block_parallel` via `process_block` so
     /// every block transaction is checked against the re-emission burning
@@ -212,6 +226,8 @@ pub struct SyncExecutor {
     /// fork-from-network is visible, not just a `warn!` line. Session-scoped
     /// (cleared on restart, like `block_perf`).
     last_block_apply_error: Option<LastBlockApplyError>,
+    /// Transaction verdicts awaiting the node's mempool action drain.
+    failed_transactions: Vec<[u8; 32]>,
     /// Monotonic count of block-apply rejections since start. Backs the
     /// `ergo_node_block_apply_errors_total` Prometheus counter.
     block_apply_error_count: u64,
@@ -237,6 +253,10 @@ pub struct SyncExecutor {
     /// once per [`header_pipeline::ORPHAN_ROOT_WALK_MIN_INTERVAL`]; the batch
     /// drain path and reciprocal SyncInfo still surface missing parents.
     orphan_root_walk_last: Option<Instant>,
+    /// Successful full-block applications since the runtime's last drain.
+    /// Rollback is not an apply. Runtime callers drain after each batch.
+    /// Non-draining embedders retain only the newest 4096 ids (oldest dropped).
+    applied_blocks: VecDeque<[u8; 32]>,
 }
 
 impl SyncExecutor {
@@ -246,23 +266,44 @@ impl SyncExecutor {
             chain_config,
             last_headers: VecDeque::with_capacity(LAST_HEADERS_WINDOW),
             block_context_headers: Vec::with_capacity(10),
+            reorg_blocks: VecDeque::new(),
+            full_candidate_height: None,
             recently_installed: HashSet::new(),
             orphan_headers: HashMap::new(),
+            context_retry_parents: HashSet::new(),
             orphan_headers_len: 0,
             header_index: BTreeMap::new(),
             recovery_done: false,
             script_validation_checkpoint: None,
             header_checkpoint: None,
+            genesis_id: None,
             reemission: None,
             header_perf: HeaderPerfCounters::default(),
             block_perf: BlockPerfCounters::default(),
             last_block_apply_error: None,
+            failed_transactions: Vec::new(),
             block_apply_error_count: 0,
             apply_phase: std::sync::Arc::new(crate::ApplyPhaseMetrics::default()),
             deep_fork_wedge: None,
             deep_fork_wedge_last_warn: None,
             orphan_root_walk_last: None,
+            applied_blocks: VecDeque::new(),
         }
+    }
+
+    /// Drain successful block applications after each execution/apply batch.
+    /// The runtime distinguishes its locally submitted id before broadcasting.
+    /// Drain after each batch; only the newest 4096 ids survive without drains.
+    pub fn take_applied_blocks(&mut self) -> Vec<[u8; 32]> {
+        self.applied_blocks.drain(..).collect()
+    }
+
+    fn record_applied_block(&mut self, id: [u8; 32]) {
+        const MAX_APPLIED_BLOCKS: usize = 4096;
+        if self.applied_blocks.len() == MAX_APPLIED_BLOCKS {
+            self.applied_blocks.pop_front();
+        }
+        self.applied_blocks.push_back(id);
     }
 
     /// Shared apply-phase metrics (clone into the API read bridge).
@@ -291,6 +332,16 @@ impl SyncExecutor {
     /// install) so they can enforce the same anchor.
     pub fn header_checkpoint(&self) -> Option<header_proc::HeaderCheckpoint> {
         self.header_checkpoint
+    }
+
+    /// Set the configured first mined header id.
+    pub fn set_genesis_id(&mut self, genesis_id: Option<[u8; 32]>) {
+        self.genesis_id = genesis_id;
+    }
+
+    /// Return the configured first mined header id, if any.
+    pub fn genesis_id(&self) -> Option<[u8; 32]> {
+        self.genesis_id
     }
 
     /// Set the EIP-27 re-emission rule inputs. `Some` enables the
@@ -408,10 +459,29 @@ impl SyncExecutor {
         now: Instant,
         wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) -> Vec<Action> {
+        // Recheck the current mode even for actions queued before a mode
+        // transition, or supplied by a public caller outside the coordinator.
+        if coordinator.should_skip_block_sections()
+            && matches!(
+                action,
+                Action::PersistSection { .. } | Action::AssembleBlock { .. }
+            )
+        {
+            return Vec::new();
+        }
         match action {
-            Action::ValidateHeader { peer, header_bytes } => {
-                self.handle_validate_header(peer, &header_bytes, store, coordinator, now)
-            }
+            Action::ValidateHeader {
+                peer,
+                modifier_id,
+                header_bytes,
+            } => self.handle_validate_header(
+                peer,
+                &modifier_id,
+                &header_bytes,
+                store,
+                coordinator,
+                now,
+            ),
             Action::AssembleBlock { header_id } => {
                 self.handle_assemble_block(&header_id, store, coordinator, wallet_wiring)
             }
@@ -456,8 +526,13 @@ impl SyncExecutor {
         let mut headers_to_validate = Vec::new();
         let mut remaining = VecDeque::new();
         for action in actions {
-            if let Action::ValidateHeader { peer, header_bytes } = action {
-                headers_to_validate.push((peer, header_bytes));
+            if let Action::ValidateHeader {
+                peer,
+                modifier_id,
+                header_bytes,
+            } = action
+            {
+                headers_to_validate.push((peer, modifier_id, header_bytes));
             } else {
                 remaining.push_back(action);
             }
@@ -532,3 +607,9 @@ impl SyncExecutor {
         )
     }
 }
+
+#[cfg(test)]
+mod relay_tests;
+
+#[cfg(test)]
+mod failed_tx_tests;

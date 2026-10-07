@@ -5,7 +5,7 @@ info:
   license:
     name: MIT OR Apache-2.0
     identifier: MIT OR Apache-2.0
-  version: 0.8.0
+  version: 0.11.0
 paths:
   /api/v1/blocks/recent:
     get:
@@ -32,6 +32,48 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/ApiRecentBlock'
+  /api/v1/diagnostics/activity:
+    get:
+      tags:
+      - node
+      operationId: activity_handler
+      parameters:
+      - name: session
+        in: query
+        description: Session ID from the previous page; required with a nonzero since cursor
+        required: false
+        schema:
+          type: string
+      - name: since
+        in: query
+        description: Exclusive sequence cursor (decimal); default 0
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      - name: limit
+        in: query
+        description: Records per page, 1–500; default 256
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '200':
+          description: Bounded session log history; oldest first. Follow nextSeq while hasMore, and surface gap/reset/droppedTotal. Not the durable file archive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiActivityPage'
+        '400':
+          description: Invalid cursor or limit
+        '403':
+          description: Operator API key required
+        '503':
+          description: Capture unavailable or temporarily busy
+      security:
+      - ApiKeyAuth: []
   /api/v1/difficulty/history:
     get:
       tags:
@@ -122,11 +164,13 @@ paths:
       tags:
       - node
       summary: |-
-        `GET /api/v1/indexer/status`. Always 200; never gated (like
+        `GET /api/v1/indexer/status`. Never gated (like
         `indexedHeight`, this must keep answering while the index is syncing,
         repairing, or halted — that is exactly when the operator needs it).
         `/blockchain/indexedHeight` stays pinned to its Scala-parity shape;
-        the self-repair markers and totals live here instead.
+        the self-repair markers and totals live here instead. Failed database
+        snapshots or previously observed read corruption return 500. Offline
+        syncing/halted handles still report their explicit status.
       description: |-
         Mounted only when an indexer handle is plumbed — on indexer-less wiring
         the route 404s, which the UI reads as "extra-index disabled".
@@ -138,6 +182,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiIndexerStatus'
+        '500':
+          description: Indexer health snapshot failed or read corruption was observed
   /api/v1/info:
     get:
       tags:
@@ -1088,6 +1134,87 @@ components:
           type: integer
           format: int32
           minimum: 0
+    ApiActivityPage:
+      type: object
+      required:
+      - sessionId
+      - oldestSeq
+      - latestSeq
+      - nextSeq
+      - hasMore
+      - gap
+      - reset
+      - capacity
+      - byteCapacity
+      - retained
+      - droppedTotal
+      - records
+      properties:
+        byteCapacity:
+          type: integer
+          minimum: 0
+        capacity:
+          type: integer
+          minimum: 0
+        droppedTotal:
+          type: string
+          description: Capture never waits on a reader; contention losses are explicit.
+        gap:
+          type: boolean
+          description: Some requested records have already been evicted.
+        hasMore:
+          type: boolean
+        latestSeq:
+          type: string
+        nextSeq:
+          type: string
+          description: Resume from this cursor, not latestSeq, while hasMore is true.
+        oldestSeq:
+          type: string
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiActivityRecord'
+        reset:
+          type: boolean
+          description: Session mismatch or a cursor beyond the current session; page starts over.
+        retained:
+          type: integer
+          minimum: 0
+        sessionId:
+          type: string
+          description: Changes on process restart. Cursors are meaningful only in this session.
+    ApiActivityRecord:
+      type: object
+      required:
+      - seq
+      - unixMs
+      - level
+      - target
+      - message
+      - fields
+      - truncated
+      properties:
+        fields:
+          type: object
+          additionalProperties: {}
+          propertyNames:
+            type: string
+        level:
+          type: string
+        message:
+          type: string
+        seq:
+          type: string
+        target:
+          type: string
+        truncated:
+          type: boolean
+          description: Oversized values/fields were omitted or shortened for this view.
+        unixMs:
+          type: integer
+          format: int64
+          minimum: 0
     ApiBlockApplyError:
       type: object
       description: |-
@@ -1123,6 +1250,7 @@ components:
         [`ApiBootstrapStatus`]. UI maps each variant to a human label and
         phase indicator.
       enum:
+      - halted
       - discovery
       - manifest_requested
       - manifest_verified
@@ -1170,7 +1298,7 @@ components:
               bootstrapped history. Absent when the store reports the
               default (Dense) and no NiPoPoW bootstrap is in progress.
 
-              Distinct from [`ApiIdentity::history_mode`] — that field is the
+              Distinct from [`crate::ApiIdentity::history_mode`] — that field is the
               operator-configured chain-retention policy (archive / pruned /
               utxo-bootstrapped / headers-only), this field is the on-disk
               header-section shape (dense from genesis vs sparse with a
@@ -1187,6 +1315,11 @@ components:
           description: |-
             Current bootstrap phase. UI maps each variant to its human
             label and phase indicator.
+        popow_abandon_reason:
+          type:
+          - string
+          - 'null'
+          description: Reason NiPoPoW bootstrap was abandoned, when application failed.
         popow_dense_from_height:
           type:
           - integer
@@ -1550,7 +1683,7 @@ components:
         identity strip. Rust-native — Scala's `/info` has no equivalent.
 
         Field contract:
-        - `state_type`, `verify_transactions`, `history_mode`, `mining`,
+        - `state_type`, `verify_transactions`, `history_mode`, `mining`, `mempool_enabled`,
           `extra_index_enabled`, `declared_addr`, `bind_addr` are
           config-intent: what `NodeConfig` asked for at boot. Scala parity
           for the wire-visible fields lives here.
@@ -1576,6 +1709,7 @@ components:
       - utxo_bootstrap
       - nipopow_bootstrap
       - mining
+      - mempool_enabled
       - extra_index_enabled
       properties:
         bind_addr:
@@ -1599,6 +1733,9 @@ components:
           description: |-
             How the operator configured chain-history retention. Tagged
             union — clients switch on `kind`. See [`ApiHistoryMode`].
+        mempool_enabled:
+          type: boolean
+          description: Whether the configured node admits and maintains mempool transactions.
         mining:
           type: boolean
         mode:
@@ -2125,12 +2262,22 @@ components:
             Peer's declared public address (`ip:port`) from its `PeerSpec`,
             what it advertises as reachable. `None` when the peer declared no
             address (anonymous / not gossipable).
+        details:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiPeerDetails'
+            description: Additional local observations and peer-reported handshake metadata.
         direction:
           $ref: '#/components/schemas/ApiPeerDirection'
         last_seen_seconds:
           type: integer
           format: int64
           minimum: 0
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiPeerNetwork'
+            description: IP metadata, resolved independently of the P2P/sync loop.
         node_name:
           type:
           - string
@@ -2141,8 +2288,8 @@ components:
           - 'null'
           format: int32
           description: |-
-            Peer's own best-block height as advertised in the most recent
-            `SyncInfo` exchange. `None` until the sync layer plumbs it through.
+            Height parsed from a peer tip header or inferred from shared header IDs.
+            The latter can understate the remote tip. `None` without an observation.
           minimum: 0
         rest_api_url:
           type:
@@ -2164,12 +2311,221 @@ components:
           type:
           - string
           - 'null'
+          description: Version advertised in the peer handshake (not a verified build version).
+    ApiPeerDetails:
+      type: object
+      required:
+      - last_progress_seconds
+      - effective_score
+      - delivery_failure_streak
+      - preferred_for_downloads
+      - sampled_at_unix_ms
+      - feature_ids
+      properties:
+        chain_status:
+          type:
+          - string
+          - 'null'
+        connection_setup_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            TCP connection/accept through completed handshake, including scheduling.
+            This is connection setup time, NOT ping or request round-trip latency.
+          minimum: 0
+        delivery_failure_streak:
+          type: integer
+          format: int32
+          minimum: 0
+        effective_score:
+          type: integer
+          format: int32
+          description: Score after time decay; lower is better. `ApiPeer.score` is the raw score.
+        feature_ids:
+          type: array
+          items:
+            type: integer
+            format: int32
+            minimum: 0
+        height_source:
+          type:
+          - string
+          - 'null'
+          description: '`reported_header` or `inferred_from_overlap`, only with a known height.'
+        last_progress_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+        last_sync_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        local_address:
+          type:
+          - string
+          - 'null'
+        mode:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiPeerMode'
+        network_magic:
+          type:
+          - string
+          - 'null'
+        preferred_for_downloads:
+          type: boolean
+        sampled_at_unix_ms:
+          type: integer
+          format: int64
+          description: Clock for comparing successive traffic snapshots.
+          minimum: 0
+        session_id:
+          type:
+          - string
+          - 'null'
+          description: Decimal string preserves all signed 64-bit session IDs in JavaScript.
     ApiPeerDirection:
       type: string
       description: Which side initiated the peer connection.
       enum:
       - inbound
       - outbound
+    ApiPeerMode:
+      type: object
+      description: Peer-reported settings, not independently verified capabilities.
+      required:
+      - state_type
+      - verifies_transactions
+      - blocks_to_keep
+      properties:
+        blocks_to_keep:
+          type: integer
+          format: int32
+          description: -1 = all, -2 = UTXO bootstrap, positive = retained suffix.
+        nipopow_bootstrap:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        state_type:
+          type: integer
+          format: int32
+          description: 'Wire value: 0 = UTXO, 1 = digest; unknown values are preserved.'
+          minimum: 0
+        verifies_transactions:
+          type: boolean
+    ApiPeerNetwork:
+      type: object
+      required:
+      - ip
+      - ip_version
+      - scope
+      - hostname_status
+      - geo_status
+      - asn_status
+      properties:
+        accuracy_radius_km:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        asn:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        asn_database:
+          type:
+          - string
+          - 'null'
+        asn_database_built_at_unix_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        asn_status:
+          type: string
+        city:
+          type:
+          - string
+          - 'null'
+        continent:
+          type:
+          - string
+          - 'null'
+        country:
+          type:
+          - string
+          - 'null'
+        country_code:
+          type:
+          - string
+          - 'null'
+        geo_database:
+          type:
+          - string
+          - 'null'
+        geo_database_built_at_unix_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        geo_status:
+          type: string
+          description: '`available`, `not_found`, `not_configured`, `downloading`, `error`, `not_public`.'
+        hostname:
+          type:
+          - string
+          - 'null'
+        hostname_checked_at_unix_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        hostname_status:
+          type: string
+          description: '`pending`, `resolved`, `unavailable`, `timeout`, `disabled`, `not_public`.'
+        ip:
+          type: string
+        ip_version:
+          type: string
+        latitude:
+          type:
+          - number
+          - 'null'
+          format: double
+        longitude:
+          type:
+          - number
+          - 'null'
+          format: double
+        network_cidr:
+          type:
+          - string
+          - 'null'
+        organization:
+          type:
+          - string
+          - 'null'
+        region:
+          type:
+          - string
+          - 'null'
+        scope:
+          type: string
+        time_zone:
+          type:
+          - string
+          - 'null'
     ApiPeerState:
       type: string
       description: Connection lifecycle state observed by the peer manager.
@@ -2189,6 +2545,7 @@ components:
       - requesting
       - quorum_met
       - applied
+      - abandoned
       - catchup
     ApiRecentBlock:
       type: object
@@ -2341,7 +2698,7 @@ components:
         Single-call dashboard view: collapses sync + tip + peer count.
         Polled at 1 Hz by the UI header strip.
 
-        Derives `Default` (like [`ApiIdentity`]) so test stubs can write
+        Derives `Default` (like [`crate::ApiIdentity`]) so test stubs can write
         `ApiStatus { <overrides>, ..Default::default() }` and stop breaking
         on every added field.
       required:
@@ -2410,8 +2767,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            Free bytes on the filesystem holding the data dir, probed per
-            status read. `None` when the mount could not be determined. The
+            Free bytes on the filesystem holding the data dir, from the
+            background storage sampler. `None` before the first sample or when
+            the mount could not be determined. The
             `ergo_disk_free_bytes` Prometheus gauge source.
           minimum: 0
         disk_total_bytes:
@@ -2420,8 +2778,8 @@ components:
           - 'null'
           format: int64
           description: |-
-            Total bytes on the filesystem holding the data dir, probed per
-            status read. The `ergo_disk_total_bytes` Prometheus gauge source.
+            Total bytes on the filesystem holding the data dir, from the
+            background storage sampler. The `ergo_disk_total_bytes` Prometheus gauge source.
           minimum: 0
         headers_ahead_of_full_blocks:
           type: integer
@@ -2433,9 +2791,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            On-disk size of the indexer redb in bytes, probed per status
-            read. `None` when `[indexer] enabled = false` or the file is
-            absent. The `ergo_index_db_bytes` Prometheus gauge source.
+            On-disk size of the indexer redb in bytes, from the background
+            storage sampler. `None` before the first sample, when
+            `[indexer] enabled = false`, or when the file is absent. The `ergo_index_db_bytes` Prometheus gauge source.
           minimum: 0
         last_applied_height:
           type: integer
@@ -2467,8 +2825,9 @@ components:
             description: |-
               The most recent block this node REJECTED during apply — a consensus
               fork-from-network signal (the node refused a block its peers may have
-              accepted). `None` when no rejection has occurred this session. A
-              persistent `Some(_)` is an operator page.
+              accepted). `None` when no rejection has occurred this session. Retained
+              after recovery for diagnosis: a known nonzero rejected height below
+              `best_full_block_height` is historical, not an active rejection alarm.
         last_reorg_depth:
           type:
           - integer
@@ -2572,8 +2931,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            On-disk size of `state.redb` in bytes, probed per status read.
-            `None` when the file is absent (never synced / failed to open).
+            On-disk size of `state.redb` in bytes, from the background storage
+            sampler (refreshed every 10 s). `None` before the first sample or
+            when the file is absent (never synced / failed to open).
             The `ergo_state_db_bytes` Prometheus gauge source.
           minimum: 0
         storage_errors_indexer_total:
@@ -3396,7 +3756,7 @@ components:
           minConfirmations:
             type: integer
             format: int64
-            description: Minimum confirmations a candidate box must have (`-1` = include pool).
+            description: Minimum block depth (`tip - inclusionHeight`; `-1` also includes unspent wallet pool outputs).
           type:
             type: string
             enum:
@@ -3543,7 +3903,7 @@ components:
             type:
             - object
             - 'null'
-            description: Non-default registers (R4..R9), hex-encoded constants. `unsupported_intent` until wired.
+            description: Non-default registers (R4..R9), densely packed hex-encoded evaluated constants.
             additionalProperties:
               type: string
             propertyNames:
@@ -3556,7 +3916,9 @@ components:
             type: string
             description: nanoErg to send (decimal string).
       - type: object
-        description: Mint a new token to `address`. `unsupported_intent` until wired.
+        description: |-
+          Mint a new token to `address` in a box carrying 1,000,000 nanoErg.
+          Its token ID is the selected first input box ID; at most one mint intent is allowed.
         required:
         - address
         - amount
@@ -3605,12 +3967,10 @@ components:
             enum:
             - burn
       description: |-
-        One requested output of a [`TxIntent`], tagged. `payment` (+ optional
-        assets/registers) and `burn` are load-bearing; `mint` and `payment.registers`
-        are valid shapes that ship `unsupported_intent(422)` until builder support
-        lands (P2-5 — a later 422→200 for the same well-formed request, not a behavior
-        change). Manual `Deserialize` so unknown sibling fields and cross-variant field
-        leakage are rejected.
+        One requested output of a [`TxIntent`], tagged. Payments support assets and
+        dense R4..R9 registers; mint emits one token with EIP-4 metadata, and burn
+        destroys an explicit quantity with `allowTokenBurn`. Manual Deserialize
+        rejects unknown sibling fields and cross-variant field leakage.
     RawTransactionBytes:
       type: string
       format: binary
@@ -3692,6 +4052,17 @@ components:
             - idle
       - type: object
         required:
+        - detail
+        - type
+        properties:
+          detail:
+            type: string
+          type:
+            type: string
+            enum:
+            - required
+      - type: object
+        required:
         - fromHeight
         - type
         properties:
@@ -3731,8 +4102,8 @@ components:
             enum:
             - unavailable
       description: |-
-        Wallet rescan lifecycle phase. `running` is a real full-rebuild-in-progress
-        state; `unavailable` is returned only on a backend that cannot replay blocks.
+        Wallet rescan lifecycle phase. `required` means a full rescan is needed;
+        `unavailable` means the backend cannot replay blocks.
     RestoreRequest:
       type: object
       description: '`POST /api/v1/wallet/restore` request. Secrets body-only, never logged.'
@@ -4034,10 +4405,8 @@ components:
         allowTokenBurn:
           type: boolean
           description: |-
-            Permit dropping (burning) a non-re-emission token surplus. RESERVED: the
-            current builder never drops a non-re-emission token (any surplus always
-            becomes change), so this flag has no effect yet; it gates the deferred
-            `burn` output intent (which ships `unsupported_intent` until wired).
+            Permit the explicit destruction quantities requested by `burn` intents.
+            Unrequested token surplus remains in change.
         changeAddress:
           type:
           - string
@@ -4304,7 +4673,7 @@ components:
           minimum: 0
         scanInvalidated:
           type: boolean
-          description: The wallet scan was invalidated (balances/addresses may be stale until a rescan).
+          description: The wallet scan was invalidated; a full rescan (fromHeight=0) is required.
         tipHeight:
           type: integer
           format: int32

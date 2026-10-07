@@ -35,9 +35,9 @@ pub enum CheckOutcome {
         weight: u64,
         replaced_ids: Vec<TxId>,
     },
-    /// Tx would be rejected, no pool mutation. `check` and `process`
-    /// produce the same `RejectReason` for the same input — `check` is
-    /// the decision phase of `process`.
+    /// The single-transaction decision rejects, without pool mutation.
+    /// `Mempool::process` can subsequently admit a package using staged
+    /// ancestors; `Mempool::check` does not run that package path.
     Rejected { reason: RejectReason },
 }
 
@@ -61,6 +61,8 @@ pub enum RejectReason {
     Duplicate,
     Structural,
     BelowMinFee,
+    /// Local relay policy; the transaction may still be valid in a block.
+    StorageRentPolicy,
     UnresolvedInput,
     UnresolvedDataInput,
     ValidationFailed {

@@ -235,6 +235,132 @@ fn process_header_with_real_mainnet_header() {
 }
 
 #[test]
+fn configured_mainnet_genesis_is_accepted_and_persisted() {
+    use ergo_sync::header_proc::process_header_cfg_with_genesis;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    let genesis_bytes = get_header_bytes(&headers, 1);
+    let genesis_id = get_header_id(&headers, 1);
+
+    let processed = process_header_cfg_with_genesis(
+        &mut store,
+        &genesis_bytes,
+        &ergo_crypto::difficulty::DifficultyParams::mainnet(),
+        None,
+        Some(genesis_id),
+    )
+    .expect("the configured mainnet genesis must be accepted");
+
+    assert_eq!(processed.header_id, genesis_id);
+    assert!(store.get_header(&genesis_id).unwrap().is_some());
+    assert_eq!(store.chain_state_meta().best_header_height, 1);
+}
+
+#[test]
+fn wrong_configured_mainnet_genesis_is_rejected_before_persistence() {
+    use ergo_sync::header_proc::process_header_cfg_with_genesis;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    let genesis_bytes = get_header_bytes(&headers, 1);
+    let genesis_id = get_header_id(&headers, 1);
+    let expected = [0x7f; 32];
+
+    let err = process_header_cfg_with_genesis(
+        &mut store,
+        &genesis_bytes,
+        &ergo_crypto::difficulty::DifficultyParams::mainnet(),
+        None,
+        Some(expected),
+    )
+    .expect_err("a header different from the configured genesis must be rejected");
+
+    assert!(matches!(
+        err,
+        HeaderProcessError::GenesisIdMismatch {
+            expected: actual_expected,
+            got,
+        } if actual_expected == expected && got == genesis_id
+    ));
+    assert!(store.get_header(&genesis_id).unwrap().is_none());
+    assert_eq!(store.chain_state_meta().best_header_height, 0);
+}
+
+#[test]
+fn disabled_genesis_check_preserves_header_processing() {
+    use ergo_sync::header_proc::process_header_cfg;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    let genesis_bytes = get_header_bytes(&headers, 1);
+    let genesis_id = get_header_id(&headers, 1);
+
+    let processed = process_header_cfg(
+        &mut store,
+        &genesis_bytes,
+        &ergo_crypto::difficulty::DifficultyParams::mainnet(),
+        None,
+    )
+    .expect("None must preserve development genesis behavior");
+
+    assert_eq!(processed.header_id, genesis_id);
+    assert!(store.get_header(&genesis_id).unwrap().is_some());
+}
+
+#[test]
+fn configured_genesis_mismatch_penalizes_header_sender() {
+    use ergo_p2p::peer::Penalty;
+    use ergo_sync::coordinator::{Action, SyncCoordinator};
+    use ergo_sync::executor::SyncExecutor;
+    use ergo_validation::context::ProtocolParams;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    let genesis_bytes = get_header_bytes(&headers, 1);
+    let genesis_id = get_header_id(&headers, 1);
+    let mut store = ergo_state::StateBackendKind::Utxo(store);
+    let mut coordinator = SyncCoordinator::new(0);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        ergo_crypto::difficulty::DifficultyParams::mainnet(),
+    );
+    executor.set_genesis_id(Some([0x7f; 32]));
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9030);
+
+    let actions = executor.execute(
+        Action::ValidateHeader {
+            peer,
+            modifier_id: genesis_id,
+            header_bytes: genesis_bytes,
+        },
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        Action::Penalize {
+            peer: penalized_peer,
+            penalty: Penalty::Misbehavior,
+        } if *penalized_peer == peer
+    )));
+    assert!(store.get_header(&genesis_id).unwrap().is_none());
+}
+
+#[test]
 fn process_header_refuses_child_of_invalidated_parent() {
     // Regression for the branch-invalidation liveness fix: once a header is
     // durably invalidated (full-block validation reject), NO descendant may
@@ -323,6 +449,7 @@ fn finalize_header_at_checkpoint_height_with_matching_id_accepted() {
         &h2_bytes,
         &ergo_crypto::difficulty::DifficultyParams::mainnet(),
         Some(ckpt),
+        None,
     )
     .expect("header matching the checkpoint must be accepted");
     assert_eq!(processed.header_id, h2_id);
@@ -359,6 +486,7 @@ fn finalize_header_at_checkpoint_height_with_wrong_id_rejected() {
         &h2_bytes,
         &ergo_crypto::difficulty::DifficultyParams::mainnet(),
         Some(ckpt),
+        None,
     )
     .expect_err("header at the checkpoint height with a different id must be rejected");
     match err {
@@ -404,6 +532,7 @@ fn finalize_header_below_checkpoint_height_unaffected() {
             &h_bytes,
             &ergo_crypto::difficulty::DifficultyParams::mainnet(),
             Some(ckpt),
+            None,
         )
         .unwrap_or_else(|e| panic!("height {height} must be unaffected by the checkpoint: {e}"));
         assert_eq!(processed.height, height);
@@ -417,7 +546,9 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
     // is InvalidModifier and the sender is penalised. Drive the real
     // executor path (`Action::ValidateHeader`) so the penalty, not just the
     // error, is pinned.
+    use ergo_p2p::delivery::ModifierStatus;
     use ergo_p2p::peer::Penalty;
+    use ergo_p2p::types::InvData;
     use ergo_sync::coordinator::{Action, SyncCoordinator};
     use ergo_sync::executor::SyncExecutor;
     use ergo_sync::header_proc::HeaderCheckpoint;
@@ -444,18 +575,24 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
     }));
 
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9030);
+    let now = Instant::now();
     let h2_bytes = get_header_bytes(&headers, 2);
     let h2_id = get_header_id(&headers, 2);
-    let actions = executor.execute_all(
-        vec![Action::ValidateHeader {
-            peer,
-            header_bytes: h2_bytes,
-        }],
-        &mut store,
-        &mut coordinator,
-        Instant::now(),
-        None,
+    coordinator.on_inv(
+        peer,
+        &InvData {
+            type_id: 101,
+            ids: vec![h2_id],
+        },
+        &store,
+        now,
     );
+    let received = coordinator.on_modifier_received(peer, 101, h2_id, h2_bytes.clone(), now);
+    assert_eq!(
+        coordinator.delivery().status(&h2_id),
+        ModifierStatus::Received
+    );
+    let actions = executor.execute_all(received, &mut store, &mut coordinator, now, None);
 
     assert!(
         actions.iter().any(|a| matches!(
@@ -470,6 +607,121 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
     assert!(
         store.get_header(&h2_id).unwrap().is_none(),
         "a header rejected by the checkpoint must not be persisted"
+    );
+    assert_eq!(
+        coordinator.delivery().status(&h2_id),
+        ModifierStatus::Unknown
+    );
+
+    executor.set_header_checkpoint(None);
+    coordinator.on_inv(
+        peer,
+        &InvData {
+            type_id: 101,
+            ids: vec![h2_id],
+        },
+        &store,
+        now,
+    );
+    let received = coordinator.on_modifier_received(peer, 101, h2_id, h2_bytes, now);
+    let retry_actions = executor.execute_all(received, &mut store, &mut coordinator, now, None);
+    assert!(!retry_actions
+        .iter()
+        .any(|action| matches!(action, Action::Penalize { .. })));
+    assert!(store.get_header(&h2_id).unwrap().is_some());
+    assert_eq!(
+        coordinator.delivery().status(&h2_id),
+        ModifierStatus::Received
+    );
+}
+
+#[test]
+fn hash_matching_malformed_header_rolls_back_and_allows_valid_delivery() {
+    use ergo_p2p::delivery::ModifierStatus;
+    use ergo_p2p::peer::Penalty;
+    use ergo_p2p::types::InvData;
+    use ergo_primitives::digest::blake2b256;
+    use ergo_sync::coordinator::{Action, SyncCoordinator};
+    use ergo_sync::executor::SyncExecutor;
+    use ergo_validation::context::ProtocolParams;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut raw_store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut raw_store);
+    let headers = load_headers();
+    seed_header_1(&mut raw_store, &headers);
+    let mut store = ergo_state::StateBackendKind::Utxo(raw_store);
+    let mut coordinator = SyncCoordinator::new(1);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        ergo_crypto::difficulty::DifficultyParams::mainnet(),
+    );
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 9030);
+    let now = Instant::now();
+
+    let malformed = vec![0x7f, 0x00];
+    let malformed_id = *blake2b256(&malformed).as_bytes();
+    coordinator.on_inv(
+        peer,
+        &InvData {
+            type_id: 101,
+            ids: vec![malformed_id],
+        },
+        &store,
+        now,
+    );
+    let received = coordinator.on_modifier_received(peer, 101, malformed_id, malformed, now);
+    assert_eq!(
+        coordinator.delivery().status(&malformed_id),
+        ModifierStatus::Received
+    );
+    let validate = received
+        .into_iter()
+        .find(|action| matches!(action, Action::ValidateHeader { .. }))
+        .expect("malformed header must be routed for validation");
+    let rejected = executor.execute(validate, &mut store, &mut coordinator, now, None);
+    assert!(rejected.iter().any(|action| matches!(
+        action,
+        Action::Penalize {
+            penalty: Penalty::Misbehavior,
+            ..
+        }
+    )));
+    assert_eq!(
+        coordinator.delivery().status(&malformed_id),
+        ModifierStatus::Unknown
+    );
+
+    let valid_bytes = get_header_bytes(&headers, 2);
+    let valid_id = get_header_id(&headers, 2);
+    coordinator.on_inv(
+        peer,
+        &InvData {
+            type_id: 101,
+            ids: vec![valid_id],
+        },
+        &store,
+        now,
+    );
+    let received = coordinator.on_modifier_received(peer, 101, valid_id, valid_bytes, now);
+    assert_eq!(
+        coordinator.delivery().status(&valid_id),
+        ModifierStatus::Received
+    );
+    let validate = received
+        .into_iter()
+        .find(|action| matches!(action, Action::ValidateHeader { .. }))
+        .expect("valid header must be routed for validation");
+    let accepted = executor.execute(validate, &mut store, &mut coordinator, now, None);
+    assert!(!accepted
+        .iter()
+        .any(|action| matches!(action, Action::Penalize { .. })));
+    assert!(store.get_header(&valid_id).unwrap().is_some());
+    assert_eq!(
+        coordinator.delivery().status(&valid_id),
+        ModifierStatus::Received
     );
 }
 
@@ -509,6 +761,7 @@ fn orphan_drain_checkpoint_mismatch_penalizes_sending_peer() {
     let orphan_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 9030);
     let installer_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 9030);
     let h2_bytes = get_header_bytes(&headers, 2);
+    let h2_id = get_header_id(&headers, 2);
     let h3_bytes = get_header_bytes(&headers, 3);
     let h3_id = get_header_id(&headers, 3);
 
@@ -522,6 +775,7 @@ fn orphan_drain_checkpoint_mismatch_penalizes_sending_peer() {
     let orphan_actions = executor.execute_all(
         vec![Action::ValidateHeader {
             peer: orphan_peer,
+            modifier_id: h3_id,
             header_bytes: h3_bytes,
         }],
         &mut store,
@@ -552,6 +806,7 @@ fn orphan_drain_checkpoint_mismatch_penalizes_sending_peer() {
     let drain_actions = executor.execute_all(
         vec![Action::ValidateHeader {
             peer: installer_peer,
+            modifier_id: h2_id,
             header_bytes: h2_bytes,
         }],
         &mut store,
@@ -583,9 +838,9 @@ fn orphan_drain_checkpoint_mismatch_penalizes_sending_peer() {
 }
 
 #[test]
-fn process_header_rejects_height_mismatch() {
-    // Process header 2 but with a parent whose metadata claims height 5
-    // instead of 1. Header 2 (height=2) should fail: expected 6, got 2.
+fn process_header_reports_local_parent_metadata_mismatch() {
+    // Parent metadata disagrees with its canonical bytes. This is local
+    // integrity failure, not evidence that the incoming child is invalid.
     use ergo_sync::header_proc::process_header;
 
     let dir = tempfile::tempdir().unwrap();
@@ -615,16 +870,20 @@ fn process_header_rejects_height_mismatch() {
         .test_force_set_best_header_unsafe(h1_id, 5, vec![1])
         .unwrap();
 
-    // Try to process header 2 (height=2, but parent claims height=5 → expects 6)
+    // Try to process header 2 using the inconsistent local parent row.
     let h2_bytes = get_header_bytes(&headers, 2);
     let result = process_header(&mut store, &h2_bytes);
     match result {
-        Err(HeaderProcessError::HeightMismatch {
-            expected: 6,
-            got: 2,
-        }) => {} // correct
-        Err(e) => panic!("expected HeightMismatch, got: {e}"),
-        Ok(_) => panic!("should have rejected height mismatch"),
+        Err(HeaderProcessError::LocalHeaderIntegrity {
+            source:
+                ergo_validation::header::HeaderValidationError::MetaHeightMismatch {
+                    meta: 5,
+                    header: 1,
+                },
+            ..
+        }) => {}
+        Err(e) => panic!("expected local parent integrity failure, got: {e}"),
+        Ok(_) => panic!("should have refused inconsistent local metadata"),
     }
 }
 
@@ -923,6 +1182,7 @@ fn block_2_without_downloaded_proofs(best_header_height: u32, retain_proofs: boo
     let actions = executor.execute_all(
         vec![Action::ValidateHeader {
             peer,
+            modifier_id: h2_id,
             header_bytes: h2_bytes.clone(),
         }],
         &mut store,
@@ -1451,6 +1711,7 @@ fn executor_parent_walk_requests_missing_parent() {
 
     let h1_id = get_header_id(&headers, 1);
     let h2_bytes = get_header_bytes(&headers, 2);
+    let h2_id = get_header_id(&headers, 2);
 
     let mut coordinator = SyncCoordinator::new(0);
     let mut executor = SyncExecutor::new(
@@ -1462,6 +1723,7 @@ fn executor_parent_walk_requests_missing_parent() {
     let actions = executor.execute_all(
         vec![Action::ValidateHeader {
             peer,
+            modifier_id: h2_id,
             header_bytes: h2_bytes.clone(),
         }],
         &mut store,
@@ -1597,6 +1859,7 @@ fn process_header_at_eip37_boundary_with_truncated_lookback_buffers_not_penalize
     let actions = executor.execute_all(
         vec![Action::ValidateHeader {
             peer,
+            modifier_id: child_id,
             header_bytes: child_bytes.clone(),
         }],
         &mut store,
@@ -1652,6 +1915,227 @@ fn process_header_at_eip37_boundary_with_truncated_lookback_buffers_not_penalize
         executor.orphan_headers_len() >= 1,
         "context-incomplete header must be buffered for retry, orphan_headers_len = 0",
     );
+}
+
+// ---------------------------------------------------------------------------
+// A header buffered on EpochContextIncomplete waits under its parent, which is
+// already installed, so only its context-retry registration brings it back on
+// later header progress once the older retarget ancestors are stored.
+// ---------------------------------------------------------------------------
+
+/// Real EIP-37 activation header and its parent, the newest of the nine
+/// 128-block retarget boundaries in its difficulty window.
+const EIP37_CHILD: u32 = 844_673;
+const EIP37_PARENT: u32 = 844_672;
+
+fn eip37_synthetic_id(height: u32) -> [u8; 32] {
+    let mut id = [0xE3; 32];
+    id[..4].copy_from_slice(&height.to_be_bytes());
+    id
+}
+
+/// Store real header bytes with metadata consistent with them.
+fn store_header_row(store: &StateStore, bytes: &[u8], cumulative_score: Vec<u8>) -> [u8; 32] {
+    let header = read_header(&mut VlqReader::new(bytes)).unwrap();
+    let id = *ergo_primitives::digest::blake2b256(bytes).as_bytes();
+    store.store_header(&id, bytes).unwrap();
+    store
+        .store_header_meta(
+            &id,
+            &HeaderMeta {
+                parent_id: *header.parent_id.as_bytes(),
+                height: header.height,
+                cumulative_score,
+                pow_validity: 1,
+                timestamp: header.timestamp,
+            },
+        )
+        .unwrap();
+    id
+}
+
+/// 844_672 as best header without its older retarget ancestors, plus mainnet
+/// header 1 off the best chain, so headers 2 and 3 are real-PoW header
+/// progress that leaves the best header alone.
+fn eip37_context_store(
+    dir: &std::path::Path,
+    eip37: &[serde_json::Value],
+    early: &[serde_json::Value],
+) -> ergo_state::StateBackendKind {
+    let mut store = StateStore::open(&dir.join("state.redb"))
+        .unwrap()
+        .with_non_durable_commits_for_test();
+    init_genesis(&mut store);
+    let best_score = vec![0xFF; 16];
+    let parent_id = store_header_row(
+        &store,
+        &get_header_bytes(eip37, EIP37_PARENT),
+        best_score.clone(),
+    );
+    store
+        .test_force_set_best_header_unsafe(parent_id, EIP37_PARENT, best_score)
+        .unwrap();
+    // The best-chain index rewrite for the child stops at its parent's row.
+    store
+        .test_force_put_header_chain_index(EIP37_PARENT, &parent_id)
+        .unwrap();
+    store_header_row(&store, &get_header_bytes(early, 1), vec![1]);
+    ergo_state::StateBackendKind::Utxo(store)
+}
+
+/// Store the eight older retarget boundaries, linked to 844_672 by per-height
+/// parent metadata. The difficulty walk follows parent links between the
+/// boundaries and reads header bytes only at them.
+fn store_eip37_retarget_ancestors(store: &StateStore, eip37: &[serde_json::Value]) {
+    let boundaries: Vec<u32> = (0..=8)
+        .rev()
+        .map(|epochs| EIP37_PARENT - 128 * epochs)
+        .collect();
+    for pair in boundaries.windows(2) {
+        let (low, high) = (pair[0], pair[1]);
+        let low_id = store_header_row(store, &get_header_bytes(eip37, low), vec![1]);
+        let high_header = read_header(&mut VlqReader::new(&get_header_bytes(eip37, high))).unwrap();
+        let mut id = *high_header.parent_id.as_bytes();
+        for height in (low + 1..high).rev() {
+            let parent_id = if height == low + 1 {
+                low_id
+            } else {
+                eip37_synthetic_id(height - 1)
+            };
+            store
+                .store_header_meta(
+                    &id,
+                    &HeaderMeta {
+                        parent_id,
+                        height,
+                        cumulative_score: vec![1],
+                        pow_validity: 1,
+                        timestamp: 0,
+                    },
+                )
+                .unwrap();
+            id = parent_id;
+        }
+    }
+}
+
+fn validate_header(headers: &[serde_json::Value], height: u32) -> ergo_sync::coordinator::Action {
+    ergo_sync::coordinator::Action::ValidateHeader {
+        peer: "10.0.0.24:9030".parse().unwrap(),
+        modifier_id: get_header_id(headers, height),
+        header_bytes: get_header_bytes(headers, height),
+    }
+}
+
+fn penalizes(actions: &[ergo_sync::coordinator::Action]) -> bool {
+    actions
+        .iter()
+        .any(|action| matches!(action, ergo_sync::coordinator::Action::Penalize { .. }))
+}
+
+#[test]
+fn epoch_context_blocked_header_retries_on_later_header_progress() {
+    use ergo_sync::coordinator::SyncCoordinator;
+    use ergo_sync::executor::SyncExecutor;
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let eip37 = load_headers_file("headers_eip37_curated.json");
+    let early = load_headers();
+    let mut store = eip37_context_store(dir.path(), &eip37, &early);
+    let mut coordinator = SyncCoordinator::new(0);
+    let mut executor = SyncExecutor::new(
+        ergo_validation::context::ProtocolParams::mainnet_default(),
+        ergo_crypto::difficulty::DifficultyParams::mainnet(),
+    );
+    let child_id = get_header_id(&eip37, EIP37_CHILD);
+
+    // Single-header path: buffered under its installed parent.
+    let actions = executor.execute(
+        validate_header(&eip37, EIP37_CHILD),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(!penalizes(&actions), "{actions:?}");
+    assert_eq!(executor.orphan_headers_len(), 1);
+
+    // Progress before the ancestors arrive retries it in the orphan drain,
+    // which buffers it again.
+    executor.execute(
+        validate_header(&early, 2),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(store
+        .get_header(&get_header_id(&early, 2))
+        .unwrap()
+        .is_some());
+    assert!(store.get_header(&child_id).unwrap().is_none());
+    assert_eq!(executor.orphan_headers_len(), 1);
+
+    // With the retarget ancestors stored, the next progress installs it.
+    store_eip37_retarget_ancestors(store.as_utxo().unwrap(), &eip37);
+    let actions = executor.execute(
+        validate_header(&early, 3),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(!penalizes(&actions), "{actions:?}");
+    assert!(store.get_header(&child_id).unwrap().is_some());
+    assert_eq!(store.chain_state_meta().best_header_id, child_id);
+    assert_eq!(executor.orphan_headers_len(), 0);
+}
+
+#[test]
+fn epoch_context_blocked_batch_header_retries_on_later_header_progress() {
+    use ergo_sync::coordinator::SyncCoordinator;
+    use ergo_sync::executor::SyncExecutor;
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let eip37 = load_headers_file("headers_eip37_curated.json");
+    let early = load_headers();
+    let mut store = eip37_context_store(dir.path(), &eip37, &early);
+    let mut coordinator = SyncCoordinator::new(0);
+    let mut executor = SyncExecutor::new(
+        ergo_validation::context::ProtocolParams::mainnet_default(),
+        ergo_crypto::difficulty::DifficultyParams::mainnet(),
+    );
+    let child_id = get_header_id(&eip37, EIP37_CHILD);
+
+    // Batch path; the already-known companion installs nothing, so the
+    // batch's own drain leaves the retry for later progress.
+    let actions = executor.execute_all(
+        vec![
+            validate_header(&eip37, EIP37_CHILD),
+            validate_header(&early, 1),
+        ],
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(!penalizes(&actions), "{actions:?}");
+    assert_eq!(executor.orphan_headers_len(), 1);
+
+    store_eip37_retarget_ancestors(store.as_utxo().unwrap(), &eip37);
+    let actions = executor.execute(
+        validate_header(&early, 2),
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(!penalizes(&actions), "{actions:?}");
+    assert!(store.get_header(&child_id).unwrap().is_some());
+    assert_eq!(store.chain_state_meta().best_header_id, child_id);
+    assert_eq!(executor.orphan_headers_len(), 0);
 }
 
 /// `recover_coordinator` walks `best_full_block+1 .. best_header` to

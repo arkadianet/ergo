@@ -1,0 +1,43 @@
+{
+  "provenance": {
+    "source": "scripts/jvm_serde_oracle/ContextExtensionBoundaryOracle.scala",
+    "sigma_state": "6.0.6",
+    "scala": "2.12.20",
+    "java": "17.0.20.1"
+  },
+  "cases": [
+    {
+      "count": 0,
+      "verdict": "ACCEPT",
+      "hex": "00"
+    },
+    {
+      "count": 1,
+      "verdict": "ACCEPT",
+      "hex": "01000400"
+    },
+    {
+      "count": 127,
+      "verdict": "ACCEPT",
+      "hex": "7f4504006504000004005804007304000504007804000a04003804002a04001804002504001904003404000e04006e04007d04001404002e04005d04003904004e04001d04006a04007904005404003d04005904007404000104004a04000604003c04007504005504006604001c04002604004604001504002104005c04004104006104000904003504006d04007c04004d04006004000d04002904004904006904000204002004002204002d04004004001104001604002c04003b04007604001b04004704000c04003604003104005604007104005104004c04000704002704006204006704005b04004204006c04000304005004002304007004007b04003004003f04001204005f04003204004304001004001f04000b04004804002b04006304005704006804002804001a04003704007204001704000804004b04007704003a04005204002404001e04003304001304006b04000404007e04004f04005e04002f04000f04004404003e04005a04006f04007a0400530400640400"
+    },
+    {
+      "count": 128,
+      "verdict": "REJECT",
+      "exception": "sigma.serialization.SerializerException",
+      "message": "Number of ContextExtension values 128 exceeds 127."
+    },
+    {
+      "count": 255,
+      "verdict": "REJECT",
+      "exception": "sigma.serialization.SerializerException",
+      "message": "Number of ContextExtension values 255 exceeds 127."
+    },
+    {
+      "count": 256,
+      "verdict": "REJECT",
+      "exception": "sigma.serialization.SerializerException",
+      "message": "Number of ContextExtension values 256 exceeds 127."
+    }
+  ]
+}

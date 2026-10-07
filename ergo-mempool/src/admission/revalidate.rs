@@ -105,7 +105,7 @@ pub(crate) fn record_failed_tx(
 }
 
 /// Is `err` a PROVABLE consensus invalidity — a hard rule failure the tx itself
-/// caused (script/monetary/structural/cost), reproducible at any tip? Returns
+/// caused (script/monetary/structural/cost) in the supplied tip context? Returns
 /// true for exactly that set; false for everything else: non-resolution
 /// failures (`UnresolvedInput`/`UnresolvedDataInput`), parse-class failures
 /// (`Deserialize`/`NonCanonical`), AND the validator's catch-all `Other(_)`.

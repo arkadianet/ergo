@@ -33,7 +33,7 @@ use ergo_primitives::digest::Digest32;
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
-use crate::segment::{read_segment, write_segment, Segment};
+use crate::segment::{read_persisted_segment, write_segment, Segment};
 
 /// Per-address running balance. Mirrors Scala `BalanceInfo.scala:18-23`.
 ///
@@ -110,7 +110,14 @@ pub fn read_balance_info(r: &mut VlqReader) -> Result<BalanceInfo, ReadError> {
             "BalanceInfo tokens length is negative: {tokens_len}"
         )));
     }
-    let mut tokens = Vec::with_capacity(tokens_len as usize);
+    let tokens_len = tokens_len as usize;
+    // Each entry needs a 32-byte ID plus at least one signed-VLQ amount byte.
+    if tokens_len > r.remaining() / 33 {
+        return Err(ReadError::InvalidData(
+            "BalanceInfo token count exceeds remaining input".into(),
+        ));
+    }
+    let mut tokens = Vec::with_capacity(tokens_len.min(crate::segment::SEGMENT_THRESHOLD));
     for _ in 0..tokens_len {
         let id_bytes = r.get_bytes(32)?;
         let mut id_arr = [0u8; 32];
@@ -168,7 +175,7 @@ pub fn read_indexed_address(r: &mut VlqReader) -> Result<IndexedAddress, ReadErr
     tree_arr.copy_from_slice(tree_bytes);
     let tree_hash = Digest32::from_bytes(tree_arr);
     let balance = read_option_balance(r)?;
-    let segment = read_segment(r)?;
+    let segment = read_persisted_segment(r)?;
     Ok(IndexedAddress {
         tree_hash,
         balance,
@@ -231,6 +238,19 @@ mod tests {
         );
         assert_eq!(&parsed, a);
         bytes
+    }
+
+    #[test]
+    fn balance_count_requires_complete_token_entries() {
+        let mut writer = VlqWriter::new();
+        writer.put_i64(0);
+        writer.put_i32(2);
+        writer.put_bytes(&[0; 32]);
+        writer.put_i64(1);
+        assert!(matches!(
+            read_balance_info(&mut VlqReader::new(&writer.result())),
+            Err(ReadError::InvalidData(message)) if message.contains("remaining input")
+        ));
     }
 
     // ----- happy path -----

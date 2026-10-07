@@ -35,12 +35,10 @@ impl Ctx {
 
 /// One postfix `ExprSuffix` marker (Exprs.scala:79-83), folded by `apply_suffix`.
 ///
-/// The markers carry no positions: every node `apply_suffix` builds takes
-/// `pos = f.pos()` (Scala pins `builder.currentSrcCtx = f.sourceContext` for the
-/// whole fold, Exprs.scala:192), so a marker's own captured index is discarded.
+/// Selectors retain their own source position (Exprs.scala:194-198, v6.0.6).
 pub(crate) enum Suffix {
     /// `.id` → `mkSelect(acc, name)` (Exprs.scala:80).
-    Select { name: String },
+    Select { name: String, pos: crate::span::Pos },
     /// `[T,…]` → `mkApplyTypes(acc, args)` (Exprs.scala:81).
     TypeApply { args: Vec<SType> },
     /// `(…)` → `mkApply` (Exprs.scala:315-319). `None` = `()` (unit carrier);
@@ -115,10 +113,13 @@ pub(crate) fn try_literal(t: &Token, src: &str) -> Option<Expr> {
 /// this module goes through here (not `expr_impl` directly), so the shared
 /// `Cursor::depth` counter (`MAX_PARSE_DEPTH`) bounds every nesting path:
 /// parens, blocks, `if`/`else` branches, lambda bodies, `val`/`def` right-hand
-/// sides. See `MAX_PARSE_DEPTH`'s doc for why one counter at this single
-/// choke point covers the whole pipeline.
+/// sides. The result is also checked for actual expression/type depth.
 pub(crate) fn expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
-    with_depth_guard(c, |c| expr_impl(c, ctx))
+    with_depth_guard(c, |c| {
+        let expr = expr_impl(c, ctx)?;
+        check_expr_depth(&expr)?;
+        Ok(expr)
+    })
 }
 
 /// `Expr` (Exprs.scala:46-75): `If | Fun | PostfixLambda`. Ordered choice by

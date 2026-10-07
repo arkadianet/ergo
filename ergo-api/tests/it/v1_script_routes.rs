@@ -35,6 +35,13 @@ const HEX_64: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 // ----- harness ------------------------------------------------------------
 
 fn app(oracle: Option<Arc<dyn ScalaOracle>>) -> Router {
+    app_with_compute(oracle, Default::default())
+}
+
+fn app_with_compute(
+    oracle: Option<Arc<dyn ScalaOracle>>,
+    compute: ergo_api::v1::ComputePool,
+) -> Router {
     let state = ScriptState {
         read: Arc::new(StubRead),
         // Chain reader intentionally None: the chain-backed paths answer
@@ -43,6 +50,7 @@ fn app(oracle: Option<Arc<dyn ScalaOracle>>) -> Router {
         network: NetworkPrefix::Mainnet,
         oracle,
         config: ScriptConfig::default(),
+        compute,
     };
     let governor =
         ergo_api::v1::governor::Governor::new(Default::default()).expect("valid governor config");
@@ -78,6 +86,54 @@ async fn post_via(
 
 fn reason(v: &serde_json::Value) -> &str {
     v["error"]["reason"].as_str().unwrap_or("<none>")
+}
+
+#[tokio::test]
+async fn script_admission_failures_match_the_published_contract() {
+    let document: serde_json::Value =
+        serde_norway::from_str(&ergo_api::v1::openapi::v1_openapi_yaml()).unwrap();
+    let compute = ergo_api::v1::ComputePool::default();
+    compute.close();
+    let router = app_with_compute(Some(Arc::new(AcceptOracle)), compute);
+
+    for (name, body) in [
+        ("compile", serde_json::json!({"source": "sigmaProp(true)"})),
+        ("inspect", serde_json::json!({"ergo_tree": "000801"})),
+        ("execute", serde_json::json!({"source": "sigmaProp(true)"})),
+        ("cost", serde_json::json!({"source": "sigmaProp(true)"})),
+        ("simulate", serde_json::json!({"box_id": HEX_64})),
+        ("explain", serde_json::json!({"box_id": HEX_64})),
+        ("diff", serde_json::json!({"source": "sigmaProp(true)"})),
+    ] {
+        let path = format!("/api/v1/script/{name}");
+        let responses = &document["paths"][&path]["post"]["responses"];
+        for status in ["401", "429", "500", "503", "504"] {
+            assert_eq!(
+                responses[status]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/V1Error",
+                "{path} must declare the shared error envelope for {status}"
+            );
+        }
+        let (status, body) = post_via(router.clone(), &path, body).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}: {body}");
+        assert_eq!(reason(&body), "shutting_down", "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn oversized_script_sources_use_the_documented_resource_limit_status() {
+    let router = app(Some(Arc::new(AcceptOracle)));
+    for name in ["compile", "execute", "cost", "diff"] {
+        let path = format!("/api/v1/script/{name}");
+        let (status, body) = post_via(
+            router.clone(),
+            &path,
+            serde_json::json!({"source": "x".repeat(64 * 1024 + 1)}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{path}: {body}");
+        assert_eq!(reason(&body), "limit_exceeded", "{path}: {body}");
+    }
 }
 
 // ----- compile ------------------------------------------------------------

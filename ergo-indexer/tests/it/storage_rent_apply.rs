@@ -22,6 +22,7 @@ fn size_delimited_tree() -> ErgoTree {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SBoolean,
@@ -35,6 +36,7 @@ fn size_delimited_tree_false() -> ErgoTree {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SBoolean,

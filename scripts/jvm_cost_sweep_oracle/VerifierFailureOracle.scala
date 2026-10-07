@@ -1,8 +1,8 @@
 //> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
 //> using scala 2.12
-//> using dep org.scorexfoundation::sigma-state:6.0.2
-//> using dep org.ergoplatform::ergo-core:6.0.2
-//> using dep org.ergoplatform::ergo-wallet:6.0.2
+//> using dep org.scorexfoundation::sigma-state:6.0.6
+//> using dep org.ergoplatform::ergo-core:6.0.6
+//> using dep org.ergoplatform::ergo-wallet:6.0.6
 
 // Usage: scripts/gen-cost-sweep.sh --verifier-throws-only
 // Deterministic missing-variable script; the wallet interpreter returns Failure.

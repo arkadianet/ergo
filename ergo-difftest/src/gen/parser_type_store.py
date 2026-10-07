@@ -78,7 +78,7 @@ def main():
             case.update(jvm=verdict.title(), jvm_detail=detail if verdict == 'REJECT' else None)
         oracle = ROOT / 'scripts/jvm_serde_oracle/ErgoSerdeOracle.scala'
         vectors['manifest'] = {
-            'scala': {'sigmastate_version': '6.0.2', 'ergo_version': '6.0.2'},
+            'scala': {'sigmastate_version': '6.0.6', 'ergo_version': '6.0.6'},
             'tool': {'generator': 'ergo-difftest/src/gen/parser_type_store.py',
                      'oracle_script': str(oracle.relative_to(ROOT)),
                      'oracle_sha256': hashlib.sha256(oracle.read_bytes()).hexdigest()},

@@ -214,6 +214,7 @@ fn scala_sourced_rejection_parity() {
             | ValidationError::PropositionTooLarge { .. }
             | ValidationError::OutputFromFuture { .. }
             | ValidationError::OutputCreationHeightBelowInputs { .. }
+            | ValidationError::DuplicateStorageRentOutput { .. }
             | ValidationError::ReemissionRulesViolated(_) => "MONETARY",
             ValidationError::ScriptError { .. } => "SCRIPT",
             ValidationError::ProofFailed { .. } => "PROOF",

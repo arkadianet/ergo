@@ -20,7 +20,7 @@ pub fn secp256k1_order() -> BigUint {
 /// hashModQ: rejection-sampling Blake2b256 hash that returns a value in [0, q).
 /// Matches Scala `ModQHash.hash`:
 /// - Hash input, if result < validRange (largest multiple of q <= 2^256), return result mod q.
-/// - Otherwise, append a counter byte and retry.
+/// - Otherwise, hash the previous digest again and repeat.
 pub fn hash_mod_q(input: &[u8]) -> BigUint {
     let q = secp256k1_order();
     // valid_range = (2^256 / q) * q — the largest multiple of q fitting in 256 bits

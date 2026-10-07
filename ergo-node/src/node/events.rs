@@ -8,7 +8,7 @@ use std::time::Instant;
 use ergo_api::SubmitError;
 use ergo_p2p::handshake::PeerFeature;
 use ergo_p2p::message;
-use ergo_p2p::peer::{Direction, PeerId, SyncVersion};
+use ergo_p2p::peer::{Direction, PeerId, Penalty, SyncVersion};
 use ergo_p2p::peer_manager::ConnectError;
 use ergo_p2p::types::ModifierTypeId;
 use ergo_primitives::reader::VlqReader;
@@ -23,8 +23,8 @@ use crate::anchor_map::parse_rest_url;
 use crate::peer_loop::{self, PeerEvent};
 
 use super::{
-    cleanup_disconnected_peer, flush_actions, handle_message, penalize_peer, send_to_peer,
-    try_send_anchor_sync_info, NodeState, PeerRuntime,
+    admit_frame, cleanup_disconnected_peer, flush_actions, handle_message, penalize_peer,
+    send_post_header_sync_info, send_to_peer, NodeState, PeerRuntime,
 };
 
 /// events flow through `handle_event` individually as before.
@@ -48,26 +48,44 @@ pub(super) fn handle_event_batch(state: &mut NodeState, events: Vec<PeerEvent>) 
     let mut other: Vec<PeerEvent> = Vec::new();
 
     for ev in events {
-        if let PeerEvent::Message {
-            peer,
-            code,
-            payload,
-        } = &ev
-        {
-            if *code == message::CODE_MODIFIER {
-                // Pre-deserialize so we can route header-Modifiers
-                // to the coalesced path without re-parsing. Tx-typed
-                // Modifiers and parse failures fall through to
-                // individual handle_event dispatch (unchanged
-                // semantics — Tx admission is per-message, parse
-                // failures emit Penalize per-message).
-                if let Ok(mods) = message::deserialize_modifiers(payload) {
-                    if mods.type_id != ModifierTypeId::Transaction.as_byte() {
-                        header_mods.push((*peer, mods));
-                        continue;
-                    }
-                }
+        let is_header_modifier = matches!(
+            &ev,
+            PeerEvent::Message { code, payload, .. }
+                if *code == message::CODE_MODIFIER
+                    && payload.first().copied() == Some(ModifierTypeId::Header.as_byte())
+        );
+        if is_header_modifier {
+            let PeerEvent::Message {
+                peer,
+                code,
+                payload,
+            } = ev
+            else {
+                continue;
+            };
+            if state.peer_manager.get(&peer).is_none() {
+                warn!(peer = %peer, "dropping message from untracked peer");
+                cleanup_disconnected_peer(state, &peer);
+                continue;
             }
+            state.peer_manager.touch(&peer, now);
+            match admit_frame(state, peer, code, &payload, now) {
+                Ok(()) => match message::deserialize_modifiers(&payload) {
+                    Ok(mods) => header_mods.push((peer, mods)),
+                    Err(e) => {
+                        warn!(peer = %peer, error = %e, "bad Modifier");
+                        flush_actions(
+                            state,
+                            vec![Action::Penalize {
+                                peer,
+                                penalty: Penalty::Misbehavior,
+                            }],
+                        );
+                    }
+                },
+                Err(actions) => flush_actions(state, actions),
+            }
+            continue;
         }
         other.push(ev);
     }
@@ -96,11 +114,9 @@ fn process_header_modifier_batch(
     now: Instant,
 ) {
     let cs_before = state.store.chain_state_meta();
-    let bh_before = cs_before.best_header_height;
     let fb_before = cs_before.best_full_block_height;
 
     let mut batch_actions = Vec::new();
-    let mut contributing_peers: Vec<PeerId> = Vec::with_capacity(messages.len());
 
     for (peer, mods) in messages {
         // Same admission gates as handle_event Message path:
@@ -123,12 +139,22 @@ fn process_header_modifier_batch(
                     .on_modifier_received(peer, type_id, mod_id, data, now),
             );
         }
-        contributing_peers.push(peer);
     }
 
     if batch_actions.is_empty() {
         return;
     }
+
+    // Accepted header deliveries retain their request owner for validation attribution.
+    let requested_headers: Vec<_> = batch_actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::ValidateHeader {
+                peer, modifier_id, ..
+            } => Some((*peer, *modifier_id)),
+            _ => None,
+        })
+        .collect();
 
     let wallet_wiring = state
         .wallet_hook
@@ -163,44 +189,23 @@ fn process_header_modifier_batch(
     }
 
     // Per-peer immediate-SyncInfo dispatch — same as the per-message
-    // path's tail. Each contributing peer gets the next anchor (or
+    // path's tail. Each requested delivering peer gets the next anchor (or
     // tip-tail fallback). Dedup the peer list since two messages
     // from the same peer in this coalesce window only need one
     // SyncInfo response.
-    if bh > bh_before {
-        contributing_peers.sort();
-        contributing_peers.dedup();
-        for peer in contributing_peers {
-            if state.registry.peers.contains_key(&peer) {
-                if !try_send_anchor_sync_info(state, &peer, now) {
-                    if let Some(rt) = state.registry.peers.get(&peer) {
-                        let payload_res = match rt.sync_version {
-                            SyncVersion::V2 => {
-                                let headers = state.executor.cached_header_bytes(50);
-                                message::serialize_sync_info(&message::SyncInfo::V2 { headers })
-                            }
-                            SyncVersion::V1 => ergo_sync::coordinator::build_sync_info_payload(
-                                rt.sync_version,
-                                &state.store,
-                            ),
-                        };
-                        match payload_res {
-                            Ok(payload) => all_actions.push(Action::SendToPeer {
-                                peer,
-                                code: message::CODE_SYNC_INFO,
-                                payload,
-                            }),
-                            Err(e) => warn!(
-                                peer = %peer,
-                                error = %e,
-                                "failed to serialize SyncInfo; skipping send"
-                            ),
-                        }
-                    }
-                }
-                state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
-            }
-        }
+    // Match Scala's valid-header gate: rejected deliveries are forgotten by
+    // the executor; already-held headers remain eligible if requested.
+    let mut requested_peers: Vec<_> = requested_headers
+        .into_iter()
+        .filter(|(_, id)| {
+            state.coordinator.delivery().status(id) == ergo_p2p::delivery::ModifierStatus::Received
+        })
+        .map(|(peer, _)| peer)
+        .collect();
+    requested_peers.sort();
+    requested_peers.dedup();
+    for peer in requested_peers {
+        send_post_header_sync_info(state, peer, now, &mut all_actions);
     }
 
     if bh.is_multiple_of(500) && bh > 0 {
@@ -444,26 +449,7 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
                 "peer connected",
             );
 
-            // Send initial SyncInfo immediately. Step C may swap our
-            // tip-tail for a single anchor ID for REST-capable peers
-            // (see `try_send_anchor_sync_info` for the eligibility
-            // gate); fall back to the standard payload otherwise.
-            // Mark sync_sent in either branch so Lever 1's per-peer
-            // throttle accounts for this send — without it, the next
-            // periodic dispatch would re-send a redundant SyncInfo
-            // ~1s later (the throttle would think no recent send had
-            // happened on this peer).
-            if !try_send_anchor_sync_info(state, &addr, now) {
-                match ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store) {
-                    Ok(payload) => {
-                        send_to_peer(state, &addr, message::CODE_SYNC_INFO, payload);
-                    }
-                    Err(e) => {
-                        warn!(peer = %addr, error = %e, "failed to serialize SyncInfo; skipping send")
-                    }
-                }
-            }
-            state.coordinator.sync_state_mut().mark_sync_sent(addr, now);
+            super::sync_helpers::send_initial_sync_info(state, &addr, sync_version, now);
 
             // Sync-S4: request the peer's known addresses so the dial
             // pool can fill beyond the CLI-seeded peer(s) over time.
@@ -602,7 +588,12 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
 ///    otherwise it no-ops and the block waits for `try_apply_next_blocks`
 ///    to pick it up later.
 /// 5. Follow-up actions (chain-extension Inv broadcasts after a
-///    successful apply, etc.) are flushed via `flush_actions`.
+///    successful apply, etc.) are flushed via `flush_actions`, whose
+///    applied-block relay announces the block with the remote freshness
+///    and tip-window gates. Deliberate deviation: Scala `postBlocksR`
+///    announces the submission before apply, ungated
+///    (BlocksApiRoute.scala:127-146 at v6.0.6 23aabead8); this outside
+///    input is announced only once it applies.
 ///
 /// Returns `Ok(header_id_hex)` when the header is in the store after
 /// the apply pipeline runs — matches Scala's `sendMinedBlock`
@@ -702,11 +693,9 @@ fn inject_local_full_block(
     // raw `process_header_cfg` would have stranded those orphans
     // indefinitely.
     //
-    // `HeaderProcessError::Deserialize` here means "re-parse of a
-    // persisted parent header failed" — NOT "caller sent bad bytes".
-    // We already parsed the caller bytes successfully at the top
-    // (`read_header(&mut r)`), so any Deserialize from process_local_header
-    // is internal-state corruption, not a submitter error.
+    // Incoming parse/validation failures are submitter rejections. Stored
+    // parent integrity and local arithmetic/caller-contract failures are
+    // separately typed and reported as internal errors.
     match state.executor.process_local_header(
         &mut state.store,
         &mut state.coordinator,
@@ -732,99 +721,75 @@ fn inject_local_full_block(
             // hiccup on a section write). All downstream calls are
             // store-write-idempotent.
         }
-        Err(
-            e @ (HeaderProcessError::ParentNotFound { .. }
-            | HeaderProcessError::Invalid { .. }
-            | HeaderProcessError::HeightMismatch { .. }
-            | HeaderProcessError::EpochContextIncomplete { .. }
-            | HeaderProcessError::EpochHeaderMissing { .. }
-            | HeaderProcessError::CheckpointMismatch { .. }
-            | HeaderProcessError::Validation(_)),
-        ) => {
-            return Err(SubmitError {
-                reason: "header_rejected".to_string(),
-                detail: Some(format!("header rejected by validator: {e}")),
-            });
-        }
-        Err(e @ HeaderProcessError::Storage(_)) => {
-            let chain = state.store.chain_state_meta();
-            ergo_state::storage_observability::report_storage_failure(
-                &ergo_state::storage_observability::StorageFailureContext {
-                    subsystem: "mining",
-                    component: "mined_block_persistence",
-                    database_path: Some(state.store.database_path()),
-                    operation: "mined_block_store_header",
-                    best_full_block_height: Some(chain.best_full_block_height),
-                    best_header_height: Some(chain.best_header_height),
-                    attempted_height: None,
-                },
-                &e,
-            );
-            return Err(SubmitError {
-                reason: "internal_error".to_string(),
-                detail: Some(format!("local store error during header apply: {e}")),
-            });
-        }
-        Err(e @ HeaderProcessError::Deserialize(_)) => {
-            let diagnostics = ergo_state::storage_observability::ErrorDiagnostics::from_error(&e);
-            tracing::error!(
-                event = "mined_block_header_failure",
-                subsystem = "mining",
-                component = "mined_block_persistence",
-                operation = "mined_block_reparse_header",
-                error = %diagnostics.display,
-                error_debug = %diagnostics.debug,
-                error_chain = %diagnostics.chain,
-                "mined block header persistence failed",
-            );
-            return Err(SubmitError {
-                reason: "internal_error".to_string(),
-                detail: Some(format!("local store error during header apply: {e}")),
-            });
-        }
-    }
-
-    // ----- Sections: persist directly under canonical section ids -----
-    let persist = |id: &[u8; 32], bytes: &[u8], type_id: u8| -> Result<(), SubmitError> {
-        state
-            .store
-            .store_block_section_typed(id, bytes, type_id)
-            .map_err(|e| {
+        Err(e) => {
+            if e.is_local_failure() {
                 let chain = state.store.chain_state_meta();
                 ergo_state::storage_observability::report_storage_failure(
                     &ergo_state::storage_observability::StorageFailureContext {
                         subsystem: "mining",
                         component: "mined_block_persistence",
                         database_path: Some(state.store.database_path()),
-                        operation: "mined_block_store_section",
+                        operation: "mined_block_store_header",
                         best_full_block_height: Some(chain.best_full_block_height),
                         best_header_height: Some(chain.best_header_height),
                         attempted_height: None,
                     },
                     &e,
                 );
-                SubmitError {
+                return Err(SubmitError {
                     reason: "internal_error".to_string(),
-                    detail: Some(format!("store_block_section_typed (type {type_id}): {e}")),
-                }
-            })
-    };
-    persist(
-        &expected.transactions_id,
-        &bt_bytes,
-        ModifierTypeId::BlockTransactions.as_byte(),
-    )?;
-    persist(
-        &expected.extension_id,
-        &ext_bytes,
-        ModifierTypeId::Extension.as_byte(),
-    )?;
+                    detail: Some(format!("local header apply failure: {e}")),
+                });
+            }
+            return Err(SubmitError {
+                reason: "header_rejected".to_string(),
+                detail: Some(format!("header rejected by validator: {e}")),
+            });
+        }
+    }
+
+    // ----- Sections: persist directly under canonical section ids -----
+    // One durable transaction for all of them, before apply: the submitter
+    // may hold the only other copy, and the header is already durable, so a
+    // node killed after a non-durable write would restart with that header,
+    // possibly as its best header, and no body for it.
+    let mut sections: Vec<(&[u8; 32], &[u8], u8)> = vec![
+        (
+            &expected.transactions_id,
+            bt_bytes.as_slice(),
+            ModifierTypeId::BlockTransactions.as_byte(),
+        ),
+        (
+            &expected.extension_id,
+            ext_bytes.as_slice(),
+            ModifierTypeId::Extension.as_byte(),
+        ),
+    ];
     if let Some(ad) = &ad_proofs_bytes {
-        persist(
+        sections.push((
             &expected.ad_proofs_id,
-            ad,
+            ad.as_slice(),
             ModifierTypeId::ADProofs.as_byte(),
-        )?;
+        ));
+    }
+    if let Err(e) = state.store.store_block_sections_durable(&sections) {
+        let chain = state.store.chain_state_meta();
+        ergo_state::storage_observability::report_storage_failure(
+            &ergo_state::storage_observability::StorageFailureContext {
+                subsystem: "mining",
+                component: "mined_block_persistence",
+                database_path: Some(state.store.database_path()),
+                operation: "mined_block_store_section",
+                best_full_block_height: Some(chain.best_full_block_height),
+                best_header_height: Some(chain.best_header_height),
+                attempted_height: None,
+            },
+            &e,
+        );
+        return Err(SubmitError {
+            reason: "internal_error".to_string(),
+            detail: Some(format!("store_block_sections_durable: {e}")),
+        });
     }
 
     // ----- Apply: AssembleBlock kicks process_block if next in line -----

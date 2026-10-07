@@ -122,10 +122,6 @@ impl WalletChainAccess for BlockingRescanChain {
         false
     }
 
-    fn read_block_at_supported(&self) -> Result<bool, ergo_state::wallet::scan::RescanReadError> {
-        Ok(true)
-    }
-
     fn read_block_at(
         &self,
         height: u32,
@@ -133,7 +129,7 @@ impl WalletChainAccess for BlockingRescanChain {
         Option<ergo_state::wallet::scan::RescanBlock>,
         ergo_state::wallet::scan::RescanReadError,
     > {
-        if height == 1 {
+        if height == 2 {
             let _ = self.entered.send(());
             let _ = self.release.lock().unwrap().recv();
             return Err(ergo_state::wallet::scan::RescanReadError::Storage {
@@ -147,6 +143,48 @@ impl WalletChainAccess for BlockingRescanChain {
             block_id: [height as u8; 32],
             txs: vec![],
         }))
+    }
+}
+
+/// Pauses each rebuild at its final tip read, after the last loop-boundary
+/// cancellation check. Preflight tip reads, including the rejected concurrent
+/// request, never block.
+struct RescanTipBarrier {
+    calls: std::sync::atomic::AtomicUsize,
+    entered: std::sync::mpsc::Sender<()>,
+    releases: [std::sync::Mutex<std::sync::mpsc::Receiver<()>>; 2],
+}
+
+impl WalletChainAccess for RescanTipBarrier {
+    fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
+        Ok(0)
+    }
+
+    fn tip_height(&self) -> Result<u32, ChainAccessError> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == 1 || call == 4 {
+            self.entered.send(()).unwrap();
+            self.releases[usize::from(call == 4)]
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        }
+        Ok(0)
+    }
+
+    fn is_pruned(&self) -> bool {
+        false
+    }
+
+    fn read_block_at(
+        &self,
+        _height: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    > {
+        Ok(None)
     }
 }
 
@@ -408,13 +446,21 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    assert_eq!(failed, 1);
+    // Block 1 replays successfully; the fixture returns a storage error at 2.
+    // Persist the failed read's height, matching the diagnostic on main.
+    assert_eq!(failed, 2);
     let read = store.read().unwrap();
     assert!(matches!(
         read.rescan_state().unwrap(),
-        ergo_state::wallet::RescanState::Failed { height: 1, .. }
+        ergo_state::wallet::RescanState::Failed { height: 2, .. }
     ));
     assert!(read.scan_invalidated().unwrap());
+    let failed_status = admin.native_status().await.unwrap();
+    assert!(matches!(
+        failed_status.rescan,
+        RescanStateDto::Failed { height: 2, .. }
+    ));
+    assert!(failed_status.scan_invalidated);
     assert!(admin.rescan_coordinator().fail_closed());
     assert!(admin.rescan_coordinator().in_progress());
     assert!(admin.rescan_coordinator().scan_rebuild_in_progress());
@@ -508,6 +554,79 @@ async fn corrupt_scan_registry_is_discarded_before_empty_full_rescan() {
     })
     .await
     .expect("rescan task must finish before the test ends");
+}
+
+#[tokio::test]
+async fn rescan_rollback_then_replacement_preserves_running_and_invalidation() {
+    use ergo_api::wallet::native::dto::RescanStateDto;
+
+    use ergo_state::wallet::apply::RescanGuard;
+    use std::time::Duration;
+
+    let (entered, entered_rx) = std::sync::mpsc::channel();
+    let (release_a, wait_a) = std::sync::mpsc::channel();
+    let (release_b, wait_b) = std::sync::mpsc::channel();
+    let chain = Arc::new(RescanTipBarrier {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        entered,
+        releases: [std::sync::Mutex::new(wait_a), std::sync::Mutex::new(wait_b)],
+    });
+    let (admin, db, _dir) = spawn_writer_with_chain(chain.clone(), Arc::new(StubTxSubmitter));
+    admin.rescan(0).await.unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(admin.rescan(0).await,
+        Err(WalletAdminError::RescanUnavailable(reason)) if reason == "rescan already in progress"));
+
+    let txn = db.begin_write().unwrap();
+    admin
+        .rescan_coordinator()
+        .rescan_guard()
+        .abort_in_progress(&txn)
+        .unwrap();
+    txn.commit().unwrap();
+    admin.rescan(0).await.unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        Arc::strong_count(&chain),
+        4,
+        "writer plus two rebuild tasks"
+    );
+
+    release_a.send(()).unwrap();
+    // The captured chain Arc is dropped after the task's local flags guard.
+    // Wait for task A to exit while B stays blocked; no timing-based sleep.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while Arc::strong_count(&chain) != 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled rescan must exit");
+    assert!(admin.rescan_coordinator().in_progress());
+    assert!(admin.rescan_coordinator().scan_rebuild_in_progress());
+    let status = admin.native_status().await.unwrap();
+    assert!(matches!(
+        status.rescan,
+        RescanStateDto::Running { from_height: 0 }
+    ));
+    assert!(
+        status.scan_invalidated,
+        "A cannot clear rollback invalidation"
+    );
+
+    release_b.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while Arc::strong_count(&chain) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement rescan must finish");
+    assert!(!admin.rescan_coordinator().in_progress());
+    assert!(!admin.rescan_coordinator().scan_rebuild_in_progress());
+    let status = admin.native_status().await.unwrap();
+    assert!(matches!(status.rescan, RescanStateDto::Idle));
+    assert!(!status.scan_invalidated);
 }
 
 /// `send.signed` idempotency (codex P0-4): a tx whose id is already a confirmed
@@ -1382,6 +1501,115 @@ async fn init_twice_returns_wallet_exists() {
     );
 }
 
+/// One committed mainnet block, so wallet signing reaches request decoding.
+fn committed_chain(path: &std::path::Path) -> ergo_state::store::StateStore {
+    let headers: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/headers_1_10.json"
+    ))
+    .unwrap();
+    let mut store = ergo_state::store::StateStore::open(path).unwrap();
+    store.initialize_genesis(&[]).unwrap();
+    let bytes = hex::decode(headers[0]["bytes"].as_str().unwrap()).unwrap();
+    let header =
+        ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
+            .unwrap();
+    let (bytes, id) = ergo_ser::header::serialize_header(&header).unwrap();
+    store.store_header(id.as_bytes(), &bytes).unwrap();
+    let root = store.root_digest();
+    store
+        .apply_block_unchecked_for_test(1, id.as_bytes(), &root, &[])
+        .unwrap();
+    store
+}
+
+#[tokio::test]
+async fn private_commitment_in_public_hints_is_a_client_error_over_http() {
+    use ergo_api::wallet::sending::{
+        FirstProverMessageJson, HintDto, SigmaBooleanJson, TransactionSignRequest, TxHintsBagDto,
+        UnsignedTxDto,
+    };
+    let chain_dir = tempfile::tempdir().unwrap();
+    let store = committed_chain(&chain_dir.path().join("chain.redb"));
+    let chain = Arc::new(ergo_node::node::wallet_bridge::ChainStateAccessorImpl::new(
+        ergo_state::reader::ChainStoreReader::new_from_db(store.db_arc()),
+        Arc::new(RedbWalletStore::new(store.db_arc())),
+        false,
+        None,
+    ));
+    let (admin, _db, _dir) = spawn_writer_with_chain(chain, Arc::new(StubTxSubmitter));
+    let key = "operator-key";
+    let security =
+        ergo_api::auth::ApiSecurity::new(ergo_api::auth::ApiSecurity::hash_key(key.as_bytes()))
+            .unwrap();
+    let app = ergo_api::wallet::router_with_security(Arc::new(admin), Some(Arc::new(security)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let tree =
+        ergo_ser::ergo_tree::read_ergo_tree(&mut ergo_primitives::reader::VlqReader::new(&[
+            0x00, 0x08, 0xd3,
+        ]))
+        .unwrap();
+    let unsigned = ergo_ser::transaction::UnsignedTransaction {
+        inputs: vec![ergo_ser::input::UnsignedInput {
+            box_id: ergo_primitives::digest::Digest32::from_bytes([0x55; 32]),
+            extension: ergo_ser::input::ContextExtension::empty(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![ergo_ser::ergo_box::ErgoBoxCandidate::new(
+            1_000_000,
+            tree,
+            1,
+            vec![],
+            ergo_ser::register::AdditionalRegisters::empty(),
+        )
+        .unwrap()],
+    };
+    let mut writer = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::transaction::write_unsigned_transaction(&mut writer, &unsigned).unwrap();
+    let point = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    let mut hints = TxHintsBagDto::default();
+    hints.public_hints.insert(
+        "0".into(),
+        vec![HintDto::OwnCommitment {
+            image: SigmaBooleanJson {
+                inner: serde_json::json!({"op": 205, "h": point}),
+            },
+            secret: "ab".repeat(32),
+            commitment: FirstProverMessageJson::Dlog { a: point.into() },
+            position: "0".into(),
+        }],
+    );
+    let request = TransactionSignRequest {
+        unsigned_tx: UnsignedTxDto {
+            bytes: hex::encode(writer.result()),
+        },
+        external_secrets: None,
+        hints: Some(hints),
+        inputs: None,
+        data_inputs: None,
+    };
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/wallet/transaction/sign"))
+        .header("api_key", key)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["reason"], "bad_request", "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("publicHints cannot contain cmtWithSecret"),
+        "{body}"
+    );
+    assert!(!body.to_string().contains(&"ab".repeat(32)));
+}
+
 #[tokio::test]
 async fn change_address_requires_unlocked_owned_key_and_preserves_persisted_value() {
     let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
@@ -1395,7 +1623,7 @@ async fn change_address_requires_unlocked_owned_key_and_preserves_persisted_valu
     let address = admin.addresses().await.unwrap().0[0].clone();
     admin.update_change_address(address.clone()).await.unwrap();
     let read_change = || {
-        db.begin_read()
+        redb::ReadableDatabase::begin_read(db.as_ref())
             .unwrap()
             .open_table(WALLET_CHANGE_ADDRESS)
             .unwrap()
@@ -1419,18 +1647,15 @@ async fn change_address_requires_unlocked_owned_key_and_preserves_persisted_valu
             .unwrap()
             .try_into()
             .unwrap();
+    let foreign_key = tracked_pubkey_key(999, &foreign);
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(WALLET_TRACKED_PUBKEYS).unwrap();
         let existing = table.iter().unwrap().next().unwrap().unwrap().1.value();
         // Reuse valid metadata: the foreign key cannot derive at that path.
-        table
-            .insert(tracked_pubkey_key(999, &foreign), existing)
-            .unwrap();
+        table.insert(foreign_key, existing).unwrap();
     }
     txn.commit().unwrap();
-    admin.lock().await.unwrap();
-    admin.unlock("pw".into()).await.unwrap();
     let foreign_address = ergo_wallet::address::pubkey_to_p2pk_address(
         &foreign,
         ergo_ser::address::NetworkPrefix::Mainnet,
@@ -1440,6 +1665,259 @@ async fn change_address_requires_unlocked_owned_key_and_preserves_persisted_valu
         admin.update_change_address(foreign_address).await,
         Err(WalletAdminError::ChangeAddressUntracked)
     ));
+    // The next unlock re-derives every persisted key and refuses the row.
+    admin.lock().await.unwrap();
+    assert!(matches!(
+        admin.unlock("pw".into()).await,
+        Err(WalletAdminError::Internal(detail)) if detail.contains("tracked key at m/")
+    ));
+    assert!(!admin.status().await.unwrap().is_unlocked);
+    let txn = db.begin_write().unwrap();
+    txn.open_table(WALLET_TRACKED_PUBKEYS)
+        .unwrap()
+        .remove(foreign_key)
+        .unwrap();
+    txn.commit().unwrap();
+    admin.unlock("pw".into()).await.unwrap();
     assert_eq!(read_change(), original);
     admin.update_change_address(address).await.unwrap();
+}
+
+mod scan_invalidation {
+    use super::*;
+    use ergo_api::wallet::native::dto::{RescanStateDto, SendTxRequest, TxRepr};
+    use ergo_api::wallet::types::Page;
+    use ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED;
+    use serde_json::json;
+
+    // ----- helpers -----
+
+    fn invalidated_writer() -> (NodeWalletAdmin, Arc<redb::Database>, tempfile::TempDir) {
+        let (admin, db, dir) = spawn_writer(Arc::new(RejectingSubmitter {
+            reason: "must_not_submit".to_string(),
+        }));
+        let txn = db.begin_write().unwrap();
+        txn.open_table(WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .insert((), true)
+            .unwrap();
+        txn.commit().unwrap();
+        (admin, db, dir)
+    }
+
+    fn request<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> T {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn assert_invalidated<T>(result: Result<T, WalletAdminError>) {
+        let result = result.map(|_| ());
+        assert!(
+            matches!(result, Err(WalletAdminError::ScanInvalidated)),
+            "{result:?}"
+        );
+    }
+
+    // ----- happy path -----
+
+    #[tokio::test]
+    async fn wallet_invalidated_status_reports_full_rescan_required() {
+        let (admin, _db, _dir) = invalidated_writer();
+        assert!(admin.status().await.unwrap().error.contains("fromHeight=0"));
+        let status = admin.native_status().await.unwrap();
+        assert!(status.scan_invalidated);
+        assert!(
+            matches!(status.rescan, RescanStateDto::Required { detail } if detail.contains("fromHeight=0"))
+        );
+        admin.lock().await.unwrap();
+    }
+
+    // ----- error paths -----
+
+    #[tokio::test]
+    async fn wallet_invalidated_balances_refused() {
+        let (admin, _db, _dir) = invalidated_writer();
+        assert_invalidated(admin.balances().await);
+        assert_invalidated(admin.balances_with_unconfirmed().await);
+        assert_invalidated(admin.native_balance(false).await);
+        assert_invalidated(admin.native_balance(true).await);
+    }
+
+    #[tokio::test]
+    async fn wallet_invalidated_boxes_and_history_refused() {
+        let (admin, _db, _dir) = invalidated_writer();
+        assert_invalidated(admin.boxes(Page::default()).await);
+        assert_invalidated(admin.boxes_unspent(Page::default()).await);
+        assert_invalidated(admin.native_boxes(0, 10).await);
+        assert_invalidated(admin.native_box_by_id("00".repeat(32)).await);
+        assert_invalidated(admin.transactions(Page::default()).await);
+        assert_invalidated(admin.transaction_by_id("00".repeat(32)).await);
+        assert_invalidated(admin.transactions_by_scan_id(11, Page::default()).await);
+        assert_invalidated(admin.native_transactions(0, 10).await);
+        assert_invalidated(admin.native_transaction_by_id("00".repeat(32)).await);
+        assert_invalidated(admin.scan_unspent_boxes(11, request(json!({}))).await);
+        assert_invalidated(admin.scan_spent_boxes(11, request(json!({}))).await);
+    }
+
+    #[tokio::test]
+    async fn wallet_invalidated_selection_and_build_refused() {
+        let (admin, _db, _dir) = invalidated_writer();
+        assert_invalidated(
+            admin
+                .boxes_collect(request(json!({"targetAssets": [], "targetBalance": 1})))
+                .await,
+        );
+        assert_invalidated(
+            admin
+                .select_boxes(request(json!({"target": {"nanoErg": "1"}})))
+                .await,
+        );
+        assert_invalidated(
+            admin
+                .transaction_generate_unsigned(request(json!({"requests": []})))
+                .await,
+        );
+        assert_invalidated(
+            admin
+                .transaction_generate(request(json!({"requests": []})))
+                .await,
+        );
+        assert_invalidated(
+            admin
+                .build_transaction(request(json!({"outputs": []})))
+                .await,
+        );
+    }
+
+    #[tokio::test]
+    async fn wallet_invalidated_signing_and_spending_refused() {
+        let (admin, _db, _dir) = invalidated_writer();
+        assert_invalidated(
+            admin
+                .transaction_sign(request(json!({"unsignedTx": {"bytes": ""}})))
+                .await,
+        );
+        assert_invalidated(
+            admin
+                .sign_transaction(request(
+                    json!({"unsignedTransaction": {"type": "bytes", "bytes": ""}}),
+                ))
+                .await,
+        );
+        assert_invalidated(
+            admin
+                .generate_commitments(request(json!({"unsignedTx": ""})))
+                .await,
+        );
+        assert_invalidated(
+            admin
+                .extract_hints(request(json!({"tx": "", "real": [], "simulated": []})))
+                .await,
+        );
+        assert_invalidated(admin.payment_send(vec![]).await);
+        assert_invalidated(
+            admin
+                .transaction_send(request(json!({"requests": []})))
+                .await,
+        );
+        assert_invalidated(
+            admin
+                .send_transaction(SendTxRequest::Signed {
+                    signed_transaction: TxRepr::from_bytes(&minimal_signed_tx().0),
+                })
+                .await,
+        );
+        assert_invalidated(
+            admin
+                .send_transaction(request(
+                    json!({"type": "intent", "intent": {"outputs": []}}),
+                ))
+                .await,
+        );
+        assert_invalidated(admin.retrieve_rewards(request(json!({}))).await);
+    }
+
+    #[tokio::test]
+    async fn wallet_invalidated_partial_rescan_refused_full_rescan_reaches_preflight() {
+        let (admin, db, _dir) = invalidated_writer();
+        assert_invalidated(admin.rescan(1).await);
+        // This backend has no replay history. Full rescan reaches that preflight;
+        // partial rescan must fail earlier with the actionable recovery error.
+        assert!(matches!(
+            admin.rescan(0).await,
+            Err(WalletAdminError::RescanUnavailable(_))
+        ));
+        assert!(redb::ReadableDatabase::begin_read(db.as_ref())
+            .unwrap()
+            .open_table(WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .get(())
+            .unwrap()
+            .unwrap()
+            .value());
+    }
+}
+
+#[tokio::test]
+async fn supervised_wallet_shutdown_joins_blocked_rescan_before_database_reopen() {
+    use std::time::Duration;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.redb");
+    let db = Arc::new(redb::Database::create(&path).unwrap());
+    let (entered, wait_entered) = std::sync::mpsc::channel();
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let chain = Arc::new(BlockingRescanChain {
+        entered,
+        release: Arc::new(std::sync::Mutex::new(wait_release)),
+    });
+    let (cancel, cancellation) = tokio::sync::watch::channel(false);
+    let wallet = EmbeddedWallet::new(WalletEngineParts {
+        storage: Arc::new(parking_lot::RwLock::new(
+            ergo_wallet::storage::SecretStorage::open(directory.path().join("wallet")),
+        )),
+        state: Arc::new(parking_lot::RwLock::new(
+            ergo_wallet_service::state::WalletState::empty(false),
+        )),
+        store: Arc::new(RedbWalletStore::new(db.clone())),
+        chain,
+        config: WalletEngineConfig {
+            network: ergo_ser::address::NetworkPrefix::Mainnet,
+            expose_private_keys: false,
+            reemission: None,
+            min_relay_fee_nano_erg: 1_000_000,
+            max_tx_size_bytes: 98_304,
+        },
+        submitter: Arc::new(StubTxSubmitter),
+        mempool: Arc::new(ergo_wallet_service::engine::NoopMempoolOverlay::new()),
+        service: None,
+        rescan: Arc::new(RescanCoordinator::new()),
+    });
+    let admin = wallet.admin;
+    let worker = tokio::spawn(wallet.writer.run_supervised(cancellation));
+    // The hook shares the database; dropping it models the action loop's release.
+    drop(wallet.hook);
+    admin.rescan(0).await.unwrap();
+    // Deterministic barrier: the worker owns the database while blocked in
+    // a block read. Shutdown cannot finish before this operation is released.
+    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    cancel.send(true).unwrap();
+    let mut shutdown = tokio::spawn(async move {
+        worker.await.unwrap().unwrap();
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut shutdown)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        admin.native_status().await,
+        Err(WalletAdminError::ShuttingDown)
+    ));
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(admin);
+    drop(db);
+    redb::Database::open(path).expect("all wallet database owners must have been joined");
 }

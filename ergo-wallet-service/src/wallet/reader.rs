@@ -478,17 +478,96 @@ impl<'tx> WalletReader<'tx> {
     }
 }
 
+// Implement HydrationSource so WalletState can hydrate. The trait
+// lives in this crate (ergo-state) so the dep direction is
+// ergo-wallet → ergo-state (clean, non-cyclic).
+impl<'tx> crate::wallet::hydration::HydrationSource for WalletReader<'tx> {
+    fn tracked_pubkeys(&self) -> Result<Vec<(u64, [u8; 33])>, String> {
+        let tbl = match self.txn.open_table(WALLET_TRACKED_PUBKEYS) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut pairs = Vec::new();
+        for entry in tbl.iter().map_err(|e| e.to_string())? {
+            let (k, _) = entry.map_err(|e| e.to_string())?;
+            pairs.push(parse_tracked_pubkey_key(&k.value()));
+        }
+        Ok(pairs)
+    }
+
+    fn visible_pubkeys(&self) -> Result<Vec<(u32, [u8; 33])>, String> {
+        let tbl = match self.txn.open_table(WALLET_VISIBLE_ADDRESSES) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut pairs = Vec::new();
+        for entry in tbl.iter().map_err(|e| e.to_string())? {
+            let (k, v) = entry.map_err(|e| e.to_string())?;
+            pairs.push((k.value(), v.value()));
+        }
+        Ok(pairs)
+    }
+
+    fn change_address_pubkey(&self) -> Result<Option<[u8; 33]>, String> {
+        let tbl = match self.txn.open_table(WALLET_CHANGE_ADDRESS) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        Ok(tbl.get(()).map_err(|e| e.to_string())?.map(|g| g.value()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wallet::tables::tracked_pubkey_key;
     use crate::wallet::types::TrackedPubkeyMeta;
     use redb::Database;
+    use redb::ReadableDatabase;
 
     // ----- helpers -----
 
     const EIP3_PATH: [u32; 5] = EIP3_FIRST_ADDRESS_PATH;
     const MASTER_PATH: &[u32] = &[]; // master key has an empty path
+
+    #[test]
+    fn hydration_missing_tables_are_empty_but_wrong_table_types_are_errors() {
+        use crate::wallet::hydration::HydrationSource;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::create(dir.path().join("hydration.redb")).unwrap();
+        {
+            let read = db.begin_read().unwrap();
+            let reader = WalletReader::new(&read);
+            assert!(reader.tracked_pubkeys().unwrap().is_empty());
+            assert!(reader.visible_pubkeys().unwrap().is_empty());
+            assert!(reader.change_address_pubkey().unwrap().is_none());
+        }
+        let write = db.begin_write().unwrap();
+        write
+            .open_table(redb::TableDefinition::<u32, u32>::new(
+                "wallet_tracked_pubkeys",
+            ))
+            .unwrap();
+        write
+            .open_table(redb::TableDefinition::<u32, u32>::new(
+                "wallet_visible_addresses",
+            ))
+            .unwrap();
+        write
+            .open_table(redb::TableDefinition::<u32, u32>::new(
+                "wallet_change_address",
+            ))
+            .unwrap();
+        write.commit().unwrap();
+        let read = db.begin_read().unwrap();
+        let reader = WalletReader::new(&read);
+        assert!(reader.tracked_pubkeys().is_err());
+        assert!(reader.visible_pubkeys().is_err());
+        assert!(reader.change_address_pubkey().is_err());
+    }
 
     fn pk(b: u8) -> [u8; 33] {
         let mut p = [b; 33];

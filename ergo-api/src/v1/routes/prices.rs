@@ -10,6 +10,7 @@ use utoipa::ToSchema;
 use super::dto::unix_ms_to_iso;
 use super::extract::V1Query;
 use super::{parse_id32, V1State};
+use crate::v1::blocking::ReadLane;
 use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::pricing::{
     reference_spot, select_reference_pool, DiscoveryError, IndexerPoolDiscovery, PoolDiscovery,
@@ -219,8 +220,9 @@ fn unpriced_item(token_id: String, reason: &str) -> PriceItem {
         (status = 200, description = "Reference price or an unpriced reason", body = PricesResponse),
         (status = 400, description = "Malformed token id, query, or unsupported quote", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 500, description = "Price discovery index read failed", body = V1Error),
-        (status = 503, description = "Extra index unavailable or price discovery incomplete", body = V1Error),
+        (status = 500, description = "Price discovery index read failed; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Extra index unavailable or price discovery incomplete; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn get_prices(
@@ -232,18 +234,24 @@ pub async fn get_prices(
         Err(response) => return *response,
     };
     let indexer = match state.indexer() {
-        Ok(indexer) => indexer,
+        Ok(indexer) => indexer.clone(),
         Err(response) => return *response,
     };
-    let discovery = IndexerPoolDiscovery::new(indexer.as_ref());
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX);
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let discovery = IndexerPoolDiscovery::new(indexer.as_ref());
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
 
-    prices_response(&discovery, query, now_ms)
+            prices_response(&discovery, query, now_ms)
+        })
+        .await
 }
 
 #[cfg(test)]

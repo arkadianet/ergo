@@ -1,7 +1,7 @@
 # Pin the Rust toolchain so contributors and CI build the workspace
-# against the exact same rustc + std + clippy. Bumping `channel` here is
-# the single edit needed to roll the whole repo.
+# against the exact same rustc + std + clippy. Update `channel` and the
+# workspace `rust-version` together; CI rejects mismatched versions.
 [toolchain]
-channel    = "1.95.0"
+channel    = "1.99.0"
 components = ["rustfmt", "clippy"]
 profile    = "minimal"

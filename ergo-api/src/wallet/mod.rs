@@ -465,12 +465,21 @@ pub(crate) async fn wallet_moved_guard(
     req: Request<Body>,
     _next: Next,
 ) -> Response {
-    if let Some(security) = &guard.security {
-        if !crate::auth::request_is_authorized(security, &req) {
-            return crate::auth::reject_invalid();
-        }
+    let Some(security) = &guard.security else {
+        return crate::auth::reject_unconfigured();
+    };
+    if !crate::auth::request_is_authorized(security, &req) {
+        return crate::auth::reject_invalid();
     }
     wallet_moved_response(&guard.daemon_address)
+}
+
+pub(crate) async fn public_wallet_moved_guard(
+    State(address): State<Arc<str>>,
+    _req: Request<Body>,
+    _next: Next,
+) -> Response {
+    wallet_moved_response(&address)
 }
 
 pub(crate) fn wallet_moved_response(address: &str) -> Response {
@@ -484,8 +493,7 @@ pub(crate) fn wallet_moved_response(address: &str) -> Response {
         .into_response()
 }
 
-/// Build the `/wallet/*` axum router and, if `security` is `Some`,
-/// wrap it with the [`crate::auth::require_api_key`] middleware via
+/// Build the `/wallet/*` axum router and always wrap it with the [`crate::auth::require_api_key`] middleware via
 /// `route_layer` — which fires only on matched routes. A plain `layer`
 /// here would also wrap this subtree's implicit fallback, which
 /// `Router::merge` then propagates router-wide, auth-gating every
@@ -495,12 +503,8 @@ pub(crate) fn wallet_moved_response(address: &str) -> Response {
 /// via the explicit `/wallet` + `/wallet/*rest` catch-all routes, which
 /// `route_layer` does cover.
 ///
-/// **Security boundary**: callers MUST pass an explicit `Option` — no
-/// convenience wrapper exists that hides the choice. Production callers
-/// pass `Some(operator_security)`; tests that don't exercise the auth
-/// gate pass `None` and document why at the call site. This makes
-/// "no auth" a deliberate per-call decision rather than a default
-/// fallthrough.
+/// **Security boundary**: `Some(operator_security)` checks the supplied key;
+/// `None` refuses every privileged request with configuration guidance.
 pub fn router_with_security(
     admin: Arc<dyn WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
@@ -519,7 +523,7 @@ pub(crate) fn router_with_security_and_moved(
         .route("/wallet/init", post(lifecycle::init))
         .route("/wallet/restore", post(lifecycle::restore))
         .route("/wallet/unlock", post(lifecycle::unlock))
-        .route("/wallet/lock", get(lifecycle::lock))
+        .route("/wallet/lock", get(lifecycle::lock).post(lifecycle::lock))
         .route("/wallet/check", post(lifecycle::check))
         .route("/wallet/rescan", post(state_mut::rescan))
         .route(
@@ -560,7 +564,7 @@ pub(crate) fn router_with_security_and_moved(
         .route("/wallet/deriveKey", post(admin_advanced::derive_key))
         .route(
             "/wallet/deriveNextKey",
-            get(admin_advanced::derive_next_key),
+            get(admin_advanced::derive_next_key).post(admin_advanced::derive_next_key),
         )
         .route(
             "/wallet/getPrivateKey",
@@ -584,26 +588,18 @@ pub(crate) fn router_with_security_and_moved(
         .route("/scan", any(crate::auth::unknown_gated_subpath))
         .route("/scan/*rest", any(crate::auth::unknown_gated_subpath))
         .with_state(admin);
-    match (security, daemon_address) {
-        (Some(sec), Some(address)) => r.route_layer(axum::middleware::from_fn_with_state(
+    match daemon_address {
+        Some(address) => r.route_layer(axum::middleware::from_fn_with_state(
             WalletMovedGuard {
                 daemon_address: Arc::from(address),
-                security: Some(sec),
+                security,
             },
             wallet_moved_guard,
         )),
-        (None, Some(address)) => r.route_layer(axum::middleware::from_fn_with_state(
-            WalletMovedGuard {
-                daemon_address: Arc::from(address),
-                security: None,
-            },
-            wallet_moved_guard,
-        )),
-        (Some(sec), None) => r.route_layer(axum::middleware::from_fn_with_state(
-            sec,
+        None => r.route_layer(axum::middleware::from_fn_with_state(
+            security,
             crate::auth::require_api_key,
         )),
-        (None, None) => r,
     }
 }
 

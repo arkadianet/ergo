@@ -4,10 +4,12 @@
 //! supporting modules tests and embedders need. The binary
 //! (`src/main.rs`) is a thin wrapper around [`run`].
 
+mod activity;
 pub mod anchor_map;
 pub mod anchor_scheduler;
 pub mod api_bridge;
 pub mod config;
+pub mod decode_stack;
 pub mod genesis;
 pub mod incidents;
 pub mod indexer_chain;
@@ -18,9 +20,13 @@ pub mod metrics_counters;
 pub mod mining_bridge;
 pub mod node;
 pub mod notifier;
+pub mod peer_details;
 pub mod peer_loop;
+pub mod realtime_indexer_bridge;
 pub mod realtime_mempool_bridge;
 pub mod snapshot;
 pub mod wallet_boot;
 
 pub use node::{run, run_inner, RunHandle};
+
+pub(crate) mod webhook_store;

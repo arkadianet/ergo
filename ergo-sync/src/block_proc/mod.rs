@@ -21,6 +21,71 @@ mod utxo;
 use digest::process_block_digest;
 use utxo::process_block_utxo;
 
+/// Parameters pricing and gating the target block's transactions. Scala
+/// appends the block, validating an epoch-start extension, before executing
+/// its transactions, so an epoch-start block uses its voted row and any other
+/// block the active row. Rule statuses are the store's cumulative settings
+/// (Scala `ErgoStateContext.validationSettings`); one row's
+/// `activated_update` is only that epoch's delta.
+fn target_block_params(
+    store: &impl ergo_state::ChainStateRead,
+    voted_params_row: Option<&ergo_validation::ActiveProtocolParameters>,
+) -> ProtocolParams {
+    ProtocolParams::for_block(
+        store.active_params(),
+        voted_params_row,
+        store.validation_settings(),
+    )
+}
+
+/// Tally the applied block's ancestors. The best-header height index can
+/// belong to a different branch while that branch's bodies are unavailable.
+fn branch_epoch_votes(
+    store: &impl ergo_state::HeaderSectionStore,
+    parent_id: [u8; 32],
+    height: u32,
+    voting_length: u32,
+) -> Result<Vec<(i8, i32)>, BlockProcessError> {
+    struct EpochHeaders(std::collections::HashMap<u32, ergo_validation::HeaderView>);
+    impl ergo_validation::ChainHeaderReader for EpochHeaders {
+        fn header_at(
+            &self,
+            height: u32,
+        ) -> Result<ergo_validation::HeaderView, ergo_validation::ChainHeaderReaderError> {
+            self.0
+                .get(&height)
+                .cloned()
+                .ok_or(ergo_validation::ChainHeaderReaderError::NotFound(height))
+        }
+    }
+    let mut headers = EpochHeaders(std::collections::HashMap::new());
+    let mut id = parent_id;
+    for ancestor_height in (height.saturating_sub(voting_length).max(1)..height).rev() {
+        let bytes = store
+            .get_header(&id)?
+            .ok_or(BlockProcessError::ParentNotFound { id })?;
+        let header =
+            ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
+                .map_err(|e| BlockProcessError::Deserialize(format!("epoch ancestor: {e:?}")))?;
+        if header.height != ancestor_height {
+            return Err(BlockProcessError::Deserialize(format!(
+                "epoch ancestor height {}, expected {ancestor_height}",
+                header.height
+            )));
+        }
+        headers.0.insert(
+            ancestor_height,
+            ergo_validation::HeaderView {
+                votes: header.votes,
+            },
+        );
+        id = *header.parent_id.as_bytes();
+    }
+    ergo_validation::compute_epoch_votes(&headers, height, voting_length).map_err(|e| {
+        BlockProcessError::Deserialize(format!("compute_epoch_votes at h={height}: {e}"))
+    })
+}
+
 #[derive(Debug, Error)]
 pub enum BlockProcessError {
     #[error("header not found: {}", hex::encode(id))]
@@ -47,6 +112,13 @@ pub enum BlockProcessError {
     Deserialize(String),
     #[error("block validation: {0}")]
     Validation(#[from] BlockValidationError),
+    /// A transaction-level verdict, resolved against the already decoded block.
+    #[error("block validation: {source}")]
+    TransactionValidation {
+        tx_id: [u8; 32],
+        #[source]
+        source: BlockValidationError,
+    },
     #[error("state application: {0}")]
     State(#[from] ergo_state::store::StateError),
     #[error("header metadata inconsistency: {0}")]
@@ -108,6 +180,26 @@ pub enum BlockProcessError {
     /// layer). The executor marks the header session-invalid.
     #[error("digest proof verification rejected the block: {0}")]
     DigestApply(#[from] ergo_state::DigestApplyError),
+}
+
+impl BlockProcessError {
+    fn with_transactions(
+        error: BlockValidationError,
+        transactions: &[ergo_ser::transaction::Transaction],
+    ) -> Self {
+        if let BlockValidationError::Transaction { index, .. } = &error {
+            if let Some(tx_id) = transactions
+                .get(*index)
+                .and_then(|tx| ergo_ser::transaction::transaction_id(tx).ok())
+            {
+                return Self::TransactionValidation {
+                    tx_id: *tx_id.as_bytes(),
+                    source: error,
+                };
+            }
+        }
+        Self::Validation(error)
+    }
 }
 
 /// Result of successfully processing a block.
@@ -175,3 +267,8 @@ pub fn process_block(
         ),
     }
 }
+
+#[cfg(test)]
+mod failed_tx_tests;
+#[cfg(test)]
+mod params_tests;

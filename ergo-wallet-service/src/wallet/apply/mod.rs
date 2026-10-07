@@ -377,9 +377,12 @@ fn apply_outputs(
 /// rescan-cancellation primitive. Wiring is explicit so the
 /// integrator can't omit it.
 ///
-/// Production implementations abort the active rescan and write
-/// `WALLET_SCAN_INVALIDATED = true` through the supplied transaction, so
-/// rollback changes and invalidation commit atomically.
+/// Production impl (in `ergo-node/src/wallet_boot.rs`): revokes
+/// the active rescan identity immediately. When cancellation requires
+/// invalidation, `WALLET_SCAN_INVALIDATED = true` is written via the supplied
+/// `txn`, so rollback's table changes and durable invalidation commit atomically.
+/// A replacement rescan owns a different identity; the cancelled task cannot
+/// regain ownership or clear its successor's flags and durable invalidation.
 pub trait RescanGuard {
     /// Abort any in-progress rescan AND invalidate wallet scan
     /// state IF (and only if) a rescan was actually running.

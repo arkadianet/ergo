@@ -3,6 +3,47 @@
   "manifest_id": "7858b36c8c7596da9999a013d91608a341583a0a1f5d4859c5d80e5d296e0fac",
   "header_id": "1b46a9a538defc5615c510b14c180f1caff16de68d8590175a2229751ef4805e",
   "state_root": "7858b36c8c7596da9999a013d91608a341583a0a1f5d4859c5d80e5d296e0fac17",
+  "header": {
+    "extensionId": "e64bbaf3b0d18ec81534e48f2daa0185420b92c8f475c1a6b817f9b6e60017b0",
+    "difficulty": "15431827456",
+    "votes": "000000",
+    "timestamp": 1788452021282,
+    "size": 221,
+    "unparsedBytes": "",
+    "stateRoot": "7858b36c8c7596da9999a013d91608a341583a0a1f5d4859c5d80e5d296e0fac17",
+    "height": 522239,
+    "nBits": 84121551,
+    "version": 4,
+    "id": "1b46a9a538defc5615c510b14c180f1caff16de68d8590175a2229751ef4805e",
+    "adProofsRoot": "25b2c49da385851a2085fd7dcf25481104dea3d3efa38cc9e7dc39e31cde0301",
+    "transactionsRoot": "d4d6d8d340530caf0ca73f576bb54eaf4fb66a482ebf142c5ff34b35ec93dc9e",
+    "extensionHash": "7a5d90a60773b48b6cf62f339a8b2ae49b10646ea3f965b838c967f7091fca48",
+    "powSolutions": {
+      "pk": "02339b416a576ed390679cd7372902f04a442177ef067ee223036d5864b98a26cb",
+      "w": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "n": "0002683ca0eb54cd",
+      "d": 0
+    },
+    "adProofsId": "1c30f1b55c9ef2e4933e1e4e1e19710c29a2d69f818fc846be46351140e2d183",
+    "transactionsId": "a1ed05ea96333bce85084c44825b35c83aa22d60c696919c26eb8cda06ddcfb3",
+    "parentId": "13e6cd5a5acd11b4aff8702cb69b675ad62b82fc2a12c37a4b8d57d74ed292f5"
+  },
   "source": "http://127.0.0.1:9062",
-  "captured_at": "2026-09-05T13:41:09Z"
+  "p2p_source": "127.0.0.1:9020",
+  "scala_version": "6.0.3",
+  "peer": {
+    "agent": "ergoref",
+    "version": [
+      6,
+      0,
+      3
+    ],
+    "name": "arks-testnet-node"
+  },
+  "network": "testnet",
+  "captured_at": "2026-09-24T07:51:12.228479+00:00",
+  "command": "scripts/capture-utxo-manifest.sh http://127.0.0.1:9062 522239 127.0.0.1 9020",
+  "manifest_file": "utxo_snapshot_manifest_522239.bin",
+  "manifest_length": 1605536,
+  "manifest_sha256": "b1e80786f37507c270273996475f8de6f071acf4472f75ad5bc4d85d7997b971"
 }

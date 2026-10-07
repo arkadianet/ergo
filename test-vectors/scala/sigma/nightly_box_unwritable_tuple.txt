@@ -1,0 +1,27 @@
+# sigma-state 6.0.6; activated version 3; run 36792671282.
+#
+# ErgoBoxCandidate.serializer.parse consumes 44 bytes and succeeds, then
+# ErgoBoxCandidate.serializer.toBytes REFUSES: TypeSerializer.serialize rejects
+# a 0-element STuple, which the reader accepts but the writer may not originate
+# (sigma.serialization.TypeSerializer.scala:94).
+#
+# This refusal is not confined to the direct serializer call. Transaction output
+# validation reaches the same code:
+#   ErgoLikeTransaction.outputs   -> ErgoBoxCandidate.toBox(txId, index)
+#   ErgoBox._bytes                -> null for a toBox-constructed box
+#   ErgoBox.bytes                 -> ErgoBox.sigmaSerializer.toBytes(this)
+#   ErgoBoxCandidate.serializer   -> serializeBodyWithIndexedDigests
+#                                  -> DefaultSerializer.serializeErgoTree
+# and ErgoTransaction.verifyOutput reads box.bytes.length for both the txDust
+# (minValuePerByte) and txBoxSize checks. So the reference cannot write such an
+# output back, and the Rust box writer must propagate the error rather than fall
+# back to the retained script bytes.
+#
+# Pinned so a future "be lenient, keep the input bytes" change to
+# ErgoBoxCandidate::serialized_ergo_tree_bytes is a deliberate, reviewed
+# reversal of this evidence rather than a silent regression.
+input=39c904cdffda7e0505050505050505050505c904cdffda7e0505050505050505aea76000a7a7a7a7dd00000000000604
+parsed_bytes=44
+verdict=REJECT
+exception=java.lang.RuntimeException: Invalid Tuple type with less than 2 items
+site=sigma.serialization.TypeSerializer.scala:94

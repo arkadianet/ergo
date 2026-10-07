@@ -7,6 +7,9 @@ use thiserror::Error;
 ///
 /// Variant taxonomy (operators triage by class, not by free-text):
 ///
+/// * [`MiningError::BuildCancelled`] — cooperative cancellation after the
+///   applied parent changes; the engine treats this as an ordinary stale build.
+///
 /// * [`MiningError::InvalidConfig`] — operator-supplied configuration
 ///   was rejected at parse time, or a runtime height/regime gate was
 ///   crossed (mining off-tip, post-EIP-27 helper called pre-activation,
@@ -32,6 +35,12 @@ use thiserror::Error;
 ///   header for interlinks computation failed.
 #[derive(Debug, Error)]
 pub enum MiningError {
+    /// The applied parent changed while a candidate was being assembled.
+    /// This cooperative stop is mapped to a stale-build outcome by the engine,
+    /// rather than reported as a validation or storage failure.
+    #[error("candidate build superseded by a new applied parent")]
+    BuildCancelled,
+
     /// Configuration was rejected at parse time, or a runtime regime
     /// gate refused to assemble. Includes the human-readable reason.
     #[error("invalid mining configuration: {0}")]
@@ -66,9 +75,9 @@ pub enum MiningError {
     /// tx assembly (build / serialize / validate of the candidate's own coinbase),
     /// and difficulty / cost retargeting that share the same "honest
     /// flow shouldn't reach here, but if it does we surface the
-    /// failure typed" semantics. Distinct from [`Decode`] (on-disk
-    /// bytes refused to parse), [`StateRead`] (storage `None`/I/O
-    /// fault), and [`EmissionInvariant`] (emission protocol contract
+    /// failure typed" semantics. Distinct from [`Self::Decode`] (on-disk
+    /// bytes refused to parse), [`Self::StateRead`] (storage `None`/I/O
+    /// fault), and [`Self::EmissionInvariant`] (emission protocol contract
     /// violated by chain data).
     #[error("{op} failed: {reason}")]
     IdComputation {
@@ -111,8 +120,8 @@ pub enum MiningError {
     /// `Ok(None)` reaching this point means `best_full_block_id` /
     /// `chain_index` referenced storage that isn't there, which is
     /// state corruption equivalent to a redb-level fault. Distinct
-    /// from [`Decode`] (bytes present but parse failed) and from
-    /// [`EmissionInvariant`] (data present and decoded but violated
+    /// from [`Self::Decode`] (bytes present but parse failed) and from
+    /// [`Self::EmissionInvariant`] (data present and decoded but violated
     /// the emission protocol contract).
     #[error("state read failed during {op}: {reason}")]
     StateRead {
@@ -135,4 +144,13 @@ pub enum MiningError {
     /// so the caller can fail the candidate cleanly instead of aborting.
     #[error("failed to serialize parent header while computing interlinks: {0}")]
     HeaderSerialization(#[from] ergo_ser::error::WriteError),
+}
+
+/// Poll between expensive stages, never inside a speculative AVL mutation.
+pub(crate) fn check_build_cancelled(should_cancel: &dyn Fn() -> bool) -> Result<(), MiningError> {
+    if should_cancel() {
+        Err(MiningError::BuildCancelled)
+    } else {
+        Ok(())
+    }
 }

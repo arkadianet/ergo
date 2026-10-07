@@ -1,0 +1,19 @@
+{
+  "reference_repository": "https://github.com/ergoplatform/ergo",
+  "reference_tag": "v6.0.5",
+  "reference_revision": "5528ef569a41ebccbc8658212e6ee3c97d990b96",
+  "source_url": "https://raw.githubusercontent.com/ergoplatform/ergo/5528ef569a41ebccbc8658212e6ee3c97d990b96/ergo-core/src/main/scala/org/ergoplatform/settings/VotingSettings.scala",
+  "scala_version": "2.12.21",
+  "java_version": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)\n",
+  "jars": {
+    "scala-library-2.12.21.jar": "e2f4040c95cc4dd1cfeaae38bdde596e4b36933632451efa7d8564c6a359510c",
+    "scala-compiler-2.12.21.jar": "fb1bb6b0d7e8e922f03b5294ef0af23b9d2bd1cde6819ecb820c57210db4548e",
+    "scala-reflect-2.12.21.jar": "8b91a08ba69a0564689793e732f06768d0914ec9e90fa8c3d1b55c5bf4600c14"
+  },
+  "files": {
+    "CaptureVotingThresholds.scala": "e2484ccf4276a10eec82392801b59932a2a968577d409152c1cb962fee97f81b",
+    "VotingSettings.scala": "92cef8eb6c8b2a74b273f909a9e26def3b56c7c7add22d68d9be96b437f8b79f",
+    "thresholds.tsv": "0b17e3066c0fb80fd38ac0c68a6d89c814bbc1e92efbde4b669b957c28064443"
+  },
+  "observations": "Four finite ordinary configurations; methods compiled from exact upstream source. Scala signed Int multiplication wraps before division. No network-chain occurrence claimed for the custom configuration."
+}

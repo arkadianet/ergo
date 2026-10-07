@@ -13,6 +13,18 @@ pub struct VlqReader<'a> {
     /// Set only for scoped sub-parses (e.g. an SBox candidate body bounded to
     /// `start + MaxBoxSize`); leaves all other parsing unaffected.
     position_limit: Option<usize>,
+    /// Depth already consumed by ENCLOSING nested-value parses, i.e. the base
+    /// the current expression's 0-based depth counts from. Mirrors Scala's
+    /// `CoreByteReader.lvl`, which lives on the READER and is therefore shared
+    /// across every serializer that parse reaches through the same reader —
+    /// including an `SBox` constant whose box carries another ErgoTree, whose
+    /// body can carry another `SBox` constant (`DataSerializer` SBox ->
+    /// `ErgoBoxCandidate.parse` -> `ErgoTreeSerializer.deserializeErgoTree(r, _)`
+    /// -> `ValueSerializer.deserialize(r)`, all on ONE reader). Without this
+    /// base, each nested box would restart the `MaxTreeDepth` budget at 0 and
+    /// the box<->tree cycle would recurse until the native stack overflowed.
+    /// Saved and restored around a scoped sub-parse like `position_limit`.
+    nesting_depth_base: usize,
     /// Sideband: every group-element encoding (raw 33 bytes) seen during the
     /// parse. Crypto-free — just bytes. The Scala reference curve-checks each
     /// group element while deserializing; this crate is crypto-free, so the
@@ -32,7 +44,21 @@ pub struct VlqReader<'a> {
     /// exactly the group elements Scala curve-checked before it wrapped a size-delimited
     /// tree as `UnparsedErgoTree` — the points AFTER that method are never reached by
     /// Scala and must not be curve-checked here.
-    unresolved_method_checkpoint: Option<(usize, u8, u8)>,
+    unresolved_method_checkpoint: Option<UnresolvedMethodCheckpoint>,
+    /// Shadow of Scala's `CoreByteReader.lvl` as it moves, not as it is
+    /// bounded: one level per `ValueSerializer.deserialize`,
+    /// `CoreDataSerializer.deserialize` (or `DataSerializer`'s `SBox` /
+    /// `SHeader` arm) and `SigmaBoolean` parse entered, given back only when
+    /// that frame returns normally. A frame a `ValidationException` unwinds
+    /// never gives its level back, so a size-delimited tree that degrades
+    /// leaves the levels open at the throw on the reader. Only differences of
+    /// this count are meaningful; see [`enter_level`](Self::enter_level).
+    scala_level: usize,
+    /// Levels left open by degraded trees earlier on this reader. Scala's
+    /// depth bound counts them for every later read, so every depth check
+    /// adds them to its own depth. See
+    /// [`leaked_levels`](Self::leaked_levels).
+    leaked_levels: usize,
     /// The ErgoTree header version of the body currently being parsed, or `None`
     /// for a headerless context (register / context-var values, which deserialize
     /// under the activated version, not a tree-header version). Read by the type
@@ -43,19 +69,16 @@ pub struct VlqReader<'a> {
     ergo_tree_version: Option<u8>,
     /// Constant pool bound while parsing an ErgoTree body.
     constant_pool_len: Option<usize>,
-    /// Optional override for the version that gates V6-EMBEDDABLE TYPE CODES
-    /// (`SUnsignedBigInt` = code 9, …) — the ACTIVATED version, per Scala
-    /// `TypeSerializer.getEmbeddableType` selecting `embeddableV5`/`embeddableV6`
-    /// by `VersionContext.current.isV6Activated` (the ACTIVATED version, NOT the
-    /// tree header). When `Some(v)`, the type decoder gates embeddable codes on
-    /// `v` instead of the header version [`ergo_tree_version`](Self::ergo_tree_version).
-    ///
-    /// `None` (the default) preserves the header-version gating every consensus
-    /// caller uses — this knob is BYTE-INERT for them. It is set ONLY by the
-    /// ergo-compiler post-write self-check (`read_ergo_tree_with_activated_version`),
-    /// which emits a header-v0 tree but must accept the V6 type codes a
-    /// `tree_version >= 3` (V6-activated) compile legitimately produces and Scala
-    /// re-parses on a V6-activated network. See that function's docs.
+    /// Variable ids bound so far on this logical reader, mirroring Scala's
+    /// per-reader `valDefTypeStore`, which is never reset: a binding in one
+    /// tree stays visible to every later tree on the same reader. `None`
+    /// means the reader may be partway through a Scala reader whose earlier
+    /// bindings it never saw, so absence proves nothing.
+    val_bindings: Option<std::collections::BTreeSet<u32>>,
+    /// Low-level override for embeddable type-table membership. Ordinary trees
+    /// select the table from their header; headerless typed-expression contexts
+    /// may explicitly select another table. This does not certify whole-tree
+    /// acceptance. The public activated ErgoTree helper clears and restores it.
     embeddable_activated_version: Option<u8>,
     /// Trusted (already-validated) source: when `true`, the box-script ACCEPTANCE
     /// gates (ErgoTree version cap / size-bit / method-resolution / sigma-root) are
@@ -87,6 +110,8 @@ pub struct VlqReader<'a> {
     /// mempool / P2P transaction parse from the tip's activated version.
     activated_script_version: Option<u8>,
     strict_method_resolution: bool,
+    /// Opt-in header byte ranges for codec diagnostics; absent in node readers.
+    header_spans: Option<Vec<(usize, usize)>>,
 }
 
 /// Errors produced while decoding a Scorex-style byte stream.
@@ -99,10 +124,10 @@ pub enum ReadError {
     #[error("VLQ decoding error: {0}")]
     Vlq(#[from] VlqError),
     /// VLQ decoded successfully but the value does not fit in the
-    /// caller-requested integer width. Mirrors Scala's
-    /// `getUIntExact` / `getUShortExact` (`toIntExact` throws
-    /// `ArithmeticException`) and sigma-rust's
-    /// `u32::try_from(u64)` / `u16::try_from(u64)`.
+    /// caller-requested integer width. Mirrors Scala's range checks:
+    /// `getUIntExact` (`toIntExact` throws `ArithmeticException`) and
+    /// `getUShort` (`require(0 <= x && x <= 0xFFFF)` on the value narrowed
+    /// to 32 bits).
     #[error("VLQ value {got} too large for {type_name}")]
     ValueTooLarge {
         /// Name of the requested integer type (`"u32"` / `"u16"`).
@@ -148,6 +173,24 @@ pub enum ReadError {
     HardReject(String),
 }
 
+/// Where the parser passed the first method its tree's registry cannot
+/// resolve (after the method's receiver and value args): the point Scala's
+/// `MethodCallSerializer.parse` throws a method-resolution
+/// `ValidationException`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnresolvedMethodCheckpoint {
+    /// Group elements recorded before the throw.
+    pub group_elements: usize,
+    /// Container (type) code of the method.
+    pub type_id: u8,
+    /// Method code.
+    pub method_id: u8,
+    /// Shadow reader level at the throw ([`VlqReader::scala_level`]).
+    pub scala_level: usize,
+    /// Levels already leaked at the throw ([`VlqReader::leaked_levels`]).
+    pub leaked_levels: usize,
+}
+
 impl<'a> VlqReader<'a> {
     /// Wrap a byte slice for sequential decoding. The reader borrows `data`
     /// for its full lifetime.
@@ -156,10 +199,15 @@ impl<'a> VlqReader<'a> {
             data,
             pos: 0,
             position_limit: None,
+            nesting_depth_base: 0,
+            header_spans: None,
             group_elements: Vec::new(),
             unresolved_method_checkpoint: None,
+            scala_level: 0,
+            leaked_levels: 0,
             ergo_tree_version: None,
             constant_pool_len: None,
+            val_bindings: None,
             embeddable_activated_version: None,
             trusted: false,
             activated_script_version: None,
@@ -227,14 +275,37 @@ impl<'a> VlqReader<'a> {
         self.pos
     }
 
-    /// Record a group-element encoding seen during the parse (the raw 33 bytes,
-    /// exactly as on the wire). Called by the deserializers at every point the
-    /// Scala reference would curve-check a group element.
+    /// Enable retained header-slice observations for differential checks.
+    pub fn enable_header_spans(&mut self) {
+        self.header_spans = Some(Vec::new());
+    }
+
+    /// Whether nested readers should collect the same diagnostic observations.
+    pub fn collects_header_spans(&self) -> bool {
+        self.header_spans.is_some()
+    }
+
+    /// Observe a successfully parsed header independently of SHeader ID hashing.
+    pub fn record_header_span(&mut self, start: usize, end: usize) {
+        if let Some(spans) = &mut self.header_spans {
+            spans.push((start, end));
+        }
+    }
+
+    /// Observed header boundaries in this reader's input coordinate space.
+    pub fn header_spans(&self) -> &[(usize, usize)] {
+        self.header_spans.as_deref().unwrap_or(&[])
+    }
+
+    /// Record a parsed group-element encoding for deferred curve validation.
+    /// The group reader normalizes every zero-prefix identity to 33 zero bytes;
+    /// this sideband is not the original wire slice. Use `data_slice` with
+    /// recorded positions when original bytes are required.
     pub fn record_group_element(&mut self, ge: [u8; 33]) {
         self.group_elements.push(ge);
     }
 
-    /// All group-element encodings seen so far.
+    /// All parsed/normalized group-element encodings recorded so far.
     pub fn group_elements(&self) -> &[[u8; 33]] {
         &self.group_elements
     }
@@ -254,14 +325,19 @@ impl<'a> VlqReader<'a> {
     /// [`unresolved_method_checkpoint`](Self::unresolved_method_checkpoint).
     pub fn mark_unresolved_method_checkpoint(&mut self, type_id: u8, method_id: u8) {
         if self.unresolved_method_checkpoint.is_none() {
-            self.unresolved_method_checkpoint =
-                Some((self.group_elements.len(), type_id, method_id));
+            self.unresolved_method_checkpoint = Some(UnresolvedMethodCheckpoint {
+                group_elements: self.group_elements.len(),
+                type_id,
+                method_id,
+                scala_level: self.scala_level,
+                leaked_levels: self.leaked_levels,
+            });
         }
     }
 
-    /// The group-element count, container code and method code at the first
-    /// unresolved method, or `None` if every method in the body resolved.
-    pub fn unresolved_method_checkpoint(&self) -> Option<(usize, u8, u8)> {
+    /// The reader's state at the first unresolved method, or `None` if every
+    /// method in the body resolved.
+    pub fn unresolved_method_checkpoint(&self) -> Option<UnresolvedMethodCheckpoint> {
         self.unresolved_method_checkpoint
     }
 
@@ -271,8 +347,47 @@ impl<'a> VlqReader<'a> {
     /// into the enclosing tree's soft-fork wrap), so an unresolved method inside it
     /// must NOT mark the outer tree's checkpoint. Save before parsing the nested
     /// body, restore after.
-    pub fn restore_unresolved_method_checkpoint(&mut self, saved: Option<(usize, u8, u8)>) {
+    pub fn restore_unresolved_method_checkpoint(
+        &mut self,
+        saved: Option<UnresolvedMethodCheckpoint>,
+    ) {
         self.unresolved_method_checkpoint = saved;
+    }
+
+    /// Start tracking variable bindings: call only where Scala starts a fresh
+    /// reader, so its `valDefTypeStore` is empty. No-op if already tracking.
+    pub fn track_val_bindings(&mut self) {
+        self.val_bindings.get_or_insert_with(Default::default);
+    }
+
+    /// Whether this reader knows every binding Scala's store would hold.
+    pub fn tracks_val_bindings(&self) -> bool {
+        self.val_bindings.is_some()
+    }
+
+    /// Record a `ValDef` / `FunDef` / `FuncValue` argument binding.
+    pub fn bind_val(&mut self, id: u32) {
+        if let Some(bindings) = &mut self.val_bindings {
+            bindings.insert(id);
+        }
+    }
+
+    /// Whether `id` was bound earlier on this reader.
+    pub fn is_val_bound(&self, id: u32) -> bool {
+        self.val_bindings
+            .as_ref()
+            .is_some_and(|bindings| bindings.contains(&id))
+    }
+
+    /// The tracked bindings, for carrying into and out of a sub-reader that
+    /// Scala would read on the same reader.
+    pub fn val_bindings(&self) -> Option<&std::collections::BTreeSet<u32>> {
+        self.val_bindings.as_ref()
+    }
+
+    /// Replace the tracked bindings (see [`Self::val_bindings`]).
+    pub fn set_val_bindings(&mut self, bindings: Option<std::collections::BTreeSet<u32>>) {
+        self.val_bindings = bindings;
     }
 
     /// Constant pool bound for the current ErgoTree body, absent for raw expressions.
@@ -306,11 +421,73 @@ impl<'a> VlqReader<'a> {
         self.embeddable_activated_version
     }
 
-    /// Set the activated-version override for V6-embeddable TYPE-code gating.
-    /// `None` restores header-version gating. Set ONLY by the ergo-compiler
-    /// self-check; byte-inert for consensus callers (which never touch it).
+    /// Set the low-level embeddable type-table override. `None` restores
+    /// header-based membership. Prefer whole-tree parsing for acceptance checks;
+    /// an explicit override can admit types the emitted header does not support.
     pub fn set_embeddable_activated_version(&mut self, version: Option<u8>) {
         self.embeddable_activated_version = version;
+    }
+
+    /// Depth consumed by enclosing nested-value parses (Scala
+    /// `CoreByteReader.level` at the point the current parse started). Save
+    /// before setting a scoped base so it can be restored afterwards.
+    pub fn nesting_depth_base(&self) -> usize {
+        self.nesting_depth_base
+    }
+
+    /// Set the base the current expression's 0-based depth counts from. Set only
+    /// when crossing into a nested value that re-enters the expression parser on
+    /// this reader (an `SBox` constant's box script); `0` is the default for a
+    /// top-level parse and leaves depth accounting exactly as it was.
+    pub fn set_nesting_depth_base(&mut self, base: usize) {
+        self.nesting_depth_base = base;
+    }
+
+    /// The level a depth check counts its own depth from: the enclosing
+    /// nested-value base plus the levels degraded trees leaked on this
+    /// reader.
+    pub fn depth_floor(&self) -> usize {
+        self.nesting_depth_base.saturating_add(self.leaked_levels)
+    }
+
+    /// Enter a frame that raises Scala's reader level. Call once the frame's
+    /// depth check has passed, and pair it with [`exit_level`](Self::exit_level)
+    /// on the frame's success path only: an error return keeps the level, as
+    /// Scala's relative `r.level = r.level - 1` never runs for a frame an
+    /// exception unwinds.
+    pub fn enter_level(&mut self) {
+        self.scala_level += 1;
+    }
+
+    /// Leave a frame entered with [`enter_level`](Self::enter_level) that
+    /// returned normally.
+    pub fn exit_level(&mut self) {
+        self.scala_level = self.scala_level.saturating_sub(1);
+    }
+
+    /// The shadow level (see [`enter_level`](Self::enter_level)). Compare two
+    /// readings to count the frames entered and not left in between.
+    pub fn scala_level(&self) -> usize {
+        self.scala_level
+    }
+
+    /// Set the shadow level, to carry it into or out of a sub-reader that
+    /// stands for the same Scala reader.
+    pub fn set_scala_level(&mut self, level: usize) {
+        self.scala_level = level;
+    }
+
+    /// Levels left open on this reader by size-delimited trees that degraded
+    /// to `UnparsedErgoTree` (Scala keeps them: `deserializeErgoTree` restores
+    /// only the position limit). Every depth check counts them.
+    pub fn leaked_levels(&self) -> usize {
+        self.leaked_levels
+    }
+
+    /// Set the leaked levels: to carry them across a sub-reader, or to start
+    /// the fresh level of a new Scala reader.
+    pub fn set_leaked_levels(&mut self, levels: usize) {
+        self.leaked_levels = levels;
     }
 
     /// Current position limit (`None` = unbounded). Save before setting a scoped
@@ -385,14 +562,18 @@ impl<'a> VlqReader<'a> {
     /// Consume `n` raw bytes and return them as a borrowed slice.
     pub fn get_bytes(&mut self, n: usize) -> Result<&'a [u8], ReadError> {
         self.check_position_limit()?;
-        if self.pos + n > self.data.len() {
+        let end = self.pos.checked_add(n).ok_or(ReadError::UnexpectedEnd {
+            pos: self.pos,
+            needed: n,
+        })?;
+        if end > self.data.len() {
             return Err(ReadError::UnexpectedEnd {
                 pos: self.pos,
                 needed: n,
             });
         }
-        let slice = &self.data[self.pos..self.pos + n];
-        self.pos += n;
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
         Ok(slice)
     }
 
@@ -483,14 +664,19 @@ impl<'a> VlqReader<'a> {
         Ok(val)
     }
 
-    /// Decode a VLQ-encoded `u16`. Returns
-    /// [`ReadError::ValueTooLarge`] if the VLQ-decoded `u64` does
-    /// not fit in `u16` — matches Scala `getUShortExact` and
-    /// sigma-rust `u16::try_from(u64)`.
+    /// Decode a VLQ-encoded unsigned short with Scala's `getUShort`
+    /// semantics (scorex-util 0.2.1 `VLQReader.getUShort`): read a full
+    /// `getULong`, narrow it with `.toInt` (keep the low 32 bits, two's
+    /// complement), and only then require `0..=0xFFFF`. So `2^32 + 1` reads
+    /// as 1, while `2^32 + 2^16` narrows to 65536 and is refused with
+    /// [`ReadError::ValueTooLarge`]. Every count, length and index the
+    /// reference reads with `getUShort` goes through here: transaction
+    /// input / data-input / output counts, box index, proof length,
+    /// collection and BigInt sizes, SigmaBoolean child counts.
     pub fn get_u16(&mut self) -> Result<u16, ReadError> {
         self.check_position_limit()?;
         let (val, consumed) = vlq::decode_vlq(&self.data[self.pos..])?;
-        let narrowed = u16::try_from(val).map_err(|_| ReadError::ValueTooLarge {
+        let narrowed = u16::try_from(val as u32 as i32).map_err(|_| ReadError::ValueTooLarge {
             type_name: "u16",
             got: val,
         })?;
@@ -503,7 +689,7 @@ impl<'a> VlqReader<'a> {
     /// header fields.
     ///
     /// **Not the same as [`Self::get_u16`]**, which is VLQ-decoded
-    /// (Scala-parity with `getUShortExact`). A caller reaching for raw
+    /// (Scala-parity with `getUShort`). A caller reaching for raw
     /// BE here when they wanted VLQ — or vice versa — silently
     /// corrupts the wire format.
     ///
@@ -821,7 +1007,55 @@ mod tests {
         );
     }
 
-    // ----- oracle parity (Scala getUIntExact / getUShortExact) -----
+    // ----- oracle parity (Scala getUIntExact / getUShort) -----
+
+    /// Scala `getUShort` narrows the full `getULong` to 32 bits BEFORE its
+    /// `0..=0xFFFF` check. JVM (`ErgoSerdeOracle.scala`, sigma-state 6.0.6,
+    /// `constant` surface, a `Coll[Byte]` whose length is the VLQ):
+    /// `0e 8180808010 ab` (2^32 + 1) -> `ACCEPT 0e01ab`; `0e 8100 ab`
+    /// (over-long 1) -> `ACCEPT 0e01ab`; `0e 81808080808080808002 ab`
+    /// (a tenth byte `02`) -> `ACCEPT 0e01ab`; `0e 8080808080808080807f`
+    /// (only bit 63 set) -> `ACCEPT 0e00`.
+    #[test]
+    fn get_u16_narrows_to_32_bits_before_the_range_check() {
+        let cases: [(Vec<u8>, u16); 7] = [
+            (vlq((1 << 32) | 1), 1),
+            (vlq(1 << 32), 0),
+            (vlq((1 << 32) | 0xFFFF), 0xFFFF),
+            (vlq(0xFFFF), 0xFFFF),
+            (vec![0x81, 0x00], 1),
+            (
+                vec![0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02],
+                1,
+            ),
+            (
+                vec![0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f],
+                0,
+            ),
+        ];
+        for (bytes, want) in cases {
+            let mut r = VlqReader::new(&bytes);
+            assert_eq!(r.get_u16().unwrap(), want, "{bytes:02x?}");
+            assert!(r.is_empty(), "{bytes:02x?}: the whole VLQ is consumed");
+        }
+    }
+
+    /// The narrowed value must still be an unsigned short. JVM (as above):
+    /// `0e 8080848010` (2^32 + 2^16, narrowing to 65536) -> `REJECT
+    /// IllegalArgumentException`. 2^31 narrows to a negative `Int` and is
+    /// refused the same way.
+    #[test]
+    fn get_u16_narrowed_value_out_of_range_errors() {
+        for v in [(1u64 << 32) | (1 << 16), 1 << 16, 1 << 31, u32::MAX as u64] {
+            let bytes = vlq(v);
+            let mut r = VlqReader::new(&bytes);
+            assert!(
+                matches!(r.get_u16(), Err(ReadError::ValueTooLarge { got, .. }) if got == v),
+                "{v:#x}"
+            );
+            assert_eq!(r.position(), 0, "{v:#x}: a failed read must not advance");
+        }
+    }
 
     #[test]
     fn get_u32_above_i32_max_returns_value_too_large_no_advance() {

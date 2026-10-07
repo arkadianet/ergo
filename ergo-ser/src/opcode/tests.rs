@@ -154,13 +154,66 @@ fn roundtrip_zero_arg_opcodes() {
     // 0x81 UnitConstant intentionally absent from this set: SUnit
     // values roundtrip through the constant-encoding path, not a
     // dispatch arm.
-    for &op in &[0x7F, 0x80, 0x82, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xAC, 0xFE] {
+    // 0x7F TrueLeaf / 0x80 FalseLeaf are absent too: they parse as opcodes but
+    // are written back as Boolean constants, see
+    // `true_leaf_and_false_leaf_write_back_as_boolean_constants`.
+    for &op in &[0x82, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xAC, 0xFE] {
         let body = Expr::Op(IrNode {
             opcode: op,
             payload: Payload::Zero,
         });
         roundtrip(&body, false);
     }
+}
+
+/// `TrueLeaf` / `FalseLeaf` are Scala `ConstantNode`s: the opcode form parses,
+/// and every write sends them through `ConstantSerializer` (`01 01` / `01 00`),
+/// into the segregation store, or into the packed `0x85` form of a
+/// `Coll[Boolean]`. JVM (`ErgoSerdeOracle.scala`, sigma-state 6.0.6,
+/// `ergo_box_candidate` surface, from SANTA `Box.tree_parse_acceptance` #2/#3):
+/// the tree `00 d1 7f` comes back as `00 d1 01 01`, `00 d1 80` as `00 d1 01 00`.
+#[test]
+fn true_leaf_and_false_leaf_write_back_as_boolean_constants() {
+    let write = |expr: &Expr| {
+        let mut w = VlqWriter::new();
+        write_expr(&mut w, expr, false).unwrap();
+        hex::encode(w.result())
+    };
+    let parse = |hex_in: &str| {
+        let bytes = hex::decode(hex_in).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let expr = parse_expr(&mut r, 0, 0).unwrap();
+        assert!(r.is_empty());
+        expr
+    };
+    let true_const = Expr::Const {
+        tpe: SigmaType::SBoolean,
+        val: SigmaValue::Boolean(true),
+    };
+    assert_eq!(parse("7f"), true_const, "TrueLeaf parses as the constant");
+    assert_eq!(write(&parse("7f")), "0101");
+    assert_eq!(write(&parse("80")), "0100");
+    // BoolToSigmaProp(TrueLeaf) / (FalseLeaf)
+    assert_eq!(write(&parse("d17f")), "d10101");
+    assert_eq!(write(&parse("d180")), "d10100");
+    // EQ(TrueLeaf, FalseLeaf) packs its operands like EQ(true, false). JVM
+    // (`ergo_box_candidate` surface): `c0843d00d1937f80010000` writes back as
+    // `c0843d00d1938501010000`.
+    assert_eq!(write(&parse("d1937f80")), "d1938501");
+    // Coll[Boolean](TrueLeaf, FalseLeaf) as 0x83 packs to 0x85 [true, false].
+    assert_eq!(
+        write(&parse("830201 7f80".replace(' ', "").as_str())),
+        "850201"
+    );
+    // Segregation extracts them like any constant.
+    let mut sink = ConstantSink::default();
+    let mut w = VlqWriter::new();
+    write_expr_segregating(&mut w, &parse("d17f"), &mut sink).unwrap();
+    assert_eq!(hex::encode(w.result()), "d17300");
+    assert_eq!(
+        sink.into_constants(),
+        vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))]
+    );
 }
 
 #[test]
@@ -198,10 +251,10 @@ fn roundtrip_two_arg_opcode() {
 #[test]
 fn roundtrip_three_arg_opcode() {
     // If(True, Height, Height)
-    let cond = Expr::Op(IrNode {
-        opcode: 0x7F,
-        payload: Payload::Zero,
-    });
+    let cond = Expr::Const {
+        tpe: SigmaType::SBoolean,
+        val: SigmaValue::Boolean(true),
+    };
     let h1 = Expr::Op(IrNode {
         opcode: 0xA3,
         payload: Payload::Zero,
@@ -229,18 +282,27 @@ fn roundtrip_const_placeholder() {
 #[test]
 fn roundtrip_val_use() {
     let body = Expr::Op(IrNode {
-        opcode: 0x72,
-        payload: Payload::ValUse { id: 1 },
+        opcode: 0xd9,
+        payload: Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(Expr::Op(IrNode {
+                opcode: 0x72,
+                payload: Payload::ValUse { id: 1 },
+            })),
+        },
     });
     roundtrip(&body, false);
 }
 
 #[test]
 fn roundtrip_tagged_var() {
-    // Type is never serialized (Scala ConstantStore.empty always non-null).
+    // TaggedVariableSerializer writes the id byte and then the type.
     let body = Expr::Op(IrNode {
         opcode: 0x71,
-        payload: Payload::TaggedVar { id: 3, tpe: None },
+        payload: Payload::TaggedVar {
+            id: 3,
+            tpe: Some(SigmaType::SInt),
+        },
     });
     roundtrip(&body, false);
 }
@@ -571,10 +633,10 @@ fn roundtrip_tuple() {
             opcode: 0xA3,
             payload: Payload::Zero,
         }),
-        Expr::Op(IrNode {
-            opcode: 0x7F,
-            payload: Payload::Zero,
-        }),
+        Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(true),
+        },
     ];
     let body = Expr::Op(IrNode {
         opcode: 0x86,
@@ -586,8 +648,19 @@ fn roundtrip_tuple() {
 #[test]
 fn roundtrip_select_field() {
     let input = Expr::Op(IrNode {
-        opcode: 0xA7,
-        payload: Payload::Zero,
+        opcode: 0x86,
+        payload: Payload::Tuple {
+            items: vec![
+                Expr::Const {
+                    tpe: SigmaType::SInt,
+                    val: SigmaValue::Int(1),
+                },
+                Expr::Const {
+                    tpe: SigmaType::SLong,
+                    val: SigmaValue::Long(2),
+                },
+            ],
+        },
     });
     let body = Expr::Op(IrNode {
         opcode: 0x8C,
@@ -673,14 +746,14 @@ fn roundtrip_deserialize_register_with_default() {
 #[test]
 fn roundtrip_sigma_and() {
     let items = vec![
-        Expr::Op(IrNode {
-            opcode: 0x7F,
-            payload: Payload::Zero,
-        }),
-        Expr::Op(IrNode {
-            opcode: 0x80,
-            payload: Payload::Zero,
-        }),
+        Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(true),
+        },
+        Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(false),
+        },
     ];
     let body = Expr::Op(IrNode {
         opcode: 0xEA,
@@ -1065,7 +1138,7 @@ fn parser_parity_audit_against_scala_registered_set() {
 #[test]
 fn taggedvar_negative_byte_id_emits_one_byte_not_5_byte_vlq() {
     // TaggedVar id is one signed byte on the wire (Scala
-    // TaggedVariableSerializer.scala:16). For id = 0xFFFF_FFFF
+    // TaggedVariableSerializer.scala:16), followed by the type. For id = 0xFFFF_FFFF
     // (signed Byte = -1) the emitted form is `put_u8(0xFF)` — a single
     // byte, not a 5-byte VLQ-u32. Pin the total payload size so a
     // regression to VLQ-u32 fails loud.
@@ -1073,7 +1146,7 @@ fn taggedvar_negative_byte_id_emits_one_byte_not_5_byte_vlq() {
         opcode: 0x71,
         payload: Payload::TaggedVar {
             id: 0xFFFF_FFFF, // signed Byte = -1
-            tpe: None,
+            tpe: Some(SigmaType::SInt),
         },
     });
     let mut w = VlqWriter::new();
@@ -1081,8 +1154,8 @@ fn taggedvar_negative_byte_id_emits_one_byte_not_5_byte_vlq() {
     let bytes = w.result();
     assert_eq!(
         bytes.len(),
-        2,
-        "TaggedVar wire form must be 2 bytes (opcode + 1-byte id); a 5-byte VLQ regression would yield 6: got {bytes:?}"
+        3,
+        "TaggedVar wire form must be 3 bytes (opcode + 1-byte id + SInt type); a 5-byte VLQ regression would yield 7: got {bytes:?}"
     );
     assert_eq!(bytes[1], 0xFF, "low byte of sign-extended id must be 0xFF");
     roundtrip(&body, false);
@@ -1095,13 +1168,13 @@ fn taggedvar_signed_byte_min_id_round_trips() {
         opcode: 0x71,
         payload: Payload::TaggedVar {
             id: 0xFFFF_FF80,
-            tpe: None,
+            tpe: Some(SigmaType::SInt),
         },
     });
     let mut w = VlqWriter::new();
     write_body(&mut w, &body, false).unwrap();
     let bytes = w.result();
-    assert_eq!(bytes.len(), 2);
+    assert_eq!(bytes.len(), 3);
     assert_eq!(bytes[1], 0x80);
     roundtrip(&body, false);
 }
@@ -1117,7 +1190,7 @@ fn taggedvar_id_0x80_unsigned_panics_on_write() {
         opcode: 0x71,
         payload: Payload::TaggedVar {
             id: 0x80,
-            tpe: None,
+            tpe: Some(SigmaType::SInt),
         },
     });
     let mut w = VlqWriter::new();
@@ -1838,4 +1911,133 @@ fn preorder_visits_block_items_before_the_result_and_counts_every_node() {
             (6, 0x00),
         ]
     );
+}
+
+// ----- oracle parity (numeric-cast type constraints) -----
+
+/// Scala `NumericCastSerializer.parse`
+/// (`transformers/NumericCastSerializer.scala:20-24`) reads the target type as
+/// `r.getType().asNumType`, i.e. `asInstanceOf[SNumericType]` on a concrete
+/// type, so a NON-NUMERIC target throws `ClassCastException` — not a
+/// `ValidationException`, so a size-delimited tree does not soft-fork-wrap it
+/// either. We accepted these, which made us more permissive than consensus.
+///
+/// Found by the nightly fuzzer as a round-trip artifact rather than as an
+/// accept-invalid: for a pre-v3 tree the write-side `Upcast(Const)` strip
+/// re-emitted just the constant, whose re-parse then failed rule 1001 and landed
+/// as `Unparsed`. The drift was the symptom; accepting the cast was the bug.
+#[test]
+fn numeric_cast_non_numeric_target_hard_rejects() {
+    // Body bytes only (no tree header): Upcast (0x7E) | Const(SInt, -1) |
+    // target type SSigmaProp (0x08).
+    for (name, hex) in [("upcast", "7e040108"), ("downcast", "7d040108")] {
+        let bytes = hex::decode(hex).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let err = parse_body(&mut r, 0)
+            .expect_err(&format!("{name}: a non-numeric target must not parse"));
+        assert!(
+            matches!(&err, ReadError::HardReject(m) if m.contains("target type must be numeric")),
+            "{name}: expected a hard reject naming the target type, got {err:?}"
+        );
+    }
+}
+
+/// Scala's `Upcast` / `Downcast` case classes carry
+/// `require(input.tpe.isInstanceOf[SNumericType], ...)` (`ast/trees.scala:398`
+/// and `:431`), so a non-numeric INPUT throws `IllegalArgumentException`, which
+/// `deserializeErgoTree` rethrows as a `SerializerException` — again not a
+/// `ValidationException`, so again a hard failure.
+///
+/// The input type is only checked when this parser inferred it precisely: Scala
+/// always has the parsed value's `tpe`, we may not, and rejecting an
+/// indeterminate input would refuse scripts the reference accepts.
+#[test]
+fn numeric_cast_non_numeric_input_hard_rejects() {
+    // Body bytes only: Upcast | Const(Coll[SInt], [1, 2]) | target SInt.
+    let bytes = hex::decode("7e1002020404").unwrap();
+    let mut r = VlqReader::new(&bytes);
+    let err = parse_body(&mut r, 0).expect_err("a Coll input must not parse");
+    assert!(
+        matches!(&err, ReadError::HardReject(m) if m.contains("input type must be numeric")),
+        "expected a hard reject naming the input type, got {err:?}"
+    );
+}
+
+/// The constraint must not narrow what the reference accepts: every numeric
+/// target is covered by the oracle fixtures below, including both opcodes.
+/// These `Upcast(Upcast(Const))` chains exercise the
+/// pre-v3 strip behaviour the difftest harness models.
+#[test]
+fn numeric_cast_numeric_types_still_parse() {
+    // Upcast(Const(SByte, 1)) -> SInt, and the two chains from the fuzz corpus.
+    for (name, hex) in [
+        ("byte_to_int", "7e020304"),
+        ("two_level_chain", "d17e7e02050304"),
+        ("three_level_chain", "d17e7e7e0205030405"),
+    ] {
+        let bytes = hex::decode(hex).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            parse_body(&mut r, 0).is_ok(),
+            "{name}: a numeric cast must still parse"
+        );
+    }
+}
+
+/// Actual JVM verdicts, including the wrapped inner tree that changes Scala's
+/// constant store. The capture program and provenance are beside the fixtures.
+#[test]
+fn numeric_cast_and_select_field_match_scala_oracle() {
+    for line in
+        include_str!("../../../test-vectors/scala/sigma/numeric_select_validation.tsv").lines()
+    {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let bytes = hex::decode(fields[4]).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let result = match fields[1] {
+            "tree" => crate::ergo_tree::read_ergo_tree(&mut r).map(|tree| {
+                assert_eq!(
+                    matches!(tree.body, Expr::Unparsed(_)),
+                    fields[0].contains("prior_wrap"),
+                    "{}: unexpected wrap classification",
+                    fields[0]
+                );
+            }),
+            "constant" => crate::sigma_value::read_constant(&mut r).map(|_| ()),
+            surface => panic!("unknown surface {surface}"),
+        };
+        if fields[2] == "ACCEPT" {
+            result.unwrap_or_else(|e| panic!("{}: {e:?}", fields[0]));
+            assert_eq!(
+                r.position(),
+                fields[3].parse::<usize>().unwrap(),
+                "{}",
+                fields[0]
+            );
+            assert!(r.is_empty(), "{}: trailing bytes", fields[0]);
+        } else {
+            assert!(
+                matches!(result, Err(ReadError::HardReject(_))),
+                "{}: {result:?}",
+                fields[0]
+            );
+        }
+    }
+}
+
+#[test]
+fn every_registered_opcode_has_a_diagnostic_name() {
+    for opcode in u8::MIN..=u8::MAX {
+        if opcode_pattern(opcode).is_some() {
+            assert_ne!(
+                opcode_name(opcode),
+                "???",
+                "registered opcode 0x{opcode:02x}"
+            );
+        }
+    }
+    assert_eq!(opcode_name(0), "???");
 }

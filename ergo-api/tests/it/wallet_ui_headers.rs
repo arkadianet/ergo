@@ -79,6 +79,9 @@ fn app() -> axum::Router {
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
+        local_reverse_proxy: false,
+        services: Arc::new(ergo_api::ApiServices::new()),
+        script_config: Default::default(),
     };
     // Security gate is irrelevant to these header assertions; `None`
     // keeps the static routes reachable without a key.
@@ -143,11 +146,15 @@ async fn spa_css_carries_spa_security_headers() {
 #[tokio::test]
 async fn spa_js_carries_spa_security_headers() {
     assert_spa_security_headers("/js/app.js").await;
+    assert_spa_security_headers("/js/activity.js").await;
+    assert_spa_security_headers("/js/activity-model.js").await;
 }
 
 #[tokio::test]
 async fn wallet_js_module_carries_spa_security_headers() {
     assert_spa_security_headers("/js/wallet.js").await;
+    assert_spa_security_headers("/js/wallet-builder.js").await;
+    assert_spa_security_headers("/js/wallet-transaction.js").await;
 }
 
 #[tokio::test]

@@ -43,11 +43,22 @@ impl SyncCoordinator {
         // circuits to Unknown).
         let (peer_header_ids, peer_headers, peer_height, status) = match sync_info {
             SyncInfo::V1 { header_ids } => {
-                let ids = header_ids.clone();
-                let status =
-                    ergo_p2p::sync::compare_sync_info_v1(&ids, &chain.best_header_id(), |id| {
-                        chain.has_header(id)
-                    });
+                let status = if chain.best_header_height() == 0 {
+                    if header_ids.is_empty() {
+                        PeerChainStatus::Equal
+                    } else {
+                        PeerChainStatus::Older
+                    }
+                } else {
+                    ergo_p2p::sync::compare_sync_info_v1(
+                        header_ids,
+                        &chain.best_header_id(),
+                        |id| chain.has_header(id),
+                    )
+                };
+                // Common-point searches below use newest-first. V1 wire IDs
+                // are canonical oldest-first, so normalize after comparison.
+                let ids = header_ids.iter().rev().copied().collect();
                 (ids, Vec::new(), None, status)
             }
             SyncInfo::V2 { headers } => {
@@ -98,11 +109,9 @@ impl SyncCoordinator {
         // publisher — sourced from the same status decision the
         // action dispatch below uses, so the API surface always
         // reflects the last classification the coordinator acted
-        // on. V2 peer_height inference: if the newest peer header
-        // is on our chain, look up its height (peer's tip from
-        // OUR view); otherwise leave None and let consumers treat
-        // it as "no overlap yet". V1 carries peer_height directly
-        // via `peer_height` already destructured above.
+        // on. V2 provides the parsed tip-header height. For V1 (and a
+        // V2 parse failure), infer height from the newest advertised ID
+        // on our best chain. Keep the source of the actual observation.
         let inferred_peer_height: Option<u32> = match peer_height {
             Some(h) => Some(h),
             None => peer_header_ids
@@ -122,6 +131,7 @@ impl SyncCoordinator {
             PeerSyncSnapshot {
                 status,
                 peer_height: inferred_peer_height,
+                height_from_header: peer_height.is_some(),
                 observed_at: now,
                 observed_best_header_id: chain.best_header_id(),
             },
@@ -130,48 +140,56 @@ impl SyncCoordinator {
         match status {
             PeerChainStatus::Younger | PeerChainStatus::Fork => {
                 // Find commonPoint: newest peer header on our best chain.
+                let v1 = matches!(sync_info, SyncInfo::V1 { .. });
                 let common_id = peer_header_ids
                     .iter()
-                    .find(|id| chain.is_on_best_chain(id))
+                    .find(|id| chain.is_on_best_chain(id) || (v1 && **id == [0; 32]))
                     .copied();
-                if let Some(common_id) = common_id {
-                    if let Some(common_h) = chain.header_height_for(&common_id) {
-                        // Walk forward from common_h + 1 up to MAX_INV_OBJECTS
-                        // header IDs from our best chain. Mirrors Scala
-                        // continuationIdsV2 + sendExtension. Returns early
-                        // when chain.header_id_at_height returns
-                        // AboveTip (we've reached our tip) or
-                        // SparseGap (sparse-mode prefix region — we
-                        // don't have the row to serve). Sparse-mode
-                        // nodes shouldn't be acting as header sources
-                        // (ModePeerFeature.nipopow = Some(1) advertises
-                        // this), but defensively break here so we never
-                        // emit an Inv claiming headers we can't
-                        // actually serve.
-                        const MAX_INV_OBJECTS: usize = 400;
-                        let our_tip_h = chain.best_header_height();
-                        let mut ids: Vec<[u8; 32]> = Vec::with_capacity(MAX_INV_OBJECTS);
-                        let mut h = common_h.saturating_add(1);
-                        while h <= our_tip_h && ids.len() < MAX_INV_OBJECTS {
-                            match chain.header_id_at_height(h) {
-                                ergo_state::chain::HeightLookup::Dense(id) => ids.push(id),
-                                ergo_state::chain::HeightLookup::SparseGap
-                                | ergo_state::chain::HeightLookup::AboveTip => break,
-                            }
-                            h = h.saturating_add(1);
+                let common_height = common_id
+                    .and_then(|id| {
+                        if v1 && id == [0; 32] {
+                            Some(0)
+                        } else {
+                            chain.header_height_for(&id)
                         }
-                        if !ids.is_empty() {
-                            let inv = ergo_p2p::types::InvData {
-                                type_id: ergo_p2p::types::ModifierTypeId::Header.as_byte(),
-                                ids,
-                            };
-                            if let Ok(payload) = message::serialize_inv(&inv) {
-                                actions.push(Action::SendToPeer {
-                                    peer,
-                                    code: message::CODE_INV,
-                                    payload,
-                                });
-                            }
+                    })
+                    .or_else(|| (v1 && peer_header_ids.is_empty()).then_some(0));
+                if let Some(common_h) = common_height {
+                    // Walk forward from common_h + 1 up to MAX_INV_OBJECTS
+                    // header IDs from our best chain. Mirrors Scala
+                    // continuationIdsV2 + sendExtension. Returns early
+                    // when chain.header_id_at_height returns
+                    // AboveTip (we've reached our tip) or
+                    // SparseGap (sparse-mode prefix region — we
+                    // don't have the row to serve). Sparse-mode
+                    // nodes shouldn't be acting as header sources
+                    // (ModePeerFeature.nipopow = Some(1) advertises
+                    // this), but defensively break here so we never
+                    // emit an Inv claiming headers we can't
+                    // actually serve.
+                    const MAX_INV_OBJECTS: usize = 400;
+                    let our_tip_h = chain.best_header_height();
+                    let mut ids: Vec<[u8; 32]> = Vec::with_capacity(MAX_INV_OBJECTS);
+                    let mut h = common_h.saturating_add(1);
+                    while h <= our_tip_h && ids.len() < MAX_INV_OBJECTS {
+                        match chain.header_id_at_height(h) {
+                            ergo_state::chain::HeightLookup::Dense(id) => ids.push(id),
+                            ergo_state::chain::HeightLookup::SparseGap
+                            | ergo_state::chain::HeightLookup::AboveTip => break,
+                        }
+                        h = h.saturating_add(1);
+                    }
+                    if !ids.is_empty() {
+                        let inv = ergo_p2p::types::InvData {
+                            type_id: ergo_p2p::types::ModifierTypeId::Header.as_byte(),
+                            ids,
+                        };
+                        if let Ok(payload) = message::serialize_inv(&inv) {
+                            actions.push(Action::SendToPeer {
+                                peer,
+                                code: message::CODE_INV,
+                                payload,
+                            });
                         }
                     }
                 }
@@ -185,7 +203,12 @@ impl SyncCoordinator {
                 if !peer_headers.is_empty() {
                     let continuation = find_continuation_header(&peer_headers, chain);
                     if let Some(header_bytes) = continuation {
-                        actions.push(Action::ValidateHeader { peer, header_bytes });
+                        let modifier_id = *blake2b256(&header_bytes).as_bytes();
+                        actions.push(Action::ValidateHeader {
+                            peer,
+                            modifier_id,
+                            header_bytes,
+                        });
                     }
                 }
             }
@@ -439,6 +462,15 @@ impl SyncCoordinator {
                 // side and so the class can't be spoofed. The delivering peer
                 // is reset (on a late/hedge win it may differ from the
                 // original owner — correct attribution).
+                if type_id == ModifierTypeId::Header.as_byte()
+                    && blake2b256(&data).as_bytes() != &modifier_id
+                {
+                    actions.push(Action::Penalize {
+                        peer,
+                        penalty: Penalty::Misbehavior,
+                    });
+                    return actions;
+                }
                 let delivered_body = self
                     .delivery
                     .modifier_type(&modifier_id)
@@ -473,6 +505,7 @@ impl SyncCoordinator {
             // Header received — validate it
             actions.push(Action::ValidateHeader {
                 peer,
+                modifier_id,
                 header_bytes: data,
             });
         } else if ModifierTypeId::is_block_section(type_id) {
@@ -527,8 +560,7 @@ impl SyncCoordinator {
         self.first_deliverers.push((header_id, peer));
 
         self.sync_state.set_best_known_header(height);
-        self.sync_state
-            .check_headers_synced(header_timestamp_ms, height);
+        self.sync_state.check_headers_synced(header_timestamp_ms);
 
         // Don't track pending blocks or request sections until headers are synced.
         // Scala: toDownload() returns Nil when !isHeadersChainSynced.
@@ -563,6 +595,11 @@ impl SyncCoordinator {
             return actions;
         }
 
+        // Below-tip fork downloads are registered by the executor, which
+        // knows the fork point. Do not create unowned assembly entries here.
+        if height <= self.sync_state.best_full_block_height() {
+            return actions;
+        }
         self.sync_state.add_pending_block(height, header_id);
         self.assembly
             .register_header(expected_sections.clone(), self.requires_proofs);
@@ -618,15 +655,28 @@ impl SyncCoordinator {
 
     /// Called after a full block has been assembled and applied to state.
     pub fn on_block_applied(&mut self, header_id: [u8; 32], height: u32) {
+        self.sync_state.retain_pending_blocks(|block| {
+            if block.height <= height {
+                self.assembly.remove(&block.header_id);
+                false
+            } else {
+                true
+            }
+        });
         self.sync_state.set_best_full_block(height);
         self.assembly.remove(&header_id);
     }
 
-    /// Drop pending block downloads that are no longer on the best-header
-    /// chain after a full-block rollback/reorg.
+    /// Drop pending downloads and assembly registrations outside the selected
+    /// best-header chain after promotion or rollback.
     pub fn prune_pending_to_best_chain(&mut self, chain: &dyn ChainView) {
-        self.sync_state
-            .retain_pending_blocks(|b| chain.is_on_best_chain(&b.header_id));
+        self.sync_state.retain_pending_blocks(|b| {
+            let keep = chain.is_on_best_chain(&b.header_id);
+            if !keep {
+                self.assembly.remove(&b.header_id);
+            }
+            keep
+        });
     }
 
     /// Check for delivery timeouts and re-request from alternative peers.
@@ -827,7 +877,14 @@ pub fn build_sync_info_payload(
             message::serialize_sync_info(&SyncInfo::V2 { headers })
         }
         SyncVersion::V1 => {
-            let ids = chain.recent_header_ids(1000); // MaxBlockIds (parser tolerates +1, serializer sends ≤1000)
+            let mut ids = chain.recent_header_ids(1000);
+            ids.reverse(); // Scala syncInfoV1 is oldest-first, tip last.
+            if ids
+                .first()
+                .is_some_and(|id| chain.header_height_for(id) == Some(1))
+            {
+                ids.insert(0, [0; 32]); // MaxBlockIds + one pregenesis sentinel.
+            }
             message::serialize_sync_info(&SyncInfo::V1 { header_ids: ids })
         }
     }

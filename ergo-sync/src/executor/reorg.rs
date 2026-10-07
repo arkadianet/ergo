@@ -75,6 +75,13 @@ pub(crate) enum ReorgOutcome {
     TooDeep,
 }
 
+#[derive(Clone)]
+struct AvailableChain {
+    fork_height: u32,
+    fork_id: [u8; 32],
+    blocks: std::collections::VecDeque<[u8; 32]>,
+}
+
 impl SyncExecutor {
     /// The most recent block-apply rejection, if any (see
     /// [`LastBlockApplyError`]).
@@ -184,18 +191,6 @@ impl SyncExecutor {
         }
     }
 
-    /// Try to apply the next sequential block(s) directly from the store.
-    /// Uses the in-memory header_index for O(1) height→header_id lookups.
-    /// Applies as many consecutive blocks as possible in one tick.
-    /// Drain pending block applies in a tight loop until no progress is made.
-    ///
-    /// Emits no entries to the action transcript by design: every effect is
-    /// a state mutation on `SyncCoordinator` (`sync_state.best_full_block`,
-    /// `assembly`) observable via getters. Spec §3's "ordered emission,
-    /// testable" property covers transcript-emitted variants
-    /// (`SendToPeer`/`Penalize`/`PersistSection`/`AssembleBlock`); chained
-    /// block-apply is a state event, not an external effect. Returning
-    /// `()` rather than `Vec<Action>` keeps that contract honest.
     /// Shared apply-failure handler for a block `process_block` rejected.
     ///
     /// A definitive validation verdict ([`is_validation_verdict`]) means the
@@ -205,10 +200,12 @@ impl SyncExecutor {
     /// evict the dead branch from the download queue, and drop stale
     /// `header_index` rows above the re-anchored tip. Persisting this across
     /// restart is what stops an invalid block being retried forever. Any other
-    /// error (transient / IO / digest-ambiguous) gets only a session-scoped
-    /// mark, cleared on restart — we must never persistently poison a branch
-    /// that might be failing on our own bug or a stale local root. If the
-    /// durable walk itself fails (IO), fall back to the session mark.
+    /// error (transient / IO / digest-ambiguous) gets a session-scoped
+    /// mark and may promote an eligible stored branch, without lowering the
+    /// selected score. Marks are cleared on restart: a local bug or stale root
+    /// must not persistently poison a branch. A durable-walk IO failure also
+    /// falls back to a session mark and promotion. Later drains retry selection
+    /// if a promotion write fails.
     ///
     /// Shared by [`Self::try_apply_next_blocks`] and `handle_assemble_block`
     /// so both apply-failure paths classify a failure identically.
@@ -224,6 +221,15 @@ impl SyncExecutor {
             // Transient / IO / digest-ambiguous failure: never poison the
             // branch persistently. Session-scoped only, cleared on restart.
             store.mark_session_invalid(header_id);
+            if let Err(error) = self.promote_session_sibling(store, coordinator, header_id, height)
+            {
+                super::report_sync_storage_failure(
+                    store,
+                    "block_apply",
+                    "promote_session_sibling",
+                    &error,
+                );
+            }
             return;
         }
         match store.invalidate_validation_branch(header_id) {
@@ -232,9 +238,22 @@ impl SyncExecutor {
                     invalidated.iter().copied().collect();
                 // Evict the dead branch from the download queue so the
                 // coordinator stops targeting it.
+                for id in &invalidated {
+                    coordinator.assembly_mut().remove(id);
+                }
                 coordinator
                     .sync_state_mut()
                     .retain_pending_blocks(|b| !invalid_ids.contains(&b.header_id));
+                if let Err(error) =
+                    self.promote_session_sibling(store, coordinator, header_id, height)
+                {
+                    super::report_sync_storage_failure(
+                        store,
+                        "block_apply",
+                        "promote_verdict_sibling",
+                        &error,
+                    );
+                }
                 let cs = store.chain_state_meta();
                 // Drop stale header_index entries above the re-anchored tip so
                 // a later recover_coordinator can't re-seed the dead branch.
@@ -243,24 +262,100 @@ impl SyncExecutor {
                     height,
                     header_id = %hex::encode(header_id),
                     invalidated = invalidated.len(),
-                    reanchored_best_header_height = cs.best_header_height,
-                    "invalidated block and descendants; best_header re-anchored",
+                    selected_best_header_height = cs.best_header_height,
+                    "invalidated block and descendants; best_header selection updated",
                 );
             }
             Err(inv_err) => {
                 // Persisting the invalidation itself failed (IO). Fall back to
-                // a session mark so we at least stop re-applying this tick; the
-                // durable walk retries next drain.
+                // a session mark so we stop re-applying this session.
                 warn!(
                     height,
                     error = %inv_err,
                     "branch invalidation failed; session-marking",
                 );
                 store.mark_session_invalid(header_id);
+                if let Err(error) =
+                    self.promote_session_sibling(store, coordinator, header_id, height)
+                {
+                    super::report_sync_storage_failure(
+                        store,
+                        "block_apply",
+                        "promote_session_sibling",
+                        &error,
+                    );
+                }
             }
         }
     }
 
+    /// Promote a validated, unmarked branch anchored at the applied tip when
+    /// the first unapplied block is rejected. Search is bounded by
+    /// `SESSION_PROMOTION_SEARCH_DEPTH`,
+    /// require score >= current best, and preserve slot order on equal scores.
+    fn promote_session_sibling(
+        &mut self,
+        store: &mut ergo_state::StateBackendKind,
+        coordinator: &mut SyncCoordinator,
+        rejected: [u8; 32],
+        height: u32,
+    ) -> StorageResult<()> {
+        let chain = store.chain_state_meta();
+        if height != chain.best_full_block_height + 1
+            || store.get_header_id_at_height(height)? != Some(rejected)
+        {
+            return Ok(());
+        }
+        let mut best_score = num_bigint::BigUint::from_bytes_be(&chain.best_header_score);
+        let mut candidate = None;
+        let upper = chain
+            .best_full_block_height
+            .saturating_add(crate::header_proc::SESSION_PROMOTION_SEARCH_DEPTH);
+        for h in height..=upper {
+            for id in store.reader_handle().header_ids_at_height_all(h)? {
+                let Some(meta) = store.get_header_meta(&id)? else {
+                    continue;
+                };
+                if meta.pow_validity != 1 || store.is_invalid(&id)? {
+                    continue;
+                }
+                let eligible = if h == height {
+                    meta.parent_id == chain.best_full_block_id
+                } else {
+                    crate::header_proc::branch_session_eligible(store, meta.parent_id, &chain)?
+                };
+                if !eligible {
+                    continue;
+                }
+                let score = num_bigint::BigUint::from_bytes_be(&meta.cumulative_score);
+                if score > best_score || (candidate.is_none() && score == best_score) {
+                    best_score = score;
+                    candidate = Some((id, meta));
+                }
+            }
+        }
+        if let Some((id, meta)) = candidate {
+            let bytes = store.get_header(&id)?.ok_or_else(|| {
+                ergo_state::store::StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(id),
+                    reason: "validated candidate has no header bytes".to_owned(),
+                }
+            })?;
+            let new_best = Some((meta.height, meta.cumulative_score.clone()));
+            store.store_validated_header(&id, &bytes, &meta, new_best)?;
+            coordinator.prune_pending_to_best_chain(store);
+            coordinator
+                .sync_state_mut()
+                .set_best_known_header(meta.height);
+            self.register_download_window(store, coordinator);
+        }
+        Ok(())
+    }
+
+    /// Apply consecutive stored blocks until no progress can be made.
+    /// Records successful ids in height order for `take_applied_blocks`;
+    /// rollback itself records nothing. Callers drain feedback after the batch.
     pub fn try_apply_next_blocks(
         &mut self,
         store: &mut ergo_state::StateBackendKind,
@@ -304,7 +399,7 @@ impl SyncExecutor {
 
             let next = store.chain_state_meta().best_full_block_height + 1;
 
-            let header_id = match self.best_chain_header_id_at(store, next) {
+            let header_id = match self.next_available_block(store, next) {
                 Ok(Some(id)) => id,
                 Ok(None) => break,
                 Err(e) => {
@@ -327,7 +422,21 @@ impl SyncExecutor {
             // restart. Scala refuses re-application via the `validityKey -> 0`
             // row (`ErgoHistoryReader.isSemanticallyValid`).
             match HeaderSectionStore::is_invalid(store, &header_id) {
-                Ok(true) => break,
+                Ok(true) => {
+                    // Retry selection after a transient promotion write failure;
+                    // the marked block itself must never be applied again.
+                    if let Err(error) =
+                        self.promote_session_sibling(store, coordinator, header_id, next)
+                    {
+                        super::report_sync_storage_failure(
+                            store,
+                            "block_apply",
+                            "retry_session_promotion",
+                            &error,
+                        );
+                    }
+                    break;
+                }
                 Ok(false) => {}
                 Err(e) => {
                     super::report_sync_storage_failure(
@@ -401,9 +510,13 @@ impl SyncExecutor {
             );
             match apply_result {
                 Ok(processed) => {
+                    if self.reorg_blocks.front() == Some(&processed.header_id) {
+                        self.reorg_blocks.pop_front();
+                    }
                     guard.success(processed.height);
                     self.update_block_context_cache(&processed);
                     coordinator.on_block_applied(processed.header_id, processed.height);
+                    self.record_applied_block(processed.header_id);
                     progressed = true;
                     if processed.height % 100 == 0 {
                         info!(height = processed.height, "block applied");
@@ -417,6 +530,13 @@ impl SyncExecutor {
                 ) => {
                     guard.failure();
                     hit_section_wait = true;
+                    if !coordinator
+                        .sync_state()
+                        .pending_blocks_iter()
+                        .any(|b| b.header_id == header_id)
+                    {
+                        self.register_download_window(store, coordinator);
+                    }
                     break;
                 }
                 Err(
@@ -444,8 +564,10 @@ impl SyncExecutor {
                     }
                 }
                 Err(e) => {
+                    self.reorg_blocks.clear();
                     guard.failure();
                     super::block_apply::report_block_process_failure(store, &header_id, &e);
+                    self.record_failed_transaction(&e);
                     self.record_block_apply_error(header_id, next, e.to_string());
                     self.invalidate_or_session_mark(store, coordinator, header_id, next, &e);
                     break;
@@ -480,20 +602,206 @@ impl SyncExecutor {
         Ok(id)
     }
 
+    /// Continue the applied chain while another branch has only headers.
+    fn next_available_block(
+        &mut self,
+        store: &ergo_state::StateBackendKind,
+        height: u32,
+    ) -> StorageResult<Option<[u8; 32]>> {
+        if let Some(id) = self.reorg_blocks.front() {
+            return Ok(Some(*id));
+        }
+        let parent = store.chain_state_meta().best_full_block_id;
+        let mut preferred = None;
+        if let Some(id) = self.best_chain_header_id_at(store, height)? {
+            if store
+                .get_header_meta(&id)?
+                .is_some_and(|m| m.parent_id == parent)
+            {
+                preferred = Some(id);
+                if store.is_invalid(&id)? {
+                    return Ok(Some(id));
+                }
+                if self.block_sections_available(store, id)? {
+                    return Ok(Some(id));
+                }
+            }
+        }
+        let mut best = None;
+        let mut score = num_bigint::BigUint::default();
+        for id in store.reader_handle().header_ids_at_height_all(height)? {
+            if let Some(meta) = store.get_header_meta(&id)? {
+                let candidate_score = num_bigint::BigUint::from_bytes_be(&meta.cumulative_score);
+                if meta.parent_id == parent
+                    && meta.pow_validity == 1
+                    && !store.is_invalid(&id)?
+                    && self.block_sections_available(store, id)?
+                    && (best.is_none() || candidate_score > score)
+                {
+                    best = Some(id);
+                    score = candidate_score;
+                }
+            }
+        }
+        Ok(best.or(preferred))
+    }
+
+    fn block_sections_available(
+        &self,
+        store: &ergo_state::StateBackendKind,
+        id: [u8; 32],
+    ) -> StorageResult<bool> {
+        let Some(raw) = store.get_header(&id)? else {
+            return Ok(false);
+        };
+        let header =
+            ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&raw))
+                .map_err(|e| {
+                    ergo_state::store::StateError::Serialization(format!("header: {e:?}"))
+                })?;
+        let expected = ExpectedSections::from_header(
+            &id,
+            header.transactions_root.as_bytes(),
+            header.extension_root.as_bytes(),
+            header.ad_proofs_root.as_bytes(),
+        );
+        let needs_proofs = match store {
+            ergo_state::StateBackendKind::Digest(_) => true,
+            ergo_state::StateBackendKind::Utxo(s) => {
+                s.ad_proofs_apply_policy() == ergo_state::store::AdProofsApplyPolicy::VerifyShipped
+            }
+        };
+        let ids = [
+            expected.transactions_id,
+            expected.extension_id,
+            expected.ad_proofs_id,
+        ];
+        store
+            .reader_handle()
+            .block_sections_exist(&ids[..if needs_proofs { 3 } else { 2 }])
+    }
+
+    /// Traverse available full chains, not just the selected header branch.
+    /// Keep only one height's frontier; stop when no available chain extends it.
+    fn available_full_chain(
+        &self,
+        store: &ergo_state::StateBackendKind,
+        fork_height: u32,
+        candidate_height: Option<u32>,
+    ) -> StorageResult<Option<AvailableChain>> {
+        use std::collections::HashMap;
+        let chain = store.chain_state_meta();
+        let mut best_score = if chain.best_full_block_height == 0 {
+            num_bigint::BigUint::default()
+        } else {
+            let full_meta = store
+                .get_header_meta(&chain.best_full_block_id)?
+                .ok_or_else(|| ergo_state::store::StateError::DbCorruption {
+                    table: "header_meta",
+                    key: hex::encode(chain.best_full_block_id),
+                    reason: "missing metadata for the applied full tip".to_owned(),
+                })?;
+            num_bigint::BigUint::from_bytes_be(&full_meta.cumulative_score)
+        };
+        let mut selected = None;
+        let base = fork_height.min(
+            chain
+                .best_full_block_height
+                .saturating_sub(store.keep_versions()),
+        );
+        let mut applied = HashMap::new();
+        let mut id = chain.best_full_block_id;
+        for height in (base..=chain.best_full_block_height).rev() {
+            applied.insert(height, id);
+            if height == base {
+                break;
+            }
+            let meta = store.get_header_meta(&id)?.ok_or_else(|| {
+                ergo_state::store::StateError::DbCorruption {
+                    table: "header_meta",
+                    key: hex::encode(id),
+                    reason: "missing applied-chain ancestor".to_owned(),
+                }
+            })?;
+            id = meta.parent_id;
+        }
+        let mut frontier = HashMap::from([(
+            id,
+            AvailableChain {
+                fork_height: base,
+                fork_id: id,
+                blocks: std::collections::VecDeque::new(),
+            },
+        )]);
+        let upper = chain
+            .best_header_height
+            .max(chain.best_full_block_height.saturating_add(1))
+            .max(candidate_height.unwrap_or(0));
+        for height in base + 1..=upper {
+            let mut next = HashMap::new();
+            if let Some(id) = applied.get(&height) {
+                next.insert(
+                    *id,
+                    AvailableChain {
+                        fork_height: height,
+                        fork_id: *id,
+                        blocks: std::collections::VecDeque::new(),
+                    },
+                );
+            }
+            for id in store.reader_handle().header_ids_at_height_all(height)? {
+                if applied.get(&height) == Some(&id) {
+                    continue;
+                }
+                let Some(meta) = store.get_header_meta(&id)? else {
+                    continue;
+                };
+                let Some(parent) = frontier.get(&meta.parent_id) else {
+                    continue;
+                };
+                if meta.pow_validity != 1
+                    || store.is_invalid(&id)?
+                    || !self.block_sections_available(store, id)?
+                {
+                    continue;
+                }
+                let mut path = parent.clone();
+                path.blocks.push_back(id);
+                let score = num_bigint::BigUint::from_bytes_be(&meta.cumulative_score);
+                if score > best_score {
+                    best_score = score;
+                    selected = Some(path.clone());
+                }
+                next.insert(id, path);
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        Ok(selected)
+    }
+
     fn register_download_window(
         &mut self,
         store: &ergo_state::StateBackendKind,
         coordinator: &mut SyncCoordinator,
     ) {
         let cs = store.chain_state_meta();
-        let base = cs.best_full_block_height + 1;
-        // Inclusive upper bound spans at most `download_window` blocks from
-        // `base` (heights base..=best_full+window), matching
+        let base = match self.full_chain_fork_point(store) {
+            Ok(ForkPoint::Found(height, _)) => height + 1,
+            _ => cs.best_full_block_height + 1,
+        };
+        // Include the replacement suffix below the applied height and up to
+        // `download_window` blocks above it, matching
         // on_header_validated's request gate `height <= best_full + window`.
         // A zero window yields an empty range (base > upper) so nothing is
         // registered, mirroring recover_coordinator. Capped at the best
         // header height so we never register beyond the header chain.
         let window = coordinator.sync_state().download_window() as u32;
+        if window == 0 {
+            return;
+        }
         let upper = cs
             .best_full_block_height
             .saturating_add(window)
@@ -513,7 +821,7 @@ impl SyncExecutor {
                 }
             };
             self.header_index.insert(h, hid);
-            coordinator.sync_state_mut().add_pending_block(h, hid);
+            coordinator.sync_state_mut().add_fork_pending_block(h, hid);
             // Register with assembly tracker so request_missing_sections
             // knows which section IDs to request.
             match store.get_header(&hid) {
@@ -549,11 +857,18 @@ impl SyncExecutor {
         coordinator: &mut SyncCoordinator,
         wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) -> StorageResult<ReorgOutcome> {
-        let (fork_height, fork_id) = match self.full_chain_fork_point(store)? {
-            ForkPoint::Found(h, id) => (h, id),
+        if !self.reorg_blocks.is_empty() {
+            return Ok(ReorgOutcome::NotNeeded);
+        }
+        let candidate_height = self.full_candidate_height.take();
+        let fork_height = match self.full_chain_fork_point(store)? {
+            ForkPoint::Found(h, _) => h,
             ForkPoint::NotForked => {
                 self.clear_deep_fork_wedge();
-                return Ok(ReorgOutcome::NotNeeded);
+                if candidate_height.is_none() {
+                    return Ok(ReorgOutcome::NotNeeded);
+                }
+                store.chain_state_meta().best_full_block_height
             }
             ForkPoint::TooDeep {
                 scanned_to,
@@ -572,6 +887,16 @@ impl SyncExecutor {
         // failure below (the Err return would otherwise keep /health wedged
         // while the chain is in fact recoverable again).
         self.clear_deep_fork_wedge();
+        // Select by full-chain work and complete availability. A ready branch
+        // need not coincide with the best (possibly header-only) branch.
+        let Some(replacement) = self.available_full_chain(store, fork_height, candidate_height)?
+        else {
+            self.register_download_window(store, coordinator);
+            return Ok(ReorgOutcome::NotNeeded);
+        };
+        let fork_height = replacement.fork_height;
+        let fork_id = replacement.fork_id;
+        let suffix = replacement.blocks;
         // Capture identity fields before any mutation so the `_failed`
         // event below carries pre-attempt values, not rebuilt-state
         // values. `fork_id` is the common-ancestor header at
@@ -579,6 +904,7 @@ impl SyncExecutor {
         let old_height = store.chain_state_meta().best_full_block_height;
         let old_id = store.chain_state_meta().best_full_block_id;
         if fork_height == old_height {
+            self.reorg_blocks = suffix;
             return Ok(ReorgOutcome::NotNeeded);
         }
         let depth = old_height.saturating_sub(fork_height);
@@ -646,6 +972,7 @@ impl SyncExecutor {
             depth,
             "full-block reorg completed",
         );
+        self.reorg_blocks = suffix;
         Ok(ReorgOutcome::Performed)
     }
 
@@ -700,6 +1027,9 @@ impl SyncExecutor {
                     return Ok(ForkPoint::Found(height, full_id));
                 }
                 Some(_) => {}
+                // A shorter, heavier header chain has no row at the applied
+                // tip's height. Keep descending the applied chain to its fork.
+                None if height > cs.best_header_height => {}
                 None => return Ok(ForkPoint::NotForked),
             }
 

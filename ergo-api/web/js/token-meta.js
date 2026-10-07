@@ -33,6 +33,7 @@ async function postReadJson(path, bodyVal) {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(bodyVal),
+      signal: AbortSignal.timeout(12000),
     });
     return r.ok ? await r.json() : null;
   } catch {

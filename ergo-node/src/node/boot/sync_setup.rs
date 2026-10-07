@@ -6,12 +6,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ergo_indexer::{IndexerHandle, IndexerQuery, IndexerTask};
+use ergo_indexer::{IndexerHandle, IndexerQuery, IndexerTask, IndexerWorker};
 use ergo_mempool::weight;
+use ergo_primitives::digest::blake2b256;
+use ergo_primitives::reader::VlqReader;
+use ergo_ser::header::read_header;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::SyncCoordinator;
 use ergo_sync::executor::SyncExecutor;
-use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::config::NodeConfig;
@@ -39,6 +41,77 @@ fn report_sync_boot_failure(
     );
 }
 
+fn check_configured_genesis(
+    store: &ergo_state::StateBackendKind,
+    genesis_id: Option<[u8; 32]>,
+) -> Result<(), String> {
+    let Some(expected) = genesis_id else {
+        return Ok(());
+    };
+    let chain = store.chain_state_meta();
+    if chain.best_header_height < 1
+        || matches!(
+            chain.header_availability,
+            ergo_state::chain::HeaderAvailability::PoPowSparse { .. }
+        )
+    {
+        return Ok(());
+    }
+    let actual = store
+        .get_header_id_at_height(1)
+        .map_err(|e| format!("boot: failed to read canonical genesis header id: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "boot: Dense store has no canonical header at height 1 (best_header_height = {})",
+                chain.best_header_height
+            )
+        })?;
+    if actual != expected {
+        return Err(format!(
+            "boot: configured genesis id mismatch: expected {}, got {}",
+            hex::encode(expected),
+            hex::encode(actual)
+        ));
+    }
+    let bytes = store
+        .get_header(&actual)
+        .map_err(|e| format!("boot: failed to read stored genesis header: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "boot: Dense store is missing stored genesis header {}",
+                hex::encode(actual)
+            )
+        })?;
+    let computed = blake2b256(&bytes);
+    if computed.as_bytes() != &actual {
+        return Err(format!(
+            "boot: stored genesis header hash mismatch: expected {}, got {}",
+            hex::encode(actual),
+            hex::encode(computed.as_bytes())
+        ));
+    }
+    let mut reader = VlqReader::new(&bytes);
+    let header = read_header(&mut reader)
+        .map_err(|e| format!("boot: failed to decode stored genesis header: {e}"))?;
+    if reader.remaining() != 0 {
+        return Err(format!(
+            "boot: stored genesis header has {} trailing bytes",
+            reader.remaining()
+        ));
+    }
+    if header.height != 1 || header.parent_id.as_bytes() != &[0u8; 32] {
+        return Err(format!(
+            "boot: stored genesis header fields mismatch: height={}, parent_id={}",
+            header.height,
+            hex::encode(header.parent_id.as_bytes())
+        ));
+    }
+    Ok(())
+}
+
+/// Shadow-validation task, spawned only after boot succeeds.
+type ShadowFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 /// Everything [`setup`] produces, threaded into [`super::run_inner_with_backend`]'s
 /// `NodeState` construction and (for `chain_meta`/`bootstrap_kind`) the
 /// handshake + identity building that follows.
@@ -46,10 +119,12 @@ pub(super) struct SyncSetup {
     pub coordinator: SyncCoordinator,
     pub executor: SyncExecutor,
     pub indexer_handle: Option<IndexerHandle>,
-    pub indexer_task_handle: Option<JoinHandle<()>>,
+    pub indexer_task_handle: Option<IndexerWorker>,
+    pub indexer_event_observer:
+        Option<Arc<crate::realtime_indexer_bridge::RealtimeIndexerObserver>>,
     pub indexer_cancel: Arc<AtomicBool>,
     pub shadow_state: Option<Arc<super::super::shadow_watch::ShadowState>>,
-    pub shadow_task_handle: Option<JoinHandle<()>>,
+    pub shadow_future: Option<ShadowFuture>,
     pub chain_meta: ergo_state::chain::ChainStateMeta,
     pub backend_is_utxo: bool,
     pub bootstrap_kind: crate::node::identity::BootstrapKind,
@@ -207,6 +282,10 @@ pub(super) fn setup(
         ergo_validation::context::ProtocolParams::mainnet_default(),
         config.chain_spec.difficulty.clone(),
     );
+    executor.set_genesis_id(config.genesis_id);
+    if let Err(e) = check_configured_genesis(store, config.genesis_id) {
+        return Err(e.into());
+    }
     executor.set_script_validation_checkpoint(config.script_validation_checkpoint);
     if let Some((h, id)) = config.script_validation_checkpoint {
         info!(
@@ -249,10 +328,9 @@ pub(super) fn setup(
     // `apply_block_digest` (no batched AVL replay), so neither applies.
     if let Some(s) = store.as_utxo_mut() {
         if config.ibd_flush_interval > 0 {
-            s.set_ibd_mode(true, config.ibd_flush_interval);
+            s.set_ibd_mode(true, config.ibd_flush_interval)?;
             info!(
                 flush_interval = config.ibd_flush_interval,
-                max_replay_blocks = config.ibd_flush_interval,
                 "IBD durability enabled",
             );
         }
@@ -264,7 +342,7 @@ pub(super) fn setup(
         // degrades to 1 job per batch when the queue stays empty between
         // blocks. In-flight memory is bounded by queue_depth × per-job
         // serialized AVL/undo size (~100-500KB), so 64 ≈ 32MB upper bound.
-        s.enable_persist_pipeline(64);
+        s.enable_persist_pipeline(64)?;
         info!(
             queue_depth = 64,
             "persist pipeline started in background thread"
@@ -282,8 +360,13 @@ pub(super) fn setup(
     // signal it on shutdown regardless of whether a task was actually
     // spawned. `indexer_task_handle` is `Some` only when a task is live.
     let indexer_cancel = Arc::new(AtomicBool::new(false));
-    let (indexer_handle, indexer_task_handle): (Option<IndexerHandle>, Option<JoinHandle<()>>) =
-        match IndexerHandle::boot(&config.indexer_config, &config.data_dir) {
+    let mut indexer_event_observer = None;
+    let (indexer_handle, indexer_task_handle): (Option<IndexerHandle>, Option<IndexerWorker>) =
+        match IndexerHandle::boot_with_cache(
+            &config.indexer_config,
+            &config.data_dir,
+            config.redb_cache_budgets.indexer,
+        ) {
             Some(handle) if handle.store().is_some() => {
                 info!(
                     poll_idle_ms = config.indexer_config.poll_idle_ms,
@@ -291,10 +374,19 @@ pub(super) fn setup(
                     "indexer enabled",
                 );
                 let chain = ChainReaderAdapter::new(store.reader_handle());
-                let task = IndexerTask::new(handle.clone(), chain);
+                let mut task = IndexerTask::new(handle.clone(), chain);
+                if config.api_bind.is_some() {
+                    let observer = Arc::new(
+                        crate::realtime_indexer_bridge::RealtimeIndexerObserver::new(
+                            config.chain_spec.network_params.address_prefix,
+                        ),
+                    );
+                    task = task.with_observer(observer.clone());
+                    indexer_event_observer = Some(observer);
+                }
                 let cancel_for_task = indexer_cancel.clone();
                 let poll_idle = Duration::from_millis(config.indexer_config.poll_idle_ms);
-                let task_handle = tokio::spawn(task.run(cancel_for_task, poll_idle));
+                let task_handle = task.spawn(cancel_for_task, poll_idle)?;
                 (Some(handle), Some(task_handle))
             }
             Some(handle) => {
@@ -316,9 +408,9 @@ pub(super) fn setup(
     // touches the apply path — it reads through its own `ChainStoreReader`
     // and writes only the shared `ShadowState` the snapshot emitter / event
     // differ project out.
-    let (shadow_state, shadow_task_handle): (
+    let (shadow_state, shadow_future): (
         Option<Arc<super::super::shadow_watch::ShadowState>>,
-        Option<JoinHandle<()>>,
+        Option<ShadowFuture>,
     ) = if config.shadow_config.enabled {
         match super::super::shadow_watch::HttpShadowReference::new(
             &config.shadow_config.reference_url,
@@ -357,7 +449,10 @@ pub(super) fn setup(
                     lag_tolerance = config.shadow_config.lag_tolerance,
                     "shadow validation enabled"
                 );
-                let task = tokio::spawn(super::super::shadow_watch::run(
+                // Retain an unpolled future until all fallible boot phases
+                // finish. Dropping failed setup releases these store readers
+                // without leaving a detached reference worker.
+                let task = Box::pin(super::super::shadow_watch::run(
                     config.shadow_config.clone(),
                     reference,
                     local,
@@ -407,26 +502,14 @@ pub(super) fn setup(
         );
     }
 
-    // Mode 3 activation parity — boot-path arm of the headers-synced
-    // flip. `recover_coordinator` above flips the latch itself when the
-    // best header's timestamp is fresh (`executor/startup.rs` →
-    // `SyncState::check_headers_synced`), so a pruned node that boots
-    // with an already-synced header chain and no full blocks reaches
-    // its first tick needing the sentinel already seeded — the
-    // coordinator's request-side gate and download window both read it.
-    // No-op for archive / Mode 6 / a store that already holds full
-    // blocks or a sentinel; see `node::prune_activation`.
-    //
-    // On a fresh seed the recovery above is stale by construction — it
-    // walked from `best_full_block_height = 0`, below the sentinel this
-    // call just wrote — so the helper re-runs it against the new floor.
-    // Without that, `blocks_to_download` filters every recovered entry
-    // away and the node never requests a section.
-    if let Err(e) = crate::node::prune_activation::seed_prune_sentinel_and_rebuild_pending(
+    // Fresh UTXO validation starts from the applied genesis parent. Repair a
+    // legacy header-only download floor, if present, before serving requests;
+    // applied, snapshot-installed and NiPoPoW-bootstrapped stores keep theirs.
+    // Rebuild the pending range only when a floor was actually reset.
+    if let Err(e) = crate::node::prune_activation::repair_unapplied_floor_and_rebuild_pending(
         store,
         &mut executor,
         &mut coordinator,
-        config.blocks_to_keep,
     ) {
         report_sync_boot_failure(store, "recover_coordinator", &e);
         return Err(Box::new(e));
@@ -502,13 +585,13 @@ pub(super) fn setup(
             crate::node::identity::NipopowResumeState::PartialHeaderSync => {
                 // The reducer's PopowBootstrap::new contract is
                 // fresh-only, and `apply_popow_proof` returns
-                // `ApplyPopowProofWrongMode` on a non-fresh
-                // store. Resuming Mode 4 from partial header
+                // `ApplyPopowProofNotFresh` on a Dense store with
+                // an existing header tip. Resuming Mode 4 from partial header
                 // progress needs new machinery on the reducer +
                 // apply path. Until that lands, refuse to boot
                 // rather than arm a reducer whose proof apply
-                // would later trigger sync_tick's terminal
-                // mark_applied and silently abort bootstrap.
+                // would later abandon bootstrap because the
+                // store is not fresh.
                 return Err(Box::new(std::io::Error::other(format!(
                     "boot: NiPoPoW bootstrap cannot resume from partial \
                          header progress (best_header_height = {}, \
@@ -531,9 +614,10 @@ pub(super) fn setup(
         executor,
         indexer_handle,
         indexer_task_handle,
+        indexer_event_observer,
         indexer_cancel,
         shadow_state,
-        shadow_task_handle,
+        shadow_future,
         chain_meta,
         backend_is_utxo,
         bootstrap_kind,
@@ -547,8 +631,138 @@ pub(super) fn setup(
 mod tests {
     use super::*;
     use clap::Parser;
+    use ergo_state::chain::HeaderMeta;
     use ergo_state::store::StateStore;
     use ergo_state::{DigestStateStore, StateBackendKind};
+
+    fn mainnet_header_bytes(height: u32) -> Vec<u8> {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../../test-vectors/mainnet/headers_1_10.json"
+        ))
+        .unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row["height"].as_u64() == Some(u64::from(height)))
+            .unwrap();
+        hex::decode(row["bytes"].as_str().unwrap()).unwrap()
+    }
+
+    fn store_with_genesis_header() -> (tempfile::TempDir, StateStore, [u8; 32]) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let bytes = mainnet_header_bytes(1);
+        let mut reader = VlqReader::new(&bytes);
+        let header = read_header(&mut reader).unwrap();
+        let actual = *blake2b256(&bytes).as_bytes();
+        store
+            .store_validated_header(
+                &actual,
+                &bytes,
+                &HeaderMeta {
+                    parent_id: [0u8; 32],
+                    height: 1,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp: header.timestamp,
+                },
+                Some((1, vec![1])),
+            )
+            .unwrap();
+        (dir, store, actual)
+    }
+
+    #[tokio::test]
+    async fn failed_late_setup_drops_unstarted_shadow_store_readers() {
+        let (dir, store, _) = store_with_genesis_header();
+        let cli = crate::config::Cli::parse_from([
+            "ergo-node",
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+        ]);
+        let mut config = NodeConfig::load(cli).unwrap();
+        config.nipopow_bootstrap = true;
+        config.indexer_config.enabled = false;
+        config.shadow_config.enabled = true;
+        // The reference future remains unpolled; no service is contacted.
+        config.shadow_config.reference_url = "http://127.0.0.1:1".into();
+        let mut store = StateBackendKind::Utxo(store);
+        let error = match setup(&config, &mut store, 0) {
+            Ok(_) => panic!("partial NiPoPoW header progress must fail late setup"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("cannot resume from partial"),
+            "{error}"
+        );
+        drop(store);
+        StateStore::open(&dir.path().join("state.redb"))
+            .expect("failed setup must not retain a detached shadow database owner");
+    }
+
+    #[test]
+    fn configured_genesis_check_validates_stored_header() {
+        let (_dir, store, actual) = store_with_genesis_header();
+        let store = StateBackendKind::Utxo(store);
+
+        assert!(check_configured_genesis(&store, Some(actual)).is_ok());
+        assert!(check_configured_genesis(&store, Some([0x22; 32])).is_err());
+    }
+
+    #[test]
+    fn configured_genesis_check_rejects_missing_stored_header() {
+        let (_dir, mut store, actual) = store_with_genesis_header();
+        store.test_remove_header_row_unsafe(&actual).unwrap();
+        let store = StateBackendKind::Utxo(store);
+
+        let err = check_configured_genesis(&store, Some(actual)).unwrap_err();
+        assert!(err.contains("missing stored genesis header"));
+    }
+
+    #[test]
+    fn configured_genesis_check_rejects_stored_hash_mismatch() {
+        let (_dir, mut store, actual) = store_with_genesis_header();
+        store
+            .test_corrupt_header_bytes_unsafe(&actual, b"not a header")
+            .unwrap();
+        let store = StateBackendKind::Utxo(store);
+
+        let err = check_configured_genesis(&store, Some(actual)).unwrap_err();
+        assert!(err.contains("hash mismatch"));
+    }
+
+    #[test]
+    fn configured_genesis_check_rejects_non_genesis_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let bytes = mainnet_header_bytes(2);
+        let mut reader = VlqReader::new(&bytes);
+        let header = read_header(&mut reader).unwrap();
+        let actual = *blake2b256(&bytes).as_bytes();
+        store
+            .store_validated_header(
+                &actual,
+                &bytes,
+                &HeaderMeta {
+                    parent_id: *header.parent_id.as_bytes(),
+                    height: 2,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp: header.timestamp,
+                },
+                None,
+            )
+            .unwrap();
+        store
+            .test_force_set_best_header_unsafe(actual, 2, vec![1])
+            .unwrap();
+        store.test_force_put_header_chain_index(1, &actual).unwrap();
+        let store = StateBackendKind::Utxo(store);
+
+        let err = check_configured_genesis(&store, Some(actual)).unwrap_err();
+        assert!(err.contains("fields mismatch"));
+    }
 
     #[tokio::test]
     async fn boot_requires_downloaded_proofs_only_for_digest_state() {

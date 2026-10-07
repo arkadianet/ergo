@@ -8,7 +8,7 @@
 //! need them.
 //!
 //! This module runs a plain [`std::thread`] that nothing on the runtime
-//! can starve. Each tick it samples process-level truth (`/proc/self`,
+//! can starve. Each tick it samples process-level truth (resident memory,
 //! wall clock) plus the lock-free [`ApplyPhaseMetrics`] atomics, stores
 //! the results in atomics that `/metrics` overlays onto the served
 //! values, and raises a wall-clock wedge alarm — with a single ERROR log
@@ -56,7 +56,7 @@ impl Default for LiveTelemetry {
 }
 
 impl LiveTelemetry {
-    /// Latest sampled RSS, KiB (0 = sampler absent / non-Linux).
+    /// Latest sampled resident memory, KiB (0 = sampler absent / unavailable).
     pub fn rss_kb(&self) -> u64 {
         self.rss_kb.load(Ordering::Relaxed)
     }
@@ -125,12 +125,32 @@ fn classify_apply(
     Some((age_ms, wedged))
 }
 
+#[cfg(target_os = "linux")]
 fn read_rss_kb() -> u64 {
     // Kernel-computed resident total from smaps_rollup — no page-size
     // assumption (a statm-pages × 4096 conversion under-reports 4-16× on
-    // non-4K-page hosts). None ⇒ non-Linux; the documented 0 fallback.
+    // non-4K-page hosts). An unavailable sample falls back to 0.
     crate::mem_smaps::read_smaps_rollup()
         .map(|r| r.rss_kb)
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_rss_kb() -> u64 {
+    // Same resident-memory source as /api/v1/host. On Windows this
+    // is the working set, not private/committed bytes. Refresh only this
+    // process; never enumerate the machine's processes on every tick.
+    let mut system = sysinfo::System::new();
+    sysinfo::get_current_pid()
+        .ok()
+        .and_then(|pid| {
+            system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                sysinfo::ProcessRefreshKind::new().with_memory(),
+            );
+            system.process(pid).map(|process| process.memory() / 1024)
+        })
         .unwrap_or(0)
 }
 
@@ -242,15 +262,17 @@ mod tests {
     }
 
     #[test]
-    fn rss_reader_returns_nonzero_on_linux_or_zero_elsewhere() {
-        // Ground-truth smoke: on Linux smaps_rollup must yield our own
-        // RSS (kernel-computed, no page-size assumption); on other
-        // platforms the documented 0 fallback holds.
+    fn rss_reader_returns_resident_memory_on_supported_platforms() {
         let kb = read_rss_kb();
-        if cfg!(target_os = "linux") {
-            assert!(kb > 0, "rollup RSS should be positive on Linux, got {kb}");
-        } else {
-            assert_eq!(kb, 0);
+        if cfg!(any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "macos"
+        )) {
+            assert!(
+                kb > 0,
+                "current process resident memory should be positive, got {kb}"
+            );
         }
     }
 

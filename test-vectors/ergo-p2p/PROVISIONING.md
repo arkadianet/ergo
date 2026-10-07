@@ -17,11 +17,11 @@ must match.
 | `inv/header_single_mainnet.hex` | `network/InvSpecification.scala:37` | `Inv` (code 55) advertising one header id `[1x16, 2x16]`. Mainnet magic `01 00 02 04`. |
 | `request_modifier/header_single_mainnet.hex` | `network/RequestModifiersSpecification.scala:38` | `RequestModifier` (code 22). **Same `InvData` payload as the Inv vector** — codec is shared; only the frame `code` differs (0x16 vs 0x37) and the modifier-bytes are identical. Mainnet magic. |
 | `sync_info/v1_single_header_mainnet.hex` | `network/ErgoSyncInfoSpecification.scala:38` | `SyncInfo` V1 (code 65) carrying one header id `[1x16, 2x16]`. Mainnet magic. Confirms the count field is VLQ (`0x01`), not raw `u16`. |
-| `modifiers/header_single_mainnet.hex` | `network/ModifiersSpecification.scala:34` | `Modifiers` (code 33) wrapping one Block-Header modifier (264-byte fixture from `HeaderSerializer.parseBytes` of `4201ad7f…`). Exercises the `(type, count, [(id, len, bytes)])` payload shape end-to-end. |
+| `modifiers/header_single_mainnet.hex` | `network/ModifiersSpecification.scala:34` | `Modifiers` (code 33) wrapping one Block-Header modifier (225-byte fixture from `HeaderSerializer.parseBytes` of `4201ad7f…`). Exercises the `(type, count, [(id, len, bytes)])` payload shape end-to-end. |
 | `sync_info/v2_single_header_payload.hex` | `ergo-core/.../network/history/ErgoSyncInfo.scala:60-74` (manual transcription, **not** an upstream byte fixture) | `SyncInfo` V2 **payload only** carrying one 225-byte header (same body as the `modifiers` fixture). Byte layout `00 FF 01 E1 01 || body` derived directly from `ErgoSyncInfoSerializer.serialize`'s V2 case. The upstream `ErgoSyncInfoSpecification` only tests V1; this entry is the strongest V2 oracle available without adding a Scala-side byte fixture. |
 
-The fixtures above are **full frames** (magic + code + length + checksum
-+ payload). The Rust oracle test at
+The first four fixtures above are **full frames** (magic + code + length +
+checksum + payload); the V2 entry is **payload only**, derived from source. The Rust oracle test at
 [`ergo-p2p/tests/it/wire_vectors_oracle.rs`](../../ergo-p2p/tests/it/wire_vectors_oracle.rs)
 decodes them through the framing layer first, validates the
 checksum, hands the payload to the per-message deserializer, then
@@ -68,7 +68,7 @@ Scala-side test additions in the upstream repo (the existing
   shape but not wire bytes. Manual derivation from
   `BasicMessagesRepo.scala:93-99` is still the strongest provenance
   available; the inline `mod tests` assertions in
-  `ergo-p2p/src/message.rs` mark this explicitly.
+  `ergo-p2p/src/message/tests.rs` mark this explicitly.
 - `manifest/*`, `get_manifest/*`, `nipopow/*` — same status:
   serializer is in `BasicMessagesRepo.scala`, no upstream byte
   fixtures.
@@ -77,3 +77,11 @@ Adding these requires opening a Scala-side PR to add the byte
 assertion (or, for handshake, parameterising the serializer to
 take fixed timestamp + session-id constants). Tracked as a
 post-Phase-10 follow-up.
+
+## Legacy V1 metadata and ordering
+
+`sync-v1/` ships pinned v6.0.5 history/header source, exact selected-method JVM
+wrapper and seven comparison/four producer observations. P2P consumes every
+comparison row; SYNC consumes every producer row and asserts common-point
+normalization/initial continuation. This is separate from the framed wire
+literals above and does not claim a complete legacy-node exchange.

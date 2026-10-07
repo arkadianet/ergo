@@ -161,15 +161,22 @@ pub(crate) struct CompileResponse {
     responses(
         (status = 200, description = "Compiled tree + addresses + typed AST", body = CompileResponse),
         (status = 400, description = "Compile error (position/phase/Scala class in detail)", body = V1Error),
-        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn compile(State(state): State<ScriptState>, body: V1Json<CompileBody>) -> Response {
     let V1Json(body) = body;
-    match compile_inner(&state, body) {
-        Ok(resp) => Json(resp).into_response(),
-        Err(resp) => *resp,
-    }
+    let compute = state.compute.clone();
+    compute
+        .response(move || match compile_inner(&state, body) {
+            Ok(resp) => Json(resp).into_response(),
+            Err(resp) => *resp,
+        })
+        .await
 }
 
 fn compile_inner(state: &ScriptState, body: CompileBody) -> Result<CompileResponse, Box<Response>> {
@@ -252,14 +259,22 @@ pub(crate) struct InspectResponse {
     responses(
         (status = 200, description = "Structured typed decompilation", body = InspectResponse),
         (status = 400, description = "Invalid ergo_tree/address, or neither/both supplied", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn inspect(State(state): State<ScriptState>, body: V1Json<InspectBody>) -> Response {
     let V1Json(body) = body;
-    match inspect_inner(&state, body) {
-        Ok(resp) => Json(resp).into_response(),
-        Err(resp) => *resp,
-    }
+    let compute = state.compute.clone();
+    compute
+        .response(move || match inspect_inner(&state, body) {
+            Ok(resp) => Json(resp).into_response(),
+            Err(resp) => *resp,
+        })
+        .await
 }
 
 fn inspect_inner(state: &ScriptState, body: InspectBody) -> Result<InspectResponse, Box<Response>> {
@@ -431,15 +446,22 @@ pub(crate) struct ExecuteResponse {
     responses(
         (status = 200, description = "Reduction result + cost", body = ExecuteResponse),
         (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
-        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn execute(State(state): State<ScriptState>, body: V1Json<ExecuteBody>) -> Response {
     let V1Json(body) = body;
-    match execute_inner(&state, body) {
-        Ok(resp) => Json(resp).into_response(),
-        Err(resp) => *resp,
-    }
+    let compute = state.compute.clone();
+    compute
+        .response(move || match execute_inner(&state, body) {
+            Ok(resp) => Json(resp).into_response(),
+            Err(resp) => *resp,
+        })
+        .await
 }
 
 fn execute_inner(state: &ScriptState, body: ExecuteBody) -> Result<ExecuteResponse, Box<Response>> {
@@ -493,15 +515,22 @@ struct CostBreakdownEntry {
     responses(
         (status = 200, description = "Total reduce cost (breakdown empty until cost-trace is wired)", body = CostResponse),
         (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
-        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn cost(State(state): State<ScriptState>, body: V1Json<ExecuteBody>) -> Response {
     let V1Json(body) = body;
-    match cost_inner(&state, body) {
-        Ok(resp) => Json(resp).into_response(),
-        Err(resp) => *resp,
-    }
+    let compute = state.compute.clone();
+    compute
+        .response(move || match cost_inner(&state, body) {
+            Ok(resp) => Json(resp).into_response(),
+            Err(resp) => *resp,
+        })
+        .await
 }
 
 fn cost_inner(state: &ScriptState, body: ExecuteBody) -> Result<CostResponse, Box<Response>> {
@@ -557,21 +586,29 @@ struct SimulateResponse {
 /// against real chain state. `box_id` missing ⇒ `box_not_found`; the chain
 /// reader unwired ⇒ `chain_reader_unavailable` (never a bare 404).
 #[utoipa::path(
-    post, path = "/api/v1/script/simulate", tag = "script",
+    post, path = "/api/v1/script/simulate",
+    operation_id = "v1_script_simulate_post", tag = "script",
     request_body = SimulateBody,
     responses(
         (status = 200, description = "Spendability against the real resolved box (single-box scope — no tx/proof verified)", body = SimulateResponse),
         (status = 400, description = "Malformed box_id, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
         (status = 404, description = "No unspent box with that id", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Chain reader unavailable, compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn simulate(State(state): State<ScriptState>, body: V1Json<SimulateBody>) -> Response {
     let V1Json(body) = body;
-    match simulate_inner(&state, body) {
-        Ok(resp) => Json(resp).into_response(),
-        Err(resp) => *resp,
-    }
+    let compute = state.compute.clone();
+    compute
+        .response(move || match simulate_inner(&state, body) {
+            Ok(resp) => Json(resp).into_response(),
+            Err(resp) => *resp,
+        })
+        .await
 }
 
 /// Resolve the real box + build its `SELF` [`EvalBox`] and the effective
@@ -704,16 +741,23 @@ pub(crate) struct ExplainResponse {
     responses(
         (status = 200, description = "Reduction trace + human_diagnosis (non-authoritative)", body = ExplainResponse),
         (status = 400, description = "Malformed box_id, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
         (status = 404, description = "No unspent box with that id", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Chain reader unavailable, compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn explain(State(state): State<ScriptState>, body: V1Json<SimulateBody>) -> Response {
     let V1Json(body) = body;
-    match explain_inner(&state, body) {
-        Ok(resp) => Json(resp).into_response(),
-        Err(resp) => *resp,
-    }
+    let compute = state.compute.clone();
+    compute
+        .response(move || match explain_inner(&state, body) {
+            Ok(resp) => Json(resp).into_response(),
+            Err(resp) => *resp,
+        })
+        .await
 }
 
 fn explain_inner(
@@ -838,7 +882,12 @@ pub(crate) struct DiffResponse {
     responses(
         (status = 200, description = "Rust vs Scala-oracle verdict comparison", body = DiffResponse),
         (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
         (status = 501, description = "No Scala reference oracle configured on this node", body = V1Error),
+        (status = 503, description = "Compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation or Scala oracle timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn diff(State(state): State<ScriptState>, body: V1Json<DiffBody>) -> Response {
@@ -858,73 +907,94 @@ async fn diff_inner(state: &ScriptState, body: DiffBody) -> Result<DiffResponse,
         ));
     };
 
-    let tree = resolve_tree(
-        state,
-        body.ergo_tree.as_deref(),
-        body.source.as_deref(),
-        body.tree_version,
-        body.env.as_ref(),
-    )?;
-    let height = context_height(state, body.context.as_ref());
-    let self_box = self_box_from_ctx(body.context.as_ref(), height)?;
-    let limit = state.config.effective_cost_limit(body.max_cost);
+    let compute = state.compute.clone();
+    let work_state = state.clone();
+    let (rust, tree_bytes, height) = compute
+        .run(move || {
+            let tree = resolve_tree(
+                &work_state,
+                body.ergo_tree.as_deref(),
+                body.source.as_deref(),
+                body.tree_version,
+                body.env.as_ref(),
+            )?;
+            let height = context_height(&work_state, body.context.as_ref());
+            let self_box = self_box_from_ctx(body.context.as_ref(), height)?;
+            let limit = work_state.config.effective_cost_limit(body.max_cost);
 
-    // Rust side: our verdict + reduced proposition + cost.
-    let rust = match bounded_reduce(&tree, height, self_box.as_ref(), limit) {
-        Ok(out) => DiffSide {
-            verdict: "accept",
-            reduced_to: Some(render_sigma_boolean(&out.reduced_to)),
-            cost: Some(out.block_cost),
-            error: None,
-        },
-        // A resource refusal (this request's cost/depth bound) is NOT a
-        // semantic verdict — diffing it against the oracle would fabricate
-        // agreement/divergence. Answer the typed refusal (`cost_limit` /
-        // `too_deep`) exactly like execute/cost/simulate.
-        Err(e)
-            if matches!(
-                e,
-                EvalError::CostExceeded(_)
-                    | EvalError::JitCostOverflow(_)
-                    | EvalError::DepthLimitExceeded(_)
-            ) =>
-        {
-            return Err(eval_error_response(&e))
-        }
-        Err(e) => DiffSide {
-            verdict: "reject",
-            reduced_to: None,
-            cost: None,
-            error: Some(e.to_string()),
-        },
-    };
+            // Rust side: our verdict + reduced proposition + cost.
+            let rust = match bounded_reduce(&tree, height, self_box.as_ref(), limit) {
+                Ok(out) => DiffSide {
+                    verdict: "accept",
+                    reduced_to: Some(render_sigma_boolean(&out.reduced_to)),
+                    cost: Some(out.block_cost),
+                    error: None,
+                },
+                // A resource refusal (this request's cost/depth bound) is NOT a
+                // semantic verdict — diffing it against the oracle would fabricate
+                // agreement/divergence. Answer the typed refusal (`cost_limit` /
+                // `too_deep`) exactly like execute/cost/simulate.
+                Err(e)
+                    if matches!(
+                        e,
+                        EvalError::CostExceeded(_)
+                            | EvalError::JitCostOverflow(_)
+                            | EvalError::DepthLimitExceeded(_)
+                    ) =>
+                {
+                    return Err(eval_error_response(&e))
+                }
+                Err(e) => DiffSide {
+                    verdict: "reject",
+                    reduced_to: None,
+                    cost: None,
+                    error: Some(e.to_string()),
+                },
+            };
 
-    // Scala side via the configured oracle transport.
-    let tree_bytes = {
-        let mut w = ergo_primitives::writer::VlqWriter::new();
-        ergo_ser::ergo_tree::write_ergo_tree(&mut w, &tree).map_err(|e| {
-            err(
-                Reason::InvalidErgoTree,
-                "the tree could not be re-serialized for the oracle",
-                e.to_string(),
-            )
-        })?;
-        w.result()
-    };
-    let scala = match oracle.reduce_tree(&tree_bytes, height).await {
-        Ok(v) => DiffSide {
-            verdict: if v.accept { "accept" } else { "reject" },
-            reduced_to: v.reduced_to,
-            cost: v.cost,
-            error: None,
-        },
-        Err(detail) => {
+            // Scala side via the configured oracle transport.
+            let tree_bytes = {
+                let mut w = ergo_primitives::writer::VlqWriter::new();
+                ergo_ser::ergo_tree::write_ergo_tree(&mut w, &tree).map_err(|e| {
+                    err(
+                        Reason::InvalidErgoTree,
+                        "the tree could not be re-serialized for the oracle",
+                        e.to_string(),
+                    )
+                })?;
+                w.result()
+            };
+            Ok::<_, Box<Response>>((rust, tree_bytes, height))
+        })
+        .await??;
+    let scala = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        oracle.reduce_tree(&tree_bytes, height),
+    )
+    .await
+    {
+        Err(_) => {
             return Err(err(
-                Reason::OracleUnavailable,
-                "the Scala reference oracle failed to respond",
-                detail,
+                Reason::Timeout,
+                "the Scala reference oracle timed out",
+                "retry the request shortly",
             ))
         }
+        Ok(result) => match result {
+            Ok(v) => DiffSide {
+                verdict: if v.accept { "accept" } else { "reject" },
+                reduced_to: v.reduced_to,
+                cost: v.cost,
+                error: None,
+            },
+            Err(detail) => {
+                return Err(err(
+                    Reason::OracleUnavailable,
+                    "the Scala reference oracle failed to respond",
+                    detail,
+                ))
+            }
+        },
     };
 
     let divergence = if rust.verdict != scala.verdict {

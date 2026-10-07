@@ -4,6 +4,7 @@
 //! via WalletReader::hydrate_from_reader on reopen, not just
 //! re-derive in memory.
 
+use redb::ReadableDatabase;
 use redb::{ReadableTable, ReadableTableMetadata};
 
 use super::wallet_e2e_helpers::TestWallet;

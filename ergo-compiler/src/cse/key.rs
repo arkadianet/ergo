@@ -7,7 +7,7 @@ use ergo_ser::sigma_value::SigmaValue;
 // ----- symbol identity -----
 
 /// A build-time symbol identity. Assigned densely in interning (evaluation)
-/// order; the numeric value doubles as the index into [`super::Interner::syms`].
+/// order; the numeric value doubles as the index into `super::Interner::syms`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SymId(pub u32);
 
@@ -55,7 +55,7 @@ pub(crate) struct ScopeTable {
 #[derive(Debug)]
 pub(crate) enum Node {
     /// A constant leaf — its wire type + value, re-emitted inline at every use
-    /// (constants never hoist).
+    /// unless its constant category is eligible for the CSE hoist gate.
     Const(SigmaType, SigmaValue),
     /// A whole-tree `Unparsed` body kept verbatim.
     Unparsed(ergo_ser::opcode::UnparsedErgoTree),

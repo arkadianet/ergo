@@ -161,7 +161,8 @@ const EIP37_CURATED_HEIGHTS: [u32; 10] = [
 ///
 /// 1. Fixture integrity — every row's `id` is `blake2b256` of its full
 ///    serialized bytes and the parse round-trips byte-for-byte, so the
-///    corpus is provably the real mainnet headers (not substituted data).
+///    corpus is byte-consistent with its captured identifiers. This alone
+///    does not authenticate mainnet chain membership.
 /// 2. Retarget oracle — `verify_header_difficulty` is called directly with the
 ///    EXTERNALLY pinned 8-epoch lookback window (the `EIP37_CURATED_HEIGHTS`
 ///    const, NOT `previous_heights_for_recalculation`, the code under test), so
@@ -178,8 +179,8 @@ fn difficulty_curated_window_eip37() {
     let path = "../test-vectors/mainnet/headers_eip37_curated.json";
     let corpus = load_corpus(path);
 
-    // (1) Fixture integrity: anchor each row to mainnet truth independently
-    // of the difficulty math — id == blake2b256(bytes) and an exact byte
+    // (1) Fixture integrity independently of the difficulty math:
+    // id == blake2b256(bytes) and an exact byte
     // round-trip (full, no-trailing-byte consumption on parse + re-emit).
     let raw = std::fs::read_to_string(path).unwrap();
     let vectors: Vec<HeaderVector> = serde_json::from_str(&raw).unwrap();
@@ -188,7 +189,7 @@ fn difficulty_curated_window_eip37() {
         assert_eq!(
             hex::encode(blake2b256(&bytes)),
             v.id,
-            "fixture row at height {} is not a real mainnet header (id != blake2b256(bytes))",
+            "fixture row at height {} has inconsistent bytes/ID (id != blake2b256(bytes))",
             v.height,
         );
         // `serialize_header` returns the canonical (bytes, header_id) pair.
@@ -204,10 +205,9 @@ fn difficulty_curated_window_eip37() {
             "serialize_header id disagrees with the fixture id at height {}",
             v.height,
         );
-        // Unfabricatable mainnet anchor: each fixture header must carry a valid
-        // Autolykos PoW solution. `id == blake2b256(bytes)` alone only proves a
-        // self-consistent {id, bytes} pair; valid PoW proves a real mined
-        // mainnet header, not synthesized data.
+        // Check the captured solution against its declared work target.
+        // Valid PoW and a consistent ID do not authenticate membership in
+        // the canonical mainnet chain; that relies on external provenance.
         verify_pow_solution(&corpus[&v.height])
             .unwrap_or_else(|e| panic!("fixture header at height {} fails PoW: {e}", v.height));
         // Provenance, matching the curated v2 fixture's discipline: source

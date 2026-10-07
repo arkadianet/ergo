@@ -1,34 +1,8 @@
-//! Mode 3 (pruned node) activation lifecycle through `run_inner`.
-//!
-//! Covers the Gate 1 sequence a real from-scratch pruned node walks:
-//!
-//! 1. the headers-synced flip seeds the prune sentinel at the
-//!    Scala-parity value (`FullBlockPruningProcessor.updateBestFullBlock`,
-//!    reached from `ToDownloadProcessor.toDownload` — the boot arm here,
-//!    where `recover_coordinator` flips the latch off the best header's
-//!    freshness),
-//! 2. an archive node under the same fixture arms nothing,
-//! 3. restart resumes with the sentinel intact and does not re-seed it,
-//! 4. a rollback below the sentinel is refused.
-//!
-//! The fixture is a synthetic 1200-header chain with fresh timestamps
-//! seeded directly into the store, which is what lets the flip happen
-//! with no peers: `SyncState::check_headers_synced` is a pure function
-//! of the best header's timestamp. `blocks_to_keep = 250` is the
-//! smallest legal pruned window (`keep_versions + SAFETY_MARGIN`), so
-//! the expected sentinel is the Scala oracle vector
-//! `flip_h1200_keep250_mainnet` in
-//! `test-vectors/mode3-pruning/runtime-vectors.json`.
-//!
-//! The download-side consequences of the seeded sentinel are pinned
-//! next to the code that implements them: the window floor and the
-//! sub-sentinel filter in `ergo-p2p/src/sync.rs`'s `blocks_to_download`
-//! tests, and the composed request / receive / storage gates against a
-//! real coordinator in `ergo-sync/tests/prune_e2e_activation.rs`.
-//! Eviction as blocks apply is pinned by
-//! `ergo-state/tests/prune_eviction_sync_oracle.rs`; this file's
-//! fixture applies no blocks, because a from-scratch pruned node has
-//! none at the flip — that is the state under test.
+//! Fresh pruned UTXO nodes replay from their applied genesis state. Header
+//! synchronization does not supply the parent state needed for a skipped prefix.
+//! This existing synthetic header-only fixture checks fresh boot, archive boot,
+//! restart and repair of the older header-only retention floor. It does not
+//! validate the synthetic headers as a canonical chain or install a snapshot.
 
 use super::common;
 
@@ -47,11 +21,8 @@ const HEADER_TIP: u32 = 1200;
 /// Smallest legal pruned window: the config/runtime floor is
 /// `keep_versions (200, = ROLLBACK_WINDOW) + SAFETY_MARGIN (50)`.
 const BLOCKS_TO_KEEP: i32 = 250;
-/// Scala oracle output for `updateBestFullBlock` at
-/// `(current_min = 1, header_height = 1200, blocksToKeep = 250,
-/// votingLength = 1024)` — vector `flip_h1200_keep250_mainnet`.
-/// `1200 - 250 + 1 = 951`, below `votingLength`, so no epoch snap.
-const EXPECTED_SENTINEL: u32 = 951;
+/// Header-only floor written by the older Mode3 activation policy.
+const LEGACY_HEADER_FLOOR: u32 = 951;
 
 fn synth_header(height: u32, parent: [u8; 32], timestamp_ms: u64) -> Header {
     let root = |seed: u8| {
@@ -147,111 +118,65 @@ fn read_sentinel(data_dir: &std::path::Path) -> Option<u32> {
         .expect("read sentinel")
 }
 
-// ----- happy path -----
-
 #[tokio::test]
-async fn mode3_fresh_node_seeds_the_sentinel_at_the_headers_synced_flip() {
+async fn mode3_fresh_node_keeps_genesis_download_floor_after_header_sync() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().join("node");
     seed_header_chain(&data_dir);
-
     let handle = ergo_node::run_inner(pruned_config(data_dir.clone()))
         .await
-        .expect("Mode 3 with blocks_to_keep = 250 is a live runtime path");
+        .expect("pruned boot");
     handle.shutdown().await.expect("clean shutdown");
-
     assert_eq!(
         read_sentinel(&data_dir),
-        Some(EXPECTED_SENTINEL),
-        "the flip must seed the sentinel at the Scala oracle value; a \
-         `None` here means the node would IBD from genesis and only \
-         start evicting afterwards (the pre-Gate-1 behaviour)",
+        None,
+        "headers cannot replace unapplied UTXO history"
     );
 }
 
 #[tokio::test]
 async fn mode3_archive_node_never_seeds_a_sentinel_at_the_flip() {
-    // Same fixture, `blocks_to_keep = -1`. The flip still happens (the
-    // header chain is equally fresh) but an archive node keeps every
-    // block, so the sentinel row must stay absent. Guards the
-    // `blocks_to_keep <= 0` refusal at the activation seam.
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().join("node");
     seed_header_chain(&data_dir);
-
     let handle = ergo_node::run_inner(common::make_test_config(data_dir.clone()))
         .await
         .expect("archive boot");
     handle.shutdown().await.expect("clean shutdown");
-
-    assert_eq!(
-        read_sentinel(&data_dir),
-        None,
-        "an archive node must never arm the prune gates",
-    );
+    assert_eq!(read_sentinel(&data_dir), None);
 }
 
 #[tokio::test]
-async fn mode3_seeded_sentinel_survives_restart_and_is_not_re_seeded() {
-    // The seed is one-shot: a present sentinel row is one of the
-    // refusal conditions, so the second boot must observe the same
-    // value even though the header tip (and therefore the candidate)
-    // has not moved. Without the latch, a growing header chain would
-    // walk the download floor forward under a node that has applied
-    // nothing.
+async fn mode3_header_only_restart_keeps_genesis_download_floor() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().join("node");
     seed_header_chain(&data_dir);
-
-    let handle = ergo_node::run_inner(pruned_config(data_dir.clone()))
-        .await
-        .expect("first boot");
-    handle.shutdown().await.expect("clean shutdown");
-    let after_first = read_sentinel(&data_dir);
-    assert_eq!(after_first, Some(EXPECTED_SENTINEL));
-
-    let handle = ergo_node::run_inner(pruned_config(data_dir.clone()))
-        .await
-        .expect("restart");
-    handle.shutdown().await.expect("clean shutdown");
-
-    assert_eq!(
-        read_sentinel(&data_dir),
-        after_first,
-        "restart must resume with the sentinel intact",
-    );
+    for _ in 0..2 {
+        let handle = ergo_node::run_inner(pruned_config(data_dir.clone()))
+            .await
+            .expect("pruned boot/restart");
+        handle.shutdown().await.expect("clean shutdown");
+        assert_eq!(read_sentinel(&data_dir), None);
+    }
 }
 
-// ----- error paths -----
-
 #[tokio::test]
-async fn mode3_rollback_below_the_seeded_sentinel_is_refused() {
-    // The sections below the sentinel are the ones a pruned node will
-    // never hold, so a reorg whose wallet replay would need them must
-    // be declined rather than half-applied. The guard keys off the
-    // persisted sentinel, so seeding it at the flip arms this refusal
-    // from the node's first tick — before any block has been applied.
+async fn mode3_repairs_an_older_unapplied_header_floor() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().join("node");
     seed_header_chain(&data_dir);
-
+    {
+        let store = StateStore::open(&data_dir.join("state.redb")).expect("open store");
+        store
+            .write_minimal_full_block_height(LEGACY_HEADER_FLOOR)
+            .unwrap();
+    }
     let handle = ergo_node::run_inner(pruned_config(data_dir.clone()))
         .await
-        .expect("boot");
+        .expect("legacy floor recovery");
     handle.shutdown().await.expect("clean shutdown");
-    assert_eq!(read_sentinel(&data_dir), Some(EXPECTED_SENTINEL));
-
-    let mut store = StateStore::open(&data_dir.join("state.redb")).expect("reopen store");
-    // `target_height + 1 < sentinel` is the refusal boundary: replay
-    // starts at `target_height + 1`, which must still be retained.
-    let err = store
-        .rollback_to(EXPECTED_SENTINEL - 2, None, None)
-        .expect_err("a sub-sentinel rollback target must be refused");
-    assert!(
-        matches!(
-            err,
-            ergo_state::store::StateError::RollbackBelowPruningSentinel { .. }
-        ),
-        "expected RollbackBelowPruningSentinel, got {err:?}",
-    );
+    assert_eq!(read_sentinel(&data_dir), Some(1));
+    let store = StateStore::open(&data_dir.join("state.redb")).expect("open repaired store");
+    assert_eq!(store.chain_state_meta().best_full_block_height, 0);
+    assert_eq!(store.chain_state_meta().best_header_height, HEADER_TIP);
 }

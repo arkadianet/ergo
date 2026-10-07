@@ -34,8 +34,14 @@ pub(super) fn write_bigint_value(
 
 pub(super) fn read_bigint_value(r: &mut VlqReader) -> Result<num_bigint::BigInt, ReadError> {
     let len = r.get_u16()? as usize;
+    // Scala builds the value with `new BigInteger(bytes)`, which throws
+    // `NumberFormatException` on an empty array. That is not a soft-fork
+    // `ValidationException`. The unsigned reader uses `new BigInteger(1,
+    // bytes)`, which accepts an empty magnitude as zero.
     if len == 0 {
-        return Ok(num_bigint::BigInt::from(0));
+        return Err(ReadError::HardReject(
+            "SBigInt value has zero length (Scala NumberFormatException)".into(),
+        ));
     }
     // Mirrors `read_unsigned_bigint_value`'s gate at the same const.
     // Scala's `CoreDataSerializer.deserializeBigInt` rejects `len > 32`.

@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 
 use ergo_primitives::digest::ModifierId;
 use ergo_ser::header::Header;
-use ergo_validation::block::EXTENSION_FIELD_VALUE_MAX_SIZE;
+use ergo_validation::block::{EXTENSION_FIELD_VALUE_MAX_SIZE, MAX_EXTENSION_SIZE};
 use ergo_validation::popow::algos::{pack_interlinks, update_interlinks};
 
 use crate::error::MiningError;
@@ -95,7 +95,8 @@ pub fn validate_custom_extension_fields(fields: &[([u8; 2], Vec<u8>)]) -> Result
 /// [`validate_custom_extension_fields`]) appended after the interlinks and any
 /// epoch fields — the general merge-mining / commitment hook. They are
 /// re-validated here (so the builder is self-defending) and the assembled list
-/// gets a final duplicate-key sweep (rule 405) across every field.
+/// gets a final duplicate-key sweep (rule 405) and serialized section-size
+/// guard (rule 400), including the header ID and field-count prefix.
 pub fn build_candidate_extension_fields(
     parent_header: &Header,
     parent_interlinks: &[ModifierId],
@@ -136,7 +137,43 @@ pub fn build_candidate_extension_fields(
             )));
         }
     }
+    validate_candidate_extension_size(&fields)?;
     Ok(fields)
+}
+
+/// Check the complete extension section's wire-size cap using the canonical
+/// serializer. A placeholder header ID has the same fixed 32-byte width as
+/// the final ID. Applies to genesis and ordinary candidates alike.
+pub fn validate_candidate_extension_size(fields: &ExtensionFields) -> Result<(), MiningError> {
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::extension::{write_extension, Extension, ExtensionField};
+    let fields = fields
+        .iter()
+        .map(|(key, value)| {
+            let key = key.as_slice().try_into().map_err(|_| {
+                MiningError::InvalidConfig(
+                    "candidate extension key must have exactly two bytes".into(),
+                )
+            })?;
+            Ok(ExtensionField {
+                key,
+                value: value.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, MiningError>>()?;
+    let extension = Extension {
+        header_id: ModifierId::from_bytes([0; 32]),
+        fields,
+    };
+    let mut writer = VlqWriter::new();
+    write_extension(&mut writer, &extension)?;
+    let size = writer.result().len();
+    if size > MAX_EXTENSION_SIZE {
+        return Err(MiningError::InvalidConfig(format!(
+            "candidate extension section is {size} bytes > {MAX_EXTENSION_SIZE} (rule 400)"
+        )));
+    }
+    Ok(())
 }
 
 /// Extension-section field list as canonical wire pairs: `(key_bytes,
@@ -146,8 +183,7 @@ pub type ExtensionFields = Vec<(Vec<u8>, Vec<u8>)>;
 
 /// Returns `true` if `height` is a voting-epoch boundary on mainnet
 /// (`height % MAINNET_VOTING_LENGTH == 0`). Mining at such a height
-/// requires the deferred epoch-boundary encoding; non-boundary heights
-/// are fully supported.
+/// requires the recomputed parameter/settings fields supplied by the caller.
 pub fn is_epoch_boundary_mainnet(height: u32) -> bool {
     height.is_multiple_of(MAINNET_VOTING_LENGTH)
 }
@@ -245,6 +281,44 @@ mod tests {
     }
 
     #[test]
+    fn complete_extension_size_accepts_exact_cap_and_rejects_one_byte_more() {
+        // 32-byte header + two-byte count + 488 * (2-byte key + length + 64)
+        // + one field of 35 bytes = 32768. Every field is individually legal.
+        let mut fields: ExtensionFields = (0..488u16)
+            .map(|id| (vec![3 + (id >> 8) as u8, id as u8], vec![0; 64]))
+            .collect();
+        fields.push((vec![5, 0], vec![0; 35]));
+        validate_candidate_extension_size(&fields).unwrap();
+        fields.last_mut().unwrap().1.push(0);
+        let err = validate_candidate_extension_size(&fields).unwrap_err();
+        assert!(
+            matches!(err, MiningError::InvalidConfig(ref message) if message.contains("32769") && message.contains("rule 400"))
+        );
+    }
+
+    #[test]
+    fn assembled_interlinks_and_custom_fields_must_fit_together() {
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../test-vectors/mainnet/headers_1_10.json"))
+                .unwrap();
+        let bytes = hex::decode(rows[0]["bytes"].as_str().unwrap()).unwrap();
+        let parent =
+            ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
+                .unwrap();
+        let mut custom: Vec<_> = (0..488u16)
+            .map(|id| ([3 + (id >> 8) as u8, id as u8], vec![0; 64]))
+            .collect();
+        custom.push(([5, 0], vec![0; 35]));
+        validate_custom_extension_fields(&custom).unwrap();
+        let err =
+            build_candidate_extension_fields(&parent, &[], 2, MAINNET_VOTING_LENGTH, &[], &custom)
+                .unwrap_err();
+        assert!(
+            matches!(err, MiningError::InvalidConfig(ref message) if message.contains("rule 400"))
+        );
+    }
+
+    #[test]
     fn build_rejects_a_custom_field_colliding_with_interlinks() {
         // A custom field is namespace-guarded, but prove the build-time
         // rule-405 sweep also catches a collision if one slipped through:
@@ -308,14 +382,14 @@ mod tests {
 
     /// Build a minimal synthetic parent header with the given height,
     /// version=2, all-zero hashes. Sufficient for `update_interlinks`
-    /// (which only reads `version` via `max_level_of` and `parent_id`
-    /// via `is_genesis`).
+    /// (which only reads `version` via `max_level_of` and height via
+    /// `is_genesis`).
     fn synth_header(height: u32) -> Header {
         use ergo_primitives::digest::{ADDigest, Digest32};
         use ergo_ser::autolykos::AutolykosSolution;
         Header {
             version: 2,
-            parent_id: Digest32::from_bytes([0x42u8; 32]).into(), // non-zero = not genesis
+            parent_id: Digest32::from_bytes([0x42u8; 32]).into(), // height is not 1
             ad_proofs_root: Digest32::from_bytes([0u8; 32]),
             transactions_root: Digest32::from_bytes([0u8; 32]),
             state_root: ADDigest::from_bytes([0u8; 33]),

@@ -1,0 +1,30 @@
+{
+  "reference_ergo_tag": "v6.0.5",
+  "reference_ergo_revision": "5528ef569a41ebccbc8658212e6ee3c97d990b96",
+  "dependency_source_url": "https://raw.githubusercontent.com/ergoplatform/ergo/5528ef569a41ebccbc8658212e6ee3c97d990b96/avldb/build.sbt",
+  "scrypto": "3.1.1",
+  "scala": "2.12.21",
+  "jars": {
+    "scala-library-2.12.21.jar": "e2f4040c95cc4dd1cfeaae38bdde596e4b36933632451efa7d8564c6a359510c",
+    "scala-compiler-2.12.21.jar": "fb1bb6b0d7e8e922f03b5294ef0af23b9d2bd1cde6819ecb820c57210db4548e",
+    "scala-reflect-2.12.21.jar": "8b91a08ba69a0564689793e732f06768d0914ec9e90fa8c3d1b55c5bf4600c14",
+    "scrypto_2.12-3.1.1.jar": "a9b44951038cd4049b997cebfb24c64b3b664a2427ac550be09030ad4119830a",
+    "scorex-util_2.12-0.2.2.jar": "4e3b0422a747b02fc83a7fd7659fc4453abc813c7b95ab858d13f63832bdd80e",
+    "supertagged_2.12-2.0-RC2.jar": "a14e9782f09d747323dacac7adcdefa9aa105012c5c42017971868c5c663a7b7",
+    "bcprov-jdk15to18-1.85.1.jar": "ffd4186dab3cb1663572f493814c4ecdfdc6c950783b566072907c6d32dc10bc"
+  },
+  "fixtures_sha256": "6b27f584369b2b25492b2d4334c810bf80152779de2be518a91296288e377518",
+  "historical_fixtures_sha256": "b64354f84c3e1ccf3842559a5bbca59c99432e0d85bab2f373af428673d7e48f",
+  "cases": 10,
+  "historical_cases_byte_identical": 7,
+  "duplicate_leaf_cases": 3,
+  "scope": "Finite official-library construction/root/proof-wire observations, not a complete reference node, chain authentication, or proof of all cross-version behavior.",
+  "dependency_source_sha256": "1c54bcd5ac2f7811da510794085dca97ce567ffe184b948b16ecb41299d9ae2a",
+  "helper_sha256": "f5977a5e1744e8ef919379068bbfff5d6f341779f371bcf6ff4e3bb79f5d9847",
+  "capture_exit_codes": {
+    "compile": 0,
+    "run": 0
+  },
+  "capture_stdout_sha256": "6b27f584369b2b25492b2d4334c810bf80152779de2be518a91296288e377518",
+  "java_version": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)\n"
+}

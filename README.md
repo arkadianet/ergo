@@ -25,6 +25,7 @@ Repository: <https://github.com/arkadianet/ergo>
   watch-only wallet daemon: descriptor format, no-secret boundary, read-only
   API, socket permissions, and confirmed-only balances.
 - [`docs/operating.md`](./docs/operating.md) — running, modes, observability.
+- [`docs/releasing.md`](./docs/releasing.md) — exact-tag validation and tested binary archives.
 - [`docs/compatibility.md`](./docs/compatibility.md) — consensus-compatibility and versioning policy.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`SECURITY.md`](./SECURITY.md) · [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
 
@@ -41,7 +42,7 @@ What ships today, against the Scala reference node's mode taxonomy:
 |---|---|---|
 | Mode 1 — Full archive | yes | yes |
 | Mode 2 — UTXO snapshot bootstrap (consume + serve) | yes | yes |
-| Mode 3 — Pruned (suffix window) | yes | yes (functional; end-to-end activation-parity tests are the remaining `done` gate) |
+| Mode 3 — Pruned (suffix window) | yes | yes (functional; fresh UTXO stores replay from genesis before pruning; complete activation and retention campaigns remain open) |
 | Mode 4 — Pruned + UTXO bootstrap | yes | yes for the composed lifecycle: a real UTXO-snapshot install and a NiPoPoW proof compose max-style on the prune sentinel and reboot cleanly (proof-first composition succeeds; snapshot-first rejects the later proof and preserves the installed state; `ergo-node/tests/it/mode4_acceptance.rs`). End-to-end deferred snapshot installation through real header catch-up and a live multi-peer soak remain outstanding |
 | Mode 5 — Digest verifier (AD-proof tx validation) | yes | yes (boots and syncs headers from peers; external ADProof-corpus parity beyond the pinned mainnet window and reorg-abort re-anchor remain) |
 | Mode 6 — Headers-only | yes | yes |
@@ -59,10 +60,11 @@ Specifics operators should read before deploying:
   "bootstrap complete" on mainnet. The Mode 2 trust anchor is provisional —
   cross-check the installed UTXO root against a known-good reference manifest
   before treating it as authoritative.
-- **REST API authentication** applies only to `/wallet/*` and `/node/shutdown`
-  (Blake2b-256 of the `api_key` header vs `[api.security].api_key_hash`).
-  Read/submit routes stay unauthenticated by design — front the public surface
-  with a reverse proxy if exposing off loopback.
+- **REST API authentication** gates privileged routes, including `POST /blocks`,
+  wallet, scan, mining and operator controls (Blake2b-256 of the `api_key` header
+  vs `[api.security].api_key_hash`). Public reads and transaction submission
+  remain unauthenticated — front the public surface with a reverse proxy if
+  exposing off loopback. See the [route inventory](docs/configuration.md#security-notes-for-the-api).
 
 Configuration enforces four of Scala's five `consistentSettings` rules at load
 time (R1, R2, R3, R5); R4 has no analogue because the node exposes no
@@ -92,7 +94,7 @@ time (R1, R2, R3, R5); R4 has no analogue because the node exposes no
 
 ## Quickstart
 
-The workspace pins Rust 1.95.0 via [`rust-toolchain.toml`](./rust-toolchain.toml)
+The workspace pins Rust 1.99.0 via [`rust-toolchain.toml`](./rust-toolchain.toml)
 (`rustup` installs it on first build).
 
 ```bash
@@ -106,6 +108,9 @@ cargo build --release -p ergo-node -p ergo-wallet -p ergo-walletd
 # CLI help.
 ./target/release/ergo-node --help
 ```
+
+The extraction milestones and remaining work are tracked in
+[wallet extraction](docs/wallet-extraction.md).
 
 The wallet also ships as a standalone **watch-only daemon**
 (`ergo-walletd`). It runs beside a node, keeps its own wallet database, syncs
@@ -128,28 +133,22 @@ runs resume from the persisted tip. Sync is bounded on both axes: `sync_batch`
 is how many blocks a pass may *apply*, `blocks_page` (default 1) how many it may
 *request* per `blocks-since` call, because the wire form hex-encodes every
 output box and a single response is capped at 8 MiB. The descriptor file is the
-daemon's only input: it lists public keys, so the `/scan/*` registry the backing
-store also implements is always empty here and `/api/v1/scans` returns `[]` —
-scan registration stays a node capability. The node also serves a
+daemon's only input: it lists public keys. The API can read persisted scan
+registrations, but cannot register or mutate scans; a new descriptor-only
+store begins with an empty registry. The node also serves a
 dependency-free
 operator web dashboard at the REST bind address (`http://127.0.0.1:9099/` by
 default) — a single-page app with Overview (live charts + event feed),
 Explorer, Peers, Mempool, Mining, Voting, and Wallet sections — plus Scala API
-docs at `/swagger` and RUST API docs at `/swagger/native`; wallet actions
-require the API key. For a ~20-minute clean-DB boot, enable Mode 2 + NiPoPoW.
-
-What the daemon checks and what it still takes on trust are written up in
-[`docs/codemap/ergo-walletd.md`](./docs/codemap/ergo-walletd.md#what-the-daemon-verifies):
-
-- every block and snapshot header arrives with its raw header, and the daemon
-  recomputes each id from those bytes and reads height and parent out of them;
-  ErgoBox bytes are parsed and fully re-derived. Transactions arrive as their
-  wallet-relevant parts, so they are not bound to the header's transactions
-  root, and proof-of-work is not checked;
-- one known deviation: `/balance` and `/status` are values the daemon computes
-  from blocks it has applied — confirmed-only, with `available == confirmed`,
-  literal-zero `reserved`/`immature`, and `null` `unconfirmed`/`reemission` —
-  so they are **not** byte-identical to an embedded wallet's embedded values.
+docs at `/swagger` and RUST API docs at `/swagger/native`. Dashboard and public
+REST work without a key. Wallet, mining controls, voting writes and admin routes
+stay locked until you set `[api.security] api_key_hash` and restart; see
+[API configuration](docs/configuration.md#apisecurity) for key generation. For a ~20-minute clean-DB boot, enable Mode 2 + NiPoPoW.
+The Peers page includes connection, traffic, sync and handshake details by default.
+Optional DB-IP database downloads and reverse DNS are both off by default;
+installed IP databases are queried locally. See
+[peer details configuration](docs/configuration.md#apipeer_details) to opt in or
+use your own offline databases.
 The full build / test / run / configuration surface — profiles, feature-gated
 tests, the config reference, observability — is in
 [`docs/overview.md`](./docs/overview.md).

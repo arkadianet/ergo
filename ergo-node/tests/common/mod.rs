@@ -54,12 +54,14 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         sync_interval: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL,
         sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
         cache_bytes: None,
+        redb_cache_budgets: Default::default(),
         script_validation_checkpoint: chain_spec.bootstrap.checkpoint,
         // No header-level anchor in tests: Scala's default is
         // `checkpoint = null` and there is no network default.
         header_checkpoint: None,
-        genesis_id: chain_spec.genesis.header_id,
+        genesis_id: None,
         api_bind: Some("127.0.0.1:0".parse().unwrap()),
+        peer_details: Default::default(),
         // Scala-parity Blake2b256("hello") test oracle. The integration
         // harness does not exercise the auth gate but `api_bind = Some`
         // implies a configured hash per the load-time invariant; we
@@ -73,6 +75,8 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
             "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf".into(),
         ),
         api_allowed_hosts: Vec::new(),
+        api_local_reverse_proxy: false,
+        api_script: Default::default(),
         allow_direct_block_submit: false,
         devnet_max_block_cost: None,
         mempool_config: MempoolConfig::default(),

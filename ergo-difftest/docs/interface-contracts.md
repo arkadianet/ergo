@@ -1,9 +1,17 @@
 # Fuzz-differential harness — interface contracts
 
 Authoritative spec for the continuous fuzz-differential harness (Rust Ergo node
-vs the Scala reference at `reference/ergo-core` v6.0.2). Every slice builds
+vs the current pinned Scala runtime 6.0.6). Every slice builds
 against the contracts here. Changing a contract is a lead-engineer decision, not
 a slice-local one.
+
+The ground-truth table below preserves the July 2026 environment; it is
+historical attribution, not present execution evidence. D1 now describes the
+current pinned-nightly workflow.
+The workspace now pins stable Rust 1.99.0. CI also runs coverage-guided campaigns
+with the independently pinned nightly in `.github/ci-tools.toml`; see
+[`fuzz/README.md`](../fuzz/README.md) for the current setup. The hermetic runner
+remains the stable PR gate.
 
 Status legend: **[BUILT]** landed + gated · **[SPEC]** contract fixed, not yet
 built · **[DEFERRED]** out of this session's scope, contract reserved.
@@ -16,7 +24,7 @@ built · **[DEFERRED]** out of this session's scope, contract reserved.
 |------|-------|
 | Scala oracle | `scripts/jvm_serde_oracle/ErgoSerdeOracle.scala`, scala-cli, sigma-state 6.0.2 (Maven) + ergo-core 6.0.2 (publishLocal). **Live-confirmed** — answers `ACCEPT <canon-hex>` on a real tree. |
 | Oracle wire | long-lived process; stdin line `<surface> <hex>`; stdout one line `ACCEPT <hex>` / `ACCEPT` / `REJECT <ExcName>` / `ERR <msg>`; special `reduce`→`ACCEPT P:<sigmahex>\|<cost>`, `mc_root`→`SIGMA`/`WRAP`/`THROW`. |
-| Oracle surfaces (today) | ergo_tree, sigma_type, constant, ergo_box_candidate, transaction, header, reduce, mc_root |
+| Oracle surfaces (2026-07-03) | ergo_tree, sigma_type, constant, ergo_box_candidate, transaction, header, reduce, mc_root |
 | Archival node | Scala `:9053`, `fullHeight` ≈ 1,820,888, `appVersion` 6.0.2. Serves `GET /blocks/at/{h}` → `[headerId]`, `GET /blocks/{id}` → full block JSON (header, blockTransactions, extension, adProofs). **Block source AND per-tx/state oracle.** |
 | Rust dev nodes | `:9073/:9072` **down** → replay applies blocks **in-process**, not over REST. |
 | Rust block-apply | `ergo_validation::block::validate_full_block_parallel(checked_header, &block_txs, &extension, &ctx) -> Result<CheckedBlock,_>` then `ergo_state::StateStore::apply_block(&checked, voted_params, hook)`; root via `StateStore::root_digest() -> ADDigest` (33 bytes). test-helpers: `apply_block_checked_for_test(height, id, expected_digest, &[CheckedTransaction])`. |
@@ -34,7 +42,7 @@ built · **[DEFERRED]** out of this session's scope, contract reserved.
 Keep the process model (long-lived, one input line → one output line) and the
 `ACCEPT/REJECT/ERR` verdict grammar. Add two surfaces:
 
-### `validate <hex>`  [SPEC]
+### `validate <hex>`  [BUILT]
 Stateless transaction validity (the context-free half of Scala
 `ErgoTransaction.validateStateless`). Input `<hex>` = a serialized
 `ErgoLikeTransaction`.
@@ -44,10 +52,10 @@ Stateless transaction validity (the context-free half of Scala
 - `ERR <msg>` — oracle could not run (not a finding).
 
 Stateful validation (`validateStateful`, needs boxesToSpend + stateContext) is
-**[DEFERRED]** to the replay driver (§2), which already has full state — the
-sidecar stays context-free so it can be driven purely from wire bytes.
+**[DEFERRED]** as a general sidecar contract. The early-mainnet replay driver
+(§2) owns a narrower fixed context; the sidecar remains context-free.
 
-### `verify_avl <hex>`  [SPEC]
+### `verify_avl <hex>`  [BUILT]
 AVL+ batch-proof verification twin of `ergo_sigma::avl::AvlVerifier`. Input
 `<hex>` = a length-framed blob: `startingDigest(33) ‖ keyLen(u8) ‖
 valueLenOpt(1 tag + optional u8) ‖ proofLen(vlq) ‖ proof ‖ opCount(vlq) ‖
@@ -69,40 +77,52 @@ as `ERR`, never as `ACCEPT`.
 
 ## 2. Replay driver I/O contract  (Slice 1b)
 
-New binary `ergo-difftest --replay` (or `src/bin/replay.rs`). Purpose: make the
-immutable chain the oracle instead of committed block bytes.
+The standalone `replay` binary compares early-mainnet application with a supplied
+archival node. Its fixed context supports contiguous heights **1..=200** from
+genesis. Later epochs need historical voted parameters, soft-fork state and
+parent extensions; the driver refuses a larger window before network or state I/O.
 
-**Input:**
-```text
---from <height> --to <height>
---node <url>            default http://127.0.0.1:9053
---pins <path>          height→hash pin file (default ergo-difftest/docs/replay-pins.json)
---offline <dir>        replay from a committed hermetic seed dir instead of the node
+```sh
+cargo run --locked -p ergo-difftest --bin replay -- \
+  --from 1 --to 200 --node http://127.0.0.1:9053 \
+  --pins ergo-difftest/replay-pins.json
 ```
 
-**Per-height loop (streamed, one block at a time — never materialize the range):**
-1. `GET /blocks/at/{h}` → header id; **assert** it equals the pinned hash for `h`
-   (reproducibility without committing bytes). Mismatch ⇒ hard error (a reorg or
-   wrong node), never silently continue.
-2. `GET /blocks/{id}` → full block JSON → decode via `ergo-rest-json`.
-3. Apply to Rust in-process: `validate_full_block_parallel` → `apply_block`.
-   Forced full-block validation = `script_validation_checkpoint: None` (no skip).
-4. Diff:
-   - **state root**: Rust `root_digest()` vs the block header's `stateRoot`
-     (which the Scala node already committed) → `RootMismatch`.
-   - **per-tx validity**: each tx's Rust verdict vs the Scala node's (a tx in a
-     committed block is valid-by-definition; a Rust `REJECT` is a reject-valid
-     divergence) → `TxValidityMismatch`.
-5. On any diff: emit a `Divergence` (§4 schema) and continue (collect, don't
-   abort — one bad block shouldn't blind the rest of the range).
+`--from` must be 1; `--to` is required. The node and pins shown are defaults.
+There is no `--offline` option. Committed fixture unit tests exercise genesis
+application separately from live archival replay.
 
-**Output:** a JSONL stream of `Divergence` records + a final summary
-`{from, to, blocks, tx_total, divergences, pins_verified}`. Exit non-zero iff any
-divergence OR any pin mismatch.
+For each height the driver fetches its served header id and full-block JSON,
+decodes wire sections, and binds the requested height, served id, decoded header
+id and any pin's header id/state root. An inconsistent source is a hard integrity
+error. Genesis uses `apply_genesis`; later blocks use
+`validate_full_block_parallel` with full script validation and then `apply_block`.
+A pin contributes to `pins_verified` only after successful application and a
+matching computed state root, including height 1. The already checked genesis
+header seeds the parent window without a second node fetch.
 
-**Pin file** `replay-pins.json`: `{ "network":"mainnet", "node_version":"6.0.2",
-"heights": { "<h>": "<headerIdHex>" } }`. Generated once from `:9053`, committed.
-This is how a retired range stays reproducible with zero committed block bytes.
+Validation or root differences emit block-specific JSONL records with
+`triage: PENDING`. A failed block stops replay because later blocks require the
+state at that height. The final summary contains
+`{from,to,blocks,tx_total,divergences,pins_verified}`; divergence or fatal integrity
+failure returns nonzero.
+
+Pin entries have the actual shape:
+```json
+{"network":"mainnet", "node_version":"6.0.2", "heights": {
+  "1": {"headerId":"<32-byte hex>", "stateRoot":"<33-byte hex>"}
+}}
+```
+The historical reference version records capture attribution, not a current
+runtime guarantee. Later-height entries remain historical metadata even though
+the fixed context cannot replay them. Pins do not guarantee an archive remains
+available or authenticate every served section.
+
+This is a diagnostic comparison: genesis is unchecked, PoW is trusted from the
+supplied node, parent-extension validation is omitted, and downloaded AD proofs
+are not passed to state application. A green early replay is not a complete
+consensus/bootstrap proof. CI explicitly reports an unset `REPLAY_NODE_URL` as
+**not tested**. Source/unit-test validation does not claim live node execution.
 
 ---
 
@@ -160,12 +180,18 @@ campaign):
   "surface":   "ergo_tree",           // oracle surface or "block:<height>"
   "kind":      "AcceptReject" | "Canonical" | "Reduce" | "Cost"
              | "RootMismatch" | "TxValidity" | "Panic",
-  "input_hex": "…",                   // the MINIMIZED input (post-shrink)
+  "input_hex": "…",                   // minimized, or preserved original on failure
   "rust":      { "verdict": "Accept|Reject|Panic", "detail": "…" },
   "jvm":       { "verdict": "Accept|Reject",       "detail": "…" },
   "repro":     "difftest --repro <hex> --surface <s>",
   "seed":      { "seed": 7, "iter": 12345 } | null,
-  "minimized": true,
+  "minimized": true | false,
+  "processing_error": "…",             // optional; failed processing, harness exit 3
+  "execution": {                       // CLI oracle producer; optional for legacy records
+    "metadata": "runs/<sha256>.json", "metadata_sha256": "…",
+    "comparison_contract": { "…": "source/compiler/oracle/context identity" },
+    "authority_complete": true, "baseline_key": "…"
+  },
   "provenance":"structured-gen|oracle-mutation|replay:h<height>",
   "triage":    "PENDING"              // never auto-resolved; a human sets the verdict
 }
@@ -173,16 +199,35 @@ campaign):
 
 **Minimization:** greedy byte-ndelta shrink that preserves the divergence
 predicate (same `kind` + same rust/jvm verdict split). Auto-file writes the
-minimized record to `ergo-difftest/regressions/<surface>/<hash>.json` and appends
-a line to `ergo-difftest/regressions/QUEUE.md`. **The which-side-is-right call is
-never made by the harness** — `triage: PENDING` until a human edits it.
+minimized record to `<output>/<surface>/<full-record-sha256>.json` and regenerates
+the derived `<output>/QUEUE.md` under a filing lock. **The which-side-is-right call is
+never made by the harness** — new records stay `triage: PENDING`. Agreement
+in one dummy reduction context cannot automatically mark a difference benign.
+Any minimization failure retains the original input/verdicts and marks the
+campaign incomplete, even when fallback filing succeeds. Campaign records retain
+the first concrete generating iteration and distinguish structured generation
+from mutation.
+
+CLI oracle execution archives exact primary and verify-sidecar Scala sources
+and immutable journals under `<output>/runs/`. Build-time source/compiler
+metadata and the running binary hash are recorded separately. Actual JVM
+properties and resolved JAR hashes identify reference execution; unavailable
+identity is an incomplete run. Repro commands select the archived sources.
+The guard decodes records and validates full JSON, source archive and journal
+identities before considering a baseline. Its separate semantic key binds the
+input/verdicts to source/compiler/oracle/context authority, excluding volatile
+seed/iteration/path evidence. Legacy short input keys cannot mute new records.
+Output initialization preserves existing files; the default is a fresh
+`regressions-run.*` directory. These are diagnostic integrity guarantees, not
+signed build attestations or power-loss durability certification. Replay block
+reports use the replay driver's block-specific schema rather than `auto_file`.
 
 ---
 
 ## 5. Known-bug rediscovery suite  (Slice 5 — the anti-theater gate)
 
-Catalog: `ergo-difftest/docs/known-bug-catalog.md` (25 entries, fix
-locations verified). Machine-readable manifest:
+Catalog: `ergo-difftest/docs/known-bug-catalog.md`. Machine-readable manifest
+(currently 39 entries; entry presence is not executed rediscovery evidence):
 `ergo-difftest/known_bugs/manifest.toml`, one entry per re-injectable bug:
 
 ```toml
@@ -196,35 +241,39 @@ reinject = "replace `crate::jvm_utf8::decode(name_bytes)` with `String::from_utf
 budget_iters = 200000            # max iters the generator gets to rediscover it
 ```
 
-**Re-injection runner** (scratch branch, never committed): applies each
-`reinject` patch, runs the target generator/differential for `budget_iters`,
-asserts a divergence of the declared `class` on the declared `surface` is found,
-reverts. A generator that cannot rediscover its wire-reachable bugs is **rejected
-and re-dispatched** — no exceptions. Wire-unreachable bugs (state-dependent:
-1808895, deser-subst cost, adproofs, eip27) are gated by the **replay driver**,
-not the wire generators.
+**Existing trigger runner:** `scripts/reinject_gate.sh` takes owned source copies,
+checks clean exit 0, applies the catalog patch, and requires finding exit 1 with
+its declared class/surface marker. Locked build failures, missing binaries and
+unrelated nonzero detector exits fail the check. Source copies and release build
+directories are removed; build/detector logs are retained. A run with no
+executed pair is incomplete (exit 3), even when every skipped entry has an
+explanation. `--generated` is currently unsupported and fails usage 2 before
+any planned work; it does not certify generator rediscovery. Independent
+clean/patched detector execution and
+bounded generated rediscovery remain separate assurance obligations. Pure saved-
+log classification unit tests do not discharge either obligation. State-dependent
+catalog cases require their own correctly contextualized replay evidence.
 
 ---
 
 ## 6. Decisions (lead engineer)
 
-**D1 — cargo-fuzz vs hermetic runner.** No nightly here or in CI, and the repo is
-pinned to stable 1.95.0; a libFuzzer target would "run green" only by never
-running — the exact theater the mission forbids. **Decision:** the generators are
-a *library* (`src/gen/`). The primary consumer is the stable hermetic runner
-(`--structured`), which runs in CI and against the live oracle. A thin `fuzz/`
-cargo-fuzz target reuses the same library for coverage-guided runs **when nightly
-is available** (opt-in, not CI-gating). This delivers "cargo-fuzz targets per
-surface" without making the gate depend on a toolchain we don't have. Recorded as
-a "remaining risk / offline trade" in the final report.
+**D1 — cargo-fuzz vs hermetic runner.** Stable Rust 1.99.0 drives the PR
+hermetic runner. The detached workspace uses the exact nightly and cargo-fuzz
+versions in `.github/ci-tools.toml`; PR CI checks locked metadata, while scheduled
+and manual jobs build/run all 12 native targets with address sanitizer.
+`libfuzzer-sys` compiles bundled C++ libFuzzer sources. Nightly enables the unstable
+Rust sanitizer/SanitizerCoverage instrumentation; a missing stable library is
+not the reason. Generator and fixed-point coverage, native crash/artifact
+assurance, and independent JVM comparisons are different evidence obligations.
+Workflow wiring or a collector unit pass does not prove an executed campaign.
 
-**D2 — fixture retirement scope.** Deleting the 101 MB committed ranges breaks
-~10 CI-run tests. **Decision:** (1) harvest interesting structures from the ranges
-into the seed corpus FIRST; (2) rewire the affected tests to a *small* committed
-hermetic seed (genesis + a handful of known-gnarly heights: 836113, plus 1–200)
-that still runs offline in CI; (3) move full-range coverage to the streamed replay
-driver, pinned by height+hash (§2). Net: CI stays hermetic on a small seed; deep
-coverage is the streamed oracle, reproducible without committing bytes.
+**D2 — fixture retirement plan.** Committed full ranges still support hermetic
+Rust tests. Retirement requires small externally sourced seeds and replacement
+receipts before deletion. The current replay driver only models heights 1–200;
+deep epoch/context reconstruction and retained later incident pins do not provide
+replacement deep coverage. Do not retire fixtures based on a skipped workflow
+or an unimplemented historical plan.
 
 **D3 — consensus-truth.** Any divergence where the correct side is unclear (incl.
 "is this a JVM quirk to bug-for-bug match?") is escalated to the human via the
@@ -233,7 +282,10 @@ triage queue. No subagent, and not the lead engineer, silently resolves it or
 
 ---
 
-## 7. Slice sequencing + model ledger
+## 7. Historical slice sequencing + model ledger
+
+This table preserves the original planning allocation; it is not a current
+reviewer assignment or proof that a slice passed its acceptance gate.
 
 | Slice | What | Model | Why |
 |-------|------|-------|-----|

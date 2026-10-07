@@ -70,8 +70,8 @@
 //! explicit `[T]` REJECTs `InvalidArguments` (oracle-confirmed), mirroring
 //! `deserializeTo`/`fromBigEndianBytes`'s existing `global_deserialize` gate.
 //!
-//! **Scope (probe-bounded):** [`unlower_expr`] covers every `Const` shape
-//! [`crate::emit::map_const`] can produce in reverse (the `unmap_const`
+//! **Scope (probe-bounded):** `unlower_expr` covers every `Const` shape
+//! `crate::emit::map_const` can produce in reverse (the `unmap_const`
 //! lockstep, including `ConstPayload::ProveDlog` — a
 //! `map_const ∘ unmap_const = identity` test sweeps every `ConstPayload`
 //! variant to guard the pair against drift), plus the nine
@@ -90,7 +90,7 @@
 //! descriptive `TyperError` rather than silently mismapped: no source in the
 //! 79-contract corpus calls `deserialize` at all, and closing the general
 //! case would mean porting a second full opcode-IR↔TypedExpr symmetric
-//! mapping for a predef nothing exercises. See lib.rs § "Known M2
+//! mapping for a predef nothing exercises. See compiler-design-ledger.md § "Known M2
 //! deviations" (D-T2) for the full ledger.
 //!
 //! `fromBase16`/`bigInt` ARE fully implemented (oracle-verified against the JVM
@@ -754,7 +754,7 @@ fn execute_from_self_reg(
     const NUM_REGISTERS: i64 = 10;
     if !(0..NUM_REGISTERS).contains(&idx) {
         return match default {
-            // WithDefault: out-of-range returns the default value verbatim.
+            // SigmaPredef.scala:429 (v6.0.6): return the default node verbatim.
             Some(d) => Some(Ok(d)),
             // bare: out-of-range throws InvalidArguments (mapped to TyperException).
             None => Some(Err(typer_err(

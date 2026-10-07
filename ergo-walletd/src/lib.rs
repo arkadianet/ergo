@@ -110,7 +110,7 @@ pub async fn run(daemon: Daemon) -> Result<(), DaemonError> {
 
 /// [`run`], with the shutdown trigger supplied by the caller.
 ///
-/// Production uses [`shutdown_signal`] (SIGINT / SIGTERM); a test needs a
+/// Production uses `shutdown_signal` (SIGINT / SIGTERM); a test needs a
 /// programmatic trigger, because raising a real signal would take the whole
 /// harness down with the daemon. `shutdown` takes over the `run_listeners`
 /// select arm, so the rest of the supervision path — the blocking sync worker,

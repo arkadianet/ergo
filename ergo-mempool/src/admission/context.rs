@@ -107,14 +107,16 @@ pub enum ValidationErr {
 /// tests inject canned behavior. The validator owns the decision to
 /// invoke script evaluation — admission has no opinion on internal
 /// validation order, only on the outcome.
-/// Cheap pre-validation digest of a parsed tx: just the identity +
-/// miner fee. Returned by [`Validator::peek_fee`] so admission can
-/// route DroppedBelowMinFee observations with a real tx_id and keep
+/// Cheap pre-validation digest of a parsed tx: identity, miner fee, and
+/// storage-rent claim shape. Returned by [`Validator::peek_fee`] so admission
+/// can filter rent claims and route fee observations with a real tx_id, keeping
 /// event identity across the min-fee gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeekedTx {
     pub tx_id: TxId,
     pub fee: u64,
+    /// Any input has an empty proof and extension variable 127 (regardless of type).
+    pub contains_storage_rent_claim: bool,
 }
 
 /// Structural projection of a transaction obtained WITHOUT full
@@ -143,11 +145,10 @@ pub struct PeekedStructure {
 
 pub trait Validator {
     /// Cheap pre-check: deserialize `tx_bytes` and extract
-    /// `(tx_id, declared miner fee)` without running scripts,
-    /// resolving inputs, or touching a `CostAccumulator`. Both
-    /// returned fields must match what `validate(..)` would later
-    /// expose on its `Validated` for the same bytes; any divergence
-    /// is a validator bug.
+    /// identity, declared miner fee, and storage-rent claim shape without running scripts,
+    /// resolving inputs, or touching a `CostAccumulator`. Identity and fee
+    /// must match what `validate(..)` would expose on its `Validated`;
+    /// the claim flag reflects the parsed inputs, independent of eligibility.
     ///
     /// Errors: `Deserialize` on malformed bytes. This is the only
     /// error variant `peek_fee` is allowed to return — every other

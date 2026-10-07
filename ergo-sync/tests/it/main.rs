@@ -1,9 +1,12 @@
+mod assembly_sibling_retention;
 mod boundary_tests;
 mod header_index_startup;
 mod header_pk_curve_check;
 mod header_receive_eof;
 mod header_sync_integration;
+mod header_too_old;
 mod hydration_error_propagation;
+mod mode5_corpus_breadth;
 mod mode5_executor_replay;
 mod mode5_genesis_block;
 mod mode5_header_sync;

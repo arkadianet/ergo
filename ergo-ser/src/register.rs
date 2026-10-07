@@ -4,7 +4,7 @@ use ergo_primitives::writer::VlqWriter;
 use crate::error::WriteError;
 use crate::opcode::{parse_expr, write_expr, Expr, IrNode, Payload};
 use crate::sigma_type::SigmaType;
-use crate::sigma_value::{read_constant, write_constant, CollValue, SigmaValue};
+use crate::sigma_value::{write_constant, CollValue, SigmaValue};
 
 /// Non-mandatory register identifier (R4 through R9). The discriminant
 /// is the slot index inside [`AdditionalRegisters`] — `R4 == 0`,
@@ -121,13 +121,18 @@ fn write_register_value(
 /// inline collections.
 pub fn read_registers(r: &mut VlqReader) -> Result<AdditionalRegisters, ReadError> {
     let count = r.get_u8()? as usize;
-    if count > 6 {
-        return Err(ReadError::InvalidData(format!(
-            "register count {count} exceeds maximum 6 (R4-R9)"
-        )));
-    }
-    let mut registers = Vec::with_capacity(count);
-    for _ in 0..count {
+    let mut registers = Vec::with_capacity(count.min(6));
+    for i in 0..count {
+        // Scala looks each register id up inside the loop,
+        // `ErgoBox.nonMandatoryRegisters(iReg)` (ErgoBoxCandidate.scala:229-230),
+        // so a seventh register throws `ArrayIndexOutOfBoundsException` only
+        // after the first six are read: an error among them comes first, and
+        // the overflow itself is a hard reject.
+        if i >= 6 {
+            return Err(ReadError::HardReject(format!(
+                "register count {count} exceeds maximum 6 (R4-R9)"
+            )));
+        }
         let (tpe, value) = read_register_value(r)?;
         // Scala `CheckV6Type` (rule 1019, ValidationRules.scala:165-186): a
         // register value's type must not contain a v6.0-only type — SOption,
@@ -171,10 +176,18 @@ pub(crate) fn type_has_v6_only_type(tpe: &SigmaType) -> bool {
 /// Read a single register value. Handles both plain Constants (type <= 0x70)
 /// and expression opcodes (> 0x70) like CreateTuple.
 fn read_register_value(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), ReadError> {
+    if r.depth_floor() >= crate::opcode::MAX_EXPR_DEPTH {
+        return Err(ReadError::DepthLimitExceeded {
+            max: crate::opcode::MAX_EXPR_DEPTH,
+        });
+    }
     let first = r.peek_u8()?;
     if first <= 0x70 {
         // Plain constant: type code + value data
-        read_constant(r)
+        // Scala calls r.getValue(), adding a ValueSerializer level before
+        // ConstantSerializer/DataSerializer. Keep the constant-specific version
+        // gates here; parse_expr's inline-tree gates do not apply to registers.
+        crate::sigma_value::read_constant_as_expr(r)
     } else {
         // Expression opcode — parse the full expression and extract type + value.
         // Register bytes carry no tree header, so pass `tree_version=0`.
@@ -618,13 +631,36 @@ mod tests {
 
     #[test]
     fn error_count_exceeds_six() {
-        // Craft bytes where count = 7.
-        let data = [0x07u8, 0x04, 0x02]; // count=7, then garbage
+        // count = 7, then seven Int(1) registers: the first six parse, and the
+        // seventh id lookup throws Scala's ArrayIndexOutOfBoundsException, a
+        // hard reject.
+        let mut data = vec![0x07u8];
+        for _ in 0..7 {
+            data.extend_from_slice(&[0x04, 0x02]);
+        }
         let mut r = VlqReader::new(&data);
         let err = read_registers(&mut r).unwrap_err();
         assert!(
-            matches!(err, ReadError::InvalidData(_)),
-            "expected InvalidData for count > 6, got: {err:?}"
+            matches!(err, ReadError::HardReject(_)),
+            "expected HardReject for count > 6, got: {err:?}"
+        );
+        assert_eq!(
+            r.position(),
+            13,
+            "the six registers before the overflow are read"
+        );
+    }
+
+    #[test]
+    fn error_in_first_six_registers_comes_before_the_count_overflow() {
+        // count = 7 with R4 = Option[Int] Some(1): rule 1019 (a
+        // ValidationException) fires on R4 before the seventh id is looked up.
+        let data = [0x07u8, 0x28, 0x01, 0x02];
+        let mut r = VlqReader::new(&data);
+        let err = read_registers(&mut r).unwrap_err();
+        assert!(
+            matches!(err, ReadError::SigmaValidation { rule_id: 1019, .. }),
+            "got: {err:?}"
         );
     }
 

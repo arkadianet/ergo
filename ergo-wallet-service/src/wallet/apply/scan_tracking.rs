@@ -45,10 +45,10 @@ fn scan_de_ids(raw: &[u8]) -> Result<Vec<u16>, redb::Error> {
 
 /// Live chain-apply variant: skips ALL scan-table writes while
 /// `WALLET_SCAN_INVALIDATED` is set (a scan-registry read failure, or a
-/// non-replayable reorg), mirroring [`apply_block_to_wallet`] /
-/// [`promote_matured_boxes`]. Otherwise a block whose match pass failed (empty
-/// matches) would still mutate the scan tables, and tracking would keep
-/// advancing while `/wallet/status` reports `scan_invalidated`. A
+/// non-replayable reorg), mirroring [`super::apply_block_to_wallet`] /
+/// [`crate::wallet::maturity::promote_matured_boxes`]. Otherwise a block whose
+/// match pass failed (empty matches) would still mutate the scan tables, and
+/// tracking would keep advancing while `/wallet/status` reports `scan_invalidated`. A
 /// `/wallet/rescan` (which calls [`apply_block_to_scans_rescan`]) rebuilds them.
 pub fn apply_block_to_scans(
     txn: &WriteTransaction,

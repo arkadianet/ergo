@@ -1,5 +1,6 @@
 use clap::Parser;
-use ergo_node::config::{Cli, LoggingConfig, LoggingFormat, NodeConfig};
+use ergo_node::config::{Cli, Command, LoggingConfig, LoggingFormat, NodeConfig};
+use ergo_node::decode_stack::DECODE_THREAD_STACK_BYTES;
 use tracing::{error, info};
 use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
 use tracing_appender::rolling::Rotation;
@@ -7,8 +8,55 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer, Registry};
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // block_on polls startup on its calling thread. Store recovery can decode
+    // transactions before the async action loop exists, so it needs the same
+    // stack as the runtime workers. This thread owns and drops the runtime.
+    let thread = std::thread::Builder::new()
+        .name("node-main".into())
+        .stack_size(DECODE_THREAD_STACK_BYTES)
+        .spawn(run_node)
+        .unwrap_or_else(|e| {
+            eprintln!("node startup thread failed: {e}");
+            std::process::exit(1);
+        });
+    if let Err(panic) = thread.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn run_node() {
+    // Block validation fans out over Rayon (`ergo-validation`'s
+    // `into_par_iter`), and script evaluation deserializes on those threads
+    // (`DeserializeContext` / `DeserializeRegister`, `Global.deserialize`), so
+    // the global pool needs the floor too — Tokio's setting does not reach it.
+    // Only main calls this, before any pool use, so `build_global` cannot race.
+    if let Err(e) = rayon::ThreadPoolBuilder::new()
+        .stack_size(DECODE_THREAD_STACK_BYTES)
+        .build_global()
+    {
+        eprintln!("rayon global pool init failed: {e}");
+        std::process::exit(1);
+    }
+
+    // `thread_stack_size` covers both the worker threads and the blocking pool
+    // (tokio `runtime::blocking::pool` takes it from the same builder field),
+    // so one setting reaches every thread the runtime spawns.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(DECODE_THREAD_STACK_BYTES)
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("tokio runtime init failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(run());
+}
+
+async fn run() {
     // Config load runs before tracing init so the subscriber knows
     // whether `[logging.file]` was requested. Errors here predate the
     // subscriber and go to stderr directly. The single warn emitted
@@ -16,6 +64,25 @@ async fn main() {
     // subscriber by design — operators see it on next boot once the
     // file appender is wired, and rejected configs error out instead.
     let cli = Cli::parse();
+    if let Some(Command::MigrateRedb {
+        source,
+        destination,
+    }) = &cli.command
+    {
+        match ergo_state::redb_migration::migrate_database(source, destination) {
+            Ok(report) => println!(
+                "verified migration: {} -> {} ({} tables); original preserved",
+                source.display(),
+                destination.display(),
+                report.tables,
+            ),
+            Err(error) => {
+                eprintln!("database migration failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let config = match NodeConfig::load(cli) {
         Ok(c) => c,
         Err(e) => {

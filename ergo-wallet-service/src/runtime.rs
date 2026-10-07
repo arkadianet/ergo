@@ -219,6 +219,25 @@ impl WalletService {
         self.rescan_to_tip_with_cancellation(from_height, || false)
     }
 
+    /// Run an engine-owned rescan. Every durable write remains conditional on
+    /// this job owning its generation, including error and unwind invalidation.
+    pub fn rescan_to_tip_owned<F, O>(
+        &self,
+        from_height: u32,
+        is_cancelled: F,
+        still_owns_generation: O,
+    ) -> Result<RescanReport, WalletServiceError>
+    where
+        F: FnMut() -> bool,
+        O: Fn() -> bool + Send + Sync + 'static,
+    {
+        let guarded = Self::new(
+            generation_guarded_store(self.store.clone(), Arc::new(still_owns_generation)),
+            self.chain.clone(),
+        );
+        guarded.rescan_to_tip_with_cancellation(from_height, is_cancelled)
+    }
+
     pub fn rescan_to_tip_with_cancellation<F>(
         &self,
         from_height: u32,
@@ -234,14 +253,20 @@ impl WalletService {
         &self,
         from_height: u32,
         max_blocks: u32,
-        mut is_cancelled: F,
+        is_cancelled: F,
     ) -> Result<RescanReport, WalletServiceError>
     where
         F: FnMut() -> bool,
     {
         self.validate_batch_size(max_blocks)?;
         let batch_size = max_blocks.min(DEFAULT_SYNC_BATCH);
-        self.set_rescan_state(&RescanState::Running { from_height })?;
+        let cancellation = RefCell::new(is_cancelled);
+        self.set_rescan_state_if_active(
+            &RescanState::Running { from_height },
+            from_height,
+            &mut || cancellation.borrow_mut()(),
+        )
+        .map_err(|error| self.fail_rescan(from_height, error.into()))?;
         let initial_tip = match self.chain.committed_tip() {
             Ok(tip) => tip,
             Err(error) => return Err(self.fail_rescan(from_height, error.into())),
@@ -255,7 +280,11 @@ impl WalletService {
             return Err(self.fail_rescan(from_height, error));
         }
         if from_height == next_height {
-            if let Err(error) = self.set_rescan_state(&RescanState::Idle) {
+            if let Err(error) =
+                self.set_rescan_state_if_active(&RescanState::Idle, from_height, &mut || {
+                    cancellation.borrow_mut()()
+                })
+            {
                 return Err(self.fail_rescan(from_height, error.into()));
             }
             return Ok(RescanReport {
@@ -340,8 +369,11 @@ impl WalletService {
             Ok(tip)
         };
         let on_batch = |_height, _tip| {
-            self.set_rescan_state(&RescanState::Running { from_height })
-                .map_err(RescanError::from)
+            self.set_rescan_state_if_active(
+                &RescanState::Running { from_height },
+                from_height,
+                &mut || cancellation.borrow_mut()(),
+            )
         };
         let result = crate::wallet::WalletScanService::rescan_bounded_store(
             self.store.as_ref(),
@@ -351,7 +383,7 @@ impl WalletService {
             initial_tip,
             read_block,
             read_tip,
-            &mut is_cancelled,
+            &mut || cancellation.borrow_mut()(),
             scan_matcher
                 .as_ref()
                 .map(|matcher| matcher as &dyn crate::wallet::ScanRescanMatcher),
@@ -373,7 +405,11 @@ impl WalletService {
             let error = ChainClientError::stale_tip(cell_tip, observed_tip);
             return Err(self.fail_rescan(from_height, WalletServiceError::Chain(error)));
         }
-        if let Err(error) = self.set_rescan_state(&RescanState::Idle) {
+        if let Err(error) =
+            self.set_rescan_state_if_active(&RescanState::Idle, from_height, &mut || {
+                cancellation.borrow_mut()()
+            })
+        {
             return Err(self.fail_rescan(from_height, error.into()));
         }
         Ok(RescanReport {
@@ -527,6 +563,28 @@ impl WalletService {
         Ok(())
     }
 
+    /// Check cancellation while holding the same writer transaction as the state update.
+    fn set_rescan_state_if_active<F>(
+        &self,
+        state: &RescanState,
+        height: u32,
+        is_cancelled: &mut F,
+    ) -> Result<(), RescanError>
+    where
+        F: FnMut() -> bool,
+    {
+        if is_cancelled() {
+            return Err(RescanError::Cancelled { height });
+        }
+        let mut write = self.store.begin_write()?;
+        if is_cancelled() {
+            return Err(RescanError::Cancelled { height });
+        }
+        write.set_rescan_state(state)?;
+        write.commit()?;
+        Ok(())
+    }
+
     fn set_rescan_state(&self, state: &RescanState) -> Result<(), WalletStoreError> {
         let mut write = self.store.begin_write()?;
         write.set_rescan_state(state)?;
@@ -546,19 +604,29 @@ impl WalletService {
         &self,
         from_height: u32,
         max_blocks: u32,
-        mut is_cancelled: F,
+        is_cancelled: F,
     ) -> Result<RescanReport, WalletServiceError>
     where
         F: FnMut() -> bool,
     {
-        self.set_rescan_state(&RescanState::Running { from_height })?;
+        let cancellation = RefCell::new(is_cancelled);
+        self.set_rescan_state_if_active(
+            &RescanState::Running { from_height },
+            from_height,
+            &mut || cancellation.borrow_mut()(),
+        )
+        .map_err(|error| self.fail_rescan(from_height, error.into()))?;
         let tip = match self.chain.committed_tip() {
             Ok(tip) => tip,
             Err(error) => return Err(self.fail_rescan(from_height, error.into())),
         };
         let next_height = tip.height.saturating_add(1);
         if from_height > next_height {
-            if let Err(error) = self.set_rescan_state(&RescanState::Idle) {
+            if let Err(error) =
+                self.set_rescan_state_if_active(&RescanState::Idle, from_height, &mut || {
+                    cancellation.borrow_mut()()
+                })
+            {
                 return Err(self.fail_rescan(from_height, error.into()));
             }
             return Err(WalletServiceError::InvalidRequest(format!(
@@ -567,7 +635,11 @@ impl WalletService {
             )));
         }
         if max_blocks == 0 || from_height == next_height {
-            if let Err(error) = self.set_rescan_state(&RescanState::Idle) {
+            if let Err(error) =
+                self.set_rescan_state_if_active(&RescanState::Idle, from_height, &mut || {
+                    cancellation.borrow_mut()()
+                })
+            {
                 return Err(self.fail_rescan(from_height, error.into()));
             }
             return Ok(RescanReport {
@@ -616,7 +688,7 @@ impl WalletService {
                 last_height,
                 |height| Ok(blocks_by_height.get(&height).cloned()),
                 || Ok::<u32, RescanReadError>(last_height),
-                &mut is_cancelled,
+                &mut || cancellation.borrow_mut()(),
                 scan_matcher
                     .as_ref()
                     .map(|matcher| matcher as &dyn crate::wallet::ScanRescanMatcher),
@@ -637,7 +709,11 @@ impl WalletService {
             let error = WalletServiceError::Chain(ChainClientError::stale_tip(tip, observed_tip));
             return Err(self.fail_rescan(from_height, error));
         }
-        if let Err(error) = self.set_rescan_state(&RescanState::Idle) {
+        if let Err(error) =
+            self.set_rescan_state_if_active(&RescanState::Idle, from_height, &mut || {
+                cancellation.borrow_mut()()
+            })
+        {
             return Err(self.fail_rescan(from_height, error.into()));
         }
         Ok(RescanReport {
@@ -862,6 +938,168 @@ fn rescan_error_height(error: &WalletServiceError, fallback: u32) -> u32 {
         WalletServiceError::Rescan(RescanError::TipChanged { expected, .. }) => expected.height,
         WalletServiceError::Chain(ChainClientError::StaleTip { expected, .. }) => expected.height,
         _ => fallback,
+    }
+}
+
+pub(crate) fn generation_guarded_store(
+    store: Arc<dyn WalletStore>,
+    still_owns: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Arc<dyn WalletStore> {
+    Arc::new(GenerationWalletStore {
+        inner: store,
+        still_owns,
+    })
+}
+
+/// The owner check runs after acquiring the underlying writer and immediately
+/// before commit. A cancelled predecessor cannot publish over its successor.
+struct GenerationWalletStore {
+    inner: Arc<dyn WalletStore>,
+    still_owns: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+fn revoked_generation() -> WalletStoreError {
+    WalletStoreError::decode("wallet rescan generation was revoked")
+}
+impl WalletStore for GenerationWalletStore {
+    fn begin_read(&self) -> Result<Box<dyn crate::wallet::WalletRead>, WalletStoreError> {
+        self.inner.begin_read()
+    }
+    fn begin_write(&self) -> Result<Box<dyn crate::wallet::WalletWrite>, WalletStoreError> {
+        if !(self.still_owns)() {
+            return Err(revoked_generation());
+        }
+        let inner = self.inner.begin_write()?;
+        if !(self.still_owns)() {
+            return Err(revoked_generation());
+        }
+        Ok(Box::new(GenerationWalletWrite {
+            inner,
+            still_owns: self.still_owns.clone(),
+        }))
+    }
+}
+struct GenerationWalletWrite {
+    inner: Box<dyn crate::wallet::WalletWrite>,
+    still_owns: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+impl crate::wallet::WalletWrite for GenerationWalletWrite {
+    fn set_scan_invalidated(&mut self, invalidated: bool) -> Result<(), WalletStoreError> {
+        self.inner.set_scan_invalidated(invalidated)
+    }
+    fn clear_scan_registry(&mut self) -> Result<(), WalletStoreError> {
+        self.inner.clear_scan_registry()
+    }
+    fn set_rescan_state(&mut self, state: &RescanState) -> Result<(), WalletStoreError> {
+        self.inner.set_rescan_state(state)
+    }
+    fn set_scan_cursor(
+        &mut self,
+        height: u32,
+        header_id: Option<&[u8; 32]>,
+    ) -> Result<(), WalletStoreError> {
+        self.inner.set_scan_cursor(height, header_id)
+    }
+    fn put_scan(
+        &mut self,
+        id: u16,
+        json: Vec<u8>,
+        last_used_id: u16,
+    ) -> Result<(), WalletStoreError> {
+        self.inner.put_scan(id, json, last_used_id)
+    }
+    fn remove_scan(&mut self, id: u16, last_used_id: u16) -> Result<(), WalletStoreError> {
+        self.inner.remove_scan(id, last_used_id)
+    }
+    fn stop_tracking_scan_box(
+        &mut self,
+        scan_id: u16,
+        box_id: &[u8; 32],
+    ) -> Result<bool, WalletStoreError> {
+        self.inner.stop_tracking_scan_box(scan_id, box_id)
+    }
+    fn replace_scan_box(
+        &mut self,
+        scan_ids: &[u16],
+        box_id: [u8; 32],
+        inclusion_height: u32,
+        output_index: u16,
+        box_bytes: Vec<u8>,
+    ) -> Result<bool, WalletStoreError> {
+        self.inner
+            .replace_scan_box(scan_ids, box_id, inclusion_height, output_index, box_bytes)
+    }
+    fn set_change_address(&mut self, pubkey: [u8; 33]) -> Result<(), WalletStoreError> {
+        self.inner.set_change_address(pubkey)
+    }
+    fn insert_tracked_pubkey(
+        &mut self,
+        path_idx: u64,
+        pubkey: [u8; 33],
+        meta: &crate::wallet::TrackedPubkeyMeta,
+    ) -> Result<(), WalletStoreError> {
+        self.inner.insert_tracked_pubkey(path_idx, pubkey, meta)
+    }
+    fn rebuild_visible_addresses(&mut self) -> Result<(), WalletStoreError> {
+        self.inner.rebuild_visible_addresses()
+    }
+    fn set_derivation_head(&mut self, head: u64) -> Result<(), WalletStoreError> {
+        self.inner.set_derivation_head(head)
+    }
+    fn prepare_rescan(
+        &mut self,
+        start_height: u32,
+        scan_rebuild: bool,
+    ) -> Result<(), WalletStoreError> {
+        self.inner.prepare_rescan(start_height, scan_rebuild)
+    }
+    fn rewind_to_ancestor(
+        &mut self,
+        ancestor_height: u32,
+        ancestor_header_id: Option<&[u8; 32]>,
+    ) -> Result<(), WalletStoreError> {
+        self.inner
+            .rewind_to_ancestor(ancestor_height, ancestor_header_id)
+    }
+    fn apply_rescan_block(
+        &mut self,
+        height: u32,
+        tracked_p2pk_trees: &BTreeSet<Vec<u8>>,
+        cached_pubkeys: &BTreeMap<u64, [u8; 33]>,
+        block: &crate::wallet::scan::RescanBlock,
+        scan_records: Option<&[crate::wallet::types::ScanMatchRecord]>,
+    ) -> Result<(), WalletStoreError> {
+        self.inner.apply_rescan_block(
+            height,
+            tracked_p2pk_trees,
+            cached_pubkeys,
+            block,
+            scan_records,
+        )
+    }
+    fn finish_rescan(&mut self, start_height: u32) -> Result<(), WalletStoreError> {
+        self.inner.finish_rescan(start_height)
+    }
+    fn apply_block(
+        &mut self,
+        height: u32,
+        header_id: &[u8; 32],
+        payload: &crate::wallet::WalletApplyPayload,
+    ) -> Result<(), WalletStoreError> {
+        self.inner.apply_block(height, header_id, payload)
+    }
+    fn rollback_block(
+        &mut self,
+        height: u32,
+        txs: &[crate::wallet::types::OwnedBlockTxData],
+        invalidate: bool,
+    ) -> Result<(), WalletStoreError> {
+        self.inner.rollback_block(height, txs, invalidate)
+    }
+    fn commit(self: Box<Self>) -> Result<(), WalletStoreError> {
+        if !(self.still_owns)() {
+            return Err(revoked_generation());
+        }
+        self.inner.commit()
     }
 }
 
@@ -1477,6 +1715,7 @@ mod tests {
         write.commit().unwrap();
 
         let tree = ErgoTree {
+            reserved_header_bits: 0,
             version: 0,
             has_size: true,
             constant_segregation: true,
@@ -1851,5 +2090,44 @@ mod tests {
             blocks: Vec::new(),
         };
         assert_eq!(client.committed_tip().unwrap().height, 3);
+    }
+}
+
+#[cfg(test)]
+mod generation_store_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn revoked_generation_aborts_pending_writes_and_preserves_successor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            crate::wallet::RedbWalletStore::open_standalone(dir.path().join("wallet.redb"))
+                .unwrap(),
+        );
+        let owns = Arc::new(AtomicBool::new(true));
+        let owner = owns.clone();
+        let guarded = generation_guarded_store(
+            store.clone(),
+            Arc::new(move || owner.load(Ordering::SeqCst)),
+        );
+        let mut pending = guarded.begin_write().unwrap();
+        pending.set_rescan_state(&RescanState::Idle).unwrap();
+        pending.set_scan_invalidated(false).unwrap();
+        owns.store(false, Ordering::SeqCst);
+        assert!(pending.commit().is_err());
+        let mut successor = store.begin_write().unwrap();
+        successor
+            .set_rescan_state(&RescanState::Running { from_height: 9 })
+            .unwrap();
+        successor.set_scan_invalidated(false).unwrap();
+        successor.commit().unwrap();
+        assert!(guarded.persist_scan_invalidation(true).is_err());
+        let read = store.read().unwrap();
+        assert_eq!(
+            read.rescan_state().unwrap(),
+            RescanState::Running { from_height: 9 }
+        );
+        assert!(!read.scan_invalidated().unwrap());
     }
 }

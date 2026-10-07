@@ -1208,7 +1208,7 @@ mod tests {
     use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
     use ergo_primitives::writer::VlqWriter;
     use ergo_ser::autolykos::AutolykosSolution;
-    use ergo_ser::block_transactions::{write_block_transactions, BlockTransactions};
+    use ergo_ser::block_transactions::{write_block_transactions_with_version, BlockTransactions};
     use ergo_ser::header::serialize_header;
     use ergo_ser::modifier_id::compute_section_id;
     use ergo_state::store::StateStore;
@@ -1270,12 +1270,27 @@ mod tests {
         }
     }
 
+    // No state updates are applied by these chain-history fixtures, but the
+    // transaction section must still contain a transaction to be valid wire data.
+    fn fixture_transaction() -> ergo_ser::transaction::Transaction {
+        ergo_ser::transaction::Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        }
+    }
+
     fn header(height: u32, parent: ModifierId) -> Header {
+        let tx_id = transaction_id(&fixture_transaction()).unwrap();
+        let witness_id = blake2b256(&[]);
         Header {
             version: 2,
             parent_id: parent,
             ad_proofs_root: Digest32::from_bytes([0; 32]),
-            transactions_root: Digest32::from_bytes([0; 32]),
+            transactions_root: Digest32::from_bytes(ergo_crypto::merkle::transactions_root(
+                &[tx_id.as_bytes()],
+                Some(&[&witness_id.as_bytes()[1..]]),
+            )),
             state_root: ADDigest::from_bytes([0; 33]),
             timestamp: 1_000_000 + height as u64,
             extension_root: Digest32::from_bytes([0; 32]),
@@ -1295,6 +1310,7 @@ mod tests {
             version: 0,
             has_size: true,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants: vec![(
                 ergo_ser::sigma_type::SigmaType::SBoolean,
                 ergo_ser::sigma_value::SigmaValue::Boolean(true),
@@ -1327,12 +1343,13 @@ mod tests {
         let id_bytes = *id.as_bytes();
         store.store_header(&id_bytes, &bytes).unwrap();
         let mut writer = VlqWriter::new();
-        write_block_transactions(
+        write_block_transactions_with_version(
             &mut writer,
             &BlockTransactions {
                 header_id: id,
-                transactions: Vec::new(),
+                transactions: vec![fixture_transaction()],
             },
+            header(height, parent).version,
         )
         .unwrap();
         let section_id = compute_section_id(
@@ -1364,12 +1381,13 @@ mod tests {
         let id_bytes = *id.as_bytes();
         store.store_header(&id_bytes, &bytes).unwrap();
         let mut writer = VlqWriter::new();
-        write_block_transactions(
+        write_block_transactions_with_version(
             &mut writer,
             &BlockTransactions {
                 header_id: id,
-                transactions: Vec::new(),
+                transactions: vec![fixture_transaction()],
             },
+            header.version,
         )
         .unwrap();
         let section_id = compute_section_id(

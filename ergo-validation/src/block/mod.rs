@@ -6,16 +6,16 @@
 //! [`validate::validate_full_block`] and
 //! [`validate::validate_full_block_parallel`] (plus its wrappers) are the
 //! public entry points; everything else in this module supports them:
-//! - [`error`] — [`BlockValidationError`], the shared error type every
+//! - `error` — [`BlockValidationError`], the shared error type every
 //!   other submodule constructs variants of.
-//! - [`extension`] — structural extension checks (rules 400/404/405/406).
-//! - [`size`] — block-transactions section size cap (rule 306).
-//! - [`interlinks`] — interlink validation against the parent extension
+//! - `extension` — structural extension checks (rules 400/404/405/406).
+//! - `size` — block-transactions section size cap (rule 306).
+//! - `interlinks` — interlink validation against the parent extension
 //!   (rules 401/402).
-//! - [`fork_vote`] — soft-fork vote prohibited-window check (rule 407).
-//! - [`overlay`] — the intra-block UTXO overlay both validation paths share.
-//! - [`layering`] — topological tx layering for the parallel path.
-//! - [`validate`] — `validate_full_block` and `validate_full_block_parallel_impl`
+//! - `fork_vote` — soft-fork vote prohibited-window check (rule 407).
+//! - `overlay` — the intra-block UTXO overlay both validation paths share.
+//! - `layering` — topological tx layering for the parallel path.
+//! - `validate` — `validate_full_block` and `validate_full_block_parallel_impl`
 //!   (+ its production wrappers), kept together deliberately: these are
 //!   intentionally near-duplicate mirror implementations (sequential vs.
 //!   parallel) whose inline comments cross-reference each other's steps.
@@ -120,6 +120,7 @@ pub struct BlockValidationContext<'a> {
     pub utxo: &'a dyn UtxoView,
     /// Votable protocol parameters at the current epoch.
     pub params: &'a ProtocolParams,
+    pub rule_306_max_block_size: u32,
     /// Voting epoch length in blocks (Scala `votingSettings.votingLength`).
     /// Mainnet 1024, testnet 128. Drives rule 215 (`hdrVotesUnknown`) —
     /// the rule only fires on headers at heights where `height %
@@ -182,12 +183,14 @@ pub struct BlockValidationContext<'a> {
     pub reemission: Option<&'a ReemissionRuleInputs>,
 }
 
-/// A block whose header is PoW/difficulty-validated and whose
-/// transactions, section linkage, merkle roots, and intra-block UTXO
-/// overlay all pass validation.
+/// A block accepted by a full-block validation entry point using the
+/// supplied checked header and chain context.
 ///
-/// Construction is limited to [`validate_full_block`] — private fields
-/// mean no other code can mint a `CheckedBlock`. Downstream consumers
+/// The production path is [`validate_full_block_parallel`]; the sequential
+/// reference is [`validate_full_block`]. Neither repeats header validation.
+/// A configured script checkpoint skips transaction scripts and their
+/// charges, while section linkage, roots, and remaining transaction checks
+/// still run. Private fields preserve the accepted parts. Downstream consumers
 /// (`StateStore::apply_block`) derive every consensus-significant
 /// field (height, header_id, expected state root) from the embedded
 /// header, not from caller arguments.
@@ -217,7 +220,7 @@ impl CheckedBlock {
     /// inverse of [`Self::into_parts`]. This bypasses validation, so it
     /// is a test-only escape hatch (gated behind `test-helpers`) for
     /// driving state-apply seams with hand-built fixtures; production
-    /// `CheckedBlock`s come only from `validate_full_block`.
+    /// `CheckedBlock`s come from the full-block validation entry points.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn from_parts(
         checked_header: CheckedHeader,

@@ -12,11 +12,11 @@ use super::{check_token_count, ErgoBoxCandidate};
 
 /// Serialize ErgoBoxCandidate in standalone mode (full token IDs).
 ///
-/// Writes the raw ErgoTree bytes directly (no length prefix), matching
+/// Writes the tree's canonical bytes directly (no length prefix), matching
 /// the Scala/sigma-rust wire format.
 pub fn write_ergo_box_candidate(w: &mut VlqWriter, c: &ErgoBoxCandidate) -> Result<(), WriteError> {
     w.put_u64(c.value);
-    w.put_bytes(&c.ergo_tree_bytes);
+    w.put_bytes(c.checked_serialized_ergo_tree_bytes()?);
     w.put_u32(c.creation_height);
     check_token_count(c.tokens.len())?;
     w.put_u8(c.tokens.len() as u8);
@@ -30,14 +30,41 @@ pub fn write_ergo_box_candidate(w: &mut VlqWriter, c: &ErgoBoxCandidate) -> Resu
 
 /// Read ErgoBoxCandidate in standalone mode (full token IDs).
 ///
-/// The ErgoTree is parsed from the stream. For size-delimited trees (has_size
-/// flag set in header), this works directly. For non-size-delimited trees,
-/// the `read_ergo_tree` call consumes all remaining bytes as the tree body,
-/// so this function only works when the reader is bounded to exact box data.
-///
-/// For parsing real mainnet box bytes (which may have non-size-delimited trees),
-/// use `parse_ergo_box_bytes` which handles tree boundary detection.
+/// The tree reader consumes its parsed expression, leaving the following box
+/// fields available for both size-delimited and non-size-delimited trees.
+/// Consensus acceptance gates run on untrusted box bytes. Use
+/// [`super::parse_ergo_box_bytes`] when also checking externally supplied
+/// proposition bytes against the complete box encoding.
 pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, ReadError> {
+    // A candidate read that starts a top-level reader starts Scala's
+    // `valDefTypeStore` empty, as `read_ergo_box` does.
+    if r.position() == 0 && r.nesting_depth_base() == 0 && !r.tracks_val_bindings() {
+        return crate::transaction::with_fresh_binding_store(r, read_ergo_box_candidate_parts);
+    }
+    read_ergo_box_candidate_parts(r)
+}
+
+/// Read the candidate of a box already accepted inside an enclosing parse,
+/// such as an `SBox` constant's bytes; see [`super::read_accepted_ergo_box`].
+pub fn read_accepted_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, ReadError> {
+    read_ergo_box_candidate_parts(r)
+}
+
+pub(super) fn read_ergo_box_candidate_parts(
+    r: &mut VlqReader,
+) -> Result<ErgoBoxCandidate, ReadError> {
+    // Top-level entry: the nesting budget must start unconsumed. See the same
+    // backstop in `read_transaction` — a leaked base shows up as a node
+    // rejecting valid input with a depth error nothing explains.
+    debug_assert_eq!(
+        r.nesting_depth_base(),
+        0,
+        "nesting depth base leaked into a top-level box-candidate parse"
+    );
+    // The box window; a tree sets its own window from its start and
+    // restores this one after it.
+    let box_limit = r.position_limit();
+    r.set_position_limit(Some(r.position() + super::MAX_BOX_SIZE));
     let value = r.get_u64()?;
     let tree_start = r.position();
     let ergo_tree = read_ergo_tree(r)?;
@@ -63,6 +90,7 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
     }
     let tree_end = r.position();
     let ergo_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
+    let canonical_tree_bytes = super::canonical_tree_bytes(&ergo_tree, &ergo_tree_bytes);
     let creation_height = r.get_u32_exact()?;
     let token_count = r.get_u8()? as usize;
     let mut tokens = Vec::with_capacity(token_count);
@@ -75,8 +103,9 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
     // Register block = the CANONICAL re-serialization of the parsed registers,
     // never the verbatim wire slice.
     //
-    // `write_ergo_box_candidate` emits these bytes, and a box id is
-    // `blake2b256` of the box bytes, so this block is what the id commits to.
+    // `write_ergo_box_candidate` emits these bytes, so a newly sealed box's
+    // canonical ID commits to this block. Whole-box readers separately retain
+    // the received ID when the original encoding differs from serialization.
     // Scala derives `ErgoBox.bytes` the same way — from the parsed
     // `ErgoBoxCandidate`, through `ValueSerializer.serialize` on each stored
     // `EvaluatedValue` node — which CANONICALIZES the register encodings the
@@ -84,9 +113,8 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
     // register whose wire bytes are `7f` (the `TrueLeaf` opcode, reachable via
     // `CaseObjectSerialization`), `80` (`FalseLeaf`) or `0105` (a Boolean
     // constant with a non-`0x01` payload) all re-serialize as `0101` / `0100`,
-    // and the box id is computed over THAT. Keeping the verbatim slice would
-    // give such a box a different id than the reference node — a silent
-    // state-root divergence on a box the reference accepts.
+    // and a newly constructed box's ID is computed over THAT. The cached ID
+    // of a parsed whole box instead commits to its original complete encoding.
     //
     // The node FORMS the reference does preserve — `Constant`, `CreateTuple`
     // (`0x86`), `ConcreteCollection` (`0x83` / packed `0x85`) and
@@ -100,14 +128,17 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
         .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
     let register_bytes = rw.result();
 
+    r.set_position_limit(box_limit);
     Ok(ErgoBoxCandidate {
         value,
         ergo_tree,
         ergo_tree_bytes,
+        canonical_tree_bytes,
         creation_height,
         tokens,
         additional_registers,
         register_bytes,
+        received_box_identity: None,
     })
 }
 
@@ -129,6 +160,7 @@ mod tests {
             version: 0,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             // Root must be SSigmaProp: under `has_size`, a non-SigmaProp root
             // (e.g. `Const(SBoolean, true)`) fails Scala's
@@ -199,8 +231,12 @@ mod tests {
     /// consensus id / bytes_to_sign paths.
     #[test]
     fn write_preserves_size_zero_unparsed_tree_bytes() {
+        // The body parse reads past the declared size: `eb00` then an unknown
+        // opcode `fd` (rule 1002) wraps to a size-0 tree; `eb00` alone runs out
+        // of input, which the JVM rejects (ArrayIndexOutOfBoundsException).
         let tree_bytes = hex::decode("eb00").unwrap();
-        let mut tr = VlqReader::new(&tree_bytes);
+        let wire = hex::decode("eb00fd").unwrap();
+        let mut tr = VlqReader::new(&wire);
         let tree = read_ergo_tree(&mut tr).expect("size-0 tree wraps");
         let candidate = ErgoBoxCandidate::from_trusted_raw_parts(
             235,
@@ -225,8 +261,12 @@ mod tests {
     /// Indexed writer likewise preserves size-0 Unparsed tree bytes.
     #[test]
     fn indexed_write_preserves_size_zero_unparsed_tree_bytes() {
+        // The body parse reads past the declared size: `cb00` then an unknown
+        // opcode `fd` (rule 1002) wraps to a size-0 tree; `cb00` alone runs out
+        // of input, which the JVM rejects (ArrayIndexOutOfBoundsException).
         let tree_bytes = hex::decode("cb00").unwrap();
-        let mut tr = VlqReader::new(&tree_bytes);
+        let wire = hex::decode("cb00fd").unwrap();
+        let mut tr = VlqReader::new(&wire);
         let tree = read_ergo_tree(&mut tr).expect("size-0 tree wraps");
         let candidate = ErgoBoxCandidate::from_trusted_raw_parts(
             1,

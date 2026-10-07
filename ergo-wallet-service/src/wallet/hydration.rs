@@ -29,16 +29,16 @@ impl HydrationSnapshot {
 }
 
 impl HydrationSource for HydrationSnapshot {
-    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_> {
-        Box::new(self.tracked.iter().copied())
+    fn tracked_pubkeys(&self) -> Result<Vec<(u64, [u8; 33])>, String> {
+        Ok(self.tracked.clone())
     }
 
-    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_> {
-        Box::new(self.visible.iter().copied())
+    fn visible_pubkeys(&self) -> Result<Vec<(u32, [u8; 33])>, String> {
+        Ok(self.visible.clone())
     }
 
-    fn change_address_pubkey(&self) -> Option<[u8; 33]> {
-        self.change
+    fn change_address_pubkey(&self) -> Result<Option<[u8; 33]>, String> {
+        Ok(self.change)
     }
 }
 
@@ -135,7 +135,7 @@ mod tests {
         let read = WalletStore::read(&db).unwrap();
         let snapshot = HydrationSnapshot::load(read.as_ref()).unwrap();
         assert!(snapshot.is_empty());
-        assert_eq!(snapshot.visible_pubkeys().count(), 0);
-        assert_eq!(snapshot.change_address_pubkey(), None);
+        assert_eq!(snapshot.visible_pubkeys().unwrap().len(), 0);
+        assert_eq!(snapshot.change_address_pubkey().unwrap(), None);
     }
 }

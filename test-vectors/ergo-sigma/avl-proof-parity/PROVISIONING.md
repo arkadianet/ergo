@@ -21,7 +21,7 @@ dependence on Rust-prover/Scala-prover byte parity — and it mirrors production
 where the Rust node verifies Scala-produced AVL proofs in mainnet blocks.
 
 - Oracle source: `scorex.crypto.authds.avltree.batch.{BatchAVLProver,BatchAVLVerifier}`
-  via `org.scorexfoundation::sigma-state:6.0.2` (same dependency the existing
+  via `org.scorexfoundation::sigma-state:6.0.6` (same dependency the existing
   `scripts/jvm_serde_oracle` uses).
 - Generator: `scripts/avl_oracle/AvlOracle.scala`.
 

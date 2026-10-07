@@ -3,6 +3,7 @@ name        = "ergo-validation"
 description = "Stateless and state-dependent validation for Ergo blocks, headers, and transactions: structural / monetary / script / cost checks; voted-protocol-parameter recomputation, validation-rule status updates, and miner-vote tallies; canonical-form enforcement and Scala-parity error mapping."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -32,10 +33,10 @@ cost-trace = ["ergo-sigma/cost-trace"]
 # Gates the workspace's diagnostic-only integration tests
 # (`diagnose_block_*`, `trace_*`, `parity_triage`, `eval_error_triage`,
 # `cost_parity`) so they only compile under `--features diagnostics`.
-# These tests previously carried `#[ignore]` so a default `cargo test`
-# would skip them; the feature gate makes the same intent explicit at
-# the build-graph level, and the dedicated CI lane runs them by
-# passing the feature flag.
+# External/manual harnesses also carry explicit `#[ignore]` markers:
+# enabling all features compiles them without requiring operator state.
+# The cost-ledger lane fetches pinned L4 inputs and selects its replay
+# tests with --run-ignored only; other reports are manual invocations.
 diagnostics = ["cost-trace"]
 
 [dev-dependencies]
@@ -88,3 +89,6 @@ path = "tests/trace_mismatch_889k.rs"
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

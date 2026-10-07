@@ -138,15 +138,18 @@ fn registry_with_dht(prop: &SigmaBoolean, secret: Scalar) -> SecretRegistry {
 }
 
 fn cand(children: Vec<SigmaBoolean>) -> SigmaBoolean {
-    SigmaBoolean::Cand(children)
+    SigmaBoolean::Cand(children.into())
 }
 
 fn cor(children: Vec<SigmaBoolean>) -> SigmaBoolean {
-    SigmaBoolean::Cor(children)
+    SigmaBoolean::Cor(children.into())
 }
 
 fn cthreshold(k: u16, children: Vec<SigmaBoolean>) -> SigmaBoolean {
-    SigmaBoolean::Cthreshold { k, children }
+    SigmaBoolean::Cthreshold {
+        k,
+        children: children.into(),
+    }
 }
 
 // ----- happy path -----
@@ -370,7 +373,7 @@ fn dht_uses_own_commitment_from_bag() {
     let mut bag = HintsBag::empty();
     bag.add(Hint::OwnCommitment(OwnCommitment {
         image: prop.clone(),
-        secret_randomness: r_bytes,
+        secret_randomness: r_bytes.into(),
         commitment: FirstProverMessage::DhTuple {
             a: a_bytes,
             b: b_bytes,
@@ -432,7 +435,7 @@ fn schnorr_uses_own_commitment_from_hints_bag() {
     let mut bag = HintsBag::empty();
     bag.add(Hint::OwnCommitment(OwnCommitment {
         image: prop.clone(),
-        secret_randomness: r_bytes,
+        secret_randomness: r_bytes.into(),
         commitment: FirstProverMessage::Schnorr(r_point),
         position: NodePosition::crypto_tree_prefix(),
     }));
@@ -1108,6 +1111,7 @@ fn non_p2pk_ergo_tree() -> ErgoTree {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: ergo_ser::opcode::Expr::Op(IrNode {
             opcode: 0x91, // HEIGHT opcode (Int, not SigmaProp) — non-trivially reducible

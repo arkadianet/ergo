@@ -1,24 +1,78 @@
-// Thin fetch wrapper. Any error/non-2xx/parse-failure resolves to null;
-// callers render placeholders. The API key (if set) is read per-call.
+// Best-effort telemetry reads resolve failed requests to null. Entity lookups, mining work and wallet reads
+// preserve response status/reason so authorization failures stay distinguishable
+// from unavailable data. The API key (if set) is read per-call.
 //
-// Return shapes are deliberately unchanged (data-or-null for reads,
-// {ok,status,detail} for writes). The only addition is a side-effect call to
-// auth.report() so the Authorize chip can re-verify opportunistically: a 403
-// with a key set means the key is bad; a 2xx from a *gated* write confirms it
+// auth.report() lets the Authorize chip re-verify opportunistically: a 403
+// with an auth reason updates the state; a 2xx from a *gated* request confirms it
 // (a 2xx from a public read proves nothing — see auth.js).
 import { getApiKey, report } from './auth.js';
 
-async function getJson(path) {
+// Entity lookups distinguish an authoritative 404 from a failed read. The
+// best-effort telemetry getter below retains its existing nullable interface.
+export class ReadError extends Error {
+  constructor(status, reason) {
+    super(reason || 'request failed');
+    this.name = 'ReadError';
+    this.status = status;
+  }
+}
+
+export async function lookupJson(path) {
+  const headers = {};
+  const key = getApiKey();
+  if (key) headers['api_key'] = key;
+  let r;
   try {
-    const headers = {};
-    const key = getApiKey();
-    if (key) headers['api_key'] = key;
-    const r = await fetch(path, { cache: 'no-store', headers, signal: AbortSignal.timeout(12000) });
-    if (key) report(r.status, false, key); // reads are public: only a 403 is meaningful here
-    if (!r.ok) return null;
-    return await r.json();
+    r = await fetch(path, { cache: 'no-store', headers, signal: AbortSignal.timeout(12000) });
   } catch {
-    return null;
+    throw new ReadError(0, 'request failed');
+  }
+  // Failure envelopes carry the reason callers distinguish (auth, index gate).
+  const error = r.ok || r.status === 404 ? null : await r.clone().json().catch(() => null);
+  report(r.status, false, key, error?.reason);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new ReadError(r.status, error?.reason || `HTTP ${r.status}`);
+  try {
+    const data = await r.json();
+    if (data == null) throw new Error('empty response');
+    return data;
+  } catch {
+    throw new ReadError(r.status, 'invalid JSON response');
+  }
+}
+
+async function getJson(path) {
+  try { return await lookupJson(path); }
+  catch { return null; }
+}
+
+// Public rent reads retain readiness errors instead of turning them into zero.
+async function getRentPage(fromHeight, toHeight, offset, limit) {
+  try {
+    const r = await fetch(`/blockchain/storageRent/maturesInRange?fromHeight=${fromHeight}&toHeight=${toHeight}&offset=${offset}&limit=${limit}&sortDirection=asc`, {
+      cache: 'no-store', signal: AbortSignal.timeout(12000),
+    });
+    const data = await r.json().catch(() => null);
+    return { ok: r.ok, status: r.status, data, reason: data?.reason ?? null };
+  } catch { return { ok: false, status: 0, data: null, reason: 'request-failed' }; }
+}
+
+// Mining reads are operator-gated. Preserve the response envelope so a 403
+// cannot masquerade as the node having no candidate (503).
+async function getMiningCandidate() {
+  const key = getApiKey();
+  try {
+    const r = await fetch('/mining/candidate', {
+      cache: 'no-store', headers: key ? { api_key: key } : {}, signal: AbortSignal.timeout(12000),
+    });
+    const data = await r.json().catch(() => null);
+    report(r.status, true, key, data?.reason);
+    // An in-flight response for an old key must not expose its work after
+    // authorization is cleared or replaced in this tab.
+    if (key !== getApiKey()) return null;
+    return { ok: r.ok, status: r.status, data, reason: data?.reason ?? null, detail: data?.detail ?? null };
+  } catch {
+    return { ok: false, status: 0, data: null, reason: 'request-failed', detail: null };
   }
 }
 
@@ -31,7 +85,8 @@ async function postJson(path, body) {
     const key = getApiKey();
     if (key) headers['api_key'] = key;
     const r = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body) });
-    if (key) report(r.status, true, key); // writes are gated: a 2xx here confirms the key
+    const error = r.status === 403 ? await r.clone().json().catch(() => null) : null;
+    report(r.status, true, key, error?.reason);
     if (r.ok) return { ok: true, status: r.status };
     let detail = null;
     try {
@@ -53,8 +108,7 @@ async function walletReq(path, opts = {}) {
   const key = getApiKey();
   if (key) headers['api_key'] = key;
   try {
-    const r = await fetch(path, { cache: 'no-store', ...opts, headers });
-    if (key) report(r.status, true, key);
+    const r = await fetch(path, { cache: 'no-store', ...(opts.method ? {} : { signal: AbortSignal.timeout(12000) }), ...opts, headers });
     let data = null;
     let reason = null;
     const text = await r.text();
@@ -66,6 +120,8 @@ async function walletReq(path, opts = {}) {
         /* non-JSON body */
       }
     }
+    report(r.status, true, key, data?.reason);
+    if (key !== getApiKey()) return { ok: false, status: 0, data: null, reason: 'Authorization changed. Try again.' };
     return { ok: r.ok, status: r.status, data, reason };
   } catch (e) {
     return { ok: false, status: 0, data: null, reason: String(e) };
@@ -94,9 +150,11 @@ export const api = {
   recentBlocks: (n = 10) => getJson(`/api/v1/blocks/recent?n=${n}`),
   // Operator event feed (bounded ring tail). `since` = last-seen seq.
   events: (since = 0) => getJson(`/api/v1/events${since ? `?since=${since}` : ''}`),
+  // Structured logs share the operator gate and stale-key response protection.
+  activity: (session, since = '0') => walletReq(`/api/v1/diagnostics/activity?limit=256${session ? `&session=${encodeURIComponent(session)}&since=${encodeURIComponent(since)}` : ''}`),
   // Mining surface — routes mount only when mining is wired (404 = off).
   // candidate is cheap on repeat calls (same-tip template cache node-side).
-  miningCandidate: () => getJson('/mining/candidate'),
+  miningCandidate: getMiningCandidate,
   miningRewardAddress: () => getJson('/mining/rewardAddress'),
   miningRewardPublicKey: () => getJson('/mining/rewardPublicKey'),
   // Network mining landscape: last-`window` headers folded by miner pk,
@@ -104,6 +162,7 @@ export const api = {
   minerStats: (window = 720) => getJson(`/api/v1/mining/minerStats?window=${window}`),
   // Emission schedule facts at a height ({minerReward, reemitted, …} nanoERG).
   emissionAt: (height) => getJson(`/emission/at/${height}`),
+  storageRentMatures: getRentPage,
   difficultyHistory: (b = 60) => getJson(`/api/v1/difficulty/history?blocks=${b}`),
   // Mempool wait-time histogram: bins+1 buckets of {nTxns, totalFee}.
   poolHistogram: (bins = 10, maxtimeMs = 3_600_000) =>
@@ -125,6 +184,11 @@ export const api = {
     unlock: (pass) => walletPost('/wallet/unlock', { pass }),
     lock: () => walletReq('/wallet/lock'),
     balances: () => walletReq('/wallet/balances'),
+    balance: () => walletReq('/api/v1/wallet/balance?includeUnconfirmed=true'),
+    transactions: (offset = 0, limit = 12) => walletReq(`/api/v1/wallet/transactions?offset=${offset}&limit=${limit}`),
+    build: (intent) => walletPost('/api/v1/wallet/transactions/build', intent),
+    sign: (unsignedTransaction) => walletPost('/api/v1/wallet/transactions/sign', { unsignedTransaction }),
+    submitSigned: (signedTransaction) => walletPost('/api/v1/wallet/transactions/send', { type: 'signed', signedTransaction }),
     addresses: () => walletReq('/wallet/addresses'),
     deriveNextKey: () => walletReq('/wallet/deriveNextKey'),
     updateChangeAddress: (address) => walletPost('/wallet/updateChangeAddress', { address }),

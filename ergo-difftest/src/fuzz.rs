@@ -1,6 +1,6 @@
 //! Stable `fuzz_one` entry point consumed by the nightly cargo-fuzz shims.
 //!
-//! The REAL fuzz logic lives here, compiled on stable 1.95.0 and unit-tested
+//! The REAL fuzz logic lives here, compiled on stable 1.99.0 and unit-tested
 //! without nightly. The `ergo-difftest/fuzz/fuzz_targets/` directory contains
 //! thin 3-line shims that call this function via libFuzzer. See
 //! `ergo-difftest/fuzz/README.md` for how to run those targets.

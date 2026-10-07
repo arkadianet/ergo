@@ -3,6 +3,7 @@ name        = "ergo-indexer-types"
 description = "Read-side types and trait surface for the Ergo Rust node's optional extra-index. Hosts the protocol-genesis fixtures, query DTOs, and the `IndexerQuery` trait that ergo-indexer's `IndexerHandle` implements; consumed by ergo-api so the HTTP layer never depends on the writer crate."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -11,3 +12,6 @@ publish    = false
 ergo-primitives = { workspace = true }
 ergo-ser        = { workspace = true }
 serde           = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true
