@@ -172,3 +172,8 @@ fn check_vectors(area: &str) {
 fn deserialize_values_match_reference() {
     check_vectors("deserialize");
 }
+
+#[test]
+fn slice_values_and_costs_match_reference() {
+    check_vectors("slice");
+}

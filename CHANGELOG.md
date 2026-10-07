@@ -18,6 +18,7 @@ infrastructure.
 
 ### Fixed
 
+- Calculate collection slice costs from the original signed bounds.
 - Allow trailing bytes after values decoded by `Global.deserializeTo`.
 
 ## [0.12.1] - 2026-10-06
