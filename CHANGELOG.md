@@ -16,38 +16,46 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-10-07
+
+A consensus release for mainnet. Upgrade every 0.12.1 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again. A 0.12.2 data directory still opens with 0.12.1.
+
+- **Consensus fixes** from a differential review against the Scala node 6.0.7, covering sigma proof verification, header parsing and identifiers, script evaluation, serialization of scripts, boxes and AVL trees, block cost accounting and the voting rules. Each fix has regression vectors with the reference verdict, cost and identifiers recorded beside them.
+- **Re-emission checks follow the node's role.** The re-emission rule (123) is checked by mining nodes and skipped by non-mining nodes, the Scala node's default. A new setting, `[node] check_reemission_rules`, turns the checks on for a non-mining node; mining always turns them on.
+- **Header and transaction identifiers** are derived from the parsed, re-serialized form. A header or transaction whose received encoding is accepted but not canonical is stored and identified canonically, and the peer that relayed it is not penalised.
+
+### Changed
+
+- Non-mining nodes no longer check re-emission token allocation (rule 123) unless `[node] check_reemission_rules = true`. Mining nodes always check it, including the emission-box branch that was not checked before.
+- Received transactions are no longer rejected for a non-canonical encoding. Transaction IDs are computed from the serialized message, and the mempool relays the received bytes.
+- Headers whose received bytes carry trailing data or an unread new-fields size are identified by their serialized fields and stored canonically.
+
 ### Fixed
 
-- Compare decoded header difficulty values when validating required difficulty.
-- Fail `Header.checkPow` evaluation when the decoded difficulty is zero.
-- Honor the compact difficulty sign when checking header proof of work.
-- Interpret sigma proof responses modulo the group order in DLog and DH-tuple verification.
-- Accrue Boolean and option-defined operation costs after evaluating and checking their inputs.
-- Reject non-function option map and filter callbacks, including on empty options.
-- Reject non-Boolean results from invoked collection filter and exists predicates.
-- Require byte collections for blake2b256 and SHA-256 script hashing.
-- Enforce the signed 256-bit result range after big integer shifts.
-- Reject empty signed big integer input to `Global.fromBigEndianBytes`.
-- Enforce the signed 256-bit result range for `Global.decodeNbits`.
-- Return empty byte and bit collections for unsigned big integer zero.
-- Evaluate method wire forms for context inputs, outputs and SELF, option access, and group multiplication.
-- Calculate collection slice costs from the original signed bounds.
-- Allow trailing bytes after values decoded by `Global.deserializeTo`.
-- Reject `flatMap` mappers whose static result type is not a collection, including on empty collections.
-- Parse the body of size-delimited trees with versions above 3 when the activated script version is below 2, rejecting bodies that fail outside rule validation and re-serializing parsed bodies.
-- Read header extension payloads only after version 4 and derive received node header IDs from serialized fields.
-- Insert numeric relation upcasts for scripts below version 3 and preserve the distinct received and serialized box bytes.
-- Accept supported transaction encodings that normalize on serialization, deriving transaction IDs from the serialized message.
-- Reject serialization of AVL tree values whose decoded key or value length is negative.
-- Preserve nested box script serialization errors when writing box constants.
-- Check collection and option receivers during script parsing and derive declared variable and tuple-index root types.
-- Apply activated validation settings to transaction, block and extension rules, retaining advertised settings across state reloads.
-- Reject cumulative Sigma status updates for unregistered rule identifiers.
-- Allow up to 255 tokens per output box when the box-size rule is deactivated.
-- Preserve omitted epoch parameter entries and validate required entries when their block or transaction use sites are reached.
-- Validate emission token allocation when re-emission checks are enabled; default those checks off for non-mining nodes and enable them for miners.
-- Split validation-settings extension values into chunks of at most 64 bytes.
-- Apply the running block cost to each input’s evaluation budget and keep mining candidates below the cost ceiling.
+- Sigma proofs: interpret DLog and DH-tuple response scalars modulo the group order.
+- Header proof of work and difficulty: honor the compact difficulty sign, fail `Header.checkPow` when the decoded difficulty is zero, and compare decoded difficulty values when validating the required difficulty.
+- Header parsing: read the new-fields payload only for header versions above 4.
+- Script parsing: insert numeric upcasts for relation operands in trees below version 3; check collection and option receivers; derive the root type of declared variables and tuple indexes; and parse size-delimited trees with versions above 3 when the activated script version is below 2.
+- Serialization: reject AVL tree values whose decoded key or value length is negative when they are written, and keep nested box script serialization errors instead of falling back to received bytes.
+- Script evaluation:
+  - `Global.deserializeTo` accepts trailing bytes;
+  - `Slice` costs use the original signed bounds;
+  - `Global.decodeNbits` and `BigInt` shifts enforce the signed 256-bit range;
+  - `Global.fromBigEndianBytes[BigInt]` rejects empty input;
+  - `UnsignedBigInt(0).toBytes` is empty;
+  - hashing requires a byte collection;
+  - `filter` and `exists` require Boolean predicate results;
+  - `flatMap` requires a mapper whose static result type is a collection, also on empty collections;
+  - option `map` and `filter` require a function argument;
+  - context `INPUTS`, `OUTPUTS` and `SELF`, option `isDefined` and `get`, and group element `multiply` evaluate in their method-call wire forms;
+  - Boolean and option-defined operations charge their cost after their input is evaluated and checked.
+- Block validation: each input's cost limit includes the cost of the block's earlier transactions, in both the sequential and parallel validators, and mining candidates stay strictly below the block cost limit.
+- Voting and parameters:
+  - epoch extensions may omit core parameters; a missing parameter fails where it is used;
+  - validation-settings extension values are split into chunks of at most 64 bytes;
+  - rules disabled by vote are no longer enforced, and an adopted settings table survives restarts and rollbacks;
+  - Sigma rule status updates for unregistered rule identifiers are rejected;
+  - an output box may hold up to 255 tokens when the box size rule is disabled.
 
 ## [0.12.1] - 2026-10-06
 
