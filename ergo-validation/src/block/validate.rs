@@ -13,9 +13,9 @@ use crate::tx::{
     CheckedTransaction,
 };
 
-use super::extension::validate_extension_structural;
+use super::extension::validate_extension_structural_active;
 use super::fork_vote::validate_fork_vote;
-use super::interlinks::validate_interlinks;
+use super::interlinks::validate_interlinks_with_context;
 use super::layering::{build_tx_layers, TxLayerInput, TxLayerResult, TxLayerSuccess};
 use super::overlay::BlockUtxoOverlay;
 use super::size::check_block_transactions_size;
@@ -169,7 +169,9 @@ fn validate_full_block_sequential_impl(
     // 2.6. Fork-vote prohibited-window check (Scala rule 407).
     // No-op when no soft-fork is in progress (ctx.soft_fork_state
     // is None) OR when the header doesn't cast a SoftFork vote.
-    validate_fork_vote(header, ctx.soft_fork_state.as_ref())?;
+    if ctx.is_rule_active(407) {
+        validate_fork_vote(header, ctx.soft_fork_state.as_ref())?;
+    }
 
     // 3. Transactions root
     let txs = &block_transactions.transactions;
@@ -231,16 +233,20 @@ fn validate_full_block_sequential_impl(
     // extension can't force the O(N²) duplicate scan as a DoS — the
     // root match cryptographically binds the extension to the header
     // before we walk its fields.
-    validate_extension_structural(extension, header.height)?;
+    validate_extension_structural_active(extension, header.height, |id| ctx.is_rule_active(id))?;
 
     // 4a.5. Interlink validation (rules 401, 402). Skipped when the
     // parent extension isn't on the context — that's Scala's
     // `exIlUnableToValidate` recoverable path. Production callers
     // wire `parent_extension` from the store for the consensus-path
     // enforcement; pre-NiPoPoW or genesis paths pass `None`.
-    if let Some(parent_ext) = ctx.parent_extension {
-        validate_interlinks(extension, ctx.parent.header(), parent_ext)?;
-    }
+    validate_interlinks_with_context(
+        extension,
+        header,
+        Some(ctx.parent.header()),
+        ctx.parent_extension,
+        |id| ctx.is_rule_active(id),
+    )?;
 
     // 4b. Block-transactions section size (rule 306).
     // Same defensive ordering as 4a: runs AFTER the transactions
@@ -248,12 +254,19 @@ fn validate_full_block_sequential_impl(
     // the re-serialize work as a DoS vector. Mirrors Scala's order
     // at `ErgoStateContext.appendFullBlock:308-310` (extension
     // validation → block-tx-size → ex-size).
-    check_block_transactions_size(
-        block_transactions,
-        header.version,
-        ctx.rule_306_max_block_size
-            .ok_or(BlockValidationError::MissingProtocolParameter { id: 3 })?,
-    )?;
+    if ctx.is_rule_active(306) {
+        check_block_transactions_size(
+            block_transactions,
+            header.version,
+            ctx.params
+                .block_rule_inputs
+                .as_ref()
+                .map_or(Some(ctx.rule_306_max_block_size), |parent| {
+                    parent.max_block_size
+                })
+                .ok_or(BlockValidationError::MissingProtocolParameter { id: 3 })?,
+        )?;
+    }
 
     // 5. Per-tx validation with intra-block UTXO overlay
     // Scala-parity header window: only the first 9 ancestors reach the
@@ -482,7 +495,9 @@ fn validate_full_block_parallel_impl(
 
     // 2.6. Fork-vote prohibited-window check (Scala rule 407).
     // Mirror of sequential step 2.6.
-    validate_fork_vote(header, ctx.soft_fork_state.as_ref())?;
+    if ctx.is_rule_active(407) {
+        validate_fork_vote(header, ctx.soft_fork_state.as_ref())?;
+    }
 
     let txs = &block_transactions.transactions;
     let mut tx_ids: Vec<Vec<u8>> = Vec::with_capacity(txs.len());
@@ -547,16 +562,27 @@ fn validate_full_block_parallel_impl(
     // bound the bytes to the header, so an unbound adversarial
     // payload can't trip the O(N²) duplicate scan / re-serialize
     // walks as a DoS vector.
-    validate_extension_structural(extension, header.height)?;
-    if let Some(parent_ext) = ctx.parent_extension {
-        validate_interlinks(extension, ctx.parent.header(), parent_ext)?;
-    }
-    check_block_transactions_size(
-        block_transactions,
-        header.version,
-        ctx.rule_306_max_block_size
-            .ok_or(BlockValidationError::MissingProtocolParameter { id: 3 })?,
+    validate_extension_structural_active(extension, header.height, |id| ctx.is_rule_active(id))?;
+    validate_interlinks_with_context(
+        extension,
+        header,
+        Some(ctx.parent.header()),
+        ctx.parent_extension,
+        |id| ctx.is_rule_active(id),
     )?;
+    if ctx.is_rule_active(306) {
+        check_block_transactions_size(
+            block_transactions,
+            header.version,
+            ctx.params
+                .block_rule_inputs
+                .as_ref()
+                .map_or(Some(ctx.rule_306_max_block_size), |parent| {
+                    parent.max_block_size
+                })
+                .ok_or(BlockValidationError::MissingProtocolParameter { id: 3 })?,
+        )?;
+    }
 
     // Layered parallel tx validation
     let layering = build_tx_layers(txs)?;

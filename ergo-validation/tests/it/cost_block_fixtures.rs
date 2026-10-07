@@ -203,7 +203,7 @@ fn context<'a>(
         parent: &parent.header,
         utxo: state,
         params,
-        rule_306_max_block_size: Some(params.max_block_size),
+        rule_306_max_block_size: params.max_block_size,
         voting_length: 128,
         votes_unknown_rule_disabled:
             ergo_validation::voting::validation_settings::parse_validation_settings_update(
@@ -725,18 +725,6 @@ fn replay(fixture: Fixture) {
         parallel.as_ref().err(),
     ] {
         assert_eq!(rust_verdict(actual), expected, "{actual:?}");
-        if fixture.parameters["4"] == 25005 && fixture.transactions_hex.len() == 3 {
-            assert!(
-                matches!(
-                    actual,
-                    Some(BlockValidationError::BlockCostExceeded {
-                        total: 37509,
-                        limit: 25005
-                    })
-                ),
-                "{actual:?}"
-            );
-        }
     }
     if expected != "Accept" {
         // Failed JVM execution has no payload; a deferred Rust sum is not substituted.

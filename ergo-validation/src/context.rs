@@ -7,9 +7,13 @@ use ergo_ser::ergo_box::ErgoBox;
 pub struct ProtocolParams {
     /// Missing named active-table entries (same mask as ActiveProtocolParameters).
     pub missing_core_parameters: u16,
+    /// Activated node rule deactivations; Sigma statuses are kept separately.
+    pub disabled_rules: std::collections::BTreeSet<u16>,
+    /// Optional parent context for section rules, before adopting an epoch update.
+    pub block_rule_inputs: Option<BlockRuleInputs>,
     /// Activated Sigma statuses. Complete tip/target contexts use
     /// `from_active_with_settings` / `for_block`; `from_active` alone carries
-    /// only the supplied row's status delta.
+    /// the supplied row's adopted settings, or its delta for legacy rows.
     pub validation_settings: ergo_sigma::evaluator::SigmaValidationSettings,
     /// Minimum nanoErg per byte of serialized box. Default: 360.
     pub min_value_per_byte: u64,
@@ -21,7 +25,8 @@ pub struct ProtocolParams {
     pub max_block_size: u32,
     /// Maximum serialized box size in bytes. Protocol-level: 4096.
     pub max_box_size: u32,
-    /// Maximum tokens per box. Protocol-level: 122.
+    /// Maximum tokens per box. Protocol-level: 255.
+    /// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/data/SigmaConstants.scala#L32>
     pub max_tokens_per_box: u8,
     /// Cost per transaction input (votable). Default: 2,000.
     pub input_cost: u64,
@@ -45,7 +50,23 @@ pub struct ProtocolParams {
     pub block_version: u8,
 }
 
+/// The parent parameter use and settings needed by block-section validation.
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/state/ErgoStateContext.scala#L328>
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockRuleInputs {
+    /// Parent id 3 may be absent, and is read only while rule 306 is active.
+    pub max_block_size: Option<u32>,
+    /// Parent rule settings, before this block's advertised settings are adopted.
+    pub validation_settings: crate::ErgoValidationSettings,
+}
+
 impl ProtocolParams {
+    /// Whether the reference node executes this rule under the activated settings.
+    pub fn is_rule_active(&self, id: u16) -> bool {
+        !crate::voting::validation_settings::DISABLEABLE_RULES.contains(&id)
+            || !self.disabled_rules.contains(&id)
+    }
+
     /// Whether a named active-table parameter is present.
     pub fn has_parameter(&self, id: u8) -> bool {
         let bit = match id {
@@ -58,8 +79,10 @@ impl ProtocolParams {
 
     pub(crate) fn require_transaction_parameters(&self) -> Result<(), crate::ValidationError> {
         for id in [2, 4, 5, 6, 7, 8, 123] {
-            if !self.has_parameter(id) {
-                return Err(crate::ValidationError::MissingProtocolParameter { id });
+            if !self.has_parameter(id) && (id != 2 || self.is_rule_active(111)) {
+                return Err(crate::ValidationError::Deserialization(format!(
+                    "missing protocol parameter {id}"
+                )));
             }
         }
         Ok(())
@@ -74,9 +97,21 @@ impl ProtocolParams {
     ) -> Self {
         let settings = voted.map_or_else(
             || previous_settings.clone(),
-            |target| previous_settings.updated(&target.activated_update),
+            |target| {
+                target.announced_settings.as_ref().map_or_else(
+                    || previous_settings.updated(&target.activated_update),
+                    |update| crate::ErgoValidationSettings {
+                        update_from_initial: update.clone(),
+                    },
+                )
+            },
         );
-        Self::from_active_with_settings(voted.unwrap_or(parent), &settings)
+        let mut params = Self::from_active_with_settings(voted.unwrap_or(parent), &settings);
+        params.block_rule_inputs = Some(BlockRuleInputs {
+            max_block_size: parent.parameter(3).map(|value| value as u32),
+            validation_settings: previous_settings.clone(),
+        });
+        params
     }
 
     /// Convert an active parameter row with the separately accumulated rule
@@ -88,6 +123,7 @@ impl ProtocolParams {
     ) -> Self {
         let mut params = Self::from_active(active);
         params.validation_settings = sigma_settings(settings.status_updates());
+        params.disabled_rules = settings.disabled_rules().iter().copied().collect();
         params
     }
 
@@ -99,6 +135,8 @@ impl ProtocolParams {
     pub fn mainnet_default() -> Self {
         Self {
             missing_core_parameters: 0,
+            disabled_rules: Default::default(),
+            block_rule_inputs: None,
             validation_settings: Default::default(),
             min_value_per_byte: 360,
             // Mainnet value from blockchain parameters (adjusted via voting).
@@ -107,7 +145,7 @@ impl ProtocolParams {
             max_block_cost: 8_001_091,
             max_block_size: 524_288,
             max_box_size: 4096,
-            max_tokens_per_box: 122,
+            max_tokens_per_box: u8::MAX,
             input_cost: 2_000,
             data_input_cost: 100,
             output_cost: 100,
@@ -121,7 +159,7 @@ impl ProtocolParams {
         }
     }
 
-    /// Convert numeric fields and this row's activated status delta from the
+    /// Convert numeric fields and this row's adopted settings (or legacy delta) from the
     /// per-epoch active set persisted in `voted_params`. Call
     /// [`Self::from_active_with_settings`] for a complete tip context or
     /// [`Self::for_block`] for a target block's validated epoch transition.
@@ -170,14 +208,20 @@ impl ProtocolParams {
             active.token_access_cost >= 0,
             "negative token_access_cost leaked past parse boundary"
         );
+        let update = active
+            .announced_settings
+            .as_ref()
+            .unwrap_or(&active.activated_update);
         Self {
             missing_core_parameters: active.missing_core_parameters,
-            validation_settings: sigma_settings(&active.activated_update.status_updates),
+            disabled_rules: update.rules_to_disable.iter().copied().collect(),
+            block_rule_inputs: None,
+            validation_settings: sigma_settings(&update.status_updates),
             min_value_per_byte: active.min_value_per_byte as u64,
             max_block_cost: active.max_block_cost as u64,
             max_block_size: active.max_block_size as u32,
             max_box_size: 4096,
-            max_tokens_per_box: 122,
+            max_tokens_per_box: u8::MAX,
             input_cost: active.input_cost as u64,
             data_input_cost: active.data_input_cost as u64,
             output_cost: active.output_cost as u64,
@@ -287,6 +331,7 @@ mod tests {
 
     fn baseline_active() -> ActiveProtocolParameters {
         ActiveProtocolParameters {
+            announced_settings: None,
             missing_core_parameters: 0,
             epoch_start_height: 1024,
             block_version: 1,

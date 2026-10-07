@@ -299,6 +299,7 @@ impl Funded {
             // pay-to-reemission contract requires.
             self.advance(
                 (height == EPOCH).then(|| ergo_validation::ActiveProtocolParameters {
+                    announced_settings: None,
                     missing_core_parameters: 0,
                     epoch_start_height: EPOCH,
                     block_version: 2,

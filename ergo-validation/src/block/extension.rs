@@ -56,8 +56,18 @@ pub fn validate_extension_structural(
     extension: &Extension,
     block_height: u32,
 ) -> Result<(), BlockValidationError> {
+    validate_extension_structural_active(extension, block_height, |_: u16| true)
+}
+
+/// Structural rules evaluated only when active in the parent settings.
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/history/storage/modifierprocessors/ExtensionValidator.scala#L20>
+pub(crate) fn validate_extension_structural_active(
+    extension: &Extension,
+    block_height: u32,
+    active: impl Fn(u16) -> bool,
+) -> Result<(), BlockValidationError> {
     // 406: non-genesis block must carry at least one extension field.
-    if block_height != 0 && extension.fields.is_empty() {
+    if active(406) && block_height != 0 && extension.fields.is_empty() {
         return Err(BlockValidationError::ExtensionEmptyOnNonGenesis {
             height: block_height,
         });
@@ -65,7 +75,7 @@ pub fn validate_extension_structural(
 
     // 400: total serialized size cap.
     let size = serialized_extension_size(extension);
-    if size > MAX_EXTENSION_SIZE {
+    if active(400) && size > MAX_EXTENSION_SIZE {
         return Err(BlockValidationError::ExtensionTooLarge {
             size,
             max: MAX_EXTENSION_SIZE,
@@ -74,7 +84,7 @@ pub fn validate_extension_structural(
 
     // 404: per-field value-length cap.
     for (index, field) in extension.fields.iter().enumerate() {
-        if field.value.len() > EXTENSION_FIELD_VALUE_MAX_SIZE {
+        if active(404) && field.value.len() > EXTENSION_FIELD_VALUE_MAX_SIZE {
             return Err(BlockValidationError::ExtensionFieldValueTooLong {
                 index,
                 len: field.value.len(),
@@ -86,6 +96,9 @@ pub fn validate_extension_structural(
     // 405: no two fields share a key. O(N²) over fields is fine —
     // mainnet extensions hold 4-30 entries, never enough to merit
     // a HashSet allocation.
+    if !active(405) {
+        return Ok(());
+    }
     for first in 0..extension.fields.len() {
         let key = extension.fields[first].key;
         for second in (first + 1)..extension.fields.len() {

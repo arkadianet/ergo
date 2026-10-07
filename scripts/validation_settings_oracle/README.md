@@ -10,3 +10,6 @@ scala-cli run scripts/validation_settings_oracle/ValidationSettingsOracle.scala 
 The oracle obtains extension chunks from `ErgoValidationSettings.toExtensionCandidate`,
 and separately tests update deserialization and complete settings deserialization.
 It records the node's initial Sigma map and the disableable node rules.
+
+It also distinguishes rule 1016 in the captured node initial map from the
+versioned Sigma core map, where the rule is registered after activation.

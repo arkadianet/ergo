@@ -18,6 +18,10 @@ infrastructure.
 
 ### Fixed
 
+- Apply activated validation settings to transaction, block and extension rules, retaining advertised settings across state reloads.
+- Reject cumulative Sigma status updates for unregistered rule identifiers.
+- Allow up to 255 tokens per output box when the box-size rule is deactivated.
+
 - Preserve omitted epoch parameter entries and validate required entries when their block or transaction use sites are reached.
 
 - Validate emission token allocation when re-emission checks are enabled; default those checks off for non-mining nodes and enable them for miners.

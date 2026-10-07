@@ -33,6 +33,11 @@ object ValidationSettingsOracle {
     val out = Json.obj("ergo_core" -> Json.fromString("6.0.7"), "sigma_state" -> Json.fromString("6.0.7"),
       "disableable" -> Json.arr(ValidationRules.rulesSpec.toSeq.filter(_._2.mayBeDisabled).map(_._1.toInt).sorted.map(Json.fromInt): _*),
       "initial_sigma_ids" -> Json.arr(ErgoValidationSettings.initial.sigmaSettings.iterator.toSeq.map(_._1.toInt).sorted.map(Json.fromInt): _*),
+      "soft_fork_1016" -> Json.fromBoolean(ErgoValidationSettings.initial.sigmaSettings.isSoftFork(sigma.validation.ValidationException("method", org.ergoplatform.validation.ValidationRules.CheckAndGetMethodV6, Seq.empty))),
+      "core_soft_fork_1016" -> Json.fromBoolean(sigma.VersionContext.withVersions(3.toByte, 3.toByte) {
+        org.ergoplatform.validation.ValidationRules.currentSettings.updated(1016.toShort, ReplacedRule(1000.toShort))
+          .isSoftFork(sigma.validation.ValidationException("method", org.ergoplatform.validation.ValidationRules.CheckAndGetMethodV6, Seq.empty))
+      }),
       "chunks" -> Json.arr(chunks: _*), "statuses" -> Json.arr(statuses: _*))
     java.nio.file.Files.write(java.nio.file.Paths.get(args(0)), out.spaces2.getBytes("UTF-8"))
   }

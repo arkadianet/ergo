@@ -10,9 +10,6 @@ use thiserror::Error;
 /// Scala-parity error envelopes.
 #[derive(Debug, Error)]
 pub enum ValidationError {
-    /// A parameter table entry was absent when a stateful use required it.
-    #[error("missing protocol parameter {id}")]
-    MissingProtocolParameter { id: u8 },
     // --- Deserialization ---
     /// Bytes failed to parse into the expected wire form.
     #[error("deserialization failed: {0}")]

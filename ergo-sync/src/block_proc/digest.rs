@@ -506,7 +506,7 @@ pub(super) fn process_block_digest(
         parent: &parent_checked,
         utxo: &digest_view,
         params,
-        rule_306_max_block_size,
+        rule_306_max_block_size: rule_306_max_block_size.unwrap_or(0),
         voting_length,
         votes_unknown_rule_disabled,
         parent_extension: parent_extension.as_ref(),

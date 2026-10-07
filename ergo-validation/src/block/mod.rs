@@ -34,7 +34,7 @@ pub use extension::{
     validate_extension_structural, EXTENSION_FIELD_VALUE_MAX_SIZE, MAX_EXTENSION_SIZE,
 };
 pub use fork_vote::{check_fork_vote_votes_collected_present, validate_fork_vote};
-pub use interlinks::validate_interlinks;
+pub use interlinks::{validate_interlinks, validate_interlinks_with_settings};
 #[cfg(feature = "test-helpers")]
 pub use validate::validate_full_block_parallel_with_costs;
 #[cfg(any(test, feature = "test-helpers"))]
@@ -120,7 +120,9 @@ pub struct BlockValidationContext<'a> {
     pub utxo: &'a dyn UtxoView,
     /// Votable protocol parameters at the current epoch.
     pub params: &'a ProtocolParams,
-    pub rule_306_max_block_size: Option<u32>,
+    /// Legacy section limit; `params.block_rule_inputs` carries the optional
+    /// parent-table value on the production path.
+    pub rule_306_max_block_size: u32,
     /// Voting epoch length in blocks (Scala `votingSettings.votingLength`).
     /// Mainnet 1024, testnet 128. Drives rule 215 (`hdrVotesUnknown`) —
     /// the rule only fires on headers at heights where `height %
@@ -181,6 +183,15 @@ pub struct BlockValidationContext<'a> {
     /// check — the public testnet (no EIP-27) and callers that don't supply
     /// it. See [`ReemissionRuleInputs`].
     pub reemission: Option<&'a ReemissionRuleInputs>,
+}
+
+impl BlockValidationContext<'_> {
+    pub(crate) fn is_rule_active(&self, id: u16) -> bool {
+        self.params.block_rule_inputs.as_ref().map_or_else(
+            || self.params.is_rule_active(id),
+            |parent| !parent.validation_settings.is_rule_disabled(id),
+        )
+    }
 }
 
 /// A block accepted by a full-block validation entry point using the

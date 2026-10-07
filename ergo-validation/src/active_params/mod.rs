@@ -14,7 +14,7 @@
 //! - `persist_codec` — `validate`/`serialize`/`deserialize`, the redb
 //!   storage wire format. Kept together deliberately: `deserialize`
 //!   documents matching the exact byte-shape `serialize` produces
-//!   (v1/v2 auto-detection).
+//!   (legacy rows and optional complete-settings suffix).
 
 mod extension_codec;
 mod launch;
@@ -117,6 +117,9 @@ pub struct ActiveProtocolParameters {
     /// **Set by `compute_next_params`, not by the parser** — the
     /// parser leaves this empty.
     pub activated_update: ErgoValidationSettingsUpdate,
+    /// Complete advertised settings adopted with this row. Legacy rows have
+    /// only an epoch delta; a disabled matching rule permits replacement.
+    pub announced_settings: Option<ErgoValidationSettingsUpdate>,
 }
 
 /// Failures raised by [`parse_active_params`] / [`ActiveProtocolParameters::serialize`] /

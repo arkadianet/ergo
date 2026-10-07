@@ -1497,7 +1497,7 @@ fn compute_epoch_payload(
     }
     // Carry forward the in-flight proposal; never reset to empty.
     let proposed = active_params.proposed_update.clone();
-    let (computed, activated_update) = compute_next_params(
+    let (mut computed, activated_update) = compute_next_params(
         active_params,
         epoch_votes,
         false, // we never emit a soft-fork (120) vote
@@ -1509,9 +1509,18 @@ fn compute_epoch_payload(
         op: "compute_next_params",
         reason: e.to_string(),
     })?;
+    // UpcomingStateContext applies Sigma status updates before building work.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/state/ErgoStateContext.scala#L139
+    activated_update
+        .validate_sigma_status_ids()
+        .map_err(|e| MiningError::IdComputation {
+            op: "validation_settings_update",
+            reason: e.to_string(),
+        })?;
     let cumulative = validation_settings
         .updated(&activated_update)
         .update_from_initial;
+    computed.announced_settings = Some(cumulative.clone());
     Ok(EpochBoundaryPayload {
         computed,
         cumulative,

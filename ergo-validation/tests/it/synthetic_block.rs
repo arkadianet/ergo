@@ -29,6 +29,8 @@ use ergo_validation::block::{
 use ergo_validation::context::{ProtocolParams, UtxoView};
 use ergo_validation::header::CheckedHeader;
 
+type BlockCostResults = [Result<(CheckedBlock, Vec<(usize, u64)>), BlockValidationError>; 2];
+
 pub(crate) const VALUE: u64 = 1_000_000_000;
 /// Height of the mainnet header every synthetic block reuses.
 pub(crate) const HEIGHT: u32 = 1000;
@@ -154,7 +156,7 @@ pub(crate) fn validate_both_with_costs(
     utxo: &MapUtxo,
     header_version: u8,
     params: &ProtocolParams,
-) -> [Result<(CheckedBlock, Vec<(usize, u64)>), BlockValidationError>; 2] {
+) -> BlockCostResults {
     validate_both_with_parent_size(
         transactions,
         utxo,
@@ -170,7 +172,17 @@ pub(crate) fn validate_both_with_parent_size(
     header_version: u8,
     params: &ProtocolParams,
     parent_max_block_size: Option<u32>,
-) -> [Result<(CheckedBlock, Vec<(usize, u64)>), BlockValidationError>; 2] {
+) -> BlockCostResults {
+    let mut block_params = params.clone();
+    block_params.block_rule_inputs = Some(ergo_validation::context::BlockRuleInputs {
+        max_block_size: parent_max_block_size,
+        validation_settings: ergo_validation::ErgoValidationSettings {
+            update_from_initial: ergo_validation::ErgoValidationSettingsUpdate {
+                rules_to_disable: params.disabled_rules.iter().copied().collect(),
+                status_updates: vec![],
+            },
+        },
+    });
     let (parent, mut header) = parent_and_header();
     header.version = header_version;
     let tx_ids: Vec<ModifierId> = transactions
@@ -213,8 +225,8 @@ pub(crate) fn validate_both_with_parent_size(
     let ctx = BlockValidationContext {
         parent: &checked_parent,
         utxo,
-        params,
-        rule_306_max_block_size: parent_max_block_size,
+        params: &block_params,
+        rule_306_max_block_size: parent_max_block_size.unwrap_or(0),
         voting_length: 1024,
         votes_unknown_rule_disabled: false,
         parent_extension: None,

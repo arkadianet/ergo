@@ -46,6 +46,8 @@
     1015,
     1019
   ],
+  "soft_fork_1016" : false,
+  "core_soft_fork_1016" : true,
   "chunks" : [
     {
       "size" : 0,

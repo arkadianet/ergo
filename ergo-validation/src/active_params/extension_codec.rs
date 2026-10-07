@@ -100,6 +100,7 @@ pub fn parse_active_params(
     let extra: Vec<(u8, i32)> = by_id.into_iter().collect();
 
     Ok(ActiveProtocolParameters {
+        announced_settings: None,
         missing_core_parameters,
         epoch_start_height,
         block_version: block_version_i32 as u8,

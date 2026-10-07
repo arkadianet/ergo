@@ -253,7 +253,7 @@ fn check_fixture(raw: &str, heights: [u32; 3], transaction_count: usize, box_cou
             parent: &ancestors[0],
             utxo: &utxo,
             params: &params,
-            rule_306_max_block_size: Some(u32::try_from(parent_params.max_block_size).unwrap()),
+            rule_306_max_block_size: u32::try_from(parent_params.max_block_size).unwrap(),
             voting_length: voting.voting_length,
             votes_unknown_rule_disabled: settings.is_rule_disabled(215),
             parent_extension: Some(&parent_ext),

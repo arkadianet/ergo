@@ -13,3 +13,5 @@ status-1017	True	False	java.util.NoSuchElementException
 status-1018	True	False	java.util.NoSuchElementException
 status-1019	True	True	-
 status-1020	True	False	java.util.NoSuchElementException
+soft-fork-1016-node	False
+soft-fork-1016-core-v6	True

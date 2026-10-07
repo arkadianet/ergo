@@ -16,6 +16,9 @@ use crate::voting::validation_settings::ErgoValidationSettingsUpdate;
 /// `extra` could produce a row that is unreadable on the next open.
 impl ActiveProtocolParameters {
     pub fn validate(&self) -> Result<(), ActiveParamsError> {
+        if let Some(settings) = &self.announced_settings {
+            settings.validate_sigma_status_ids()?;
+        }
         const RESERVED: &[u8] = &[
             ids::STORAGE_FEE_FACTOR,
             ids::MIN_VALUE_PER_BYTE,
@@ -62,7 +65,7 @@ impl ActiveProtocolParameters {
     /// violated (negative constrained fields, excessive field count, or
     /// duplicate/reserved extra IDs); see [`Self::validate`].
     ///
-    /// Wire format **v2** (current writer):
+    /// Wire format **v2** (legacy-compatible prefix):
     ///
     /// ```text
     /// u32 epoch_start_height (BE)
@@ -78,7 +81,7 @@ impl ActiveProtocolParameters {
     /// [`Self::deserialize`] auto-detects: if the body length matches
     /// the v1 exact-length invariant, it decodes as v1 with empty
     /// update blobs; otherwise it expects the v2 trailing fields.
-    /// New writes always emit v2.
+    /// Rows with complete adopted settings append a v3 length-prefixed settings blob.
     ///
     /// Internal format only — never sent on the wire.
     pub fn serialize(&self) -> Result<Vec<u8>, ActiveParamsError> {
@@ -120,12 +123,17 @@ impl ActiveProtocolParameters {
         out.extend_from_slice(&proposed_blob);
         out.extend_from_slice(&(activated_blob.len() as u32).to_be_bytes());
         out.extend_from_slice(&activated_blob);
+        // Optional v3 suffix: v1/v2 rows remain readable and unchanged when absent.
+        if let Some(settings) = &self.announced_settings {
+            let bytes = settings.serialize();
+            out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            out.extend_from_slice(&bytes);
+        }
         Ok(out)
     }
 
-    /// Decode a record produced by `serialize`. Auto-detects v1 vs v2
-    /// based on whether the body matches the v1 exact-length invariant
-    /// or has v2 trailing fields.
+    /// Decode a record produced by `serialize`. Auto-detects v1, v2 or
+    /// the v3 complete-settings suffix from the remaining length.
     pub fn deserialize(bytes: &[u8]) -> Result<Self, ActiveParamsError> {
         if bytes.len() < 5 {
             return Err(ActiveParamsError::UnexpectedEof);
@@ -146,11 +154,12 @@ impl ActiveProtocolParameters {
         // v1 body length is exactly count * 5; v2 has trailing
         // length-prefixed update blobs.
         let trailing = &bytes[entries_end..];
-        let (proposed_update, activated_update) = if trailing.is_empty() {
+        let (proposed_update, activated_update, announced_settings) = if trailing.is_empty() {
             // v1 wire format: no update blobs persisted.
             (
                 ErgoValidationSettingsUpdate::empty(),
                 ErgoValidationSettingsUpdate::empty(),
+                None,
             )
         } else {
             // v2: parse proposed_update + activated_update.
@@ -182,10 +191,22 @@ impl ActiveProtocolParameters {
             let activated = ErgoValidationSettingsUpdate::deserialize_exact(
                 &trailing[activated_start..activated_end],
             )?;
-            if trailing.len() != activated_end {
-                return Err(ActiveParamsError::TrailingBytes);
-            }
-            (proposed, activated)
+            let announced = if trailing.len() == activated_end {
+                None
+            } else {
+                let suffix = &trailing[activated_end..];
+                if suffix.len() < 4 {
+                    return Err(ActiveParamsError::TrailingBytes);
+                }
+                let length = u32::from_be_bytes(suffix[..4].try_into().unwrap()) as usize;
+                if suffix.len() != 4 + length {
+                    return Err(ActiveParamsError::TrailingBytes);
+                }
+                let settings = ErgoValidationSettingsUpdate::deserialize_exact(&suffix[4..])?;
+                settings.validate_sigma_status_ids()?;
+                Some(settings)
+            };
+            (proposed, activated, announced)
         };
 
         let mut by_id: std::collections::BTreeMap<u8, i32> = std::collections::BTreeMap::new();
@@ -252,6 +273,7 @@ impl ActiveProtocolParameters {
             extra,
             proposed_update,
             activated_update,
+            announced_settings,
         })
     }
 }
