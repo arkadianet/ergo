@@ -209,3 +209,9 @@ fn big_integer_operations_and_shift_bounds_match_reference() {
     check_vectors("shift-extra");
     check_vectors("arithmetic-extra");
 }
+
+#[test]
+fn hash_and_byte_consumer_inputs_match_reference() {
+    check_vectors("hash");
+    check_vectors("hash-extra");
+}

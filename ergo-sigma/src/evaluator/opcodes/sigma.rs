@@ -154,7 +154,9 @@ pub(in crate::evaluator) fn eval_decode_point(
     }
 }
 
-// 0xCB CalcBlake2b256 — accepts Coll[Byte] and Coll[Int] (bytes widened by Map).
+// 0xCB CalcBlake2b256 — the reference casts the input array to Array[Byte].
+// Preserve the runtime byte carrier check even for wire trees with other types.
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L153-L160
 pub(in crate::evaluator) fn eval_calc_blake2b256(
     inner: &Expr,
     cx: &mut EvalCtx<'_>,
@@ -162,7 +164,6 @@ pub(in crate::evaluator) fn eval_calc_blake2b256(
     let val = cx.eval_expr(inner)?;
     let bytes = match val {
         Value::CollBytes(b) => b,
-        Value::CollInt(ints) => ints.iter().map(|&i| i as u8).collect(),
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Coll[Byte] for CalcBlake2b256",
@@ -175,7 +176,7 @@ pub(in crate::evaluator) fn eval_calc_blake2b256(
     Ok(Value::CollBytes(hash.as_bytes().to_vec()))
 }
 
-// 0xCC CalcSha256 — accepts Coll[Byte] and Coll[Int].
+// 0xCC CalcSha256 — the same runtime Array[Byte] requirement as blake2b256.
 pub(in crate::evaluator) fn eval_calc_sha256(
     inner: &Expr,
     cx: &mut EvalCtx<'_>,
@@ -183,7 +184,6 @@ pub(in crate::evaluator) fn eval_calc_sha256(
     let val = cx.eval_expr(inner)?;
     let bytes = match val {
         Value::CollBytes(b) => b,
-        Value::CollInt(ints) => ints.iter().map(|&i| i as u8).collect(),
         _ => {
             return Err(EvalError::TypeError {
                 expected: "Coll[Byte] for CalcSha256",
