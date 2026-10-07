@@ -314,7 +314,10 @@ pub(super) fn from_big_endian_bytes(
             a.copy_from_slice(&bytes);
             Ok(Value::Long(i64::from_be_bytes(a)))
         }
-        S::SBigInt if bytes.len() <= 32 => Ok(Value::BigInt(
+        // Java BigInteger rejects an empty signed representation; the unsigned
+        // constructor below accepts it as zero. Preserve that distinction.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L249-L258
+        S::SBigInt if !bytes.is_empty() && bytes.len() <= 32 => Ok(Value::BigInt(
             num_bigint::BigInt::from_signed_bytes_be(&bytes),
         )),
         // SUnsignedBigInt: UNSIGNED big-endian parse (Scala

@@ -18,6 +18,7 @@ infrastructure.
 
 ### Fixed
 
+- Reject empty signed big integer input to `Global.fromBigEndianBytes`.
 - Enforce the signed 256-bit result range for `Global.decodeNbits`.
 - Return empty byte and bit collections for unsigned big integer zero.
 - Evaluate method wire forms for context inputs, outputs and SELF, option access, and group multiplication.
