@@ -375,6 +375,39 @@ impl MonetaryParams {
     }
 }
 
+/// Total emission at a height, in nanoErgs.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/org/ergoplatform/mining/emission/EmissionRules.scala#L67-L74>
+pub fn emission_at_height(height: u32, monetary: &MonetaryParams) -> u64 {
+    if height < monetary.fixed_rate_period {
+        monetary.fixed_rate
+    } else {
+        let epoch =
+            1 + u64::from(height - monetary.fixed_rate_period) / u64::from(monetary.epoch_length);
+        monetary
+            .fixed_rate
+            .saturating_sub(monetary.one_epoch_reduction.saturating_mul(epoch))
+    }
+}
+
+/// Re-emission tokens allocated to a block's reward output.
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/reemission/ReemissionRules.scala#L27-L39>
+pub fn reemission_for_height(
+    height: u32,
+    monetary: &MonetaryParams,
+    activation_height: u32,
+) -> u64 {
+    let emission = emission_at_height(height, monetary);
+    let basic = 12_000_000_000;
+    let buffer = 3_000_000_000;
+    if height >= activation_height && emission >= basic + buffer {
+        basic
+    } else if height >= activation_height && emission > buffer {
+        emission - buffer
+    } else {
+        0
+    }
+}
+
 /// Re-emission (EIP-27) parameters: activation height, distribution
 /// schedule, and the token / NFT identities that drive the injection.
 /// All values differ between mainnet and testnet; testnet's

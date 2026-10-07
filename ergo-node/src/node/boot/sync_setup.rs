@@ -311,7 +311,8 @@ pub(super) fn setup(
         ),
         None => info!("header checkpoint: disabled (no [chain] checkpoint configured)"),
     }
-    let reemission_rules = super::build_reemission_rules(&config.chain_spec);
+    let reemission_rules =
+        super::build_reemission_rules(&config.chain_spec, config.check_reemission_rules);
     match &reemission_rules {
         Some(r) => info!(
             activation_height = r.activation_height,

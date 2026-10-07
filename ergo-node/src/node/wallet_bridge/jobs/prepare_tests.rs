@@ -164,6 +164,8 @@ impl Funded {
         .unwrap();
         let spec = ergo_chain_spec::ChainSpec::for_network(ergo_chain_spec::Network::Mainnet);
         let rules = ergo_validation::ReemissionRuleInputs {
+            check_rules: true,
+            emission: None,
             activation_height: 100,
             reemission_token_id: *spec
                 .reemission

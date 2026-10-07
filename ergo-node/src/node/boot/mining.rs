@@ -106,7 +106,10 @@ pub(super) fn build_subsystem(
     // Same EIP-27 rules the block validator and mempool use, so a candidate
     // can never carry an EIP-27-invalid emission / fee / storage-rent /
     // selected tx that block validation would later reject.
-    .with_reemission_rules(super::build_reemission_rules(&config.chain_spec))
+    .with_reemission_rules(super::build_reemission_rules(
+        &config.chain_spec,
+        config.check_reemission_rules,
+    ))
     .with_voting_targets(voting_targets_slot.clone())
     // Operator-configured custom extension fields (merge-mining / commitment
     // hook). Pre-validated by `MiningConfig::validate` at startup; re-checked

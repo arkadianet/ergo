@@ -31,9 +31,7 @@ use ergo_ser::register::AdditionalRegisters;
 use ergo_ser::token::Token;
 use ergo_ser::transaction::Transaction;
 
-use crate::emission_rules::{
-    emission_at_height, miners_reward_at_height, MonetarySettings, COINS_IN_ONE_ERGO,
-};
+use crate::emission_rules::{miners_reward_at_height, MonetarySettings};
 use crate::error::MiningError;
 use crate::reward_script::reward_output_script;
 
@@ -55,16 +53,7 @@ pub fn reemission_for_height(
     settings: &MonetarySettings,
     reemission: &ReemissionSettings,
 ) -> u64 {
-    let emission = emission_at_height(height, settings);
-    let basic = 12u64 * COINS_IN_ONE_ERGO;
-    let buffer = 3u64 * COINS_IN_ONE_ERGO;
-    if height >= reemission.activation_height && emission >= basic + buffer {
-        basic
-    } else if height >= reemission.activation_height && emission > buffer {
-        emission - buffer
-    } else {
-        0
-    }
+    ergo_chain_spec::reemission_for_height(height, settings, reemission.activation_height)
 }
 
 /// Build the at-activation emission tx — `next_height ==
@@ -351,6 +340,7 @@ fn empty_input(box_id: Digest32) -> Result<Input, MiningError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emission_rules::COINS_IN_ONE_ERGO;
     use ergo_primitives::digest::ModifierId;
     use serde::Deserialize;
 

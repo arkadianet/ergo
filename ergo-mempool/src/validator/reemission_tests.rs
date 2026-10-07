@@ -66,6 +66,8 @@ fn fixture(preserve_token: bool) -> (Boxes, Vec<u8>, ReemissionRuleInputs) {
         Boxes(input),
         w.result(),
         ReemissionRuleInputs {
+            check_rules: true,
+            emission: None,
             activation_height: 0,
             reemission_token_id: TOKEN,
             pay_to_reemission_tree: FALSE.to_vec(),

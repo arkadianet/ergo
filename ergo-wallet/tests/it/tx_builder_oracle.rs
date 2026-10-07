@@ -310,6 +310,8 @@ fn pay_to_reemission_tree() -> Vec<u8> {
 /// EIP-27 rules with activation at height 100.
 fn reemission_rules() -> ergo_validation::ReemissionRuleInputs {
     ergo_validation::ReemissionRuleInputs {
+        check_rules: true,
+        emission: None,
         activation_height: 100,
         reemission_token_id: [REEMISSION_TOKEN; 32],
         pay_to_reemission_tree: pay_to_reemission_tree(),

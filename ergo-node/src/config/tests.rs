@@ -2601,3 +2601,25 @@ fn stale_indexer_retention_is_explicit_in_store_and_offline_cli() {
     ])
     .is_err());
 }
+
+#[test]
+fn reemission_check_defaults_and_mining_override() {
+    for (node_setting, mining, expected) in [
+        ("", false, false),
+        ("check_reemission_rules = true", false, true),
+        ("check_reemission_rules = false", false, false),
+        ("check_reemission_rules = false", true, true),
+    ] {
+        let file = write_toml(&format!("[node]\n{node_setting}\n"));
+        let mut cli = minimal_cli(Some(file.path()));
+        cli.mining_enabled = mining;
+        if mining {
+            cli.mining_public_key =
+                Some("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".into());
+        }
+        assert_eq!(
+            NodeConfig::load(cli).unwrap().check_reemission_rules,
+            expected
+        );
+    }
+}

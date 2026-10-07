@@ -18,6 +18,8 @@ infrastructure.
 
 ### Fixed
 
+- Validate emission token allocation when re-emission checks are enabled; default those checks off for non-mining nodes and enable them for miners.
+
 - Split validation-settings extension values into chunks of at most 64 bytes.
 
 - Apply the running block cost to each input’s evaluation budget and keep mining candidates below the cost ceiling.

@@ -1030,6 +1030,8 @@ async fn native_balance_reserves_eip27_reward_box_tokens() {
         min_relay_fee_nano_erg: 1_000_000,
         max_tx_size_bytes: 98_304,
         reemission: Some(ergo_validation::ReemissionRuleInputs {
+            check_rules: true,
+            emission: None,
             activation_height: ACTIVATION,
             reemission_token_id: REEMISSION_TOKEN,
             pay_to_reemission_tree: vec![0u8], // unused by the reserve estimate
@@ -1138,6 +1140,8 @@ async fn native_select_boxes_burn_aware_dry_run() {
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_seed = db.clone();
     let rules = ergo_validation::ReemissionRuleInputs {
+        check_rules: true,
+        emission: None,
         activation_height: ACTIVATION,
         reemission_token_id: REEMISSION_TOKEN,
         pay_to_reemission_tree: vec![0u8], // unused by the dry-run (no tree parse)

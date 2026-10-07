@@ -1472,6 +1472,8 @@ mod tests {
                 index: 0,
             },
             rules: ergo_validation::ReemissionRuleInputs {
+                check_rules: true,
+                emission: None,
                 activation_height: 1000,
                 reemission_token_id: REEMISSION_TOKEN,
                 pay_to_reemission_tree: hex::decode(PAY2R_HEX).unwrap(),
@@ -1587,6 +1589,8 @@ mod tests {
             reward_id: input_id,
             reward_box: input,
             rules: ergo_validation::ReemissionRuleInputs {
+                check_rules: true,
+                emission: None,
                 activation_height: 1000,
                 reemission_token_id: [0x22; 32],
                 pay_to_reemission_tree: hex::decode(PAY2R_HEX).unwrap(),
@@ -1773,6 +1777,8 @@ mod tests {
             reward_id: input_id,
             reward_box: input.clone(),
             rules: ergo_validation::ReemissionRuleInputs {
+                check_rules: true,
+                emission: None,
                 activation_height: 1000,
                 reemission_token_id: [0x22; 32],
                 pay_to_reemission_tree: hex::decode(PAY2R_HEX).unwrap(),
@@ -2054,6 +2060,8 @@ mod tests {
             reward_id,
             reward_box,
             rules: ergo_validation::ReemissionRuleInputs {
+                check_rules: true,
+                emission: None,
                 activation_height: 100,
                 reemission_token_id: REEMISSION_TOKEN,
                 pay_to_reemission_tree: pay2r_tree.clone(),
