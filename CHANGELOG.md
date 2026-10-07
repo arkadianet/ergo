@@ -18,6 +18,8 @@ infrastructure.
 
 ### Fixed
 
+- Accrue Boolean and option-defined operation costs after evaluating and checking their inputs.
+
 - Reject non-function option map and filter callbacks, including on empty options.
 - Reject non-Boolean results from invoked collection filter and exists predicates.
 - Require byte collections for blake2b256 and SHA-256 script hashing.

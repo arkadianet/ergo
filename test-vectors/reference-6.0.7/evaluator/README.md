@@ -23,3 +23,12 @@ inventory is distinct from transaction verdicts: a resolved method can still
 fail on its input, and the v3 parser rejects argument-free MethodCall forms.
 `methods-extra.json` pins those version-dependent wire outcomes, option None,
 context results, and multiplication with the group identity.
+
+`evaluation-order.tsv` contains expression hex, tree version and a JIT budget;
+`evaluation-order.jvm.tsv` records the evaluated result or error and the JIT cost
+retained at that point. Generate it with `EvaluationOrderOracle.scala` using the
+same Scala/JVM options above. These cases run through the public reduction path,
+including short-circuit and exhausted-budget controls.
+
+`lambda-sweep` covers map, filter, exists, forall, flatMap and option map/filter,
+with empty/nonempty inputs and valid and invalid callback values.
