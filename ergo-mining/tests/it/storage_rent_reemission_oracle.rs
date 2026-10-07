@@ -63,6 +63,8 @@ fn mainnet_rules() -> ReemissionRuleInputs {
         .emission_script_trees()
         .expect("mainnet has emission trees");
     ReemissionRuleInputs {
+        check_rules: true,
+        emission: None,
         activation_height: reem.activation_height,
         reemission_token_id: *reem.reemission_token_id.as_bytes(),
         pay_to_reemission_tree: trees.pay_to_reemission,

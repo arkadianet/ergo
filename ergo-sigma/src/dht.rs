@@ -199,12 +199,12 @@ fn bytes_to_scalar(bytes: &[u8]) -> Option<Scalar> {
     }
     padded[32 - bytes.len()..].copy_from_slice(bytes);
     let field_bytes = k256::FieldBytes::from(padded);
-    let scalar = Scalar::from_repr(field_bytes);
-    if scalar.is_some().into() {
-        Some(scalar.unwrap())
-    } else {
-        None
-    }
+    // The reference reads an unchecked unsigned response of up to 32 bytes.
+    // BouncyCastle's point multiplication reduces it modulo the group order;
+    // match that deliberately for consensus, including noncanonical responses.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/SigSerializer.scala#L197-L207
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/crypto/DiffieHellmanTupleProtocol.scala#L119-L140
+    Some(<Scalar as k256::elliptic_curve::ops::Reduce<k256::U256>>::reduce_bytes(&field_bytes))
 }
 
 fn challenge_to_scalar(challenge: &[u8]) -> Scalar {
@@ -240,5 +240,14 @@ mod tests {
         assert_eq!(tree[1], 1);
         assert_eq!(tree[2], 0x08);
         assert_eq!(tree[3], 0xCE);
+    }
+}
+
+#[cfg(test)]
+mod response_length_tests {
+    #[test]
+    fn response_longer_than_group_width_is_rejected() {
+        assert!(super::bytes_to_scalar(&[0; 33]).is_none());
+        assert!(super::bytes_to_scalar(&[0; 32]).is_some());
     }
 }

@@ -1,0 +1,151 @@
+{
+  "entries": [
+    {
+      "name": "bool_reg_02_registers",
+      "mode": "registers",
+      "bytes_hex": "010102",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "bool_reg_02_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d30100010102",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "height_nonminimal_vlq_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d381000000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "inputs_count_nonminimal_tx",
+      "mode": "transaction",
+      "bytes_hex": "8100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d3010000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "bigint_nonminimal_constant",
+      "mode": "constant",
+      "bytes_hex": "06020005",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "bigint_nonminimal_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d301000106020005",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "coll_bool_padding_constant",
+      "mode": "constant",
+      "bytes_hex": "0d01ff",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "coll_bool_padding_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d30100010d01ff",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "ge_identity_garbage_constant",
+      "mode": "constant",
+      "bytes_hex": "0700ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "ge_identity_garbage_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d30100010700ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "ctx_dup_keys_2",
+      "mode": "context_extension",
+      "bytes_hex": "02010400010402",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "ctx_dup_keys_5",
+      "mode": "context_extension",
+      "bytes_hex": "05010400020400030400040400010401",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "ctx_5_reverse_order",
+      "mode": "context_extension",
+      "bytes_hex": "05050400040400030400020400010400",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "ctx_5_reverse_order_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000005050400040400030400020400010400000001c0843d080208d3010000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "ctx_dup_keys_2_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000002010400010402000001c0843d080208d3010000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "ctx_trueleaf_7f",
+      "mode": "context_extension",
+      "bytes_hex": "01017f",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "ctx_key_0x7f",
+      "mode": "context_extension",
+      "bytes_hex": "017f0400",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "ctx_key_0x80",
+      "mode": "context_extension",
+      "bytes_hex": "01800400",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "ctx_count_0x80",
+      "mode": "context_extension",
+      "bytes_hex": "80",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "avl_flags_ff_constant",
+      "mode": "constant",
+      "bytes_hex": "64000000000000000000000000000000000000000000000000000000000000000000ff0100",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "avl_flags_ff_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d301000164000000000000000000000000000000000000000000000000000000000000000000ff0100",
+      "version": 3,
+      "activated": 3
+    }
+  ]
+}

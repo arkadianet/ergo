@@ -11,7 +11,7 @@ pub const INITIAL_VERSION: u8 = 1;
 /// Last header version that does **not** preserve `unparsed_bytes`. From
 /// version `INTERPRETER_60_VERSION + 1` onwards (i.e. v5+), readers
 /// retain forward-compatible trailing bytes; for v2-v4 the bytes are
-/// discarded on read.
+/// left unconsumed on read.
 pub const INTERPRETER_60_VERSION: u8 = 4;
 
 /// Ergo block header: the consensus-critical metadata committed to by
@@ -44,8 +44,8 @@ pub struct Header {
     /// Three-byte miner vote vector for protocol parameter changes.
     pub votes: [u8; 3],
     /// Forward-compatible trailing bytes between the votes vector and
-    /// the PoW solution. Versions 2-4 emit these on the wire but discard
-    /// them on read; v5+ preserves them so unknown future fields can be
+    /// the PoW solution. Versions 2-4 do not consume a payload after the size
+    /// byte; v5+ preserves the payload so unknown future fields can be
     /// round-tripped without losing data.
     pub unparsed_bytes: Vec<u8>,
     /// PoW solution (Autolykos v1 for header v1, Autolykos v2 for v2+).
@@ -135,8 +135,8 @@ pub fn serialize_header_without_pow(h: &Header) -> Result<Vec<u8>, WriteError> {
 
 /// Decode a full header (with PoW solution) from `r`.
 ///
-/// For versions 2-4 the trailing `unparsed_bytes` payload is read but
-/// **discarded** — the returned `Header.unparsed_bytes` is always empty.
+/// For versions 2-4 the size byte is read but no payload is consumed;
+/// the returned `Header.unparsed_bytes` is always empty.
 /// For v5+ (anything `> INTERPRETER_60_VERSION`) the bytes are
 /// preserved verbatim so unknown future fields round-trip.
 pub fn read_header(r: &mut VlqReader) -> Result<Header, ReadError> {
@@ -154,12 +154,14 @@ pub fn read_header(r: &mut VlqReader) -> Result<Header, ReadError> {
 
     let unparsed_bytes = if version_gt(version, INITIAL_VERSION) {
         let len = r.get_u8()? as usize;
-        let bytes = r.get_bytes(len)?;
-        if version_gt(version, INTERPRETER_60_VERSION) {
-            bytes.to_vec()
+        // Deliberately match the reference's signed Byte comparison: the
+        // solution immediately follows the size byte for versions 2-4, even
+        // when that byte is nonzero.
+        // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/history/header/HeaderSerializer.scala#L59-L66
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/HeaderWithoutPow.scala#L81-L91
+        if len > 0 && version_gt(version, INTERPRETER_60_VERSION) {
+            r.get_bytes(len)?.to_vec()
         } else {
-            // v2-v4 emit the bytes on the wire but drop them on read,
-            // matching Scala's HeaderSerializer.parseBody.
             Vec::new()
         }
     } else {
@@ -195,6 +197,17 @@ pub fn serialize_header(h: &Header) -> Result<(Vec<u8>, ModifierId), WriteError>
     let bytes = w.result();
     let id: ModifierId = blake2b256(&bytes).into();
     Ok((bytes, id))
+}
+
+/// Compute a node header ID from its parsed, reserialized fields. Parsing a
+/// standalone modifier can leave trailing bytes, as the reference parseBytes
+/// does. SHeader values use their received slice for identity instead.
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/history/header/Header.scala#L62>
+pub fn header_id_from_bytes(bytes: &[u8]) -> Result<ModifierId, ReadError> {
+    let header = read_header(&mut VlqReader::new(bytes))?;
+    serialize_header(&header)
+        .map(|(_, id)| id)
+        .map_err(|error| ReadError::InvalidData(format!("header serialization: {error}")))
 }
 
 #[cfg(test)]
@@ -335,10 +348,10 @@ mod tests {
     }
 
     #[test]
-    fn header_v3_discards_unparsed_bytes_on_read() {
-        // v3 writes a length byte + content, but read discards content and returns empty
+    fn header_v3_nonzero_new_fields_size_leaves_solution_in_place() {
+        // v3 reads a size byte but does not read a payload.
         let mut w = VlqWriter::new();
-        // Write a v3 header manually with non-empty unparsed_bytes in the wire format
+        // Write a v3 header manually with a nonzero new-fields size byte.
         w.put_u8(3); // version
         w.put_bytes(&[0x01; 32]); // parent_id
         w.put_bytes(&[0x02; 32]); // ad_proofs_root
@@ -349,9 +362,9 @@ mod tests {
         write_nbits(&mut w, 0x1a01_7660); // n_bits
         w.put_u32(200_000); // height
         w.put_bytes(&[0x00; 3]); // votes
-                                 // unparsed_bytes: length=2, content=0xDE 0xAD (versions 2-4 discard content on read)
+                                 // new-fields size=2; no payload for versions 2-4
         w.put_u8(2);
-        w.put_bytes(&[0xDE, 0xAD]);
+        // No payload is consumed for version 3.
         // AutolykosSolution V2 (version > 1)
         w.put_bytes(&[0x02; 33]); // pk
         w.put_bytes(&[0xBB; 8]); // nonce
@@ -360,7 +373,7 @@ mod tests {
         let mut r = VlqReader::new(&wire);
         let decoded = read_header(&mut r).unwrap();
         assert!(r.is_empty());
-        // Content must be discarded for versions 2-4
+        // The nonzero size byte does not consume solution bytes for versions 2-4
         assert_eq!(decoded.unparsed_bytes, vec![] as Vec<u8>);
     }
 

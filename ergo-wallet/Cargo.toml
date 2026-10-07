@@ -77,3 +77,7 @@ path = "tests/it/main.rs"
 
 [lints]
 workspace = true
+
+[[example]]
+name = "reference_sigma_responses"
+required-features = ["test-utils"]

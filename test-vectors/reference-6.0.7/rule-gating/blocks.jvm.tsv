@@ -1,0 +1,31 @@
+name	rule	missing	disabled	verdict	cost	adopted_disabled
+rule-306-active	306	0		Reject	-	-
+rule-306-disabled	306	0	306	Accept	18124	306
+rule-306-missing-3-active	306	3		Reject	-	-
+rule-306-missing-3-disabled	306	3	306	Accept	18124	306
+rule-111-missing-2-active	111	2	215,409	Reject	-	-
+rule-111-missing-2-disabled	111	2	111,215,409	Accept	18124	111,215,409
+rule-400-active	400	0	405	Reject	-	-
+rule-400-disabled	400	0	400,405	Accept	18124	400,405
+rule-401-active	401	0	402	Reject	-	-
+rule-401-disabled	401	0	401,402	Accept	18124	401,402
+rule-402-active	402	0		Reject	-	-
+rule-402-disabled	402	0	402	Accept	18124	402
+rule-404-active	404	0		Reject	-	-
+rule-404-disabled	404	0	404	Accept	18124	404
+rule-405-active	405	0		Reject	-	-
+rule-405-disabled	405	0	405	Accept	18124	405
+rule-406-active	406	0		Reject	-	-
+rule-406-disabled	406	0	406	Accept	18124	406
+rule-407-active	407	0		Reject	-	-
+rule-407-disabled	407	0	407	Accept	18124	407
+rule-408-active	408	0	215,409	Reject	-	-
+rule-408-disabled	408	0	215,408,409	Reject	-	-
+rule-410-active	410	0	215,409	Reject	-	-
+rule-410-disabled	410	0	215,409,410	Accept	18124	215,409,410
+rule-411-active	411	0	215,409	Reject	-	-
+rule-411-disabled	411	0	215,409,411	Reject	-	-
+rule-412-active	412	0	215,409	Reject	-	-
+rule-412-disabled	412	0	215,409,412	Accept	18124	[]
+rule-413-active	413	0		Reject	-	-
+rule-413-disabled	413	0	413	Accept	18124	413

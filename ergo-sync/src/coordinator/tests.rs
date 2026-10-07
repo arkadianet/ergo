@@ -203,7 +203,7 @@ fn on_modifier_received_accepts_requested() {
     let p = peer(9030);
 
     // First request via Inv
-    let header_bytes = vec![10, 20, 30];
+    let (header_bytes, _) = parseable_header_at(100, 0x44);
     let header_id = header_id(&header_bytes);
     let inv = InvData {
         type_id: ModifierTypeId::Header.as_byte(),
@@ -217,6 +217,37 @@ fn on_modifier_received_accepts_requested() {
         ModifierTypeId::Header.as_byte(),
         header_id,
         header_bytes,
+        now,
+    );
+    assert!(actions
+        .iter()
+        .any(|a| matches!(a, Action::ValidateHeader { .. })));
+    assert!(!actions.iter().any(|a| matches!(a, Action::Penalize { .. })));
+}
+
+#[test]
+fn on_modifier_received_accepts_normalized_header_identity() {
+    let mut coord = SyncCoordinator::new(0);
+    let chain = MockChain::new(0, 0);
+    let now = Instant::now();
+    let p = peer(9030);
+    let (mut bytes, canonical_id) = parseable_header_at(100, 0x44);
+    bytes.extend_from_slice(&[0xaa, 0xbb]);
+    assert_ne!(header_id(&bytes), canonical_id);
+    coord.on_inv(
+        p,
+        &InvData {
+            type_id: ModifierTypeId::Header.as_byte(),
+            ids: vec![canonical_id],
+        },
+        &chain,
+        now,
+    );
+    let actions = coord.on_modifier_received(
+        p,
+        ModifierTypeId::Header.as_byte(),
+        canonical_id,
+        bytes,
         now,
     );
     assert!(actions
@@ -3427,7 +3458,7 @@ fn timeout_no_penalty_when_modifier_received_meanwhile() {
 
     // Connectivity clock advances past the request time via a real accept.
     let chain = MockChain::new(101, 100);
-    let other_bytes = vec![1];
+    let (other_bytes, _) = parseable_header_at(102, 0x45);
     let other = header_id(&other_bytes);
     let inv = InvData {
         type_id: ModifierTypeId::Header.as_byte(),

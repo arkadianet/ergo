@@ -334,6 +334,7 @@ pub(super) struct TomlStore {
 #[derive(serde::Deserialize, Default, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct TomlNode {
+    pub(super) check_reemission_rules: Option<bool>,
     pub(super) agent_name: Option<String>,
     pub(super) node_name: Option<String>,
     /// `[node] blocks_to_keep` — pruning suffix length (Mode 3 of the

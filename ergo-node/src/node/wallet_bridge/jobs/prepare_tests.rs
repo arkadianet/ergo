@@ -164,6 +164,8 @@ impl Funded {
         .unwrap();
         let spec = ergo_chain_spec::ChainSpec::for_network(ergo_chain_spec::Network::Mainnet);
         let rules = ergo_validation::ReemissionRuleInputs {
+            check_rules: true,
+            emission: None,
             activation_height: 100,
             reemission_token_id: *spec
                 .reemission
@@ -297,6 +299,8 @@ impl Funded {
             // pay-to-reemission contract requires.
             self.advance(
                 (height == EPOCH).then(|| ergo_validation::ActiveProtocolParameters {
+                    announced_settings: None,
+                    missing_core_parameters: 0,
                     epoch_start_height: EPOCH,
                     block_version: 2,
                     ..ergo_validation::scala_launch()

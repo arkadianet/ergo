@@ -797,3 +797,6 @@ mod reemission_tests;
 
 #[cfg(test)]
 mod sized_tree_tests;
+
+#[cfg(test)]
+mod reference_serialization_tests;

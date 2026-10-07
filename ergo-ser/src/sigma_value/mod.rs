@@ -418,7 +418,7 @@ pub fn write_value_versioned(
             write_sigma_boolean(w, sb)?;
         }
         (SigmaType::SAvlTree, SigmaValue::AvlTree(avl)) => {
-            write_avl_tree(w, avl);
+            write_avl_tree(w, avl)?;
         }
         (SigmaType::SColl(elem_type), SigmaValue::Coll(coll)) => {
             write_coll(w, elem_type, coll, version)?;

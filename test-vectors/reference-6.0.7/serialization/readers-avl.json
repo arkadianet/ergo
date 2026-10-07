@@ -1,0 +1,704 @@
+{
+  "entries": [
+    {
+      "name": "avl_neg_keylen_constant",
+      "mode": "constant",
+      "bytes_hex": "6400000000000000000000000000000000000000000000000000000000000000000000808080800800",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "avl_neg_vallen_constant",
+      "mode": "constant",
+      "bytes_hex": "640000000000000000000000000000000000000000000000000000000000000000000001018080808008",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "avl_ok_constant",
+      "mode": "constant",
+      "bytes_hex": "64000000000000000000000000000000000000000000000000000000000000000000070100",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "avl_flags_ff_constant",
+      "mode": "constant",
+      "bytes_hex": "64000000000000000000000000000000000000000000000000000000000000000000ff0100",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "avl_neg_keylen_registers",
+      "mode": "registers",
+      "bytes_hex": "016400000000000000000000000000000000000000000000000000000000000000000000808080800800",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "avl_neg_keylen_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d30100016400000000000000000000000000000000000000000000000000000000000000000000808080800800",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "avl_neg_vallen_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d3010001640000000000000000000000000000000000000000000000000000000000000000000001018080808008",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "avl_flags_ff_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d301000164000000000000000000000000000000000000000000000000000000000000000000ff0100",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "box_avl_neg_whole",
+      "mode": "box",
+      "bytes_hex": "c0843d080208d30100016400000000000000000000000000000000000000000000000000000000000000000000808080800800000000000000000000000000000000000000000000000000000000000000000000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "sbox_const_avl_neg_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d301000163c0843d080208d30100016400000000000000000000000000000000000000000000000000000000000000000000808080800800000000000000000000000000000000000000000000000000000000000000000000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "key-min-constant",
+      "mode": "constant",
+      "bytes_hex": "6400000000000000000000000000000000000000000000000000000000000000000000808080800800",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "6400000000000000000000000000000000000000000000000000000000000000000000808080800800",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-expression",
+      "mode": "expression",
+      "bytes_hex": "6400000000000000000000000000000000000000000000000000000000000000000000808080800800",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-registers",
+      "mode": "registers",
+      "bytes_hex": "016400000000000000000000000000000000000000000000000000000000000000000000808080800800",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "01006400000000000000000000000000000000000000000000000000000000000000000000808080800800",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-tree",
+      "mode": "tree",
+      "bytes_hex": "1b2c01640000000000000000000000000000000000000000000000000000000000000000000080808080080008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-tree-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d1b2c01640000000000000000000000000000000000000000000000000000000000000000000080808080080008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-tree-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d1b2c01640000000000000000000000000000000000000000000000000000000000000000000080808080080008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-tree-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d1b2c01640000000000000000000000000000000000000000000000000000000000000000000080808080080008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-tree-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d1b2c01640000000000000000000000000000000000000000000000000000000000000000000080808080080008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-tree-tree",
+      "mode": "tree",
+      "bytes_hex": "1b590163c0843d1b2c01640000000000000000000000000000000000000000000000000000000000000000000080808080080008d301000000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-register-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000808080800800000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-register-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000808080800800000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-register-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000808080800800000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-register-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000808080800800000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-register-tree",
+      "mode": "tree",
+      "bytes_hex": "1b580163c0843d00d10101010001640000000000000000000000000000000000000000000000000000000000000000000080808080080000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-constant",
+      "mode": "constant",
+      "bytes_hex": "640000000000000000000000000000000000000000000000000000000000000000000020018080808008",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "640000000000000000000000000000000000000000000000000000000000000000000020018080808008",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-expression",
+      "mode": "expression",
+      "bytes_hex": "640000000000000000000000000000000000000000000000000000000000000000000020018080808008",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-registers",
+      "mode": "registers",
+      "bytes_hex": "01640000000000000000000000000000000000000000000000000000000000000000000020018080808008",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "0100640000000000000000000000000000000000000000000000000000000000000000000020018080808008",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-tree",
+      "mode": "tree",
+      "bytes_hex": "1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001808080800808d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-tree-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001808080800808d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-tree-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001808080800808d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-tree-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001808080800808d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-tree-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001808080800808d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-tree-tree",
+      "mode": "tree",
+      "bytes_hex": "1b5a0163c0843d1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001808080800808d301000000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-register-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d00d10101010001640000000000000000000000000000000000000000000000000000000000000000000020018080808008000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-register-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d00d10101010001640000000000000000000000000000000000000000000000000000000000000000000020018080808008000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-register-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d00d10101010001640000000000000000000000000000000000000000000000000000000000000000000020018080808008000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-register-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d00d10101010001640000000000000000000000000000000000000000000000000000000000000000000020018080808008000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-register-tree",
+      "mode": "tree",
+      "bytes_hex": "1b590163c0843d00d1010101000164000000000000000000000000000000000000000000000000000000000000000000002001808080800800000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-constant",
+      "mode": "constant",
+      "bytes_hex": "6400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f00",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "6400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f00",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-expression",
+      "mode": "expression",
+      "bytes_hex": "6400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f00",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-registers",
+      "mode": "registers",
+      "bytes_hex": "016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f00",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "01006400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f00",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-tree",
+      "mode": "tree",
+      "bytes_hex": "1b2c016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f0008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-tree-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d1b2c016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f0008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-tree-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d1b2c016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f0008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-tree-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d1b2c016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f0008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-tree-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d1b2c016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f0008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-tree-tree",
+      "mode": "tree",
+      "bytes_hex": "1b590163c0843d1b2c016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f0008d301000000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-register-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f00000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-register-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f00000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-register-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f00000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-register-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f00000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-register-tree",
+      "mode": "tree",
+      "bytes_hex": "1b580163c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f0000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-constant",
+      "mode": "constant",
+      "bytes_hex": "64000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "64000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-expression",
+      "mode": "expression",
+      "bytes_hex": "64000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-registers",
+      "mode": "registers",
+      "bytes_hex": "0164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010064000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-tree",
+      "mode": "tree",
+      "bytes_hex": "1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f08d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-tree-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-tree-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-tree-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-tree-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-tree-tree",
+      "mode": "tree",
+      "bytes_hex": "1b5a0163c0843d1b2d0164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f08d301000000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-register-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d00d1010101000164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-register-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d00d1010101000164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-register-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d00d1010101000164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-register-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d00d1010101000164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-register-tree",
+      "mode": "tree",
+      "bytes_hex": "1b590163c0843d00d1010101000164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f00000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-constant",
+      "mode": "constant",
+      "bytes_hex": "6400000000000000000000000000000000000000000000000000000000000000000007200108",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "6400000000000000000000000000000000000000000000000000000000000000000007200108",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-expression",
+      "mode": "expression",
+      "bytes_hex": "6400000000000000000000000000000000000000000000000000000000000000000007200108",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-registers",
+      "mode": "registers",
+      "bytes_hex": "016400000000000000000000000000000000000000000000000000000000000000000007200108",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "01006400000000000000000000000000000000000000000000000000000000000000000007200108",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-tree",
+      "mode": "tree",
+      "bytes_hex": "1b2901640000000000000000000000000000000000000000000000000000000000000000000720010808d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-tree-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d1b2901640000000000000000000000000000000000000000000000000000000000000000000720010808d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-tree-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d1b2901640000000000000000000000000000000000000000000000000000000000000000000720010808d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-tree-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d1b2901640000000000000000000000000000000000000000000000000000000000000000000720010808d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-tree-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d1b2901640000000000000000000000000000000000000000000000000000000000000000000720010808d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-tree-tree",
+      "mode": "tree",
+      "bytes_hex": "1b560163c0843d1b2901640000000000000000000000000000000000000000000000000000000000000000000720010808d301000000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-register-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000007200108000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-register-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000007200108000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-register-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000007200108000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-register-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000007200108000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-register-tree",
+      "mode": "tree",
+      "bytes_hex": "1b550163c0843d00d10101010001640000000000000000000000000000000000000000000000000000000000000000000720010800000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-register-constant-box-read",
+      "mode": "box-read",
+      "bytes_hex": "c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000808080800800000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-min-nested-register-constant-box-candidate-read",
+      "mode": "box-candidate-read",
+      "bytes_hex": "c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000808080800800",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-register-constant-box-read",
+      "mode": "box-read",
+      "bytes_hex": "c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f00000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "key-max-nested-register-constant-box-candidate-read",
+      "mode": "box-candidate-read",
+      "bytes_hex": "c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000000ffffffff0f00",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-register-constant-box-read",
+      "mode": "box-read",
+      "bytes_hex": "c0843d00d10101010001640000000000000000000000000000000000000000000000000000000000000000000020018080808008000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-min-nested-register-constant-box-candidate-read",
+      "mode": "box-candidate-read",
+      "bytes_hex": "c0843d00d10101010001640000000000000000000000000000000000000000000000000000000000000000000020018080808008",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-register-constant-box-read",
+      "mode": "box-read",
+      "bytes_hex": "c0843d00d1010101000164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "value-max-nested-register-constant-box-candidate-read",
+      "mode": "box-candidate-read",
+      "bytes_hex": "c0843d00d1010101000164000000000000000000000000000000000000000000000000000000000000000000002001ffffffff0f",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-register-constant-box-read",
+      "mode": "box-read",
+      "bytes_hex": "c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000007200108000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "length-control-nested-register-constant-box-candidate-read",
+      "mode": "box-candidate-read",
+      "bytes_hex": "c0843d00d101010100016400000000000000000000000000000000000000000000000000000000000000000007200108",
+      "activated": 3,
+      "version": 3
+    }
+  ]
+}

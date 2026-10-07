@@ -89,6 +89,8 @@ impl Default for RedbCacheBudgets {
 
 #[derive(Debug)]
 pub struct NodeConfig {
+    /// Apply re-emission validation rules. Defaults off; mining enables it.
+    pub check_reemission_rules: bool,
     pub network: Network,
     /// Shared chain specification. Constructed once via
     /// [`ChainSpec::for_network`] and cloned into long-lived services.

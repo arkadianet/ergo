@@ -135,6 +135,7 @@ pub fn compute_next_params(
     // state-machine outcome.
     result.proposed_update = proposed_update.clone();
     result.activated_update = activated_update.clone();
+    result.announced_settings = None;
     Ok((result, activated_update))
 }
 

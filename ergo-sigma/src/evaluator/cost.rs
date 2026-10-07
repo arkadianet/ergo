@@ -266,6 +266,12 @@ fn eq_with_cost_inner(
     cost: &mut CostAccumulator,
 ) -> Result<bool, EvalError> {
     match left {
+        // Deliberately preserve the reference's asymmetric dispatch: Context
+        // has no left-value case, but may be unequal to a supported left value.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/DataValueComparer.scala#L310-L414
+        Value::Context => Err(EvalError::RuntimeException(
+            "cannot compare a Context left value",
+        )),
         // Tuple: EQ_Tuple, then pairwise `&&` short-circuit (Scala case 3).
         //
         // `DataValueComparer.equalDataValues` (sigma-state 6.0.2,

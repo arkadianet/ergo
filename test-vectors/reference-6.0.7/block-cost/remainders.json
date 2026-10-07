@@ -1,0 +1,130 @@
+{
+  "sigma_state_jar" : "sigma-state_2.12-6.0.7.jar",
+  "ergo_core_jar" : "ergo-core_2.12.jar",
+  "tx0_original_cost" : 18124,
+  "tx1_cost_alone" : 18124,
+  "tx2_cost_alone" : 18124,
+  "sum" : 36248,
+  "tx1_bytes" : "0456d19ba9258fbeeea376fc134a810baf16cb4494dc817ce8ab5b5d612bf25d060000270ce04401d3a07068185101dcc6f7afc67dc6611c4c8fd5571827230eef717000006ca21c507712bd5f71b1d65f88407d37edb4f0f76e2f0d284f9fb579de7db6a60000dc774a9ef68e32433cb601cc572d5a4f97b00c46fc210ee169fe6e521043b35c000000000180d0acf30e0008cd023d0faf2ff3580ce38cf6f5a003416f0e9039e388dc2ea8300395603757e6a846e8070000",
+  "tx2_bytes" : "046a99de3b8381bb6c8b29b4665dab0ae15e849909114b01018a5511e9cb0d9d7e00006fee2919ad143ae2057f5f99322ec0d2dd43fd85cbb538eb6e029bc03706c9af000023ef38e3bfe6011d84942f6b17602a3878129eaa4b90411777395ff37012962a0000916d22712b77fa0fae2824a6ba7eec8abcd030f5b592cce570cc8387a902b368000000000180d0acf30e0008cd023d0faf2ff3580ce38cf6f5a003416f0e9039e388dc2ea8300395603757e6a846e8070000",
+  "boxes1" : [
+    "8094ebdc0300d1dad90101017201010101e80700000b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b00",
+    "8094ebdc0300d1dad90101017201010101e80700000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c01",
+    "8094ebdc0300d1dad90101017201010101e80700000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d02",
+    "8094ebdc0300d1dad90101017201010101e80700000e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e03"
+  ],
+  "boxes2" : [
+    "8094ebdc0300d1dad90101017201010101e8070000151515151515151515151515151515151515151515151515151515151515151500",
+    "8094ebdc0300d1dad90101017201010101e8070000161616161616161616161616161616161616161616161616161616161616161601",
+    "8094ebdc0300d1dad90101017201010101e8070000171717171717171717171717171717171717171717171717171717171717171702",
+    "8094ebdc0300d1dad90101017201010101e8070000181818181818181818181818181818181818181818181818181818181818181803"
+  ],
+  "runs" : [
+    {
+      "transactions" : [
+        "tx1",
+        "tx2"
+      ],
+      "limit" : 36248,
+      "verdict" : "Reject",
+      "failed_tx" : "tx2",
+      "error" : "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. de40f23ce7ceed162fad0128ee727230d774092a3c743560ae97f9581f778df7: #3 => Failure(sigma.exceptions.CostLimitException: Estimated execution cost JitCost(65) exceeds the limit JitCost(60))",
+      "accumulated" : 18124,
+      "per_tx" : [
+        {
+          "tx" : "tx1",
+          "tx_cost" : 18124,
+          "accumulated_after" : 18124
+        }
+      ]
+    },
+    {
+      "transactions" : [
+        "tx1",
+        "tx2"
+      ],
+      "limit" : 36249,
+      "verdict" : "Accept",
+      "failed_tx" : null,
+      "error" : null,
+      "accumulated" : 36248,
+      "per_tx" : [
+        {
+          "tx" : "tx1",
+          "tx_cost" : 18124,
+          "accumulated_after" : 18124
+        },
+        {
+          "tx" : "tx2",
+          "tx_cost" : 18124,
+          "accumulated_after" : 36248
+        }
+      ]
+    },
+    {
+      "transactions" : [
+        "tx1",
+        "tx2"
+      ],
+      "limit" : 36247,
+      "verdict" : "Reject",
+      "failed_tx" : "tx2",
+      "error" : "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. de40f23ce7ceed162fad0128ee727230d774092a3c743560ae97f9581f778df7: #3 => Failure(sigma.exceptions.CostLimitException: Estimated execution cost JitCost(65) exceeds the limit JitCost(50))",
+      "accumulated" : 18124,
+      "per_tx" : [
+        {
+          "tx" : "tx1",
+          "tx_cost" : 18124,
+          "accumulated_after" : 18124
+        }
+      ]
+    },
+    {
+      "transactions" : [
+        "tx2",
+        "tx1"
+      ],
+      "limit" : 36248,
+      "verdict" : "Reject",
+      "failed_tx" : "tx1",
+      "error" : "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. 9cad72660dba6f44bd1b59e9ed6e3e9fc41c6b493125fede46f0297243f01de8: #3 => Failure(sigma.exceptions.CostLimitException: Estimated execution cost JitCost(65) exceeds the limit JitCost(60))",
+      "accumulated" : 18124,
+      "per_tx" : [
+        {
+          "tx" : "tx2",
+          "tx_cost" : 18124,
+          "accumulated_after" : 18124
+        }
+      ]
+    },
+    {
+      "transactions" : [
+        "tx1"
+      ],
+      "limit" : 18124,
+      "verdict" : "Reject",
+      "failed_tx" : "tx1",
+      "error" : "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. 9cad72660dba6f44bd1b59e9ed6e3e9fc41c6b493125fede46f0297243f01de8: #3 => Failure(sigma.exceptions.CostLimitException: Estimated execution cost JitCost(65) exceeds the limit JitCost(60))",
+      "accumulated" : 0,
+      "per_tx" : [
+      ]
+    },
+    {
+      "transactions" : [
+        "tx1"
+      ],
+      "limit" : 18125,
+      "verdict" : "Accept",
+      "failed_tx" : null,
+      "error" : null,
+      "accumulated" : 18124,
+      "per_tx" : [
+        {
+          "tx" : "tx1",
+          "tx_cost" : 18124,
+          "accumulated_after" : 18124
+        }
+      ]
+    }
+  ]
+}

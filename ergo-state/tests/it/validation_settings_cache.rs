@@ -277,3 +277,65 @@ fn mode2_trusted_cumulative_survives_store_reopen() {
         .iter()
         .any(|(id, s)| *id == 1011 && matches!(s, RuleStatus::Replaced(1016))));
 }
+
+/// A matching-rule deactivation permits the epoch extension to replace the
+/// cumulative settings. Forward apply, reopen and rollback must retain that
+/// complete adopted table, including rules which become active again.
+#[test]
+fn advertised_settings_replacement_survives_reopen_and_rollback() {
+    let oracle: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/reference-6.0.7/rule-gating/blocks.json"
+    ))
+    .unwrap();
+    let case = oracle["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "rule-412-disabled")
+        .unwrap();
+    assert_eq!(case["accept"], true);
+    let adopted: Vec<u16> = serde_json::from_value(case["adopted_disabled"].clone()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.redb");
+    let mut store = StateStore::open(&path)
+        .unwrap()
+        .with_non_durable_commits_for_test();
+    seed_genesis(&mut store);
+    let previous = ErgoValidationSettingsUpdate {
+        rules_to_disable: vec![215, 409, 412],
+        status_updates: vec![],
+    };
+    apply_chain_to_epoch_boundary(&mut store, 1024, previous.clone());
+    for height in 1025..2048 {
+        apply_no_op(&mut store, height, None);
+    }
+    let mut replacement = epoch_row(2048, ErgoValidationSettingsUpdate::empty());
+    replacement.announced_settings = Some(ErgoValidationSettingsUpdate {
+        rules_to_disable: adopted.clone(),
+        status_updates: vec![],
+    });
+    apply_no_op(&mut store, 2048, Some(replacement.clone()));
+    assert_eq!(store.validation_settings().disabled_rules(), adopted);
+    assert!(ergo_validation::ProtocolParams::from_active_with_settings(
+        store.active_params(),
+        store.validation_settings()
+    )
+    .is_rule_active(412));
+    drop(store);
+    let mut reopened = StateStore::open(&path)
+        .unwrap()
+        .with_non_durable_commits_for_test();
+    assert_eq!(reopened.validation_settings().disabled_rules(), adopted);
+    assert_eq!(
+        reopened.active_params().announced_settings,
+        replacement.announced_settings
+    );
+    reopened.rollback_to(2047, None, None).unwrap();
+    assert_eq!(
+        reopened.validation_settings().disabled_rules(),
+        previous.rules_to_disable
+    );
+    apply_no_op(&mut reopened, 2048, Some(replacement));
+    apply_no_op(&mut reopened, 2049, None);
+    assert_eq!(reopened.validation_settings().disabled_rules(), adopted);
+}

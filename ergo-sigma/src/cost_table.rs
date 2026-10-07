@@ -450,6 +450,8 @@ pub fn add_eq_cost(
         }
 
         // Functions are not comparable in Ergo
+        // Context on the left is rejected by the costed comparator before this table.
+        Value::Context => Ok(()),
         Value::Func { .. } => cost.add(JitCost::from_jit(EQ_PRIM)),
     }
 }

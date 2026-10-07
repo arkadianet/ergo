@@ -207,7 +207,6 @@ fn method_cost_table_matches_scala_constants() {
     // These method declarations reuse inline-opcode costs in the JVM.
     // This pins their shared prices, not MethodCall reachability or lowering.
     for (ids, opcode) in [
-        ((7, 4), 0xA0),
         ((8, 1), 0xD0),
         ((12, 1), 0xB1),
         ((12, 3), 0xAD),
@@ -218,13 +217,8 @@ fn method_cost_table_matches_scala_constants() {
         ((12, 8), 0xB5),
         ((12, 9), 0xB3),
         ((12, 10), 0xB2),
-        ((36, 2), 0xE6),
-        ((36, 3), 0xE4),
         ((36, 4), 0xE5),
-        ((101, 4), 0xA4),
-        ((101, 5), 0xA5),
         ((101, 6), 0xA3),
-        ((101, 7), 0xA7),
         ((101, 11), 0xE3),
         ((99, 9), 0xC6),
         ((99, 10), 0xC6),

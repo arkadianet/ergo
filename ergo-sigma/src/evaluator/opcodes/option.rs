@@ -65,11 +65,14 @@ pub(in crate::evaluator) fn eval_option_is_defined(
     inner: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0xE6)?;
     let val = cx.eval_expr(inner)?;
     match val {
-        Value::Opt(Some(_)) => Ok(Value::Bool(true)),
-        Value::Opt(None) => Ok(Value::Bool(false)),
+        Value::Opt(option) => {
+            // The reference casts the child to Option before this charge.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L658-L661
+            add_cost(cx.cost, 0xE6)?;
+            Ok(Value::Bool(option.is_some()))
+        }
         _ => Err(EvalError::TypeError {
             expected: "Option for OptionIsDefined",
             got: format!("{val:?}"),

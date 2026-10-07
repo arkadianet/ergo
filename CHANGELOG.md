@@ -16,6 +16,51 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-10-07
+
+A consensus release for mainnet. Upgrade every 0.12.1 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again. A 0.12.2 data directory still opens with 0.12.1.
+
+- **Consensus fixes** from a differential review against the Scala node 6.0.7, covering sigma proof verification, header parsing and identifiers, script evaluation, serialization of scripts, boxes and AVL trees, block cost accounting and the voting rules. Each fix has regression vectors with the reference verdict, cost and identifiers recorded beside them.
+- **Re-emission checks follow the node's role.** The re-emission rule (123) is checked by mining nodes and skipped by non-mining nodes, the Scala node's default. A new setting, `[node] check_reemission_rules`, turns the checks on for a non-mining node; mining always turns them on.
+- **Header and transaction identifiers** are derived from the parsed, re-serialized form. A header or transaction whose received encoding is accepted but not canonical is stored and identified canonically, and the peer that relayed it is not penalised.
+
+### Added
+
+- `ErgoBoxCandidate::box_serialization_version` and `ErgoBoxCandidate::received_box_identity` read-only accessors in `ergo-ser`, and a public `ReceivedBoxIdentity` with read-only accessors for its fields. No behaviour change.
+
+### Changed
+
+- Non-mining nodes no longer check re-emission token allocation (rule 123) unless `[node] check_reemission_rules = true`. Mining nodes always check it, including the emission-box branch that was not checked before.
+- Received transactions are no longer rejected for a non-canonical encoding. Transaction IDs are computed from the serialized message, and the mempool relays the received bytes.
+- Headers whose received bytes carry trailing data or an unread new-fields size are identified by their serialized fields and stored canonically.
+
+### Fixed
+
+- Sigma proofs: interpret DLog and DH-tuple response scalars modulo the group order.
+- Header proof of work and difficulty: honor the compact difficulty sign, fail `Header.checkPow` when the decoded difficulty is zero, and compare decoded difficulty values when validating the required difficulty.
+- Header parsing: read the new-fields payload only for header versions above 4.
+- Script parsing: insert numeric upcasts for relation operands in trees below version 3; check collection and option receivers; derive the root type of declared variables and tuple indexes; and parse size-delimited trees with versions above 3 when the activated script version is below 2.
+- Serialization: reject AVL tree values whose decoded key or value length is negative when they are written, and keep nested box script serialization errors instead of falling back to received bytes.
+- Script evaluation:
+  - `Global.deserializeTo` accepts trailing bytes;
+  - `Slice` costs use the original signed bounds;
+  - `Global.decodeNbits` and `BigInt` shifts enforce the signed 256-bit range;
+  - `Global.fromBigEndianBytes[BigInt]` rejects empty input;
+  - `UnsignedBigInt(0).toBytes` is empty;
+  - hashing requires a byte collection;
+  - `filter` and `exists` require Boolean predicate results;
+  - `flatMap` requires a mapper whose static result type is a collection, also on empty collections;
+  - option `map` and `filter` require a function argument;
+  - context `INPUTS`, `OUTPUTS` and `SELF`, option `isDefined` and `get`, and group element `multiply` evaluate in their method-call wire forms;
+  - Boolean and option-defined operations charge their cost after their input is evaluated and checked.
+- Block validation: each input's cost limit includes the cost of the block's earlier transactions, in both the sequential and parallel validators, and mining candidates stay strictly below the block cost limit.
+- Voting and parameters:
+  - epoch extensions may omit core parameters; a missing parameter fails where it is used;
+  - validation-settings extension values are split into chunks of at most 64 bytes;
+  - rules disabled by vote are no longer enforced, and an adopted settings table survives restarts and rollbacks;
+  - Sigma rule status updates for unregistered rule identifiers are rejected;
+  - an output box may hold up to 255 tokens when the box size rule is disabled.
+
 ## [0.12.1] - 2026-10-06
 
 A consensus release for mainnet. Upgrade every 0.12.0 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.

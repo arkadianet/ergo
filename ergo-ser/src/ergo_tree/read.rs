@@ -114,16 +114,24 @@ pub(super) fn read_ergo_tree_tracking_template(
         let declared_size = r.get_uint_to_i32()?;
         let body_start = r.position();
 
-        // A future-version tree is wrapped LENIENTLY here (the conformance hook
-        // feeds size-stripped trees, template-hashing relies on the wrap); the
-        // box-script layer decides via `check_tree_version_supported`, keyed to
-        // the activated version the parse runs under: Scala HARD-rejects it at
-        // deserialize from activated 2 on (`VersionContext.withVersions` throws
-        // when treeVersion > activated), and below that admits the body to the
-        // parse — where a body that fails is kept as `UnparsedErgoTree` exactly
-        // like this wrap. The reader advances to the declared-size end, as on
-        // every wrap path.
-        if version > MAX_SUPPORTED_TREE_VERSION {
+        // From activated 2 on, a future-version tree is wrapped LENIENTLY here
+        // without looking at its body (the conformance hook feeds size-stripped
+        // trees, template-hashing relies on the wrap); the box-script layer then
+        // hard-rejects it via `check_tree_version_supported`, as Scala's
+        // `VersionContext.withVersions` throws when treeVersion > activated. The
+        // reader advances to the declared-size end, as on every wrap path.
+        // Below JIT activation the VersionContext require is inert, so the
+        // reference parses a future-version body with that tree version: a
+        // ValidationException wraps, any other failure is a hard reject, and a
+        // successful parse yields a tree that re-serializes from its AST. Take
+        // the ordinary parse path there; only from activation 2 on is the body
+        // never looked at. An unset scope is the reference default, activated 1.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L141-L209
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/VersionContext.scala#L17-L21
+        if version > MAX_SUPPORTED_TREE_VERSION
+            && (super::reader_activated_script_version(r) as i8)
+                >= super::JIT_ACTIVATION_VERSION as i8
+        {
             let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
             return Ok((
                 unparsed_soft_fork_tree(version, has_size, constant_segregation, full, None),

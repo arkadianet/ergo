@@ -47,6 +47,31 @@ pub fn no_arg_cost_rows() -> Vec<((u8, u8), &'static str, CostKind)> {
             CostKind::Fixed(JitCost::from_jit(COST_CONTEXT_PRE_HEADER)),
         ),
         (
+            (101, 4),
+            "INPUTS",
+            CostKind::Fixed(JitCost::from_jit(COST_CONTEXT_INPUTS)),
+        ),
+        (
+            (101, 5),
+            "OUTPUTS",
+            CostKind::Fixed(JitCost::from_jit(COST_CONTEXT_OUTPUTS)),
+        ),
+        (
+            (101, 7),
+            "SELF",
+            CostKind::Fixed(JitCost::from_jit(COST_CONTEXT_SELF)),
+        ),
+        (
+            (36, 2),
+            "isDefined",
+            CostKind::Fixed(JitCost::from_jit(COST_OPTION_IS_DEFINED)),
+        ),
+        (
+            (36, 3),
+            "get",
+            CostKind::Fixed(JitCost::from_jit(COST_OPTION_GET)),
+        ),
+        (
             (101, 8),
             "selfBoxIndex",
             CostKind::Fixed(JitCost::from_jit(COST_CONTEXT_SELF_BOX_INDEX)),
@@ -374,6 +399,16 @@ pub fn no_arg_cost_rows() -> Vec<((u8, u8), &'static str, CostKind)> {
 pub const COST_CONTEXT_DATA_INPUTS: u64 = 15;
 pub const COST_CONTEXT_HEADERS: u64 = 15;
 pub const COST_CONTEXT_PRE_HEADER: u64 = 15;
+// These method-table tariffs equal the dedicated opcode tariffs. MethodCall
+// additionally charges its own 4-JIT overhead after evaluating the receiver.
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/methods.scala#L1731-L1739
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/methods.scala#L742-L752
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/values.scala#L1361-L1381
+pub const COST_CONTEXT_INPUTS: u64 = 10;
+pub const COST_CONTEXT_OUTPUTS: u64 = 10;
+pub const COST_CONTEXT_SELF: u64 = 10;
+pub const COST_OPTION_IS_DEFINED: u64 = 10;
+pub const COST_OPTION_GET: u64 = 15;
 pub const COST_CONTEXT_SELF_BOX_INDEX: u64 = 20;
 pub const COST_CONTEXT_LAST_BLOCK_UTXO_ROOT_HASH: u64 = 15;
 pub const COST_CONTEXT_MINER_PUB_KEY: u64 = 20;
@@ -469,6 +504,59 @@ pub(super) fn eval_no_arg_method(
         (12, 1) => {
             add_cost(cost, 0xB1)?;
             Ok(Some(Value::Int(collection_len(obj_val, ctx) as i32)))
+        }
+        // The reference invokes these no-argument methods by reflection.
+        // Both property and method wire forms share this body and tariff.
+        (101, 4) => {
+            add_method_cost(cost, COST_CONTEXT_INPUTS)?;
+            if !matches!(obj_val, Value::Context) {
+                return Err(EvalError::TypeError {
+                    expected: "Context receiver",
+                    got: format!("{obj_val:?}"),
+                });
+            }
+            Ok(Some(Value::BoxCollection(BoxSource::Inputs)))
+        }
+        (101, 5) => {
+            add_method_cost(cost, COST_CONTEXT_OUTPUTS)?;
+            if !matches!(obj_val, Value::Context) {
+                return Err(EvalError::TypeError {
+                    expected: "Context receiver",
+                    got: format!("{obj_val:?}"),
+                });
+            }
+            Ok(Some(Value::BoxCollection(BoxSource::Outputs)))
+        }
+        (101, 7) => {
+            add_method_cost(cost, COST_CONTEXT_SELF)?;
+            if !matches!(obj_val, Value::Context) {
+                return Err(EvalError::TypeError {
+                    expected: "Context receiver",
+                    got: format!("{obj_val:?}"),
+                });
+            }
+            Ok(Some(Value::SelfBox))
+        }
+        (36, 2) => {
+            add_method_cost(cost, COST_OPTION_IS_DEFINED)?;
+            match obj_val {
+                Value::Opt(v) => Ok(Some(Value::Bool(v.is_some()))),
+                other => Err(EvalError::TypeError {
+                    expected: "Option for isDefined",
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+        (36, 3) => {
+            add_method_cost(cost, COST_OPTION_GET)?;
+            match obj_val {
+                Value::Opt(Some(v)) => Ok(Some((**v).clone())),
+                Value::Opt(None) => Err(EvalError::RuntimeException("Option.get on None")),
+                other => Err(EvalError::TypeError {
+                    expected: "Option for get",
+                    got: format!("{other:?}"),
+                }),
+            }
         }
         // SContext(101).dataInputs(1) -> Coll[Box]            cost: 15
         (101, 1) => {
@@ -600,9 +688,15 @@ pub(super) fn eval_no_arg_method(
                 ));
             }
             let header = eh.to_header();
-            Ok(Some(Value::Bool(
-                ergo_crypto::pow::verify_pow_solution(&header).is_ok(),
-            )))
+            // Deliberately preserve the reference's division-by-zero failure
+            // instead of converting it to false. Reflection wraps this exception.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CHeader.scala#L73-L79
+            match ergo_crypto::pow::verify_pow_solution(&header) {
+                Err(ergo_crypto::pow::PowError::ZeroDifficulty) => Err(
+                    EvalError::InvocationTargetException("BigInteger divide by zero"),
+                ),
+                result => Ok(Some(Value::Bool(result.is_ok()))),
+            }
         }
         // SPreHeader(105) property methods 1-7                cost: 10
         (105, 1) => {
@@ -1000,10 +1094,10 @@ pub(super) fn eval_no_arg_method(
 ///   signed two's-complement big-endian = `num_bigint::to_signed_bytes_be`.
 /// * UnsignedBigInt — `CUnsignedBigInt.toBytes` =
 ///   `BigIntegers.asUnsignedByteArray(value)` = minimal *unsigned*
-///   magnitude big-endian (no sign byte), with zero encoded as a single
-///   `0x00` byte. Bouncy Castle keeps the lone zero and strips a leading
-///   `0x00` only when more bytes follow, which is exactly
-///   `to_bytes_be().1` on the always-non-negative carrier.
+///   magnitude big-endian (no sign byte), with zero encoded as empty.
+///   The reference strips the sign byte even when it is the only byte.
+///   <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/data/CUnsignedBigInt.scala#L32>
+///   <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/crypto/BigIntegers.scala#L110-L117>
 fn numeric_big_endian_bytes(v: &Value) -> Result<Vec<u8>, EvalError> {
     Ok(match v {
         Value::Byte(x) => vec![*x as u8],
@@ -1011,6 +1105,9 @@ fn numeric_big_endian_bytes(v: &Value) -> Result<Vec<u8>, EvalError> {
         Value::Int(x) => x.to_be_bytes().to_vec(),
         Value::Long(x) => x.to_be_bytes().to_vec(),
         Value::BigInt(x) => x.to_signed_bytes_be(),
+        // Deliberately preserve the reference's empty zero magnitude for
+        // consensus; toBits consumes these same bytes and is empty too.
+        Value::UnsignedBigInt(x) if x.sign() == num_bigint::Sign::NoSign => Vec::new(),
         Value::UnsignedBigInt(x) => x.to_bytes_be().1,
         other => {
             return Err(EvalError::TypeError {

@@ -1,0 +1,7 @@
+tree	avl-read-key	3	sigmaProp(Global.deserializeTo[AvlTree](SELF.R4[Coll[Byte]].get).keyLength < 0)
+tree	avl-write-key	3	sigmaProp(Global.serialize(Global.deserializeTo[AvlTree](SELF.R4[Coll[Byte]].get)).size > 0)
+tree	box-read-value	3	sigmaProp(Global.deserializeTo[Box](SELF.R4[Coll[Byte]].get).value > 0L)
+tree	box-write-value	3	sigmaProp(Global.serialize(Global.deserializeTo[Box](SELF.R4[Coll[Byte]].get)).size > 0)
+tree	embedded-prop	3	executeFromVar[SigmaProp](0)
+tree	embedded-prop-v0	0	executeFromVar[SigmaProp](0)
+tree	embedded-prop-v1	1	executeFromVar[SigmaProp](0)

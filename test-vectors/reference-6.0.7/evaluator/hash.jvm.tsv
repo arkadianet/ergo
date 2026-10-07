@@ -1,0 +1,9 @@
+b2-xor-equal-len	true	12127
+b2-xor-unequal-len	true	12127
+b2-xor-unequal-len2	true	12126
+b2-global-xor-unequal	true	12126
+b2-xor-empty	true	12119
+b2-blake-empty	true	12121
+b2-sha-empty	true	12127
+b6-es-blake-coll-int-v3	false	null
+b6-es-blake-coll-int-v0	false	null

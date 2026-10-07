@@ -9,7 +9,6 @@ pub mod structural;
 
 use ergo_primitives::digest::blake2b256;
 use ergo_primitives::reader::VlqReader;
-use ergo_primitives::writer::VlqWriter;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::transaction::{bytes_to_sign, read_transaction, Transaction};
 
@@ -119,7 +118,6 @@ impl CheckedTransaction {
 /// 0. Local policy size check (not consensus)
 /// 1. Deserialize (reject malformed bytes)
 /// 2. Structural validation (stateless — size limits, no duplicates)
-/// 3. Canonical encoding (re-serialize and compare — consensus-critical)
 /// 4. Resolve inputs from UTXO set
 /// 5. Monetary validation (ERG + token conservation)
 /// 6. Script validation (per-input ErgoTree eval + proof verify)
@@ -147,11 +145,15 @@ pub fn validate_transaction(
     // (earliest stateless stage) to match that deserialize-time rejection.
     ge::validate_group_elements(&group_elements)?;
 
-    // Stage 2: structural (stateless — cheaper than canonical re-serialization)
+    cx.params.require_transaction_parameters()?;
+
+    // Stage 2: structural (stateless)
     structural::validate_structural(&tx, cx.params)?;
 
-    // Stage 3: canonical encoding check
-    check_canonical(&tx, tx_bytes)?;
+    // Accepted wire encodings may normalize when written. IDs below commit
+    // to bytes_to_sign, while the mempool retains received bytes for relay.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/src/main/scala/org/ergoplatform/network/ErgoNodeViewSynchronizer.scala#L793-L800
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/src/main/scala/org/ergoplatform/network/ErgoNodeViewSynchronizer.scala#L1193
 
     // Stage 4: resolve inputs
     let resolved_inputs = resolve_inputs(&tx, utxo)?;
@@ -180,13 +182,19 @@ pub fn validate_transaction(
     monetary::check_positive_assets(&tx)?;
     // Rule 110 (txDataInputsUnique) — Scala checks it after the data boxes
     // resolve and before the per-output loop.
-    data_inputs::validate_data_inputs_unique(&tx, cx.ctx.height)?;
+    if cx.params.is_rule_active(110) {
+        data_inputs::validate_data_inputs_unique(&tx, cx.ctx.height)?;
+    }
     heights::validate_output_heights(&tx, cx.ctx)?;
-    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
+    if cx.params.is_rule_active(124) {
+        heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
+    }
 
     // Stage 5: monetary
     monetary::validate_monetary(&tx, &resolved_inputs)?;
-    rent_outputs::validate_rent_output_indices(&tx, cx.ctx.height)?;
+    if cx.params.is_rule_active(125) {
+        rent_outputs::validate_rent_output_indices(&tx, cx.ctx.height)?;
+    }
 
     // Stage 5.5: transaction init cost
     let init_cost = script::compute_tx_init_cost(&tx, &resolved_inputs, cx.params);
@@ -213,7 +221,11 @@ pub fn validate_transaction(
     // Stage 7: EIP-27 re-emission burning (Scala `verifyReemissionSpending`,
     // run inside `validateStateful` after `verifyInput`). Network-constant rule
     // carried on `cx.rules`; a no-op when not supplied (testnet / no EIP-27).
-    if let Some(rules) = cx.rules.reemission {
+    if let Some(rules) = cx
+        .rules
+        .reemission
+        .filter(|_| cx.params.is_rule_active(123))
+    {
         verify_reemission_spending(&tx, &resolved_inputs, cx.ctx.height, rules)?;
     }
 
@@ -228,8 +240,10 @@ pub fn validate_transaction(
 /// Composable validation for callers that already have parsed Transaction
 /// and resolved inputs (e.g. block validation with batch UTXO resolution).
 ///
-/// Verifies the lengths and IDs of both resolved box lists and checks the
-/// transaction's canonical bytes against `original_bytes`. The caller owns
+/// Verifies the lengths and IDs of both resolved box lists. IDs commit to
+/// reserialized message bytes. The original-byte argument remains available
+/// to callers sharing the parsed and unparsed validation interfaces.
+/// The caller owns
 /// the original parse's version context and authorizes `skip_scripts`;
 /// skipping scripts also skips their init-cost and evaluator charges.
 pub fn validate_transaction_parsed(
@@ -280,7 +294,7 @@ pub fn validate_transaction_parsed(
 /// elements at deserialize.
 pub fn validate_transaction_parsed_with_group_elements(
     tx: Transaction,
-    original_bytes: &[u8],
+    _original_bytes: &[u8],
     group_elements: &[[u8; 33]],
     resolved_inputs: Vec<ErgoBox>,
     resolved_data_inputs: Vec<ErgoBox>,
@@ -291,8 +305,13 @@ pub fn validate_transaction_parsed_with_group_elements(
     verify_resolved_inputs_match(&tx, &resolved_inputs)?;
     verify_resolved_data_inputs_match(&tx, &resolved_data_inputs)?;
 
-    // Canonical check against original bytes
-    check_canonical(&tx, original_bytes)?;
+    // The reference has no received-bytes equality rule. Its block section
+    // root commits to parsed transaction IDs and proof hashes, not raw tx bytes.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/history/BlockTransactions.scala#L49-L68
+
+    if !skip_scripts {
+        cx.params.require_transaction_parameters()?;
+    }
 
     // Structural
     structural::validate_structural(&tx, cx.params)?;
@@ -303,14 +322,20 @@ pub fn validate_transaction_parsed_with_group_elements(
     // Rule 108 (txPositiveAssets) — before the per-output 112/124 loop.
     monetary::check_positive_assets(&tx)?;
     // Rule 110 (txDataInputsUnique), in Scala's position.
-    data_inputs::validate_data_inputs_unique(&tx, cx.ctx.height)?;
+    if cx.params.is_rule_active(110) {
+        data_inputs::validate_data_inputs_unique(&tx, cx.ctx.height)?;
+    }
     // Per-output height constraints (Scala rules 112 + 124)
     heights::validate_output_heights(&tx, cx.ctx)?;
-    heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
+    if cx.params.is_rule_active(124) {
+        heights::validate_monotonic_heights(&tx, &resolved_inputs, cx.ctx.block_version())?;
+    }
 
     // Monetary
     monetary::validate_monetary(&tx, &resolved_inputs)?;
-    rent_outputs::validate_rent_output_indices(&tx, cx.ctx.height)?;
+    if cx.params.is_rule_active(125) {
+        rent_outputs::validate_rent_output_indices(&tx, cx.ctx.height)?;
+    }
 
     // Compute bytes_to_sign + tx_id once. Always needed (tx_id is stored
     // on CheckedTransaction for state apply, regardless of script
@@ -346,7 +371,11 @@ pub fn validate_transaction_parsed_with_group_elements(
     // `cx.rules`; a no-op when not supplied (testnet / no EIP-27). Runs even
     // when scripts are skipped below the checkpoint — it is a stateful
     // token/monetary rule, not script evaluation.
-    if let Some(rules) = cx.rules.reemission {
+    if let Some(rules) = cx
+        .rules
+        .reemission
+        .filter(|_| cx.params.is_rule_active(123))
+    {
         verify_reemission_spending(&tx, &resolved_inputs, cx.ctx.height, rules)?;
     }
 
@@ -381,16 +410,6 @@ fn deserialize_transaction(
         )));
     }
     Ok((tx, r.take_group_elements()))
-}
-
-fn check_canonical(tx: &Transaction, expected_bytes: &[u8]) -> Result<(), ValidationError> {
-    let mut w = VlqWriter::new();
-    ergo_ser::transaction::write_transaction_preserving_extension_encodings(&mut w, tx)
-        .map_err(|e| ValidationError::Deserialization(e.to_string()))?;
-    if w.result() != expected_bytes {
-        return Err(ValidationError::NonCanonical);
-    }
-    Ok(())
 }
 
 fn resolve_inputs(tx: &Transaction, utxo: &dyn UtxoView) -> Result<Vec<ErgoBox>, ValidationError> {
