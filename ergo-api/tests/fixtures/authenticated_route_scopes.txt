@@ -10,6 +10,10 @@ GET /api/v1/accounts wallet
 GET /api/v1/accounts/{account_id} wallet
 GET /api/v1/accounts/{account_id}/addresses wallet
 GET /api/v1/accounts/{account_id}/balance wallet
+GET /api/v1/chain/blocks-since wallet
+GET /api/v1/chain/boxes/{id} wallet
+GET /api/v1/chain/snapshot wallet
+GET /api/v1/chain/tip wallet
 GET /api/v1/diagnostics/activity operator
 GET /api/v1/mining/candidate mining
 GET /api/v1/mining/candidate-details mining
@@ -62,6 +66,7 @@ POST /api/v1/accounts wallet
 POST /api/v1/accounts/private-key admin
 POST /api/v1/accounts/watch wallet
 POST /api/v1/accounts/{account_id}/addresses wallet
+POST /api/v1/chain/transactions wallet
 POST /api/v1/mining/candidate-with-txs mining
 POST /api/v1/mining/private-transactions operator
 POST /api/v1/mining/private-transactions/{tx_id}/cancel operator

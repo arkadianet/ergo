@@ -411,8 +411,13 @@ mod tests {
             .with_writer(logs.clone())
             .finish();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let wallet_store = std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(
+            std::sync::Arc::new(
+                redb::Database::create(config.data_dir.join("wallet-fixture.redb")).unwrap(),
+            ),
+        ));
         let subsystem = tracing::subscriber::with_default(subscriber, || {
-            build_subsystem(config, &Default::default(), &tx, None)
+            build_subsystem(config, &Default::default(), &tx, Some(wallet_store))
         })
         .unwrap_or_else(|e| panic!("mining boot refused: {e}"));
         let logged = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();

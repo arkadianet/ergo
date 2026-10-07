@@ -172,7 +172,7 @@ pub enum HeaderAuthError {
 /// parent must equal `height` and `parent_id`.
 ///
 /// The id is computed over the bytes as received, never over a re-encoding:
-/// the decoder drops the unparsed section of v2-v4 headers, so re-encoding a
+/// the decoder ignores the new-fields size of v2-v4 headers, so re-encoding a
 /// decoded header does not always reproduce the bytes its id was taken over.
 pub fn authenticate_header(
     bytes: &[u8],
@@ -848,19 +848,16 @@ mod tests {
 
         #[test]
         fn id_is_taken_over_received_bytes_not_a_re_encoding() {
-            // A v2 header may carry an unparsed section on the wire, which the
-            // decoder drops (the encoder refuses to write one), so re-encoding
-            // the decoded header yields different bytes and a different id.
-            // Authentication must hash what was received. Splice a 3-byte
-            // section in where the encoder writes its empty length byte: the
-            // last byte of the PoW-less encoding.
+            // A v2 header accepts a nonzero new-fields size byte but reads no
+            // payload: the PoW solution follows that byte immediately. The
+            // decoder ignores the size and the encoder writes zero, so the
+            // received and re-encoded bytes have different ids.
             let plain = header(2, 7, [9; 32], Vec::new());
             let (plain_bytes, _) = serialize_header(&plain).unwrap();
             let length_at = serialize_header_without_pow(&plain).unwrap().len() - 1;
             assert_eq!(plain_bytes[length_at], 0);
-            let mut bytes = plain_bytes[..length_at].to_vec();
-            bytes.extend_from_slice(&[3, 1, 2, 3]);
-            bytes.extend_from_slice(&plain_bytes[length_at + 1..]);
+            let mut bytes = plain_bytes.clone();
+            bytes[length_at] = 3;
             let id = *blake2b256(&bytes).as_bytes();
 
             let decoded = authenticate_header(&bytes, &id, 7, &[9; 32]).unwrap();
@@ -869,6 +866,10 @@ mod tests {
             assert_eq!(reencoded, plain_bytes);
             assert_ne!(reencoded, bytes);
             assert_ne!(*reencoded_id.as_bytes(), id);
+            assert!(matches!(
+                authenticate_header(&bytes, reencoded_id.as_bytes(), 7, &[9; 32]),
+                Err(HeaderAuthError::IdMismatch { .. })
+            ));
         }
 
         #[test]

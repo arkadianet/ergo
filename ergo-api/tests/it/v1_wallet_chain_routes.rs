@@ -4,7 +4,7 @@ use axum::body::{to_bytes, Body};
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
-use ergo_api::auth::{ApiSecurity, API_KEY_HEADER};
+use ergo_api::auth::{ApiSecurity, CredentialScope, ScopedCredentialConfig, API_KEY_HEADER};
 use ergo_api::server::{router_with_mempool_and_wallet_and_wallet_moved, ServerCtx};
 use ergo_api::traits::{NodeReadState, NoopMempoolView, WalletChain, WalletChainError};
 use ergo_api::types::{
@@ -336,6 +336,14 @@ fn app(chain: Option<Arc<dyn WalletChain>>) -> Router {
 }
 
 fn production_app(chain: Option<Arc<dyn WalletChain>>, wallet_moved: Option<&str>) -> Router {
+    production_app_with_security(chain, wallet_moved, security())
+}
+
+fn production_app_with_security(
+    chain: Option<Arc<dyn WalletChain>>,
+    wallet_moved: Option<&str>,
+    security: Arc<ApiSecurity>,
+) -> Router {
     let ctx = ServerCtx {
         local_reverse_proxy: false,
         services: Arc::new(ergo_api::ApiServices::new()),
@@ -357,7 +365,7 @@ fn production_app(chain: Option<Arc<dyn WalletChain>>, wallet_moved: Option<&str
         ctx,
         None,
         Arc::new(NoopWalletAdmin),
-        Some(security()),
+        Some(security),
         wallet_moved,
     )
 }
@@ -503,6 +511,97 @@ async fn wallet_chain_routes_require_the_v1_api_key() {
         let (status, _) = send(app.clone(), method, uri, Body::empty(), Some("wrong")).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
     }
+}
+
+/// walletd needs authenticated committed-chain reads and submission even when
+/// wallet ownership is external. Unrelated scopes must not reach that backend.
+#[tokio::test]
+async fn wallet_chain_routes_accept_only_wallet_or_admin_scoped_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let scopes = [
+        CredentialScope::Wallet,
+        CredentialScope::Admin,
+        CredentialScope::Mining,
+        CredentialScope::Operator,
+    ];
+    let security = Arc::new(
+        ApiSecurity::new(ApiSecurity::hash_key(KEY))
+            .unwrap()
+            .with_credentials(
+                scopes
+                    .iter()
+                    .map(|scope| ScopedCredentialConfig {
+                        id: format!("{scope:?}"),
+                        hash: ApiSecurity::hash_key(format!("{scope:?}").as_bytes()),
+                        scopes: vec![*scope],
+                        revoked: false,
+                    })
+                    .collect(),
+                dir.path().join("revocations.json"),
+            )
+            .unwrap(),
+    );
+    let (chain, calls) = fake(Mode::Good);
+    let app = production_app_with_security(
+        Some(chain),
+        Some("http://127.0.0.1:19090"),
+        security.clone(),
+    );
+    let cases = [
+        (Method::GET, "/api/v1/chain/tip".to_string()),
+        (Method::GET, "/api/v1/chain/snapshot".to_string()),
+        (
+            Method::GET,
+            format!(
+                "/api/v1/chain/blocks-since?height=10&id={}&limit=1",
+                "a".repeat(64)
+            ),
+        ),
+        (
+            Method::GET,
+            format!(
+                "/api/v1/chain/boxes/{}?tip={}",
+                "1".repeat(64),
+                "a".repeat(64)
+            ),
+        ),
+        (Method::POST, "/api/v1/chain/transactions".to_string()),
+    ];
+    for scope in scopes {
+        let key = format!("{scope:?}");
+        let allowed = matches!(scope, CredentialScope::Wallet | CredentialScope::Admin);
+        calls.lock().unwrap().clear();
+        for (method, uri) in &cases {
+            let body = if *method == Method::POST {
+                Body::from(r#"{"transaction":"00ff"}"#)
+            } else {
+                Body::empty()
+            };
+            let (status, value) = send(app.clone(), method.clone(), uri, body, Some(&key)).await;
+            assert_eq!(
+                status,
+                if allowed {
+                    StatusCode::OK
+                } else {
+                    StatusCode::UNAUTHORIZED
+                },
+                "{scope:?}: {method} {uri}: {value}"
+            );
+            if !allowed {
+                assert_eq!(value["error"]["reason"], "unauthorized");
+            }
+        }
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            if allowed { cases.len() } else { 0 },
+            "{scope:?} backend access"
+        );
+    }
+    security.revoke_credential("Wallet").unwrap();
+    calls.lock().unwrap().clear();
+    let (status, _) = get(app, "/api/v1/chain/tip", Some("Wallet")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

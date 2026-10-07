@@ -28,6 +28,12 @@ impl WalletChainAccess for PrunedChainAccessor {
     fn is_pruned(&self) -> bool {
         true
     }
+    fn lookup_utxo(
+        &self,
+        _: &[u8; 32],
+    ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, ChainAccessError> {
+        Ok(None)
+    }
     fn read_block_at(
         &self,
         _: u32,
@@ -78,6 +84,12 @@ impl WalletChainAccess for StubChainAccessorTip {
 
     fn is_pruned(&self) -> bool {
         false
+    }
+    fn lookup_utxo(
+        &self,
+        _: &[u8; 32],
+    ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, ChainAccessError> {
+        Ok(None)
     }
 
     fn read_block_at(

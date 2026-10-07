@@ -626,11 +626,11 @@ mod tests {
     }
 
     #[test]
-    fn contract_covers_exactly_one_hundred_sixteen_reasons_no_duplicates() {
+    fn contract_covers_exactly_one_hundred_nineteen_reasons_no_duplicates() {
         use std::collections::BTreeSet;
         let rows = contract();
-        assert_eq!(rows.len(), 116, "expected 116 canonical reasons");
+        assert_eq!(rows.len(), 119, "expected 119 canonical reasons");
         let wires: BTreeSet<&str> = rows.iter().map(|(_, w, _)| *w).collect();
-        assert_eq!(wires.len(), 116, "wire strings must be unique");
+        assert_eq!(wires.len(), 119, "wire strings must be unique");
     }
 }
