@@ -115,8 +115,13 @@ impl PartialEq for ErgoBoxCandidate {
     }
 }
 
+/// The received identity of a parsed whole box whose encoding differs from its
+/// canonical serialization. The box ID hashes these received bytes while the
+/// box's value, creation height, tokens, transaction ID and index still equal
+/// the values recorded here; see [`ErgoBox::box_id`]. Read-only: obtained from
+/// [`ErgoBoxCandidate::received_box_identity`].
 #[derive(Debug, Clone, PartialEq)]
-struct ReceivedBoxIdentity {
+pub struct ReceivedBoxIdentity {
     id: Digest32,
     bytes: Vec<u8>,
     value: u64,
@@ -124,6 +129,43 @@ struct ReceivedBoxIdentity {
     tokens: Vec<Token>,
     transaction_id: ModifierId,
     index: u16,
+}
+
+impl ReceivedBoxIdentity {
+    /// `blake2b256` of the received whole-box bytes.
+    pub fn id(&self) -> Digest32 {
+        self.id
+    }
+
+    /// The received whole-box bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Box value recorded when the bytes were received.
+    pub fn value(&self) -> u64 {
+        self.value
+    }
+
+    /// Creation height recorded when the bytes were received.
+    pub fn creation_height(&self) -> u32 {
+        self.creation_height
+    }
+
+    /// Tokens recorded when the bytes were received.
+    pub fn tokens(&self) -> &[Token] {
+        &self.tokens
+    }
+
+    /// Minting transaction ID recorded when the bytes were received.
+    pub fn transaction_id(&self) -> ModifierId {
+        self.transaction_id
+    }
+
+    /// Output index recorded when the bytes were received.
+    pub fn index(&self) -> u16 {
+        self.index
+    }
 }
 
 impl ErgoBoxCandidate {
@@ -378,6 +420,19 @@ impl ErgoBoxCandidate {
         &self.register_bytes
     }
 
+    /// Script version this candidate's registers serialize under in whole-box
+    /// bytes. A parsed candidate takes its reader's activated script version
+    /// (3 when unset); [`ErgoBoxCandidate::new`] and [`ErgoBox::new`] use 1.
+    pub fn box_serialization_version(&self) -> u8 {
+        self.box_serialization_version
+    }
+
+    /// The received identity of a parsed whole box whose encoding differs from
+    /// canonical serialization; `None` for canonical, built or changed boxes.
+    pub fn received_box_identity(&self) -> Option<&ReceivedBoxIdentity> {
+        self.received_box_identity.as_deref()
+    }
+
     /// Cached structured register bytes, or the original serialization failure.
     pub fn checked_register_bytes(&self) -> Result<&[u8], WriteError> {
         match &self.register_serialization_error {
@@ -535,6 +590,71 @@ mod tests {
                 val: SigmaValue::SigmaProp(crate::sigma_value::SigmaBoolean::TrivialProp(true)),
             },
         }
+    }
+
+    // ----- read-only accessors -----
+
+    fn sealed_box() -> ErgoBox {
+        let candidate = ErgoBoxCandidate::new(
+            1,
+            size_delimited_tree(),
+            7,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        ErgoBox::new(candidate, ModifierId::from_bytes([0x5A; 32]), 2)
+    }
+
+    #[test]
+    fn accessors_report_built_and_sealed_candidates() {
+        let candidate = ErgoBoxCandidate::new(
+            1,
+            size_delimited_tree(),
+            7,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        assert_eq!(candidate.box_serialization_version(), 1);
+        assert!(candidate.received_box_identity().is_none());
+        let sealed = sealed_box();
+        assert_eq!(sealed.candidate.box_serialization_version(), 1);
+        assert!(sealed.candidate.received_box_identity().is_none());
+    }
+
+    #[test]
+    fn accessors_report_parsed_candidate_version_and_canonical_identity() {
+        let sealed = sealed_box();
+        let bytes = serialize_ergo_box(&sealed).unwrap();
+        let mut r = VlqReader::new(&bytes).with_activated_script_version(2);
+        let parsed = read_ergo_box(&mut r).unwrap();
+        assert_eq!(parsed.candidate.box_serialization_version(), 2);
+        // Canonical received bytes record no separate identity.
+        assert!(parsed.candidate.received_box_identity().is_none());
+    }
+
+    #[test]
+    fn received_box_identity_accessors_expose_the_non_canonical_encoding() {
+        let sealed = sealed_box();
+        let canonical = serialize_ergo_box(&sealed).unwrap();
+        // Value 1 is the leading VLQ byte; encode it non-minimally as 81 00.
+        assert_eq!(canonical[0], 0x01);
+        let mut received = vec![0x81, 0x00];
+        received.extend_from_slice(&canonical[1..]);
+        let parsed = read_ergo_box(&mut VlqReader::new(&received)).unwrap();
+        let identity = parsed.candidate.received_box_identity().unwrap();
+        assert_eq!(identity.id(), blake2b256(&received));
+        assert_eq!(identity.bytes(), received.as_slice());
+        assert_eq!(identity.value(), 1);
+        assert_eq!(identity.creation_height(), 7);
+        assert!(identity.tokens().is_empty());
+        assert_eq!(
+            identity.transaction_id(),
+            ModifierId::from_bytes([0x5A; 32])
+        );
+        assert_eq!(identity.index(), 2);
+        assert_eq!(parsed.box_id().unwrap(), identity.id());
     }
 
     // ----- atomic register replacement -----

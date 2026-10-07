@@ -24,6 +24,10 @@ A consensus release for mainnet. Upgrade every 0.12.1 node, mining nodes first. 
 - **Re-emission checks follow the node's role.** The re-emission rule (123) is checked by mining nodes and skipped by non-mining nodes, the Scala node's default. A new setting, `[node] check_reemission_rules`, turns the checks on for a non-mining node; mining always turns them on.
 - **Header and transaction identifiers** are derived from the parsed, re-serialized form. A header or transaction whose received encoding is accepted but not canonical is stored and identified canonically, and the peer that relayed it is not penalised.
 
+### Added
+
+- `ErgoBoxCandidate::box_serialization_version` and `ErgoBoxCandidate::received_box_identity` read-only accessors in `ergo-ser`, and a public `ReceivedBoxIdentity` with read-only accessors for its fields. No behaviour change.
+
 ### Changed
 
 - Non-mining nodes no longer check re-emission token allocation (rule 123) unless `[node] check_reemission_rules = true`. Mining nodes always check it, including the emission-box branch that was not checked before.
