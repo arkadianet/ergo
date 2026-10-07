@@ -1497,7 +1497,7 @@ fn compute_epoch_payload(
     }
     // Carry forward the in-flight proposal; never reset to empty.
     let proposed = active_params.proposed_update.clone();
-    let (mut computed, activated_update) = compute_next_params(
+    let (computed, activated_update) = compute_next_params(
         active_params,
         epoch_votes,
         false, // we never emit a soft-fork (120) vote
@@ -1520,7 +1520,6 @@ fn compute_epoch_payload(
     let cumulative = validation_settings
         .updated(&activated_update)
         .update_from_initial;
-    computed.announced_settings = Some(cumulative.clone());
     Ok(EpochBoundaryPayload {
         computed,
         cumulative,

@@ -318,9 +318,13 @@ pub fn validate_epoch_extension(
 
     // The reference stores the advertised table, including omitted ids.
     // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/state/ErgoStateContext.scala#L248
+    // Record it only when it differs from folding this epoch's delta, so
+    // ordinary rows keep the v2 persistence layout that older nodes read.
+    let folded = prev_settings.updated(&activated_update);
     let mut adopted = parsed;
     adopted.activated_update = activated_update.clone();
-    adopted.announced_settings = Some(next_settings.update_from_initial.clone());
+    adopted.announced_settings = (next_settings.update_from_initial != folded.update_from_initial)
+        .then(|| next_settings.update_from_initial.clone());
     Ok(ExtensionValidationOutcome {
         computed: adopted,
         next_settings,
