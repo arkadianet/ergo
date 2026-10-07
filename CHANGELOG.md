@@ -16,6 +16,10 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject `substConstants` and `Global.deserializeTo` calls whose parsed bytes contain an off-curve group element, including points inside SigmaProp, Box and Header values. These calls were previously accepted.
+
 ### Added
 
 - `ErgoBoxCandidate::canonical_tree_bytes` in `ergo-ser`: a read-only accessor returning the stored canonical tree cache exactly (`&Result<Option<Vec<u8>>, WriteError>`). No behaviour change.
