@@ -72,6 +72,10 @@ mod ids {
 /// surfaced via `/info`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveProtocolParameters {
+    /// Missing named table entries: bits 0..7 are ids 1..8, bit 8 is id 123.
+    /// Named values are placeholders when absent; `parameter` returns None.
+    /// This preserves Scala's partial parameter table without inventing defaults.
+    pub missing_core_parameters: u16,
     /// Epoch boundary height these parameters take effect from.
     pub epoch_start_height: u32,
     /// Block-format version (low byte of parameter id 123).
@@ -179,6 +183,34 @@ pub enum ActiveParamsError {
 /// stable and these stay forward-compatibly grouped with other
 /// non-numeric soft-fork voting keys.
 impl ActiveProtocolParameters {
+    /// Look up a numeric parameter, preserving missing entries.
+    pub fn parameter(&self, id: u8) -> Option<i32> {
+        let bit = match id {
+            1..=8 => Some(id - 1),
+            123 => Some(8),
+            _ => None,
+        };
+        if bit.is_some_and(|b| self.missing_core_parameters & (1 << b) != 0) {
+            return None;
+        }
+        match id {
+            1 => Some(self.storage_fee_factor),
+            2 => Some(self.min_value_per_byte),
+            3 => Some(self.max_block_size),
+            4 => Some(self.max_block_cost),
+            5 => Some(self.token_access_cost),
+            6 => Some(self.input_cost),
+            7 => Some(self.data_input_cost),
+            8 => Some(self.output_cost),
+            9 => self.subblocks_per_block,
+            123 => Some(self.block_version as i32),
+            _ => self
+                .extra
+                .iter()
+                .find_map(|(key, value)| (*key == id).then_some(*value)),
+        }
+    }
+
     /// Read the soft-fork starting height (id 122) if present in `extra`.
     pub fn soft_fork_starting_height(&self) -> Option<i32> {
         self.extra

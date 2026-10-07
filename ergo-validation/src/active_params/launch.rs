@@ -10,6 +10,7 @@ use crate::voting::validation_settings::ErgoValidationSettingsUpdate;
 /// `voted_params` so the snapshot read path always finds *some* row.
 pub fn scala_launch_mainnet() -> ActiveProtocolParameters {
     ActiveProtocolParameters {
+        missing_core_parameters: 0,
         epoch_start_height: 0,
         block_version: 1,
         storage_fee_factor: 1_250_000,

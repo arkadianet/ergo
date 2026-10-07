@@ -30,7 +30,7 @@ use match_rules::{match_parameters, match_parameters_60};
 /// for downstream rule gating.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionValidationOutcome {
-    /// Recomputed next-epoch active parameters.
+    /// Advertised next-epoch parameters after validation against the computed table.
     pub computed: ActiveProtocolParameters,
     /// Cumulative validation settings after applying `activated_update`.
     pub next_settings: ErgoValidationSettings,
@@ -297,8 +297,12 @@ pub fn validate_epoch_extension(
         });
     };
 
+    // The reference stores the advertised table, including omitted ids.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/state/ErgoStateContext.scala#L248
+    let mut adopted = parsed;
+    adopted.activated_update = activated_update.clone();
     Ok(ExtensionValidationOutcome {
-        computed,
+        computed: adopted,
         next_settings,
         activated_update,
     })

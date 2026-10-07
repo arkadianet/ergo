@@ -251,7 +251,8 @@ fn validate_full_block_sequential_impl(
     check_block_transactions_size(
         block_transactions,
         header.version,
-        ctx.rule_306_max_block_size,
+        ctx.rule_306_max_block_size
+            .ok_or(BlockValidationError::MissingProtocolParameter { id: 3 })?,
     )?;
 
     // 5. Per-tx validation with intra-block UTXO overlay
@@ -553,7 +554,8 @@ fn validate_full_block_parallel_impl(
     check_block_transactions_size(
         block_transactions,
         header.version,
-        ctx.rule_306_max_block_size,
+        ctx.rule_306_max_block_size
+            .ok_or(BlockValidationError::MissingProtocolParameter { id: 3 })?,
     )?;
 
     // Layered parallel tx validation

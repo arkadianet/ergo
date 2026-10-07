@@ -228,6 +228,7 @@ impl UtxoView for MapUtxo {
 
 fn build_active_params(voted: &VotedParams) -> ActiveProtocolParameters {
     ActiveProtocolParameters {
+        missing_core_parameters: 0,
         epoch_start_height: 1499136,
         block_version: voted.block_version as u8,
         storage_fee_factor: voted.storage_fee_factor,

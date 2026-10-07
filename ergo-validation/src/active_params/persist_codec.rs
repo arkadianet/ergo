@@ -42,7 +42,9 @@ impl ActiveProtocolParameters {
                 return Err(ActiveParamsError::NegativeProtocolParam { id, value });
             }
         }
-        let count = 9 + usize::from(self.subblocks_per_block.is_some()) + self.extra.len();
+        let count = 9 - self.missing_core_parameters.count_ones() as usize
+            + usize::from(self.subblocks_per_block.is_some())
+            + self.extra.len();
         u8::try_from(count).map_err(|_| ActiveParamsError::TooManyParameters(count))?;
         let mut seen = std::collections::BTreeSet::<u8>::new();
         for (id, _) in &self.extra {
@@ -97,6 +99,7 @@ impl ActiveProtocolParameters {
         }
         entries.push((ids::BLOCK_VERSION, self.block_version as i32));
         entries.extend(self.extra.iter().copied());
+        entries.retain(|(id, _)| self.parameter(*id).is_some());
         entries.sort_by_key(|(id, _)| *id);
 
         let count = u8::try_from(entries.len())
@@ -198,11 +201,13 @@ impl ActiveProtocolParameters {
             }
         }
 
-        let mut take = |id: u8| {
-            by_id
-                .remove(&id)
-                .ok_or(ActiveParamsError::MissingRequired(id))
-        };
+        let missing_core_parameters = [1, 2, 3, 4, 5, 6, 7, 8, 123]
+            .iter()
+            .enumerate()
+            .fold(0u16, |mask, (bit, id)| {
+                mask | if by_id.contains_key(id) { 0 } else { 1 << bit }
+            });
+        let mut take = |id: u8| by_id.remove(&id).map_or(Ok::<_, ActiveParamsError>(0), Ok);
         // Non-negativity-constrained fields fail-close at the codec
         // boundary so `ProtocolParams::from_active` stays infallible.
         // Same contract as parse_active_params.
@@ -232,6 +237,7 @@ impl ActiveProtocolParameters {
         let extra: Vec<(u8, i32)> = by_id.into_iter().collect();
 
         Ok(Self {
+            missing_core_parameters,
             epoch_start_height,
             block_version: block_version_i32 as u8,
             storage_fee_factor,

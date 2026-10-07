@@ -5,6 +5,8 @@ use ergo_ser::ergo_box::ErgoBox;
 /// These change at epoch boundaries via soft-fork voting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolParams {
+    /// Missing named active-table entries (same mask as ActiveProtocolParameters).
+    pub missing_core_parameters: u16,
     /// Activated Sigma statuses. Complete tip/target contexts use
     /// `from_active_with_settings` / `for_block`; `from_active` alone carries
     /// only the supplied row's status delta.
@@ -44,6 +46,25 @@ pub struct ProtocolParams {
 }
 
 impl ProtocolParams {
+    /// Whether a named active-table parameter is present.
+    pub fn has_parameter(&self, id: u8) -> bool {
+        let bit = match id {
+            1..=8 => id - 1,
+            123 => 8,
+            _ => return true,
+        };
+        self.missing_core_parameters & (1 << bit) == 0
+    }
+
+    pub(crate) fn require_transaction_parameters(&self) -> Result<(), crate::ValidationError> {
+        for id in [2, 4, 5, 6, 7, 8, 123] {
+            if !self.has_parameter(id) {
+                return Err(crate::ValidationError::MissingProtocolParameter { id });
+            }
+        }
+        Ok(())
+    }
+
     /// Select parameters after validating the target block's epoch extension.
     /// Scala appends that extension before executing the target transactions.
     pub fn for_block(
@@ -77,6 +98,7 @@ impl ProtocolParams {
     /// per-epoch active set is not yet available.
     pub fn mainnet_default() -> Self {
         Self {
+            missing_core_parameters: 0,
             validation_settings: Default::default(),
             min_value_per_byte: 360,
             // Mainnet value from blockchain parameters (adjusted via voting).
@@ -149,6 +171,7 @@ impl ProtocolParams {
             "negative token_access_cost leaked past parse boundary"
         );
         Self {
+            missing_core_parameters: active.missing_core_parameters,
             validation_settings: sigma_settings(&active.activated_update.status_updates),
             min_value_per_byte: active.min_value_per_byte as u64,
             max_block_cost: active.max_block_cost as u64,
@@ -264,6 +287,7 @@ mod tests {
 
     fn baseline_active() -> ActiveProtocolParameters {
         ActiveProtocolParameters {
+            missing_core_parameters: 0,
             epoch_start_height: 1024,
             block_version: 1,
             storage_fee_factor: 1_250_000,

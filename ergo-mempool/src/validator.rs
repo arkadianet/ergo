@@ -282,6 +282,7 @@ fn resolve_data_inputs(
 fn map_validation_error(err: ValidationError) -> ValidationErr {
     use ValidationError as E;
     match err {
+        E::MissingProtocolParameter { id } => ValidationErr::Other(format!("missing protocol parameter {id}")),
         E::Deserialization(_) => ValidationErr::Deserialize,
         E::NonCanonical => ValidationErr::NonCanonical,
         // Admission-fast-fail bucket. Mempool uses this to route

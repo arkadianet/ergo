@@ -18,6 +18,8 @@ infrastructure.
 
 ### Fixed
 
+- Preserve omitted epoch parameter entries and validate required entries when their block or transaction use sites are reached.
+
 - Validate emission token allocation when re-emission checks are enabled; default those checks off for non-mining nodes and enable them for miners.
 
 - Split validation-settings extension values into chunks of at most 64 bytes.

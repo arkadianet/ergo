@@ -147,6 +147,8 @@ pub fn validate_transaction(
     // (earliest stateless stage) to match that deserialize-time rejection.
     ge::validate_group_elements(&group_elements)?;
 
+    cx.params.require_transaction_parameters()?;
+
     // Stage 2: structural (stateless — cheaper than canonical re-serialization)
     structural::validate_structural(&tx, cx.params)?;
 
@@ -293,6 +295,10 @@ pub fn validate_transaction_parsed_with_group_elements(
 
     // Canonical check against original bytes
     check_canonical(&tx, original_bytes)?;
+
+    if !skip_scripts {
+        cx.params.require_transaction_parameters()?;
+    }
 
     // Structural
     structural::validate_structural(&tx, cx.params)?;

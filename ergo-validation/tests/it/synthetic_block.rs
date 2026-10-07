@@ -155,6 +155,22 @@ pub(crate) fn validate_both_with_costs(
     header_version: u8,
     params: &ProtocolParams,
 ) -> [Result<(CheckedBlock, Vec<(usize, u64)>), BlockValidationError>; 2] {
+    validate_both_with_parent_size(
+        transactions,
+        utxo,
+        header_version,
+        params,
+        Some(params.max_block_size),
+    )
+}
+
+pub(crate) fn validate_both_with_parent_size(
+    transactions: Vec<Transaction>,
+    utxo: &MapUtxo,
+    header_version: u8,
+    params: &ProtocolParams,
+    parent_max_block_size: Option<u32>,
+) -> [Result<(CheckedBlock, Vec<(usize, u64)>), BlockValidationError>; 2] {
     let (parent, mut header) = parent_and_header();
     header.version = header_version;
     let tx_ids: Vec<ModifierId> = transactions
@@ -198,7 +214,7 @@ pub(crate) fn validate_both_with_costs(
         parent: &checked_parent,
         utxo,
         params,
-        rule_306_max_block_size: params.max_block_size,
+        rule_306_max_block_size: parent_max_block_size,
         voting_length: 1024,
         votes_unknown_rule_disabled: false,
         parent_extension: None,

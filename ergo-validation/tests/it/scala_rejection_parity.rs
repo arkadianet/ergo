@@ -221,6 +221,7 @@ fn scala_sourced_rejection_parity() {
             ValidationError::ProofFailed { .. } => "PROOF",
             ValidationError::CostExceeded { .. } | ValidationError::JitCostOverflow(_) => "COST",
             ValidationError::Deserialization(_) | ValidationError::NonCanonical => "CANONICAL",
+            ValidationError::MissingProtocolParameter { .. } => "INTERNAL",
             ValidationError::InternalInvariantViolated(_) => "INTERNAL",
         };
 
