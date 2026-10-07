@@ -181,6 +181,7 @@ pub fn parse_ergo_box_bytes(
             tokens,
             additional_registers,
             register_bytes,
+            register_serialization_error: None,
             box_serialization_version: crate::ergo_tree::DEFAULT_ACTIVATED_SCRIPT_VERSION,
             received_box_identity: None,
         },

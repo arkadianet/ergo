@@ -36,7 +36,10 @@ fn write_ergo_box_candidate_indexed_inner(
 ) -> Result<(), WriteError> {
     w.put_u64(c.value);
     let tree_bytes = c.checked_serialized_ergo_tree_bytes()?;
-    if received_tree_size && c.canonical_tree_bytes.is_some() && c.ergo_tree.has_size {
+    if received_tree_size
+        && c.canonical_tree_bytes.as_ref().is_ok_and(Option::is_some)
+        && c.ergo_tree.has_size
+    {
         // Deliberately match the JVM consensus quirk: successful tree parsing
         // ignores the declared size. Only the wire check preserves that slot;
         // box bytes, IDs and bytesToSign still use the recomputed size above.
@@ -85,7 +88,7 @@ fn write_ergo_box_candidate_indexed_inner(
         w.put_u32(idx);
         w.put_u64(token.amount);
     }
-    w.put_bytes(&c.register_bytes);
+    w.put_bytes(c.checked_register_bytes()?);
     Ok(())
 }
 
@@ -188,6 +191,7 @@ fn read_box_tail(
         tokens,
         additional_registers,
         register_bytes,
+        register_serialization_error: None,
         box_serialization_version: 1,
         received_box_identity: None,
     })

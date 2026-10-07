@@ -18,6 +18,9 @@ infrastructure.
 
 ### Fixed
 
+- Reject serialization of AVL tree values whose decoded key or value length is negative.
+- Preserve nested box script serialization errors when writing box constants.
+
 - Check collection and option receivers during script parsing and derive declared variable and tuple-index root types.
 
 ## [0.12.1] - 2026-10-06

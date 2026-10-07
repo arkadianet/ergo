@@ -30,6 +30,11 @@ object SiblingsOracle {
         var extra: Option[String] = None
         val result = try {
           mode match {
+            case "box-candidate-read" =>
+              ErgoBoxCandidate.serializer.parse(r)
+            case "box-read" =>
+              val b = ErgoBox.sigmaSerializer.parse(r)
+              extra = Some("box_id=" + Base16.encode(b.id) + " bytes_is_received=" + java.util.Arrays.equals(b.bytes, bytes))
             case "box-candidate" =>
               val b = ErgoBoxCandidate.serializer.parse(r)
               canonical = Some(Base16.encode(ErgoBoxCandidate.serializer.toBytes(b)))
@@ -59,6 +64,8 @@ object SiblingsOracle {
               val w = SigmaSerializer.startWriter(); TypeSerializer.serialize(t, w)
               canonical = Some(Base16.encode(w.toBytes))
               extra = Some(t.toString)
+            case "constant-read" =>
+              ConstantSerializer(DeserializationSigmaBuilder).deserialize(r)
             case "constant" =>
               val cs = ConstantSerializer(DeserializationSigmaBuilder)
               val v = cs.deserialize(r)

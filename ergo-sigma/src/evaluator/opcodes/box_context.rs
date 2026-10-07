@@ -286,7 +286,20 @@ pub(in crate::evaluator) fn box_candidate_bytes_canonical(
 fn box_candidate_bytes_versioned(b: &EvalBox, version: u8) -> Result<Vec<u8>, EvalError> {
     let mut w = ergo_primitives::writer::VlqWriter::new();
     w.put_u64(b.value as u64);
-    w.put_bytes(&b.script_bytes);
+    // CoreDataSerializer serializes the parsed tree, while propositionBytes
+    // and ErgoBox.bytes can retain received bytes. Failures must propagate.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/ErgoBoxCandidate.scala#L138-L142
+    let script = match &b.lazy_vals.serialized_script {
+        Some(result) => result
+            .as_ref()
+            .map_err(|error| EvalError::TypeError {
+                expected: "serializable box script",
+                got: error.clone(),
+            })?
+            .as_slice(),
+        None => &b.script_bytes,
+    };
+    w.put_bytes(script);
     w.put_u32(b.creation_height);
     w.put_u8(b.tokens.len() as u8);
     for (id, amount) in &b.tokens {

@@ -134,7 +134,7 @@ fn reference_receiver_transactions() {
         .parent()
         .unwrap()
         .join("test-vectors/reference-6.0.7/serialization");
-    for file in ["receiver-types"] {
+    for file in ["receiver-types", "avl-lengths", "nested-boxes"] {
         let path = root.join(format!("{file}.json"));
         let fixture: J = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let oracle = std::fs::read_to_string(path.with_extension("jvm.tsv")).unwrap();

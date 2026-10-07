@@ -31,7 +31,7 @@ fn reference_receiver_types() {
         .unwrap()
         .join("test-vectors/reference-6.0.7/serialization");
     let mut count = 0;
-    for file in ["readers-receivers"] {
+    for file in ["readers-receivers", "readers-avl", "readers-nested-box"] {
         let path = root.join(format!("{file}.json"));
         let fixture: Fixture =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -65,6 +65,9 @@ fn reference_receiver_types() {
                     "expression" => {
                         opcode::parse_body(&mut r, v.version).map_err(|e| e.to_string())?;
                     }
+                    "constant-read" => {
+                        sigma_value::read_constant(&mut r).map_err(|e| e.to_string())?;
+                    }
                     "constant" => {
                         let (t, x) =
                             sigma_value::read_constant(&mut r).map_err(|e| e.to_string())?;
@@ -80,6 +83,15 @@ fn reference_receiver_types() {
                         let ext =
                             input::read_context_extension(&mut r).map_err(|e| e.to_string())?;
                         input::write_context_extension(&mut w, &ext).map_err(|e| e.to_string())?;
+                    }
+                    "box-candidate-read" => {
+                        ergo_box::read_ergo_box_candidate(&mut r).map_err(|e| e.to_string())?;
+                    }
+                    "box-read" => {
+                        let b = ergo_box::read_ergo_box(&mut r).map_err(|e| e.to_string())?;
+                        identity = Some(hex::encode(
+                            b.box_id().map_err(|e| e.to_string())?.as_bytes(),
+                        ));
                     }
                     "box-candidate" => {
                         let b =

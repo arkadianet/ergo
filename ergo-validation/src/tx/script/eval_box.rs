@@ -28,7 +28,9 @@ pub(crate) fn ergo_box_to_eval_box(b: &ErgoBox, index: usize) -> Result<EvalBox,
     };
 
     Ok(EvalBox {
-        lazy_vals: Default::default(),
+        lazy_vals: std::sync::Arc::new(ergo_sigma::evaluator::EvalBoxLazyVals::from_candidate(
+            &b.candidate,
+        )),
         creation_height: b.candidate.creation_height,
         script_bytes: b.candidate.ergo_tree_bytes().to_vec(),
         value: b.candidate.value as i64,
@@ -67,7 +69,7 @@ pub(crate) fn candidate_to_eval_box(
     let id = ergo_primitives::digest::blake2b256(&raw_bytes);
 
     Ok(EvalBox {
-        lazy_vals: Default::default(),
+        lazy_vals: std::sync::Arc::new(ergo_sigma::evaluator::EvalBoxLazyVals::from_candidate(c)),
         creation_height: c.creation_height,
         script_bytes: c.ergo_tree_bytes().to_vec(),
         value: c.value as i64,
