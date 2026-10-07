@@ -202,3 +202,10 @@ fn compact_target_numeric_bounds_match_reference() {
 fn big_endian_numeric_inputs_match_reference() {
     check_vectors("big-endian");
 }
+
+#[test]
+fn big_integer_operations_and_shift_bounds_match_reference() {
+    check_vectors("bigint-shift");
+    check_vectors("shift-extra");
+    check_vectors("arithmetic-extra");
+}
