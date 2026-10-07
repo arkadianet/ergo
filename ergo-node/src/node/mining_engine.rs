@@ -14,7 +14,7 @@
 //!   synchronous [`ergo_mining::engine::build_and_publish_cached`] for each, and
 //!   returns the result over the request's `oneshot`.
 //!
-//! ## Lifecycle: spawner owns the thread, the future owns the sender
+//! ## Lifecycle: spawner owns the thread, request producers own senders
 //!
 //! The build worker is spawned by [`boot`](super::boot) (production) or by the
 //! engine tests, *not* by [`run_mining_engine`]. The spawner keeps the worker's
@@ -25,8 +25,10 @@
 //! then `abort()`s it. At rest the coordinator is parked at `reply_rx.await` — an
 //! abort point — so an abort drops the future. Because the future owns the
 //! sender (not the thread), dropping it on *any* exit — cooperative return or
-//! abort-drop — closes the channel; the worker's `recv()` then errs, it drains
-//! its at-most-one in-flight build, and exits. Shutdown joins the worker thread
+//! abort-drop — releases the background producer. Shutdown also drops the
+//! action loop's request sender and client reply receivers. Once both senders
+//! are gone, the worker cancels abandoned requests, finishes any active
+//! background build, and exits. Shutdown joins the worker thread
 //! *after* the coordinator is gone, via the `JoinHandle` it kept, so a worker
 //! still finishing a build can never detach and keep reading/publishing past
 //! shutdown. Pre-split the worker handle lived inside the future and was dropped
@@ -47,8 +49,9 @@
 //!
 //! The `watch` channel coalesces, so the coordinator always builds the
 //! *latest* intent — rapid tip/mempool churn collapses to one build, never a
-//! backlog. Builds are serial: the coordinator awaits each reply before
-//! issuing the next request, so at most one build is ever in flight.
+//! backlog. The coordinator awaits each reply before issuing the next request.
+//! Up to two admitted API requests share the same worker and caches; all builds
+//! execute serially on its owning thread.
 //!
 //! Two-phase publish per tip: a full candidate build can take seconds, during
 //! which `/mining/candidate` 503s for the new tip. So on a tip's *first* build
@@ -74,11 +77,14 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ergo_indexer::StorageRentEligibleDto;
+use ergo_indexer::{IndexerQuery, StorageRentEligibleDto};
 use ergo_mining::candidate::BuildMode;
-use ergo_mining::engine::{build_and_publish_cached, BuildIntent, BuildOutcome};
+use ergo_mining::engine::{
+    build_and_publish_cached, build_requested_and_publish_cached, BuildIntent, BuildOutcome,
+};
 use ergo_mining::error::MiningError;
 use ergo_mining::handle::MiningHandle;
+use ergo_mining::rent_state::RentSelfClaimState;
 use ergo_mining::state_view::CandidateProofCache;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
@@ -87,6 +93,14 @@ use ergo_validation::UtxoView;
 use tokio::sync::{oneshot, watch};
 use tracing::{debug, error, info, warn};
 
+#[cfg(test)]
+type RequestedCancelHook = Box<dyn FnMut([u8; 33])>;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static REQUESTED_CANCEL_HOOK: std::cell::RefCell<Option<RequestedCancelHook>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Storage-rent period in blocks (≈ 4 years). Non-votable protocol
 /// constant; mirrors `ergo-validation`'s `storage_period`. A box is
 /// rent-eligible at height `H` when its `creationHeight <= H - this`.
@@ -94,8 +108,8 @@ const STORAGE_PERIOD_BLOCKS: u32 = 1_051_200;
 
 /// Hard bound on indexer pages fetched per build. Stale rows (indexer lag or
 /// a recent reorg) are filtered against the build snapshot and backfilled
-/// from subsequent pages; this caps the worst-case scan when the index is
-/// badly behind so a build never stalls on unbounded indexer reads.
+/// from subsequent pages; this caps reads during small apply/reorg lag.
+/// Larger height gaps pause the scan entirely.
 ///
 /// Page size is `max_storage_rent_claims`, so the worst-case scan is
 /// `MAX_RENT_PAGES * max_claims` rows: a small claim cap also shrinks the
@@ -104,6 +118,30 @@ const STORAGE_PERIOD_BLOCKS: u32 = 1_051_200;
 /// candidate (the missed boxes stay eligible for the next build once the
 /// index catches up). Correctness never depends on collecting every box.
 const MAX_RENT_PAGES: u32 = 4;
+
+fn update_rent_self_claim_state(
+    handle: &MiningHandle,
+    indexed_height: u64,
+    parent_height: u32,
+) -> RentSelfClaimState {
+    let next = RentSelfClaimState::at_height(
+        handle.claim_storage_rent() && handle.max_storage_rent_claims() > 0,
+        indexed_height,
+        parent_height,
+    );
+    let previous = handle.set_rent_self_claim_state(next);
+    match (previous, next) {
+        (RentSelfClaimState::PausedIndexerBehind { .. }, RentSelfClaimState::Active) => {
+            info!("storage-rent self-claims resumed: indexer at height {indexed_height}, chain at {parent_height}");
+        }
+        (RentSelfClaimState::PausedIndexerBehind { .. }, _) => {}
+        (_, RentSelfClaimState::PausedIndexerBehind { .. }) => {
+            warn!("storage-rent self-claims paused: indexer at height {indexed_height}, chain at {parent_height}; claims resume when the index catches up");
+        }
+        _ => {}
+    }
+    next
+}
 
 /// Enumerate storage-rent-eligible boxes for the miner self-claim:
 /// oldest-first, capped at `max_claims`, each materialized to a full
@@ -126,40 +164,62 @@ fn resolve_eligible_rent_boxes(
     indexer: Option<&ergo_indexer::IndexerHandle>,
     snapshot: &CommittedSnapshot,
     candidate_height: u32,
-    max_claims: u32,
+    handle: &MiningHandle,
     should_cancel: &dyn Fn() -> bool,
 ) -> Vec<ErgoBox> {
     if should_cancel() {
         return Vec::new();
     }
-    let Some(store_idx) = indexer.and_then(|h| h.store()) else {
-        // Boot-time config validation requires the indexer when rent claiming
-        // is enabled, so an absent store here means the indexer halted —
-        // surfaced so "rent stopped working" is distinguishable from "no
-        // eligible boxes".
-        warn!(
-            "mining: rent claiming enabled but indexer store unavailable; building without rent self-claim"
-        );
-        return Vec::new();
-    };
-    // Silent: a chain younger than one storage period simply has no eligible
-    // boxes yet — normal on young chains, not operator-actionable.
-    let Some(height_cutoff) = candidate_height.checked_sub(STORAGE_PERIOD_BLOCKS) else {
-        return Vec::new();
-    };
-    page_rent_boxes_cancellable(
-        |off, lim| {
-            store_idx.read_storage_rent_eligible_paged(
-                height_cutoff,
-                off,
-                lim,
-                ergo_indexer::SortDir::Asc,
+    resolve_rent_boxes_at_height(
+        handle,
+        indexer.map_or(0, IndexerQuery::indexed_height),
+        candidate_height.saturating_sub(1),
+        || {
+            // A schema-2 index migrating in the background has no store yet;
+            // its status already reports Migrating, so skip without warning.
+            if indexer.is_some_and(|h| matches!(h.status(), ergo_indexer::IndexerStatus::Migrating))
+            {
+                return Vec::new();
+            }
+            let Some(store_idx) = indexer.and_then(|h| h.store()) else {
+                warn!(
+                    "mining: rent claiming enabled but indexer store unavailable; building without rent self-claim"
+                );
+                return Vec::new();
+            };
+            // Young chains have no eligible boxes yet.
+            let Some(height_cutoff) = candidate_height.checked_sub(STORAGE_PERIOD_BLOCKS) else {
+                return Vec::new();
+            };
+            page_rent_boxes_cancellable(
+                |off, lim| {
+                    store_idx.read_storage_rent_eligible_paged(
+                        height_cutoff,
+                        off,
+                        lim,
+                        ergo_indexer::SortDir::Asc,
+                    )
+                },
+                |id| snapshot.get_box(id),
+                handle.max_storage_rent_claims(),
+                should_cancel,
             )
         },
-        |id| snapshot.get_box(id),
-        max_claims,
-        should_cancel,
     )
+}
+
+fn resolve_rent_boxes_at_height(
+    handle: &MiningHandle,
+    indexed_height: u64,
+    parent_height: u32,
+    scan: impl FnOnce() -> Vec<ErgoBox>,
+) -> Vec<ErgoBox> {
+    if update_rent_self_claim_state(handle, indexed_height, parent_height)
+        != RentSelfClaimState::Active
+    {
+        return Vec::new();
+    }
+    scan()
 }
 
 /// Page through eligible-box rows, materializing each against the build
@@ -254,14 +314,17 @@ fn page_rent_boxes_cancellable<E: std::fmt::Debug>(
 }
 
 /// Whether the enriched (Full) refresh after a minimal publish would add
-/// nothing: an empty frozen pool with rent claiming off makes the full build
-/// byte-equivalent to the minimal one (modulo timestamp), so a second publish
-/// is pure template-ring churn.
+/// nothing: an empty frozen pool and private queue with rent claiming off
+/// make the full build byte-equivalent to the minimal one (modulo timestamp),
+/// so a second publish is pure template-ring churn. Only Full builds select
+/// private transactions.
 fn full_refresh_adds_nothing(
     intent: &ergo_mining::engine::BuildIntent,
     handle: &MiningHandle,
 ) -> bool {
-    intent.mempool.is_empty() && !handle.claim_storage_rent()
+    intent.mempool.is_empty()
+        && intent.private_transactions.is_empty()
+        && !handle.claim_storage_rent()
 }
 
 /// Backoff between commit-visibility retries (the committed redb tip trailing
@@ -280,30 +343,72 @@ const MAX_VIS_RETRIES: u32 = 40;
 /// operator-actionable, not routine.
 const SLOW_BUILD_WARN_MS: u64 = 2_000;
 
-/// One build job handed from the coordinator to the build worker. The
-/// coordinator owns every sequencing decision (mode probe, retry budget,
-/// minimal→full refresh); the worker only executes the build serially and
-/// returns the result over `reply`.
+/// One build job handed from the coordinator or mining-request dispatcher to
+/// the serial worker. The coordinator sequences background mode selection and
+/// refreshes; the dispatcher admits full builds for client packages.
 ///
 /// `pub(super)` because the request channel is created by the spawner (boot or
 /// the engine tests) — it owns the worker thread, the coordinator future owns
-/// only the `Sender<BuildRequest>` — so the type must be nameable there even
-/// though only `run_mining_engine` ever constructs a `BuildRequest`.
+/// only a `Sender<BuildRequest>`. The dispatcher also owns a sender, which the
+/// action loop releases during shutdown.
 pub(super) struct BuildRequest {
     intent: BuildIntent,
     mode: BuildMode,
-    /// Response channel. The coordinator awaits exactly one reply per request,
-    /// so the request→reply protocol stays strictly serial (≤1 in flight).
+    /// Client-supplied transactions, empty for ordinary background builds.
+    requested: Vec<Vec<u8>>,
+    forbidden_private_ids: Vec<ergo_primitives::digest::Digest32>,
+    /// Background replies carry an outcome and the dry-run base-cache
+    /// disposition; client replies carry the published work or an API error.
     ///
     /// The reply carries the build result plus the dry-run base-cache
     /// disposition string for the build-complete log line:
-    /// `"off"` (cache disabled), `"primed"` (tip hit), `"advanced"` (single-step
-    /// advance succeeded), `"cold"` (full rehydrate), or `"cold_fallback"`
-    /// (advance attempted, failed, fell back to rehydrate). The disposition is
+    /// `"off"` (cache disabled), `"primed"` (tip hit), `"advanced"` (base
+    /// advanced from its own tip), `"advanced_fork"` (tip forked off below the
+    /// base; a retained ancestor was advanced along the new branch), `"cold"`
+    /// (full rehydrate), or `"cold_fallback"` (advance attempted, failed, fell
+    /// back to rehydrate). The disposition is
     /// computed on the worker — the only place that can observe the cache slot
     /// state after the build — and threaded back here because the log lines live
     /// on the coordinator.
-    reply: oneshot::Sender<(Result<BuildOutcome, MiningError>, &'static str)>,
+    reply: BuildReply,
+}
+
+/// Replies distinguish ordinary producer builds from client-requested jobs.
+/// Keeping both on one worker preserves the single-owner AVL cache invariant.
+enum BuildReply {
+    Background(oneshot::Sender<(Result<BuildOutcome, MiningError>, &'static str)>),
+    Requested {
+        reply: oneshot::Sender<
+            Result<ergo_rest_json::mining::WorkMessageJson, ergo_api::MiningApiError>,
+        >,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+        deadline: Instant,
+    },
+}
+
+impl BuildRequest {
+    pub(super) fn requested(
+        intent: BuildIntent,
+        requested: Vec<Vec<u8>>,
+        forbidden_private_ids: Vec<ergo_primitives::digest::Digest32>,
+        reply: oneshot::Sender<
+            Result<ergo_rest_json::mining::WorkMessageJson, ergo_api::MiningApiError>,
+        >,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            intent,
+            mode: BuildMode::Full,
+            requested,
+            forbidden_private_ids,
+            reply: BuildReply::Requested {
+                reply,
+                _permit: permit,
+                deadline,
+            },
+        }
+    }
 }
 
 /// Run the build worker loop until the request channel closes.
@@ -315,8 +420,8 @@ pub(super) struct BuildRequest {
 /// things — the indexer and mining handles) so the coordinator stays clock-
 /// and indexer-free, exactly as the inline build did.
 ///
-/// `reply` send errors are ignored: a dropped receiver means the coordinator
-/// has gone, in which case the next `recv()` returns `Err` and the loop exits.
+/// `reply` send errors are ignored. A dropped client receiver cancels its build;
+/// the worker exits once both producers have released their request senders.
 ///
 /// Spawned by [`boot`](super::boot) (production) or directly by the engine
 /// tests, never by [`run_mining_engine`]: the spawner owns the worker
@@ -350,9 +455,24 @@ pub(super) fn run_build_worker(
     while let Ok(BuildRequest {
         intent,
         mode,
+        requested,
+        forbidden_private_ids,
         reply,
     }) = req_rx.recv()
     {
+        let is_requested = matches!(&reply, BuildReply::Requested { .. });
+        let caller_left = match &reply {
+            BuildReply::Requested { reply, .. } => reply.is_closed(),
+            BuildReply::Background(reply) => reply.is_closed(),
+        };
+        if caller_left {
+            continue;
+        }
+        update_rent_self_claim_state(
+            &handle,
+            indexer.as_ref().map_or(0, IndexerQuery::indexed_height),
+            intent.expected_height,
+        );
         // Wall-clock closure, sampled by the engine core at the publish step so
         // the stamped time is when the template is actually published (not when
         // this possibly-retried build started). Lives on the worker, not the
@@ -371,31 +491,70 @@ pub(super) fn run_build_worker(
         // the disposition stays `None` and we fall back to a sensible wire
         // label.
         let mut raw_disposition: Option<BaseDisposition> = None;
-        let result = build_and_publish_cached(
-            &reader,
-            &handle,
-            &intent,
-            mode,
-            use_base_cache.then_some(&mut base),
-            &mut proof_cache,
-            now_ms,
-            |snapshot, h| {
-                resolve_eligible_rent_boxes(
-                    indexer.as_ref(),
-                    snapshot,
-                    h,
-                    handle.max_storage_rent_claims(),
-                    &|| {
-                        let tip = handle.best_tip();
-                        !tip.synced || tip.parent_id != intent.expected_parent
-                    },
+        let result = loop {
+            let caller_cancelled = || {
+                #[cfg(test)]
+                if matches!(&reply, BuildReply::Requested { .. }) {
+                    REQUESTED_CANCEL_HOOK.with_borrow_mut(|hook| {
+                        if let Some(hook) = hook {
+                            hook(intent.miner_pk);
+                        }
+                    });
+                }
+                matches!(&reply,
+                BuildReply::Requested { reply, deadline, .. } if reply.is_closed() || Instant::now() >= *deadline)
+            };
+            let rent_resolver = |snapshot: &CommittedSnapshot, h: u32| {
+                resolve_eligible_rent_boxes(indexer.as_ref(), snapshot, h, &handle, &|| {
+                    let tip = handle.best_tip();
+                    !tip.synced || tip.parent_id != intent.expected_parent || caller_cancelled()
+                })
+            };
+            let result = if is_requested {
+                build_requested_and_publish_cached(
+                    &reader,
+                    &handle,
+                    &intent,
+                    &requested,
+                    &forbidden_private_ids,
+                    &caller_cancelled,
+                    use_base_cache.then_some(&mut base),
+                    &mut proof_cache,
+                    now_ms,
+                    rent_resolver,
+                    &mut raw_disposition,
                 )
-            },
-            &mut raw_disposition,
-        );
+            } else {
+                build_and_publish_cached(
+                    &reader,
+                    &handle,
+                    &intent,
+                    mode,
+                    use_base_cache.then_some(&mut base),
+                    &mut proof_cache,
+                    now_ms,
+                    rent_resolver,
+                    &mut raw_disposition,
+                )
+            };
+            if is_requested
+                && matches!(result, Ok(BuildOutcome::TipNotVisible))
+                && !caller_cancelled()
+            {
+                let remaining = match &reply {
+                    BuildReply::Requested { deadline, .. } => {
+                        deadline.saturating_duration_since(Instant::now())
+                    }
+                    BuildReply::Background(_) => VIS_BACKOFF,
+                };
+                std::thread::sleep(VIS_BACKOFF.min(remaining));
+                continue;
+            }
+            break result;
+        };
         // Map the returned disposition to the wire string the coordinator logs.
-        // `"off"` when the cache is disabled; `"advanced"` / `"primed"` /
-        // `"cold"` / `"cold_fallback"` from the actual path taken.
+        // `"off"` when the cache is disabled; `"advanced"` / `"advanced_fork"`
+        // / `"primed"` / `"cold"` / `"cold_fallback"` from the actual path taken.
         // Non-building outcomes (TipNotVisible etc.) leave `raw_disposition`
         // `None`; we keep `"off"` when the cache is disabled and `"cold"` as
         // the fallback for the non-building paths (the slot is unaffected, so
@@ -406,6 +565,7 @@ pub(super) fn run_build_worker(
             match raw_disposition {
                 Some(BaseDisposition::Hit) => "primed",
                 Some(BaseDisposition::Advanced) => "advanced",
+                Some(BaseDisposition::AdvancedFromAncestor) => "advanced_fork",
                 Some(BaseDisposition::Rehydrated) => "cold",
                 Some(BaseDisposition::RehydratedAfterFailedAdvance) => "cold_fallback",
                 // Cache enabled but no build ran (early-return outcome): keep
@@ -419,9 +579,39 @@ pub(super) fn run_build_worker(
                 }
             }
         };
-        // Coordinator gone (receiver dropped) ⇒ ignore; the next `recv()` errs
-        // and the loop exits.
-        let _ = reply.send((result, base_cache));
+        // A producer may have dropped its receiver; sending is best-effort.
+        match reply {
+            BuildReply::Background(reply) => {
+                let _ = reply.send((result, base_cache));
+            }
+            BuildReply::Requested { reply, _permit, .. } => {
+                use ergo_api::MiningApiError;
+                let result = match result {
+                    Ok(BuildOutcome::Published { template_seq, .. }) => handle
+                        .cached_requested_template_if_synced(template_seq, now_ms())
+                        .map(|(work, identity)| {
+                            crate::mining_bridge::work_message_to_json(
+                                work,
+                                identity.template_seq,
+                                identity.clean_jobs,
+                            )
+                        })
+                        .ok_or_else(|| {
+                            MiningApiError::Unavailable("candidate tip moved during build".into())
+                        }),
+                    Ok(outcome) => Err(MiningApiError::Unavailable(format!(
+                        "candidate not published: {outcome:?}"
+                    ))),
+                    Err(MiningError::InvalidRequest(detail)) => {
+                        Err(MiningApiError::BadRequest(detail))
+                    }
+                    Err(error) => Err(MiningApiError::Internal(format!(
+                        "candidate build: {error}"
+                    ))),
+                };
+                let _ = reply.send(result);
+            }
+        }
     }
 }
 
@@ -533,7 +723,9 @@ pub(super) async fn run_mining_engine(
                 .send(BuildRequest {
                     intent: intent.clone(),
                     mode,
-                    reply: reply_tx,
+                    requested: Vec::new(),
+                    forbidden_private_ids: Vec::new(),
+                    reply: BuildReply::Background(reply_tx),
                 })
                 .is_err()
             {
@@ -562,7 +754,7 @@ pub(super) async fn run_mining_engine(
                         _ = tokio::time::sleep(VIS_BACKOFF) => {}
                     }
                 }
-                Ok(BuildOutcome::Published { timings: t }) => {
+                Ok(BuildOutcome::Published { timings: t, .. }) => {
                     let accounted = t.setup
                         + t.rent_resolve
                         + t.assembly
@@ -726,6 +918,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rent_claims_pause_quietly_while_index_migrates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state =
+            ergo_state::store::StateStore::open(&tmp.path().join("state.redb")).unwrap();
+        state.initialize_genesis(&[([1; 32], vec![1; 40])]).unwrap();
+        let snapshot = state.committed_snapshot().unwrap().unwrap();
+        let candidate_height = STORAGE_PERIOD_BLOCKS + 1;
+        // Within the lag margin the scan runs, and only the Migrating check
+        // keeps it from warning that the store is unavailable on every build.
+        // Far behind, the rent state logs its single pause transition.
+        for (indexed_height, pause_warnings) in [(u64::from(STORAGE_PERIOD_BLOCKS), 0), (123, 1)] {
+            let handle = plain_handle().with_rent_config(true, 4);
+            let indexer = ergo_indexer::IndexerHandle::syncing(indexed_height);
+            indexer.set_status(ergo_indexer::IndexerStatus::Migrating);
+            let log_path = tmp.path().join(format!("rent-{indexed_height}.log"));
+            let log = std::fs::File::create(&log_path).unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || log.try_clone().unwrap())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                for _ in 0..3 {
+                    assert!(resolve_eligible_rent_boxes(
+                        Some(&indexer),
+                        &snapshot,
+                        candidate_height,
+                        &handle,
+                        &|| false
+                    )
+                    .is_empty());
+                }
+            });
+            let logged = std::fs::read_to_string(log_path).unwrap();
+            assert!(
+                !logged.contains("indexer store unavailable"),
+                "migration must not warn on each candidate build: {logged}"
+            );
+            assert_eq!(
+                logged.matches("storage-rent self-claims paused").count(),
+                pause_warnings,
+                "{logged}"
+            );
+        }
+    }
+
     /// One eligible-id row naming the box with the given `seed`. The other
     /// DTO fields are immaterial to paging — only `box_id` is read.
     fn row(seed: u8) -> StorageRentEligibleDto {
@@ -766,6 +1004,126 @@ mod tests {
             };
             Ok(page)
         }
+    }
+
+    #[test]
+    fn rent_self_claim_skips_pages_while_behind_and_resumes() {
+        let handle = plain_handle().with_rent_config(true, 4);
+        let parent = STORAGE_PERIOD_BLOCKS + 100;
+        let fetches = Cell::new(0);
+        let rows = [row(1)];
+        for (indexed_height, expected_boxes, expected_fetches) in [
+            (u64::from(parent - 3), 0, 0),
+            (u64::from(parent - 20), 0, 0),
+            (u64::from(parent), 1, 1),
+        ] {
+            let boxes = resolve_rent_boxes_at_height(&handle, indexed_height, parent, || {
+                page_rent_boxes(pager(&rows, &fetches), resolver(&[1]), 4)
+            });
+            assert_eq!(boxes.len(), expected_boxes);
+            assert_eq!(fetches.get(), expected_fetches);
+        }
+    }
+
+    #[test]
+    fn rent_self_claim_small_apply_lag_stays_active() {
+        let handle = plain_handle().with_rent_config(true, 4);
+        let parent = STORAGE_PERIOD_BLOCKS + 100;
+        let rows = [row(1)];
+        for lag in 0..=2 {
+            let fetches = Cell::new(0);
+            let boxes =
+                resolve_rent_boxes_at_height(&handle, u64::from(parent - lag), parent, || {
+                    page_rent_boxes(pager(&rows, &fetches), resolver(&[1]), 4)
+                });
+            assert_eq!(boxes.len(), 1, "lag {lag}");
+            assert_eq!(fetches.get(), 1, "lag {lag}");
+            assert_eq!(handle.rent_self_claim_state(), RentSelfClaimState::Active);
+        }
+        assert_eq!(
+            RentSelfClaimState::at_height(true, u64::MAX, parent),
+            RentSelfClaimState::Active
+        );
+    }
+
+    #[test]
+    fn rent_self_claim_disabled_never_scans() {
+        for (enabled, cap) in [(false, 4), (true, 0)] {
+            let handle = plain_handle().with_rent_config(enabled, cap);
+            let fetches = Cell::new(0);
+            let rows = [row(1)];
+            let boxes = resolve_rent_boxes_at_height(&handle, 100, 100, || {
+                page_rent_boxes(pager(&rows, &fetches), resolver(&[1]), 4)
+            });
+            assert!(boxes.is_empty());
+            assert_eq!(fetches.get(), 0);
+            assert_eq!(handle.rent_self_claim_state(), RentSelfClaimState::Disabled);
+        }
+    }
+
+    #[test]
+    fn rent_self_claim_transitions_log_once_in_each_direction() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::prelude::*;
+
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        struct Events(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut message = Message(String::new());
+                event.record(&mut message);
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((*event.metadata().level(), message.0));
+            }
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Events(events.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let handle = plain_handle().with_rent_config(true, 4);
+            update_rent_self_claim_state(&handle, 100, 100);
+            update_rent_self_claim_state(&handle, 90, 100);
+            update_rent_self_claim_state(&handle, 91, 101);
+            assert_eq!(
+                handle.rent_self_claim_state(),
+                RentSelfClaimState::PausedIndexerBehind {
+                    indexed_height: 91,
+                    chain_height: 101,
+                }
+            );
+            update_rent_self_claim_state(&handle, 99, 101);
+            update_rent_self_claim_state(&handle, 101, 101);
+            assert_eq!(
+                *events.lock().unwrap(),
+                [
+                    (tracing::Level::WARN, "storage-rent self-claims paused: indexer at height 90, chain at 100; claims resume when the index catches up".into()),
+                    (tracing::Level::INFO, "storage-rent self-claims resumed: indexer at height 99, chain at 101".into()),
+                ]
+            );
+            update_rent_self_claim_state(&handle, 90, 101);
+            update_rent_self_claim_state(&handle, 101, 101);
+        });
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                (tracing::Level::WARN, "storage-rent self-claims paused: indexer at height 90, chain at 100; claims resume when the index catches up".into()),
+                (tracing::Level::INFO, "storage-rent self-claims resumed: indexer at height 99, chain at 101".into()),
+                (tracing::Level::WARN, "storage-rent self-claims paused: indexer at height 90, chain at 101; claims resume when the index catches up".into()),
+                (tracing::Level::INFO, "storage-rent self-claims resumed: indexer at height 101, chain at 101".into()),
+            ]
+        );
     }
 
     // ----- happy path -----
@@ -947,6 +1305,9 @@ mod tests {
         mempool: ergo_mempool::MempoolReadSnapshot,
     ) -> ergo_mining::engine::BuildIntent {
         ergo_mining::engine::BuildIntent {
+            private_transactions: std::sync::Arc::new(Vec::new()),
+            operator_generation: 0,
+            operator_owned: true,
             expected_parent: [0u8; 32],
             expected_height: 0,
             mempool: std::sync::Arc::new(mempool),
@@ -1002,6 +1363,17 @@ mod tests {
     }
 
     #[test]
+    fn full_refresh_not_skipped_when_private_work_waits() {
+        let mut intent = minimal_intent(ergo_mempool::MempoolReadSnapshot::empty());
+        intent.private_transactions = std::sync::Arc::new(vec![synth_entry(1)]);
+        let handle = plain_handle(); // rent off
+        assert!(
+            !full_refresh_adds_nothing(&intent, &handle),
+            "queued private work is selected only by the full build",
+        );
+    }
+
+    #[test]
     fn full_refresh_not_skipped_when_rent_on() {
         let intent = minimal_intent(ergo_mempool::MempoolReadSnapshot::empty());
         let handle = plain_handle().with_rent_config(true, 4);
@@ -1027,7 +1399,10 @@ mod tests {
                 matches!(req_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
                 "coordinator must retain one request/reply in flight"
             );
-            old.reply
+            let BuildReply::Background(old_reply) = old.reply else {
+                panic!("background build expected")
+            };
+            old_reply
                 .send((Ok(BuildOutcome::DroppedStale), "cold"))
                 .unwrap();
 
@@ -1035,11 +1410,14 @@ mod tests {
             seen_tx
                 .send((latest.intent.expected_parent, latest.mode))
                 .unwrap();
-            latest
-                .reply
+            let BuildReply::Background(latest_reply) = latest.reply else {
+                panic!("background build expected")
+            };
+            latest_reply
                 .send((
                     Ok(BuildOutcome::Published {
                         timings: Default::default(),
+                        template_seq: 0,
                     }),
                     "advanced",
                 ))

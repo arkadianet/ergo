@@ -1,0 +1,54 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.extension_evaluated_values",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "ext-x15-tuple-upcast-below-v3-accept#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: Tuple(1, Upcast(1, Long))} (86 02 04 02 7e 04 02 05), under the v5 context (2, 2). Below tree v3 the serializer writes an Upcast of a Constant as the Constant (ValueSerializer.scala:157-169): 86 02 04 02 04 02. NON-IDENTITY, and the tx id hashes that form. Blocks below v4 parse their transactions outside any version context, under the default (1, 1) (VersionContext.scala:58-61, BlockTransactions.scala:184-202), which strips the same way. The v6 file keeps it (tree v3).",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100860204027e040205000001c0843d0008d3010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100860204020402000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 2,
+        "ergoTree" : 2
+      }
+    },
+    {
+      "name" : "ext-c2-coll-of-func-below-v3-reject#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "The v6 file's C2, {0: an empty Coll of (Int, Int) => Int} (83 00 70 02 04 04 04 00), under (2, 2): below tree v3 the function type code 0x70 is not a type (rule 1008, CheckTypeCode): the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001008300700204040400000001c0843d0008d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 2,
+        "ergoTree" : 2
+      }
+    },
+    {
+      "name" : "ext-c2-coll-of-func-one-arg-below-v3-reject#2",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "The same with Int => Int (83 00 70 01 04 04 00): rule 1008, a reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100010083007001040400000001c0843d0008d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 2,
+        "ergoTree" : 2
+      }
+    },
+    {
+      "name" : "ext-u1-tuple-upcast-height-below-v3-accept#3",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "{0: Tuple(1, Upcast(HEIGHT, Long))} (86 02 04 02 7e a3 05) under (2, 2). Below tree v3 the serializer drops an Upcast only when its input is a Constant: the stripped value decides the constant case, and otherwise the original node is written (ValueSerializer.scala:362-393). HEIGHT is not a Constant, so the Upcast stays. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100860204027ea305000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 2,
+        "ergoTree" : 2
+      }
+    }
+  ]
+}

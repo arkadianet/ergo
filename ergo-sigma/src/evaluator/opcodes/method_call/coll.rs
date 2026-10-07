@@ -187,7 +187,7 @@ pub(super) fn zip(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     let zip_cost = COST_ZIP;
     cx.cost.add(zip_cost.compute(n)?)?;
     // CollsOverArrays.scala:184: VersionContext.current.isJitActivated (>= 2).
-    if cx.ctx.activated_script_version < 2 {
+    if (cx.ctx.activated_script_version as i8) < 2 {
         return crate::evaluator::helpers::legacy_pair(obj_val, ys_val, cx.ctx);
     }
     // Capture each operand's element type before
@@ -306,6 +306,29 @@ fn flatmap_output_elem_type(
     }
 }
 
+/// Static types that can never unify with flatMap's `Coll[B]` mapper result.
+fn is_certainly_not_collection(tpe: &SigmaType) -> bool {
+    matches!(
+        tpe,
+        SigmaType::SBoolean
+            | SigmaType::SByte
+            | SigmaType::SShort
+            | SigmaType::SInt
+            | SigmaType::SLong
+            | SigmaType::SBigInt
+            | SigmaType::SUnsignedBigInt
+            | SigmaType::SGroupElement
+            | SigmaType::SSigmaProp
+            | SigmaType::SUnit
+            | SigmaType::SBox
+            | SigmaType::SAvlTree
+            | SigmaType::SHeader
+            | SigmaType::SPreHeader
+            | SigmaType::SOption(_)
+            | SigmaType::SFunc { .. }
+    )
+}
+
 /// Empty collection `Value` in the carrier the evaluator uses for `elem`.
 fn empty_coll_for_elem(elem: &SigmaType) -> Value {
     match elem {
@@ -349,6 +372,7 @@ pub(super) fn flat_map(
         } => {
             // Collect all inner collections, preserving the raw Value form
             // so we can reassemble the correct output type.
+            let inner_colls_was_empty = items.is_empty();
             let mut inner_colls: Vec<Value> = Vec::new();
             for item in items {
                 // Scala closure invocation: Value.checkType runs
@@ -409,6 +433,23 @@ pub(super) fn flat_map(
                         .iter()
                         .filter_map(|(id, tpe)| tpe.clone().map(|tpe| (*id, tpe))),
                 );
+                // flatMap_eval resolves RType[B] from the call's static
+                // `Coll[B]` type before iterating, so a mapper whose static
+                // result is not a collection fails even on an empty receiver
+                // (stypeToRType of the unresolved type variable throws).
+                // Only result types that are certainly not collections are
+                // judged; unknown, tuple and SAny results keep the fallback.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/methods.scala#L993-L1001
+                if inner_colls_was_empty {
+                    if let Some(tpe) = infer_expr_type(&body, &bindings, cx.constants) {
+                        if is_certainly_not_collection(&tpe) {
+                            return Err(EvalError::TypeError {
+                                expected: "collection result type for flatMap mapper",
+                                got: format!("{tpe:?}"),
+                            });
+                        }
+                    }
+                }
                 let result = first_shape
                     .or_else(|| {
                         flatmap_output_elem_type(&body, &bindings, cx.constants)

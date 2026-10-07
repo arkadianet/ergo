@@ -15,6 +15,7 @@ use error::NativeErr;
 
 pub mod dto;
 pub mod error;
+pub(crate) mod jobs;
 pub(crate) mod schema;
 
 /// Unwrap a `Query<T>` extraction, mapping Axum's rejection (unknown query key
@@ -441,7 +442,7 @@ pub(crate) async fn init(
     responses(
         (status = 200, description = "Wallet restored"),
         (status = 400, description = "Malformed body", body = schema::NativeWalletError),
-        (status = 409, description = "Wallet exists / restore unsupported on a pruned node", body = schema::NativeWalletError),
+        (status = 409, description = "Wallet already exists", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -755,6 +756,14 @@ pub(crate) fn router_with_security_and_moved(
         .route("/api/v1/wallet/transactions/sign", post(sign_transaction))
         .route("/api/v1/wallet/transactions/send", post(send_transaction))
         .route("/api/v1/wallet/rewards/retrieve", post(retrieve_rewards))
+        .route(
+            "/api/v1/wallet/mining-jobs",
+            get(jobs::list).post(jobs::create),
+        )
+        .route(
+            "/api/v1/wallet/mining-jobs/:job_id/cancel",
+            post(jobs::cancel),
+        )
         .route("/api/v1/wallet/transactions/:tx_id", get(transaction_by_id))
         // --- lifecycle (POST) ---
         .route("/api/v1/wallet/init", post(init))

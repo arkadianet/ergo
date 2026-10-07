@@ -6,13 +6,15 @@
 //!   error types for the mining subsystem.
 //!
 //! External-miner work generation and submitted-solution verification; there
-//! is no internal CPU miner or `/mining/candidateWithTxs` route. Reward keys
+//! is no internal CPU miner. Caller-supplied candidate transactions use the
+//! same block validation and proof path as ordinary mining. Reward keys
 //! may come from a configured key or the wallet's EIP-3 first address. The
 //! builder selects vote bytes from configured targets and handles supported
 //! epoch boundaries. `offline_generation` permits the configured devnet
 //! freshness exception; ordinary network mining requires a current applied tip.
 
 pub mod candidate;
+pub mod candidate_proof;
 pub mod candidate_selection;
 pub mod coinbase;
 pub mod config;
@@ -22,7 +24,12 @@ pub mod engine;
 pub mod error;
 pub mod extension_builder;
 pub mod handle;
+pub mod inspection;
+mod outcome_journal;
+pub mod policy;
+pub mod private_queue;
 pub mod reemission;
+pub mod rent_state;
 pub mod reward_script;
 pub mod solution;
 pub mod state_view;
@@ -42,3 +49,5 @@ pub use handle::{
 pub use reward_script::{reward_output_script, reward_output_script_from_hex, REWARD_SCRIPT_LEN};
 
 mod genesis;
+mod policy_store;
+mod retained_size;

@@ -19,7 +19,7 @@ use ergo_primitives::writer::VlqWriter;
 use crate::error::WriteError;
 use crate::opcode::{self, Body};
 use crate::sigma_type::SigmaType;
-use crate::sigma_value::{write_constant, SigmaValue};
+use crate::sigma_value::{write_constant_versioned, SigmaValue};
 
 mod gates;
 mod hash;
@@ -29,6 +29,7 @@ pub(crate) mod root_type;
 mod tests;
 mod type_infer;
 
+pub(crate) use gates::check_tree_version_value_supported;
 pub use gates::{
     check_header_size_bit, check_resolvable_methods, check_sigma_prop_root,
     check_tree_version_supported,
@@ -148,7 +149,7 @@ fn write_ergo_tree_body(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteE
     if tree.constant_segregation {
         w.put_u32(tree.constants.len() as u32);
         for (tpe, val) in &tree.constants {
-            write_constant(w, tpe, val)?;
+            write_constant_versioned(w, tpe, val, tree.version)?;
         }
     }
     opcode::write_expr_versioned(w, &tree.body, tree.version)?;

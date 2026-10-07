@@ -1,42 +1,13 @@
 # Fuzz-differential harness — interface contracts
 
-Authoritative spec for the continuous fuzz-differential harness (Rust Ergo node
-vs the current pinned Scala runtime 6.0.6). Every slice builds
-against the contracts here. Changing a contract is a lead-engineer decision, not
-a slice-local one.
+These contracts describe the current differential harness and its limitations.
+The JVM serde oracle pins sigma-state and ergo-core 6.0.6 in
+[`ErgoSerdeOracle.scala`](../../scripts/jvm_serde_oracle/ErgoSerdeOracle.scala).
+The hermetic runner is the stable PR gate. Coverage-guided campaigns use the
+nightly and cargo-fuzz versions in [the shared tool pins](../../.github/ci-tools.toml);
+see [the fuzz workflow](../fuzz/README.md) for setup.
 
-The ground-truth table below preserves the July 2026 environment; it is
-historical attribution, not present execution evidence. D1 now describes the
-current pinned-nightly workflow.
-The workspace now pins stable Rust 1.99.0. CI also runs coverage-guided campaigns
-with the independently pinned nightly in `.github/ci-tools.toml`; see
-[`fuzz/README.md`](../fuzz/README.md) for the current setup. The hermetic runner
-remains the stable PR gate.
-
-Status legend: **[BUILT]** landed + gated · **[SPEC]** contract fixed, not yet
-built · **[DEFERRED]** out of this session's scope, contract reserved.
-
----
-
-## 0. Ground truth (verified 2026-07-03)
-
-| Fact | Value |
-|------|-------|
-| Scala oracle | `scripts/jvm_serde_oracle/ErgoSerdeOracle.scala`, scala-cli, sigma-state 6.0.2 (Maven) + ergo-core 6.0.2 (publishLocal). **Live-confirmed** — answers `ACCEPT <canon-hex>` on a real tree. |
-| Oracle wire | long-lived process; stdin line `<surface> <hex>`; stdout one line `ACCEPT <hex>` / `ACCEPT` / `REJECT <ExcName>` / `ERR <msg>`; special `reduce`→`ACCEPT P:<sigmahex>\|<cost>`, `mc_root`→`SIGMA`/`WRAP`/`THROW`. |
-| Oracle surfaces (2026-07-03) | ergo_tree, sigma_type, constant, ergo_box_candidate, transaction, header, reduce, mc_root |
-| Archival node | Scala `:9053`, `fullHeight` ≈ 1,820,888, `appVersion` 6.0.2. Serves `GET /blocks/at/{h}` → `[headerId]`, `GET /blocks/{id}` → full block JSON (header, blockTransactions, extension, adProofs). **Block source AND per-tx/state oracle.** |
-| Rust dev nodes | `:9073/:9072` **down** → replay applies blocks **in-process**, not over REST. |
-| Rust block-apply | `ergo_validation::block::validate_full_block_parallel(checked_header, &block_txs, &extension, &ctx) -> Result<CheckedBlock,_>` then `ergo_state::StateStore::apply_block(&checked, voted_params, hook)`; root via `StateStore::root_digest() -> ADDigest` (33 bytes). test-helpers: `apply_block_checked_for_test(height, id, expected_digest, &[CheckedTransaction])`. |
-| Rust reduce | `ergo_sigma::…::reduce_expr_with_cost(&expr, &ctx, &constants, &mut cost)`. |
-| JSON decode | `ergo_rest_json::decode_scala_transaction_with_mode`, `DecodedFullBlock`, `ScalaFullBlock`. |
-| Hermetic harness | `ergo-difftest` (own PRNG `rng.rs`; **byte-mutation** `generate.rs` — the silent-failure risk); `--oracle` Phase 2; `tests/it/selftest.rs` proves the detector has teeth. |
-| Toolchain | **stable 1.95.0 pinned, NO nightly** → cargo-fuzz/libFuzzer cannot run here or in CI. |
-| Bulk fixtures | `test-vectors/mainnet` = 101 MB; range extractions already `.gitignore`d; committed ranges consumed by ~10 CI-run tests. |
-
----
-
-## 1. Sidecar RPC contract  (Slice 1a)
+## 1. Sidecar RPC contract
 
 **Generalize the existing scala-cli oracle — do NOT invent a new mechanism.**
 Keep the process model (long-lived, one input line → one output line) and the
@@ -75,7 +46,7 @@ as `ERR`, never as `ACCEPT`.
 
 ---
 
-## 2. Replay driver I/O contract  (Slice 1b)
+## 2. Replay driver I/O contract
 
 The standalone `replay` binary compares early-mainnet application with a supplied
 archival node. Its fixed context supports contiguous heights **1..=200** from
@@ -126,7 +97,7 @@ consensus/bootstrap proof. CI explicitly reports an unset `REPLAY_NODE_URL` as
 
 ---
 
-## 3. Generator output contract  (Slice 2b/2c)
+## 3. Generator output contract
 
 The generators are the silent-failure surface — this contract exists so a weak
 generator is *detectable*, not just green.
@@ -170,7 +141,7 @@ Generators live in `ergo-difftest/src/gen/` as a library, consumed by:
 
 ---
 
-## 4. Divergence record schema  (Slice 3 — minimize + auto-file)
+## 4. Divergence record schema
 
 One schema for every producer (oracle Phase 2, replay driver, structured
 campaign):
@@ -224,7 +195,7 @@ reports use the replay driver's block-specific schema rather than `auto_file`.
 
 ---
 
-## 5. Known-bug rediscovery suite  (Slice 5 — the anti-theater gate)
+## 5. Known-bug rediscovery suite
 
 Catalog: `ergo-difftest/docs/known-bug-catalog.md`. Machine-readable manifest
 (currently 39 entries; entry presence is not executed rediscovery evidence):
@@ -256,7 +227,7 @@ catalog cases require their own correctly contextualized replay evidence.
 
 ---
 
-## 6. Decisions (lead engineer)
+## 6. Assurance policy
 
 **D1 — cargo-fuzz vs hermetic runner.** Stable Rust 1.99.0 drives the PR
 hermetic runner. The detached workspace uses the exact nightly and cargo-fuzz
@@ -280,22 +251,31 @@ or an unimplemented historical plan.
 triage queue. No subagent, and not the lead engineer, silently resolves it or
 "fixes" the Rust side to match itself.
 
----
 
-## 7. Historical slice sequencing + model ledger
+## 7. Surface selection and triage
 
-This table preserves the original planning allocation; it is not a current
-reviewer assignment or proof that a slice passed its acceptance gate.
+Reproduce a finding with its `input_hex` or the hex after `--repro`, rather than
+Rust's canonical output from the `rust=Accept(...)` field. Re-serializing the
+output can remove the input difference being investigated.
 
-| Slice | What | Model | Why |
-|-------|------|-------|-----|
-| 1a | Sidecar `validate`+`verify_avl` surfaces | Sonnet | loud-fail: answers or visibly doesn't |
-| 5  | Known-bug manifest + re-injection runner | Sonnet (lead reviews hard) | infra, but it's the gate — verify teeth |
-| 2b | **SER structure-aware generators** | **Opus** | silent-fail; highest bug density; hardest review |
-| 1b | Streamed replay driver | Sonnet | loud-fail: replays+diffs or doesn't |
-| 2c | SIGMA generators | Opus | silent-fail |
-| 3  | Divergence minimize + auto-file | Sonnet | loud-fail infra |
-| 1c | Corpus harvest + fixture retirement | Sonnet | mechanical, but destructive — lead gates |
-| 6  | cargo-fuzz scaffold (opt-in) + nightly CI | Sonnet | loud-fail wiring |
+Select the surface that owns the behavior: parse/canonical differences on
+`ergo_tree`, evaluation and cost on `reduce`, box-script gates on
+`ergo_box_candidate`, and monetary/structural checks on `transaction`. The bare
+`ergo_tree` surface is a parse diagnostic: retained original script bytes and
+checks deferred to validation can make a writer/parse difference irrelevant to
+a particular consensus path. Agreement under one reduction context alone cannot
+establish that a difference is benign; retain the input, context and authority
+record for human review.
 
-Consensus-truth triage = HUMAN only, every slice.
+Acceptance comparisons use a clean-versus-patched delta on the bug's declared
+class and surface, rather than an absolute divergence count. Structured sigma
+generation lives in `src/gen/sigma_expr.rs` and supplies the `reduce` surface
+with typed trees covering sigma propositions, arithmetic, collections, context
+access, registers, tuples, options and deserialize nodes.
+
+The reduction surfaces call `reduce_expr_with_cost` directly. They bypass
+`verify_spending`'s deserialize-substitution initialization cost, so they cannot
+rediscover that cost bug merely by emitting a deserialize node. Use a fully
+contextualized verification or replay test for that seam. Both reduction contexts
+also have an empty `CONTEXT.headers` window; they do not establish last-header
+window parity. These limitations are documented in `src/oracle.rs`.

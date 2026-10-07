@@ -5,7 +5,7 @@ core. Owns wallet state, the redb wallet store, apply/rollback/rescan logic,
 chain-client boundaries, box selection, unsigned transaction construction, and
 — in `engine` — the complete wallet command logic: lifecycle, reads,
 build/sign/self-verify/send, the reward sweep, multi-sig, key derivation,
-`/scan/*`, rescan orchestration, and the chain-apply hook. It does not own
+`/scan/*`, rescan orchestration, finite private mining jobs, and the chain-apply hook. It does not own
 HTTP, a tokio runtime, node lifecycle, or secret-file policy; embedders supply
 those through the engine's seams.
 
@@ -71,6 +71,10 @@ transitional `ergo-state -> ergo-wallet-service` integration
     `TransactionSign` / `TransactionSend` / `BoxesCollect` and the native send
     commands.
   - `sweep.rs` — the "retrieve matured mining rewards" sweep.
+  - `jobs.rs` — bounded durable maintenance jobs, signed-byte journaling,
+    reservation policy, crash recovery and private queue reconciliation.
+    Mutable engine entrypoints preserve command ordering; background RPC
+    deadlines belong to the embedding node's submission adapter.
   - `multisig.rs`, `hints_codec.rs` — `generateCommitments` / `extractHints`
     and the hints-bag JSON codec.
   - `keys.rs` — `deriveKey` / `deriveNextKey` / `getPrivateKey` and
@@ -90,6 +94,9 @@ transitional `ergo-state -> ergo-wallet-service` integration
 - `src/state.rs` — cached wallet state and hydration boundary.
 - `src/wallet/` — redb tables, value types, reader/writer traits, apply and
   maturity logic, scan tracking, schema migration, and rescan service.
+  `mining_jobs.rs` owns the job journal; `utxo_scan.rs` owns discovery coverage,
+  unknown inclusion heights and atomic wallet publication. The state crate
+  supplies verified offline UTXO traversal and snapshot anchors.
 - `src/tx_builder.rs`, `src/box_selector/` — transaction/UTXO construction
   logic independent of a transport.
 - `src/scan/` — scan predicates, registry, and scan request types.

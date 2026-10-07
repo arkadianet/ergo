@@ -359,8 +359,8 @@ fn open_rejects_corrupt_voted_params_row_at_expected_key() {
         let txn = ergo_state::begin_write_qr(&db).unwrap();
         {
             let mut t = txn.open_table(VOTED_PARAMS).unwrap();
-            // 4-byte height + count=0 + no entries → MissingRequired on decode.
-            t.insert(0u64, &[0u8, 0, 0, 0, 0][..]).unwrap();
+            // 4-byte height + count=1 + no entry bytes is truncated on decode.
+            t.insert(0u64, &[0u8, 0, 0, 0, 1][..]).unwrap();
         }
         txn.commit().unwrap();
     }

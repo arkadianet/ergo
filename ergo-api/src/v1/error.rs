@@ -56,10 +56,13 @@ pub enum Reason {
     ProtocolNotFound,
     WebhookNotFound,
     AccountNotFound,
+    CredentialNotFound,
     AddressNotWatched,
     TxNotInBlock,
     NotBlacklisted,
     NotASingletonProtocol,
+    /// No retained mining template matches the inspection selectors.
+    TemplateNotFound,
 
     // ----- invalid input (400) -----
     BadRequest,
@@ -193,6 +196,7 @@ pub enum Reason {
     AlreadyBlacklisted,
     StaleTip,
     HistoryPruned,
+    ConfigConflict,
     InternalError,
 }
 
@@ -214,10 +218,12 @@ impl Reason {
             | ProtocolNotFound
             | WebhookNotFound
             | AccountNotFound
+            | CredentialNotFound
             | AddressNotWatched
             | TxNotInBlock
             | NotBlacklisted
-            | NotASingletonProtocol => StatusCode::NOT_FOUND,
+            | NotASingletonProtocol
+            | TemplateNotFound => StatusCode::NOT_FOUND,
 
             // 400 — invalid input + the frozen submit-domain bare verbs
             // (`map_submit_error` maps every submit verb except the transient
@@ -278,9 +284,8 @@ impl Reason {
             // 409 — subsystem-off (config) + state-conflict
             IndexerDisabled | IndexerSyncing | IndexerHalted | SubmitDisabled
             | MempoolViewDisabled | RealtimeDisabled | WebhooksDisabled | SnapshotDisabled
-            | MiningDisabled | SensitiveOpDisabled | AlreadyBlacklisted | StaleTip => {
-                StatusCode::CONFLICT
-            }
+            | MiningDisabled | SensitiveOpDisabled | AlreadyBlacklisted | StaleTip
+            | ConfigConflict => StatusCode::CONFLICT,
 
             HistoryPruned | WalletMoved => StatusCode::GONE,
 
@@ -439,10 +444,12 @@ mod tests {
             (ProtocolNotFound, "protocol_not_found", nf),
             (WebhookNotFound, "webhook_not_found", nf),
             (AccountNotFound, "account_not_found", nf),
+            (CredentialNotFound, "credential_not_found", nf),
             (AddressNotWatched, "address_not_watched", nf),
             (TxNotInBlock, "tx_not_in_block", nf),
             (NotBlacklisted, "not_blacklisted", nf),
             (NotASingletonProtocol, "not_a_singleton_protocol", nf),
+            (TemplateNotFound, "template_not_found", nf),
             // invalid input (400)
             (BadRequest, "bad_request", br),
             (InvalidAddress, "invalid_address", br),
@@ -565,6 +572,7 @@ mod tests {
             (AlreadyBlacklisted, "already_blacklisted", cf),
             (StaleTip, "stale_tip", cf),
             (HistoryPruned, "history_pruned", StatusCode::GONE),
+            (ConfigConflict, "config_conflict", cf),
             (
                 InternalError,
                 "internal_error",

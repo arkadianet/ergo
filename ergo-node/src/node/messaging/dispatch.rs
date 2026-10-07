@@ -613,7 +613,7 @@ fn handle_inv(state: &mut NodeState, peer: PeerId, inv: InvData, now: Instant) -
             .iter()
             .filter_map(|id| {
                 let tx_id = Digest32::from_bytes(*id);
-                if state.mempool.contains(&tx_id) {
+                if state.mempool.contains(&tx_id) || state.mempool.is_private_transaction(&tx_id) {
                     return None;
                 }
                 if state.mempool.is_invalidated(&tx_id) {

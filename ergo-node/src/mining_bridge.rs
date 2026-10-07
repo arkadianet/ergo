@@ -15,9 +15,13 @@
 
 use std::sync::Arc;
 
+mod inspection;
+
 use async_trait::async_trait;
 use ergo_api::mining::{MiningApiError, NodeMining};
 use ergo_rest_json::mining::{AutolykosSolutionJson, CandidateMetricsJson, WorkMessageJson};
+use ergo_rest_json::mining::{CandidateProofJson, TransactionMembershipProofJson};
+use ergo_rest_json::ScalaTransactionInput;
 use tokio::sync::{mpsc, oneshot};
 
 /// Project a typed mining `WorkMessage` to its JSON wire shape, stamping the
@@ -36,7 +40,17 @@ pub(crate) fn work_message_to_json(
         b: w.target,
         h: Some(w.height),
         pk: hex::encode(w.pk),
-        proof: None,
+        proof: w.proof.map(|p| CandidateProofJson {
+            msg_preimage: hex::encode(p.msg_preimage),
+            tx_proofs: p
+                .tx_proofs
+                .into_iter()
+                .map(|p| TransactionMembershipProofJson {
+                    leaf: hex::encode(p.leaf),
+                    levels: p.levels.into_iter().map(hex::encode).collect(),
+                })
+                .collect(),
+        }),
         template_seq,
         clean_jobs,
         metrics: Some(CandidateMetricsJson {
@@ -56,6 +70,10 @@ pub(crate) fn work_message_to_json(
 /// existing `crate::api_bridge::SUBMIT_TIMEOUT` value (5s).
 pub const MINING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Lithos bounds its HTTP call at ten seconds. Leave time for HTTP transport
+/// while bounding on-demand build admission and the worker queue.
+pub(crate) const CANDIDATE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(9);
+
 /// Upper bound on a `GET /mining/candidate?longpoll=` block. When the client
 /// is already on the current template the handler parks until the next publish
 /// or this elapses, then returns whatever is current (a fresher template, or
@@ -69,6 +87,29 @@ pub const LONGPOLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// loop's `select!` arm sends back when the request completes.
 #[derive(Debug)]
 pub enum MiningRequest {
+    /// Request-specific build; the permit bounds queued and executing packages
+    /// together and stays owned by the worker even if the HTTP caller leaves.
+    GetCandidateWithTxs {
+        transactions: Vec<Vec<u8>>,
+        requested_ids: Vec<ergo_primitives::digest::Digest32>,
+        miner_pk: Option<[u8; 33]>,
+        reply: oneshot::Sender<Result<WorkMessageJson, MiningApiError>>,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        deadline: std::time::Instant,
+    },
+    ListPrivateTransactions {
+        reply:
+            oneshot::Sender<Result<Vec<ergo_api::mining::PrivateTransactionEntry>, MiningApiError>>,
+    },
+    SubmitPrivateTransaction {
+        bytes: Vec<u8>,
+        options: ergo_api::mining::PrivateTransactionOptions,
+        reply: oneshot::Sender<Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError>>,
+    },
+    CancelPrivateTransaction {
+        tx_id: String,
+        reply: oneshot::Sender<Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError>>,
+    },
     /// `GET /mining/candidate` — main loop serves the cache via
     /// [`ergo_mining::handle::MiningHandle::cached_template_if_synced`] (the
     /// off-loop engine is the sole builder) and replies with the work message
@@ -102,6 +143,15 @@ pub enum MiningRequest {
     },
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 /// `NodeMining` impl over an mpsc channel. Construct one in the node
 /// init alongside the `mining_submit_{tx,rx}` channel, hand the
 /// `Sender` here and the `Receiver` to the action loop.
@@ -112,6 +162,7 @@ pub enum MiningRequest {
 /// network prefix for address encoding.
 pub struct MiningBridge {
     tx: mpsc::Sender<MiningRequest>,
+    handle: Option<ergo_mining::handle::MiningHandle>,
     network: ergo_ser::address::NetworkPrefix,
     /// Serve-state-change receiver from the [`MiningHandle`]. Observes a change
     /// whenever the served candidate changes — a publish OR a tip transition
@@ -122,6 +173,7 @@ pub struct MiningBridge {
     /// a test constructor overrides it so the timeout path runs deterministically
     /// without a real 30 s wait.
     longpoll_timeout: std::time::Duration,
+    requested_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl MiningBridge {
@@ -139,10 +191,25 @@ impl MiningBridge {
     ) -> Self {
         Self {
             tx,
+            handle: None,
             network,
             serve_rx,
             longpoll_timeout: LONGPOLL_TIMEOUT,
+            requested_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }
+    }
+
+    /// Give the operator inspection path direct access to the immutable cache.
+    /// Formatting happens on the API task, outside the writer-loop/cache lock.
+    pub fn with_handle(mut self, handle: ergo_mining::handle::MiningHandle) -> Self {
+        self.handle = Some(handle);
+        self
+    }
+
+    fn inspection_handle(&self) -> Result<&ergo_mining::handle::MiningHandle, MiningApiError> {
+        self.handle
+            .as_ref()
+            .ok_or_else(|| MiningApiError::Unavailable("mining cache unavailable".into()))
     }
 
     /// Test-only constructor with an explicit (short) longpoll bound so the
@@ -157,9 +224,11 @@ impl MiningBridge {
     ) -> Self {
         Self {
             tx,
+            handle: None,
             network,
             serve_rx,
             longpoll_timeout,
+            requested_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }
     }
 
@@ -227,6 +296,25 @@ impl MiningBridge {
         }
     }
 
+    async fn private_request<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, MiningApiError>>) -> MiningRequest,
+    ) -> Result<T, MiningApiError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.try_send(make(reply)).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => {
+                MiningApiError::Unavailable("mining channel full; retry with backoff".into())
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                MiningApiError::Unavailable("node main loop has stopped".into())
+            }
+        })?;
+        tokio::time::timeout(MINING_TIMEOUT, rx)
+            .await
+            .map_err(|_| MiningApiError::Timeout("private queue request timed out".into()))?
+            .map_err(|_| MiningApiError::Unavailable("main loop closed reply channel".into()))?
+    }
+
     /// Erase the concrete type for axum state injection.
     pub fn into_dyn(self) -> Arc<dyn NodeMining> {
         Arc::new(self)
@@ -249,6 +337,239 @@ fn parse_and_encode_reward_address(
 
 #[async_trait]
 impl NodeMining for MiningBridge {
+    async fn candidate_with_txs(
+        &self,
+        txs: Vec<ScalaTransactionInput>,
+        miner_pk: Option<String>,
+    ) -> Result<Option<WorkMessageJson>, MiningApiError> {
+        if txs.len() > 1024 {
+            return Err(MiningApiError::BadRequest(
+                "at most 1024 requested transactions".into(),
+            ));
+        }
+        let miner_pk = miner_pk
+            .map(|pk| {
+                let bytes = hex::decode(pk)
+                    .map_err(|e| MiningApiError::BadRequest(format!("public key: {e}")))?;
+                let pk: [u8; 33] = bytes.as_slice().try_into().map_err(|_| {
+                    MiningApiError::BadRequest(
+                        "public key must be a compressed 33-byte point".into(),
+                    )
+                })?;
+                k256::PublicKey::from_sec1_bytes(&pk).map_err(|_| {
+                    MiningApiError::BadRequest("public key is not a secp256k1 point".into())
+                })?;
+                Ok(pk)
+            })
+            .transpose()?;
+        // Decode directly from typed DTOs: routing the signed JSON through a
+        // generic Value would sort context-extension keys and change its ID.
+        let mut transactions = Vec::with_capacity(txs.len());
+        let mut requested_ids = Vec::with_capacity(txs.len());
+        let mut bytes_total = 0usize;
+        for mut input in txs {
+            let bytes = ergo_rest_json::decode_scala_transaction(&input)
+                .map_err(|(_, e)| MiningApiError::BadRequest(e))?;
+            bytes_total = bytes_total.saturating_add(bytes.len());
+            if bytes_total > 2 * 1024 * 1024 {
+                return Err(MiningApiError::BadRequest(
+                    "requested transactions exceed 2 MiB".into(),
+                ));
+            }
+            // bytes_to_sign uses the signed wire format with empty proofs;
+            // preserve extensions and JSON decoding's original tree bytes.
+            for tx_input in &mut input.inputs {
+                tx_input.spending_proof.proof_bytes.clear();
+            }
+            let sign_bytes = ergo_rest_json::decode_scala_transaction(&input)
+                .map_err(|(_, e)| MiningApiError::BadRequest(e))?;
+            requested_ids.push(ergo_primitives::digest::blake2b256(&sign_bytes));
+            transactions.push(bytes);
+        }
+        if let Some(handle) = &self.handle {
+            if let Some((work, identity)) = handle.cached_requested_package(
+                miner_pk,
+                &requested_ids,
+                crate::snapshot::unix_now_ms(),
+            ) {
+                return Ok(Some(work_message_to_json(
+                    work,
+                    identity.template_seq,
+                    identity.clean_jobs,
+                )));
+            }
+        }
+        let permit = self
+            .requested_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                MiningApiError::Unavailable(
+                    "candidate request queue full; retry with backoff".into(),
+                )
+            })?;
+        let deadline = std::time::Instant::now() + CANDIDATE_REQUEST_TIMEOUT;
+        let (reply, response) = oneshot::channel();
+        self.tx
+            .try_send(MiningRequest::GetCandidateWithTxs {
+                transactions,
+                requested_ids,
+                miner_pk,
+                reply,
+                permit,
+                deadline,
+            })
+            .map_err(|e| MiningApiError::Unavailable(format!("candidate request channel: {e}")))?;
+        match tokio::time::timeout_at(deadline.into(), response).await {
+            Ok(Ok(result)) => result.map(Some),
+            Ok(Err(_)) => Err(MiningApiError::Unavailable("mining worker stopped".into())),
+            Err(_) => Err(MiningApiError::Timeout(
+                "candidate build exceeded nine seconds".into(),
+            )),
+        }
+    }
+
+    async fn candidate_details(
+        &self,
+        msg: Option<String>,
+        template_seq: Option<u64>,
+    ) -> Result<Option<ergo_rest_json::mining_inspection::CandidateDetailsJson>, MiningApiError>
+    {
+        let msg = inspection::parse_msg(msg)?;
+        let handle = self.inspection_handle()?;
+        handle
+            .inspect_template(msg, template_seq)
+            .map(|s| {
+                inspection::candidate_details(s, self.network, handle.reemission_ref(), now_ms())
+            })
+            .transpose()
+    }
+
+    async fn mining_history(
+        &self,
+    ) -> Result<ergo_rest_json::mining_inspection::MiningHistoryJson, MiningApiError> {
+        use ergo_rest_json::mining_inspection::{
+            MiningAccountingJson, MiningAssetJson, MiningHistoryJson, MiningOutcomeJson,
+        };
+        let handle = self.inspection_handle()?;
+        Ok(MiningHistoryJson {
+            retention: ergo_mining::handle::MAX_RETAINED_TEMPLATES
+                + ergo_mining::handle::MAX_REQUESTED_TEMPLATES,
+            retained_templates: handle
+                .inspect_history()
+                .into_iter()
+                .map(inspection::summary)
+                .collect(),
+            outcomes: handle
+                .mining_outcomes()
+                .into_iter()
+                .map(|e| MiningOutcomeJson {
+                    msg: e.msg.map(hex::encode),
+                    template_seq: e.template_seq,
+                    block_id: e.block_id.map(hex::encode),
+                    at_ms: e.at_ms,
+                    outcome: e.outcome,
+                    detail: e.detail,
+                    canonical: None,
+                    confirmations: None,
+                    accounting: e.accounting.map(|a| MiningAccountingJson {
+                        height: a.height,
+                        emission_nano_erg: a.emission_nano_erg,
+                        emission_gross_nano_erg: a.emission_gross_nano_erg,
+                        reemission_obligation_nano_erg: a.reemission_obligation_nano_erg,
+                        fees_nano_erg: a.fees_nano_erg,
+                        rent_nano_erg: a.rent_nano_erg,
+                        recovered_tokens: a
+                            .recovered_tokens
+                            .into_iter()
+                            .map(|t| MiningAssetJson {
+                                token_id: t.token_id,
+                                amount: t.amount,
+                            })
+                            .collect(),
+                    }),
+                })
+                .collect(),
+            resets_on_restart: !handle.outcome_journal_status().0,
+            journal_error: handle.outcome_journal_status().1,
+            chain_tip: None,
+        })
+    }
+
+    async fn mining_freshness(
+        &self,
+    ) -> Result<ergo_rest_json::mining_inspection::MiningFreshnessJson, MiningApiError> {
+        use ergo_rest_json::mining_inspection::MiningFreshnessJson;
+        let handle = self.inspection_handle()?;
+        let best = handle.best_tip();
+        let current = handle.cached_template_if_synced();
+        Ok(MiningFreshnessJson {
+            mining_started: best.synced,
+            last_template_msg: current.as_ref().map(|(w, _)| hex::encode(w.msg)),
+            last_template_height: current.as_ref().map(|(w, _)| w.height),
+            last_template_age_ms: current
+                .as_ref()
+                .map(|(_, id)| now_ms().saturating_sub(id.built_at_ms)),
+            template_seq: current.map(|(_, id)| id.template_seq),
+        })
+    }
+
+    async fn rent_self_claim_state(&self) -> ergo_api::mining::RentSelfClaimState {
+        use ergo_api::mining::RentSelfClaimState as JsonState;
+        use ergo_mining::rent_state::RentSelfClaimState;
+        match self
+            .handle
+            .as_ref()
+            .map(|h| h.rent_self_claim_state())
+            .unwrap_or_default()
+        {
+            RentSelfClaimState::Disabled => JsonState::Disabled,
+            RentSelfClaimState::Active => JsonState::Active,
+            RentSelfClaimState::PausedIndexerBehind {
+                indexed_height,
+                chain_height,
+            } => JsonState::PausedIndexerBehind {
+                indexed_height,
+                chain_height,
+            },
+        }
+    }
+
+    async fn block_policy(&self) -> Result<serde_json::Value, MiningApiError> {
+        serde_json::to_value(self.inspection_handle()?.policy())
+            .map_err(|e| MiningApiError::Internal(e.to_string()))
+    }
+
+    async fn set_block_policy(
+        &self,
+        policy: serde_json::Value,
+    ) -> Result<serde_json::Value, MiningApiError> {
+        let policy: ergo_mining::policy::BlockPolicy = serde_json::from_value(policy)
+            .map_err(|e| MiningApiError::BadRequest(e.to_string()))?;
+        let handle = self.inspection_handle()?.clone();
+        // Saving syncs the policy file to disk: keep it off the API workers.
+        let saved = tokio::task::spawn_blocking(move || handle.set_policy(policy))
+            .await
+            .map_err(|e| MiningApiError::Internal(format!("mining policy save task: {e}")))?;
+        match saved {
+            Ok(None) => {}
+            Ok(Some(warning)) => {
+                tracing::warn!(%warning, "mining: block policy saved and active");
+            }
+            // Only an invalid policy is the client's fault. A storage failure
+            // leaves the saved and active policy unchanged.
+            Err(ergo_mining::MiningError::InvalidConfig(detail)) => {
+                return Err(MiningApiError::BadRequest(detail));
+            }
+            Err(error) => {
+                return Err(MiningApiError::Internal(format!(
+                    "mining policy not saved: {error}"
+                )));
+            }
+        }
+        self.block_policy().await
+    }
+
     async fn candidate(
         &self,
         longpoll: Option<String>,
@@ -339,6 +660,34 @@ impl NodeMining for MiningBridge {
             .map_err(|e| MiningApiError::Internal(format!("encode reward address: {e}")))
     }
 
+    async fn private_transactions(
+        &self,
+    ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, MiningApiError> {
+        self.private_request(|reply| MiningRequest::ListPrivateTransactions { reply })
+            .await
+    }
+
+    async fn submit_private_transaction(
+        &self,
+        bytes: Vec<u8>,
+        options: ergo_api::mining::PrivateTransactionOptions,
+    ) -> Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError> {
+        self.private_request(|reply| MiningRequest::SubmitPrivateTransaction {
+            bytes,
+            options,
+            reply,
+        })
+        .await
+    }
+
+    async fn cancel_private_transaction(
+        &self,
+        tx_id: String,
+    ) -> Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError> {
+        self.private_request(|reply| MiningRequest::CancelPrivateTransaction { tx_id, reply })
+            .await
+    }
+
     async fn reward_pubkey(&self) -> Result<String, MiningApiError> {
         let pk = self.request_reward_key().await?;
         Ok(hex::encode(pk))
@@ -349,6 +698,44 @@ impl NodeMining for MiningBridge {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn rent_self_claim_state_maps_worker_availability() {
+        use ergo_api::mining::RentSelfClaimState as JsonState;
+        use ergo_mining::rent_state::RentSelfClaimState;
+        let handle = ergo_mining::handle::MiningHandle::new(
+            [0x02; 33],
+            ergo_mining::emission_rules::MonetarySettings::mainnet(),
+            None,
+            ergo_crypto::difficulty::DifficultyParams::mainnet(),
+            ergo_validation::VotingSettings::mainnet(),
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        let bridge = MiningBridge::new(
+            tx,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            handle.subscribe_serve_changes(),
+        )
+        .with_handle(handle.clone());
+        assert_eq!(bridge.rent_self_claim_state().await, JsonState::Disabled);
+        for (state, expected) in [
+            (RentSelfClaimState::Active, JsonState::Active),
+            (
+                RentSelfClaimState::PausedIndexerBehind {
+                    indexed_height: 90,
+                    chain_height: 100,
+                },
+                JsonState::PausedIndexerBehind {
+                    indexed_height: 90,
+                    chain_height: 100,
+                },
+            ),
+            (RentSelfClaimState::Disabled, JsonState::Disabled),
+        ] {
+            handle.set_rent_self_claim_state(state);
+            assert_eq!(bridge.rent_self_claim_state().await, expected);
+        }
+    }
 
     // ----- helpers -----
 
@@ -394,7 +781,8 @@ mod tests {
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 match req {
-                    MiningRequest::GetCandidate { reply } => {
+                    MiningRequest::GetCandidate { reply }
+                    | MiningRequest::GetCandidateWithTxs { reply, .. } => {
                         let payload = match responder_served.lock().expect("served slot").clone() {
                             Some(msg) => Ok(work_json(&msg)),
                             None => Err(MiningApiError::Unavailable("unsynced".into())),
@@ -405,6 +793,11 @@ mod tests {
                     // arms are unreachable here.
                     MiningRequest::SubmitSolution { reply, .. } => {
                         let _ = reply.send(Err(MiningApiError::Unavailable("n/a".into())));
+                    }
+                    MiningRequest::ListPrivateTransactions { .. }
+                    | MiningRequest::SubmitPrivateTransaction { .. }
+                    | MiningRequest::CancelPrivateTransaction { .. } => {
+                        panic!("private requests are not expected in this fixture")
                     }
                     MiningRequest::GetRewardKey { reply } => {
                         let _ = reply.send(Err(MiningApiError::Unavailable("n/a".into())));
@@ -438,6 +831,7 @@ mod tests {
             target: num_bigint::BigUint::from(123_456_789u64),
             height: 1_786_188,
             pk: [0x02; 33],
+            proof: None,
             metrics: ergo_mining::work_message::CandidateMetrics {
                 transaction_count: 5,
                 selected_transaction_count: 3,
@@ -590,6 +984,56 @@ mod tests {
         );
     }
 
+    // ----- error paths -----
+
+    #[tokio::test]
+    async fn requested_candidates_bound_abandoned_and_active_builds_until_worker_releases_them() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (_serve_tx, serve_rx) = tokio::sync::watch::channel(0u64);
+        let bridge = Arc::new(MiningBridge::new(
+            tx,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            serve_rx,
+        ));
+        let first = {
+            let bridge = Arc::clone(&bridge);
+            tokio::spawn(async move { bridge.candidate_with_txs(vec![], None).await })
+        };
+        let first_request = rx.recv().await.unwrap();
+        let second = {
+            let bridge = Arc::clone(&bridge);
+            tokio::spawn(async move { bridge.candidate_with_txs(vec![], None).await })
+        };
+        let second_request = rx.recv().await.unwrap();
+        assert!(matches!(
+            bridge.candidate_with_txs(vec![], None).await,
+            Err(MiningApiError::Unavailable(_))
+        ));
+
+        // A disconnected caller must not free its slot while its build still
+        // occupies the worker queue; otherwise reconnects can grow the queue.
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            bridge.candidate_with_txs(vec![], None).await,
+            Err(MiningApiError::Unavailable(_))
+        ));
+        drop(first_request);
+        let replacement = {
+            let bridge = Arc::clone(&bridge);
+            tokio::spawn(async move { bridge.candidate_with_txs(vec![], None).await })
+        };
+        let replacement_request = rx.recv().await.unwrap();
+        for request in [second_request, replacement_request] {
+            let MiningRequest::GetCandidateWithTxs { reply, .. } = request else {
+                panic!("expected requested candidate");
+            };
+            reply.send(Ok(work_json("AA"))).unwrap();
+        }
+        assert!(second.await.unwrap().unwrap().is_some());
+        assert!(replacement.await.unwrap().unwrap().is_some());
+    }
+
     #[tokio::test]
     async fn candidate_longpoll_wakes_on_channel_close() {
         // Shutdown wake: a parked longpoll must exit promptly when the action
@@ -625,5 +1069,174 @@ mod tests {
             matches!(result, Err(MiningApiError::Unavailable(_))),
             "a longpoll parked at shutdown returns Unavailable, got {result:?}",
         );
+    }
+
+    // ----- error paths -----
+
+    #[tokio::test]
+    async fn policy_storage_failure_is_internal_while_an_invalid_policy_is_the_clients() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        let handle = ergo_mining::handle::MiningHandle::mainnet([0x02; 33])
+            .with_policy_store(data_dir.join("mining-policy.json"))
+            .unwrap();
+        // A file now stands where the data directory was, so nothing can be
+        // saved there.
+        std::fs::remove_dir(&data_dir).unwrap();
+        std::fs::write(&data_dir, "").unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        let bridge = MiningBridge::new(
+            tx,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            handle.subscribe_serve_changes(),
+        )
+        .with_handle(handle.clone());
+        let mut policy = serde_json::to_value(handle.policy()).unwrap();
+        policy["rent_max_cost_basis_points"] = 0.into();
+        let stored = bridge.set_block_policy(policy).await;
+        assert!(
+            matches!(stored, Err(MiningApiError::Internal(_))),
+            "{stored:?}"
+        );
+        assert_eq!(handle.policy(), ergo_mining::policy::BlockPolicy::default());
+        let mut invalid = serde_json::to_value(handle.policy()).unwrap();
+        invalid["rent_max_cost_basis_points"] = 10_001.into();
+        let rejected = bridge.set_block_policy(invalid).await;
+        assert!(
+            matches!(rejected, Err(MiningApiError::BadRequest(_))),
+            "{rejected:?}"
+        );
+    }
+    #[tokio::test]
+    async fn requested_cache_hit_bypasses_full_build_admission() {
+        use ergo_mining::{
+            candidate::Candidate,
+            engine::{BestTip, BuildReason},
+            inspection::CandidateObservation,
+            work_message::{CandidateMetrics, WorkMessage},
+        };
+        use ergo_primitives::{digest::Digest32, reader::VlqReader};
+        use ergo_validation::pre_header::{
+            build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
+        };
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
+        ))
+        .unwrap();
+        let header_bytes = hex::decode(fixture["header"].as_str().unwrap()).unwrap();
+        let header = ergo_ser::header::read_header(&mut VlqReader::new(&header_bytes)).unwrap();
+        let pk: [u8; 33] = hex::decode(fixture["miner_pk"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let parent = *header.parent_id.as_bytes();
+        let transactions: Vec<_> = fixture["transactions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(2)
+            .map(|tx| {
+                ergo_ser::transaction::read_transaction(&mut VlqReader::new(
+                    &hex::decode(tx.as_str().unwrap()).unwrap(),
+                ))
+                .unwrap()
+            })
+            .collect();
+        let ids = transactions
+            .iter()
+            .map(|tx| {
+                Digest32::from_bytes(
+                    *ergo_ser::transaction::transaction_id(tx)
+                        .unwrap()
+                        .as_bytes(),
+                )
+            })
+            .collect();
+        let candidate = Candidate {
+            validation_ctx: CandidateValidationContext {
+                pre_header: CandidatePreHeader {
+                    version: header.version,
+                    parent_id: parent,
+                    height: header.height,
+                    timestamp: header.timestamp,
+                    n_bits: header.n_bits,
+                    votes: header.votes,
+                    miner_pubkey: pk,
+                },
+                activated_script_version: 2,
+                last_headers: vec![],
+                last_block_utxo_root: build_last_block_utxo_root(header.state_root),
+            },
+            header: header.clone(),
+            transactions,
+            ad_proof_bytes: vec![],
+            extension_fields: vec![],
+            msg: [7; 32],
+            target: num_bigint::BigUint::from(1u8),
+            parent_id: parent,
+            observation: CandidateObservation {
+                requested_ids: ids,
+                ..Default::default()
+            },
+        };
+        let handle = ergo_mining::handle::MiningHandle::mainnet([2; 33]);
+        handle.set_best_tip(BestTip {
+            parent_id: parent,
+            chain_seq: 1,
+            synced: true,
+        });
+        let work = WorkMessage {
+            msg: candidate.msg,
+            pk,
+            target: candidate.target.clone(),
+            height: header.height,
+            proof: None,
+            metrics: CandidateMetrics::default(),
+        };
+        let identity = handle
+            .publish_if_current(
+                candidate,
+                work,
+                &parent,
+                crate::snapshot::unix_now_ms,
+                BuildReason::Requested,
+            )
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        let bridge = MiningBridge::new(
+            tx,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            handle.subscribe_serve_changes(),
+        )
+        .with_handle(handle);
+        let _first = bridge.requested_slots.clone().try_acquire_owned().unwrap();
+        let _second = bridge.requested_slots.clone().try_acquire_owned().unwrap();
+        let package: Vec<ScalaTransactionInput> = fixture["transactions_json"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(2)
+            .map(|tx| serde_json::from_str(tx.as_str().unwrap()).unwrap())
+            .collect();
+        let response = bridge
+            .candidate_with_txs(package.clone(), Some(hex::encode(pk)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.template_seq, identity.template_seq);
+        assert_eq!(response.msg, hex::encode(identity.template_id));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        let mut reversed = package;
+        reversed.reverse();
+        assert!(matches!(
+            bridge
+                .candidate_with_txs(reversed, Some(hex::encode(pk)))
+                .await,
+            Err(MiningApiError::Unavailable(_))
+        ));
     }
 }

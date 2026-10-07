@@ -17,8 +17,50 @@ pub fn write_ergo_box_candidate_indexed(
     c: &ErgoBoxCandidate,
     token_id_table: &[TokenId],
 ) -> Result<(), WriteError> {
+    write_ergo_box_candidate_indexed_inner(w, c, token_id_table, false)
+}
+
+pub(crate) fn write_ergo_box_candidate_indexed_for_wire_check(
+    w: &mut VlqWriter,
+    c: &ErgoBoxCandidate,
+    token_id_table: &[TokenId],
+) -> Result<(), WriteError> {
+    write_ergo_box_candidate_indexed_inner(w, c, token_id_table, true)
+}
+
+fn write_ergo_box_candidate_indexed_inner(
+    w: &mut VlqWriter,
+    c: &ErgoBoxCandidate,
+    token_id_table: &[TokenId],
+    received_tree_size: bool,
+) -> Result<(), WriteError> {
     w.put_u64(c.value);
-    w.put_bytes(c.checked_serialized_ergo_tree_bytes()?);
+    let tree_bytes = c.checked_serialized_ergo_tree_bytes()?;
+    if received_tree_size
+        && c.canonical_tree_bytes.as_ref().is_ok_and(Option::is_some)
+        && c.ergo_tree.has_size
+    {
+        // Deliberately match the JVM consensus quirk: successful tree parsing
+        // ignores the declared size. Only the wire check preserves that slot;
+        // box bytes, IDs and bytesToSign still use the recomputed size above.
+        // Keep the canonical body here so this exception only relaxes size.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L141-L182
+        let body_start = |bytes: &[u8]| -> Result<usize, WriteError> {
+            let mut reader = VlqReader::new(bytes);
+            reader
+                .get_u8()
+                .and_then(|_| reader.get_uint_to_i32())
+                .map_err(|e| WriteError::InvalidData(format!("tree size: {e}")))?;
+            Ok(reader.position())
+        };
+        let canonical_body = body_start(tree_bytes)?;
+        let received_body = body_start(&c.ergo_tree_bytes)?;
+        w.put_u8(tree_bytes[0]);
+        w.put_bytes(&c.ergo_tree_bytes[1..received_body]);
+        w.put_bytes(&tree_bytes[canonical_body..]);
+    } else {
+        w.put_bytes(tree_bytes);
+    }
     w.put_u32(c.creation_height);
     check_token_count(c.tokens.len())?;
     w.put_u8(c.tokens.len() as u8);
@@ -46,7 +88,7 @@ pub fn write_ergo_box_candidate_indexed(
         w.put_u32(idx);
         w.put_u64(token.amount);
     }
-    w.put_bytes(&c.register_bytes);
+    w.put_bytes(c.checked_register_bytes()?);
     Ok(())
 }
 
@@ -125,14 +167,19 @@ fn read_box_tail(
     // The canonical re-serialization of the parsed registers, never the
     // verbatim wire slice: Scala writes an output box's registers back from
     // its parsed values (`ValueSerializer.serialize` on each stored
-    // `EvaluatedValue`), so a transaction id and its output box ids commit to
-    // those bytes. A register the reference accepts in a non-canonical form
+    // `EvaluatedValue`), so the transaction ID commits to those bytes in the
+    // parsing context. Newly sealed output box IDs use the default context
+    // instead; keep that provenance separately below. A non-canonical register
     // (the `TrueLeaf` opcode `7f`, a collection length above 2^32) would
     // otherwise give the transaction a different id than the reference's.
     // Same rule as the standalone reader, `read_ergo_box_candidate`.
     let mut rw = VlqWriter::new();
-    crate::register::write_registers(&mut rw, &additional_registers)
-        .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
+    crate::register::write_registers_versioned(
+        &mut rw,
+        &additional_registers,
+        r.activated_script_version().unwrap_or(3),
+    )
+    .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
     let register_bytes = rw.result();
     let canonical_tree_bytes = super::canonical_tree_bytes(&ergo_tree, &ergo_tree_bytes);
     Ok(ErgoBoxCandidate {
@@ -144,6 +191,8 @@ fn read_box_tail(
         tokens,
         additional_registers,
         register_bytes,
+        register_serialization_error: None,
+        box_serialization_version: 1,
         received_box_identity: None,
     })
 }

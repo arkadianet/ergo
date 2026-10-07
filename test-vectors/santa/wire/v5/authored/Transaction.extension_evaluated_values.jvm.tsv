@@ -1,0 +1,4 @@
+ext-x15-tuple-upcast-below-v3-accept#0	ACCEPT 0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100860204020402000001c0843d0008d3010000
+ext-c2-coll-of-func-below-v3-reject#1	REJECT ValidationException
+ext-c2-coll-of-func-one-arg-below-v3-reject#2	REJECT ValidationException
+ext-u1-tuple-upcast-height-below-v3-accept#3	ACCEPT 0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100860204027ea305000001c0843d0008d3010000

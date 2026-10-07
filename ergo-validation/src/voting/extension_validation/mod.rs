@@ -30,7 +30,7 @@ use match_rules::{match_parameters, match_parameters_60};
 /// for downstream rule gating.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionValidationOutcome {
-    /// Recomputed next-epoch active parameters.
+    /// Advertised next-epoch parameters after validation against the computed table.
     pub computed: ActiveProtocolParameters,
     /// Cumulative validation settings after applying `activated_update`.
     pub next_settings: ErgoValidationSettings,
@@ -170,6 +170,9 @@ pub fn validate_epoch_extension(
     voting_settings: &VotingSettings,
     trust_extension_settings: bool,
 ) -> Result<ExtensionValidationOutcome, ExtensionValidationError> {
+    // Rules 408/411 can be disabled, but Scala's subsequent validateTry still
+    // rejects either failed parse. Deliberately preserve that acceptance behavior.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/state/ErgoStateContext.scala#L200
     // Step 1-2: parse params + settings from extension.
     // (Combined: parse_active_params extracts proposed_update from
     // the (0x00, 124) blob in the same pass; parse_validation_settings_update
@@ -218,9 +221,9 @@ pub fn validate_epoch_extension(
         )?
     };
 
-    // Step 4: exBlockVersion (rule 410). Always runs, including under
+    // Step 4: exBlockVersion (rule 410), when active, including under
     // genesis-era bypass — `ErgoStateContext.scala:222`.
-    if computed.block_version != header.version {
+    if !prev_settings.is_rule_disabled(410) && computed.block_version != header.version {
         return Err(ExtensionValidationError::BlockVersion {
             computed: computed.block_version,
             header: header.version,
@@ -255,7 +258,19 @@ pub fn validate_epoch_extension(
     // Equality is via `updateFromInitial == updateFromInitial`
     // (`ErgoValidationSettings.scala:90`). We compare those cumulative
     // updates directly.
-    let computed_next_settings = prev_settings.updated(&activated_update);
+    // Activation applies the update even when rule 412 is disabled. Match the
+    // JVM missing-map-key exception deliberately at this use site.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/state/ErgoStateContext.scala#L221
+    activated_update
+        .validate_sigma_status_ids()
+        .map_err(ExtensionValidationError::ParseValidationSettings)?;
+    let computed_next_settings = if prev_active.epoch_start_height == 0 {
+        ErgoValidationSettings {
+            update_from_initial: parsed_settings_update.clone(),
+        }
+    } else {
+        prev_settings.updated(&activated_update)
+    };
     // The trust path only fires when `prev_settings` is the launch
     // defaults (i.e. `update_from_initial == empty()`). This bounds the
     // bypass to the genuinely-uninformed state — once the trusted
@@ -268,6 +283,10 @@ pub fn validate_epoch_extension(
         && prev_settings.update_from_initial == ErgoValidationSettingsUpdate::empty();
     let next_settings = if parsed_settings_update == computed_next_settings.update_from_initial {
         computed_next_settings
+    } else if prev_settings.is_rule_disabled(412) {
+        ErgoValidationSettings {
+            update_from_initial: parsed_settings_update,
+        }
     } else if trust_can_fire {
         // Mode 2 install: accept the parsed cumulative as authoritative
         // and seed the settings cache from it. Logged loudly so the
@@ -297,8 +316,17 @@ pub fn validate_epoch_extension(
         });
     };
 
+    // The reference stores the advertised table, including omitted ids.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/state/ErgoStateContext.scala#L248
+    // Record it only when it differs from folding this epoch's delta, so
+    // ordinary rows keep the v2 persistence layout that older nodes read.
+    let folded = prev_settings.updated(&activated_update);
+    let mut adopted = parsed;
+    adopted.activated_update = activated_update.clone();
+    adopted.announced_settings = (next_settings.update_from_initial != folded.update_from_initial)
+        .then(|| next_settings.update_from_initial.clone());
     Ok(ExtensionValidationOutcome {
-        computed,
+        computed: adopted,
         next_settings,
         activated_update,
     })

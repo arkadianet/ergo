@@ -2173,3 +2173,48 @@ fn bridge_header_ranges_corrupt_row_is_corrupt_compat_stays_best_effort() {
     assert!(bridge.last_headers(1).is_empty());
     assert!(bridge.nipopow_header_at_height(1).is_none());
 }
+
+#[test]
+fn probes_ignore_historical_storage_errors_but_keep_live_wedge_alarm() {
+    use clap::Parser;
+    use ergo_api::NodeReadState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let read = read_state_for_host(HostPaths {
+        state_db: dir.path().join("state.redb"),
+        index_db: dir.path().join("index.redb"),
+        data_dir: dir.path().to_path_buf(),
+    });
+    let config = crate::config::NodeConfig::load(crate::config::Cli::parse_from([
+        "ergo-node",
+        "--network",
+        "devnet",
+        "--peers",
+        "127.0.0.1:1",
+    ]))
+    .unwrap();
+    let control = crate::runtime_control::RuntimeControl::new(&config).unwrap();
+    control.beat();
+    let read = read.with_runtime_control(control);
+    for store in ["state", "indexer", "peers"] {
+        let mut snapshot = crate::snapshot::NodeSnapshot::empty(
+            read.handle.load().info.clone(),
+            ergo_api::types::ApiWeightFunction::Cost,
+        );
+        snapshot.health.status = ergo_api::types::HealthStatus::Ok;
+        snapshot.sync.headers_chain_synced = true;
+        snapshot.sync.recovery_done = true;
+        snapshot.tip.best_full_block.timestamp_unix_ms = crate::snapshot::unix_now_ms();
+        snapshot.status.last_storage_error = Some(format!("{store}: historical failure"));
+        read.handle.store(Arc::new(snapshot));
+        assert!(read.status().last_storage_error.is_some());
+        assert!(read.probes().unwrap().readiness.ready, "{store}");
+    }
+    read.telemetry.store_sample(0, 0, Some(600_000), true);
+    let probes = read.probes().unwrap();
+    assert!(!probes.liveness.ready);
+    assert!(probes
+        .readiness
+        .reasons
+        .contains(&"runtime_or_storage_fault".into()));
+}

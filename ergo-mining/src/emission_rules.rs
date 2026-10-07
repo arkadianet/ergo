@@ -30,15 +30,7 @@ pub use ergo_chain_spec::MonetaryParams as MonetarySettings;
 ///
 /// Below `fixed_rate_period`: returns `fixed_rate` flat.
 /// At/above: per-epoch reduction starting from epoch 1, clamped at 0.
-pub fn emission_at_height(h: u32, s: &MonetarySettings) -> u64 {
-    if h < s.fixed_rate_period {
-        s.fixed_rate
-    } else {
-        let epoch = 1 + u64::from(h - s.fixed_rate_period) / u64::from(s.epoch_length);
-        s.fixed_rate
-            .saturating_sub(s.one_epoch_reduction.saturating_mul(epoch))
-    }
-}
+pub use ergo_chain_spec::emission_at_height;
 
 /// Per-height miner share. Mirror of `EmissionRules.minersRewardAtHeight`
 /// (`EmissionRules.scala:79-86`).

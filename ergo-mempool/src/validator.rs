@@ -285,7 +285,8 @@ fn map_validation_error(err: ValidationError) -> ValidationErr {
         | E::PropositionTooLarge { .. }
         | E::OutputFromFuture { .. }
         | E::OutputCreationHeightBelowInputs { .. }
-        | E::DuplicateStorageRentOutput { .. } => ValidationErr::Structural,
+        | E::DuplicateStorageRentOutput { .. }
+        | E::DuplicateDataInputs { .. } => ValidationErr::Structural,
         E::InputBoxNotFound { .. } => ValidationErr::UnresolvedInput,
         E::DataInputBoxNotFound { .. } => ValidationErr::UnresolvedDataInput,
         E::ResolvedInputsMismatch { .. }
@@ -774,3 +775,9 @@ mod tests {
 
 #[cfg(test)]
 mod reemission_tests;
+
+#[cfg(test)]
+mod sized_tree_tests;
+
+#[cfg(test)]
+mod reference_serialization_tests;

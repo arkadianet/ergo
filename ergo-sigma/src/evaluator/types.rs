@@ -39,15 +39,59 @@ pub struct EvalBox {
     /// emits: `DataSerializer.serialize(SBox)` re-serializes from structure
     /// (`box_canonical_bytes`), never from `bytes`. Empty for test-only boxes.
     pub raw_bytes: Vec<u8>,
-    /// Verbatim register block (count byte + concatenated per-register
-    /// entries) exactly as it appeared on the wire. Preserves each register's
+    /// Cached register block (count byte + concatenated per-register entries).
+    /// Canonical on successful writes, received when a write failure is deferred.
+    /// Preserves each register's
     /// node provenance — Constant vs `CreateTuple` (0x86) vs `ConcreteCollection`
-    /// (0x83) — which the parsed `registers` field discards. `bytesWithNoRef`
+    /// (0x83), including stored expression children. `bytesWithNoRef`
     /// (0xC4) re-serializes from these bytes to keep that provenance, matching
     /// Scala's `ErgoBoxCandidate.serializer`. Populated from `ErgoBox` at
     /// construction; empty for test-only boxes (which fall back to a structural
     /// re-encode).
     pub register_bytes: Vec<u8>,
+    /// Scala's per-box lazy values. Clones share them across transaction inputs.
+    pub lazy_vals: std::sync::Arc<EvalBoxLazyVals>,
+}
+
+/// Per-register source carriers cached by the deserialize-substitution path.
+pub type DeserializeRegisterByteCache = [[std::sync::OnceLock<Option<Vec<u8>>>; 6]; 2];
+
+/// Values Scala computes once per box in `lazy val`s.
+#[derive(Debug, Default)]
+pub struct EvalBoxLazyVals {
+    /// Structured proposition serialization, when different from script_bytes
+    /// or when writing failed. Captured at box materialization, never re-parsed
+    /// during evaluation. Proposition/received-byte properties keep their bytes.
+    pub serialized_script: Option<Result<Vec<u8>, String>>,
+    /// `ErgoBoxCandidate.bytesWithNoRef`: the first reader's VersionContext
+    /// fixes the bytes (a constant `Upcast` is stripped below ErgoTree v3).
+    pub bytes_without_ref: std::sync::OnceLock<Vec<u8>>,
+    /// Materialized source for DeserializeRegister (Some(bytes), or a carrier
+    /// whose unchecked JVM byte-array cast fails). Raw byte constants are
+    /// borrowed directly. Tuple/ConcreteCollection `.value` is lazy per box.
+    /// Indexed by ErgoTree-version class, like registers_materialized.
+    /// Allocate the register cache only on the paid substitution path.
+    pub deserialize_register_bytes: std::sync::OnceLock<Box<DeserializeRegisterByteCache>>,
+    /// Whether every additional register materialized (`CBox.registers`),
+    /// indexed by ErgoTree-version class `[pre-v3, v3+]` because the
+    /// SHeader/SOption gates differ between them. Only success is recorded:
+    /// a failure aborts the script, so a register read never repeats it.
+    pub registers_materialized: [std::sync::OnceLock<()>; 2],
+}
+
+impl EvalBoxLazyVals {
+    /// Preserve the box parser's cached tree write result for SBox serialization.
+    pub fn from_candidate(candidate: &ergo_ser::ergo_box::ErgoBoxCandidate) -> Self {
+        let serialized_script = match candidate.checked_serialized_ergo_tree_bytes() {
+            Ok(bytes) if bytes != candidate.ergo_tree_bytes() => Some(Ok(bytes.to_vec())),
+            Err(error) => Some(Err(error.to_string())),
+            _ => None,
+        };
+        Self {
+            serialized_script,
+            ..Default::default()
+        }
+    }
 }
 
 impl EvalBox {
@@ -65,6 +109,7 @@ impl EvalBox {
             tokens: Vec::new(),
             raw_bytes: Vec::new(),
             register_bytes: Vec::new(),
+            lazy_vals: Default::default(),
         }
     }
 }
@@ -219,10 +264,15 @@ impl SigmaValidationSettings {
     /// org/.../ValidationRules.scala:122-131. Rule 1019 throws a single SType,
     /// which cannot match its MethodsContainer/method-pair Changed override.
     pub fn is_soft_fork(&self, rule_id: u16, args: &[u8], activated_version: u8) -> bool {
+        // Deliberately match the node's omission for consensus: rule 1020 is
+        // in coreSettings V5/V6, but absent from org.ergoplatform's currentSettings.
+        // SigmaValidationSettings.isSoftFork returns false for an absent rule,
+        // including a replaced status received by this Rust settings map.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/validation/ValidationRules.scala#L207-L249
         matches!(rule_id, 1000..=1016 | 1019)
             && match self.0.get(&rule_id) {
                 Some(RuleStatus::Replaced(_)) => {
-                    !(activated_version >= 3 && matches!(rule_id, 1007 | 1008 | 1011))
+                    !((activated_version as i8) >= 3 && matches!(rule_id, 1007 | 1008 | 1011))
                 }
                 // SoftForkChecker.scala:35: the exact failed type byte
                 // must occur in the activated ChangedRule payload.
@@ -314,6 +364,9 @@ pub struct ReductionContext<'a> {
     /// Activated script version: block.headerVersion - 1.
     /// Controls consensus-preserving behavior differences across protocol versions.
     /// Pre-JIT (< 2): selfBoxIndex returns -1 (known bug preserved as consensus).
+    /// Stored as byte bits; activation comparisons use `as i8` deliberately,
+    /// matching Scala's `VersionContext` signed byte for consensus.
+    /// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/VersionContext.scala#L17-L34>
     pub activated_script_version: u8,
     /// ErgoTree HEADER version of the script under evaluation (the low 3 bits
     /// of the tree's header byte), NOT the activated/block version. Scala's
@@ -391,12 +444,12 @@ impl<'a> ReductionContext<'a> {
         method_id: u8,
         required: u8,
     ) -> Result<(), EvalError> {
-        if self.activated_script_version < required {
+        if (self.activated_script_version as i8) < required as i8 {
             Err(EvalError::SoftForkNotActivated {
                 type_id,
                 method_id,
                 required,
-                got: self.activated_script_version,
+                got: self.activated_script_version as i8,
             })
         } else {
             Ok(())
@@ -512,6 +565,9 @@ pub enum Value {
     BoxCollection(BoxSource),
     /// SGlobal singleton — marker for Global method dispatch.
     Global,
+    /// The executing Context, distinct from its SELF box. Reflection requires
+    /// the actual receiver type even when the context is stored in a variable.
+    Context,
     /// SPreHeader — carrier for PreHeader field access.
     PreHeader,
     /// Inline box constant — parsed from OpaqueBoxBytes in SBox constants.
@@ -611,6 +667,7 @@ impl PartialEq for Value {
             // Carrier types and functions: structural identity only
             (Value::SelfBox, Value::SelfBox) => true,
             (Value::Global, Value::Global) => true,
+            (Value::Context, Value::Context) => true,
             (Value::PreHeader, Value::PreHeader) => true,
             (
                 Value::BoxRef {
@@ -696,7 +753,7 @@ pub enum EvalError {
         type_id: u8,
         method_id: u8,
         required: u8,
-        got: u8,
+        got: i8,
     },
     /// A v6/EIP-50 method (`ergo_ser::opcode::is_v3_only_method`) appears in a
     /// real pre-v3 (tree-header version < 3) ErgoTree. Scala's
@@ -726,6 +783,10 @@ pub enum EvalError {
     /// A recognized Sigma deserialization validation rule failed.
     #[error("Sigma validation rule {rule_id} failed")]
     SigmaValidation { rule_id: u16, args: Vec<u8> },
+    /// A validation exception thrown during evaluation, outside Scala's
+    /// substitution-only soft-fork catch.
+    #[error("evaluation validation rule {rule_id} failed")]
+    EvaluationValidation { rule_id: u16, args: Vec<u8> },
     /// Scala `Interpreter.checkSoftForkCondition` (`Interpreter.scala:325-328`),
     /// run by `verify` BEFORE any reduction (`:362-365`): with the activated
     /// script version within this interpreter's range, a tree whose header
@@ -737,7 +798,7 @@ pub enum EvalError {
     #[error("ErgoTree version {tree_version} is higher than activated {activated_script_version}")]
     TreeVersionAboveActivated {
         tree_version: u8,
-        activated_script_version: u8,
+        activated_script_version: i8,
     },
 }
 

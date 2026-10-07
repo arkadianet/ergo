@@ -1,0 +1,673 @@
+CONTAINER	0	1	Boolean	0
+CONTAINER	0	2	Byte	7
+METHOD	0	2	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SByte$	null
+METHOD	0	2	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SShort$	null
+METHOD	0	2	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SInt$	null
+METHOD	0	2	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SLong$	null
+METHOD	0	2	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SBigInt$	null
+METHOD	0	2	6	toBytes	custom	(SByte$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	0	2	7	toBits	custom	(SByte$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	0	3	Short	7
+METHOD	0	3	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SByte$	null
+METHOD	0	3	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SShort$	null
+METHOD	0	3	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SInt$	null
+METHOD	0	3	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SLong$	null
+METHOD	0	3	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SBigInt$	null
+METHOD	0	3	6	toBytes	custom	(SShort$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	0	3	7	toBits	custom	(SShort$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	0	4	Int	7
+METHOD	0	4	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SByte$	null
+METHOD	0	4	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SShort$	null
+METHOD	0	4	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SInt$	null
+METHOD	0	4	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SLong$	null
+METHOD	0	4	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SBigInt$	null
+METHOD	0	4	6	toBytes	custom	(SInt$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	0	4	7	toBits	custom	(SInt$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	0	5	Long	7
+METHOD	0	5	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SByte$	null
+METHOD	0	5	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SShort$	null
+METHOD	0	5	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SInt$	null
+METHOD	0	5	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SLong$	null
+METHOD	0	5	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SBigInt$	null
+METHOD	0	5	6	toBytes	custom	(SLong$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	0	5	7	toBits	custom	(SLong$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	0	6	BigInt	7
+METHOD	0	6	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SByte$	null
+METHOD	0	6	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SShort$	null
+METHOD	0	6	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SInt$	null
+METHOD	0	6	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SLong$	null
+METHOD	0	6	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SBigInt$	null
+METHOD	0	6	6	toBytes	custom	(SBigInt$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	0	6	7	toBits	custom	(SBigInt$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	0	7	GroupElement	4
+METHOD	0	7	2	getEncoded	fixed-reflection	(SGroupElement) => Coll[SByte$]	FixedCost(JitCost(250))
+METHOD	0	7	3	exp	fixed-reflection	(SGroupElement,SBigInt$) => SGroupElement	FixedCost(JitCost(900))
+METHOD	0	7	4	multiply	fixed-reflection	(SGroupElement,SGroupElement) => SGroupElement	FixedCost(JitCost(40))
+METHOD	0	7	5	negate	fixed-reflection	(SGroupElement) => SGroupElement	FixedCost(JitCost(45))
+CONTAINER	0	8	SigmaProp	2
+METHOD	0	8	1	propBytes	unresolved:RuntimeException:Cannot find eval method def propBytes_eval(List(class sigma.ast.MethodCall, interface sigma.SigmaProp, class sigma.eval.ErgoTreeEvaluator))	(SSigmaProp) => Coll[SByte$]	PerItemCost(JitCost(35),JitCost(6),1)
+METHOD	0	8	2	isProven	unresolved:RuntimeException:Cannot find eval method def isProven_eval(List(class sigma.ast.MethodCall, interface sigma.SigmaProp, class sigma.eval.ErgoTreeEvaluator))	(SSigmaProp) => SBoolean	null
+CONTAINER	0	12	SCollection	17
+METHOD	0	12	1	size	fixed-reflection	(Coll[IV]) => SInt$	FixedCost(JitCost(14))
+METHOD	0	12	2	getOrElse	eval-reflection	[IV](Coll[IV],SInt$,IV) => IV	DynamicCost
+METHOD	0	12	3	map	eval-reflection	[IV,OV](Coll[IV],(IV) => OV) => Coll[OV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	0	12	4	exists	unresolved:RuntimeException:Cannot find eval method def exists_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => SBoolean	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	0	12	5	fold	unresolved:RuntimeException:Cannot find eval method def fold_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, class java.lang.Object, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV,OV](Coll[IV],OV,(OV,IV) => OV) => OV	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	0	12	6	forall	unresolved:RuntimeException:Cannot find eval method def forall_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => SBoolean	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	0	12	7	slice	unresolved:RuntimeException:Cannot find eval method def slice_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, int, int, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],SInt$,SInt$) => Coll[IV]	PerItemCost(JitCost(10),JitCost(2),100)
+METHOD	0	12	8	filter	unresolved:RuntimeException:Cannot find eval method def filter_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => Coll[IV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	0	12	9	append	unresolved:RuntimeException:Cannot find eval method def append_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface sigma.Coll, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],Coll[IV]) => Coll[IV]	PerItemCost(JitCost(20),JitCost(2),100)
+METHOD	0	12	10	apply	fixed-reflection	[IV](Coll[IV],SInt$) => IV	FixedCost(JitCost(30))
+METHOD	0	12	14	indices	eval-reflection	(Coll[IV]) => Coll[SInt$]	PerItemCost(JitCost(20),JitCost(2),16)
+METHOD	0	12	15	flatMap	eval-reflection	[IV,OV](Coll[IV],(IV) => Coll[OV]) => Coll[OV]	PerItemCost(JitCost(60),JitCost(10),8)
+METHOD	0	12	19	patch	eval-reflection	[IV](Coll[IV],SInt$,Coll[IV],SInt$) => Coll[IV]	PerItemCost(JitCost(30),JitCost(2),10)
+METHOD	0	12	20	updated	eval-reflection	[IV](Coll[IV],SInt$,IV) => Coll[IV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	0	12	21	updateMany	eval-reflection	[IV](Coll[IV],Coll[SInt$],Coll[IV]) => Coll[IV]	PerItemCost(JitCost(20),JitCost(2),10)
+METHOD	0	12	26	indexOf	eval-reflection	[IV](Coll[IV],IV,SInt$) => SInt$	PerItemCost(JitCost(20),JitCost(10),2)
+METHOD	0	12	29	zip	eval-reflection	[IV,OV](Coll[IV],Coll[OV]) => Coll[(IV,OV)]	PerItemCost(JitCost(10),JitCost(1),10)
+CONTAINER	0	36	SOption	5
+METHOD	0	36	2	isDefined	fixed-reflection	(Option[T]) => SBoolean	FixedCost(JitCost(10))
+METHOD	0	36	3	get	fixed-reflection	(Option[T]) => T	FixedCost(JitCost(15))
+METHOD	0	36	4	getOrElse	unresolved:NoSuchMethodException:scala.Option.getOrElse(java.lang.Object)	[T](Option[T],T) => T	FixedCost(JitCost(20))
+METHOD	0	36	7	map	fixed-reflection	[T,R](Option[T],(T) => R) => Option[R]	FixedCost(JitCost(20))
+METHOD	0	36	8	filter	fixed-reflection	[T](Option[T],(T) => SBoolean) => Option[T]	FixedCost(JitCost(20))
+CONTAINER	0	96	STuple	0
+CONTAINER	0	97	Any	0
+CONTAINER	0	98	Unit	0
+CONTAINER	0	99	Box	18
+METHOD	0	99	1	value	fixed-reflection	(SBox) => SLong$	FixedCost(JitCost(8))
+METHOD	0	99	2	propositionBytes	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	0	99	3	bytes	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	0	99	4	bytesWithoutRef	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	0	99	5	id	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	0	99	6	creationInfo	fixed-reflection	(SBox) => (SInt$,Coll[SByte$])	FixedCost(JitCost(16))
+METHOD	0	99	8	tokens	fixed-reflection	(SBox) => Coll[(Coll[SByte$],SLong$)]	FixedCost(JitCost(15))
+METHOD	0	99	7	getRegV5	unresolved:NoSuchMethodException:sigma.Box.getRegV5(int)	[T](SBox,SInt$) => Option[T]	FixedCost(JitCost(50))
+METHOD	0	99	9	R0	unresolved:NoSuchMethodException:sigma.Box.R0()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	0	99	10	R1	unresolved:NoSuchMethodException:sigma.Box.R1()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	0	99	11	R2	unresolved:NoSuchMethodException:sigma.Box.R2()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	0	99	12	R3	unresolved:NoSuchMethodException:sigma.Box.R3()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	0	99	13	R4	unresolved:NoSuchMethodException:sigma.Box.R4()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	0	99	14	R5	unresolved:NoSuchMethodException:sigma.Box.R5()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	0	99	15	R6	unresolved:NoSuchMethodException:sigma.Box.R6()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	0	99	16	R7	unresolved:NoSuchMethodException:sigma.Box.R7()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	0	99	17	R8	unresolved:NoSuchMethodException:sigma.Box.R8()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	0	99	18	R9	unresolved:NoSuchMethodException:sigma.Box.R9()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+CONTAINER	0	100	AvlTree	15
+METHOD	0	100	1	digest	fixed-reflection	(SAvlTree) => Coll[SByte$]	FixedCost(JitCost(15))
+METHOD	0	100	2	enabledOperations	fixed-reflection	(SAvlTree) => SByte$	FixedCost(JitCost(15))
+METHOD	0	100	3	keyLength	fixed-reflection	(SAvlTree) => SInt$	FixedCost(JitCost(15))
+METHOD	0	100	4	valueLengthOpt	fixed-reflection	(SAvlTree) => Option[SInt$]	FixedCost(JitCost(15))
+METHOD	0	100	5	isInsertAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	0	100	6	isUpdateAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	0	100	7	isRemoveAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	0	100	8	updateOperations	fixed-reflection	(SAvlTree,SByte$) => SAvlTree	FixedCost(JitCost(45))
+METHOD	0	100	9	contains	eval-reflection	(SAvlTree,Coll[SByte$],Coll[SByte$]) => SBoolean	DynamicCost
+METHOD	0	100	10	get	eval-reflection	(SAvlTree,Coll[SByte$],Coll[SByte$]) => Option[Coll[SByte$]]	DynamicCost
+METHOD	0	100	11	getMany	eval-reflection	(SAvlTree,Coll[Coll[SByte$]],Coll[SByte$]) => Coll[Option[Coll[SByte$]]]	DynamicCost
+METHOD	0	100	12	insert	eval-reflection	(SAvlTree,Coll[(Coll[SByte$],Coll[SByte$])],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	0	100	13	update	eval-reflection	(SAvlTree,Coll[(Coll[SByte$],Coll[SByte$])],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	0	100	14	remove	eval-reflection	(SAvlTree,Coll[Coll[SByte$]],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	0	100	15	updateDigest	fixed-reflection	(SAvlTree,Coll[SByte$]) => SAvlTree	FixedCost(JitCost(40))
+CONTAINER	0	101	Context	11
+METHOD	0	101	1	dataInputs	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(15))
+METHOD	0	101	2	headers	fixed-reflection	(SContext) => Coll[SHeader]	FixedCost(JitCost(15))
+METHOD	0	101	3	preHeader	fixed-reflection	(SContext) => SPreHeader	FixedCost(JitCost(15))
+METHOD	0	101	4	INPUTS	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(10))
+METHOD	0	101	5	OUTPUTS	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(10))
+METHOD	0	101	6	HEIGHT	fixed-reflection	(SContext) => SInt$	FixedCost(JitCost(26))
+METHOD	0	101	7	SELF	fixed-reflection	(SContext) => SBox	FixedCost(JitCost(10))
+METHOD	0	101	8	selfBoxIndex	fixed-reflection	(SContext) => SInt$	FixedCost(JitCost(20))
+METHOD	0	101	9	LastBlockUtxoRootHash	fixed-reflection	(SContext) => SAvlTree	FixedCost(JitCost(15))
+METHOD	0	101	10	minerPubKey	fixed-reflection	(SContext) => Coll[SByte$]	FixedCost(JitCost(20))
+METHOD	0	101	11	getVar	unresolved:NoSuchMethodException:sigma.Context.getVar(byte)	[T](SContext,SByte$) => Option[T]	FixedCost(JitCost(10))
+CONTAINER	0	102	String	0
+CONTAINER	0	104	Header	15
+METHOD	0	104	1	id	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	0	104	2	version	fixed-reflection	(SHeader) => SByte$	FixedCost(JitCost(10))
+METHOD	0	104	3	parentId	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	0	104	4	ADProofsRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	0	104	5	stateRoot	fixed-reflection	(SHeader) => SAvlTree	FixedCost(JitCost(10))
+METHOD	0	104	6	transactionsRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	0	104	7	timestamp	fixed-reflection	(SHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	0	104	8	nBits	fixed-reflection	(SHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	0	104	9	height	fixed-reflection	(SHeader) => SInt$	FixedCost(JitCost(10))
+METHOD	0	104	10	extensionRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	0	104	11	minerPk	fixed-reflection	(SHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	0	104	12	powOnetimePk	fixed-reflection	(SHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	0	104	13	powNonce	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	0	104	14	powDistance	fixed-reflection	(SHeader) => SBigInt$	FixedCost(JitCost(10))
+METHOD	0	104	15	votes	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+CONTAINER	0	105	PreHeader	7
+METHOD	0	105	1	version	fixed-reflection	(SPreHeader) => SByte$	FixedCost(JitCost(10))
+METHOD	0	105	2	parentId	fixed-reflection	(SPreHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	0	105	3	timestamp	fixed-reflection	(SPreHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	0	105	4	nBits	fixed-reflection	(SPreHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	0	105	5	height	fixed-reflection	(SPreHeader) => SInt$	FixedCost(JitCost(10))
+METHOD	0	105	6	minerPk	fixed-reflection	(SPreHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	0	105	7	votes	fixed-reflection	(SPreHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+CONTAINER	0	106	SigmaDslBuilder	2
+METHOD	0	106	1	groupGenerator	fixed-reflection	(SGlobal) => SGroupElement	FixedCost(JitCost(10))
+METHOD	0	106	2	xor	eval-reflection	(SGlobal,Coll[SByte$],Coll[SByte$]) => Coll[SByte$]	PerItemCost(JitCost(10),JitCost(2),128)
+CONTAINER	1	1	Boolean	0
+CONTAINER	1	2	Byte	7
+METHOD	1	2	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SByte$	null
+METHOD	1	2	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SShort$	null
+METHOD	1	2	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SInt$	null
+METHOD	1	2	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SLong$	null
+METHOD	1	2	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SBigInt$	null
+METHOD	1	2	6	toBytes	custom	(SByte$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	1	2	7	toBits	custom	(SByte$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	1	3	Short	7
+METHOD	1	3	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SByte$	null
+METHOD	1	3	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SShort$	null
+METHOD	1	3	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SInt$	null
+METHOD	1	3	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SLong$	null
+METHOD	1	3	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SBigInt$	null
+METHOD	1	3	6	toBytes	custom	(SShort$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	1	3	7	toBits	custom	(SShort$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	1	4	Int	7
+METHOD	1	4	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SByte$	null
+METHOD	1	4	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SShort$	null
+METHOD	1	4	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SInt$	null
+METHOD	1	4	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SLong$	null
+METHOD	1	4	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SBigInt$	null
+METHOD	1	4	6	toBytes	custom	(SInt$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	1	4	7	toBits	custom	(SInt$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	1	5	Long	7
+METHOD	1	5	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SByte$	null
+METHOD	1	5	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SShort$	null
+METHOD	1	5	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SInt$	null
+METHOD	1	5	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SLong$	null
+METHOD	1	5	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SBigInt$	null
+METHOD	1	5	6	toBytes	custom	(SLong$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	1	5	7	toBits	custom	(SLong$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	1	6	BigInt	7
+METHOD	1	6	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SByte$	null
+METHOD	1	6	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SShort$	null
+METHOD	1	6	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SInt$	null
+METHOD	1	6	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SLong$	null
+METHOD	1	6	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SBigInt$	null
+METHOD	1	6	6	toBytes	custom	(SBigInt$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	1	6	7	toBits	custom	(SBigInt$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	1	7	GroupElement	4
+METHOD	1	7	2	getEncoded	fixed-reflection	(SGroupElement) => Coll[SByte$]	FixedCost(JitCost(250))
+METHOD	1	7	3	exp	fixed-reflection	(SGroupElement,SBigInt$) => SGroupElement	FixedCost(JitCost(900))
+METHOD	1	7	4	multiply	fixed-reflection	(SGroupElement,SGroupElement) => SGroupElement	FixedCost(JitCost(40))
+METHOD	1	7	5	negate	fixed-reflection	(SGroupElement) => SGroupElement	FixedCost(JitCost(45))
+CONTAINER	1	8	SigmaProp	2
+METHOD	1	8	1	propBytes	unresolved:RuntimeException:Cannot find eval method def propBytes_eval(List(class sigma.ast.MethodCall, interface sigma.SigmaProp, class sigma.eval.ErgoTreeEvaluator))	(SSigmaProp) => Coll[SByte$]	PerItemCost(JitCost(35),JitCost(6),1)
+METHOD	1	8	2	isProven	unresolved:RuntimeException:Cannot find eval method def isProven_eval(List(class sigma.ast.MethodCall, interface sigma.SigmaProp, class sigma.eval.ErgoTreeEvaluator))	(SSigmaProp) => SBoolean	null
+CONTAINER	1	12	SCollection	17
+METHOD	1	12	1	size	fixed-reflection	(Coll[IV]) => SInt$	FixedCost(JitCost(14))
+METHOD	1	12	2	getOrElse	eval-reflection	[IV](Coll[IV],SInt$,IV) => IV	DynamicCost
+METHOD	1	12	3	map	eval-reflection	[IV,OV](Coll[IV],(IV) => OV) => Coll[OV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	1	12	4	exists	unresolved:RuntimeException:Cannot find eval method def exists_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => SBoolean	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	1	12	5	fold	unresolved:RuntimeException:Cannot find eval method def fold_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, class java.lang.Object, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV,OV](Coll[IV],OV,(OV,IV) => OV) => OV	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	1	12	6	forall	unresolved:RuntimeException:Cannot find eval method def forall_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => SBoolean	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	1	12	7	slice	unresolved:RuntimeException:Cannot find eval method def slice_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, int, int, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],SInt$,SInt$) => Coll[IV]	PerItemCost(JitCost(10),JitCost(2),100)
+METHOD	1	12	8	filter	unresolved:RuntimeException:Cannot find eval method def filter_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => Coll[IV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	1	12	9	append	unresolved:RuntimeException:Cannot find eval method def append_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface sigma.Coll, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],Coll[IV]) => Coll[IV]	PerItemCost(JitCost(20),JitCost(2),100)
+METHOD	1	12	10	apply	fixed-reflection	[IV](Coll[IV],SInt$) => IV	FixedCost(JitCost(30))
+METHOD	1	12	14	indices	eval-reflection	(Coll[IV]) => Coll[SInt$]	PerItemCost(JitCost(20),JitCost(2),16)
+METHOD	1	12	15	flatMap	eval-reflection	[IV,OV](Coll[IV],(IV) => Coll[OV]) => Coll[OV]	PerItemCost(JitCost(60),JitCost(10),8)
+METHOD	1	12	19	patch	eval-reflection	[IV](Coll[IV],SInt$,Coll[IV],SInt$) => Coll[IV]	PerItemCost(JitCost(30),JitCost(2),10)
+METHOD	1	12	20	updated	eval-reflection	[IV](Coll[IV],SInt$,IV) => Coll[IV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	1	12	21	updateMany	eval-reflection	[IV](Coll[IV],Coll[SInt$],Coll[IV]) => Coll[IV]	PerItemCost(JitCost(20),JitCost(2),10)
+METHOD	1	12	26	indexOf	eval-reflection	[IV](Coll[IV],IV,SInt$) => SInt$	PerItemCost(JitCost(20),JitCost(10),2)
+METHOD	1	12	29	zip	eval-reflection	[IV,OV](Coll[IV],Coll[OV]) => Coll[(IV,OV)]	PerItemCost(JitCost(10),JitCost(1),10)
+CONTAINER	1	36	SOption	5
+METHOD	1	36	2	isDefined	fixed-reflection	(Option[T]) => SBoolean	FixedCost(JitCost(10))
+METHOD	1	36	3	get	fixed-reflection	(Option[T]) => T	FixedCost(JitCost(15))
+METHOD	1	36	4	getOrElse	unresolved:NoSuchMethodException:scala.Option.getOrElse(java.lang.Object)	[T](Option[T],T) => T	FixedCost(JitCost(20))
+METHOD	1	36	7	map	fixed-reflection	[T,R](Option[T],(T) => R) => Option[R]	FixedCost(JitCost(20))
+METHOD	1	36	8	filter	fixed-reflection	[T](Option[T],(T) => SBoolean) => Option[T]	FixedCost(JitCost(20))
+CONTAINER	1	96	STuple	0
+CONTAINER	1	97	Any	0
+CONTAINER	1	98	Unit	0
+CONTAINER	1	99	Box	18
+METHOD	1	99	1	value	fixed-reflection	(SBox) => SLong$	FixedCost(JitCost(8))
+METHOD	1	99	2	propositionBytes	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	1	99	3	bytes	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	1	99	4	bytesWithoutRef	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	1	99	5	id	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	1	99	6	creationInfo	fixed-reflection	(SBox) => (SInt$,Coll[SByte$])	FixedCost(JitCost(16))
+METHOD	1	99	8	tokens	fixed-reflection	(SBox) => Coll[(Coll[SByte$],SLong$)]	FixedCost(JitCost(15))
+METHOD	1	99	7	getRegV5	unresolved:NoSuchMethodException:sigma.Box.getRegV5(int)	[T](SBox,SInt$) => Option[T]	FixedCost(JitCost(50))
+METHOD	1	99	9	R0	unresolved:NoSuchMethodException:sigma.Box.R0()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	1	99	10	R1	unresolved:NoSuchMethodException:sigma.Box.R1()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	1	99	11	R2	unresolved:NoSuchMethodException:sigma.Box.R2()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	1	99	12	R3	unresolved:NoSuchMethodException:sigma.Box.R3()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	1	99	13	R4	unresolved:NoSuchMethodException:sigma.Box.R4()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	1	99	14	R5	unresolved:NoSuchMethodException:sigma.Box.R5()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	1	99	15	R6	unresolved:NoSuchMethodException:sigma.Box.R6()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	1	99	16	R7	unresolved:NoSuchMethodException:sigma.Box.R7()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	1	99	17	R8	unresolved:NoSuchMethodException:sigma.Box.R8()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	1	99	18	R9	unresolved:NoSuchMethodException:sigma.Box.R9()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+CONTAINER	1	100	AvlTree	15
+METHOD	1	100	1	digest	fixed-reflection	(SAvlTree) => Coll[SByte$]	FixedCost(JitCost(15))
+METHOD	1	100	2	enabledOperations	fixed-reflection	(SAvlTree) => SByte$	FixedCost(JitCost(15))
+METHOD	1	100	3	keyLength	fixed-reflection	(SAvlTree) => SInt$	FixedCost(JitCost(15))
+METHOD	1	100	4	valueLengthOpt	fixed-reflection	(SAvlTree) => Option[SInt$]	FixedCost(JitCost(15))
+METHOD	1	100	5	isInsertAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	1	100	6	isUpdateAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	1	100	7	isRemoveAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	1	100	8	updateOperations	fixed-reflection	(SAvlTree,SByte$) => SAvlTree	FixedCost(JitCost(45))
+METHOD	1	100	9	contains	eval-reflection	(SAvlTree,Coll[SByte$],Coll[SByte$]) => SBoolean	DynamicCost
+METHOD	1	100	10	get	eval-reflection	(SAvlTree,Coll[SByte$],Coll[SByte$]) => Option[Coll[SByte$]]	DynamicCost
+METHOD	1	100	11	getMany	eval-reflection	(SAvlTree,Coll[Coll[SByte$]],Coll[SByte$]) => Coll[Option[Coll[SByte$]]]	DynamicCost
+METHOD	1	100	12	insert	eval-reflection	(SAvlTree,Coll[(Coll[SByte$],Coll[SByte$])],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	1	100	13	update	eval-reflection	(SAvlTree,Coll[(Coll[SByte$],Coll[SByte$])],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	1	100	14	remove	eval-reflection	(SAvlTree,Coll[Coll[SByte$]],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	1	100	15	updateDigest	fixed-reflection	(SAvlTree,Coll[SByte$]) => SAvlTree	FixedCost(JitCost(40))
+CONTAINER	1	101	Context	11
+METHOD	1	101	1	dataInputs	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(15))
+METHOD	1	101	2	headers	fixed-reflection	(SContext) => Coll[SHeader]	FixedCost(JitCost(15))
+METHOD	1	101	3	preHeader	fixed-reflection	(SContext) => SPreHeader	FixedCost(JitCost(15))
+METHOD	1	101	4	INPUTS	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(10))
+METHOD	1	101	5	OUTPUTS	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(10))
+METHOD	1	101	6	HEIGHT	fixed-reflection	(SContext) => SInt$	FixedCost(JitCost(26))
+METHOD	1	101	7	SELF	fixed-reflection	(SContext) => SBox	FixedCost(JitCost(10))
+METHOD	1	101	8	selfBoxIndex	fixed-reflection	(SContext) => SInt$	FixedCost(JitCost(20))
+METHOD	1	101	9	LastBlockUtxoRootHash	fixed-reflection	(SContext) => SAvlTree	FixedCost(JitCost(15))
+METHOD	1	101	10	minerPubKey	fixed-reflection	(SContext) => Coll[SByte$]	FixedCost(JitCost(20))
+METHOD	1	101	11	getVar	unresolved:NoSuchMethodException:sigma.Context.getVar(byte)	[T](SContext,SByte$) => Option[T]	FixedCost(JitCost(10))
+CONTAINER	1	102	String	0
+CONTAINER	1	104	Header	15
+METHOD	1	104	1	id	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	1	104	2	version	fixed-reflection	(SHeader) => SByte$	FixedCost(JitCost(10))
+METHOD	1	104	3	parentId	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	1	104	4	ADProofsRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	1	104	5	stateRoot	fixed-reflection	(SHeader) => SAvlTree	FixedCost(JitCost(10))
+METHOD	1	104	6	transactionsRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	1	104	7	timestamp	fixed-reflection	(SHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	1	104	8	nBits	fixed-reflection	(SHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	1	104	9	height	fixed-reflection	(SHeader) => SInt$	FixedCost(JitCost(10))
+METHOD	1	104	10	extensionRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	1	104	11	minerPk	fixed-reflection	(SHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	1	104	12	powOnetimePk	fixed-reflection	(SHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	1	104	13	powNonce	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	1	104	14	powDistance	fixed-reflection	(SHeader) => SBigInt$	FixedCost(JitCost(10))
+METHOD	1	104	15	votes	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+CONTAINER	1	105	PreHeader	7
+METHOD	1	105	1	version	fixed-reflection	(SPreHeader) => SByte$	FixedCost(JitCost(10))
+METHOD	1	105	2	parentId	fixed-reflection	(SPreHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	1	105	3	timestamp	fixed-reflection	(SPreHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	1	105	4	nBits	fixed-reflection	(SPreHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	1	105	5	height	fixed-reflection	(SPreHeader) => SInt$	FixedCost(JitCost(10))
+METHOD	1	105	6	minerPk	fixed-reflection	(SPreHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	1	105	7	votes	fixed-reflection	(SPreHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+CONTAINER	1	106	SigmaDslBuilder	2
+METHOD	1	106	1	groupGenerator	fixed-reflection	(SGlobal) => SGroupElement	FixedCost(JitCost(10))
+METHOD	1	106	2	xor	eval-reflection	(SGlobal,Coll[SByte$],Coll[SByte$]) => Coll[SByte$]	PerItemCost(JitCost(10),JitCost(2),128)
+CONTAINER	2	1	Boolean	0
+CONTAINER	2	2	Byte	7
+METHOD	2	2	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SByte$	null
+METHOD	2	2	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SShort$	null
+METHOD	2	2	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SInt$	null
+METHOD	2	2	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SLong$	null
+METHOD	2	2	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SBigInt$	null
+METHOD	2	2	6	toBytes	custom	(SByte$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	2	2	7	toBits	custom	(SByte$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	2	3	Short	7
+METHOD	2	3	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SByte$	null
+METHOD	2	3	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SShort$	null
+METHOD	2	3	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SInt$	null
+METHOD	2	3	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SLong$	null
+METHOD	2	3	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SBigInt$	null
+METHOD	2	3	6	toBytes	custom	(SShort$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	2	3	7	toBits	custom	(SShort$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	2	4	Int	7
+METHOD	2	4	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SByte$	null
+METHOD	2	4	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SShort$	null
+METHOD	2	4	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SInt$	null
+METHOD	2	4	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SLong$	null
+METHOD	2	4	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SBigInt$	null
+METHOD	2	4	6	toBytes	custom	(SInt$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	2	4	7	toBits	custom	(SInt$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	2	5	Long	7
+METHOD	2	5	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SByte$	null
+METHOD	2	5	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SShort$	null
+METHOD	2	5	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SInt$	null
+METHOD	2	5	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SLong$	null
+METHOD	2	5	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SBigInt$	null
+METHOD	2	5	6	toBytes	custom	(SLong$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	2	5	7	toBits	custom	(SLong$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	2	6	BigInt	7
+METHOD	2	6	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SByte$	null
+METHOD	2	6	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SShort$	null
+METHOD	2	6	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SInt$	null
+METHOD	2	6	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SLong$	null
+METHOD	2	6	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SBigInt$	null
+METHOD	2	6	6	toBytes	custom	(SBigInt$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	2	6	7	toBits	custom	(SBigInt$) => Coll[SBoolean]	FixedCost(JitCost(5))
+CONTAINER	2	7	GroupElement	4
+METHOD	2	7	2	getEncoded	fixed-reflection	(SGroupElement) => Coll[SByte$]	FixedCost(JitCost(250))
+METHOD	2	7	3	exp	fixed-reflection	(SGroupElement,SBigInt$) => SGroupElement	FixedCost(JitCost(900))
+METHOD	2	7	4	multiply	fixed-reflection	(SGroupElement,SGroupElement) => SGroupElement	FixedCost(JitCost(40))
+METHOD	2	7	5	negate	fixed-reflection	(SGroupElement) => SGroupElement	FixedCost(JitCost(45))
+CONTAINER	2	8	SigmaProp	2
+METHOD	2	8	1	propBytes	unresolved:RuntimeException:Cannot find eval method def propBytes_eval(List(class sigma.ast.MethodCall, interface sigma.SigmaProp, class sigma.eval.ErgoTreeEvaluator))	(SSigmaProp) => Coll[SByte$]	PerItemCost(JitCost(35),JitCost(6),1)
+METHOD	2	8	2	isProven	unresolved:RuntimeException:Cannot find eval method def isProven_eval(List(class sigma.ast.MethodCall, interface sigma.SigmaProp, class sigma.eval.ErgoTreeEvaluator))	(SSigmaProp) => SBoolean	null
+CONTAINER	2	12	SCollection	17
+METHOD	2	12	1	size	fixed-reflection	(Coll[IV]) => SInt$	FixedCost(JitCost(14))
+METHOD	2	12	2	getOrElse	eval-reflection	[IV](Coll[IV],SInt$,IV) => IV	DynamicCost
+METHOD	2	12	3	map	eval-reflection	[IV,OV](Coll[IV],(IV) => OV) => Coll[OV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	2	12	4	exists	unresolved:RuntimeException:Cannot find eval method def exists_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => SBoolean	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	2	12	5	fold	unresolved:RuntimeException:Cannot find eval method def fold_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, class java.lang.Object, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV,OV](Coll[IV],OV,(OV,IV) => OV) => OV	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	2	12	6	forall	unresolved:RuntimeException:Cannot find eval method def forall_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => SBoolean	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	2	12	7	slice	unresolved:RuntimeException:Cannot find eval method def slice_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, int, int, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],SInt$,SInt$) => Coll[IV]	PerItemCost(JitCost(10),JitCost(2),100)
+METHOD	2	12	8	filter	unresolved:RuntimeException:Cannot find eval method def filter_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => Coll[IV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	2	12	9	append	unresolved:RuntimeException:Cannot find eval method def append_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface sigma.Coll, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],Coll[IV]) => Coll[IV]	PerItemCost(JitCost(20),JitCost(2),100)
+METHOD	2	12	10	apply	fixed-reflection	[IV](Coll[IV],SInt$) => IV	FixedCost(JitCost(30))
+METHOD	2	12	14	indices	eval-reflection	(Coll[IV]) => Coll[SInt$]	PerItemCost(JitCost(20),JitCost(2),16)
+METHOD	2	12	15	flatMap	eval-reflection	[IV,OV](Coll[IV],(IV) => Coll[OV]) => Coll[OV]	PerItemCost(JitCost(60),JitCost(10),8)
+METHOD	2	12	19	patch	eval-reflection	[IV](Coll[IV],SInt$,Coll[IV],SInt$) => Coll[IV]	PerItemCost(JitCost(30),JitCost(2),10)
+METHOD	2	12	20	updated	eval-reflection	[IV](Coll[IV],SInt$,IV) => Coll[IV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	2	12	21	updateMany	eval-reflection	[IV](Coll[IV],Coll[SInt$],Coll[IV]) => Coll[IV]	PerItemCost(JitCost(20),JitCost(2),10)
+METHOD	2	12	26	indexOf	eval-reflection	[IV](Coll[IV],IV,SInt$) => SInt$	PerItemCost(JitCost(20),JitCost(10),2)
+METHOD	2	12	29	zip	eval-reflection	[IV,OV](Coll[IV],Coll[OV]) => Coll[(IV,OV)]	PerItemCost(JitCost(10),JitCost(1),10)
+CONTAINER	2	36	SOption	5
+METHOD	2	36	2	isDefined	fixed-reflection	(Option[T]) => SBoolean	FixedCost(JitCost(10))
+METHOD	2	36	3	get	fixed-reflection	(Option[T]) => T	FixedCost(JitCost(15))
+METHOD	2	36	4	getOrElse	unresolved:NoSuchMethodException:scala.Option.getOrElse(java.lang.Object)	[T](Option[T],T) => T	FixedCost(JitCost(20))
+METHOD	2	36	7	map	fixed-reflection	[T,R](Option[T],(T) => R) => Option[R]	FixedCost(JitCost(20))
+METHOD	2	36	8	filter	fixed-reflection	[T](Option[T],(T) => SBoolean) => Option[T]	FixedCost(JitCost(20))
+CONTAINER	2	96	STuple	0
+CONTAINER	2	97	Any	0
+CONTAINER	2	98	Unit	0
+CONTAINER	2	99	Box	18
+METHOD	2	99	1	value	fixed-reflection	(SBox) => SLong$	FixedCost(JitCost(8))
+METHOD	2	99	2	propositionBytes	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	2	99	3	bytes	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	2	99	4	bytesWithoutRef	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	2	99	5	id	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	2	99	6	creationInfo	fixed-reflection	(SBox) => (SInt$,Coll[SByte$])	FixedCost(JitCost(16))
+METHOD	2	99	8	tokens	fixed-reflection	(SBox) => Coll[(Coll[SByte$],SLong$)]	FixedCost(JitCost(15))
+METHOD	2	99	7	getRegV5	unresolved:NoSuchMethodException:sigma.Box.getRegV5(int)	[T](SBox,SInt$) => Option[T]	FixedCost(JitCost(50))
+METHOD	2	99	9	R0	unresolved:NoSuchMethodException:sigma.Box.R0()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	2	99	10	R1	unresolved:NoSuchMethodException:sigma.Box.R1()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	2	99	11	R2	unresolved:NoSuchMethodException:sigma.Box.R2()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	2	99	12	R3	unresolved:NoSuchMethodException:sigma.Box.R3()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	2	99	13	R4	unresolved:NoSuchMethodException:sigma.Box.R4()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	2	99	14	R5	unresolved:NoSuchMethodException:sigma.Box.R5()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	2	99	15	R6	unresolved:NoSuchMethodException:sigma.Box.R6()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	2	99	16	R7	unresolved:NoSuchMethodException:sigma.Box.R7()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	2	99	17	R8	unresolved:NoSuchMethodException:sigma.Box.R8()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	2	99	18	R9	unresolved:NoSuchMethodException:sigma.Box.R9()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+CONTAINER	2	100	AvlTree	15
+METHOD	2	100	1	digest	fixed-reflection	(SAvlTree) => Coll[SByte$]	FixedCost(JitCost(15))
+METHOD	2	100	2	enabledOperations	fixed-reflection	(SAvlTree) => SByte$	FixedCost(JitCost(15))
+METHOD	2	100	3	keyLength	fixed-reflection	(SAvlTree) => SInt$	FixedCost(JitCost(15))
+METHOD	2	100	4	valueLengthOpt	fixed-reflection	(SAvlTree) => Option[SInt$]	FixedCost(JitCost(15))
+METHOD	2	100	5	isInsertAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	2	100	6	isUpdateAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	2	100	7	isRemoveAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	2	100	8	updateOperations	fixed-reflection	(SAvlTree,SByte$) => SAvlTree	FixedCost(JitCost(45))
+METHOD	2	100	9	contains	eval-reflection	(SAvlTree,Coll[SByte$],Coll[SByte$]) => SBoolean	DynamicCost
+METHOD	2	100	10	get	eval-reflection	(SAvlTree,Coll[SByte$],Coll[SByte$]) => Option[Coll[SByte$]]	DynamicCost
+METHOD	2	100	11	getMany	eval-reflection	(SAvlTree,Coll[Coll[SByte$]],Coll[SByte$]) => Coll[Option[Coll[SByte$]]]	DynamicCost
+METHOD	2	100	12	insert	eval-reflection	(SAvlTree,Coll[(Coll[SByte$],Coll[SByte$])],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	2	100	13	update	eval-reflection	(SAvlTree,Coll[(Coll[SByte$],Coll[SByte$])],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	2	100	14	remove	eval-reflection	(SAvlTree,Coll[Coll[SByte$]],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	2	100	15	updateDigest	fixed-reflection	(SAvlTree,Coll[SByte$]) => SAvlTree	FixedCost(JitCost(40))
+CONTAINER	2	101	Context	11
+METHOD	2	101	1	dataInputs	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(15))
+METHOD	2	101	2	headers	fixed-reflection	(SContext) => Coll[SHeader]	FixedCost(JitCost(15))
+METHOD	2	101	3	preHeader	fixed-reflection	(SContext) => SPreHeader	FixedCost(JitCost(15))
+METHOD	2	101	4	INPUTS	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(10))
+METHOD	2	101	5	OUTPUTS	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(10))
+METHOD	2	101	6	HEIGHT	fixed-reflection	(SContext) => SInt$	FixedCost(JitCost(26))
+METHOD	2	101	7	SELF	fixed-reflection	(SContext) => SBox	FixedCost(JitCost(10))
+METHOD	2	101	8	selfBoxIndex	fixed-reflection	(SContext) => SInt$	FixedCost(JitCost(20))
+METHOD	2	101	9	LastBlockUtxoRootHash	fixed-reflection	(SContext) => SAvlTree	FixedCost(JitCost(15))
+METHOD	2	101	10	minerPubKey	fixed-reflection	(SContext) => Coll[SByte$]	FixedCost(JitCost(20))
+METHOD	2	101	11	getVar	unresolved:NoSuchMethodException:sigma.Context.getVar(byte)	[T](SContext,SByte$) => Option[T]	FixedCost(JitCost(10))
+CONTAINER	2	102	String	0
+CONTAINER	2	104	Header	15
+METHOD	2	104	1	id	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	2	104	2	version	fixed-reflection	(SHeader) => SByte$	FixedCost(JitCost(10))
+METHOD	2	104	3	parentId	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	2	104	4	ADProofsRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	2	104	5	stateRoot	fixed-reflection	(SHeader) => SAvlTree	FixedCost(JitCost(10))
+METHOD	2	104	6	transactionsRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	2	104	7	timestamp	fixed-reflection	(SHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	2	104	8	nBits	fixed-reflection	(SHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	2	104	9	height	fixed-reflection	(SHeader) => SInt$	FixedCost(JitCost(10))
+METHOD	2	104	10	extensionRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	2	104	11	minerPk	fixed-reflection	(SHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	2	104	12	powOnetimePk	fixed-reflection	(SHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	2	104	13	powNonce	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	2	104	14	powDistance	fixed-reflection	(SHeader) => SBigInt$	FixedCost(JitCost(10))
+METHOD	2	104	15	votes	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+CONTAINER	2	105	PreHeader	7
+METHOD	2	105	1	version	fixed-reflection	(SPreHeader) => SByte$	FixedCost(JitCost(10))
+METHOD	2	105	2	parentId	fixed-reflection	(SPreHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	2	105	3	timestamp	fixed-reflection	(SPreHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	2	105	4	nBits	fixed-reflection	(SPreHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	2	105	5	height	fixed-reflection	(SPreHeader) => SInt$	FixedCost(JitCost(10))
+METHOD	2	105	6	minerPk	fixed-reflection	(SPreHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	2	105	7	votes	fixed-reflection	(SPreHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+CONTAINER	2	106	SigmaDslBuilder	2
+METHOD	2	106	1	groupGenerator	fixed-reflection	(SGlobal) => SGroupElement	FixedCost(JitCost(10))
+METHOD	2	106	2	xor	eval-reflection	(SGlobal,Coll[SByte$],Coll[SByte$]) => Coll[SByte$]	PerItemCost(JitCost(10),JitCost(2),128)
+CONTAINER	3	1	Boolean	0
+CONTAINER	3	2	Byte	13
+METHOD	3	2	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SByte$	null
+METHOD	3	2	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SShort$	null
+METHOD	3	2	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SInt$	null
+METHOD	3	2	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SLong$	null
+METHOD	3	2	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, byte, class sigma.eval.ErgoTreeEvaluator))	(SByte$) => SBigInt$	null
+METHOD	3	2	6	toBytes	custom	(SByte$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	3	2	7	toBits	custom	(SByte$) => Coll[SBoolean]	FixedCost(JitCost(5))
+METHOD	3	2	8	bitwiseInverse	custom	(SByte$) => SByte$	FixedCost(JitCost(5))
+METHOD	3	2	9	bitwiseOr	custom	(SByte$,SByte$) => SByte$	FixedCost(JitCost(5))
+METHOD	3	2	10	bitwiseAnd	custom	(SByte$,SByte$) => SByte$	FixedCost(JitCost(5))
+METHOD	3	2	11	bitwiseXor	custom	(SByte$,SByte$) => SByte$	FixedCost(JitCost(5))
+METHOD	3	2	12	shiftLeft	custom	(SByte$,SInt$) => SByte$	FixedCost(JitCost(5))
+METHOD	3	2	13	shiftRight	custom	(SByte$,SInt$) => SByte$	FixedCost(JitCost(5))
+CONTAINER	3	3	Short	13
+METHOD	3	3	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SByte$	null
+METHOD	3	3	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SShort$	null
+METHOD	3	3	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SInt$	null
+METHOD	3	3	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SLong$	null
+METHOD	3	3	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, short, class sigma.eval.ErgoTreeEvaluator))	(SShort$) => SBigInt$	null
+METHOD	3	3	6	toBytes	custom	(SShort$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	3	3	7	toBits	custom	(SShort$) => Coll[SBoolean]	FixedCost(JitCost(5))
+METHOD	3	3	8	bitwiseInverse	custom	(SShort$) => SShort$	FixedCost(JitCost(5))
+METHOD	3	3	9	bitwiseOr	custom	(SShort$,SShort$) => SShort$	FixedCost(JitCost(5))
+METHOD	3	3	10	bitwiseAnd	custom	(SShort$,SShort$) => SShort$	FixedCost(JitCost(5))
+METHOD	3	3	11	bitwiseXor	custom	(SShort$,SShort$) => SShort$	FixedCost(JitCost(5))
+METHOD	3	3	12	shiftLeft	custom	(SShort$,SInt$) => SShort$	FixedCost(JitCost(5))
+METHOD	3	3	13	shiftRight	custom	(SShort$,SInt$) => SShort$	FixedCost(JitCost(5))
+CONTAINER	3	4	Int	13
+METHOD	3	4	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SByte$	null
+METHOD	3	4	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SShort$	null
+METHOD	3	4	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SInt$	null
+METHOD	3	4	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SLong$	null
+METHOD	3	4	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, int, class sigma.eval.ErgoTreeEvaluator))	(SInt$) => SBigInt$	null
+METHOD	3	4	6	toBytes	custom	(SInt$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	3	4	7	toBits	custom	(SInt$) => Coll[SBoolean]	FixedCost(JitCost(5))
+METHOD	3	4	8	bitwiseInverse	custom	(SInt$) => SInt$	FixedCost(JitCost(5))
+METHOD	3	4	9	bitwiseOr	custom	(SInt$,SInt$) => SInt$	FixedCost(JitCost(5))
+METHOD	3	4	10	bitwiseAnd	custom	(SInt$,SInt$) => SInt$	FixedCost(JitCost(5))
+METHOD	3	4	11	bitwiseXor	custom	(SInt$,SInt$) => SInt$	FixedCost(JitCost(5))
+METHOD	3	4	12	shiftLeft	custom	(SInt$,SInt$) => SInt$	FixedCost(JitCost(5))
+METHOD	3	4	13	shiftRight	custom	(SInt$,SInt$) => SInt$	FixedCost(JitCost(5))
+CONTAINER	3	5	Long	13
+METHOD	3	5	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SByte$	null
+METHOD	3	5	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SShort$	null
+METHOD	3	5	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SInt$	null
+METHOD	3	5	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SLong$	null
+METHOD	3	5	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, long, class sigma.eval.ErgoTreeEvaluator))	(SLong$) => SBigInt$	null
+METHOD	3	5	6	toBytes	custom	(SLong$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	3	5	7	toBits	custom	(SLong$) => Coll[SBoolean]	FixedCost(JitCost(5))
+METHOD	3	5	8	bitwiseInverse	custom	(SLong$) => SLong$	FixedCost(JitCost(5))
+METHOD	3	5	9	bitwiseOr	custom	(SLong$,SLong$) => SLong$	FixedCost(JitCost(5))
+METHOD	3	5	10	bitwiseAnd	custom	(SLong$,SLong$) => SLong$	FixedCost(JitCost(5))
+METHOD	3	5	11	bitwiseXor	custom	(SLong$,SLong$) => SLong$	FixedCost(JitCost(5))
+METHOD	3	5	12	shiftLeft	custom	(SLong$,SInt$) => SLong$	FixedCost(JitCost(5))
+METHOD	3	5	13	shiftRight	custom	(SLong$,SInt$) => SLong$	FixedCost(JitCost(5))
+CONTAINER	3	6	BigInt	15
+METHOD	3	6	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SByte$	null
+METHOD	3	6	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SShort$	null
+METHOD	3	6	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SInt$	null
+METHOD	3	6	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SLong$	null
+METHOD	3	6	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, interface sigma.BigInt, class sigma.eval.ErgoTreeEvaluator))	(SBigInt$) => SBigInt$	null
+METHOD	3	6	6	toBytes	custom	(SBigInt$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	3	6	7	toBits	custom	(SBigInt$) => Coll[SBoolean]	FixedCost(JitCost(5))
+METHOD	3	6	8	bitwiseInverse	custom	(SBigInt$) => SBigInt$	FixedCost(JitCost(5))
+METHOD	3	6	9	bitwiseOr	custom	(SBigInt$,SBigInt$) => SBigInt$	FixedCost(JitCost(5))
+METHOD	3	6	10	bitwiseAnd	custom	(SBigInt$,SBigInt$) => SBigInt$	FixedCost(JitCost(5))
+METHOD	3	6	11	bitwiseXor	custom	(SBigInt$,SBigInt$) => SBigInt$	FixedCost(JitCost(5))
+METHOD	3	6	12	shiftLeft	custom	(SBigInt$,SInt$) => SBigInt$	FixedCost(JitCost(5))
+METHOD	3	6	13	shiftRight	custom	(SBigInt$,SInt$) => SBigInt$	FixedCost(JitCost(5))
+METHOD	3	6	14	toUnsigned	fixed-reflection	(SBigInt$) => SUnsignedBigInt$	FixedCost(JitCost(5))
+METHOD	3	6	15	toUnsignedMod	fixed-reflection	(SBigInt$,SUnsignedBigInt$) => SUnsignedBigInt$	FixedCost(JitCost(15))
+CONTAINER	3	7	GroupElement	5
+METHOD	3	7	2	getEncoded	fixed-reflection	(SGroupElement) => Coll[SByte$]	FixedCost(JitCost(250))
+METHOD	3	7	3	exp	fixed-reflection	(SGroupElement,SBigInt$) => SGroupElement	FixedCost(JitCost(900))
+METHOD	3	7	4	multiply	fixed-reflection	(SGroupElement,SGroupElement) => SGroupElement	FixedCost(JitCost(40))
+METHOD	3	7	5	negate	fixed-reflection	(SGroupElement) => SGroupElement	FixedCost(JitCost(45))
+METHOD	3	7	6	expUnsigned	fixed-reflection	(SGroupElement,SUnsignedBigInt$) => SGroupElement	FixedCost(JitCost(900))
+CONTAINER	3	8	SigmaProp	2
+METHOD	3	8	1	propBytes	unresolved:RuntimeException:Cannot find eval method def propBytes_eval(List(class sigma.ast.MethodCall, interface sigma.SigmaProp, class sigma.eval.ErgoTreeEvaluator))	(SSigmaProp) => Coll[SByte$]	PerItemCost(JitCost(35),JitCost(6),1)
+METHOD	3	8	2	isProven	unresolved:RuntimeException:Cannot find eval method def isProven_eval(List(class sigma.ast.MethodCall, interface sigma.SigmaProp, class sigma.eval.ErgoTreeEvaluator))	(SSigmaProp) => SBoolean	null
+CONTAINER	3	9	UnsignedBigInt	19
+METHOD	3	9	1	toByte	unresolved:RuntimeException:Cannot find eval method def toByte_eval(List(class sigma.ast.MethodCall, interface sigma.UnsignedBigInt, class sigma.eval.ErgoTreeEvaluator))	(SUnsignedBigInt$) => SByte$	null
+METHOD	3	9	2	toShort	unresolved:RuntimeException:Cannot find eval method def toShort_eval(List(class sigma.ast.MethodCall, interface sigma.UnsignedBigInt, class sigma.eval.ErgoTreeEvaluator))	(SUnsignedBigInt$) => SShort$	null
+METHOD	3	9	3	toInt	unresolved:RuntimeException:Cannot find eval method def toInt_eval(List(class sigma.ast.MethodCall, interface sigma.UnsignedBigInt, class sigma.eval.ErgoTreeEvaluator))	(SUnsignedBigInt$) => SInt$	null
+METHOD	3	9	4	toLong	unresolved:RuntimeException:Cannot find eval method def toLong_eval(List(class sigma.ast.MethodCall, interface sigma.UnsignedBigInt, class sigma.eval.ErgoTreeEvaluator))	(SUnsignedBigInt$) => SLong$	null
+METHOD	3	9	5	toBigInt	unresolved:RuntimeException:Cannot find eval method def toBigInt_eval(List(class sigma.ast.MethodCall, interface sigma.UnsignedBigInt, class sigma.eval.ErgoTreeEvaluator))	(SUnsignedBigInt$) => SBigInt$	null
+METHOD	3	9	6	toBytes	custom	(SUnsignedBigInt$) => Coll[SByte$]	FixedCost(JitCost(5))
+METHOD	3	9	7	toBits	custom	(SUnsignedBigInt$) => Coll[SBoolean]	FixedCost(JitCost(5))
+METHOD	3	9	8	bitwiseInverse	custom	(SUnsignedBigInt$) => SUnsignedBigInt$	FixedCost(JitCost(5))
+METHOD	3	9	9	bitwiseOr	custom	(SUnsignedBigInt$,SUnsignedBigInt$) => SUnsignedBigInt$	FixedCost(JitCost(5))
+METHOD	3	9	10	bitwiseAnd	custom	(SUnsignedBigInt$,SUnsignedBigInt$) => SUnsignedBigInt$	FixedCost(JitCost(5))
+METHOD	3	9	11	bitwiseXor	custom	(SUnsignedBigInt$,SUnsignedBigInt$) => SUnsignedBigInt$	FixedCost(JitCost(5))
+METHOD	3	9	12	shiftLeft	custom	(SUnsignedBigInt$,SInt$) => SUnsignedBigInt$	FixedCost(JitCost(5))
+METHOD	3	9	13	shiftRight	custom	(SUnsignedBigInt$,SInt$) => SUnsignedBigInt$	FixedCost(JitCost(5))
+METHOD	3	9	14	modInverse	fixed-reflection	(SUnsignedBigInt$,SUnsignedBigInt$) => SUnsignedBigInt$	FixedCost(JitCost(150))
+METHOD	3	9	15	plusMod	fixed-reflection	(SUnsignedBigInt$,SUnsignedBigInt$,SUnsignedBigInt$) => SUnsignedBigInt$	FixedCost(JitCost(30))
+METHOD	3	9	16	subtractMod	fixed-reflection	(SUnsignedBigInt$,SUnsignedBigInt$,SUnsignedBigInt$) => SUnsignedBigInt$	FixedCost(JitCost(30))
+METHOD	3	9	17	multiplyMod	fixed-reflection	(SUnsignedBigInt$,SUnsignedBigInt$,SUnsignedBigInt$) => SUnsignedBigInt$	FixedCost(JitCost(40))
+METHOD	3	9	18	mod	fixed-reflection	(SUnsignedBigInt$,SUnsignedBigInt$) => SUnsignedBigInt$	FixedCost(JitCost(20))
+METHOD	3	9	19	toSigned	fixed-reflection	(SUnsignedBigInt$) => SBigInt$	FixedCost(JitCost(10))
+CONTAINER	3	12	SCollection	21
+METHOD	3	12	1	size	fixed-reflection	(Coll[IV]) => SInt$	FixedCost(JitCost(14))
+METHOD	3	12	2	getOrElse	eval-reflection	[IV](Coll[IV],SInt$,IV) => IV	DynamicCost
+METHOD	3	12	3	map	eval-reflection	[IV,OV](Coll[IV],(IV) => OV) => Coll[OV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	3	12	4	exists	unresolved:RuntimeException:Cannot find eval method def exists_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => SBoolean	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	3	12	5	fold	unresolved:RuntimeException:Cannot find eval method def fold_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, class java.lang.Object, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV,OV](Coll[IV],OV,(OV,IV) => OV) => OV	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	3	12	6	forall	unresolved:RuntimeException:Cannot find eval method def forall_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => SBoolean	PerItemCost(JitCost(3),JitCost(1),10)
+METHOD	3	12	7	slice	unresolved:RuntimeException:Cannot find eval method def slice_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, int, int, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],SInt$,SInt$) => Coll[IV]	PerItemCost(JitCost(10),JitCost(2),100)
+METHOD	3	12	8	filter	unresolved:RuntimeException:Cannot find eval method def filter_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface scala.Function1, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],(IV) => SBoolean) => Coll[IV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	3	12	9	append	unresolved:RuntimeException:Cannot find eval method def append_eval(List(class sigma.ast.MethodCall, interface sigma.Coll, interface sigma.Coll, class sigma.eval.ErgoTreeEvaluator))	[IV](Coll[IV],Coll[IV]) => Coll[IV]	PerItemCost(JitCost(20),JitCost(2),100)
+METHOD	3	12	10	apply	fixed-reflection	[IV](Coll[IV],SInt$) => IV	FixedCost(JitCost(30))
+METHOD	3	12	14	indices	eval-reflection	(Coll[IV]) => Coll[SInt$]	PerItemCost(JitCost(20),JitCost(2),16)
+METHOD	3	12	15	flatMap	eval-reflection	[IV,OV](Coll[IV],(IV) => Coll[OV]) => Coll[OV]	PerItemCost(JitCost(60),JitCost(10),8)
+METHOD	3	12	19	patch	eval-reflection	[IV](Coll[IV],SInt$,Coll[IV],SInt$) => Coll[IV]	PerItemCost(JitCost(30),JitCost(2),10)
+METHOD	3	12	20	updated	eval-reflection	[IV](Coll[IV],SInt$,IV) => Coll[IV]	PerItemCost(JitCost(20),JitCost(1),10)
+METHOD	3	12	21	updateMany	eval-reflection	[IV](Coll[IV],Coll[SInt$],Coll[IV]) => Coll[IV]	PerItemCost(JitCost(20),JitCost(2),10)
+METHOD	3	12	26	indexOf	eval-reflection	[IV](Coll[IV],IV,SInt$) => SInt$	PerItemCost(JitCost(20),JitCost(10),2)
+METHOD	3	12	29	zip	eval-reflection	[IV,OV](Coll[IV],Coll[OV]) => Coll[(IV,OV)]	PerItemCost(JitCost(10),JitCost(1),10)
+METHOD	3	12	30	reverse	eval-reflection	[IV](Coll[IV]) => Coll[IV]	PerItemCost(JitCost(20),JitCost(2),100)
+METHOD	3	12	31	startsWith	eval-reflection	[IV](Coll[IV],Coll[IV]) => SBoolean	PerItemCost(JitCost(10),JitCost(1),10)
+METHOD	3	12	32	endsWith	eval-reflection	[IV](Coll[IV],Coll[IV]) => SBoolean	PerItemCost(JitCost(10),JitCost(1),10)
+METHOD	3	12	33	get	fixed-reflection	[IV](Coll[IV],SInt$) => Option[IV]	FixedCost(JitCost(30))
+CONTAINER	3	36	SOption	5
+METHOD	3	36	2	isDefined	fixed-reflection	(Option[T]) => SBoolean	FixedCost(JitCost(10))
+METHOD	3	36	3	get	fixed-reflection	(Option[T]) => T	FixedCost(JitCost(15))
+METHOD	3	36	4	getOrElse	unresolved:NoSuchMethodException:scala.Option.getOrElse(java.lang.Object)	[T](Option[T],T) => T	FixedCost(JitCost(20))
+METHOD	3	36	7	map	fixed-reflection	[T,R](Option[T],(T) => R) => Option[R]	FixedCost(JitCost(20))
+METHOD	3	36	8	filter	fixed-reflection	[T](Option[T],(T) => SBoolean) => Option[T]	FixedCost(JitCost(20))
+CONTAINER	3	96	STuple	0
+CONTAINER	3	97	Any	0
+CONTAINER	3	98	Unit	0
+CONTAINER	3	99	Box	19
+METHOD	3	99	1	value	fixed-reflection	(SBox) => SLong$	FixedCost(JitCost(8))
+METHOD	3	99	2	propositionBytes	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	3	99	3	bytes	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	3	99	4	bytesWithoutRef	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	3	99	5	id	fixed-reflection	(SBox) => Coll[SByte$]	FixedCost(JitCost(12))
+METHOD	3	99	6	creationInfo	fixed-reflection	(SBox) => (SInt$,Coll[SByte$])	FixedCost(JitCost(16))
+METHOD	3	99	8	tokens	fixed-reflection	(SBox) => Coll[(Coll[SByte$],SLong$)]	FixedCost(JitCost(15))
+METHOD	3	99	7	getRegV5	unresolved:NoSuchMethodException:sigma.Box.getRegV5(int)	[T](SBox,SInt$) => Option[T]	FixedCost(JitCost(50))
+METHOD	3	99	9	R0	unresolved:NoSuchMethodException:sigma.Box.R0()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	3	99	10	R1	unresolved:NoSuchMethodException:sigma.Box.R1()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	3	99	11	R2	unresolved:NoSuchMethodException:sigma.Box.R2()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	3	99	12	R3	unresolved:NoSuchMethodException:sigma.Box.R3()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	3	99	13	R4	unresolved:NoSuchMethodException:sigma.Box.R4()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	3	99	14	R5	unresolved:NoSuchMethodException:sigma.Box.R5()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	3	99	15	R6	unresolved:NoSuchMethodException:sigma.Box.R6()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	3	99	16	R7	unresolved:NoSuchMethodException:sigma.Box.R7()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	3	99	17	R8	unresolved:NoSuchMethodException:sigma.Box.R8()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	3	99	18	R9	unresolved:NoSuchMethodException:sigma.Box.R9()	[T](SBox) => Option[T]	FixedCost(JitCost(50))
+METHOD	3	99	19	getReg	fixed-reflection	[T](SBox,SInt$) => Option[T]	FixedCost(JitCost(50))
+CONTAINER	3	100	AvlTree	16
+METHOD	3	100	1	digest	fixed-reflection	(SAvlTree) => Coll[SByte$]	FixedCost(JitCost(15))
+METHOD	3	100	2	enabledOperations	fixed-reflection	(SAvlTree) => SByte$	FixedCost(JitCost(15))
+METHOD	3	100	3	keyLength	fixed-reflection	(SAvlTree) => SInt$	FixedCost(JitCost(15))
+METHOD	3	100	4	valueLengthOpt	fixed-reflection	(SAvlTree) => Option[SInt$]	FixedCost(JitCost(15))
+METHOD	3	100	5	isInsertAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	3	100	6	isUpdateAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	3	100	7	isRemoveAllowed	fixed-reflection	(SAvlTree) => SBoolean	FixedCost(JitCost(15))
+METHOD	3	100	8	updateOperations	fixed-reflection	(SAvlTree,SByte$) => SAvlTree	FixedCost(JitCost(45))
+METHOD	3	100	9	contains	eval-reflection	(SAvlTree,Coll[SByte$],Coll[SByte$]) => SBoolean	DynamicCost
+METHOD	3	100	10	get	eval-reflection	(SAvlTree,Coll[SByte$],Coll[SByte$]) => Option[Coll[SByte$]]	DynamicCost
+METHOD	3	100	11	getMany	eval-reflection	(SAvlTree,Coll[Coll[SByte$]],Coll[SByte$]) => Coll[Option[Coll[SByte$]]]	DynamicCost
+METHOD	3	100	12	insert	eval-reflection	(SAvlTree,Coll[(Coll[SByte$],Coll[SByte$])],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	3	100	13	update	eval-reflection	(SAvlTree,Coll[(Coll[SByte$],Coll[SByte$])],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	3	100	14	remove	eval-reflection	(SAvlTree,Coll[Coll[SByte$]],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+METHOD	3	100	15	updateDigest	fixed-reflection	(SAvlTree,Coll[SByte$]) => SAvlTree	FixedCost(JitCost(40))
+METHOD	3	100	16	insertOrUpdate	eval-reflection	(SAvlTree,Coll[(Coll[SByte$],Coll[SByte$])],Coll[SByte$]) => Option[SAvlTree]	DynamicCost
+CONTAINER	3	101	Context	12
+METHOD	3	101	1	dataInputs	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(15))
+METHOD	3	101	2	headers	fixed-reflection	(SContext) => Coll[SHeader]	FixedCost(JitCost(15))
+METHOD	3	101	3	preHeader	fixed-reflection	(SContext) => SPreHeader	FixedCost(JitCost(15))
+METHOD	3	101	4	INPUTS	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(10))
+METHOD	3	101	5	OUTPUTS	fixed-reflection	(SContext) => Coll[SBox]	FixedCost(JitCost(10))
+METHOD	3	101	6	HEIGHT	fixed-reflection	(SContext) => SInt$	FixedCost(JitCost(26))
+METHOD	3	101	7	SELF	fixed-reflection	(SContext) => SBox	FixedCost(JitCost(10))
+METHOD	3	101	8	selfBoxIndex	fixed-reflection	(SContext) => SInt$	FixedCost(JitCost(20))
+METHOD	3	101	9	LastBlockUtxoRootHash	fixed-reflection	(SContext) => SAvlTree	FixedCost(JitCost(15))
+METHOD	3	101	10	minerPubKey	fixed-reflection	(SContext) => Coll[SByte$]	FixedCost(JitCost(20))
+METHOD	3	101	11	getVar	unresolved:NoSuchMethodException:sigma.Context.getVar(byte)	[T](SContext,SByte$) => Option[T]	FixedCost(JitCost(10))
+METHOD	3	101	12	getVarFromInput	fixed-reflection	[T](SContext,SShort$,SByte$) => Option[T]	FixedCost(JitCost(10))
+CONTAINER	3	102	String	0
+CONTAINER	3	104	Header	16
+METHOD	3	104	1	id	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	3	104	2	version	fixed-reflection	(SHeader) => SByte$	FixedCost(JitCost(10))
+METHOD	3	104	3	parentId	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	3	104	4	ADProofsRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	3	104	5	stateRoot	fixed-reflection	(SHeader) => SAvlTree	FixedCost(JitCost(10))
+METHOD	3	104	6	transactionsRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	3	104	7	timestamp	fixed-reflection	(SHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	3	104	8	nBits	fixed-reflection	(SHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	3	104	9	height	fixed-reflection	(SHeader) => SInt$	FixedCost(JitCost(10))
+METHOD	3	104	10	extensionRoot	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	3	104	11	minerPk	fixed-reflection	(SHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	3	104	12	powOnetimePk	fixed-reflection	(SHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	3	104	13	powNonce	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	3	104	14	powDistance	fixed-reflection	(SHeader) => SBigInt$	FixedCost(JitCost(10))
+METHOD	3	104	15	votes	fixed-reflection	(SHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	3	104	16	checkPow	fixed-reflection	(SHeader) => SBoolean	FixedCost(JitCost(700))
+CONTAINER	3	105	PreHeader	7
+METHOD	3	105	1	version	fixed-reflection	(SPreHeader) => SByte$	FixedCost(JitCost(10))
+METHOD	3	105	2	parentId	fixed-reflection	(SPreHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+METHOD	3	105	3	timestamp	fixed-reflection	(SPreHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	3	105	4	nBits	fixed-reflection	(SPreHeader) => SLong$	FixedCost(JitCost(10))
+METHOD	3	105	5	height	fixed-reflection	(SPreHeader) => SInt$	FixedCost(JitCost(10))
+METHOD	3	105	6	minerPk	fixed-reflection	(SPreHeader) => SGroupElement	FixedCost(JitCost(10))
+METHOD	3	105	7	votes	fixed-reflection	(SPreHeader) => Coll[SByte$]	FixedCost(JitCost(10))
+CONTAINER	3	106	SigmaDslBuilder	10
+METHOD	3	106	1	groupGenerator	fixed-reflection	(SGlobal) => SGroupElement	FixedCost(JitCost(10))
+METHOD	3	106	2	xor	eval-reflection	(SGlobal,Coll[SByte$],Coll[SByte$]) => Coll[SByte$]	PerItemCost(JitCost(10),JitCost(2),128)
+METHOD	3	106	3	serialize	eval-reflection	[T](SGlobal,T) => Coll[SByte$]	DynamicCost
+METHOD	3	106	8	powHit	eval-reflection	(SGlobal,SInt$,Coll[SByte$],Coll[SByte$],Coll[SByte$],SInt$) => SUnsignedBigInt$	sigma.ast.PowHitCostKind$@1a75e76a
+METHOD	3	106	4	deserializeTo	eval-reflection	[T](SGlobal,Coll[SByte$]) => T	PerItemCost(JitCost(100),JitCost(32),32)
+METHOD	3	106	6	encodeNbits	fixed-reflection	(SGlobal,SBigInt$) => SLong$	FixedCost(JitCost(25))
+METHOD	3	106	7	decodeNbits	fixed-reflection	(SGlobal,SLong$) => SBigInt$	FixedCost(JitCost(50))
+METHOD	3	106	5	fromBigEndianBytes	fixed-reflection	[T](SGlobal,Coll[SByte$]) => T	FixedCost(JitCost(10))
+METHOD	3	106	9	some	fixed-reflection	[T](SGlobal,T) => Option[T]	FixedCost(JitCost(5))
+METHOD	3	106	10	none	fixed-reflection	[T](SGlobal) => Option[T]	FixedCost(JitCost(5))

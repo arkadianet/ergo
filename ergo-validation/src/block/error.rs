@@ -7,6 +7,9 @@ use crate::header::HeaderValidationError;
 /// [`validate_full_block_parallel`](super::validate::validate_full_block_parallel).
 #[derive(Debug, Error)]
 pub enum BlockValidationError {
+    /// A prior parameter table omitted a parameter used by this block.
+    #[error("missing protocol parameter {id}")]
+    MissingProtocolParameter { id: u8 },
     /// A block section's `header_id` does not equal the validated
     /// header's id.
     #[error(

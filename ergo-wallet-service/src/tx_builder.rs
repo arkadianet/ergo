@@ -310,6 +310,12 @@ impl<'a> UnsignedTxBuilder<'a> {
         let change_has_tokens = !change_tokens.is_empty();
         let change_goes_to_fee =
             change_goes_to_fee(change_erg, change_has_tokens, self.min_box_value);
+        if self.fee == 0 && change_goes_to_fee {
+            return Err(WalletError::TxBuild(
+                "zero-fee transactions need exact inputs or change above the minimum box value"
+                    .into(),
+            ));
+        }
         let fee_value = if change_goes_to_fee {
             self.fee
                 .checked_add(change_erg)
@@ -318,19 +324,21 @@ impl<'a> UnsignedTxBuilder<'a> {
             self.fee
         };
 
-        // Fee output (value includes any folded sub-minimum change).
-        let fee_tree = parse_ergo_tree(&self.fee_ergo_tree)
-            .map_err(|e| WalletError::TxBuild(format!("decode fee ergo_tree: {e}")))?;
-        output_candidates.push(
-            ErgoBoxCandidate::new(
-                fee_value,
-                fee_tree,
-                self.current_height,
-                vec![],
-                AdditionalRegisters::empty(),
-            )
-            .map_err(|e| WalletError::TxBuild(format!("ErgoBoxCandidate (fee): {e:?}")))?,
-        );
+        if fee_value > 0 {
+            // Fee output (value includes any folded sub-minimum change).
+            let fee_tree = parse_ergo_tree(&self.fee_ergo_tree)
+                .map_err(|e| WalletError::TxBuild(format!("decode fee ergo_tree: {e}")))?;
+            output_candidates.push(
+                ErgoBoxCandidate::new(
+                    fee_value,
+                    fee_tree,
+                    self.current_height,
+                    vec![],
+                    AdditionalRegisters::empty(),
+                )
+                .map_err(|e| WalletError::TxBuild(format!("ErgoBoxCandidate (fee): {e:?}")))?,
+            );
+        }
 
         // EIP-27 pay-to-reemission output: exactly `to_burn` nanoErg (1 per burned
         // re-emission token). For a real reward box `to_burn` is ERG-scale, so this

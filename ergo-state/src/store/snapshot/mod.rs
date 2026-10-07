@@ -21,6 +21,7 @@
 mod lazy;
 
 use redb::ReadableDatabase;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
@@ -561,12 +562,15 @@ impl CommittedSnapshot {
     /// path is the oracle.
     ///
     /// Cache key is the committed `best_full_block_id` ONLY: any tip change
-    /// (advance OR equal-height reorg) misses and rehydrates. `state_root` is
-    /// carried for a `debug_assert` cross-check, never as a key.
+    /// (advance OR equal-height reorg) misses, then advances a held tree to the
+    /// new tip or rehydrates. `state_root` is carried for a `debug_assert`
+    /// cross-check, never as a key.
     ///
     /// `disposition` is set to the path taken: [`BaseDisposition::Hit`] when
-    /// the tip matched the cached base, [`BaseDisposition::Advanced`] when a
-    /// single-step advance succeeded, [`BaseDisposition::RehydratedAfterFailedAdvance`]
+    /// the tip matched the cached base, [`BaseDisposition::Advanced`] when the
+    /// base was advanced from its own tip, [`BaseDisposition::AdvancedFromAncestor`]
+    /// when the tip forked off below the base and a retained ancestor was
+    /// advanced along the new branch, [`BaseDisposition::RehydratedAfterFailedAdvance`]
     /// when advance was attempted but failed (and full rehydrate ran instead),
     /// or [`BaseDisposition::Rehydrated`] when there was no base to advance
     /// (cold start). If the method returns `Err`, `disposition` is set to the
@@ -606,105 +610,188 @@ impl CommittedSnapshot {
         )
     }
 
-    /// Try to advance a stale `DryRunBase` (cached at tip N) by applying
-    /// block N+1 (the current committed tip) in-place, without a full
-    /// rehydrate from `AVL_NODES`.
+    /// Advance a stale `DryRunBase` to the current committed tip by replaying
+    /// stored blocks in place, without a full rehydrate from `AVL_NODES`.
     ///
-    /// Returns `Ok(advanced_base)` only when every step succeeds AND the
-    /// advanced digest agrees with `self.state_root()`. Any failure — wrong
-    /// parent, missing section, decode error, prover error, or digest
-    /// mismatch — returns `Err`, and the caller falls back to full rehydrate.
-    /// The consumed `base` tree is dropped on the error path; it is never
-    /// reused after this call regardless of the outcome.
-    fn try_advance_base(&self, base: DryRunBase) -> Result<DryRunBase, StateError> {
+    /// Walks back from the committed tip — at most [`MAX_ROLL_FORWARD_BLOCKS`]
+    /// headers — to the first block a pristine tree is held for: the base's
+    /// own tip (the chain simply grew, by one block or a few) or one of its
+    /// retained ancestors (the tip forked off below the base: a reorg). It
+    /// then replays the `BlockTransactions` of every block on the way back up,
+    /// checking each intermediate post-block digest against that block's
+    /// header and the final one against `self.state_root()`.
+    ///
+    /// Returns the advanced base plus the disposition it earned
+    /// ([`BaseDisposition::Advanced`] or
+    /// [`BaseDisposition::AdvancedFromAncestor`]). Any failure — no held tree
+    /// within the window, missing header or section, decode error, prover
+    /// error, or digest mismatch — returns `Err`, and the caller falls back to
+    /// full rehydrate. Every tree taken from `base`, retained ancestors
+    /// included, is dropped on the error path: they share nodes with the tree
+    /// being replayed, whose `visited` bits are clean again only after a
+    /// completed `generate_proof`.
+    fn try_advance_base(
+        &self,
+        base: DryRunBase,
+    ) -> Result<(DryRunBase, BaseDisposition), StateError> {
         let tip = self.best_full_block_id();
 
-        // 1. The current committed tip's header must have base.tip_id as parent
-        //    (single-step descendant gate).
-        let h = self.header(&tip)?.ok_or(StateError::InternalInvariant {
-            what: "try_advance_base: committed tip header missing",
-        })?;
-        if h.parent_id.as_bytes() != &base.tip_id {
-            return Err(StateError::InternalInvariant {
-                what: "try_advance_base: tip parent != base tip_id (not single-step)",
-            });
-        }
-
-        // 2. Look up the BlockTransactions section for the current tip.
-        let section_id = compute_section_id(
-            TYPE_BLOCK_TRANSACTIONS,
-            &tip,
-            h.transactions_root.as_bytes(),
-        );
-        let bytes = self
-            .block_section(&section_id)?
-            .ok_or(StateError::InternalInvariant {
-                what: "try_advance_base: BlockTransactions section not stored for current tip",
+        // 1. Walk back from the tip to a block a pristine tree is held for,
+        //    collecting the blocks to replay, newest first. `start` is `None`
+        //    for the base itself, `Some(i)` for `base.ancestors[i]`.
+        let mut path: Vec<([u8; 32], Header)> = Vec::new();
+        let mut cursor = tip;
+        let start = loop {
+            if cursor == base.tip_id {
+                break None;
+            }
+            if let Some(i) = base.ancestors.iter().position(|a| a.tip_id == cursor) {
+                break Some(i);
+            }
+            if path.len() == MAX_ROLL_FORWARD_BLOCKS {
+                return Err(StateError::InternalInvariant {
+                    what: "try_advance_base: no held base within the roll-forward window",
+                });
+            }
+            let header = self.header(&cursor)?.ok_or(StateError::InternalInvariant {
+                what: "try_advance_base: header missing on the walk back from the tip",
             })?;
+            let parent = *header.parent_id.as_bytes();
+            path.push((cursor, header));
+            cursor = parent;
+        };
 
-        // 3. Decode and sanity-check the header_id linkage.
-        let bt = read_stored_block_transactions(&bytes)
-            .map_err(|e| StateError::Serialization(format!("try_advance_base: {e}")))?;
-        if bt.header_id.as_bytes() != &tip {
-            return Err(StateError::InternalInvariant {
-                what: "try_advance_base: decoded BlockTransactions header_id != tip",
+        // 2. Take the starting tree. When the tip forked off below the base,
+        //    the base and every ancestor above the fork point are on the
+        //    abandoned branch and are dropped; only ancestors of the fork
+        //    point stay retained.
+        let DryRunBase {
+            tip_id,
+            state_root,
+            tree,
+            mut ancestors,
+            ..
+        } = base;
+        let (disposition, mut cur_tip, mut cur_root, mut cur_tree) = match start {
+            None => (BaseDisposition::Advanced, tip_id, state_root, tree),
+            Some(i) => {
+                drop(tree);
+                let fork = ancestors
+                    .drain(..=i)
+                    .next_back()
+                    .expect("drained range ends at the matched ancestor");
+                (
+                    BaseDisposition::AdvancedFromAncestor,
+                    fork.tip_id,
+                    fork.state_root,
+                    fork.tree,
+                )
+            }
+        };
+
+        // 3. Replay each block on the path, oldest first.
+        let last = path.len().saturating_sub(1);
+        for (step, (block_id, header)) in path.into_iter().rev().enumerate() {
+            // Look up and decode the block's stored BlockTransactions section,
+            // sanity-checking its header_id linkage.
+            let section_id = compute_section_id(
+                TYPE_BLOCK_TRANSACTIONS,
+                &block_id,
+                header.transactions_root.as_bytes(),
+            );
+            let bytes = self
+                .block_section(&section_id)?
+                .ok_or(StateError::InternalInvariant {
+                what: "try_advance_base: BlockTransactions section not stored for a replayed block",
+            })?;
+            let bt = read_stored_block_transactions(&bytes)
+                .map_err(|e| StateError::Serialization(format!("try_advance_base: {e}")))?;
+            if bt.header_id.as_bytes() != &block_id {
+                return Err(StateError::InternalInvariant {
+                    what: "try_advance_base: decoded BlockTransactions header_id != replayed block",
+                });
+            }
+
+            // Build the canonical netting change set from the raw
+            // transactions, plus the data-input lookup prefix (digest-neutral —
+            // the proof is discarded below — but kept so this path runs the
+            // identical canonical op stream as every other prover consumer).
+            let refs: Vec<&Transaction> = bt.transactions.iter().collect();
+            let (to_remove, to_insert) = StateStore::build_utxo_changes_raw(&refs)?;
+            let to_lookup: Vec<[u8; 32]> = bt
+                .transactions
+                .iter()
+                .flat_map(|tx| tx.data_inputs.iter().map(|di| *di.box_id.as_bytes()))
+                .collect();
+
+            // Keep the pre-block tree: once this block's `generate_proof`
+            // completes, its shared nodes are clean again and it is a
+            // pristine base for `cur_tip`, the parent of `block_id`.
+            let pre_block = cur_tree.clone();
+
+            // Apply the change set via the shared `apply_change_set_to_prover`
+            // path (same removes-ascending-then-inserts-ascending order, same
+            // generate_proof flag cleanup), taking the post-op tree straight
+            // from the prover. Discard the proof bytes — only the post-op
+            // digest and tree are needed here.
+            let mut prover = batch_avl_prover_from_tree(cur_tree);
+            let (digest, _proof) = super::dry_run::apply_change_set_to_prover(
+                &mut prover,
+                &to_lookup,
+                &to_remove,
+                &to_insert,
+            )?;
+
+            // An intermediate block's post-state must be the root its header
+            // commits to (the final block is checked against the committed
+            // root below) — so every retained tree is the state it is keyed to.
+            if step != last && digest != header.state_root {
+                return Err(StateError::DigestMismatch {
+                    computed: hex::encode(digest.as_bytes()),
+                    expected: hex::encode(header.state_root.as_bytes()),
+                });
+            }
+
+            ancestors.push_front(AncestorBase {
+                tip_id: cur_tip,
+                state_root: cur_root,
+                tree: pre_block,
             });
+            ancestors.truncate(RETAINED_ANCESTORS);
+            cur_tree = prover.base.tree;
+            cur_tip = block_id;
+            cur_root = digest;
         }
 
-        // 4. Build the canonical netting change set from the raw transactions,
-        //    plus the data-input lookup prefix (digest-neutral — the proof is
-        //    discarded below — but kept so this path runs the identical
-        //    canonical op stream as every other prover consumer).
-        let refs: Vec<&Transaction> = bt.transactions.iter().collect();
-        let (to_remove, to_insert) = StateStore::build_utxo_changes_raw(&refs)?;
-        let to_lookup: Vec<[u8; 32]> = bt
-            .transactions
-            .iter()
-            .flat_map(|tx| tx.data_inputs.iter().map(|di| *di.box_id.as_bytes()))
-            .collect();
-
-        // 5. Wrap the consumed base.tree in a prover, apply the change set
-        //    via the shared `apply_change_set_to_prover` path (same
-        //    removes-ascending-then-inserts-ascending order, same
-        //    generate_proof flag cleanup). Taking `&mut` lets us extract the
-        //    post-op tree directly from the prover instead of doing a second
-        //    full rehydrate. Discard the proof bytes — only the post-op
-        //    digest and tree are needed here.
-        let mut prover = batch_avl_prover_from_tree(base.tree);
-        let (advanced_digest, _proof) = super::dry_run::apply_change_set_to_prover(
-            &mut prover,
-            &to_lookup,
-            &to_remove,
-            &to_insert,
-        )?;
-
-        // 6. Mandatory digest check (NOT debug_assert): the advanced digest
+        // 4. Mandatory digest check (NOT debug_assert): the advanced digest
         //    must equal the snapshot's committed state_root. Mirrors the live
         //    apply's hard-fail (apply.rs ~541) — wrongness must be
         //    structurally unservable.
         let expected = self.state_root();
-        if advanced_digest != expected {
+        if cur_root != expected {
             return Err(StateError::DigestMismatch {
-                computed: hex::encode(advanced_digest.as_bytes()),
+                computed: hex::encode(cur_root.as_bytes()),
                 expected: hex::encode(expected.as_bytes()),
             });
         }
+        debug_assert_eq!(cur_tip, tip, "roll-forward ends at the committed tip");
 
-        // 7. Extract the post-generate_proof tree directly from the prover.
-        //    `generate_proof` (called inside `apply_change_set_to_prover`)
-        //    clears `visited` flags on all shared nodes via `pack_tree`'s
-        //    post-order `mark_visited(false)`, so the tree is pristine for
-        //    reuse as a new base. `tree_height` is read from the oracle tree's
-        //    `height` field, which the AVL ops kept up to date, not
-        //    recomputed.
-        let tree = prover.base.tree;
-        let tree_height = tree.height as u8;
-        Ok(DryRunBase {
-            tip_id: tip,
-            state_root: expected,
-            tree,
-            tree_height,
-        })
+        // 5. `generate_proof` (inside `apply_change_set_to_prover`) clears
+        //    `visited` flags on all shared nodes via `pack_tree`'s post-order
+        //    `mark_visited(false)`, so the final tree is pristine for reuse as
+        //    the new base. `tree_height` is read from the oracle tree's
+        //    `height` field, which the AVL ops kept up to date, not recomputed.
+        let tree_height = cur_tree.height as u8;
+        Ok((
+            DryRunBase {
+                tip_id: tip,
+                state_root: expected,
+                tree: cur_tree,
+                tree_height,
+                ancestors,
+            },
+            disposition,
+        ))
     }
 
     /// Change-map core of [`Self::candidate_dry_run_cached`]. Split out so the
@@ -731,15 +818,16 @@ impl CommittedSnapshot {
         *disposition = None;
         let tip = self.best_full_block_id();
 
-        // Miss or stale tip: attempt a single-step advance if we have a stale
-        // base, otherwise fall back to full rehydrate. Drop the old base slot
-        // first so peak memory never holds two graphs simultaneously.
+        // Miss or stale tip: attempt to advance a stale base (from its own tip
+        // or a retained ancestor) if we have one, otherwise fall back to full
+        // rehydrate. Drop the old base slot first so peak memory never holds
+        // two graphs simultaneously.
         if base.as_ref().map(|b| b.tip_id) != Some(tip) {
             let old_base = base.take();
             let new_base = match old_base {
                 Some(stale) => match self.try_advance_base(stale) {
-                    Ok(advanced) => {
-                        *disposition = Some(BaseDisposition::Advanced);
+                    Ok((advanced, how)) => {
+                        *disposition = Some(how);
                         advanced
                     }
                     Err(e) => {
@@ -754,6 +842,7 @@ impl CommittedSnapshot {
                             state_root: self.state_root(),
                             tree,
                             tree_height,
+                            ancestors: VecDeque::new(),
                         }
                     }
                 },
@@ -765,6 +854,7 @@ impl CommittedSnapshot {
                         state_root: self.state_root(),
                         tree,
                         tree_height,
+                        ancestors: VecDeque::new(),
                     }
                 }
             };
@@ -836,9 +926,13 @@ impl CommittedSnapshot {
 pub enum BaseDisposition {
     /// Tip matched the cached base — no tree work, just a COW clone.
     Hit,
-    /// Single-step advance of a stale base succeeded — one block rolled
-    /// forward without a full UTXO-graph rehydrate.
+    /// A stale base was advanced from its own tip — the block(s) since then
+    /// rolled forward without a full UTXO-graph rehydrate.
     Advanced,
+    /// The tip forked off below the cached base (a reorg): a retained
+    /// ancestor base at the fork point was advanced along the new branch
+    /// instead of rehydrating.
+    AdvancedFromAncestor,
     /// No prior base existed; full rehydrate from `AVL_NODES`.
     Rehydrated,
     /// A single-step advance was attempted but failed; fell back to full
@@ -861,12 +955,37 @@ pub enum BaseDisposition {
 /// `!Send`: the inner `Rc<RefCell<Node>>` graph cannot cross a thread
 /// boundary, so the base lives on a single dedicated build thread (one serial
 /// consumer — never shared).
+///
+/// Reorgs: the base also keeps pristine trees for its tip's most recent
+/// ancestors (up to `RETAINED_ANCESTORS`), so when the tip forks off below
+/// it the next build replays the new branch from the fork point instead of
+/// rehydrating the whole UTXO graph. Consecutive trees share every node a
+/// block did not touch, so each ancestor costs roughly one block's worth of
+/// replaced nodes. Ancestors share nodes with the base tree, so they fall
+/// under the same poison contract: whenever the base is dropped, so are they.
 pub struct DryRunBase {
     tip_id: [u8; 32],
     /// Debug cross-check only — never part of the cache key.
     state_root: ADDigest,
     tree: OracleTree,
     tree_height: u8,
+    /// Pristine trees for the tip's parent, grandparent, … (nearest first).
+    ancestors: VecDeque<AncestorBase>,
+}
+
+/// How many ancestor trees a [`DryRunBase`] retains: a reorg up to this many
+/// blocks deep is replayed from the fork point instead of rehydrated.
+const RETAINED_ANCESTORS: usize = 3;
+
+/// Most blocks one advance replays (the new branch after a reorg, or blocks
+/// the chain grew by between two builds). Past this a full rehydrate is used.
+const MAX_ROLL_FORWARD_BLOCKS: usize = 6;
+
+/// A retained pristine tree for an ancestor of a [`DryRunBase`]'s tip.
+struct AncestorBase {
+    tip_id: [u8; 32],
+    state_root: ADDigest,
+    tree: OracleTree,
 }
 
 impl DryRunBase {

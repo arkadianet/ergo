@@ -24,7 +24,30 @@ pub fn write_ergo_box_candidate(w: &mut VlqWriter, c: &ErgoBoxCandidate) -> Resu
         w.put_bytes(token.token_id.as_bytes());
         w.put_u64(token.amount);
     }
-    w.put_bytes(&c.register_bytes);
+    w.put_bytes(c.checked_register_bytes()?);
+    Ok(())
+}
+
+/// Serialize a candidate under the ambient version, including stored node children.
+/// The transaction wire cache and a newly sealed box's default-context bytes
+/// are distinct (ValueSerializer.serializable strips constant Upcast below v3).
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ValueSerializer.scala#L157-L170>
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala#L163-L176>
+pub fn write_ergo_box_candidate_versioned(
+    w: &mut VlqWriter,
+    c: &ErgoBoxCandidate,
+    version: u8,
+) -> Result<(), WriteError> {
+    w.put_u64(c.value);
+    w.put_bytes(c.checked_serialized_ergo_tree_bytes()?);
+    w.put_u32(c.creation_height);
+    check_token_count(c.tokens.len())?;
+    w.put_u8(c.tokens.len() as u8);
+    for token in &c.tokens {
+        w.put_bytes(token.token_id.as_bytes());
+        w.put_u64(token.amount);
+    }
+    crate::register::write_registers_versioned(w, &c.additional_registers, version)?;
     Ok(())
 }
 
@@ -99,14 +122,15 @@ pub(super) fn read_ergo_box_candidate_parts(
         let amount = r.get_u64()?;
         tokens.push(Token { token_id, amount });
     }
+    let register_start = r.position();
     let additional_registers = read_registers(r)?;
-    // Register block = the CANONICAL re-serialization of the parsed registers,
-    // never the verbatim wire slice.
+    // On successful writes, the register block is the canonical
+    // re-serialization of the parsed values.
     //
     // `write_ergo_box_candidate` emits these bytes, so a newly sealed box's
     // canonical ID commits to this block. Whole-box readers separately retain
     // the received ID when the original encoding differs from serialization.
-    // Scala derives `ErgoBox.bytes` the same way — from the parsed
+    // Scala derives a newly constructed ErgoBox.bytes the same way — from the parsed
     // `ErgoBoxCandidate`, through `ValueSerializer.serialize` on each stored
     // `EvaluatedValue` node — which CANONICALIZES the register encodings the
     // reference accepts but does not itself emit. Verified against the JVM: a
@@ -124,9 +148,21 @@ pub(super) fn read_ergo_box_candidate_parts(
     // wallet or the reference node itself produces) these bytes are identical
     // to the wire slice they replace.
     let mut rw = VlqWriter::new();
-    crate::register::write_registers(&mut rw, &additional_registers)
-        .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
-    let register_bytes = rw.result();
+    // ErgoBox.parse retains received bytes; a write failure must not prevent
+    // reading the box's value or bytes. Deliberately delay the JVM exception
+    // until a structured write, including nested SBox values in registers.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/ErgoBox.scala#L214-L227
+    let register_serialization_error = crate::register::write_registers_versioned(
+        &mut rw,
+        &additional_registers,
+        r.activated_script_version().unwrap_or(3),
+    )
+    .err();
+    let register_bytes = if register_serialization_error.is_some() {
+        r.data_slice(register_start, r.position()).to_vec()
+    } else {
+        rw.result()
+    };
 
     r.set_position_limit(box_limit);
     Ok(ErgoBoxCandidate {
@@ -138,6 +174,8 @@ pub(super) fn read_ergo_box_candidate_parts(
         tokens,
         additional_registers,
         register_bytes,
+        register_serialization_error,
+        box_serialization_version: r.activated_script_version().unwrap_or(3),
         received_box_identity: None,
     })
 }

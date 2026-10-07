@@ -406,7 +406,9 @@ impl WalletEngine {
     pub fn native_status(
         &self,
     ) -> Result<ergo_wallet_protocol::native::dto::WalletStatusDto, WalletAdminError> {
-        use ergo_wallet_protocol::native::dto::{NetworkDto, RescanStateDto, WalletStatusDto};
+        use ergo_wallet_protocol::native::dto::{
+            DiscoveryCoverageDto, NetworkDto, RescanStateDto, WalletStatusDto,
+        };
         let initialized = !matches!(
             self.storage.read().lock_state(),
             ergo_wallet::storage::LockState::Uninitialized
@@ -458,11 +460,27 @@ impl WalletEngine {
             },
             crate::wallet::RescanState::Idle if self.chain.is_pruned() => {
                 RescanStateDto::Unavailable {
-                    detail: "node is pruned; block replay unavailable".to_string(),
+                    detail: "node is pruned; block replay unavailable; stopped UTXO nodes can use wallet-scan-utxo".to_string(),
                 }
             }
             crate::wallet::RescanState::Idle => RescanStateDto::Idle,
         };
+        let discovery = read
+            .discovery_coverage()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .map(|coverage| {
+                let uncovered_pubkeys = read
+                    .discovery_uncovered_pubkeys(&coverage)
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+                Ok::<_, WalletAdminError>(DiscoveryCoverageDto {
+                    anchor_height: coverage.anchor_height,
+                    anchor_header_id: coverage.anchor_header_id,
+                    history_complete: coverage.history_complete,
+                    covered_pubkeys: coverage.covered_pubkeys,
+                    uncovered_pubkeys,
+                })
+            })
+            .transpose()?;
         Ok(WalletStatusDto {
             initialized,
             locked,
@@ -473,6 +491,7 @@ impl WalletEngine {
             eip27_active,
             rescan,
             scan_invalidated,
+            discovery,
         })
     }
 
@@ -555,7 +574,7 @@ impl WalletEngine {
             .into_iter()
             .skip(offset as usize)
             .take(limit as usize)
-            .map(box_to_summary)
+            .map(|wb| box_to_summary_at(self.chain.as_ref(), read.as_ref(), wb))
             .collect::<Result<Vec<_>, WalletAdminError>>()?;
         Ok(BoxPage {
             items,
@@ -578,7 +597,8 @@ impl WalletEngine {
         let wb = read
             .box_by_id(&box_id)
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        wb.map(box_to_summary).transpose()
+        wb.map(|wb| box_to_summary_at(self.chain.as_ref(), read.as_ref(), wb))
+            .transpose()
     }
 
     /// `GET /api/v1/wallet/transactions` (paged). Ordered `(blockHeight desc, txId
@@ -709,6 +729,27 @@ fn decode_hex32(s: &str) -> Result<[u8; 32], WalletAdminError> {
 /// summary. Fallible only on the (invariant-impossible) scan-id overflow — a
 /// scan id that does not fit `u16` is corrupt storage, surfaced as `internal`
 /// rather than silently truncated to `65535`.
+fn box_to_summary_at(
+    chain: &dyn super::WalletChainAccess,
+    read: &dyn crate::wallet::WalletRead,
+    wb: crate::wallet::types::WalletBox,
+) -> Result<ergo_wallet_protocol::native::dto::WalletBoxSummary, WalletAdminError> {
+    let mut summary = box_to_summary(wb.clone())?;
+    summary.inclusion_height_known = read
+        .inclusion_height_known(wb.box_id)
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    summary.declared_creation_height =
+        if matches!(wb.status, crate::wallet::types::BoxStatus::Spent { .. }) {
+            None
+        } else {
+            chain
+                .lookup_utxo(&wb.box_id)
+                .map_err(super::map_chain_error)?
+                .map(|b| b.candidate.creation_height)
+        };
+    Ok(summary)
+}
+
 fn box_to_summary(
     wb: crate::wallet::types::WalletBox,
 ) -> Result<ergo_wallet_protocol::native::dto::WalletBoxSummary, WalletAdminError> {
@@ -755,6 +796,8 @@ fn box_to_summary(
         creation_tx_id: hex::encode(wb.creation_tx_id),
         creation_output_index: wb.creation_output_index,
         creation_height: wb.creation_height,
+        inclusion_height_known: true,
+        declared_creation_height: None,
         status,
         provenance,
     })

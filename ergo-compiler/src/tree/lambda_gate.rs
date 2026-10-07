@@ -5,7 +5,7 @@ use crate::emit::EmitError;
 use super::*;
 
 /// GraphBuilding verdict-parity gate over the emitted body — lambda and
-/// application shapes the FULL Scala compiler rejects (compiler-design-ledger.md D-C5).
+/// application shapes the FULL Scala compiler rejects (ergo-compiler/docs/compiler-design-ledger.md D-C5).
 ///
 /// Oracle-pinned rules:
 /// - **Zero-arg `FuncValue` rejects ANYWHERE** — even as the rhs of an

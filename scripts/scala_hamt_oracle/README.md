@@ -8,7 +8,7 @@ iteration order from the real Scala 2.12 standard library, used to oracle-verify
 
 The Rust HAMT port in `ergo-ser/src/scala_hamt.rs` reproduces Scala 2.12's
 `HashTrieMap` iteration order so `ContextExtension` serialization stays Scala-
-parity for `≥ 5` entries (see `docs/parity-checklist.md` §4.3). The algorithm
+parity for `≥ 5` entries (see [serialization compatibility](../../docs/compatibility.md#what-is-implemented-and-parity-tested)). The algorithm
 itself is documented in `scala_hamt.rs` with the Scala 2.12 source quoted, but
 a self-derived test oracle was the only verification — Codex review on commit
 `76f0305` flagged this as a residual gap.

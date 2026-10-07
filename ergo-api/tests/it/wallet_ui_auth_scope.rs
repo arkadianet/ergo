@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
-use ergo_api::auth::{ApiSecurity, API_KEY_HEADER};
+use ergo_api::auth::{ApiSecurity, CredentialScope, ScopedCredentialConfig, API_KEY_HEADER};
 use ergo_api::server::{
     router_with_mempool_and_wallet_and_security, router_with_mempool_and_wallet_and_wallet_moved,
     ServerCtx,
@@ -110,6 +110,10 @@ fn app() -> axum::Router {
 }
 
 fn moved_app(address: &str, with_security: bool) -> axum::Router {
+    moved_app_with_security(address, with_security.then(security))
+}
+
+fn moved_app_with_security(address: &str, security: Option<Arc<ApiSecurity>>) -> axum::Router {
     let ctx = ServerCtx {
         local_reverse_proxy: false,
         services: Arc::new(ergo_api::ApiServices::new()),
@@ -131,7 +135,7 @@ fn moved_app(address: &str, with_security: bool) -> axum::Router {
         ctx,
         None,
         Arc::new(NoopWalletAdmin),
-        with_security.then(security),
+        security,
         Some(address),
     )
 }
@@ -246,6 +250,93 @@ async fn external_wallet_routes_preserve_api_key_gate() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
+/// External ownership guidance must pass the same scope gate as the
+/// embedded wallet, including the admin-only private-key route.
+#[tokio::test]
+async fn external_wallet_guard_preserves_scoped_credential_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let credentials = [
+        ("wallet", "wallet-key", CredentialScope::Wallet),
+        ("operator", "operator-key", CredentialScope::Operator),
+        ("mining", "mining-key", CredentialScope::Mining),
+        ("admin", "admin-key", CredentialScope::Admin),
+    ];
+    let security = Arc::new(
+        ApiSecurity::new(SCALA_HELLO_HASH.to_string())
+            .unwrap()
+            .with_credentials(
+                credentials
+                    .iter()
+                    .map(|(id, key, scope)| ScopedCredentialConfig {
+                        id: (*id).into(),
+                        hash: ApiSecurity::hash_key(key.as_bytes()),
+                        scopes: vec![*scope],
+                        revoked: false,
+                    })
+                    .collect(),
+                dir.path().join("revocations.json"),
+            )
+            .unwrap(),
+    );
+    let address = "http://127.0.0.1:19090";
+    let app = moved_app_with_security(address, Some(security.clone()));
+    for (_, key, scope) in credentials {
+        for (method, path, admin_only) in [
+            (Method::GET, "/wallet/status", false),
+            (Method::GET, "/api/v1/wallet/status", false),
+            (Method::POST, "/api/v1/wallet/mining-jobs", false),
+            (Method::POST, "/api/v1/wallet/mining-jobs/1/cancel", false),
+            (Method::POST, "/wallet/getPrivateKey", true),
+        ] {
+            let allowed = scope == CredentialScope::Admin
+                || (scope == CredentialScope::Wallet && !admin_only);
+            let request = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(API_KEY_HEADER, key)
+                .header(header::CONTENT_TYPE, "application/json")
+                // The ownership guard runs before request parsing or wallet work.
+                .body(Body::from("malformed"))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                if allowed {
+                    StatusCode::GONE
+                } else {
+                    StatusCode::FORBIDDEN
+                },
+                "{scope:?}: {method} {path}",
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if allowed {
+                assert_eq!(body["reason"], "wallet_moved");
+                assert_eq!(body["address"], address);
+            } else {
+                assert!(
+                    body.get("address").is_none(),
+                    "scope rejection leaked daemon address"
+                );
+                assert_ne!(body["reason"], "wallet_moved");
+            }
+        }
+    }
+    // A live revocation must also reach the already-mounted ownership guard.
+    security.revoke_credential("wallet").unwrap();
+    let response = app
+        .oneshot(get_with_header(
+            "/wallet/status",
+            API_KEY_HEADER,
+            "wallet-key",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn external_wallet_routes_require_a_configured_key_before_ownership_guidance() {
     for path in ["/wallet/status", "/api/v1/wallet/status", "/scan/listAll"] {
@@ -330,4 +421,39 @@ async fn external_wallet_script_routes_return_moved() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::GONE, "path {path}");
     }
+}
+
+#[tokio::test]
+async fn wallet_mining_jobs_require_operator_key_before_body_parsing() {
+    for (method, path) in [
+        ("GET", "/api/v1/wallet/mining-jobs"),
+        ("POST", "/api/v1/wallet/mining-jobs"),
+        ("POST", "/api/v1/wallet/mining-jobs/1/cancel"),
+    ] {
+        for key in [None, Some("wrong")] {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(key) = key {
+                request = request.header(API_KEY_HEADER, key);
+            }
+            let response = app()
+                .oneshot(request.body(Body::from("malformed")).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+    }
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/wallet/mining-jobs")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(API_KEY_HEADER, PLAINTEXT_KEY)
+        .body(Body::from("{\"unexpected\":true}"))
+        .unwrap();
+    assert_eq!(
+        app().oneshot(request).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
 }

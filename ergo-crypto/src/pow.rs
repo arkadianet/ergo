@@ -6,11 +6,14 @@ use thiserror::Error;
 use crate::autolykos::common::blake2b256;
 use crate::autolykos::v1;
 use crate::autolykos::v2;
-use crate::difficulty::{get_target, verify_nbits, DifficultyParams};
+use crate::difficulty::{get_target_checked, verify_nbits, DifficultyParams};
 
 /// Errors produced by the PoW-equation half of header verification.
 #[derive(Debug, Error)]
 pub enum PowError {
+    /// Decoded difficulty is zero: the reference's target division throws.
+    #[error("zero difficulty from nBits")]
+    ZeroDifficulty,
     /// The Autolykos equation rejected the solution (`v1` EC equation
     /// failed, or `v2` hit ≥ target). The contained string carries a
     /// short reason for telemetry.
@@ -39,7 +42,7 @@ pub enum PowError {
 /// `header.version`/`header.height` pairing whose PoW equation holds, so
 /// rejecting more here would be the chain-split direction.
 pub fn verify_pow_solution(header: &Header) -> Result<(), PowError> {
-    let target = get_target(header.n_bits);
+    let target = get_target_checked(header.n_bits)?;
     if target == BigUint::ZERO {
         return Err(PowError::InvalidSolution("zero target from nBits".into()));
     }

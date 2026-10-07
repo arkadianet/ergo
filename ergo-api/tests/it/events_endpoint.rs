@@ -157,6 +157,14 @@ impl NodeReadState for FeedStub {
 }
 
 fn activity_app(configured: bool, read: Arc<dyn NodeReadState>) -> axum::Router {
+    activity_app_with_services(configured, read, Arc::new(ergo_api::ApiServices::new()))
+}
+
+fn activity_app_with_services(
+    configured: bool,
+    read: Arc<dyn NodeReadState>,
+    services: Arc<ergo_api::ApiServices>,
+) -> axum::Router {
     use ergo_api::auth::ApiSecurity;
     use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
     router_with_mempool_and_wallet_and_security(
@@ -174,7 +182,7 @@ fn activity_app(configured: bool, read: Arc<dyn NodeReadState>) -> axum::Router 
             emission_scripts: None,
             utxo_reads_supported: true,
             local_reverse_proxy: false,
-            services: Arc::new(ergo_api::ApiServices::new()),
+            services,
             script_config: Default::default(),
         },
         None,
@@ -458,5 +466,103 @@ impl NodeReadState for DefaultStub {
             last_progress_age_ms: 0,
             peer_count: 0,
         }
+    }
+}
+
+#[derive(Default)]
+struct ReplayTestStore(std::sync::Mutex<ergo_api::v1::realtime::journal::JournalRecovery>);
+impl ergo_api::v1::realtime::journal::RealtimeStore for ReplayTestStore {
+    fn load_events(&self) -> Result<ergo_api::v1::realtime::journal::JournalRecovery, String> {
+        let saved = self.0.lock().unwrap();
+        Ok(ergo_api::v1::realtime::journal::JournalRecovery {
+            next_seq: saved.next_seq,
+            events: saved.events.clone(),
+        })
+    }
+    fn reserve_cursor(&self, next: u64) -> Result<(), String> {
+        self.0.lock().unwrap().next_seq = next;
+        Ok(())
+    }
+    fn append_events(
+        &self,
+        events: &[ergo_api::v1::realtime::journal::ReplayEvent],
+    ) -> Result<(), String> {
+        self.0.lock().unwrap().events.extend_from_slice(events);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn replay_history_pages_shared_cursors_and_preserves_inverse_links() {
+    use ergo_api::v1::realtime::RealtimeEventBody;
+    let store = Arc::new(ReplayTestStore::default());
+    let services =
+        Arc::new(ergo_api::ApiServices::with_durable_realtime(None, store.clone()).unwrap());
+    let bus = &services.realtime.bus;
+    for height in 1..=3 {
+        bus.publish(RealtimeEventBody::block_applied(
+            height as u64,
+            format!("h-{height}"),
+            height,
+            1,
+            100,
+        ));
+    }
+    let mut inverse = RealtimeEventBody::block_applied(4, "h-2".into(), 2, 1, 100);
+    inverse.event = "reorg";
+    inverse.previous_seq = Some(3);
+    bus.publish(inverse);
+    services.shutdown_background().await;
+    drop(services);
+    let services = Arc::new(ergo_api::ApiServices::with_durable_realtime(None, store).unwrap());
+    let app = activity_app_with_services(false, Arc::new(FeedStub), services);
+    let first = get_json(
+        app.clone(),
+        "/api/v1/events/replay?channels=blocks&since=0&limit=2",
+    )
+    .await;
+    assert_eq!(first["events"][0]["seq"], 1);
+    assert_eq!(first["events"][1]["seq"], 2);
+    assert_eq!(first["next_seq"], 2);
+    assert_eq!(first["has_more"], true);
+    assert_eq!(first["gap"], false);
+    assert_eq!(first["persistence"]["committed_seq"], 4);
+    assert_eq!(first["persistence"]["complete_through_seq"], 4);
+    let last = get_json(
+        app.clone(),
+        "/api/v1/events/replay?channels=blocks&since=2&limit=2",
+    )
+    .await;
+    assert_eq!(last["events"][1]["previous_seq"], 3);
+    assert_eq!(last["next_seq"], 4);
+    assert_eq!(last["has_more"], false);
+    let empty = get_json(app, "/api/v1/events/replay?channels=peers&since=0").await;
+    assert!(empty["events"].as_array().unwrap().is_empty());
+    assert_eq!(empty["next_seq"], 4);
+}
+
+#[tokio::test]
+async fn replay_history_rejects_bad_selectors_limits_and_future_cursors() {
+    let app = activity_app(false, Arc::new(FeedStub));
+    for query in [
+        "channels=blocks&limit=0",
+        "channels=blocks&limit=1025",
+        "channels=box:no",
+        "channels=",
+        "channels=blocks&since=1",
+        "channels=blocks&since=no",
+        "",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/events/replay?{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
     }
 }

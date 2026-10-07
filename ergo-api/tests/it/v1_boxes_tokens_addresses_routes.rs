@@ -1,5 +1,5 @@
 //! Route-level integration tests for the second v1 group: `boxes/*` +
-//! `tokens/*` + `addresses/*` reads (`dev-docs/v1-api-design.md` §3.7).
+//! `tokens/*` + `addresses/*` reads.
 //!
 //! Convention-lock tests: the honest `indexer_disabled` / `_syncing` /
 //! `_halted` gating (v1 mounts unconditionally, never a bare 404 for a disabled

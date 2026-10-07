@@ -136,6 +136,8 @@ fn apply(
         .reemission
         .as_ref()
         .map(|r| ergo_validation::ReemissionRuleInputs {
+            check_rules: true,
+            emission: None,
             activation_height: r.activation_height,
             reemission_token_id: *r.reemission_token_id.as_bytes(),
             pay_to_reemission_tree: spec

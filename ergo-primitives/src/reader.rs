@@ -108,6 +108,8 @@ pub struct VlqReader<'a> {
     /// the block-transactions reader from the wire block version (header
     /// version >= 4 only, `BlockTransactionsSerializer.parse`), and the
     /// mempool / P2P transaction parse from the tip's activated version.
+    /// Stored as byte bits; activation comparisons must use `as i8` to match
+    /// Scala's signed `VersionContext` byte, including synthetic negatives.
     activated_script_version: Option<u8>,
     strict_method_resolution: bool,
     /// Opt-in header byte ranges for codec diagnostics; absent in node readers.
@@ -146,8 +148,8 @@ pub enum ReadError {
         args: Vec<u8>,
         message: String,
     },
-    /// Nested value/expression deserialization exceeded the maximum tree depth
-    /// (Scala `SigmaConstants.MaxTreeDepth`). Scala raises this as a
+    /// Deserialization exceeded the value/expression or type recursion bound
+    /// (Scala `SigmaConstants.MaxTreeDepth` or `MaxTypeDepth`). Scala raises this as a
     /// `SerializerException` (`DeserializeCallDepthExceeded`), which is NOT in
     /// the set its `ErgoTreeSerializer.deserializeErgoTree` catches, so it is
     /// never wrapped into an `UnparsedErgoTree` (soft fork) even for
@@ -157,6 +159,11 @@ pub enum ReadError {
         /// The depth bound that was exceeded.
         max: usize,
     },
+    /// A direct JVM ClassCastException. Hard at the wire boundary, but the
+    /// deserialize-substitution rewrite rule deliberately swallows this class.
+    /// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/kiama/rewriting/Rewriter.scala#L180-L191>
+    #[error("deserialization class cast: {0}")]
+    ClassCast(String),
     /// A hard, NON-soft-forkable deserialization rejection that must propagate
     /// even out of a size-delimited tree — the Rust analog of a Scala
     /// `SerializerException` (as opposed to a soft-forkable `ValidationException`,

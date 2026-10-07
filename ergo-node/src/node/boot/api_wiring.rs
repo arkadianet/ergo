@@ -28,6 +28,7 @@ use super::super::NodeError;
 /// subsystem (which needs [`voting_targets_slot`](Self::voting_targets_slot)).
 pub(super) struct Scaffold {
     pub api_info: ergo_api::types::ApiInfo,
+    pub runtime_control: Arc<crate::runtime_control::RuntimeControl>,
     pub identity_slot: crate::api_bridge::IdentitySlot,
     pub snapshot_publisher: SnapshotPublisher,
     pub voting_targets_slot: Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
@@ -52,6 +53,7 @@ pub(super) fn build_scaffold(
     // started; the publisher itself stays cheap (one ArcSwap) and is
     // updated unconditionally so disabling/enabling the API never
     // changes the main loop's hot path.
+    let runtime_control = crate::runtime_control::RuntimeControl::new(config)?;
     let api_info = ergo_api::types::ApiInfo {
         agent_name: config.agent_name.clone(),
         node_name: config.node_name.clone(),
@@ -114,6 +116,7 @@ pub(super) fn build_scaffold(
         live_telemetry,
     )
     .with_peer_details(peer_details)
+    .with_runtime_control(runtime_control.clone())
     .into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =
         SubmitBridge::new(submit_tx.clone(), event_tx.clone())
@@ -122,6 +125,7 @@ pub(super) fn build_scaffold(
 
     Ok(Scaffold {
         api_info,
+        runtime_control,
         identity_slot,
         snapshot_publisher,
         voting_targets_slot,
@@ -158,17 +162,20 @@ fn build_wallet_chain_wiring(
     is_pruned: bool,
     reemission_rules: Option<ergo_validation::ReemissionRuleInputs>,
     reemission_inputs: Vec<ergo_wallet_service::chain::ReemissionInput>,
+    private_queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
 ) -> WalletChainWiring {
     let is_utxo_backend = store.as_utxo().is_some();
     if let Some(wallet_store) = wallet_store {
         let reader = store.reader_handle();
-        let accessor: Arc<dyn ergo_wallet_service::engine::WalletChainAccess> =
-            Arc::new(super::super::wallet_bridge::ChainStateAccessorImpl::new(
+        let accessor: Arc<dyn ergo_wallet_service::engine::WalletChainAccess> = Arc::new(
+            super::super::wallet_bridge::ChainStateAccessorImpl::new(
                 reader.clone(),
                 wallet_store.clone(),
                 is_pruned,
                 reemission_rules.clone(),
-            ));
+            )
+            .with_private_queue(private_queue),
+        );
         let client = Arc::new(
             super::super::wallet_bridge::InProcessChainClient::new(reader, submit_bridge.clone())
                 .with_state_accessor(accessor.clone())
@@ -241,12 +248,20 @@ pub(super) async fn bind(
     mempool: &mut ergo_mempool::Mempool,
     wallet_store: Option<Arc<dyn ergo_wallet_service::wallet::WalletStore>>,
     mining_bridge: Option<Arc<dyn ergo_api::NodeMining>>,
+    private_queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
     voting_targets_slot: Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
     shutdown_notify: &Arc<tokio::sync::Notify>,
     peer_connect_tx: &mpsc::Sender<std::net::SocketAddr>,
+    peer_control_tx: &mpsc::Sender<crate::runtime_control::PeerControlRequest>,
+    runtime_control: Arc<crate::runtime_control::RuntimeControl>,
     votes_changed_tx: &mpsc::Sender<()>,
 ) -> Result<ApiBind, NodeError> {
-    let security = api_security(config)?;
+    // Validate/load the revocation ledger before spawning storage-owning tasks.
+    let security = if config.api_bind.is_some() {
+        api_security(config)?
+    } else {
+        None
+    };
     let network_prefix = config.chain_spec.network_params.address_prefix;
     // P5 mempool overlay: hand the snapshot-backed view to
     // the API so `/blockchain/balance` (and future unspent
@@ -257,10 +272,50 @@ pub(super) async fn bind(
     // wallet writer below for its unconfirmed-balance overlay — built
     // once here so both consumers share the same instance.
     let mempool_view = SnapshotMempoolView::new(snapshot_publisher.handle()).into_dyn();
+
+    // Production wallet admin. Owns the secret storage + wallet
+    // state behind RwLocks; the writer task is a dedicated tokio
+    // task receiving commands via a channel.
+    let indexer_probe = indexer_handle.clone();
+    let wallet_probe_store = wallet_store.clone();
+    let wallet_probe_reader = store.reader_handle();
+    runtime_control.set_dependencies(Arc::new(move |require_indexer, require_wallet| {
+        use ergo_indexer::IndexerQuery;
+        let indexer_height = require_indexer
+            .then(|| indexer_probe.as_ref().map(|handle| handle.indexed_height()))
+            .flatten();
+        let indexer_healthy = require_indexer
+            && indexer_probe
+                .as_ref()
+                .is_some_and(|handle| handle.is_caught_up());
+        let (wallet_height, wallet_healthy) = if require_wallet {
+            wallet_probe_store
+                .as_ref()
+                .and_then(|store| {
+                    let read = store.read().ok()?;
+                    let cursor = read.scan_cursor().ok()??;
+                    let tip = wallet_probe_reader.committed_tip().ok()??;
+                    Some((
+                        Some(cursor.height),
+                        cursor.height == tip.0 && cursor.header_id == Some(tip.1),
+                    ))
+                })
+                .unwrap_or((None, false))
+        } else {
+            (None, false)
+        };
+        crate::runtime_control::Dependencies {
+            indexer_height,
+            indexer_healthy,
+            wallet_height,
+            wallet_healthy,
+        }
+    }));
     let wallet_moved = (config.wallet_mode == crate::config::WalletMode::External)
         .then_some(config.wallet_daemon_address.as_str());
     let is_pruned = config.blocks_to_keep != -1;
-    let reemission_rules = super::build_reemission_rules(&config.chain_spec);
+    let reemission_rules =
+        super::build_reemission_rules(&config.chain_spec, config.check_reemission_rules);
     let reemission_inputs = reemission_rules
         .as_ref()
         .map(|rules| {
@@ -281,6 +336,7 @@ pub(super) async fn bind(
         is_pruned,
         reemission_rules,
         reemission_inputs,
+        private_queue.clone(),
     );
 
     let mut wallet_session_id = 0;
@@ -346,12 +402,17 @@ pub(super) async fn bind(
         let writer_cfg = ergo_wallet_service::engine::WalletEngineConfig {
             network: network_prefix,
             expose_private_keys: config.wallet_expose_private_keys,
-            reemission: super::build_reemission_rules(&config.chain_spec),
+            reemission: super::build_reemission_rules(
+                &config.chain_spec,
+                config.check_reemission_rules,
+            ),
             min_relay_fee_nano_erg: config.mempool_config.min_relay_fee_nano_erg,
             max_tx_size_bytes: config.mempool_config.max_tx_size_bytes,
         };
         let submit_handle: Arc<dyn ergo_wallet_service::engine::TxSubmitter> = Arc::new(
-            super::super::wallet_bridge::NodeSubmitAdapter::new(submit_bridge.clone()),
+            super::super::wallet_bridge::NodeSubmitAdapter::new(submit_bridge.clone())
+                .with_private_mining(mining_bridge.clone())
+                .with_stored_private_queue(private_queue.clone()),
         );
         let wallet = super::super::wallet_bridge::EmbeddedWallet::new(
             ergo_wallet_service::engine::WalletEngineParts {
@@ -462,40 +523,49 @@ pub(super) async fn bind(
     // than acknowledging registrations that would disappear at restart.
     let webhook_path = config.data_dir.join("webhooks.redb");
     let api_services = tokio::task::spawn_blocking(move || {
-        let webhook_engine = crate::webhook_store::RedbWebhookStore::open(&webhook_path)
-            .and_then(|store| {
-                ergo_api::v1::WebhookEngine::durable(Default::default(), Arc::new(store))
-            })
-            .map(Arc::new);
-        let webhook_engine = match webhook_engine {
-            Ok(engine) => Some(engine),
+        let store = match crate::webhook_store::RedbWebhookStore::open(&webhook_path) {
+            Ok(store) => Arc::new(store),
+            Err(error) => {
+                tracing::error!(%error, "notification store unavailable; live realtime, durable replay and webhooks disabled");
+                return Err(error);
+            }
+        };
+        let webhook_engine = match ergo_api::v1::WebhookEngine::durable(Default::default(), store.clone()) {
+            Ok(engine) => Some(Arc::new(engine)),
             Err(error) => {
                 tracing::error!(%error, "durable webhook store unavailable; webhooks disabled");
                 None
             }
         };
-        Arc::new(ergo_api::ApiServices::with_webhooks(webhook_engine))
+        ergo_api::ApiServices::with_durable_realtime(webhook_engine, store).map(Arc::new)
     })
-    .await
-    .unwrap_or_else(|error| {
-        tracing::error!(%error, "webhook storage initialization failed; webhooks disabled");
-        Arc::new(ergo_api::ApiServices::with_webhooks(None))
-    });
+    .await;
+    let api_services = match api_services
+        .map_err(|error| error.to_string())
+        .and_then(|result| result)
+    {
+        Ok(services) => services,
+        Err(error) => {
+            tracing::error!(%error, "notification cursor initialization failed; realtime and webhooks disabled");
+            Arc::new(ergo_api::ApiServices::without_notifications())
+        }
+    };
     // Realtime WS bridge (A2): the same node-owned bus the
     // router feeds the `blocks` coarse-ring bridge into. Wiring
     // it as a `MempoolObserver` lets admit/evict publish
     // `tx_accepted`/`tx_dropped` on the `mempool` channel
     // directly from the admission hot path, bypassing the
     // coarse ring (which only carries block/reorg/peer events).
-    mempool.set_observer(Some(Arc::new(
-        crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
-            api_services.realtime.bus.clone(),
-        ),
-    )));
-    // Restore any durable webhook cursor before activating this observer.
-    // Disabled indexers and boot failures without a store have no observer.
-    if let Some(observer) = indexer_event_observer {
-        observer.activate(api_services.realtime.bus.clone());
+    if api_services.realtime.bus.is_enabled() {
+        mempool.set_observer(Some(Arc::new(
+            crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
+                api_services.realtime.bus.clone(),
+            ),
+        )));
+        // Restore durable cursors before activating the indexer source.
+        if let Some(observer) = indexer_event_observer {
+            observer.activate(api_services.realtime.bus.clone());
+        }
     }
     let mut admin = crate::api_bridge::ShutdownAdmin::new(
         shutdown_notify.clone(),
@@ -503,7 +573,8 @@ pub(super) async fn bind(
     )
     // Held regardless of mining state to keep the channel open; only
     // fired on a successful vote update (which requires mining).
-    .with_votes_changed_signal(votes_changed_tx.clone());
+    .with_votes_changed_signal(votes_changed_tx.clone())
+    .with_operator_control(runtime_control, peer_control_tx.clone(), security.clone());
     // Expose the runtime voting write only when mining is enabled —
     // votes have no effect without a candidate builder, so
     // `POST /api/v1/votes` otherwise returns `MiningDisabled`.
@@ -571,13 +642,21 @@ pub(super) async fn bind(
 fn api_security(
     config: &NodeConfig,
 ) -> Result<Option<Arc<ergo_api::auth::ApiSecurity>>, NodeError> {
-    config
-        .api_key_hash
-        .clone()
-        .map(ergo_api::auth::ApiSecurity::new)
-        .transpose()
-        .map(|security| security.map(Arc::new))
-        .map_err(|e| -> NodeError { format!("invalid api_key_hash in NodeConfig: {e}").into() })
+    if config.allow_unauthenticated_legacy_mining && config.api_key_hash.is_none() {
+        return Err("allow_unauthenticated_legacy_mining requires api_key_hash".into());
+    }
+    let Some(hash) = config.api_key_hash.clone() else {
+        ergo_api::auth::validate_credentials(&config.api_scoped_keys, None)?;
+        return Ok(None);
+    };
+    let security = ergo_api::auth::ApiSecurity::new(hash)
+        .map_err(|e| -> NodeError { format!("invalid api_key_hash in NodeConfig: {e}").into() })?
+        .with_credentials(
+            config.api_scoped_keys.clone(),
+            config.data_dir.join("credentials-revoked.json"),
+        )?
+        .with_unauthenticated_legacy_mining(config.allow_unauthenticated_legacy_mining);
+    Ok(Some(Arc::new(security)))
 }
 
 #[cfg(test)]
@@ -615,6 +694,92 @@ mod tests {
 
         fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
             Err(redb::Error::Io(std::io::Error::other("injected recovery write failure")).into())
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_replay_cursor_never_falls_back_to_reused_session_cursors() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("node.toml");
+        std::fs::write(&config_path, "[api]\nbind = \"127.0.0.1:0\"\n").unwrap();
+        let cli = crate::config::Cli::parse_from([
+            "ergo-node",
+            "--network",
+            "devnet",
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "--peers",
+            "127.0.0.1:1",
+        ]);
+        let config = NodeConfig::load(cli).unwrap();
+        let path = directory.path().join("webhooks.redb");
+        {
+            let db = redb::Database::create(&path).unwrap();
+            let write = db.begin_write().unwrap();
+            {
+                let mut table = write
+                    .open_table(redb::TableDefinition::<&str, &[u8]>::new(
+                        "realtime_metadata_v1",
+                    ))
+                    .unwrap();
+                table
+                    .insert(
+                        "state",
+                        br#"{"version":2,"next_seq":100000,"retained_bytes":0}"#.as_slice(),
+                    )
+                    .unwrap();
+            }
+            write.commit().unwrap();
+        }
+        let handle = crate::node::run_inner(config).await.unwrap();
+        let address = handle.api_addr.expect("other API routes remain available");
+        let bus = &handle.api_services.as_ref().unwrap().realtime.bus;
+        let published = bus.try_publish(ergo_api::v1::realtime::RealtimeEventBody::block_applied(
+            1,
+            "rejected".into(),
+            1,
+            1,
+            100,
+        ));
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .get(format!(
+                "http://{address}/api/v1/events/replay?channels=blocks"
+            ))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let value: serde_json::Value = response.json().await.unwrap();
+        client
+            .get(format!("http://{address}/api/v1/info"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        handle.shutdown().await.unwrap();
+        assert_eq!(
+            published, None,
+            "uncertain persisted cursors must disable notification publication"
+        );
+        assert_eq!(status, reqwest::StatusCode::CONFLICT);
+        assert_eq!(value["error"]["reason"], "realtime_disabled");
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn api_security_shipped_templates_resolve_without_verifier() {
+        for source in [
+            include_str!("../../../ergo-node.toml"),
+            include_str!("../../../ergo-node.toml.example"),
+        ] {
+            let (_dir, config) = template_config(source);
+            assert!(config.api_bind.unwrap().ip().is_loopback());
+            assert!(api_security(&config).unwrap().is_none());
         }
     }
 
@@ -792,8 +957,15 @@ mod tests {
         let backend = ergo_state::StateBackendKind::Utxo(state);
         let submit = submit_bridge();
 
-        let external =
-            build_wallet_chain_wiring(&backend, None, submit.clone(), false, None, Vec::new());
+        let external = build_wallet_chain_wiring(
+            &backend,
+            None,
+            submit.clone(),
+            false,
+            None,
+            Vec::new(),
+            None,
+        );
         assert!(external.writer.is_none());
         assert!(external.api.is_some());
 
@@ -805,6 +977,7 @@ mod tests {
             false,
             None,
             Vec::new(),
+            None,
         );
         assert!(embedded.writer.is_some());
         assert!(embedded.api.is_some());
@@ -824,8 +997,15 @@ mod tests {
         )
         .unwrap();
         let backend = ergo_state::StateBackendKind::Digest(state);
-        let wiring =
-            build_wallet_chain_wiring(&backend, None, submit_bridge(), false, None, Vec::new());
+        let wiring = build_wallet_chain_wiring(
+            &backend,
+            None,
+            submit_bridge(),
+            false,
+            None,
+            Vec::new(),
+            None,
+        );
         assert!(wiring.writer.is_none());
         assert!(wiring.api.is_none());
     }

@@ -15,11 +15,13 @@ pub mod apply;
 pub mod error;
 pub mod hydration;
 pub mod maturity;
+pub mod mining_jobs;
 pub mod reader;
 pub mod scan;
 pub mod store;
 pub mod tables;
 pub mod types;
+pub mod utxo_scan;
 
 use std::sync::Arc;
 
@@ -38,14 +40,30 @@ pub struct WalletScanCursor {
 pub const WALLET_SCHEMA_VERSION: u32 = 2;
 
 pub fn migrate_schema(db: &Arc<Database>) -> Result<(), WalletStoreError> {
-    migrate_schema_with_index(db, false)
+    migrate_schema_with_index(db, false, None)
 }
 
 pub fn migrate_standalone_schema(db: &Arc<Database>) -> Result<(), WalletStoreError> {
-    migrate_schema_with_index(db, true)
+    migrate_schema_with_index(db, true, None)
 }
 
-fn migrate_schema_with_index(db: &Arc<Database>, standalone: bool) -> Result<(), WalletStoreError> {
+type DiscoveryAnchorReader<'a> =
+    dyn Fn(&redb::ReadTransaction, u32) -> Result<Option<[u8; 32]>, WalletStoreError> + 'a;
+
+/// The embedded chain adapter validates a discovery anchor when snapshot state
+/// has no historical applied-header index at the wallet cursor.
+pub fn migrate_schema_with_anchor(
+    db: &Arc<Database>,
+    anchor: &DiscoveryAnchorReader<'_>,
+) -> Result<(), WalletStoreError> {
+    migrate_schema_with_index(db, false, Some(anchor))
+}
+
+fn migrate_schema_with_index(
+    db: &Arc<Database>,
+    standalone: bool,
+    anchor: Option<&DiscoveryAnchorReader<'_>>,
+) -> Result<(), WalletStoreError> {
     let (version, height, stored_id) = {
         let txn = crate::wallet::store::read_redb(db)?;
         let version = match txn.open_table(tables::WALLET_SCHEMA_VERSION_TABLE) {
@@ -83,7 +101,7 @@ fn migrate_schema_with_index(db: &Arc<Database>, standalone: bool) -> Result<(),
             invalidate |= stored_id.is_some();
             None
         }
-        Some(height) => match read_index_header(db, height, standalone) {
+        Some(height) => match read_index_header(db, height, standalone, anchor) {
             Ok(expected) if stored_id.is_some_and(|stored| stored != expected) => {
                 invalidate = true;
                 None
@@ -174,6 +192,7 @@ fn read_index_header(
     db: &Database,
     height: u32,
     standalone: bool,
+    anchor: Option<&DiscoveryAnchorReader<'_>>,
 ) -> Result<[u8; 32], WalletStoreError> {
     let txn = crate::wallet::store::read_redb(db)?;
     let table = if standalone {
@@ -184,17 +203,26 @@ fn read_index_header(
     let table = match table {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => {
+            if let Some(id) = anchor.map(|read| read(&txn, height)).transpose()?.flatten() {
+                return Ok(id);
+            }
             return Err(WalletStoreError::decode(
                 "wallet cursor points to a height without its applied-header index",
             ));
         }
         Err(error) => return Err(error.into()),
     };
-    let row = table.get(height as u64)?.ok_or_else(|| {
-        WalletStoreError::decode(
-            "wallet cursor points to a height without its applied-header index",
-        )
-    })?;
+    let row = match table.get(height as u64)? {
+        Some(row) => row,
+        None => {
+            if let Some(id) = anchor.map(|read| read(&txn, height)).transpose()?.flatten() {
+                return Ok(id);
+            }
+            return Err(WalletStoreError::decode(
+                "wallet cursor points to a height without its applied-header index",
+            ));
+        }
+    };
     let bytes = row.value();
     if bytes.len() != 32 {
         return Err(WalletStoreError::decode(format!(

@@ -224,6 +224,7 @@ fn migrated_peers_preserve_records_bans_schema_and_reject_unsupported_recovery()
             until: SystemTime::now(),
             count: 7,
             permanent: true,
+            operator: true,
         })
         .unwrap();
     }
@@ -316,7 +317,6 @@ fn packaged_operator_binary_migrates_without_config_or_node_startup() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn node_boot_refuses_mixed_current_state_and_unsupported_peer_formats() {
-    use ergo_p2p::address_book::AddressBookError;
     for version in [2, 4] {
         let dir = tempfile::tempdir().unwrap();
         let peer_path = dir.path().join("peers.redb");
@@ -335,6 +335,7 @@ async fn node_boot_refuses_mixed_current_state_and_unsupported_peer_formats() {
                 until: SystemTime::now(),
                 count: 7,
                 permanent: true,
+                operator: true,
             })
             .unwrap();
         }
@@ -350,6 +351,7 @@ async fn node_boot_refuses_mixed_current_state_and_unsupported_peer_formats() {
         }
         let bytes = fs::read(&peer_path).unwrap();
         let mut config = super::common::make_test_config(dir.path().to_path_buf());
+        config.auto_upgrade_legacy = false;
         config.cache_bytes = Some(1024 * 1024);
         config.redb_cache_budgets.state = 1024 * 1024;
         config.redb_cache_budgets.peers = 1024 * 1024;
@@ -360,9 +362,15 @@ async fn node_boot_refuses_mixed_current_state_and_unsupported_peer_formats() {
                 panic!("boot must refuse unsupported peer format {version}");
             }
         };
-        assert!(
-            matches!(error.downcast_ref::<AddressBookError>(), Some(AddressBookError::UnsupportedFileFormat { version: actual }) if *actual == version)
-        );
+        let error = error.to_string();
+        if version == 2 {
+            assert!(error.contains("ergo-node upgrade-data"), "{error}");
+        } else {
+            assert!(
+                error.contains("cannot classify") && error.contains("4"),
+                "{error}"
+            );
+        }
         assert!(fs::read(&peer_path).unwrap() == bytes);
         assert!(!fs::read_dir(dir.path()).unwrap().any(|e| e
             .unwrap()
@@ -370,4 +378,310 @@ async fn node_boot_refuses_mixed_current_state_and_unsupported_peer_formats() {
             .to_string_lossy()
             .contains("corrupt-")));
     }
+}
+
+fn directory_upgrade_fixture(directory: &Path, schema: u32) -> Vec<(String, Vec<u8>)> {
+    let source = tempfile::tempdir().unwrap();
+    {
+        let mut state =
+            StateStore::open_with_cache(&source.path().join("state.redb"), 1024 * 1024).unwrap();
+        state
+            .initialize_genesis(&ergo_node::genesis::mainnet_genesis_boxes())
+            .unwrap();
+        state.verify_or_init_state_type("utxo").unwrap();
+        let db = state.db_arc();
+        let write = ergo_state::begin_write_qr(&db).unwrap();
+        write
+            .open_table(ergo_state::wallet::tables::WALLET_SCAN_HEIGHT)
+            .unwrap()
+            .insert((), 0)
+            .unwrap();
+        write
+            .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .insert((), true)
+            .unwrap();
+        write.commit().unwrap();
+    }
+    {
+        let book = AddressBook::open_at_with_cache(&source.path().join("peers.redb"), 1024 * 1024)
+            .unwrap();
+        book.upsert_handshaked(
+            "1.2.3.4:9030".parse().unwrap(),
+            "reference",
+            [6, 0, 7],
+            "upgrade-test",
+            LastDirection::Outbound,
+            SystemTime::now(),
+        )
+        .unwrap();
+    }
+    {
+        let db = redb::Database::create(source.path().join("webhooks.redb")).unwrap();
+        let write = ergo_state::begin_write_qr(&db).unwrap();
+        write
+            .open_table(TableDefinition::<&str, &[u8]>::new("webhook_snapshot_v1"))
+            .unwrap()
+            .insert("snapshot", b"webhook registrations".as_slice())
+            .unwrap();
+        write.commit().unwrap();
+    }
+    drop(
+        IndexerStore::open_with_cache(&source.path().join("archive-index.redb"), 1024 * 1024)
+            .unwrap(),
+    );
+    let mut originals = Vec::new();
+    for name in [
+        "state.redb",
+        "peers.redb",
+        "webhooks.redb",
+        "archive-index.redb",
+    ] {
+        let path = directory.join(name);
+        legacy_fixture(&source.path().join(name), &path);
+        if name == "archive-index.redb" {
+            let db = redb_legacy::Database::open(&path).unwrap();
+            let write = db.begin_write().unwrap();
+            write
+                .open_table(redb_legacy::TableDefinition::<&str, &[u8]>::new(
+                    "indexer_meta",
+                ))
+                .unwrap()
+                .insert("schema_version", schema.to_be_bytes().as_slice())
+                .unwrap();
+            write.commit().unwrap();
+        }
+        originals.push((name.to_string(), fs::read(path).unwrap()));
+    }
+    originals
+}
+
+fn assert_upgraded_directory(
+    directory: &Path,
+    originals: &[(String, Vec<u8>)],
+    stale: bool,
+    discard: bool,
+    keep_stale: bool,
+) {
+    for (name, bytes) in originals {
+        let backup = directory.join(format!("{name}.redb2-backup"));
+        let retained = !discard && !(name == "archive-index.redb" && stale && !keep_stale);
+        assert_eq!(backup.exists(), retained);
+        if retained {
+            assert_eq!(fs::read(backup).unwrap(), *bytes);
+        }
+        if name == "archive-index.redb" && stale {
+            assert!(!directory.join(name).exists());
+        } else {
+            redb::ReadOnlyDatabase::open(directory.join(name)).unwrap();
+        }
+    }
+    let mut state =
+        StateStore::open_with_cache(&directory.join("state.redb"), 1024 * 1024).unwrap();
+    assert_eq!(
+        *state.root_digest().as_bytes(),
+        ergo_chain_spec::GenesisParams::mainnet().state_digest
+    );
+    let reader = ChainStoreReader::new_from_db(state.db_arc());
+    for (id, bytes) in ergo_node::genesis::mainnet_genesis_boxes() {
+        assert_eq!(reader.lookup_box(&id).unwrap(), Some(bytes));
+    }
+    let db = state.db_arc();
+    let read = db.begin_read().unwrap();
+    assert!(read
+        .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
+        .unwrap()
+        .get(())
+        .unwrap()
+        .unwrap()
+        .value());
+    assert_eq!(
+        read.open_table(ergo_state::wallet::tables::WALLET_SCAN_HEIGHT)
+            .unwrap()
+            .get(())
+            .unwrap()
+            .unwrap()
+            .value(),
+        0
+    );
+    let peers = AddressBook::open_at_with_cache(&directory.join("peers.redb"), 1024 * 1024)
+        .unwrap()
+        .load_all(false)
+        .unwrap();
+    assert_eq!(peers.peers.len(), 1);
+    assert_eq!(peers.peers[0].node_name, "upgrade-test");
+    let db = redb::ReadOnlyDatabase::open(directory.join("webhooks.redb")).unwrap();
+    assert_eq!(
+        db.begin_read()
+            .unwrap()
+            .open_table(TableDefinition::<&str, &[u8]>::new("webhook_snapshot_v1"))
+            .unwrap()
+            .get("snapshot")
+            .unwrap()
+            .unwrap()
+            .value(),
+        b"webhook registrations"
+    );
+    if !stale {
+        let (_, outcome) =
+            IndexerStore::open_with_cache(&directory.join("archive-index.redb"), 1024 * 1024)
+                .unwrap();
+        assert_eq!(outcome, OpenOutcome::Resumed);
+    }
+}
+
+#[test]
+fn packaged_upgrade_data_command_upgrades_entire_directory_and_is_idempotent() {
+    for (schema, discard, keep_stale) in [
+        (2, false, false),
+        (ergo_indexer::store::INDEXER_SCHEMA_VERSION, false, false),
+        (2, true, false),
+        (1, false, false),
+        (2, false, true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let originals = directory_upgrade_fixture(dir.path(), schema);
+        let command = || {
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ergo-node"));
+            command
+                .current_dir(dir.path())
+                .arg("upgrade-data")
+                .arg(dir.path())
+                .args(["--indexer-db", "archive-index.redb"]);
+            if discard {
+                command.arg("--discard-backups");
+            }
+            if keep_stale {
+                command.arg("--keep-stale-indexer");
+            }
+            command
+        };
+        let output = command().output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("databases migrated"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("tables") && stderr.contains("rows") && stderr.contains("bytes"),
+            "{stderr}"
+        );
+        if discard {
+            assert!(stderr.contains("external backup"));
+        }
+        assert_upgraded_directory(
+            dir.path(),
+            &originals,
+            schema < ergo_indexer::store::INDEXER_SCHEMA_VERSION,
+            discard,
+            keep_stale,
+        );
+        let output = command().output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("no-op"));
+        assert!(!dir.path().join("ergo-data").exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_hook_upgrades_without_networking_and_disabled_switch_gives_guidance() {
+    for keep_stale in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let originals = directory_upgrade_fixture(dir.path(), 2);
+        let mut config = super::common::make_test_config(dir.path().to_path_buf());
+        config.indexer_config.db_filename = "archive-index.redb".into();
+        config.auto_upgrade_legacy = false;
+        config.auto_upgrade_keep_stale_indexer = keep_stale;
+        let error = ergo_node::data_upgrade::prepare_startup(&config)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("ergo-node upgrade-data") && error.contains("archive-index.redb"),
+            "{error}"
+        );
+        for (name, bytes) in &originals {
+            assert_eq!(fs::read(dir.path().join(name)).unwrap(), *bytes);
+        }
+        config.auto_upgrade_legacy = true;
+        let lock = ergo_node::data_upgrade::prepare_startup(&config)
+            .await
+            .unwrap();
+        assert!(ergo_node::data_upgrade::DataDirectoryLock::acquire(dir.path()).is_err());
+        assert_upgraded_directory(dir.path(), &originals, true, false, keep_stale);
+        drop(lock);
+        let lock = ergo_node::data_upgrade::prepare_startup(&config)
+            .await
+            .unwrap();
+        assert_upgraded_directory(dir.path(), &originals, true, false, keep_stale);
+        drop(lock);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boot_hook_precedes_sentinel_peek_and_refuses_a_second_directory_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = directory_upgrade_fixture(dir.path(), 2);
+    let mut config = super::common::make_test_config(dir.path().to_path_buf());
+    config.indexer_config.db_filename = "archive-index.redb".into();
+    config.cache_bytes = Some(1024 * 1024);
+    config.redb_cache_budgets.state = 1024 * 1024;
+    config.redb_cache_budgets.peers = 1024 * 1024;
+    // Current application schema fails later in boot: this test never binds or
+    // dials a network socket, but runs the actual pre-open production ordering.
+    config.state_type = ergo_node::config::StateType::Digest;
+    config.verify_transactions = false;
+    config.blocks_to_keep = 0;
+    config.mempool_config.enabled = false;
+    let error = match ergo_node::run_inner(config).await {
+        Err(error) => error.to_string(),
+        Ok(handle) => {
+            handle.shutdown().await.unwrap();
+            panic!("UTXO sentinel must reject digest mode");
+        }
+    };
+    assert!(error.contains("initialized for state backend"), "{error}");
+    assert_upgraded_directory(dir.path(), &original, true, false, false);
+    let lock = ergo_node::data_upgrade::DataDirectoryLock::acquire(dir.path()).unwrap();
+    let config = super::common::make_test_config(dir.path().to_path_buf());
+    let error = match ergo_node::run_inner(config).await {
+        Err(error) => error.to_string(),
+        Ok(handle) => {
+            handle.shutdown().await.unwrap();
+            panic!("second owner must fail");
+        }
+    };
+    assert!(error.contains("data directory is in use"), "{error}");
+    drop(lock);
+}
+
+#[tokio::test]
+async fn upgraded_directory_retained_backups_support_doctor_backup_verify_and_restore() {
+    let data = tempfile::tempdir().unwrap();
+    let destinations = tempfile::tempdir().unwrap();
+    let originals = directory_upgrade_fixture(data.path(), 2);
+    let mut config = super::common::make_test_config(data.path().to_path_buf());
+    config.indexer_config.db_filename = "archive-index.redb".into();
+    let lock = ergo_node::data_upgrade::prepare_startup(&config)
+        .await
+        .unwrap();
+    drop(lock);
+    let inspected = ergo_node::maintenance::doctor(data.path()).unwrap();
+    assert!(inspected.databases.contains_key("state.redb"));
+    assert!(!inspected
+        .databases
+        .keys()
+        .any(|name| name.ends_with(".redb2-backup")));
+    let backup = destinations.path().join("backup");
+    ergo_node::maintenance::backup(data.path(), &backup).unwrap();
+    ergo_node::maintenance::verify_backup(&backup).unwrap();
+    let restored = destinations.path().join("restored");
+    ergo_node::maintenance::restore(&backup, &restored).unwrap();
+    assert_upgraded_directory(&restored, &originals, true, false, false);
 }

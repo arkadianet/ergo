@@ -31,9 +31,10 @@
 //! **Restart durability.** Production persists subscriptions, signing secrets,
 //! bounded delivery history, retry deadlines and acknowledgements in a private
 //! redb store. Unknown in-flight outcomes retry with the same delivery ID/body.
-//! The bounded queue may reject new events when all entries are still pending;
-//! No webhook gap marker is sent for pre-admission loss; consumers should
-//! periodically reconcile chain state via REST.
+//! The bounded queue preserves pending obligations and retries source admission
+//! after backlog saturation. The worker replays retained bus observations after
+//! overflow/restart; an irrecoverable source gap visibly pauses subscriptions
+//! for REST reconciliation before the operator explicitly resumes them.
 
 pub mod blocking;
 pub mod engine;

@@ -117,7 +117,7 @@ pub(crate) async fn send_transaction_native_impl(
 
     // 1. Produce signed bytes (build+sign own secrets for `intent`; decode for `signed`).
     let (signed_bytes, snapshot) = match req {
-        SendTxRequest::Intent { intent } => {
+        SendTxRequest::Intent { intent, .. } => {
             let (built, pool_snapshot) = build_transaction_impl_with_snapshot(
                 intent, state, store, chain, network, mempool,
             )?;
@@ -136,7 +136,9 @@ pub(crate) async fn send_transaction_native_impl(
             )?;
             (bytes, Some(snapshot))
         }
-        SendTxRequest::Signed { signed_transaction } => {
+        SendTxRequest::Signed {
+            signed_transaction, ..
+        } => {
             let bytes = hex::decode(signed_transaction.bytes_hex())
                 .map_err(|_| WalletAdminError::BadRequest("signedTransaction: bad hex".into()))?;
             let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
@@ -183,8 +185,30 @@ pub(crate) async fn send_transaction_native_impl(
     }
     drop(snapshot);
 
+    let (delivery, options) = match req {
+        SendTxRequest::Intent {
+            delivery,
+            private_options,
+            ..
+        }
+        | SendTxRequest::Signed {
+            delivery,
+            private_options,
+            ..
+        } => (*delivery, private_options.clone().unwrap_or_default()),
+    };
+    let result = match delivery {
+        ergo_wallet_protocol::native::dto::TxDelivery::Broadcast => {
+            submitter.submit_transaction(signed_bytes).await
+        }
+        ergo_wallet_protocol::native::dto::TxDelivery::MinePrivate => {
+            submitter
+                .submit_private_transaction(signed_bytes, options)
+                .await
+        }
+    };
     // 3. Submit. A `duplicate` reason (already in-pool) is idempotently accepted.
-    match submitter.submit_transaction(signed_bytes).await {
+    match result {
         Ok(_) => Ok(SendTxResponse {
             tx_id: tx_id_hex,
             accepted: true,
@@ -195,6 +219,12 @@ pub(crate) async fn send_transaction_native_impl(
             accepted: true,
             transaction: None,
         }),
+        // The private queue could not durably store the transaction: a node
+        // fault, not a request the caller can fix.
+        Err(e) if e.reason == "private_mining_error" => Err(WalletAdminError::Internal(
+            e.detail
+                .unwrap_or_else(|| "private mining queue error".into()),
+        )),
         Err(e) => Err(map_submit_error(e)),
     }
 }
@@ -539,5 +569,95 @@ mod tests {
             map_sign_error(W::TxBuild("reduce: boom".into())),
             WalletAdminError::Internal(_)
         ));
+    }
+
+    /// A durable private queue failure is a server error, never a broadcast.
+    #[test]
+    fn a_private_queue_storage_failure_is_an_internal_error() {
+        use std::future::Future;
+        struct FailingQueue;
+        #[async_trait::async_trait]
+        impl TxSubmitter for FailingQueue {
+            async fn submit_transaction(
+                &self,
+                _: Vec<u8>,
+            ) -> Result<String, crate::engine::TxSubmitError> {
+                panic!("private delivery never broadcasts");
+            }
+            async fn submit_private_transaction(
+                &self,
+                _: Vec<u8>,
+                _: ergo_wallet_protocol::mining::PrivateTransactionOptions,
+            ) -> Result<String, crate::engine::TxSubmitError> {
+                Err(crate::engine::TxSubmitError {
+                    reason: "private_mining_error".into(),
+                    detail: Some("private queue commit failed: no space left".into()),
+                })
+            }
+        }
+        struct NoChain;
+        impl WalletChainAccess for NoChain {
+            fn wallet_scan_height(&self) -> Result<u32, crate::engine::ChainAccessError> {
+                Ok(0)
+            }
+            fn tip_height(&self) -> Result<u32, crate::engine::ChainAccessError> {
+                Ok(0)
+            }
+            fn is_pruned(&self) -> bool {
+                false
+            }
+            fn read_block_at(
+                &self,
+                _: u32,
+            ) -> Result<
+                Option<crate::wallet::scan::RescanBlock>,
+                crate::wallet::scan::RescanReadError,
+            > {
+                Ok(None)
+            }
+        }
+        let tx = ergo_ser::transaction::Transaction {
+            inputs: vec![ergo_ser::input::Input {
+                box_id: ergo_primitives::digest::Digest32::from_bytes([1; 32]),
+                spending_proof: ergo_ser::input::SpendingProof::new(
+                    vec![],
+                    ergo_ser::input::ContextExtension::empty(),
+                )
+                .unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        };
+        let request: ergo_wallet_protocol::native::dto::SendTxRequest = serde_json::from_value(serde_json::json!({
+            "type": "signed",
+            "signedTransaction": {"type": "bytes", "bytes": hex::encode(serialize_signed_tx(&tx).unwrap())},
+            "delivery": "mine_private"
+        })).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let storage = RwLock::new(ergo_wallet::storage::SecretStorage::open(
+            dir.path().join("secrets"),
+        ));
+        let state = RwLock::new(crate::state::WalletState::empty(false));
+        let pool = crate::engine::NoopMempoolOverlay::new();
+        let future = send_transaction_native_impl(
+            &request,
+            &storage,
+            &state,
+            &db,
+            &NoChain,
+            &FailingQueue,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            &pool,
+        );
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(result) = std::pin::pin!(future).as_mut().poll(&mut context)
+        else {
+            panic!("immediate queue failure should complete");
+        };
+        assert!(
+            matches!(result, Err(WalletAdminError::Internal(ref detail)) if detail.contains("no space left")),
+            "{result:?}"
+        );
     }
 }

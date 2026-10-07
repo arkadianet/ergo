@@ -2434,6 +2434,197 @@ fn api_script_policy_resolves_and_rejects_misspellings_and_invalid_costs() {
 }
 
 #[test]
+fn legacy_mining_auth_requires_a_configured_key() {
+    let file = temp_toml("[api.security]\nallow_unauthenticated_legacy_mining = true\n");
+    let error = NodeConfig::load(minimal_cli(Some(file.path()))).unwrap_err();
+    assert!(error.contains("allow_unauthenticated_legacy_mining requires api_key_hash"));
+}
+
+#[test]
+fn legacy_mining_auth_defaults_closed_and_explicit_opt_in_loads() {
+    let default_file = default_toml();
+    let cfg = NodeConfig::load(minimal_cli(Some(default_file.path()))).unwrap();
+    assert!(!cfg.allow_unauthenticated_legacy_mining);
+    let file = temp_toml(&format!("[api.security]\napi_key_hash = \"{TEST_DEFAULT_API_KEY_HASH}\"\nallow_unauthenticated_legacy_mining = true\n"));
+    let cfg = NodeConfig::load(minimal_cli(Some(file.path()))).unwrap();
+    assert!(cfg.allow_unauthenticated_legacy_mining);
+}
+
+#[test]
+fn api_operational_settings_and_scoped_credentials_are_validated() {
+    let source = format!(
+        r#"
+[api.limits]
+refill_per_sec = 30.0
+burst = 80.0
+[api.readiness]
+require_indexer = true
+[api.security]
+api_key_hash = "{TEST_DEFAULT_API_KEY_HASH}"
+[[api.security.keys]]
+id = "pool"
+hash = "{}"
+scopes = ["mining"]
+"#,
+        ergo_api::auth::ApiSecurity::hash_key(b"pool-key")
+    );
+    let path = temp_toml(&source);
+    let resolved = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert_eq!(resolved.api_limits.burst, 80.0);
+    assert!(resolved.api_readiness.require_indexer);
+    assert_eq!(resolved.api_scoped_keys.len(), 1);
+    for source in [
+        "[api.limits]\nrefill_per_sec = 0.0\n",
+        "[api.limits]\nburst = 1.0\n",
+        "[api.limits]\nexempt_loopback = false\n",
+        "[api.readiness]\ntip_max_age_ms = 0\n",
+    ] {
+        let path = temp_toml(source);
+        assert!(
+            NodeConfig::load(minimal_cli(Some(&path))).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn scoped_bad_hash_reaches_hash_validation_with_a_master() {
+    let source = format!("[api.security]\napi_key_hash = \"{TEST_DEFAULT_API_KEY_HASH}\"\n[[api.security.keys]]\nid = \"pool\"\nhash = \"bad\"\nscopes = [\"mining\"]\n");
+    let path = temp_toml(&source);
+    let error = NodeConfig::load(minimal_cli(Some(&path)))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("64"), "must reject the hash length: {error}");
+    assert!(!error.contains("require a master"));
+}
+
+#[test]
+fn container_configuration_enables_dns_rebinding_guard() {
+    let source: toml::Value =
+        toml::from_str(include_str!("../../../deploy/ergo-node.container.toml")).unwrap();
+    let hosts = source["api"]["allowed_hosts"].as_array().unwrap();
+    assert_eq!(
+        hosts,
+        &vec![
+            toml::Value::String("localhost".into()),
+            toml::Value::String("127.0.0.1".into()),
+            toml::Value::String("node".into())
+        ]
+    );
+}
+
+#[test]
+fn container_configuration_and_build_context_protect_secrets() {
+    let docker = include_str!("../../../Dockerfile");
+    assert!(docker.contains("install -d -o root -g root -m 0755 /etc/ergo"));
+    assert!(docker.contains("RUN chmod 0444 /etc/ergo/node.toml"));
+    let ignore = include_str!("../../../.dockerignore");
+    for pattern in ["**/.claude", "**/keystore", "**/keystores", "**/*.keystore"] {
+        assert!(ignore.lines().any(|line| line == pattern));
+    }
+}
+
+#[test]
+fn build_context_protects_nested_rust_wallet_data_and_keeps_vectors() {
+    let ignore = include_str!("../../../.dockerignore");
+    // The default data directory may be created under ergo-node/ or any
+    // other working directory; its wallet secrets are UUID-named JSON files.
+    assert!(ignore.lines().any(|line| line == "**/ergo-data"));
+    for pattern in [
+        "wallet",
+        "**/wallet",
+        "**/wallet/*.json",
+        "**/*.json",
+        "test-vectors",
+        "test-vectors/wallet",
+    ] {
+        assert!(
+            !ignore.lines().any(|line| line == pattern),
+            "wallet vectors must remain in the build context: {pattern}"
+        );
+    }
+    assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/wallet")
+        .is_dir());
+}
+
+#[test]
+fn legacy_auto_upgrade_defaults_on_and_store_can_disable_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.toml");
+    std::fs::write(&path, "[store]\n").unwrap();
+    assert!(
+        NodeConfig::load(minimal_cli(Some(&path)))
+            .unwrap()
+            .auto_upgrade_legacy
+    );
+    std::fs::write(&path, "[store]\nauto_upgrade_legacy = false\n").unwrap();
+    assert!(
+        !NodeConfig::load(minimal_cli(Some(&path)))
+            .unwrap()
+            .auto_upgrade_legacy
+    );
+}
+
+#[test]
+fn stale_indexer_retention_is_explicit_in_store_and_offline_cli() {
+    use clap::Parser;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node.toml");
+    std::fs::write(&path, "[store]\n").unwrap();
+    assert!(
+        !NodeConfig::load(minimal_cli(Some(&path)))
+            .unwrap()
+            .auto_upgrade_keep_stale_indexer
+    );
+    std::fs::write(&path, "[store]\nauto_upgrade_keep_stale_indexer = true\n").unwrap();
+    assert!(
+        NodeConfig::load(minimal_cli(Some(&path)))
+            .unwrap()
+            .auto_upgrade_keep_stale_indexer
+    );
+    let cli =
+        Cli::try_parse_from(["ergo-node", "upgrade-data", "data", "--keep-stale-indexer"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(super::Command::UpgradeData {
+            keep_stale_indexer: true,
+            ..
+        })
+    ));
+    assert!(Cli::try_parse_from([
+        "ergo-node",
+        "upgrade-data",
+        "data",
+        "--keep-stale-indexer",
+        "--discard-backups"
+    ])
+    .is_err());
+}
+
+#[test]
+fn reemission_check_defaults_and_mining_override() {
+    for (node_setting, mining, expected) in [
+        ("", false, false),
+        ("check_reemission_rules = true", false, true),
+        ("check_reemission_rules = false", false, false),
+        ("check_reemission_rules = false", true, true),
+    ] {
+        let file = write_toml(&format!("[node]\n{node_setting}\n"));
+        let mut cli = minimal_cli(Some(file.path()));
+        cli.mining_enabled = mining;
+        if mining {
+            cli.mining_public_key =
+                Some("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".into());
+        }
+        assert_eq!(
+            NodeConfig::load(cli).unwrap().check_reemission_rules,
+            expected
+        );
+    }
+}
+
+#[test]
 fn wallet_mode_defaults_to_embedded() {
     let path = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n");
     let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("default wallet mode loads");

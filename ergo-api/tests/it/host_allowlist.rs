@@ -310,3 +310,79 @@ async fn empty_host_header_rejected() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
 }
+
+#[tokio::test]
+async fn container_probes_accept_pod_and_load_balancer_hosts_only_on_probe_routes() {
+    let app = app("0.0.0.0:9099", &["localhost", "127.0.0.1", "node"]);
+    for host in [
+        "10.42.0.17:9099",
+        "lb-health.example:9099",
+        "[fd00::17]:9099",
+    ] {
+        for route in ["startup", "liveness", "readiness"] {
+            for method in [Method::GET, Method::HEAD] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(format!("/api/v1/node/{route}?check=1"))
+                            .header(header::HOST, host)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                // This stub has no runtime bridge, so the probe returns 503.
+                assert_eq!(
+                    response.status(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{host} {route}"
+                );
+            }
+        }
+        for path in [
+            "/api/v1/node/status",
+            "/api/v1/node/config",
+            "/api/v1/node/liveness/extra",
+            "/api/v1/node/liveness/",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::HOST, host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST, "{path}");
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/node/liveness")
+                    .header(header::HOST, host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+    // HTTP/2 supplies :authority rather than a Host header.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("http://10.42.0.17:9099/api/v1/node/liveness")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}

@@ -136,6 +136,8 @@ macro_rules! chain_read {
 /// across every block apply so per-block / per-tx
 /// allocations amortize over the run.
 pub struct IndexerTask<C: IndexerChainSource> {
+    #[cfg(test)]
+    profile: CatchupProfile,
     observer: Option<Arc<dyn IndexerObserver>>,
     handle: IndexerHandle,
     chain: Arc<C>,
@@ -151,6 +153,13 @@ pub struct IndexerTask<C: IndexerChainSource> {
     /// unlatched warn would fire once per second for the (potentially
     /// unbounded) life of a deep-fork wedge.
     hold_logged: bool,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct CatchupProfile {
+    apply: Duration,
+    commit: Duration,
 }
 
 /// Owned dedicated indexer thread. Dropping requests cancellation; use
@@ -180,6 +189,8 @@ impl Drop for IndexerWorker {
 impl<C: IndexerChainSource> IndexerTask<C> {
     pub fn new(handle: IndexerHandle, chain: Arc<C>) -> Self {
         Self {
+            #[cfg(test)]
+            profile: CatchupProfile::default(),
             observer: None,
             handle,
             chain,
@@ -233,7 +244,12 @@ impl<C: IndexerChainSource> IndexerTask<C> {
     /// one slow/large block still finishes atomically. Rollback remains per block.
     /// The driver uses this method while `step()` retains single-block semantics.
     pub fn step_batch(&mut self) -> IndexerPoll {
-        let poll = self.step_with_budget(16, Duration::from_millis(50), 8 * 1024 * 1024);
+        let poll = self.step_with_policy(
+            CATCHUP_MAX_BLOCKS,
+            CATCHUP_TIME_BUDGET,
+            CATCHUP_BYTE_BUDGET,
+            true,
+        );
         self.finish_poll(poll)
     }
 
@@ -251,6 +267,23 @@ impl<C: IndexerChainSource> IndexerTask<C> {
         time_budget: Duration,
         byte_budget: u64,
     ) -> IndexerPoll {
+        self.step_with_policy(max_blocks, time_budget, byte_budget, false)
+    }
+
+    fn step_with_policy(
+        &mut self,
+        max_blocks: usize,
+        time_budget: Duration,
+        byte_budget: u64,
+        adaptive: bool,
+    ) -> IndexerPoll {
+        // `run` finishes a pending schema migration before its first poll; a
+        // caller stepping the task directly must not see a missing store.
+        if matches!(self.handle.status(), IndexerStatus::Migrating) {
+            if let Err(error) = self.handle.finish_boot(&self.cancel) {
+                return IndexerPoll::Halted(error);
+            }
+        }
         let store = match self.handle.store() {
             Some(s) => s,
             None => {
@@ -369,6 +402,18 @@ impl<C: IndexerChainSource> IndexerTask<C> {
 
         self.handle.set_status(IndexerStatus::Syncing);
 
+        // Polls near the applied tip publish each block promptly. Far behind,
+        // amortize quick-repair's allocator writes and synchronous flushes.
+        // Only one decoded block and one block's scratch are retained; redb's
+        // transaction growth and optional observer backlog have the same budgets.
+        // A single large block can exceed the byte or time budget.
+        let max_blocks =
+            if adaptive && u64::from(tip.height) - meta.indexed_height <= CATCHUP_TIP_MARGIN {
+                1
+            } else {
+                max_blocks
+            };
+
         let next_h32 = match u32::try_from(next_height) {
             Ok(h) => h,
             Err(_) => {
@@ -427,6 +472,8 @@ impl<C: IndexerChainSource> IndexerTask<C> {
         let mut bytes = 0_u64;
         let mut observations = Vec::new();
         for applied_count in 1..=max_blocks {
+            #[cfg(test)]
+            let apply_started = Instant::now();
             let indexed = IndexerBlock {
                 height: block.height,
                 header_id: block.header_id,
@@ -442,6 +489,10 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                 Ok(applied) => applied,
                 Err(error) => return IndexerPoll::Halted(error), // abort all uncommitted rows
             };
+            #[cfg(test)]
+            {
+                self.profile.apply += apply_started.elapsed();
+            }
             next = applied.meta;
             if self.observer.is_some() {
                 observations.push(BlockChanges {
@@ -454,6 +505,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             if applied.secondary_repair_pending
                 || applied_count == max_blocks
                 || next.indexed_height >= u64::from(tip.height)
+                || (adaptive && u64::from(tip.height) - next.indexed_height <= CATCHUP_TIP_MARGIN)
                 || start.elapsed() >= time_budget
                 || bytes >= byte_budget
                 || self.cancel.load(Ordering::Acquire)
@@ -487,8 +539,14 @@ impl<C: IndexerChainSource> IndexerTask<C> {
         {
             return IndexerPoll::Race;
         }
+        #[cfg(test)]
+        let commit_started = Instant::now();
         if let Err(error) = write.commit() {
             return IndexerPoll::Halted(error.into());
+        }
+        #[cfg(test)]
+        {
+            self.profile.commit += commit_started.elapsed();
         }
         self.handle.set_indexed_height(next.indexed_height);
         if let Some(observer) = &self.observer {
@@ -555,6 +613,22 @@ impl<C: IndexerChainSource> IndexerTask<C> {
         // Share the driver's cancel flag with `step` so an in-progress
         // secondary-index rebuild can drain promptly on shutdown.
         self.cancel = cancel.clone();
+        if let Err(error) = self.handle.finish_boot(&cancel) {
+            if !cancel.load(Ordering::Acquire) {
+                if error.is_storage_error() {
+                    crate::handle::report_indexer_storage_failure(
+                        None,
+                        "indexer_finish_boot",
+                        None,
+                        &error,
+                    );
+                }
+                tracing::error!(%error, "indexer background boot failed");
+                self.handle
+                    .set_status(IndexerStatus::Halted(error.halt_reason()));
+            }
+            return;
+        }
         let poll_idle = poll_idle.max(MIN_POLL_DELAY);
         let mut section_retry_count: u32 = 0;
         loop {
@@ -637,10 +711,18 @@ impl<C: IndexerChainSource> IndexerTask<C> {
 pub const MAX_SECTION_RETRIES: u32 = 5;
 const SECTION_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MIN_POLL_DELAY: Duration = Duration::from_millis(50);
+const CATCHUP_MAX_BLOCKS: usize = 256;
+const CATCHUP_TIME_BUDGET: Duration = Duration::from_secs(1);
+const CATCHUP_BYTE_BUDGET: u64 = 32 * 1024 * 1024;
+const CATCHUP_TIP_MARGIN: u64 = 32;
 
 #[cfg(test)]
 #[path = "task_batch_tests.rs"]
 mod batch_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "task_mainnet_bench.rs"]
+mod task_mainnet_bench;
 
 /// Returns `true` if the sleep elapsed; `false` if the cancel flag
 /// flipped during sleep. Used by the driver loop to exit promptly on

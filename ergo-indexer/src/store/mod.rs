@@ -5,6 +5,8 @@
 pub(crate) mod address;
 pub(crate) mod boxes;
 pub(crate) mod meta;
+mod migration;
+mod migration_registry;
 pub(crate) mod numeric;
 pub(crate) mod paging;
 pub(crate) mod segment;
@@ -16,6 +18,7 @@ pub(crate) mod txs;
 pub(crate) mod undo;
 
 pub use meta::{IndexerMeta, INDEXER_SCHEMA_VERSION};
+pub use migration_registry::has_migration_path;
 pub use undo::{UndoEntry, ROLLBACK_WINDOW};
 
 use ergo_indexer_types::{IndexedErgoBox, IndexedErgoTransaction};
@@ -36,6 +39,8 @@ use std::sync::{
 
 use redb::Database;
 
+type SchemaMigration = fn(&Database) -> Result<(), IndexerError>;
+
 use crate::error::IndexerError;
 use ergo_indexer_types::IndexerHaltReason;
 
@@ -47,6 +52,10 @@ pub enum OpenOutcome {
     /// File present and `schema_version` matched — resumed from
     /// persisted meta.
     Resumed,
+    /// Registered schema steps await conversion on the dedicated indexer worker.
+    MigrationPending,
+    /// Registered schema steps committed, preserving the checkpoint.
+    Migrated { previous_version: u32 },
     /// File present but `schema_version` mismatched — file deleted and
     /// recreated, meta empty.
     WipedAndRecreated { previous_version: u32 },
@@ -105,6 +114,11 @@ impl Drop for RepairGuard<'_> {
 }
 
 impl IndexerStore {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn test_snapshot(&self) -> redb::ReadTransaction {
+        self.db.begin_read().unwrap()
+    }
+
     pub(crate) fn acquire_repair(&self) -> Result<RepairGuard<'_>, IndexerError> {
         self.repair_running
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -126,7 +140,8 @@ impl IndexerStore {
     /// |---|---|
     /// | File absent | Create fresh, `schema_version = INDEXER_SCHEMA_VERSION`. |
     /// | File present, `schema_version` matches | Resume. |
-    /// | File present, `schema_version` mismatches | Delete, recreate fresh. |
+    /// | File present, registered migration path | Migrate each step atomically; rebuild on failure. |
+    /// | File present, other `schema_version` mismatches | Delete, recreate fresh. |
     /// | File present, `schema_version` key missing | Halt `SchemaCorruption`. |
     /// | File present, redb open / table / decode failure | Halt `DbCorruption`. |
     pub fn open(path: &Path) -> Result<(Self, OpenOutcome), IndexerError> {
@@ -137,6 +152,39 @@ impl IndexerStore {
     pub fn open_with_cache(
         path: &Path,
         cache_bytes: usize,
+    ) -> Result<(Self, OpenOutcome), IndexerError> {
+        Self::open_inner(path, cache_bytes, Some(migration_registry::run_uncancelled))
+    }
+
+    #[cfg(test)]
+    fn open_with_migration(
+        path: &Path,
+        cache_bytes: usize,
+        migrate: SchemaMigration,
+    ) -> Result<(Self, OpenOutcome), IndexerError> {
+        Self::open_inner(path, cache_bytes, Some(migrate))
+    }
+
+    pub(crate) fn open_for_boot(
+        path: &Path,
+        cache_bytes: usize,
+    ) -> Result<(Self, OpenOutcome), IndexerError> {
+        Self::open_inner(path, cache_bytes, None)
+    }
+
+    fn open_inner(
+        path: &Path,
+        cache_bytes: usize,
+        migrate: Option<SchemaMigration>,
+    ) -> Result<(Self, OpenOutcome), IndexerError> {
+        Self::open_with_registry(path, cache_bytes, migrate, migration_registry::MIGRATIONS)
+    }
+
+    fn open_with_registry(
+        path: &Path,
+        cache_bytes: usize,
+        migrate: Option<SchemaMigration>,
+        registry: &[migration_registry::MigrationStep],
     ) -> Result<(Self, OpenOutcome), IndexerError> {
         if !path.exists() {
             return Self::create_fresh(path, cache_bytes).map(|s| (s, OpenOutcome::CreatedFresh));
@@ -187,6 +235,39 @@ impl IndexerStore {
             }
             Some(previous_version) => {
                 drop(read_txn);
+                if migration_registry::path_from(registry, previous_version).is_some() {
+                    let Some(migrate) = migrate else {
+                        return Ok((
+                            Self {
+                                db: Arc::new(db),
+                                repair_running: Arc::new(AtomicBool::new(false)),
+                                path: path.to_path_buf(),
+                                redb_cache_bytes: cache_bytes,
+                                rollback_window: ROLLBACK_WINDOW,
+                            },
+                            OpenOutcome::MigrationPending,
+                        ));
+                    };
+                    match migrate(&db) {
+                        Ok(()) => {
+                            return Ok((
+                                Self {
+                                    db: Arc::new(db),
+                                    repair_running: Arc::new(AtomicBool::new(false)),
+                                    path: path.to_path_buf(),
+                                    redb_cache_bytes: cache_bytes,
+                                    rollback_window: ROLLBACK_WINDOW,
+                                },
+                                OpenOutcome::Migrated { previous_version },
+                            ));
+                        }
+                        Err(error) => tracing::warn!(
+                            event = "indexer_schema_migration_failed",
+                            %error,
+                            "schema migration aborted; rebuilding index from genesis",
+                        ),
+                    }
+                }
                 drop(db);
                 tracing::info!(
                     previous_version,
@@ -199,6 +280,39 @@ impl IndexerStore {
                 })?;
                 let store = Self::create_fresh(path, cache_bytes)?;
                 Ok((store, OpenOutcome::WipedAndRecreated { previous_version }))
+            }
+        }
+    }
+
+    pub(crate) fn finish_migration(self, cancel: &AtomicBool) -> Result<Self, IndexerError> {
+        self.finish_migration_with(cancel, |db| {
+            migration_registry::run(db, cancel, migration_registry::MIGRATIONS)
+        })
+    }
+
+    pub(crate) fn finish_migration_with(
+        self,
+        cancel: &AtomicBool,
+        migrate: impl FnOnce(&Database) -> Result<(), IndexerError>,
+    ) -> Result<Self, IndexerError> {
+        match migrate(&self.db) {
+            Ok(()) => Ok(self),
+            Err(error) if cancel.load(Ordering::Acquire) => Err(error),
+            Err(error) => {
+                tracing::warn!(event = "indexer_schema_migration_failed", %error,
+                    "schema migration aborted; rebuilding index from genesis");
+                let path = self.path.clone();
+                let cache_bytes = self.redb_cache_bytes;
+                let rollback_window = self.rollback_window;
+                // Release the sole database owner before deleting/recreating it.
+                drop(self);
+                std::fs::remove_file(&path).map_err(|source| IndexerError::FsIo {
+                    context: "remove_file schema-wipe",
+                    source,
+                })?;
+                let mut store = Self::create_fresh(&path, cache_bytes)?;
+                store.set_rollback_window(rollback_window);
+                Ok(store)
             }
         }
     }
@@ -757,7 +871,7 @@ impl From<IndexerError> for IndexerHaltReason {
 mod cache_budget_tests {
     use super::*;
     #[test]
-    fn cache_budget_preserved_on_create_resume_and_schema_rebuild() {
+    fn cache_budget_preserved_on_create_resume_migration_and_schema_rebuild() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("indexer.redb");
         {
@@ -773,9 +887,27 @@ mod cache_budget_tests {
             meta::write_schema_version(&tx, INDEXER_SCHEMA_VERSION - 1).unwrap();
             tx.commit().unwrap();
         }
-        let (store, outcome) = IndexerStore::open_with_cache(&path, 16384).unwrap();
-        assert!(matches!(outcome, OpenOutcome::WipedAndRecreated { .. }));
-        assert_eq!(store.redb_cache_capacity_bytes(), 16384);
+        {
+            let (store, outcome) = IndexerStore::open_with_cache(&path, 16384).unwrap();
+            assert!(matches!(
+                outcome,
+                OpenOutcome::Migrated {
+                    previous_version: 2
+                }
+            ));
+            assert_eq!(store.redb_cache_capacity_bytes(), 16384);
+            let tx = ergo_state::begin_write_qr(&store.db).unwrap();
+            meta::write_schema_version(&tx, 1).unwrap();
+            tx.commit().unwrap();
+        }
+        let (store, outcome) = IndexerStore::open_with_cache(&path, 8192).unwrap();
+        assert!(matches!(
+            outcome,
+            OpenOutcome::WipedAndRecreated {
+                previous_version: 1
+            }
+        ));
+        assert_eq!(store.redb_cache_capacity_bytes(), 8192);
         assert_eq!(store.read_meta().unwrap().indexed_height, 0);
     }
 }

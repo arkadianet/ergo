@@ -51,22 +51,20 @@ pub const fn neutral_votes() -> [u8; 3] {
     [0, 0, 0]
 }
 
-/// Compute the script-evaluator version for a given `block_version`.
+/// Compute the script-evaluator version byte for a protocol `block_version`.
 ///
-/// Mirrors Scala `Header.scriptFromBlockVersion(blockVersion) =
-/// (blockVersion - 1).toByte` (`Header.scala:150-152` in the
-/// ergoplatform/ergo reference). The relationship is purely a function
-/// of `block_version`; the activated validation settings do NOT shift
-/// the script version (that is handled separately via rule
-/// replacements in `ErgoValidationSettings`).
+/// Deliberately match the JVM signed-byte arithmetic quirk for consensus:
+/// Scala computes `(blockVersion - 1).toByte`. We retain the byte bits in `u8`;
+/// consumers compare activation as `i8`. Thus 0 gives -1, 200 gives -57, and
+/// 128 gives 127 (subtraction wraps at the signed boundary). Versions 0 and
+/// 128..=255 cannot occur on mainnet today; versions 1..=127 are unchanged.
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/history/header/Header.scala#L150-L156>
 ///
-/// Block validation and mempool tip contexts pass the active parameters'
-/// `block_version` (Scala `stateContext.blockVersion`), never a header's own
-/// version byte. `block_version = 0` is a synthetic value that never appears
-/// on mainnet, but saturating avoids underflow if some pre-genesis test path
-/// constructs it.
+/// Block validation and mempool tip contexts use the active parameters'
+/// `block_version`, never a header's own version byte. Candidate contexts use
+/// the candidate's selected protocol version.
 pub const fn derive_activated_script_version(block_version: u8) -> u8 {
-    block_version.saturating_sub(1)
+    block_version.wrapping_sub(1)
 }
 
 #[cfg(test)]
@@ -81,15 +79,26 @@ mod mining_helper_tests {
     }
 
     #[test]
-    fn derive_activated_script_version_matches_existing_pattern() {
-        // Scala `Header.scriptFromBlockVersion`: `(blockVersion - 1).toByte`,
-        // saturating at the synthetic version 0.
+    fn derive_activated_script_version_matches_scala_signed_byte_arithmetic() {
+        // Scala promotes the signed byte to Int, subtracts, then narrows.
         for v in 0..=255u8 {
+            let activated = derive_activated_script_version(v);
             assert_eq!(
-                derive_activated_script_version(v),
-                v.saturating_sub(1),
+                activated as i8,
+                (i32::from(v as i8) - 1) as i8,
                 "version {v}"
             );
+            let ctx = crate::TransactionContext {
+                height: 0,
+                miner_pubkey: [0; 33],
+                pre_header_timestamp: 0,
+                activated_script_version: activated,
+                pre_header_version: 4,
+                pre_header_parent_id: [0; 32],
+                pre_header_n_bits: 0,
+                pre_header_votes: [0; 3],
+            };
+            assert_eq!(ctx.block_version(), v, "version round-trip {v}");
         }
     }
 
@@ -106,12 +115,13 @@ mod mining_helper_tests {
         assert_eq!(derive_activated_script_version(4), 3);
     }
 
-    // ----- saturation guard -----
-
     #[test]
-    fn derive_activated_script_version_zero_saturates() {
-        // block_version = 0 is synthetic (never on mainnet); saturating_sub
-        // means no underflow. Pinned to document the guard exists.
-        assert_eq!(derive_activated_script_version(0), 0);
+    fn derive_activated_script_version_signed_edges() {
+        assert_eq!(derive_activated_script_version(0) as i8, -1);
+        assert_eq!(derive_activated_script_version(127) as i8, 126);
+        assert_eq!(derive_activated_script_version(128) as i8, 127);
+        assert_eq!(derive_activated_script_version(129) as i8, -128);
+        assert_eq!(derive_activated_script_version(200) as i8, -57);
+        assert_eq!(derive_activated_script_version(255) as i8, -2);
     }
 }

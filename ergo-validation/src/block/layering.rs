@@ -37,7 +37,12 @@ pub(crate) struct TxLayers {
 // indexed (`group_elements[i]`) inside the parallel closure, avoiding a per-tx
 // Vec clone — the points slice is `Sync` and outlives the parallel section.
 pub(crate) type TxLayerInput = (usize, Vec<u8>, Vec<ErgoBox>, Vec<ErgoBox>);
-pub(crate) type TxLayerResult = (usize, Result<(CheckedTransaction, u64), ValidationError>);
+pub(crate) struct TxLayerSuccess {
+    pub checked: CheckedTransaction,
+    pub block_cost: u64,
+    pub checked_peak: ergo_primitives::cost::JitCost,
+}
+pub(crate) type TxLayerResult = (usize, Result<TxLayerSuccess, ValidationError>);
 
 #[cfg(test)]
 impl TxLayers {

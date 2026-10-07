@@ -47,7 +47,7 @@
 //! References:
 //! - `test-vectors/ergoscript/typer/golden_seed.txt` — committed oracle captures
 //! - `test-vectors/ergoscript/typer/corpus_verdicts.json` — JVM-oracle corpus runs
-//! - `dev-docs/ergoscript-compiler-m2-typer-plan.md` §Task-9
+//! - `ergo-compiler/docs/compiler-design-ledger.md`, Oracle stack
 //! - `scripts/jvm_typer_oracle/TyperOracle.scala` — the JVM oracle
 
 use std::collections::BTreeMap;

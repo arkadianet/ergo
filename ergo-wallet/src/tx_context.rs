@@ -54,7 +54,7 @@ impl BlockchainParameters {
     /// Returns `block_version - 1`, the activated script version the
     /// evaluator uses to gate soft-fork method calls.
     pub fn activated_script_version(&self) -> u8 {
-        self.block_version.saturating_sub(1)
+        ergo_validation::derive_activated_script_version(self.block_version)
     }
 }
 
@@ -228,7 +228,7 @@ impl BlockchainStateContext {
             input_extensions,
             last_headers,
             last_block_utxo_root,
-            activated_script_version: ph.version.saturating_sub(1),
+            activated_script_version: ergo_validation::derive_activated_script_version(ph.version),
         }
     }
 }
@@ -254,6 +254,7 @@ fn ergo_box_to_eval_box_simple(b: &ErgoBox, _index: usize) -> EvalBox {
     let registers = copy_registers_to_eval(&b.candidate);
 
     EvalBox {
+        lazy_vals: Default::default(),
         creation_height: b.candidate.creation_height,
         script_bytes: b.candidate.ergo_tree_bytes().to_vec(),
         value: b.candidate.value as i64,
@@ -294,6 +295,7 @@ fn candidate_to_eval_box_simple(c: &ErgoBoxCandidate, index: usize) -> EvalBox {
     };
     let registers = copy_registers_to_eval(c);
     EvalBox {
+        lazy_vals: Default::default(),
         creation_height: c.creation_height,
         script_bytes: c.ergo_tree_bytes().to_vec(),
         value: c.value as i64,

@@ -213,7 +213,7 @@ impl CandidateStateView for CommittedSnapshot {
 ///
 /// After a build, [`Self::last_disposition`] returns the path the dry-run
 /// took: [`BaseDisposition::Hit`], [`BaseDisposition::Advanced`],
-/// [`BaseDisposition::Rehydrated`], or
+/// [`BaseDisposition::AdvancedFromAncestor`], [`BaseDisposition::Rehydrated`], or
 /// [`BaseDisposition::RehydratedAfterFailedAdvance`]. The disposition is `None`
 /// if no build has completed through this view yet (i.e. `candidate_dry_run`
 /// has not been called).
@@ -807,7 +807,9 @@ mod tests {
             height: header.height,
             miner_pubkey,
             pre_header_timestamp: timestamp,
-            activated_script_version: header.version - 1,
+            activated_script_version: ergo_validation::derive_activated_script_version(
+                header.version,
+            ),
             pre_header_version: header.version,
             pre_header_parent_id: *header.parent_id.as_bytes(),
             pre_header_n_bits: u64::from(header.n_bits),

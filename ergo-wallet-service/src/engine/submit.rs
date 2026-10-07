@@ -27,6 +27,71 @@ pub trait TxSubmitter: Send + Sync {
     /// intentionally: the native send path maps `duplicate` → `200 accepted`;
     /// the compat callers map every failure to `WalletAdminError::Internal`.
     async fn submit_transaction(&self, tx_bytes: Vec<u8>) -> Result<String, TxSubmitError>;
+
+    /// Whether the backend can accept new private mining work in this process.
+    fn private_mining_configured(&self) -> bool {
+        false
+    }
+
+    /// Admit only to the durable private queue, without public relay.
+    async fn submit_private_transaction(
+        &self,
+        _tx_bytes: Vec<u8>,
+        _options: ergo_wallet_protocol::mining::PrivateTransactionOptions,
+    ) -> Result<String, TxSubmitError> {
+        Err(private_mining_unavailable())
+    }
+
+    /// One bounded queue snapshot used to reconcile approved wallet jobs.
+    async fn private_transactions(
+        &self,
+    ) -> Result<Vec<ergo_wallet_protocol::mining::PrivateTransactionEntry>, TxSubmitError> {
+        Err(private_mining_unavailable())
+    }
+
+    async fn private_transaction_status(
+        &self,
+        tx_id: String,
+    ) -> Result<Option<ergo_wallet_protocol::mining::PrivateTransactionEntry>, TxSubmitError> {
+        self.private_transactions()
+            .await
+            .map(|entries| entries.into_iter().find(|entry| entry.tx_id == tx_id))
+    }
+
+    async fn cancel_private_transaction(&self, _tx_id: String) -> Result<(), TxSubmitError> {
+        Err(private_mining_unavailable())
+    }
+
+    /// Background-job RPCs have bounded latency supplied by the embedding
+    /// runtime. Ordinary interactive delivery keeps its existing contract.
+    async fn job_private_transactions(
+        &self,
+    ) -> Result<Vec<ergo_wallet_protocol::mining::PrivateTransactionEntry>, TxSubmitError> {
+        self.private_transactions().await
+    }
+    async fn job_private_transaction_status(
+        &self,
+        tx_id: String,
+    ) -> Result<Option<ergo_wallet_protocol::mining::PrivateTransactionEntry>, TxSubmitError> {
+        self.private_transaction_status(tx_id).await
+    }
+    async fn job_submit_private_transaction(
+        &self,
+        tx_bytes: Vec<u8>,
+        options: ergo_wallet_protocol::mining::PrivateTransactionOptions,
+    ) -> Result<String, TxSubmitError> {
+        self.submit_private_transaction(tx_bytes, options).await
+    }
+    async fn job_cancel_private_transaction(&self, tx_id: String) -> Result<(), TxSubmitError> {
+        self.cancel_private_transaction(tx_id).await
+    }
+}
+
+fn private_mining_unavailable() -> TxSubmitError {
+    TxSubmitError {
+        reason: "private_mining_unavailable".into(),
+        detail: None,
+    }
 }
 
 /// Map a submit error to a native [`WalletAdminError`]. A `duplicate` reason is the

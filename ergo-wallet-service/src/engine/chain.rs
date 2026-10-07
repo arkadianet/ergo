@@ -148,8 +148,8 @@ impl SigningView for PoolSigningView {
 }
 
 /// Read-only chain access for the wallet engine. The engine uses it for:
-/// (a) `walletHeight` in `/wallet/status`, (b) the pruning check in
-/// `/wallet/restore`, (c) block fetch during `/wallet/rescan`, and (d) the
+/// (a) `walletHeight` in `/wallet/status`, (b) incomplete-history detection
+/// on `/wallet/restore`, (c) block fetch during `/wallet/rescan`, and (d) the
 /// signing view + UTXO lookup for the send routes.
 pub trait WalletChainAccess: Send + Sync {
     /// Current wallet scan height — populates `walletHeight`.
@@ -157,8 +157,15 @@ pub trait WalletChainAccess: Send + Sync {
     /// Best full-block tip height. Used as the rescan upper bound.
     fn tip_height(&self) -> Result<u32, ChainAccessError>;
     /// True if the node is configured with `blocks_to_keep != -1`.
-    /// `/wallet/restore` refuses on pruned nodes per Scala parity.
+    /// Restoring a seed marks its history incomplete on a pruned node.
     fn is_pruned(&self) -> bool;
+    /// Inputs reserved by the node's durable private mining queue. Wallet
+    /// maintenance-job reservations are combined separately from WalletStore.
+    fn reserved_wallet_inputs(
+        &self,
+    ) -> Result<std::collections::BTreeSet<[u8; 32]>, WalletAdminError> {
+        Ok(std::collections::BTreeSet::new())
+    }
     /// EIP-27 re-emission rule inputs for this network (`None` off EIP-27
     /// nets, e.g. testnet). The burn-aware builder and the self-verify
     /// EIP-27 gate read it here so a built spend can never violate
@@ -170,7 +177,7 @@ pub trait WalletChainAccess: Send + Sync {
     /// requested block is unavailable (pruned or not yet downloaded).
     fn read_block_at(&self, height: u32) -> Result<Option<RescanBlock>, RescanReadError>;
     /// True when `read_block_at` can return real block data. Distinct from
-    /// `is_pruned()` (which gates `/wallet/restore`) — this gates
+    /// `is_pruned()` (which marks restored history incomplete) — this gates
     /// `/wallet/rescan`. When false, rescan is refused before touching any
     /// wallet state, preventing the destructive clear-then-skip sequence.
     /// Default impl treats a genesis-only tip as supported; otherwise it

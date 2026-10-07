@@ -1,0 +1,282 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.extension_evaluated_values",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "ext-x1-trueleaf-accept#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 7f, the TrueLeaf opcode. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). TrueLeaf is a ConstantNode (values.scala:771), so putValue writes it through the constant path (ValueSerializer.scala:362-371): 01 01. NON-IDENTITY; the tx id hashes the written form.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001007f000001c0843d0008d3010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001000101000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x2-falseleaf-accept#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 80, the FalseLeaf opcode. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). Written back as 01 00. NON-IDENTITY.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100010080000001c0843d0008d3010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001000100000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x3-group-generator-accept#2",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 82, GroupGenerator (values.scala:738). An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100010082000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x4-coll-int-accept#3",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 83 02 04 04 02 04 04, a ConcreteCollection Coll[Int](1, 2). An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100010083020404020404000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x5-coll-boolean-constants-accept#4",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 83 02 01 01 01 01 00, a ConcreteCollection Coll[Boolean](true, false) of constant items. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). A Boolean collection whose items are all Constants is written with the packed serializer (values.scala:871-875): 85 02 01. NON-IDENTITY.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100010083020101010100000001c0843d0008d3010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100850201000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x6-coll-boolean-leaves-accept#5",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 83 02 01 7f 80, the same collection with TrueLeaf and FalseLeaf items, which are Constants too. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). Written back packed: 85 02 01. NON-IDENTITY.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001008302017f80000001c0843d0008d3010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100850201000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x7-coll-boolean-empty-accept#6",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 83 00 01, an empty Coll[Boolean]: forall over no items is true, so it is written packed: 85 00. NON-IDENTITY.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100830001000001c0843d0008d3010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001008500000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x8-coll-boolean-packed-accept#7",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 85 02 01, the packed Boolean collection form. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100850201000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x9-tuple-pair-accept#8",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 86 02 04 02 04 04, a Tuple node (1, 2). An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100860204020404000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x10-tuple-three-accept#9",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 86 03 04 02 04 04 04 06, a 3-item Tuple. The count is a signed byte and nothing checks the arity (TupleSerializer.scala:27-36). An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001008603040204040406000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x11-tuple-one-accept#10",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 86 01 04 02, a 1-item Tuple. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100010086010402000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x12-tuple-empty-accept#11",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 86 00, an empty Tuple. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001008600000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x13-tuple-height-accept#12",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 86 02 04 02 a3, Tuple(1, HEIGHT). A Tuple's items are not cast at parse, and CheckV6Type only walks their types. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). (Evaluating it fails; see the transaction vector evaluated-values-spend.) Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100010086020402a3000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x14-coll-int-height-accept#13",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 83 01 04 a3, Coll[Int](HEIGHT): a collection's items are not cast at parse either. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100830104a3000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-x15-tuple-upcast-v3-accept#14",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 86 02 04 02 7e 04 02 05, Tuple(1, Upcast(1, Long)). An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). From tree v3 the serializer keeps an Upcast (ValueSerializer.scala:157-169), and v4 blocks parse their transactions under (3, 3) (BlockTransactions.scala:184-202), where the tx id is computed (ErgoTransaction.scala:68, an eager val). Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100860204027e040205000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-n1-placeholder-reject#15",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 73 00, ConstantPlaceholder(0). An extension's reader has no constants, so the store lookup throws (ConstantPlaceholderSerializer.scala:20): the JVM rejects. Twin that keeps a fix from over-accepting.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001007300000001c0843d0008d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-n2-height-reject#16",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = a3, HEIGHT: not an EvaluatedValue, so the cast (ContextExtension.scala:61) throws a ClassCastException: the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100a3000001c0843d0008d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-n3-plus-reject#17",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 9a 04 02 04 04, Plus(1, 2): the same cast fails, a reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001009a04020404000001c0843d0008d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-n4-tuple-placeholder-reject#18",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 86 02 04 02 73 00, a Tuple holding a placeholder: the item's store lookup throws, a reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100860204027300000001c0843d0008d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-n5-tuple-getvar-reject#19",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 86 02 04 02 e3 00 04, a Tuple holding GetVar[Int](0), of type Option[Int]. CheckV6Type walks a Tuple's item types (ValidationRules.scala:190), and an Option fails rule 1019: the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100010086020402e30004000001c0843d0008d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-n6-tuple-count-0x80-reject#20",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 86 80 followed by 128 × Int 1 (04 02). The Tuple's count is a getByte: -128, and the allocation throws a NegativeArraySizeException: the JVM rejects. An impl that reads the count as an unsigned byte takes 128 items: the over-accept.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100868004020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402040204020402000001c0843d0008d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-c1-coll-of-tuple-node-accept#21",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 83 01 58 86 02 04 02 04 04, a Coll[(Int, Int)] whose one item is the Tuple node (1, 2). The item's type matches the declared element type, so ConcreteCollectionSerializer's assert passes. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). (Converting it fails; see the transaction vector evaluated-values-spend.) Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000100830158860204020404000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-c2-coll-of-func-v3-accept#22",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 83 00 70 02 04 04 04 00, an empty Coll whose element type is the function type (Int, Int) => Int. From tree v3 the type parses and serializes. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). (Converting it fails; see the transaction vector.) Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710001008300700204040400000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "ext-c2-coll-of-func-one-arg-v3-accept#23",
+      "kind" : "Transaction",
+      "source" : "santa:authored-evaluated-values",
+      "description" : "A one-input transaction whose input 0 carries the extension {0: v}, with v = 83 00 70 01 04 04 00, an empty Coll of Int => Int. An EvaluatedValue, so the JVM parses it (ContextExtension.scala:61). Round-trip identity. sigma-rust, which reads only a Constant here, rejects it: the over-reject.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7100010083007001040400000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

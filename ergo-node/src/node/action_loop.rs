@@ -69,6 +69,8 @@ pub(super) async fn action_loop(
     mut mining_submit_rx: mpsc::Receiver<crate::mining_bridge::MiningRequest>,
     // Operator /peers/connect dial requests from the REST admin handle.
     mut peer_connect_rx: mpsc::Receiver<std::net::SocketAddr>,
+    mut peer_control_rx: mpsc::Receiver<crate::runtime_control::PeerControlRequest>,
+    runtime_control: std::sync::Arc<crate::runtime_control::RuntimeControl>,
     // Operator vote changes (POST /api/v1/votes) — each `()` forces an
     // immediate same-tip mining candidate rebuild so the new votes take effect.
     mut votes_changed_rx: mpsc::Receiver<()>,
@@ -85,6 +87,13 @@ pub(super) async fn action_loop(
     let _wallet_shutdown_guard = WalletShutdownOnDrop {
         session_id: wallet_session_id,
     };
+    struct StopGuard(std::sync::Arc<crate::runtime_control::RuntimeControl>);
+    impl Drop for StopGuard {
+        fn drop(&mut self) {
+            self.0.stop();
+        }
+    }
+    let _stop_guard = StopGuard(runtime_control.clone());
     // Tick every 5s so cold-start fills the outbound pool quickly.
     // The slow-mode gate inside `try_dial_peers` enforces the
     // original 30s cadence once the deficit is small (see
@@ -146,6 +155,17 @@ pub(super) async fn action_loop(
     // gets fresh work without waiting for the recovery retry.
     let mut mining_rebuild_requested = false;
     let mut mining_deadline: Option<Instant> = None;
+    let mut operator_generation = mining
+        .as_ref()
+        .map(|w| w.handle.operator_generation())
+        .unwrap_or(0);
+    // Private queue revision the last signalled build reflected. A change on
+    // the same tip (admission, cancellation, expiry) asks for a rebuild that
+    // includes or drops the transaction; current templates keep serving.
+    let mut private_revision = mining
+        .as_ref()
+        .map(|w| w.handle.private_queue().revision())
+        .unwrap_or(0);
     // Startup priming publishes the persisted BestTip. Normal online mining
     // still waits for a freshly applied, recent block to open its startup
     // latch; offline generation and an empty devnet have explicit exceptions.
@@ -162,6 +182,7 @@ pub(super) async fn action_loop(
     }
 
     loop {
+        runtime_control.beat();
         // Give queued control-plane work an explicit service opportunity before
         // a ready peer batch. Dispatch at most one request from each queue per
         // iteration; ordinary selection below still wakes immediately on a new
@@ -173,6 +194,9 @@ pub(super) async fn action_loop(
             shutdown_log!("[node] shutdown requested, exiting loop...");
             break;
         }
+        if let Ok(req) = peer_control_rx.try_recv() {
+            super::operator_control::dispatch(&mut state, req);
+        }
         if let Ok(req) = submit_rx.try_recv() {
             reply_to_api_submission(&mut state, req);
         }
@@ -181,6 +205,7 @@ pub(super) async fn action_loop(
                 &mut state,
                 mining.as_ref().map(|m| &m.handle),
                 mining.as_ref().is_some_and(|m| m.offline_generation),
+                mining.as_ref().map(|m| &m.request_tx),
                 req,
             );
         }
@@ -202,6 +227,9 @@ pub(super) async fn action_loop(
                     }
                     _ = dial_tick.tick() => {
                         try_dial_peers(&mut state);
+                    }
+                    Some(request) = peer_control_rx.recv() => {
+                        super::operator_control::dispatch(&mut state, request);
                     }
                     Some(addr) = peer_connect_rx.recv() => {
                         connect_to_address(&mut state, addr);
@@ -279,6 +307,7 @@ pub(super) async fn action_loop(
                             &mut state,
                             mining.as_ref().map(|m| &m.handle),
                             mining.as_ref().is_some_and(|m| m.offline_generation),
+                            mining.as_ref().map(|m| &m.request_tx),
                             req,
                         );
                     }
@@ -298,6 +327,12 @@ pub(super) async fn action_loop(
         // the select keeps the wiring in a single place rather than threaded
         // through events.rs / sync_tick.rs.
         if let Some(wiring) = mining.as_ref() {
+            // Confirmations first, then deadlines (a rollback can also make
+            // a mined transaction pending again), before the next build
+            // snapshot is selected.
+            super::private_mining::run_lifecycle(&mut state, &wiring.handle);
+            let generation_now = wiring.handle.operator_generation();
+            let operator_changed = generation_now != operator_generation;
             let now = tokio::time::Instant::now().into_std();
             let tip_now = MiningTipSnapshot::capture(&state);
             let revision_now = state.mempool.revision();
@@ -334,7 +369,13 @@ pub(super) async fn action_loop(
                     refresh_debounce: wiring.refresh_debounce,
                 },
             );
-            let signal = decided.or(mining_votes_dirty.then_some(BuildReason::VotesChanged));
+            let private_now = wiring.handle.private_queue().revision();
+            let signal = decided
+                .or((private_now != private_revision).then_some(BuildReason::PrivateQueue))
+                .or(operator_changed.then_some(BuildReason::MempoolRefresh))
+                .or(mining_votes_dirty.then_some(BuildReason::VotesChanged));
+            operator_generation = generation_now;
+            private_revision = private_now;
             mining_votes_dirty = false;
             if let Some(reason) = signal {
                 let prev = mining_last_tip.best_full_id();
@@ -356,14 +397,16 @@ pub(super) async fn action_loop(
                     }
                     // A same-parent refresh: advance the pool tracker to the
                     // revision we just rebuilt against and stamp the debounce.
-                    // `VotesChanged` is the same shape — a forced same-tip
-                    // rebuild against the current pool.
-                    BuildReason::MempoolRefresh | BuildReason::VotesChanged => {
+                    // `VotesChanged` and `PrivateQueue` are the same shape — a
+                    // forced same-tip rebuild against the current pool.
+                    BuildReason::MempoolRefresh
+                    | BuildReason::VotesChanged
+                    | BuildReason::PrivateQueue => {
                         mining_last_revision = revision_now;
                         mining_last_mempool_signal = Some(now);
                     }
                     // Startup is only used at the prime call above, never here.
-                    BuildReason::Startup => {}
+                    BuildReason::Startup | BuildReason::Requested => {}
                 }
             } else {
                 // Header-only transitions do not regenerate an unchanged
@@ -402,9 +445,14 @@ pub(super) async fn action_loop(
     // below and eventually surface as `timeout`, which is the wrong
     // reason code for a stopping node. Defense in depth alongside
     // the abort-API-first ordering in `RunHandle::shutdown()`.
+    runtime_control.stop();
+    drop(peer_control_rx);
     drop(submit_rx);
     drop(mining_submit_rx);
     let wallet_tasks_result = crate::wallet_boot::await_wallet_tasks(wallet_session_id).await;
+    // Release the on-demand worker sender before the persistence drain so
+    // shutdown can join the worker as soon as its active build completes.
+    drop(mining);
     let cs_shutdown = state.store.chain_state_meta();
     shutdown_log!(
         "[node] tip at shutdown: h={} bh={}, peers={}",
@@ -442,7 +490,7 @@ pub(super) async fn action_loop(
     }
 }
 
-fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandle>) {
+pub(super) fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandle>) {
     if !state.mempool.config().enabled {
         return;
     }
@@ -472,7 +520,14 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
     let outcome = state.mempool_notifier.poll(utxo);
     let tip_changed = match outcome {
         PollOutcome::Initialized(_) | PollOutcome::NoChange => false,
-        PollOutcome::Emit(state_diff) => {
+        PollOutcome::Emit(mut state_diff) => {
+            // Private mining transactions never return to the public mempool:
+            // the rollback neither replays them nor reports them as returned.
+            state_diff.demoted.retain(|tx| {
+                !state.mempool.is_private_transaction(
+                    &ergo_primitives::digest::Digest32::from_bytes(tx.tx_id),
+                )
+            });
             // Workstream C: a rollback (non-empty `demoted`) captures its
             // enrichment HERE — the only place the returned-tx set and the
             // winning tip meet — for the event differ to attach by tip id.
@@ -741,6 +796,7 @@ mod tests {
         let wiring = MiningWiring {
             handle,
             intent_tx,
+            request_tx: std::sync::mpsc::channel().0,
             refresh_debounce: Duration::from_millis(250),
             block_interval_ms: 120_000,
             offline_generation: false,

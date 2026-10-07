@@ -202,3 +202,8 @@ semantics, apply classification, maturity, scan tracking, and rescan logic.
 The edge is deliberately one-way. Phase 2 retains this compatibility facade
 and embedded co-commit boundary; hosting the spending engine in the daemon and
 cutting over embedded storage are follow-on deployment work.
+## Doc accuracy notes
+- The crate's read-only handle is `reader::ChainStoreReader`
+  (`src/reader.rs:31`), reached via `StateStore::reader_handle()`. There is no
+  type named `StateReader`. See [the architecture](../../ARCHITECTURE.md)
+  for the cross-crate read boundary.

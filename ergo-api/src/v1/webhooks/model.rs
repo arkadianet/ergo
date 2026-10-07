@@ -70,6 +70,8 @@ impl DeliveryStatus {
 pub enum AutoDisabledReason {
     /// `consecutive_failures` crossed `MAX_CONSECUTIVE_FAILURES`.
     MaxConsecutiveFailures,
+    /// The retained realtime history no longer covers an unadmitted interval.
+    SourceGap,
 }
 
 /// An operator-registered webhook subscription, including persisted signing and retry state.
@@ -93,6 +95,9 @@ pub struct Subscription {
     pub min_confirmations: u32,
     /// Registration time, unix ms.
     pub created_at_unix_ms: u64,
+    /// Events observed before this registration are outside its obligation.
+    #[serde(default)]
+    pub start_seq: u64,
     // ----- live governor state -----
     /// Consecutive failed deliveries since the last success.
     pub consecutive_failures: u32,
@@ -370,6 +375,7 @@ mod tests {
             active,
             min_confirmations: min_conf,
             created_at_unix_ms: 1_000,
+            start_seq: 0,
             consecutive_failures: 0,
             health: WebhookHealth::Delivered,
             last_delivery_at_unix_ms: None,

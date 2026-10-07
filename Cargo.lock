@@ -735,7 +735,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "ergo-api"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -754,6 +754,7 @@ dependencies = [
  "hex",
  "hmac",
  "http-body-util",
+ "k256",
  "num-bigint",
  "num-integer",
  "num-traits",
@@ -779,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-chain-spec"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "ergo-primitives",
  "ergo-ser",
@@ -788,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-compiler"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "base64",
  "bs58",
@@ -804,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-crypto"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "blake2",
  "ergo-chain-spec",
@@ -821,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-difftest"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -846,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-indexer"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "ergo-indexer-types",
  "ergo-primitives",
@@ -860,11 +861,12 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "ergo-indexer-types"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "ergo-primitives",
  "ergo-ser",
@@ -873,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-mempool"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "ergo-chain-spec",
  "ergo-mempool",
@@ -893,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-mining"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "ergo-chain-spec",
  "ergo-crypto",
@@ -915,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-node"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -941,6 +943,7 @@ dependencies = [
  "ergo-wallet-protocol",
  "ergo-wallet-service",
  "flate2",
+ "fs4",
  "hex",
  "indexmap",
  "k256",
@@ -954,6 +957,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
@@ -963,11 +967,12 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
 name = "ergo-p2p"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "ergo-primitives",
  "ergo-ser",
@@ -981,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-primitives"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "blake2",
  "hex",
@@ -993,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-rest-json"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "ergo-crypto",
  "ergo-primitives",
@@ -1007,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-ser"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "bs58",
  "ergo-primitives",
@@ -1022,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-sigma"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1048,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-state"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "bincode",
  "blake2",
@@ -1082,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-sync"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "ergo-chain-spec",
  "ergo-crypto",
@@ -1106,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-validation"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "ergo-chain-spec",
  "ergo-crypto",
@@ -1133,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-wallet"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "aes-gcm",
  "assert_cmd",
@@ -1165,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-wallet-protocol"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "hex",
  "serde",
@@ -1174,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-wallet-service"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "async-trait",
  "bincode",
@@ -1200,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-walletd"
-version = "0.11.0"
+version = "0.12.3"
 dependencies = [
  "axum",
  "bincode",
@@ -1334,6 +1339,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

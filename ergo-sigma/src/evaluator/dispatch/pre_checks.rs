@@ -108,3 +108,13 @@ fn check_v3_only_methods(ctx: &ReductionContext<'_>, body: &Expr) -> Result<(), 
 pub fn validate_group_element(bytes: [u8; 33]) -> Result<(), EvalError> {
     opcodes::sigma::canonicalize_group_element(bytes).map(|_| ())
 }
+
+/// Curve-check every point a runtime parse recorded on its reader. The JVM
+/// decodes each GroupElement while it parses data, including the points inside
+/// SigmaProp, Box and Header values, so an off-curve point fails the parse.
+/// Evaluator paths that parse script-supplied bytes with their own reader must
+/// therefore drain that reader's points, as transaction validation does.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/serialization/GroupElementSerializer.scala>
+pub(crate) fn validate_recorded_group_elements(points: &[[u8; 33]]) -> Result<(), EvalError> {
+    points.iter().try_for_each(|ge| validate_group_element(*ge))
+}

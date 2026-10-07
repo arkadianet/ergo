@@ -1,0 +1,14 @@
+b2-coll-fold	true	12135
+b2-coll-fold-overflow	false	null
+b2-coll-map-filter	true	12146
+b2-coll-flatmap	true	12137
+b2-coll-flatmap-empty	true	12131
+b2-opt-get-none	false	null
+b2-opt-getorelse-none	false	null
+b2-opt-getorelse-some	false	null
+b2-opt-map	false	null
+b2-opt-map-none	false	null
+b2-opt-filter	false	null
+b2-opt-isempty	false	null
+b6-es-filter-nonbool-lambda	false	null
+b6-es-exists-nonbool-lambda	false	null

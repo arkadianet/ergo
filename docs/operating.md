@@ -81,9 +81,8 @@ to start on an unsupported combination.
 | **Mode 3 — pruned** | `state_type = "utxo"`, `blocks_to_keep = N > 0` | Partial | A standard pruned config boots — `blocks_to_keep` at or above the rollback-window floor (`keep_versions + SAFETY_MARGIN`, 250 at the defaults) — with `block_sections` eviction. Fresh UTXO stores replay from genesis before pruning; complete activation and retention campaigns remain open. |
 | **Mode 4 — pruned + bootstrap** | Mode 3 plus `utxo_bootstrap = true` | Partial | Install/reopen and both NiPoPoW/UTXO orderings are tested. A three-peer test exercises deferred snapshot installation through real header catch-up, full validation of the next mainnet block and restart. Long-running live multi-peer soak remains outstanding. |
 
-The [operating-mode evidence inventory](operating-mode-evidence.md) links the
-fixtures, bounded recovery tests, historical campaign receipts and remaining
-closure criteria behind these statuses.
+The [operating-mode status](compatibility.md#operating-mode-status) describes
+current implementation coverage, bounded regression tests and remaining caveats.
 
 Defaults: `state_type = "utxo"`, `verify_transactions = true`,
 `blocks_to_keep = -1` — i.e. omitting all three knobs gives you Mode 1.
@@ -276,7 +275,7 @@ or the top-level `data_dir` key. The node creates the following under it:
 | `peers.redb` | Peer address book (known peers + bans); independent of the consensus DB | Always |
 | `wallet/` | Encrypted (AES-GCM) wallet secret storage | When the wallet is initialized |
 | `indexer.redb` | Extra-index (address / token / template) DB | Only when `[indexer] enabled = true` |
-| `webhooks.redb` | Private webhook registrations, signing secrets, delivery history and pending retries | When the API listener is enabled |
+| `webhooks.redb` | Private webhook registrations, signing secrets, delivery history, pending retries and bounded realtime replay | When the API listener is enabled |
 | `logs/` (or the configured `[logging.file].dir`) | Rotated log files | Only when `[logging.file]` is configured |
 | `ergo-node.toml` | Config file, when you keep it in the data dir | Operator-placed |
 
@@ -315,8 +314,8 @@ digest backup only into a digest-configured node.
 2. Stop the node gracefully (see [Graceful shutdown](#graceful-shutdown)) so
    the final state commit and a clean redb close complete.
 3. Back up `data_dir` (see above) before any cross-minor upgrade.
-4. For a redb 2.6 → 4 upgrade, complete the [offline database migration](#migrating-legacy-redb-databases)
-   below before starting the new binary. Other upgrades follow their release notes.
+4. For a redb 2.6 → 4 upgrade, review the [automatic database upgrade](#migrating-legacy-redb-databases)
+   and space requirements below. Other upgrades follow their release notes.
 5. Swap in the new binary and restart against the verified config and
    `data_dir`.
 
@@ -344,74 +343,177 @@ Notes:
 
 ## Migrating legacy redb databases
 
-The redb 4 storage upgrade cannot open the file-format v2 databases normally
-created by redb 2.6. Normal startup fails closed with `UpgradeRequired(2)`;
-the peer address book also preserves unsupported files rather than quarantining
-them as corruption. The offline command below upgrades **a new copy**, preserves
-the original, and verifies table schemas and every key/value row with both the
-legacy and current readers. It applies to UTXO and digest `state.redb`, the
-embedded wallet tables, the peer book, and optional indexer and webhook databases.
-It does not change application schemas, consensus bytes, or encrypted seeds.
+Version 0.12 upgrades redb 2.6 file-format v2 databases **automatically on
+startup**, before opening node storage or starting networking. Stop 0.11
+cleanly, disable its automatic restart, and keep a complete external backup of
+the stopped data directory (including `wallet/` and config). Install the new
+binary and start with the same configuration. A large archival database can
+take a long time to copy and verify; progress reports the path, file size,
+elapsed time, copy bytes, verification tables and rows every five seconds.
 
-1. Stop the old node gracefully and disable its automatic restart. Keep its
-   binary and config for rollback. Back up the **whole stopped data directory**,
-   including `wallet/`, with permissions intact; a set of databases copied at
-   different running-node heights is not a consistent backup.
-2. Create a separate destination directory. Copy config and `wallet/` into it
-   with their permissions intact, but do not copy database files into the
-   destination paths: publication refuses existing files, directories and even
-   dangling symlinks. Ensure disk space for the complete backup, migrated files,
-   and one temporary database copy with upgrade/repair overhead. Run as the
-   same account that owns the data and wallet files.
-3. Using the **new** binary, migrate each database from the same stopped source
-   directory. The destination parent must already exist. Adjust the indexer
-   filename if `[indexer] db_filename` overrides the default; omit that command
-   when no indexer database exists. Migrate `webhooks.redb` too if it was created
-   by a legacy binary; omit that command when the file does not exist.
+The inventory is `state.redb` (UTXO/digest and all embedded wallet tables),
+`peers.redb`, `webhooks.redb`, and `[indexer] db_filename` (default
+`indexer.redb`). Encrypted wallet secrets, the private mining queue, mining
+policy/history and maintenance journals are files/JSON, not separate redb
+databases. Missing databases are left for normal startup to create; current
+files are skipped. A stale 0.11 (redb 2.6) indexer, with schema below current,
+is deleted **first** through the crash-safe journal, freeing space for the state
+upgrade even when ample space and a registered schema migration path exist.
+After the state upgrade it rebuilds from genesis in the background while the
+node mines. Rolling back to 0.11 also rebuilds a deleted index. A legacy indexer
+already at the current schema is converted and kept.
+
+Indexes already using redb 4 migrate in place in the background when their
+schema has a registered path. Schema 2 migrates to schema 3 in one atomic
+transaction: token metadata is recomputed from issuing boxes and wrapped-script
+template entries are added, preserving indexed height and rollback history.
+Node startup returns a `migrating` handle without exposing the store; indexed
+data routes return 503 `indexer-migrating` and rent self-claims pause quietly
+while API, P2P and mining run. On shutdown, uncommitted schema migration is
+aborted and schema 2 remains available for the next boot. Unsupported versions
+and failed schema migrations rebuild in the background. Progress logs report
+scanned boxes, changed tokens, affected boxes/templates and elapsed time every
+ten seconds. The [developer migration guide](../ergo-indexer/docs/indexer-schema-migrations.md#011-upgrade-policy)
+explains why stale 0.11 indexes rebuild instead of undergoing synchronous
+file-format conversion.
+
+To retain stale derived data explicitly, pass `--keep-stale-indexer` to the
+offline command, or set `[store] auto_upgrade_keep_stale_indexer = true` for
+startup (default `false`). This retains the legacy file as a rollback backup
+and rebuilds the index, including for schema 2. Retention frees no space and
+may prevent upgrading on a nearly full disk. `--keep-stale-indexer` conflicts with `--discard-backups`.
+
+To perform the upgrade separately from startup, using the new binary:
+
+```bash
+./ergo-node upgrade-data ./ergo-data
+# Use exactly your [indexer] db_filename if it differs from the default:
+./ergo-node upgrade-data ./ergo-data --indexer-db archive-index.redb
+```
+
+This command does not load configuration or start networking. Supply the same
+data directory and indexer path that normal startup will use. Names ending in
+`.redb2-backup` and directories ending in `.redb-upgrade` are reserved artifacts. Both paths share
+the startup implementation and an exclusive `.ergo-node.lock` held throughout
+upgrade; startup keeps that lock until shutdown. Never remove the lock file.
+Legacy database writer locks also reject a running 0.11 node. A completed
+`upgrade-data` run reports a no-op on repetition.
+
+Automatic conversion can be disabled:
+
+```toml
+[store]
+auto_upgrade_legacy = false
+```
+
+It defaults to `true`. With conversion disabled, startup checks the inventory
+without writing database files and fails with `ergo-node upgrade-data` guidance
+when legacy files or an unfinished upgrade exist.
+
+**Space and backups.** Before each copied database, the upgrader requires free
+bytes on that filesystem equal to its file size plus the larger of **10% or
+256 MiB**. The query uses the path's filesystem (`statvfs` on Unix,
+`GetDiskFreeSpaceExW` on Windows), including container overlay mounts. If free
+space cannot be determined, the node warns and proceeds: this check is a
+preflight, and an out-of-space copy still fails safely. Conversion may still
+fail if other processes consume that space;
+originals remain recoverable. Each original becomes `<filename>.redb2-backup`
+after its replacement passes both readers' integrity and typed row verification.
+The verified file and the rename directories are synced. State, peer and
+webhook backups are retained by default; stale indexer backups are retained
+only on explicit request. A 41.7 GiB state needs about 45.9 GiB free for its
+copy; deleting a stale 42.2 GiB index can make an upgrade fit a drive with
+24 GB initially free.
+
+The rebuilt index still needs about as much space as the deleted index. When
+the indexer is enabled, startup warns if free space after the upgrade is below
+that size. Keeping both state copies can leave too little space for rebuilding.
+Every startup, even with automatic conversion disabled, logs a **WARN** for
+each `*.redb2-backup` with its path and size. These backups are plain files the
+node never opens: deleting them is safe while it runs once you are satisfied
+with the upgrade. Alternatively, stop the node and run the command below.
+
+If space is limited, free space or explicitly discard rollback copies:
+
+```bash
+./ergo-node upgrade-data ./ergo-data --discard-backups
+# Add --indexer-db archive-index.redb if configured.
+```
+
+This deletes each legacy backup immediately after the verified replacement
+is durable; the stale indexer is already deleted by default. The
+command logs that **rollback to 0.11 then requires an external backup**. It also removes retained backups from earlier attempts when their current database
+opens read-only, or when the only indexer copy is a stale schema-2 backup. It
+refuses to delete the only surviving copy of any other database. The same
+per-file space check still applies. Startup keeps backups of migrated
+databases; discarding those automatically requires this explicit command.
+
+For another disk, the existing copy-only converter remains available:
+
+```bash
+mkdir ./ergo-data-redb4
+./ergo-node migrate-redb ./ergo-data/state.redb ./ergo-data-redb4/state.redb
+```
+
+Stop the node first; migrate each required legacy database to the other disk,
+copy current databases, config and `wallet/` with permissions intact, then
+switch `data_dir` only after all files succeed. Omit a stale indexer to let the
+new node rebuild it. The destination must not exist. Unknown table types,
+multimaps, persistent savepoints, unsupported formats and malformed metadata
+fail closed; the converter never replaces the source or an existing destination.
+
+**Interruption and recovery.** SIGINT/SIGTERM cancels copying or verification,
+cleans private temporaries and retains originals. If a signal arrives during
+the short journaled rename sequence, that sequence finishes before interruption
+is reported. Any failure exits non-zero with its reason. A kill or crash can
+leave `<filename>.redb-upgrade/`; rerun `upgrade-data` or start with automatic
+conversion enabled. The journal discards an unverified copy while retaining
+its original, or finishes installing a durably verified copy before handling
+its backup. Recovery honors a discard decision already recorded in the journal,
+even when the retry uses default startup settings. Existing rollback backups
+are never replaced. Do not manually
+delete upgrade journals or copies between the two renames. An unclean legacy
+indexer whose schema cannot be read without repair is treated as stale with a
+warning, and deleted by default (or retained on explicit request), without
+repairing the source. Clean legacy indexes below the current schema follow the
+same rebuild policy; current-schema legacy indexes are always converted.
+State, peers and webhooks still require verified conversion; recovery happens
+only in the converter's private copy. Windows shares the converter's portable directory-sync limit;
+use an external stopped-directory backup for power-loss recovery there.
+
+**Rollback to 0.11.** Version 0.11 cannot open upgraded files. Blocks and wallet
+observations recorded only by 0.12 must be downloaded/scanned again.
+
+1. Stop the new node, disable automatic restart, and keep the new directory
+   separately if you want to preserve its later history. Finish any interrupted
+   upgrade with `upgrade-data` before following the completed-upgrade commands
+   below. Alternatively restore the entire external pre-upgrade backup.
+2. Restore **every** retained legacy database over its current file, including
+   an explicitly retained stale indexer backup. For the default filenames:
 
    ```bash
-   mkdir ./ergo-data-redb4
-   # Copy your config and, when present, wallet/ into ergo-data-redb4 first.
-   ./ergo-node migrate-redb ./ergo-data/state.redb ./ergo-data-redb4/state.redb
-   ./ergo-node migrate-redb ./ergo-data/peers.redb ./ergo-data-redb4/peers.redb
-   ./ergo-node migrate-redb ./ergo-data/indexer.redb ./ergo-data-redb4/indexer.redb
-   ./ergo-node migrate-redb ./ergo-data/webhooks.redb ./ergo-data-redb4/webhooks.redb
+   cd ./ergo-data
+   for file in state.redb peers.redb indexer.redb webhooks.redb; do
+     if [ -f "$file.redb2-backup" ]; then
+       mv -f -- "$file.redb2-backup" "$file"
+     fi
+   done
    ```
 
-   This command never loads node configuration or starts networking. It takes
-   a nonblocking exclusive lock compatible with the old writer on the source;
-   a live/open database fails immediately. It opens only a private copy for
-   recovery, upgrade and integrity checks. Unknown table types, multimaps,
-   persistent savepoints and unsupported file versions fail closed. A database
-   already readable by redb 4 reports that no legacy migration is needed and
-   creates no destination. For a mixed stopped v2/v3 set, copy already-current
-   files with permissions intact into the new directory instead.
-4. Start only after **all** required database copies succeed. Update the config's
-   data directory to use the new directory, or supply
-   `--data-dir ./ergo-data-redb4`. The wallet path is always `wallet/` inside that
-   directory; ensure it was copied there. Check any independently configured
-   absolute paths. Validate the resumed
-   state mode, chain tip/root, wallet scan/balances, indexer progress and webhook
-   registrations before restoring automatic restart. Keep the original directory
-   and backup.
-
-**Failure and recovery.** Failure before publication removes the temporary
-copy and leaves source bytes unchanged, including on malformed input or repair
-failure. Fix the reported cause and retry to a new destination. An interrupted
-process can leave `.ergo-redb-migrate-*` files in the destination directory;
-normal startup never uses them. Remove those temporary files only while all
-migration processes are stopped. A parent-directory sync failure on Unix or a
-permission-restoration failure on Windows can report an error **after** the
-verified destination was published. Keep it for inspection; retrying will
-refuse to replace it. The source is still preserved. The file is synced before
-publication and Unix also syncs its parent directory; Windows has no portable
-parent-directory sync and restores the source's readonly attribute after publish.
-
-**Rollback.** Stop the new node completely, then restore the old binary and its
-config against the original stopped directory or the full pre-upgrade backup.
-Do not point redb 2.6 at a directory subsequently written by redb 4. Do not mix
-old and new state, wallet or indexer files. Blocks received only by the new node
-must be downloaded again by the old node; confirm the resumed tip and wallet.
+   Replace `indexer.redb` with the configured indexer filename/path. This is an
+   offline rollback action; never run it while either binary is running.
+3. Remove redb 4 databases that the new binary created where no legacy file
+   existed before the upgrade, or the stale indexer was deleted. In particular,
+   if the indexer, peer or webhook
+   database had no pre-upgrade file/backup, remove that newly created file:
+   `rm -- indexer.redb`, `rm -- peers.redb`, or `rm -- webhooks.redb`, as applicable.
+   Do not delete `state.redb` if its backup is unavailable: restore the external
+   backup instead. With `--discard-backups`, restore the **whole** external
+   stopped-directory backup; there are no local originals to roll back to.
+4. Restore the 0.11 binary and configuration. Restore the pre-upgrade `wallet/`
+   too if its secrets/configuration changed after upgrading. Start 0.11 against
+   the restored directory, then confirm the tip and wallet balances. Keep all
+   database files from the same stopped-node snapshot.
 
 The indexer now uses `Durability::Immediate` for every apply and repair commit.
 This replaces redb 2.6's `Eventual`: commits have a synchronous durability
@@ -747,6 +849,12 @@ list. Read routes and transaction submission remain public. Native script routes
 can additionally require a credential with `[api.script] require_api_key = true`;
 this setting does not alter Scala-compatible script compilation authentication.
 
+Current Lithos clients omit credentials on solo-candidate reads and solution
+submission. `[api.security] allow_unauthenticated_legacy_mining = true` explicitly
+opens the four legacy mining routes while supplied-transaction candidates and
+v1 operator routes retain authentication. This option still requires a configured
+hash. See [Lithos integration](lithos.md) for configuration and wallet-file setup.
+
 Before exposing the API, put public endpoints behind a firewall or reverse proxy
 with per-client rate limits and expose only the endpoints you intend. For a
 proxy terminating on loopback, set `[api] local_reverse_proxy = true` so proxy
@@ -788,7 +896,10 @@ drains accepted API compute and tracked service tasks, drains the persistence
 pipeline and performs the final durable flush. Realtime, sampler and webhook
 services belong to the running node and are joined or aborted on shutdown;
 restarting a node creates fresh workers and restores durable webhook
-registrations and admitted retries. A failed persistence batch is terminal for
+registrations, admitted retries and retained realtime replay. The replay journal
+reserves cursors before use, confirms persistence asynchronously and drains
+off the API reactor during shutdown. See [Operator events](events.md) for
+watermarks, bounded retention and source-gap recovery. A failed persistence batch is terminal for
 that worker, and later dependent writes are
 refused until recovery against committed state.
 

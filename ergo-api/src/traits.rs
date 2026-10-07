@@ -51,6 +51,11 @@ pub trait NodeReadState: Send + Sync {
     }
     fn health(&self) -> ApiHealth;
 
+    /// Separate process, runtime and chain-service probes. None means unavailable.
+    fn probes(&self) -> Option<crate::operator_control::NodeProbes> {
+        None
+    }
+
     /// Live subsystem gauges for `/metrics`. Default zeros so test
     /// fixtures and embedders compile unchanged; the node overrides it.
     fn sync_gauges(&self) -> ApiSyncGauges {
@@ -568,6 +573,47 @@ pub struct TxBuildError {
 /// the connection refuses.
 pub trait NodeAdmin: Send + Sync {
     fn request_shutdown(&self);
+
+    fn effective_config(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    fn apply_config_patch(
+        &self,
+        _patch: crate::operator_control::RuntimeConfigPatch,
+    ) -> Result<serde_json::Value, crate::operator_control::OperatorControlError> {
+        Err(crate::operator_control::OperatorControlError::Unavailable(
+            "runtime configuration is unavailable".into(),
+        ))
+    }
+
+    fn api_governor(&self) -> Option<Arc<crate::v1::Governor>> {
+        None
+    }
+
+    fn peer_control(
+        &self,
+        _command: crate::operator_control::PeerControl,
+    ) -> crate::operator_control::PeerControlFuture<'_> {
+        Box::pin(async {
+            Err(crate::operator_control::OperatorControlError::Unavailable(
+                "peer control is unavailable".into(),
+            ))
+        })
+    }
+
+    fn credentials(&self) -> Option<Vec<crate::auth::CredentialInfo>> {
+        None
+    }
+
+    fn revoke_credential(
+        &self,
+        _id: &str,
+    ) -> Result<(), crate::operator_control::OperatorControlError> {
+        Err(crate::operator_control::OperatorControlError::Unavailable(
+            "credential control is unavailable".into(),
+        ))
+    }
 
     /// Fire-and-forget dial request for `POST /peers/connect` (Scala
     /// fires `ConnectTo(PeerInfo.fromAddress(...))` at the network

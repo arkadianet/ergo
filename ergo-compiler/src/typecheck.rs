@@ -52,9 +52,9 @@ use crate::typer::{assign_type, predefined_env, TyperCtx, TyperError};
 ///   `SigmaProp` (`ScriptApiRoute.scala:60-65` throws a bare `new Exception`;
 ///   oracle: `cc HEIGHT` → `REJECT 0:0 Exception`).
 /// - [`CompileError::Emit`] — emit-phase failure ([`EmitError`]); a compiler
-///   bug surface or an `ergo-ser`-unrepresentable node (compiler-design-ledger.md D-E1..D-E3),
+///   bug surface or an `ergo-ser`-unrepresentable node (ergo-compiler/docs/compiler-design-ledger.md D-E1..D-E3),
 ///   not a user error — EXCEPT [`EmitError::GraphBuildingReject`], the
-///   USER-reachable GraphBuilding verdict-parity gate (compiler-design-ledger.md D-C5), which
+///   USER-reachable GraphBuilding verdict-parity gate (ergo-compiler/docs/compiler-design-ledger.md D-C5), which
 ///   carries the oracle's exception class. The other variants have no
 ///   dedicated Scala exception class — the route collapses every
 ///   non-`CompilerException` throwable into its catch-all.

@@ -1,0 +1,6 @@
+tx1,tx2	30228	Reject	18124	tx2
+tx1,tx2	30229	Reject	18124	tx2
+tx1,tx2	32239	Reject	18124	tx2
+tx1,tx2	32240	Accept	30228	-
+tx2,tx1	30229	Accept	30228	-
+tx2	12105	Reject	0	tx2

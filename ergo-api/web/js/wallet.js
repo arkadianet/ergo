@@ -17,7 +17,9 @@ import { erg, num, truncMiddle } from './format.js';
 import { copyBtn } from './table.js';
 import { fetchTokenMeta, tokenName, getTokenMeta } from './token-meta.js';
 import { createWalletBuilder } from './wallet-builder.js';
-import { decimal } from './wallet-transaction.js';
+import { createPrivateMiningQueue } from './wallet-private.js';
+import { createWalletMaintenance, describeMaintenanceJob, pendingMaintenance, recipientLines } from './wallet-maintenance.js';
+import { decimal, walletRecoveryMessage } from './wallet-transaction.js';
 
 let root = null;
 let authUnsub = null;
@@ -36,6 +38,10 @@ let unlockRendered = false;
 // token picker can offer "what you actually have" instead of a blank hex
 // field. Refreshed every refreshBalances() poll tick.
 let myAssets = [];
+let privateQueue = null;
+let maintenance = null;
+// Lock state the pending-operations notice was last loaded for.
+let jobNoticeFor = null;
 let builder = null, walletBalance = null, walletStatus = null;
 let activeTab = 'assets', assetPage = 0, activityPage = 0, generation = 0, refreshing = false;
 let assetsRendered = false;
@@ -114,6 +120,7 @@ export function mount(el_) {
         <div class="wallet-hero__status">
           <div class="wb-heading"><h2>Wallet access</h2><div data-status-right></div></div>
           <div data-status-body></div>
+          <div data-jobs-notice></div>
         </div>
       </section>
       <div class="wallet-tabs" role="tablist" aria-label="Wallet sections" data-wallet-tabs></div>
@@ -133,12 +140,20 @@ export function mount(el_) {
         <div class="panel__head"><h2 class="panel__title">Wallet activity</h2><span class="muted">Confirmed on chain</span></div>
         <div class="panel__body" data-activity-body></div>
       </section>
+      <section class="panel wallet-view" data-wallet-view="private" id="wallet-private" role="tabpanel" aria-labelledby="wallet-tab-private" hidden>
+        <div class="panel__head"><h2 class="panel__title">Private mining transactions</h2></div>
+        <div class="panel__body" data-private-body></div>
+      </section>
+      <section class="panel wallet-view" data-wallet-view="maintenance" id="wallet-maintenance" role="tabpanel" aria-labelledby="wallet-tab-maintenance" hidden>
+        <div class="panel__head"><h2 class="panel__title">Private wallet maintenance</h2></div>
+        <div class="panel__body" data-maintenance-body></div>
+      </section>
       <section class="panel wallet-view" data-keys-panel data-wallet-view="manage" id="wallet-manage" role="tabpanel" aria-labelledby="wallet-tab-manage" hidden>
         <div class="panel__head"><h2 class="panel__title">Wallet management</h2></div>
         <div class="panel__body" data-keys-body></div>
       </section>
     </div>`;
-  for (const [id, title] of [['assets', 'Assets'], ['build', 'Build transaction'], ['receive', 'Receive'], ['activity', 'Activity'], ['manage', 'Manage']]) {
+  for (const [id, title] of [['assets', 'Assets'], ['build', 'Build transaction'], ['receive', 'Receive'], ['activity', 'Activity'], ['private', 'Private mining'], ['maintenance', 'Maintenance'], ['manage', 'Manage']]) {
     const tab = el('button', { type: 'button', role: 'tab', id: 'wallet-tab-' + id,
       'aria-controls': 'wallet-' + id, 'aria-selected': id === activeTab ? 'true' : 'false',
       tabindex: id === activeTab ? '0' : '-1', text: title, onclick: () => selectTab(id) });
@@ -177,7 +192,7 @@ export function onHide() {
 // Skip the 4 s poll while a recovery phrase is shown or a submit is in flight,
 // so a refresh can't navigate away from the mnemonic gate or fight a request.
 export function isBusy() {
-  return mnemonicGateOpen || submitInFlight;
+  return mnemonicGateOpen || submitInFlight || maintenance?.isBusy();
 }
 
 export function onSlow() {
@@ -196,7 +211,7 @@ export function canLeave() {
         'Leaving discards it permanently. Leave anyway?',
     );
   }
-  if (submitInFlight) {
+  if (submitInFlight || maintenance?.isBusy()) {
     return window.confirm(
       'A wallet operation is still in progress — its result (including a freshly ' +
         'generated recovery phrase) may be lost. Leave anyway?',
@@ -227,7 +242,10 @@ function renderAuthGate(s) {
 function scrubSecrets() {
   if (!root) return;
   generation++;
+  privateQueue?.dispose(); privateQueue = null;
   builder?.dispose(); builder = null;
+  maintenance?.dispose(); maintenance = null;
+  jobNoticeFor = null; q('[data-jobs-notice]')?.replaceChildren();
   walletBalance = walletStatus = null; assetsRendered = false;
   q('[data-wallet-amount]').textContent = '—';
   q('[data-wallet-breakdown]').replaceChildren();
@@ -339,14 +357,9 @@ async function lockWallet() {
 // ── scan-invalidated banner ──────────────────────────────────────────────────
 function renderScanBanner(s) {
   const b = q('[data-scan-banner]');
-  if (s.error === 'scan_invalidated') {
-    b.textContent =
-      'Wallet scan invalidated — balances and addresses may be stale until a rescan. ' +
-      'Trigger one from the CLI/API (POST /wallet/rescan).';
-    b.hidden = false;
-  } else {
-    b.hidden = true;
-  }
+  const message = walletRecoveryMessage(s.error);
+  b.textContent = message || '';
+  b.hidden = !message;
 }
 
 // ── reads: balances + addresses ──────────────────────────────────────────────
@@ -371,6 +384,8 @@ function selectTab(id, focus = false) {
   }
   for (const panel of root.querySelectorAll('[data-wallet-view]')) panel.hidden = panel.dataset.walletView !== id;
   if (id === 'activity' && walletStatus?.isUnlocked) refreshActivity();
+  if (id === 'private') showPrivateQueue();
+  if (id === 'maintenance' && walletStatus?.isInitialized) showMaintenance();
 }
 
 async function refreshBalances(epoch = generation) {
@@ -817,6 +832,44 @@ function populateChangeSelect(list) {
   if (list.includes(prev)) sel.value = prev;
 }
 
+function showPrivateQueue() {
+  if (privateQueue) return;
+  const key = getApiKey(), epoch = generation;
+  privateQueue = createPrivateMiningQueue(q('[data-private-body]'), { api: api.wallet,
+    active: () => epoch === generation && key === getApiKey() && !q('[data-wallet-app]').hidden });
+}
+
+// Pending operations stay reviewable and cancellable while locked; approving
+// new ones needs an unlocked wallet.
+function showMaintenance() {
+  if (!maintenance) { maintenance = createWalletMaintenance(q('[data-maintenance-body]'), { onJobs: renderJobNotice }); maintenance.update(walletStatus); maintenance.load(); }
+  else if (maintenance.update(walletStatus)) maintenance.load();
+  else maintenance.refresh();
+}
+
+// Approved jobs sign when due while the wallet is unlocked, so every lock-state
+// change surfaces pending operations and their payment recipients for review.
+async function refreshJobNotice(epoch) {
+  const res = await api.wallet.miningJobs();
+  if (epoch !== generation) return;
+  if (!res.ok) { jobNoticeFor = null; return; }
+  renderJobNotice(res.data?.items || []);
+}
+
+function renderJobNotice(items) {
+  const box = q('[data-jobs-notice]');
+  if (!box) return;
+  const { pending, payments } = pendingMaintenance(items);
+  if (!pending.length) { box.replaceChildren(); return; }
+  const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+  const banner = el('div', { class: 'banner banner--warn' }, el('p', { text: `${count(pending.length, 'approved maintenance operation')} pending${payments.length ? ', including ' + count(payments.length, 'payment') : ''}. ` +
+    (walletStatus?.isUnlocked ? 'They sign automatically when due while the wallet is unlocked.' : 'They sign automatically when due after you unlock.') }));
+  for (const job of payments.slice(0, 5)) for (const line of recipientLines(describeMaintenanceJob(job))) banner.append(el('p', { class: 'wb-note', text: `${job.request.label}: ${line}` }));
+  if (payments.length > 5) banner.append(el('p', { class: 'wb-note', text: `${count(payments.length - 5, 'more payment')} pending.` }));
+  banner.append(el('button', { class: 'btn btn--sm', type: 'button', text: 'Review operations', onclick: () => selectTab('maintenance') }));
+  box.replaceChildren(banner);
+}
+
 // ── refresh ──────────────────────────────────────────────────────────────────
 async function refresh() {
   if (!root || q('[data-wallet-app]').hidden || refreshing) return;
@@ -832,8 +885,11 @@ async function refresh() {
     }
     walletStatus = res.data;
     renderScanBanner(walletStatus);
+    if (activeTab === 'private') showPrivateQueue();
     if (!walletStatus.isInitialized) { setOnboarding(true); showOnboard(); return; }
     setOnboarding(false); renderStatusPanel(walletStatus);
+    if (jobNoticeFor !== walletStatus.isUnlocked) { jobNoticeFor = walletStatus.isUnlocked; refreshJobNotice(epoch); }
+    if (activeTab === 'maintenance') showMaintenance();
     if (walletStatus.isUnlocked) {
       showSendPanel(); showKeysPanel(); builder.update(walletBalance, walletStatus);
       await Promise.all([refreshBalances(epoch), refreshAddresses(epoch), ...(activeTab === 'activity' ? [refreshActivity(epoch)] : [])]);

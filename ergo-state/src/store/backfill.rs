@@ -84,7 +84,7 @@ pub(super) const MODIFIER_INDEX_CHUNK_ROWS_CAP: usize = 50_000;
 
 use redb::ReadableDatabase;
 use redb::{ReadableTable, ReadableTableMetadata};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{
     read_height_index_ids, StateError, StateStore, BLOCK_SECTIONS, HEADERS, HEADERS_BY_HEIGHT,
@@ -269,13 +269,18 @@ impl StateStore {
             return Ok(0);
         }
 
+        // A fresh data dir indexes its synced headers here on the first
+        // restart (the sync path does not tag them), and an upgraded one
+        // indexes its pre-existing headers. Both run once, before the API
+        // starts, so log them at info level with progress (#608).
         let progress_enabled = total_rows > 10_000;
         if progress_enabled {
             info!(
                 total_rows,
                 chunk_bytes = bytes_budget,
                 chunk_rows = rows_cap,
-                "modifier-type-index: streaming headers",
+                "one-time migration: indexing modifier types; the node starts serving \
+                 when the startup migrations finish",
             );
         }
 
@@ -404,7 +409,7 @@ impl StateStore {
             last_id = Some(chunk.last().expect("non-empty chunk").0);
             if progress_enabled {
                 let elapsed_ms = chunk_start.elapsed().as_millis() as u64;
-                debug!(
+                info!(
                     chunk = chunk_index,
                     rows_in = chunk_rows,
                     bytes_in = chunk_bytes,
@@ -412,8 +417,9 @@ impl StateStore {
                     cumulative_written = written,
                     rows_seen,
                     total_rows,
+                    percent = rows_seen * 100 / total_rows,
                     elapsed_ms,
-                    "modifier-type-index chunk",
+                    "one-time migration: modifier-type index progress",
                 );
             }
             chunk_index += 1;
@@ -460,7 +466,7 @@ impl StateStore {
                 written,
                 chunks = chunk_index,
                 max_chunk_bytes,
-                "modifier-type-index scan complete",
+                "one-time migration: modifier-type index complete",
             );
         }
         on_event(ModifierIndexBackfillEvent::AfterCommit { written, scan_secs });

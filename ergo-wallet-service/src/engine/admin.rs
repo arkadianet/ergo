@@ -169,9 +169,6 @@ impl WalletEngine {
         pass: String,
         use_pre_1627: bool,
     ) -> Result<(), WalletAdminError> {
-        if self.chain.is_pruned() {
-            return Err(WalletAdminError::RestorePruningUnsupported);
-        }
         let mut storage = self.storage.write();
         // Refuse to overwrite an existing wallet (same safety guard as `init`).
         if !matches!(
@@ -179,6 +176,13 @@ impl WalletEngine {
             ergo_wallet::storage::LockState::Uninitialized
         ) {
             return Err(WalletAdminError::WalletExists);
+        }
+        // Persist incomplete history before publishing the seed so a crash
+        // cannot leave a restored pruned wallet claiming a complete balance.
+        if self.chain.is_pruned() {
+            self.store
+                .persist_scan_invalidation(true)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         }
         storage
             .restore(&mnemonic, &mnemonic_pass, &pass, use_pre_1627)

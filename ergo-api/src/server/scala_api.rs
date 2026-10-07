@@ -87,18 +87,25 @@ pub(super) fn auxiliary_router(
     let mut operations = std::collections::BTreeSet::new();
     let mut router = Router::new();
     if let Some(mining) = mining {
-        // `/mining/*` is operator surface: `POST /mining/solution` injects a
-        // PoW solution into the block pipeline, the longpoll candidate read
-        // holds an API task, and the reward routes leak the miner payout
-        // identity. Gate it behind the api_key like `/node/shutdown` —
-        // Scala leaves these open, but our own v1 design doc flagged that
-        // as drift to close, not parity to keep.
-        let mined = crate::mining::mining_router(mining);
-        let mined = mined.route_layer(axum::middleware::from_fn_with_state(
-            security.clone(),
-            crate::auth::require_api_key,
-        ));
-        router = router.merge(mined);
+        // Existing mining routes default to the operator key gate. Operators
+        // may explicitly allow Scala clients that omit a key on those routes;
+        // transaction injection always requires the configured key.
+        let legacy = crate::mining::legacy_mining_router(mining.clone());
+        let legacy = if security
+            .as_ref()
+            .is_some_and(|s| s.allow_unauthenticated_legacy_mining())
+        {
+            legacy
+        } else {
+            legacy.route_layer(axum::middleware::from_fn_with_state(
+                security.clone(),
+                crate::auth::require_api_key,
+            ))
+        };
+        let transactions = crate::mining::transaction_mining_router(mining).route_layer(
+            axum::middleware::from_fn_with_state(security.clone(), crate::auth::require_api_key),
+        );
+        router = router.merge(legacy).merge(transactions);
         operations.extend(
             documented
                 .iter()

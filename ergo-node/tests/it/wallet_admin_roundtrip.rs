@@ -16,6 +16,29 @@ use ergo_wallet_service::engine::{
 
 struct StubChainAccessor;
 
+struct PrunedChainAccessor;
+
+impl WalletChainAccess for PrunedChainAccessor {
+    fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
+        Ok(0)
+    }
+    fn tip_height(&self) -> Result<u32, ChainAccessError> {
+        Ok(0)
+    }
+    fn is_pruned(&self) -> bool {
+        true
+    }
+    fn read_block_at(
+        &self,
+        _: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    > {
+        Ok(None)
+    }
+}
+
 impl WalletChainAccess for StubChainAccessor {
     fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
         Ok(0)
@@ -557,6 +580,121 @@ async fn corrupt_scan_registry_is_discarded_before_empty_full_rescan() {
 }
 
 #[tokio::test]
+async fn pruned_restore_and_discovery_coverage_remain_visible_while_locked() {
+    use ergo_state::wallet::tables::*;
+    let (admin, db, _dir) =
+        spawn_writer_with_chain(Arc::new(PrunedChainAccessor), Arc::new(StubTxSubmitter));
+    let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    admin
+        .restore(phrase.into(), String::new(), "pw".into(), false)
+        .await
+        .unwrap();
+    let status = admin.native_status().await.unwrap();
+    assert!(status.scan_invalidated);
+    assert!(matches!(
+        status.rescan,
+        ergo_api::wallet::native::dto::RescanStateDto::Required { ref detail } if detail.contains("wallet-scan-utxo")
+    ));
+    assert_eq!(
+        admin.status().await.unwrap().error,
+        WalletAdminError::ScanInvalidated.to_string()
+    );
+    assert!(matches!(
+        admin.native_balance(false).await,
+        Err(WalletAdminError::ScanInvalidated)
+    ));
+    assert!(matches!(
+        admin.native_boxes(0, 10).await,
+        Err(WalletAdminError::ScanInvalidated)
+    ));
+    admin.unlock("pw".into()).await.unwrap();
+    assert!(!ergo_state::wallet::reader::WalletReader::new(
+        &redb::ReadableDatabase::begin_read(db.as_ref()).unwrap(),
+    )
+    .tracked_pubkeys_with_paths()
+    .unwrap()
+    .is_empty());
+    assert!(admin.native_status().await.unwrap().scan_invalidated);
+    assert!(matches!(
+        admin.balances().await,
+        Err(WalletAdminError::ScanInvalidated)
+    ));
+    admin.lock().await.unwrap();
+    let txn = db.begin_write().unwrap();
+    let coverage = ergo_state::wallet::utxo_scan::DiscoveryCoverage {
+        version: 1,
+        anchor_height: 0,
+        anchor_header_id: "00".repeat(32),
+        state_root: "00".repeat(33),
+        history_complete: false,
+        matched_boxes: 1,
+        covered_pubkeys: ergo_state::wallet::reader::WalletReader::new(
+            &redb::ReadableDatabase::begin_read(db.as_ref()).unwrap(),
+        )
+        .tracked_pubkeys_with_paths()
+        .unwrap()
+        .into_iter()
+        .map(|(_, pk, _)| hex::encode(pk))
+        .collect(),
+    };
+    txn.open_table(WALLET_UTXO_DISCOVERY)
+        .unwrap()
+        .insert((), serde_json::to_vec(&coverage).unwrap())
+        .unwrap();
+    let wb = ergo_state::wallet::types::WalletBox {
+        box_id: [0x11; 32],
+        creation_tx_id: [0x22; 32],
+        creation_output_index: 0,
+        creation_height: 0,
+        value: 1_000_000,
+        assets: vec![],
+        status: ergo_state::wallet::types::BoxStatus::Confirmed,
+        provenance: ergo_state::wallet::types::BoxProvenance::Owned,
+    };
+    txn.open_table(WALLET_BOXES)
+        .unwrap()
+        .insert(wb.box_id, bincode::serialize(&wb).unwrap())
+        .unwrap();
+    txn.open_table(WALLET_DISCOVERED_BOXES)
+        .unwrap()
+        .insert(wb.box_id, 0)
+        .unwrap();
+    // Emulate the atomic discovery publication below; invalidation clears
+    // only together with the verified holdings and coverage.
+    txn.open_table(WALLET_SCAN_INVALIDATED)
+        .unwrap()
+        .insert((), false)
+        .unwrap();
+    txn.commit().unwrap();
+    let status = admin.native_status().await.unwrap();
+    assert!(status.locked);
+    assert!(!status.discovery.unwrap().history_complete);
+    let boxes = admin.native_boxes(0, 10).await.unwrap();
+    assert!(!boxes.items[0].inclusion_height_known);
+    assert!(
+        !admin
+            .native_box_by_id(hex::encode(wb.box_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .inclusion_height_known
+    );
+    assert!(matches!(
+        admin.rescan(1).await.unwrap_err(),
+        WalletAdminError::BadRequest(_)
+    ));
+    assert!(!admin.rescan_coordinator().in_progress());
+    assert!(!admin.native_status().await.unwrap().scan_invalidated);
+    assert!(matches!(
+        admin
+            .restore(phrase.into(), String::new(), "pw2".into(), false)
+            .await
+            .unwrap_err(),
+        WalletAdminError::WalletExists
+    ));
+}
+
+#[tokio::test]
 async fn rescan_rollback_then_replacement_preserves_running_and_invalidation() {
     use ergo_api::wallet::native::dto::RescanStateDto;
 
@@ -667,6 +805,8 @@ async fn native_send_signed_known_tx_short_circuits() {
 
     let resp = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&signed_bytes),
         })
         .await
@@ -694,6 +834,8 @@ async fn native_send_signed_duplicate_is_idempotent_accept() {
 
     let resp = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&signed_bytes),
         })
         .await
@@ -717,6 +859,8 @@ async fn native_send_signed_real_rejection_is_error() {
 
     let err = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&signed_bytes),
         })
         .await
@@ -740,6 +884,8 @@ async fn native_send_signed_malformed_bytes_is_bad_request() {
     // `00` is valid hex (one 0x00 byte) but not a serialized Transaction.
     let err = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&[0x00]),
         })
         .await
@@ -779,7 +925,11 @@ async fn native_send_intent_locked_rejects() {
         allow_token_burn: false,
     };
     let err = admin
-        .send_transaction(SendTxRequest::Intent { intent })
+        .send_transaction(SendTxRequest::Intent {
+            intent,
+            delivery: Default::default(),
+            private_options: None,
+        })
         .await
         .expect_err("intent send requires unlock");
     assert!(matches!(err, WalletAdminError::Locked), "got {err:?}");
@@ -1043,6 +1193,8 @@ async fn native_balance_reserves_eip27_reward_box_tokens() {
         min_relay_fee_nano_erg: 1_000_000,
         max_tx_size_bytes: 98_304,
         reemission: Some(ergo_validation::ReemissionRuleInputs {
+            check_rules: true,
+            emission: None,
             activation_height: ACTIVATION,
             reemission_token_id: REEMISSION_TOKEN,
             pay_to_reemission_tree: vec![0u8], // unused by the reserve estimate
@@ -1148,6 +1300,8 @@ async fn native_select_boxes_burn_aware_dry_run() {
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_seed = db.clone();
     let rules = ergo_validation::ReemissionRuleInputs {
+        check_rules: true,
+        emission: None,
         activation_height: ACTIVATION,
         reemission_token_id: REEMISSION_TOKEN,
         pay_to_reemission_tree: vec![0u8], // unused by the dry-run (no tree parse)
@@ -1822,6 +1976,8 @@ mod scan_invalidation {
         assert_invalidated(
             admin
                 .send_transaction(SendTxRequest::Signed {
+                    delivery: Default::default(),
+                    private_options: None,
                     signed_transaction: TxRepr::from_bytes(&minimal_signed_tx().0),
                 })
                 .await,
@@ -1920,4 +2076,105 @@ async fn supervised_wallet_shutdown_joins_blocked_rescan_before_database_reopen(
     drop(admin);
     drop(db);
     redb::Database::open(path).expect("all wallet database owners must have been joined");
+}
+
+struct CapturingPrivateSubmitter {
+    expected_bytes: Vec<u8>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl TxSubmitter for CapturingPrivateSubmitter {
+    async fn submit_transaction(&self, _bytes: Vec<u8>) -> Result<String, TxSubmitError> {
+        panic!("mine_private delivery must never reach public submission")
+    }
+    async fn submit_private_transaction(
+        &self,
+        bytes: Vec<u8>,
+        options: ergo_wallet_protocol::mining::PrivateTransactionOptions,
+    ) -> Result<String, TxSubmitError> {
+        assert_eq!(bytes, self.expected_bytes);
+        assert_eq!(options.expires_at_ms, Some(2_000_000_000_000));
+        assert_eq!(options.expires_at_height, Some(250));
+        assert_eq!(options.priority, 5);
+        assert_eq!(options.label.as_deref(), Some("phone signed"));
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(hex::encode(minimal_signed_tx().1))
+    }
+}
+
+#[tokio::test]
+async fn native_signed_private_delivery_preserves_bytes_without_wallet_unlock_or_broadcast() {
+    use ergo_api::wallet::native::dto::{SendTxRequest, TxDelivery, TxRepr};
+    let (bytes, id) = minimal_signed_tx();
+    let submitter = Arc::new(CapturingPrivateSubmitter {
+        expected_bytes: bytes.clone(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (admin, _db, _dir) = spawn_writer(submitter.clone());
+    let request = || SendTxRequest::Signed {
+        signed_transaction: TxRepr::from_bytes(&bytes),
+        delivery: TxDelivery::MinePrivate,
+        private_options: Some(ergo_wallet_protocol::mining::PrivateTransactionOptions {
+            expires_at_ms: Some(2_000_000_000_000),
+            expires_at_height: Some(250),
+            priority: 5,
+            label: Some("phone signed".into()),
+        }),
+    };
+    for _ in 0..2 {
+        let result = admin.send_transaction(request()).await.unwrap();
+        assert!(result.accepted);
+        assert_eq!(result.tx_id, hex::encode(id));
+    }
+    assert_eq!(submitter.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// The real writer refuses to journal an approval while the wallet is locked:
+/// an approved job later signs with the wallet key, like an intent send. A node
+/// without private mining refuses it too, since the job could never run.
+#[tokio::test]
+async fn mining_job_approval_requires_an_unlocked_wallet_and_private_mining() {
+    use ergo_api::wallet::native::dto::{WalletJobRequest, WalletJobTask};
+    use ergo_state::wallet::tables::WALLET_BOXES;
+    use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
+    let (admin, db, _dir) = spawn_writer(Arc::new(StubTxSubmitter));
+    admin.init("pw".into(), String::new(), 24).await.unwrap();
+    let owned = WalletBox {
+        box_id: [0xA0; 32],
+        creation_tx_id: [0xB0; 32],
+        creation_output_index: 0,
+        creation_height: 100,
+        value: 1_000_000,
+        assets: vec![([0xC0; 32], 42)],
+        status: BoxStatus::Confirmed,
+        provenance: BoxProvenance::Owned,
+    };
+    let write = db.begin_write().unwrap();
+    write
+        .open_table(WALLET_BOXES)
+        .unwrap()
+        .insert(owned.box_id, bincode::serialize(&owned).unwrap())
+        .unwrap();
+    write.commit().unwrap();
+    let request = WalletJobRequest {
+        label: "approved renewal".into(),
+        task: WalletJobTask::Renew {
+            box_ids: vec![hex::encode(owned.box_id)],
+        },
+        not_before_height: 201,
+        expires_at_height: 921,
+        max_attempts: 2,
+    };
+    assert!(admin.native_status().await.unwrap().locked);
+    assert!(matches!(
+        admin.create_mining_job(request.clone()).await,
+        Err(WalletAdminError::Locked)
+    ));
+    admin.unlock("pw".into()).await.unwrap();
+    assert!(matches!(
+        admin.create_mining_job(request).await,
+        Err(WalletAdminError::BadRequest(detail)) if detail.contains("private mining")
+    ));
+    assert!(admin.mining_jobs().await.unwrap().items.is_empty());
 }

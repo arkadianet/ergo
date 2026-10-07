@@ -22,12 +22,14 @@
 //! [`NodeMining`] traits the compat surface reads —
 //! reshaped into the standard envelope + snake_case glossary. Where a
 //! capability has no trait seam yet (manual peer-ban, config read/patch,
-//! forced-tx candidate, next-block vote preview), the endpoint mounts and
+//! next-block vote preview), the endpoint mounts and
 //! answers the honest `route_unavailable` rather than a bare 404.
 
 pub(crate) mod mining;
+pub(crate) mod mining_policy;
 pub(crate) mod network;
 pub(crate) mod node;
+pub(crate) mod private_mining;
 pub(crate) mod voting;
 
 use std::sync::Arc;
@@ -252,12 +254,22 @@ pub fn operator_router(
             governor_mw,
         ));
 
+    let probes: Router<OperatorState> = Router::new()
+        .route("/api/v1/node/startup", get(node::startup))
+        .route("/api/v1/node/liveness", get(node::liveness))
+        .route("/api/v1/node/readiness", get(node::readiness));
+
     // ----- T1: operator (api_key) controls -----
     let t1: Router<OperatorState> = Router::new()
         // node config read (mutation is T2, below)
         .route("/api/v1/node/config", get(node::config_get))
         // network controls
         .route("/api/v1/network/connect", post(network::connect))
+        .route("/api/v1/network/disconnect", post(network::disconnect))
+        .route(
+            "/api/v1/network/peers/:addr",
+            axum::routing::delete(network::remove),
+        )
         .route("/api/v1/network/blacklist", post(network::blacklist_add))
         .route(
             "/api/v1/network/blacklist/:addr",
@@ -265,12 +277,29 @@ pub fn operator_router(
         )
         // mining controls
         .route("/api/v1/mining/candidate", get(mining::candidate))
+        .route(
+            "/api/v1/mining/policy",
+            get(mining_policy::get).put(mining_policy::set),
+        )
+        .route(
+            "/api/v1/mining/candidate-details",
+            get(mining::candidate_details),
+        )
+        .route("/api/v1/mining/history", get(mining::history))
         .route("/api/v1/mining/solution", post(mining::solution))
         .route("/api/v1/mining/reward-address", get(mining::reward_address))
         .route("/api/v1/mining/reward-pubkey", get(mining::reward_pubkey))
         .route(
             "/api/v1/mining/candidate-with-txs",
             post(mining::candidate_with_txs),
+        )
+        .route(
+            "/api/v1/mining/private-transactions",
+            get(private_mining::list).post(private_mining::submit),
+        )
+        .route(
+            "/api/v1/mining/private-transactions/:tx_id/cancel",
+            post(private_mining::cancel),
         )
         // voting operator writes/reads
         .route(
@@ -293,6 +322,11 @@ pub fn operator_router(
     // is a separately-reviewable behavior change, deferred out of this additive
     // group. `config` PATCH (mutation) is the T2 control this group carries.
     let t2: Router<OperatorState> = Router::new()
+        .route("/api/v1/node/credentials", get(node::credentials))
+        .route(
+            "/api/v1/node/credentials/:id",
+            axum::routing::delete(node::revoke_credential),
+        )
         // config mutation is the more dangerous half of node/config → T2
         .route(
             "/api/v1/node/config",
@@ -303,7 +337,24 @@ pub fn operator_router(
             require_tier,
         ));
 
-    t0.merge(t1).merge(t2).with_state(state)
+    t0.merge(probes).merge(t1).merge(t2).with_state(state)
+}
+
+fn control_error(error: crate::operator_control::OperatorControlError) -> Response {
+    use crate::operator_control::OperatorControlError;
+    let reason = match &error {
+        OperatorControlError::Invalid(_) => Reason::BadRequest,
+        OperatorControlError::Conflict(_) => Reason::ConfigConflict,
+        OperatorControlError::Unavailable(_) | OperatorControlError::Storage(_) => {
+            Reason::RouteUnavailable
+        }
+        OperatorControlError::NotFound(_) => Reason::CredentialNotFound,
+    };
+    v1_error(
+        reason,
+        error.to_string(),
+        "inspect node configuration or state and retry",
+    )
 }
 
 #[cfg(test)]

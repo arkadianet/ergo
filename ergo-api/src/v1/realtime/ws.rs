@@ -81,7 +81,7 @@ pub async fn ws_handler(
             return v1_error(
                 Reason::RealtimeDisabled,
                 "real-time subscriptions are not enabled on this node",
-                "the RealtimeBus is not wired in this build",
+                "check notification storage errors in the boot log and restart",
             )
         }
     };

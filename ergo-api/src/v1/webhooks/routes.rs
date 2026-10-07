@@ -64,8 +64,8 @@ impl WebhooksState {
         self.handle.as_ref().ok_or_else(|| {
             Box::new(v1_error(
                 Reason::WebhooksDisabled,
-                "the webhook store is not wired on this node",
-                "webhooks require the durable delivery subsystem to be enabled",
+                "the durable webhook subsystem is unavailable on this node",
+                "check notification storage errors in the boot log; stop the node, back up webhooks.redb, restore writable storage or a compatible database backup, then restart; see docs/events.md",
             ))
         })
     }
@@ -247,13 +247,16 @@ pub(crate) async fn register(
     };
     let min_conf = req.confirmations.unwrap_or(1);
 
+    let registration_bus = handle.bus.clone();
     run_operation(handle, move |engine| {
-        match engine.register(
+        let start_seq = registration_bus.latest_seq();
+        match engine.register_after(
             req.url,
             keys,
             secret,
             min_conf,
             crate::v1::webhooks::worker::now_unix_ms(),
+            start_seq,
         ) {
             Ok(sub) => (
                 axum::http::StatusCode::CREATED,
@@ -406,8 +409,9 @@ pub(crate) async fn patch_active(
         Ok(h) => h,
         Err(e) => return *e,
     };
+    let resume_bus = handle.bus.clone();
     run_operation(handle, move |engine| {
-        match engine.set_active(&id, body.active) {
+        match engine.set_active_after(&id, body.active, resume_bus.latest_seq()) {
             Some(sub) => Json(sub.to_dto()).into_response(),
             None if !engine.is_available() => v1_error(
                 Reason::WebhooksDisabled,
@@ -580,6 +584,55 @@ mod tests {
         let (status, v) = json_of(resp).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(v["error"]["reason"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn patch_resume_records_current_bus_boundary() {
+        let state = state_enabled();
+        let handle = state.handle.as_ref().unwrap();
+        let id = handle
+            .executor
+            .run_worker(|engine| {
+                let sub = engine
+                    .register(
+                        "https://x.example/h".into(),
+                        vec!["blocks".into()],
+                        None,
+                        1,
+                        0,
+                    )
+                    .unwrap();
+                engine.set_active(&sub.webhook_id, false).unwrap();
+                sub.webhook_id
+            })
+            .await
+            .unwrap();
+        handle
+            .bus
+            .publish(crate::v1::realtime::RealtimeEventBody::block_applied(
+                1,
+                "header".into(),
+                1,
+                1,
+                100,
+            ));
+        let executor = handle.executor.clone();
+        let resp = app(state)
+            .oneshot(req(
+                "PATCH",
+                &format!("/api/v1/webhooks/{id}"),
+                Some("operator-secret"),
+                Some(json!({"active": true})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let start = executor
+            .run_worker(move |engine| engine.get(&id).unwrap().start_seq)
+            .await
+            .unwrap();
+        assert_eq!(start, 1);
+        executor.shutdown().await;
     }
 
     // ----- register happy path + secret echoed once -----
@@ -783,5 +836,11 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(v["error"]["reason"], "webhooks_disabled");
+        let detail = v["error"]["detail"].as_str().unwrap();
+        assert!(detail.contains("boot log"));
+        assert!(detail.contains("stop the node"));
+        assert!(detail.contains("back up webhooks.redb"));
+        assert!(detail.contains("compatible database backup"));
+        assert!(detail.contains("docs/events.md"));
     }
 }

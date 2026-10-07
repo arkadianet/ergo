@@ -5,10 +5,20 @@ use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
 use super::AvlTreeData;
+use crate::error::WriteError;
 
 // -- AvlTree serialization --
 
-pub(super) fn write_avl_tree(w: &mut VlqWriter, avl: &AvlTreeData) {
+pub(super) fn write_avl_tree(w: &mut VlqWriter, avl: &AvlTreeData) -> Result<(), WriteError> {
+    // Scala deliberately wraps getUInt().toInt on read, but putUInt throws for
+    // the resulting negative Int. Match both halves for consensus: callers
+    // that only deserialize can retain the value, while reserialization fails.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/data/AvlTreeData.scala#L73-L89
+    if avl.key_length < 0 || avl.value_length_opt.is_some_and(|len| len < 0) {
+        return Err(WriteError::InvalidData(
+            "AvlTree key/value lengths must be nonnegative when serialized".into(),
+        ));
+    }
     // Raw digest bytes, NO length prefix (Scala AvlTreeData.serializer:
     // `putBytes(digest.toArray)`). Wire-derived / literal trees always carry a
     // 33-byte digest, so the emitted bytes are unchanged from the old fixed
@@ -19,10 +29,6 @@ pub(super) fn write_avl_tree(w: &mut VlqWriter, avl: &AvlTreeData) {
         | ((avl.update_allowed as u8) << 1)
         | ((avl.remove_allowed as u8) << 2);
     w.put_u8(flags);
-    // Write the signed length back through the unsigned VLQ codec (round-trips
-    // the original bytes for a wrapped-negative length). Scala's putUInt would
-    // throw on a negative length; that only matters for re-serializing an
-    // already-invalid tree, which is out of scope here.
     w.put_u32(avl.key_length as u32);
     // Scala: w.putOption(data.valueLengthOpt)(_.putUInt(_))
     match avl.value_length_opt {
@@ -32,6 +38,7 @@ pub(super) fn write_avl_tree(w: &mut VlqWriter, avl: &AvlTreeData) {
             w.put_u32(len as u32);
         }
     }
+    Ok(())
 }
 
 pub(super) fn read_avl_tree(r: &mut VlqReader) -> Result<AvlTreeData, ReadError> {

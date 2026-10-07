@@ -24,6 +24,107 @@ fn opcode_deserialize_context() {
 }
 
 #[test]
+fn evaluation_parsers_check_box_versions_inside_nested_constant_shapes() {
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::sigma_value::{write_constant, write_value, CollValue};
+
+    for version in [3, 4] {
+        let mut w = VlqWriter::new();
+        w.put_u64(1_000_000);
+        w.put_bytes(&[0x08 | version, 2, 0x08, 0xd3]);
+        w.put_bytes(&[0, 0, 0]); // height, tokens, registers
+        w.put_bytes(&[0; 32]);
+        w.put_u16(0);
+        let boxed = SigmaValue::OpaqueBoxBytes(w.result());
+        for (tpe, value) in [
+            (SigmaType::SBox, boxed.clone()),
+            (
+                SigmaType::SColl(Box::new(SigmaType::SBox)),
+                SigmaValue::Coll(CollValue::Values(vec![boxed.clone()])),
+            ),
+            (
+                SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SBox]),
+                SigmaValue::Tuple(vec![SigmaValue::Int(1), boxed.clone()]),
+            ),
+            (
+                SigmaType::SOption(Box::new(SigmaType::SBox)),
+                SigmaValue::Opt(Some(Box::new(boxed.clone()))),
+            ),
+        ] {
+            let mut constant_writer = VlqWriter::new();
+            write_constant(&mut constant_writer, &tpe, &value).unwrap();
+            let constant = constant_writer.result();
+            let b = make_test_box();
+            let mut ctx = ctx_with_self_box(&b);
+            ctx.extension.insert(
+                1,
+                (
+                    SigmaType::SColl(Box::new(SigmaType::SByte)),
+                    SigmaValue::Coll(CollValue::Bytes(constant.clone())),
+                ),
+            );
+            let deserialize = op(
+                0xd4,
+                Payload::DeserializeContext {
+                    id: 1,
+                    tpe: tpe.clone(),
+                },
+            );
+            let decoded = eval_to_value(&deserialize, &ctx, &[]);
+            assert_eq!(
+                decoded.is_ok(),
+                version == 3,
+                "context: {tpe:?}, {decoded:?}"
+            );
+            if let Err(error) = decoded {
+                assert!(!matches!(error, EvalError::SigmaValidation { .. }));
+            }
+
+            let mut data_writer = VlqWriter::new();
+            write_value(&mut data_writer, &tpe, &value).unwrap();
+            let global = op(
+                0xdc,
+                Payload::MethodCall {
+                    type_id: 106,
+                    method_id: 4,
+                    obj: Box::new(op(0xdd, Payload::Zero)),
+                    args: vec![const_bytes(data_writer.result())],
+                    type_args: vec![tpe.clone()],
+                },
+            );
+            let decoded = eval_to_value(&global, &ctx, &[]);
+            assert_eq!(
+                decoded.is_ok(),
+                version == 3,
+                "global: {tpe:?}, {decoded:?}"
+            );
+
+            // A v4 template header is accepted. Only the nested Box version
+            // enters deserializeErgoTree's VersionContext check.
+            let mut body_writer = VlqWriter::new();
+            body_writer.put_u32(1);
+            body_writer.put_bytes(&constant);
+            body_writer.put_bytes(&[0x73, 0]);
+            let body = body_writer.result();
+            let mut template_writer = VlqWriter::new();
+            template_writer.put_u8(0x1c);
+            template_writer.put_u32(body.len() as u32);
+            template_writer.put_bytes(&body);
+            let template = template_writer.result();
+            let substituted = subst_constants_versioned(&template, &[], &[], true, 3);
+            assert_eq!(
+                substituted.is_ok(),
+                version == 3,
+                "subst: {tpe:?}, {substituted:?}"
+            );
+            if let Ok((bytes, _)) = substituted {
+                assert_eq!(bytes, template);
+            }
+        }
+    }
+}
+
+#[test]
 fn opcode_deserialize_context_missing_var() {
     let expr = op(
         0xD4,

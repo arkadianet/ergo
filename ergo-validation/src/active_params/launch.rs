@@ -10,6 +10,8 @@ use crate::voting::validation_settings::ErgoValidationSettingsUpdate;
 /// `voted_params` so the snapshot read path always finds *some* row.
 pub fn scala_launch_mainnet() -> ActiveProtocolParameters {
     ActiveProtocolParameters {
+        announced_settings: None,
+        missing_core_parameters: 0,
         epoch_start_height: 0,
         block_version: 1,
         storage_fee_factor: 1_250_000,
@@ -35,6 +37,7 @@ pub fn scala_launch_mainnet() -> ActiveProtocolParameters {
 /// See `test-vectors/testnet/initial-context/` for source and early captures.
 pub fn scala_launch_testnet() -> ActiveProtocolParameters {
     ActiveProtocolParameters {
+        announced_settings: None,
         block_version: 4,
         proposed_update: ErgoValidationSettingsUpdate {
             rules_to_disable: vec![215, 409],
@@ -52,6 +55,7 @@ pub fn scala_launch_for_network(net: Network) -> ActiveProtocolParameters {
         Network::Mainnet => scala_launch_mainnet(),
         Network::Testnet => scala_launch_testnet(),
         Network::Devnet => ActiveProtocolParameters {
+            announced_settings: None,
             block_version: 4,
             ..scala_launch_mainnet()
         },

@@ -1,0 +1,15 @@
+With Java 21, Scala CLI and locally published ergo-core 6.0.7:
+
+```bash
+export COURSIER_REPOSITORIES='ivy2Local|https://repo.maven.apache.org/maven2'
+scala-cli run scripts/validation_settings_oracle/ValidationSettingsOracle.scala \
+  --server=false --jvm system -- \
+  test-vectors/reference-6.0.7/validation-settings/settings.json
+```
+
+The oracle obtains extension chunks from `ErgoValidationSettings.toExtensionCandidate`,
+and separately tests update deserialization and complete settings deserialization.
+It records the node's initial Sigma map and the disableable node rules.
+
+It also distinguishes rule 1016 in the captured node initial map from the
+versioned Sigma core map, where the rule is registered after activation.

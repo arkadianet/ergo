@@ -28,3 +28,50 @@ pub(super) fn wall_to_instant(
         Err(_) => mono_now,
     }
 }
+
+/// Ban expiries are future timestamps, unlike dial-history timestamps. Keep the
+/// remaining TTL across restart instead of clamping every live ban to "now".
+pub(super) fn ban_expiry_to_instant(
+    target: SystemTime,
+    mono_now: Instant,
+    wall_now: SystemTime,
+) -> Instant {
+    match target.duration_since(wall_now) {
+        Ok(remaining) => mono_now
+            .checked_add(remaining.min(std::time::Duration::from_secs(365 * 24 * 3600)))
+            .unwrap_or_else(|| mono_now + std::time::Duration::from_secs(365 * 24 * 3600)),
+        Err(_) => mono_now,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn restored_ban_ttl_is_capped_when_wall_clock_moves_backwards() {
+        let mono = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        assert_eq!(
+            ban_expiry_to_instant(wall + Duration::from_secs(10 * 365 * 86400), mono, wall),
+            mono + Duration::from_secs(365 * 86400)
+        );
+    }
+
+    #[test]
+    fn ban_restore_keeps_future_ttl_while_dial_history_clamps_future_dates() {
+        let mono = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let future = wall + Duration::from_secs(3600);
+        assert_eq!(
+            ban_expiry_to_instant(future, mono, wall),
+            mono + Duration::from_secs(3600)
+        );
+        assert_eq!(
+            ban_expiry_to_instant(wall - Duration::from_secs(1), mono, wall),
+            mono
+        );
+        assert_eq!(wall_to_instant(future, mono, wall), mono);
+    }
+}

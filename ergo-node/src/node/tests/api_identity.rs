@@ -23,6 +23,7 @@ pub(super) fn cfg_with_mode(
         mempool_config.enabled = false;
     }
     NodeConfig {
+        check_reemission_rules: false,
         network: Network::Mainnet,
         shadow_config: Default::default(),
         chain_spec: Arc::new(ChainSpec::mainnet()),
@@ -46,6 +47,8 @@ pub(super) fn cfg_with_mode(
         sync_interval: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL,
         sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
         cache_bytes: None,
+        auto_upgrade_legacy: true,
+        auto_upgrade_keep_stale_indexer: false,
         redb_cache_budgets: Default::default(),
         script_validation_checkpoint: None,
         header_checkpoint: None,
@@ -53,9 +56,13 @@ pub(super) fn cfg_with_mode(
         api_bind: None,
         peer_details: Default::default(),
         api_key_hash: None,
+        allow_unauthenticated_legacy_mining: false,
         api_allowed_hosts: Vec::new(),
         api_local_reverse_proxy: false,
         api_script: Default::default(),
+        api_scoped_keys: Vec::new(),
+        api_limits: Default::default(),
+        api_readiness: Default::default(),
         allow_direct_block_submit: false,
         devnet_max_block_cost: None,
         mempool_config,

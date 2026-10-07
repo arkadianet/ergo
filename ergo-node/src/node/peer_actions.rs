@@ -90,8 +90,10 @@ fn getpeers_fanout(have: usize, want: usize, connected: usize) -> usize {
 /// gate below throttles to one cycle per `DIAL_SLOW_PERIOD` once the
 /// pool is nearly full.
 pub(super) fn try_dial_peers(state: &mut NodeState) {
-    let now = Instant::now();
+    try_dial_peers_at(state, Instant::now());
+}
 
+fn try_dial_peers_at(state: &mut NodeState, now: Instant) {
     // Periodic gossip: ask one random non-degraded connected peer
     // for its peer list every GOSSIP_INTERVAL, regardless of
     // outbound deficit. Mirrors Scala `PeerSynchronizer` so topology
@@ -114,11 +116,35 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
     if deficit == 0 {
         return;
     }
+    // Slightly overshoot normal demand to absorb immediate dial failures.
+    let want = (deficit + 1).min(MAX_DIAL_ATTEMPTS_PER_CYCLE);
+    let mut addrs = state.peer_manager.addresses_to_connect(now, want);
+    let recovery = addrs.is_empty() && state.peer_manager.connected_count() == 0;
+    // Recovery has its own cadence, independent of deficit and normal dials.
+    // None fires immediately even when startup occurs in normal slow mode.
+    if recovery {
+        if state
+            .last_recovery_dial_at
+            .is_some_and(|last| now.duration_since(last) < DIAL_SLOW_PERIOD)
+        {
+            return;
+        }
+        addrs = state
+            .peer_manager
+            .addresses_for_recovery(now, want, state.recovery_dial_rotation);
+        if !addrs.is_empty() {
+            state.last_recovery_dial_at = Some(now);
+            state.recovery_dial_rotation = state.recovery_dial_rotation.wrapping_add(1);
+        }
+    }
     // Steady-state throttle: when we're within DIAL_FAST_THRESHOLD
     // of the outbound target, only dial once per DIAL_SLOW_PERIOD.
     // The base 5s tick still fires; we just early-return from most
     // of them.
-    if deficit <= DIAL_FAST_THRESHOLD && now.duration_since(state.last_dial_at) < DIAL_SLOW_PERIOD {
+    if !recovery
+        && deficit <= DIAL_FAST_THRESHOLD
+        && now.duration_since(state.last_dial_at) < DIAL_SLOW_PERIOD
+    {
         return;
     }
     // Past the throttle gate: stamp now so the next slow-mode tick
@@ -126,11 +152,6 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
     // firing dials or fanning a GetPeers (both are valid "we did
     // work" paths).
     state.last_dial_at = now;
-    // Overshoot the deficit slightly to absorb dials that fail
-    // immediately, but cap at the per-cycle budget.
-    let want = (deficit + 1).min(MAX_DIAL_ATTEMPTS_PER_CYCLE);
-    let addrs = state.peer_manager.addresses_to_connect(now, want);
-
     // Top up the candidate pool by asking connected peers for their peer
     // lists whenever ours is thin relative to this cycle's demand — not
     // only when it is fully drained. Firing on "thin" (not just "empty")
@@ -149,25 +170,6 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
             .filter(|addr| state.registry.peers.contains_key(addr))
             .collect();
         let fanout = getpeers_fanout(addrs.len(), want, gossip_targets.len());
-        // Dead-end detection: zero dial candidates (every known address
-        // is inside its dial-backoff window) AND zero connected peers —
-        // there is no discovery surface left. GetPeers has no one to
-        // ask, and the next dial attempt is gated by the exponential
-        // backoff (up to the 2h cap), so at the default `info` log level
-        // — where the per-dial traces are debug-only — the node looks
-        // frozen at peers = 0. Observed in a v0.5.3 testnet soak whose
-        // bundled seeds went dark: three refused dials, then silence.
-        if addrs.is_empty()
-            && gossip_targets.is_empty()
-            && starve_warn_due(state.last_starve_warn_at, now)
-        {
-            state.last_starve_warn_at = Some(now);
-            warn!(
-                deficit = deficit,
-                known_addresses = state.peer_manager.known_addresses_len(),
-                "peer bootstrap starved: no dial candidates (all known addresses in dial-backoff) and no connected peers — no discovery surface; check seed reachability or configure [peers] known"
-            );
-        }
         if fanout > 0 {
             // Rotate the start offset so we don't keep hitting the same
             // leading peers each cycle — spreads discovery load and pulls a
@@ -188,10 +190,19 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
         }
     }
 
+    let mut recovery_attempts = 0;
     for addr in addrs {
-        match state.peer_manager.register_outbound(addr, now) {
+        let registered = if recovery {
+            state.peer_manager.register_recovery_outbound(addr, now)
+        } else {
+            state.peer_manager.register_outbound(addr, now)
+        };
+        match registered {
             Ok(()) => {
-                debug!(peer = %addr, deficit = deficit, "attempting dial");
+                if recovery {
+                    recovery_attempts += 1;
+                }
+                debug!(peer = %addr, deficit = deficit, recovery, "attempting dial");
                 tokio::spawn(peer_loop::dial_task(
                     addr,
                     state.magic,
@@ -203,6 +214,15 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
                 debug!(peer = %addr, error = %e, "cannot register outbound dial");
             }
         }
+    }
+    if recovery && starve_warn_due(state.last_starve_warn_at, now) {
+        state.last_starve_warn_at = Some(now);
+        warn!(
+            deficit,
+            known_addresses = state.peer_manager.known_addresses_len(),
+            recovery_dials = recovery_attempts,
+            "peer bootstrap starved: no normal dial candidates and no connected peers; attempting recovery dials"
+        );
     }
 }
 
@@ -471,5 +491,171 @@ mod tests {
         // ...and the warn re-fires once the interval has elapsed.
         let later = now + STARVE_WARN_INTERVAL;
         assert!(starve_warn_due(Some(now), later));
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use ergo_p2p::address_book::AddressBook;
+    use ergo_p2p::peer_manager::{PeerLimits, PeerManager, PeerOrigin};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    fn starved_state(
+        dir: &std::path::Path,
+        target: usize,
+    ) -> (NodeState, Arc<AddressBook>, Vec<SocketAddr>) {
+        let mut state = crate::node::tests::make_state(&dir.join("state.redb"));
+        state.peer_manager = PeerManager::new_with_limits(
+            0,
+            PeerLimits {
+                target_outbound: target,
+                ..PeerLimits::default()
+            },
+        );
+        let book = Arc::new(AddressBook::open_at(&dir.join("peers.redb")).unwrap());
+        state.peer_manager.set_address_book(book.clone());
+        let now = Instant::now();
+        let addrs: Vec<SocketAddr> = (1..=8)
+            .map(|i| format!("127.{i}.0.1:1").parse().unwrap())
+            .collect();
+        for addr in &addrs {
+            state
+                .peer_manager
+                .add_known_address(*addr, PeerOrigin::Seed);
+            for _ in 0..5 {
+                state.peer_manager.mark_dial_failed(addr, now);
+            }
+        }
+        (state, book, addrs)
+    }
+
+    fn fail_batch(state: &mut NodeState, addrs: &[SocketAddr]) {
+        let events = addrs
+            .iter()
+            .filter(|addr| state.peer_manager.get(addr).is_some())
+            .map(|addr| crate::peer_loop::PeerEvent::ConnectFailed { addr: *addr })
+            .collect();
+        crate::node::events::handle_event_batch(state, events);
+    }
+
+    // Current-thread tests never yield: spawned dial tasks cannot run, so
+    // these exercise the scheduler and event paths without network traffic.
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_first_cycle_is_immediate_and_batch_is_four() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _, addrs) = starved_state(dir.path(), 8);
+        let now = Instant::now();
+        state.last_dial_at = now; // Inside the normal slow-mode cooldown.
+        try_dial_peers_at(&mut state, now);
+        assert_eq!(state.peer_manager.peer_count(), 4);
+        assert_eq!(state.last_recovery_dial_at, Some(now));
+        assert_eq!(state.last_starve_warn_at, Some(now));
+        for addr in &addrs[..4] {
+            assert!(state.peer_manager.get(addr).is_some());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_batches_are_limited_to_once_per_thirty_seconds_and_rotate() {
+        let dir = tempfile::tempdir().unwrap();
+        // Large deficit normally dials every 5s; recovery still waits 30s.
+        let (mut state, _, addrs) = starved_state(dir.path(), 96);
+        let now = Instant::now();
+        try_dial_peers_at(&mut state, now);
+        assert_eq!(state.peer_manager.peer_count(), 4);
+        fail_batch(&mut state, &addrs);
+        for secs in [0, 5, 10, 20, 29] {
+            try_dial_peers_at(&mut state, now + Duration::from_secs(secs));
+            assert_eq!(state.peer_manager.peer_count(), 0, "early batch at {secs}s");
+        }
+        try_dial_peers_at(&mut state, now + DIAL_SLOW_PERIOD);
+        assert_eq!(state.peer_manager.peer_count(), 4);
+        assert!(
+            state.peer_manager.get(&addrs[4]).is_some(),
+            "ties must rotate"
+        );
+        assert!(state.peer_manager.get(&addrs[0]).is_none());
+        assert_eq!(
+            state.last_starve_warn_at,
+            Some(now),
+            "WARN stays rate limited"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_is_disabled_with_a_connected_peer_even_without_registry_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _, addrs) = starved_state(dir.path(), 96);
+        let now = Instant::now();
+        state.peer_manager.register_outbound(addrs[0], now).unwrap();
+        state.peer_manager.mark_tcp_connected(&addrs[0]);
+        state
+            .peer_manager
+            .complete_handshake(&addrs[0], state.our_handshake.peer_spec.clone(), None, now)
+            .unwrap();
+        try_dial_peers_at(&mut state, now);
+        assert_eq!(state.peer_manager.peer_count(), 1);
+        assert_eq!(state.last_recovery_dial_at, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_is_disabled_with_a_normal_candidate_and_normal_failure_escalates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, book, _) = starved_state(dir.path(), 96);
+        let normal: SocketAddr = "127.0.20.1:1".parse().unwrap();
+        state
+            .peer_manager
+            .add_known_address(normal, PeerOrigin::Seed);
+        try_dial_peers_at(&mut state, Instant::now());
+        assert_eq!(state.peer_manager.peer_count(), 1);
+        assert!(state.peer_manager.get(&normal).is_some());
+        assert_eq!(state.last_recovery_dial_at, None);
+        fail_batch(&mut state, &[normal]);
+        let loaded = book.load_all(false).unwrap();
+        assert_eq!(
+            loaded
+                .peers
+                .iter()
+                .find(|p| p.addr == normal)
+                .unwrap()
+                .consecutive_failures,
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_connect_failed_event_preserves_persisted_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, book, addrs) = starved_state(dir.path(), 96);
+        let before = book.load_all(false).unwrap();
+        try_dial_peers_at(&mut state, Instant::now());
+        assert_eq!(state.peer_manager.peer_count(), 4);
+        fail_batch(&mut state, &addrs);
+        assert_eq!(state.peer_manager.peer_count(), 0);
+        let after = book.load_all(false).unwrap();
+        for old in before.peers {
+            let new = after.peers.iter().find(|p| p.addr == old.addr).unwrap();
+            assert_eq!(new.consecutive_failures, old.consecutive_failures);
+            assert_eq!(new.last_failure, old.last_failure);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_timeout_preserves_backoff_instead_of_escalating() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, book, _) = starved_state(dir.path(), 96);
+        let now = Instant::now();
+        try_dial_peers_at(&mut state, now);
+        assert_eq!(state.peer_manager.peer_count(), 4);
+        crate::node::sync_tick::handle_sync_tick_at(&mut state, now + Duration::from_secs(6));
+        assert_eq!(state.peer_manager.peer_count(), 0);
+        assert!(book
+            .load_all(false)
+            .unwrap()
+            .peers
+            .iter()
+            .all(|p| p.consecutive_failures == 5));
     }
 }

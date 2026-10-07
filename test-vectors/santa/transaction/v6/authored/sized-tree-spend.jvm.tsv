@@ -1,0 +1,17 @@
+if-rule-1001-degraded-spend-reject#0	false	null
+if-true-branch-sigmaprop-accept#1	true	12102
+if-false-branch-int-reject#2	false	null
+cand-empty-fiat-shamir-proof-accept#3	true	12106
+cand-empty-no-proof-reject#4	false	null
+cthreshold-k0-empty-fiat-shamir-proof-accept#5	true	12107
+cthreshold-k0-empty-no-proof-reject#6	false	null
+cor-empty-no-proof-reject#7	false	null
+cand-trueprop-child-no-proof-reject#8	false	null
+cthreshold-k0-trueprop-child-no-proof-reject#9	false	null
+sigmaand-node-empty-reject#10	false	null
+sigmaor-node-empty-reject#11	false	null
+sigmaand-node-256-true-accept#12	true	12280
+cthreshold-2of3-real-children-accept#13	true	13304
+cthreshold-k0-cand-truncated-proof-no-coefficient-accept#14	true	12110
+cthreshold-k0-cand-truncated-proof-half-coefficient-accept#15	true	12110
+cor-empty-fiat-shamir-proof-reject#16	false	null

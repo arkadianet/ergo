@@ -34,7 +34,7 @@ pub(in crate::evaluator) fn eval_bool_to_sigma_prop(
             SigmaBoolean::TrivialProp(false)
         })),
         // trees.scala:39: VersionContext.current.isJitActivated is activation >= 2.
-        Value::SigmaProp(_) if cx.ctx.activated_script_version < 2 => Ok(val),
+        Value::SigmaProp(_) if (cx.ctx.activated_script_version as i8) < 2 => Ok(val),
         _ => Err(EvalError::TypeError {
             expected: "Bool",
             got: format!("{val:?}"),
@@ -48,8 +48,12 @@ pub(in crate::evaluator) fn eval_bin_or(
     right: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0xEC)?;
     let l = cx.eval_expr(left)?;
+    // Match the reference's Boolean cast before charging this operation.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/trees.scala#L1246-L1273
+    if matches!(l, Value::Bool(_)) {
+        add_cost(cx.cost, 0xEC)?;
+    }
     match l {
         Value::Bool(true) => {
             if let Some(t) = cx.trace.as_mut() {
@@ -83,8 +87,12 @@ pub(in crate::evaluator) fn eval_bin_and(
     right: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0xED)?;
     let l = cx.eval_expr(left)?;
+    // Match the reference's Boolean cast before charging this operation.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/trees.scala#L1246-L1273
+    if matches!(l, Value::Bool(_)) {
+        add_cost(cx.cost, 0xED)?;
+    }
     match l {
         Value::Bool(false) => {
             if let Some(t) = cx.trace.as_mut() {
@@ -117,9 +125,12 @@ pub(in crate::evaluator) fn eval_logical_not(
     inner: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0xEF)?;
     match cx.eval_expr(inner)? {
-        Value::Bool(b) => Ok(Value::Bool(!b)),
+        Value::Bool(b) => {
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/trees.scala#L1381-L1384
+            add_cost(cx.cost, 0xEF)?;
+            Ok(Value::Bool(!b))
+        }
         other => Err(EvalError::TypeError {
             expected: "Bool for LogicalNot",
             got: format!("{other:?}"),

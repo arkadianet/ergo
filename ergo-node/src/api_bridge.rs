@@ -81,6 +81,7 @@ pub struct SnapshotReadState {
     /// and wall-clock apply age/wedge, written by a plain thread nothing
     /// on the runtime can starve. Overlaid onto `/metrics` per request.
     telemetry: std::sync::Arc<crate::node::telemetry::LiveTelemetry>,
+    runtime_control: Option<Arc<crate::runtime_control::RuntimeControl>>,
 }
 
 /// Filesystem paths the background storage sampler probes.
@@ -113,6 +114,9 @@ pub struct ShutdownAdmin {
     /// (keeps the channel open); only fired on a successful vote update, which
     /// requires `voting_targets` to be `Some`.
     votes_changed_tx: Option<tokio::sync::mpsc::Sender<()>>,
+    runtime_control: Option<Arc<crate::runtime_control::RuntimeControl>>,
+    peer_control_tx: Option<tokio::sync::mpsc::Sender<crate::runtime_control::PeerControlRequest>>,
+    api_security: Option<Arc<ergo_api::auth::ApiSecurity>>,
 }
 
 impl ShutdownAdmin {
@@ -125,6 +129,9 @@ impl ShutdownAdmin {
             peer_connect_tx,
             voting_targets: None,
             votes_changed_tx: None,
+            runtime_control: None,
+            peer_control_tx: None,
+            api_security: None,
         }
     }
 
@@ -147,12 +154,104 @@ impl ShutdownAdmin {
         self
     }
 
+    pub fn with_operator_control(
+        mut self,
+        control: Arc<crate::runtime_control::RuntimeControl>,
+        peers: tokio::sync::mpsc::Sender<crate::runtime_control::PeerControlRequest>,
+        security: Option<Arc<ergo_api::auth::ApiSecurity>>,
+    ) -> Self {
+        self.runtime_control = Some(control);
+        self.peer_control_tx = Some(peers);
+        self.api_security = security;
+        self
+    }
+
     pub fn into_dyn(self) -> Arc<dyn NodeAdmin> {
         Arc::new(self)
     }
 }
 
 impl NodeAdmin for ShutdownAdmin {
+    fn effective_config(&self) -> Option<serde_json::Value> {
+        self.runtime_control
+            .as_ref()
+            .map(|control| control.effective_config())
+    }
+
+    fn apply_config_patch(
+        &self,
+        patch: ergo_api::operator_control::RuntimeConfigPatch,
+    ) -> Result<serde_json::Value, ergo_api::operator_control::OperatorControlError> {
+        self.runtime_control
+            .as_ref()
+            .ok_or_else(|| {
+                ergo_api::operator_control::OperatorControlError::Unavailable(
+                    "runtime config is unavailable".into(),
+                )
+            })?
+            .patch(patch)
+    }
+
+    fn api_governor(&self) -> Option<Arc<ergo_api::v1::Governor>> {
+        self.runtime_control
+            .as_ref()
+            .map(|control| control.governor())
+    }
+
+    fn credentials(&self) -> Option<Vec<ergo_api::auth::CredentialInfo>> {
+        self.api_security
+            .as_ref()
+            .map(|security| security.credentials())
+    }
+
+    fn revoke_credential(
+        &self,
+        id: &str,
+    ) -> Result<(), ergo_api::operator_control::OperatorControlError> {
+        self.api_security
+            .as_ref()
+            .ok_or_else(|| {
+                ergo_api::operator_control::OperatorControlError::Unavailable(
+                    "API security is unavailable".into(),
+                )
+            })?
+            .revoke_credential(id)
+    }
+
+    fn peer_control(
+        &self,
+        command: ergo_api::operator_control::PeerControl,
+    ) -> ergo_api::operator_control::PeerControlFuture<'_> {
+        Box::pin(async move {
+            use ergo_api::operator_control::OperatorControlError;
+            let tx = self.peer_control_tx.as_ref().ok_or_else(|| {
+                OperatorControlError::Unavailable("peer control is unavailable".into())
+            })?;
+            let (reply, receive) = tokio::sync::oneshot::channel();
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            tx.try_send(crate::runtime_control::PeerControlRequest {
+                command,
+                deadline,
+                reply,
+            })
+            .map_err(|_| {
+                OperatorControlError::Unavailable("peer control queue is full or closed".into())
+            })?;
+            tokio::time::timeout_at(deadline.into(), receive)
+                .await
+                .map_err(|_| {
+                    OperatorControlError::Unavailable(
+                        "peer control timed out; inspect peer state before retrying".into(),
+                    )
+                })?
+                .map_err(|_| {
+                    OperatorControlError::Unavailable(
+                        "node runtime stopped before acknowledging peer control".into(),
+                    )
+                })?
+        })
+    }
+
     fn request_shutdown(&self) {
         info!("/node/shutdown received via REST API");
         self.notify.notify_one();
@@ -242,7 +341,16 @@ impl SnapshotReadState {
             voting_targets,
             apply_phase,
             telemetry,
+            runtime_control: None,
         }
+    }
+
+    pub fn with_runtime_control(
+        mut self,
+        control: Arc<crate::runtime_control::RuntimeControl>,
+    ) -> Self {
+        self.runtime_control = Some(control);
+        self
     }
 
     /// Attach the independent, cached IP metadata resolver.
@@ -264,6 +372,15 @@ impl SnapshotReadState {
 }
 
 impl NodeReadState for SnapshotReadState {
+    fn probes(&self) -> Option<ergo_api::operator_control::NodeProbes> {
+        self.runtime_control.as_ref().map(|control| {
+            // Overlay live starvation/storage alarms onto the immutable snapshot
+            // report, so readiness can fail even while snapshot publication froze.
+            let status = self.status();
+            control.probes(&self.handle.load(), &status)
+        })
+    }
+
     fn sync_gauges(&self) -> ergo_api::ApiSyncGauges {
         self.handle.load().gauges
     }

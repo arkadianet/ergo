@@ -1,0 +1,11 @@
+rent-recreation-accept	true	12250
+rent-recreation-tokens-accept	true	12650
+rent-recreation-height-reject	false	null
+rent-recreation-value-reject	false	null
+rent-recreation-script-reject	false	null
+rent-recreation-tokens-reject	false	null
+rent-recreation-register-reject	false	null
+rent-recreation-tuple-register-accept	true	12250
+rent-recreation-tuple-register-reject	false	null
+rent-recreation-segregated-script-accept	true	12250
+rent-recreation-noncanonical-script-reject	false	null

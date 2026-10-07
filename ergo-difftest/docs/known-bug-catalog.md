@@ -1,7 +1,7 @@
 # Known consensus-divergence catalog (rediscovery suite)
 
-25 past Rust-vs-Scala divergences, mined from `dev-docs/` incidents + git log,
-fix locations verified on current `main`. This is the **generator-acceptance
+This catalog describes 25 fixed Rust-vs-Scala divergences and their re-injection
+recipes. Fix commits preserve their provenance. This is the **generator-acceptance
 gate**: a generator that cannot rediscover its wire-reachable bugs is rejected.
 
 Paths relative to worktree root. `WR` = wire-reachable (a byte-level generator
@@ -67,7 +67,7 @@ resurrects one bug; the generator must produce an input the differential flags.
   Trigger: pre-v3 tree with a MethodCall to a v6-only method id.
 - **#19 declared-size** — revert ergo_tree.rs to `get_u32_exact`+`get_bytes(size)`.
   Trigger: size-delimited tree whose declared size ≠ actual body length.
-  **Harness note (2026-08):** soft-fork-opaque (`UnparsedErgoTree`) values that
+  **Harness behavior:** soft-fork-opaque (`UnparsedErgoTree`) values that
   fail re-decode after a canonical rewrite of following VLQ fields are reported
   as difftest `WriteRejected`, not `Bug` — Scala shares the wrap→structural
   reshape. Consensus box/tx writers still emit preserved `propositionBytes`

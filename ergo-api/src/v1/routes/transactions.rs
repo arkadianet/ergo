@@ -80,6 +80,13 @@ pub async fn tx_by_id(State(state): State<V1State>, Path(tx_id_hex): Path<String
     };
     match indexer.status() {
         IndexerStatus::CaughtUp => {}
+        IndexerStatus::Migrating => {
+            return v1_error(
+                Reason::IndexerSyncing,
+                "the extra index is migrating",
+                "retry once GET /api/v1/indexer/status reports caught up",
+            )
+        }
         IndexerStatus::Syncing => {
             return v1_error(
                 Reason::IndexerSyncing,

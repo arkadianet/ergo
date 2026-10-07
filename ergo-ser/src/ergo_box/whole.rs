@@ -15,7 +15,15 @@ use super::{ErgoBox, ErgoBoxCandidate};
 
 /// Serialize a full ErgoBox (standalone mode).
 pub fn write_ergo_box(w: &mut VlqWriter, b: &ErgoBox) -> Result<(), WriteError> {
-    write_ergo_box_candidate(w, &b.candidate)?;
+    if (b.candidate.box_serialization_version as i8) < 3 {
+        super::write_ergo_box_candidate_versioned(
+            w,
+            &b.candidate,
+            b.candidate.box_serialization_version,
+        )?;
+    } else {
+        write_ergo_box_candidate(w, &b.candidate)?;
+    }
     w.put_bytes(b.transaction_id.as_bytes());
     w.put_u16(b.index);
     Ok(())
@@ -142,10 +150,15 @@ pub fn parse_ergo_box_bytes(
     }
     let additional_registers = read_registers(&mut r)?;
     // Canonical registers and tree, as every box reader keeps them; see
-    // `read_ergo_box_candidate`.
+    // `read_ergo_box_candidate`. The registers serialize under the same default
+    // context as the tree gate above, whose ErgoTree version is also 1.
     let mut rw = VlqWriter::new();
-    crate::register::write_registers(&mut rw, &additional_registers)
-        .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
+    crate::register::write_registers_versioned(
+        &mut rw,
+        &additional_registers,
+        crate::ergo_tree::DEFAULT_ACTIVATED_SCRIPT_VERSION,
+    )
+    .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
     let register_bytes = rw.result();
     let canonical_tree_bytes = super::canonical_tree_bytes(&ergo_tree, ergo_tree_bytes);
     let transaction_id = ModifierId::from_bytes(r.get_array::<32>()?);
@@ -168,6 +181,8 @@ pub fn parse_ergo_box_bytes(
             tokens,
             additional_registers,
             register_bytes,
+            register_serialization_error: None,
+            box_serialization_version: crate::ergo_tree::DEFAULT_ACTIVATED_SCRIPT_VERSION,
             received_box_identity: None,
         },
         transaction_id,

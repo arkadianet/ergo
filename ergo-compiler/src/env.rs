@@ -60,7 +60,7 @@ pub enum EnvValue {
     /// (`ScriptApiRoute.scala:52-54`) injects each wallet pubkey as
     /// `myPubKey_N -> ProveDlog(pk)` into the `/script/p2sAddress` /
     /// `p2shAddress` compile env; the opaque, non-emittable `SigmaProp(String)`
-    /// label (`compiler-design-ledger.md` D-E3) and the raw-curve-point (not SigmaProp-typed)
+    /// label (`ergo-compiler/docs/compiler-design-ledger.md` D-E3) and the raw-curve-point (not SigmaProp-typed)
     /// `GroupElement` variant cannot represent this shape. The downstream
     /// typed-AST/binder/emit plumbing for `ConstPayload::ProveDlog` already
     /// exists end-to-end (the binder's `PK(...)` rule, `binder.rs:604`,

@@ -9,14 +9,83 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 /// Offline operator commands. These never start the node or load its config.
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Create a new validated configuration and protected API credential.
+    Init(crate::init::InitArgs),
+    /// Generate or hash an API credential without starting the node.
+    ApiKey {
+        #[command(subcommand)]
+        command: ApiKeyCommand,
+    },
     /// Copy and upgrade a stopped legacy redb database; never replace either path.
     MigrateRedb {
         /// Existing database belonging to a stopped node.
         source: PathBuf,
         /// New database path in an existing directory; must not exist.
         destination: PathBuf,
+    },
+    /// Upgrade all legacy databases in a stopped node's data directory in place.
+    UpgradeData {
+        data_dir: PathBuf,
+        /// Exactly `[indexer] db_filename`, including any configured path.
+        #[arg(long, default_value = "indexer.redb")]
+        indexer_db: PathBuf,
+        /// Remove legacy rollback copies after verification; requires an external backup to roll back.
+        #[arg(long)]
+        discard_backups: bool,
+        /// Retain a stale legacy indexer instead of deleting derived data before the state upgrade.
+        #[arg(long, conflicts_with = "discard_backups")]
+        keep_stale_indexer: bool,
+    },
+    /// Verify and copy a stopped node's complete data directory.
+    Backup {
+        data_dir: PathBuf,
+        destination: PathBuf,
+    },
+    /// Verify checksums, committed metadata and UTXO root in a backup.
+    VerifyBackup { directory: PathBuf },
+    /// Restore a verified backup into a new data directory.
+    Restore {
+        directory: PathBuf,
+        destination: PathBuf,
+        /// Confirm that private transactions and wallet jobs from this backup may run again.
+        #[arg(long)]
+        keep_pending_work: bool,
+    },
+    /// Inspect a stopped node without repairing or changing its databases.
+    Doctor { data_dir: PathBuf },
+    /// Verify and report logical current-UTXO storage usage.
+    UtxoStats { data_dir: PathBuf },
+    /// Discover tracked wallet holdings from current UTXOs; no historical blocks required.
+    WalletScanUtxo {
+        data_dir: PathBuf,
+        /// Discard a previous checkpoint and start at the current committed tip.
+        #[arg(long)]
+        restart: bool,
+    },
+}
+
+/// Secrets are supplied through files or stdin, never through CLI arguments.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ApiKeyCommand {
+    /// Save a new random secret and print its configuration hash.
+    Generate {
+        /// New secret file in an existing directory; stdout (-) is forbidden.
+        #[arg(long)]
+        secret_file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the configuration hash of an existing secret.
+    Hash {
+        #[arg(long, required_unless_present = "stdin", conflicts_with = "stdin")]
+        secret_file: Option<PathBuf>,
+        /// Read from stdin without a prompt.
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 

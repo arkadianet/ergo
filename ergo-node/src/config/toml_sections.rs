@@ -188,6 +188,8 @@ pub(super) struct TomlApi {
     /// routes stay closed; supplied hashes are validated at load.
     pub(super) security: Option<TomlApiSecurity>,
     pub(super) script: TomlApiScript,
+    pub(super) limits: ergo_api::operator_control::ApiLimits,
+    pub(super) readiness: ergo_api::operator_control::ProbePolicy,
 }
 
 /// `[api.security]` TOML subsection. Carries the operator's
@@ -199,6 +201,11 @@ pub(super) struct TomlApiSecurity {
     /// 64 chars. Generate a RANDOM secret first, then hash it, e.g.:
     /// `secret=$(openssl rand -hex 32); printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1`.
     pub(super) api_key_hash: Option<String>,
+    /// Compatibility with Lithos clients which omit credentials on solo jobs
+    /// and solution submission. Default false; still requires a configured key
+    /// for supplied-transaction candidate building.
+    pub(super) allow_unauthenticated_legacy_mining: bool,
+    pub(super) keys: Vec<ergo_api::auth::ScopedCredentialConfig>,
 }
 
 /// Native script playground policy, validated before binding the API.
@@ -316,6 +323,8 @@ pub(super) struct TomlHeaderCheckpoint {
 #[derive(serde::Deserialize, Default, Debug)]
 #[serde(default)]
 pub(super) struct TomlStore {
+    pub(super) auto_upgrade_legacy: Option<bool>,
+    pub(super) auto_upgrade_keep_stale_indexer: Option<bool>,
     /// AVL arena clean-node LRU budget (separate from redb caches), in bytes. Override
     /// `StateStore::DEFAULT_CACHE_BYTES`.
     pub(super) cache_bytes: Option<usize>,
@@ -327,6 +336,7 @@ pub(super) struct TomlStore {
 #[derive(serde::Deserialize, Default, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct TomlNode {
+    pub(super) check_reemission_rules: Option<bool>,
     pub(super) agent_name: Option<String>,
     pub(super) node_name: Option<String>,
     /// `[node] blocks_to_keep` — pruning suffix length (Mode 3 of the

@@ -805,25 +805,30 @@ fn read_reserved_scan_boxes(
     let mut entries: Vec<ScanBoxEntry> = Vec::new();
     for rb in boxes {
         let wb = &rb.wallet_box;
-        let h = wb.creation_height as i64;
-        if h < filter.min_inclusion_height as i64 {
-            continue;
+        let known = read.inclusion_height_known(wb.box_id).map_err(internal)?;
+        let inclusion_height = known.then_some(wb.creation_height);
+        let confirmations = inclusion_height.map(|h| current_height as i64 - h as i64);
+        if let Some(h) = inclusion_height {
+            if (h as i64) < filter.min_inclusion_height as i64 {
+                continue;
+            }
+            if filter.max_inclusion_height >= 0 && h as i64 > filter.max_inclusion_height as i64 {
+                continue;
+            }
         }
-        if filter.max_inclusion_height >= 0 && h > filter.max_inclusion_height as i64 {
-            continue;
-        }
-        let confirmations = current_height as i64 - wb.creation_height as i64;
-        if filter.min_confirmations >= 0 && confirmations < filter.min_confirmations as i64 {
-            continue;
-        }
-        if filter.max_confirmations >= 0 && confirmations > filter.max_confirmations as i64 {
-            continue;
+        if let Some(confirmations) = confirmations {
+            if filter.min_confirmations >= 0 && confirmations < filter.min_confirmations as i64 {
+                continue;
+            }
+            if filter.max_confirmations >= 0 && confirmations > filter.max_confirmations as i64 {
+                continue;
+            }
         }
         entries.push(ScanBoxEntry {
             box_id: hex::encode(wb.box_id),
             value: wb.value,
-            inclusion_height: Some(wb.creation_height),
-            confirmations_num: Some(confirmations),
+            inclusion_height,
+            confirmations_num: confirmations,
             spent: want_spent,
             bytes: hex::encode(&rb.box_bytes),
         });
@@ -2571,6 +2576,46 @@ mod reserved_scan_read_tests {
                 .total,
             0
         );
+    }
+
+    #[test]
+    fn discovered_reserved_boxes_have_unknown_inclusion_and_skip_height_filters() {
+        let (_dir, db) = temp_db();
+        for (scan, provenance) in [
+            (MINING_SCAN_ID, BoxProvenance::MinerReward),
+            (PAYMENTS_SCAN_ID, BoxProvenance::Owned),
+        ] {
+            let id = [scan as u8; 32];
+            put_wallet_box(&db, id, 1_000_000, 1000, BoxStatus::Confirmed, provenance);
+            let txn = db.begin_write().unwrap();
+            txn.open_table(crate::wallet::tables::WALLET_DISCOVERED_BOXES)
+                .unwrap()
+                .insert(id, 1)
+                .unwrap();
+            txn.commit().unwrap();
+            let mut f = filter();
+            f.min_inclusion_height = 2000;
+            f.max_inclusion_height = 3000;
+            f.min_confirmations = 50;
+            f.max_confirmations = 100;
+            let rows = read_scan_boxes(&db, Some(1001), scan, false, &f, None).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].inclusion_height, None);
+            assert_eq!(rows[0].confirmations_num, None);
+            let wire = serde_json::to_value(&rows[0]).unwrap();
+            assert!(wire["inclusionHeight"].is_null());
+            assert!(wire["confirmationsNum"].is_null());
+            // Removing only the discovery marker restores normal filtering.
+            let txn = db.begin_write().unwrap();
+            txn.open_table(crate::wallet::tables::WALLET_DISCOVERED_BOXES)
+                .unwrap()
+                .remove(id)
+                .unwrap();
+            txn.commit().unwrap();
+            assert!(read_scan_boxes(&db, Some(1001), scan, false, &f, None)
+                .unwrap()
+                .is_empty());
+        }
     }
 
     // ----- reserved-id off-chain (mempool) overlay -----

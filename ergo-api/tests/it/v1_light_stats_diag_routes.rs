@@ -1,5 +1,5 @@
 //! Route-level tests for the `light/*`, `stats/*`, and `diagnostics` groups
-//! (`dev-docs/v1-api-design.md` §3.13–§3.15). Convention-lock coverage: exact
+//! with convention-lock coverage: exact
 //! snake_case field names, the `{items, page}` series envelope, the canonical
 //! error `reason`s, honest `*_unavailable` / `*_disabled` gating, the O2
 //! membership-proof dual mount, and the diagnostics signals over a stub

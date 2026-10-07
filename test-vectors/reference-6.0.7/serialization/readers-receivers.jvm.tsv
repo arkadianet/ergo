@@ -1,0 +1,886 @@
+sw_e4_bool_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	4	-	-	-
+sw_e4_bool_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	3	-	-	-
+sw_e4_bool_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	4	-	-	-
+sw_e4_byte_v0s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SOption (sigma.ast.SByte$ and sigma.ast.SOption are in unnamed 	5	-	-	-
+sw_e4_byte_v0n	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SOption (sigma.ast.SByte$ and sigma.ast.SOption are in unnamed 	4	-	-	-
+sw_e4_byte_v3s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SOption (sigma.ast.SByte$ and sigma.ast.SOption are in unnamed 	5	-	-	-
+sw_e4_int_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	5	-	-	-
+sw_e4_int_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	4	-	-	-
+sw_e4_int_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	5	-	-	-
+sw_e4_long_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	5	-	-	-
+sw_e4_long_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	4	-	-	-
+sw_e4_long_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	5	-	-	-
+sw_e4_bigint_v0s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBigInt$ and sigma.ast.SOption are in unna	6	-	-	-
+sw_e4_bigint_v0n	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBigInt$ and sigma.ast.SOption are in unna	5	-	-	-
+sw_e4_bigint_v3s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBigInt$ and sigma.ast.SOption are in unna	6	-	-	-
+sw_e4_collbyte_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	6	-	-	-
+sw_e4_collbyte_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	5	-	-	-
+sw_e4_collbyte_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	6	-	-	-
+sw_e4_collint_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	6	-	-	-
+sw_e4_collint_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	5	-	-	-
+sw_e4_collint_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	6	-	-	-
+sw_e4_collbool_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	6	-	-	-
+sw_e4_collbool_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	5	-	-	-
+sw_e4_collbool_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	6	-	-	-
+sw_e4_box_v0s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBox$ and sigma.ast.SOption are in unnamed mo	4	-	-	-
+sw_e4_box_v0n	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBox$ and sigma.ast.SOption are in unnamed mo	3	-	-	-
+sw_e4_box_v3s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBox$ and sigma.ast.SOption are in unnamed mo	4	-	-	-
+sw_e4_sigma_v0s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SOption (sigma.ast.SSigmaProp$ and sigma.ast.SOption are i	5	-	-	-
+sw_e4_sigma_v0n	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SOption (sigma.ast.SSigmaProp$ and sigma.ast.SOption are i	4	-	-	-
+sw_e4_sigma_v3s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SOption (sigma.ast.SSigmaProp$ and sigma.ast.SOption are i	5	-	-	-
+sw_e4_ge_v0s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SOption (sigma.ast.SGroupElement$ and sigma.ast.SOption	37	-	-	-
+sw_e4_ge_v0n	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SOption (sigma.ast.SGroupElement$ and sigma.ast.SOption	36	-	-	-
+sw_e4_ge_v3s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SOption (sigma.ast.SGroupElement$ and sigma.ast.SOption	37	-	-	-
+sw_e4_optint_v0s	WRAPPED	6	1001	-	-
+sw_e4_optint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	5	-	-	-
+sw_e4_optint_v3s	WRAPPED	6	1001	-	-
+sw_e4_avl_v0s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SOption (sigma.ast.SAvlTree$ and sigma.ast.SOption are in un	40	-	-	-
+sw_e4_avl_v0n	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SOption (sigma.ast.SAvlTree$ and sigma.ast.SOption are in un	39	-	-	-
+sw_e4_avl_v3s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SOption (sigma.ast.SAvlTree$ and sigma.ast.SOption are in un	40	-	-	-
+sw_e4_str_v0s	ClassCastException:class sigma.ast.SString$ cannot be cast to class sigma.ast.SOption (sigma.ast.SString$ and sigma.ast.SOption are in unna	6	-	-	-
+sw_e4_str_v0n	ClassCastException:class sigma.ast.SString$ cannot be cast to class sigma.ast.SOption (sigma.ast.SString$ and sigma.ast.SOption are in unna	5	-	-	-
+sw_e4_str_v3s	ClassCastException:class sigma.ast.SString$ cannot be cast to class sigma.ast.SOption (sigma.ast.SString$ and sigma.ast.SOption are in unna	6	-	-	-
+sw_e4_unit_v0s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SOption (sigma.ast.SUnit$ and sigma.ast.SOption are in unnamed 	4	-	-	-
+sw_e4_unit_v0n	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SOption (sigma.ast.SUnit$ and sigma.ast.SOption are in unnamed 	3	-	-	-
+sw_e4_unit_v3s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SOption (sigma.ast.SUnit$ and sigma.ast.SOption are in unnamed 	4	-	-	-
+sw_e4_tuple_v0s	ClassCastException:class sigma.ast.STuple cannot be cast to class sigma.ast.SOption (sigma.ast.STuple and sigma.ast.SOption are in unnamed 	6	-	-	-
+sw_e4_tuple_v0n	ClassCastException:class sigma.ast.STuple cannot be cast to class sigma.ast.SOption (sigma.ast.STuple and sigma.ast.SOption are in unnamed 	5	-	-	-
+sw_e4_tuple_v3s	ClassCastException:class sigma.ast.STuple cannot be cast to class sigma.ast.SOption (sigma.ast.STuple and sigma.ast.SOption are in unnamed 	6	-	-	-
+sw_e4_func_i_b_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	8	-	-	-
+sw_e4_func_i_b_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	7	-	-	-
+sw_e4_func_i_b_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	8	-	-	-
+sw_e4_func_i_i_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	9	-	-	-
+sw_e4_func_i_i_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	8	-	-	-
+sw_e4_func_i_i_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	9	-	-	-
+sw_e4_height_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	4	-	-	-
+sw_e4_height_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	3	-	-	-
+sw_e4_height_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	4	-	-	-
+sw_e4_collsigma_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	7	-	-	-
+sw_e4_collsigma_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	6	-	-	-
+sw_e4_collsigma_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	7	-	-	-
+sw_e6_bool_v0s	WRAPPED	4	1001	-	-
+sw_e6_bool_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	3	-	-	-
+sw_e6_bool_v3s	WRAPPED	4	1001	-	-
+sw_e6_byte_v0s	WRAPPED	5	1001	-	-
+sw_e6_byte_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_e6_byte_v3s	WRAPPED	5	1001	-	-
+sw_e6_int_v0s	WRAPPED	5	1001	-	-
+sw_e6_int_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_e6_int_v3s	WRAPPED	5	1001	-	-
+sw_e6_long_v0s	WRAPPED	5	1001	-	-
+sw_e6_long_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_e6_long_v3s	WRAPPED	5	1001	-	-
+sw_e6_bigint_v0s	WRAPPED	6	1001	-	-
+sw_e6_bigint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	5	-	-	-
+sw_e6_bigint_v3s	WRAPPED	6	1001	-	-
+sw_e6_collbyte_v0s	WRAPPED	6	1001	-	-
+sw_e6_collbyte_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	5	-	-	-
+sw_e6_collbyte_v3s	WRAPPED	6	1001	-	-
+sw_e6_collint_v0s	WRAPPED	6	1001	-	-
+sw_e6_collint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	5	-	-	-
+sw_e6_collint_v3s	WRAPPED	6	1001	-	-
+sw_e6_collbool_v0s	WRAPPED	6	1001	-	-
+sw_e6_collbool_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	5	-	-	-
+sw_e6_collbool_v3s	WRAPPED	6	1001	-	-
+sw_e6_box_v0s	WRAPPED	4	1001	-	-
+sw_e6_box_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	3	-	-	-
+sw_e6_box_v3s	WRAPPED	4	1001	-	-
+sw_e6_sigma_v0s	WRAPPED	5	1001	-	-
+sw_e6_sigma_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_e6_sigma_v3s	WRAPPED	5	1001	-	-
+sw_e6_ge_v0s	WRAPPED	37	1001	-	-
+sw_e6_ge_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	36	-	-	-
+sw_e6_ge_v3s	WRAPPED	37	1001	-	-
+sw_e6_optint_v0s	WRAPPED	6	1001	-	-
+sw_e6_optint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	5	-	-	-
+sw_e6_optint_v3s	WRAPPED	6	1001	-	-
+sw_e6_avl_v0s	WRAPPED	40	1001	-	-
+sw_e6_avl_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	39	-	-	-
+sw_e6_avl_v3s	WRAPPED	40	1001	-	-
+sw_e6_str_v0s	WRAPPED	7	1001	-	-
+sw_e6_str_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	5	-	-	-
+sw_e6_str_v3s	WRAPPED	7	1001	-	-
+sw_e6_unit_v0s	WRAPPED	4	1001	-	-
+sw_e6_unit_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	3	-	-	-
+sw_e6_unit_v3s	WRAPPED	4	1001	-	-
+sw_e6_tuple_v0s	WRAPPED	6	1001	-	-
+sw_e6_tuple_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	5	-	-	-
+sw_e6_tuple_v3s	WRAPPED	6	1001	-	-
+sw_e6_func_i_b_v0s	WRAPPED	8	1001	-	-
+sw_e6_func_i_b_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	7	-	-	-
+sw_e6_func_i_b_v3s	WRAPPED	8	1001	-	-
+sw_e6_func_i_i_v0s	WRAPPED	9	1001	-	-
+sw_e6_func_i_i_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_e6_func_i_i_v3s	WRAPPED	9	1001	-	-
+sw_e6_height_v0s	WRAPPED	4	1001	-	-
+sw_e6_height_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	3	-	-	-
+sw_e6_height_v3s	WRAPPED	4	1001	-	-
+sw_e6_collsigma_v0s	WRAPPED	7	1001	-	-
+sw_e6_collsigma_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	6	-	-	-
+sw_e6_collsigma_v3s	WRAPPED	7	1001	-	-
+sw_ad_bool_bool_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBoolean$ and sigma.ast.SFunc are in unname	5	-	-	-
+sw_ad_bool_bool_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBoolean$ and sigma.ast.SFunc are in unname	4	-	-	-
+sw_ad_bool_bool_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBoolean$ and sigma.ast.SFunc are in unname	5	-	-	-
+sw_ad_byte_byte_v0s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SByte$ and sigma.ast.SFunc are in unnamed modu	7	-	-	-
+sw_ad_byte_byte_v0n	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SByte$ and sigma.ast.SFunc are in unnamed modu	6	-	-	-
+sw_ad_byte_byte_v3s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SByte$ and sigma.ast.SFunc are in unnamed modu	7	-	-	-
+sw_ad_int_int_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	7	-	-	-
+sw_ad_int_int_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	6	-	-	-
+sw_ad_int_int_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	7	-	-	-
+sw_ad_long_long_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SLong$ and sigma.ast.SFunc are in unnamed modu	7	-	-	-
+sw_ad_long_long_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SLong$ and sigma.ast.SFunc are in unnamed modu	6	-	-	-
+sw_ad_long_long_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SLong$ and sigma.ast.SFunc are in unnamed modu	7	-	-	-
+sw_ad_bigint_bigint_v0s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBigInt$ and sigma.ast.SFunc are in unnamed 	9	-	-	-
+sw_ad_bigint_bigint_v0n	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBigInt$ and sigma.ast.SFunc are in unnamed 	8	-	-	-
+sw_ad_bigint_bigint_v3s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBigInt$ and sigma.ast.SFunc are in unnamed 	9	-	-	-
+sw_ad_collbyte_collbyte_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	9	-	-	-
+sw_ad_collbyte_collbyte_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	8	-	-	-
+sw_ad_collbyte_collbyte_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	9	-	-	-
+sw_ad_collint_collint_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	9	-	-	-
+sw_ad_collint_collint_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	8	-	-	-
+sw_ad_collint_collint_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	9	-	-	-
+sw_ad_collbool_collbool_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	9	-	-	-
+sw_ad_collbool_collbool_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	8	-	-	-
+sw_ad_collbool_collbool_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	9	-	-	-
+sw_ad_box_box_v0s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBox$ and sigma.ast.SFunc are in unnamed module	5	-	-	-
+sw_ad_box_box_v0n	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBox$ and sigma.ast.SFunc are in unnamed module	4	-	-	-
+sw_ad_box_box_v3s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBox$ and sigma.ast.SFunc are in unnamed module	5	-	-	-
+sw_ad_sigma_sigma_v0s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SSigmaProp$ and sigma.ast.SFunc are in un	7	-	-	-
+sw_ad_sigma_sigma_v0n	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SSigmaProp$ and sigma.ast.SFunc are in un	6	-	-	-
+sw_ad_sigma_sigma_v3s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SSigmaProp$ and sigma.ast.SFunc are in un	7	-	-	-
+sw_ad_ge_ge_v0s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SGroupElement$ and sigma.ast.SFunc are	71	-	-	-
+sw_ad_ge_ge_v0n	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SGroupElement$ and sigma.ast.SFunc are	70	-	-	-
+sw_ad_ge_ge_v3s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SGroupElement$ and sigma.ast.SFunc are	71	-	-	-
+sw_ad_optint_optint_v0s	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SFunc (sigma.ast.SOption and sigma.ast.SFunc are in unnamed mo	9	-	-	-
+sw_ad_optint_optint_v0n	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SFunc (sigma.ast.SOption and sigma.ast.SFunc are in unnamed mo	8	-	-	-
+sw_ad_optint_optint_v3s	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SFunc (sigma.ast.SOption and sigma.ast.SFunc are in unnamed mo	9	-	-	-
+sw_ad_avl_avl_v0s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SAvlTree$ and sigma.ast.SFunc are in unname	77	-	-	-
+sw_ad_avl_avl_v0n	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SAvlTree$ and sigma.ast.SFunc are in unname	76	-	-	-
+sw_ad_avl_avl_v3s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SAvlTree$ and sigma.ast.SFunc are in unname	77	-	-	-
+sw_ad_str_str_v0s	SerializerException:Tree version (0) is above activated script version (3)	11	-	-	-
+sw_ad_str_str_v0n	SerializerException:Tree version (0) is above activated script version (3)	10	-	-	-
+sw_ad_str_str_v3s	SerializerException:Tree version (3) is above activated script version (3)	11	-	-	-
+sw_ad_unit_unit_v0s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SUnit$ and sigma.ast.SFunc are in unnamed modu	5	-	-	-
+sw_ad_unit_unit_v0n	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SUnit$ and sigma.ast.SFunc are in unnamed modu	4	-	-	-
+sw_ad_unit_unit_v3s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SUnit$ and sigma.ast.SFunc are in unnamed modu	5	-	-	-
+sw_ad_tuple_tuple_v0s	ClassCastException:class sigma.ast.STuple cannot be cast to class sigma.ast.SFunc (sigma.ast.STuple and sigma.ast.SFunc are in unnamed modu	9	-	-	-
+sw_ad_tuple_tuple_v0n	ClassCastException:class sigma.ast.STuple cannot be cast to class sigma.ast.SFunc (sigma.ast.STuple and sigma.ast.SFunc are in unnamed modu	8	-	-	-
+sw_ad_tuple_tuple_v3s	ClassCastException:class sigma.ast.STuple cannot be cast to class sigma.ast.SFunc (sigma.ast.STuple and sigma.ast.SFunc are in unnamed modu	9	-	-	-
+sw_ad_func_i_b_func_i_b_v0s	WRAPPED	13	1001	-	-
+sw_ad_func_i_b_func_i_b_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	12	-	-	-
+sw_ad_func_i_b_func_i_b_v3s	WRAPPED	13	1001	-	-
+sw_ad_func_i_i_func_i_i_v0s	WRAPPED	15	1001	-	-
+sw_ad_func_i_i_func_i_i_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	14	-	-	-
+sw_ad_func_i_i_func_i_i_v3s	WRAPPED	15	1001	-	-
+sw_ad_height_height_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	5	-	-	-
+sw_ad_height_height_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	4	-	-	-
+sw_ad_height_height_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	5	-	-	-
+sw_ad_collsigma_collsigma_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	11	-	-	-
+sw_ad_collsigma_collsigma_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	10	-	-	-
+sw_ad_collsigma_collsigma_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	11	-	-	-
+sw_ad_int_long_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SLong$ and sigma.ast.SFunc are in unnamed modu	7	-	-	-
+sw_ad_int_long_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SLong$ and sigma.ast.SFunc are in unnamed modu	6	-	-	-
+sw_ad_int_long_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SLong$ and sigma.ast.SFunc are in unnamed modu	7	-	-	-
+sw_ad_long_int_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	7	-	-	-
+sw_ad_long_int_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	6	-	-	-
+sw_ad_long_int_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	7	-	-	-
+sw_ad_byte_int_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	7	-	-	-
+sw_ad_byte_int_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	6	-	-	-
+sw_ad_byte_int_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	7	-	-	-
+sw_ad_int_bigint_v0s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBigInt$ and sigma.ast.SFunc are in unnamed 	8	-	-	-
+sw_ad_int_bigint_v0n	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBigInt$ and sigma.ast.SFunc are in unnamed 	7	-	-	-
+sw_ad_int_bigint_v3s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBigInt$ and sigma.ast.SFunc are in unnamed 	8	-	-	-
+sw_ad_bool_int_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	6	-	-	-
+sw_ad_bool_int_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	5	-	-	-
+sw_ad_bool_int_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	6	-	-	-
+sw_ad_collbyte_collint_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	9	-	-	-
+sw_ad_collbyte_collint_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	8	-	-	-
+sw_ad_collbyte_collint_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	9	-	-	-
+sw_ad_height_long_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SLong$ and sigma.ast.SFunc are in unnamed modu	6	-	-	-
+sw_ad_height_long_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SLong$ and sigma.ast.SFunc are in unnamed modu	5	-	-	-
+sw_ad_height_long_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SLong$ and sigma.ast.SFunc are in unnamed modu	6	-	-	-
+sw_ad_long_height_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	6	-	-	-
+sw_ad_long_height_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	5	-	-	-
+sw_ad_long_height_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	6	-	-	-
+sw_ad_sigma_bool_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBoolean$ and sigma.ast.SFunc are in unname	6	-	-	-
+sw_ad_sigma_bool_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBoolean$ and sigma.ast.SFunc are in unname	5	-	-	-
+sw_ad_sigma_bool_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SBoolean$ and sigma.ast.SFunc are in unname	6	-	-	-
+sw_ad_bool_sigma_v0s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SSigmaProp$ and sigma.ast.SFunc are in un	6	-	-	-
+sw_ad_bool_sigma_v0n	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SSigmaProp$ and sigma.ast.SFunc are in un	5	-	-	-
+sw_ad_bool_sigma_v3s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SSigmaProp$ and sigma.ast.SFunc are in un	6	-	-	-
+sw_ad_collbyte_int_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	8	-	-	-
+sw_ad_collbyte_int_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	7	-	-	-
+sw_ad_collbyte_int_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SFunc (sigma.ast.SInt$ and sigma.ast.SFunc are in unnamed module	8	-	-	-
+sw_ad_int_collbyte_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	8	-	-	-
+sw_ad_int_collbyte_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	7	-	-	-
+sw_ad_int_collbyte_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SFunc (sigma.ast.SCollectionType and sigma.ast.SFunc a	8	-	-	-
+sw_b3_bool_bool_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	5	-	-	-
+sw_b3_bool_bool_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	4	-	-	-
+sw_b3_bool_bool_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	5	-	-	-
+sw_b3_byte_byte_v0s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b3_byte_byte_v0n	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b3_byte_byte_v3s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b3_int_int_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b3_int_int_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b3_int_int_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b3_long_long_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b3_long_long_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b3_long_long_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b3_bigint_bigint_v0s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	9	-	-	-
+sw_b3_bigint_bigint_v0n	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	8	-	-	-
+sw_b3_bigint_bigint_v3s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	9	-	-	-
+sw_b3_collbyte_collbyte_v0s	WRAPPED	9	1001	-	-
+sw_b3_collbyte_collbyte_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b3_collbyte_collbyte_v3s	WRAPPED	9	1001	-	-
+sw_b3_collint_collint_v0s	WRAPPED	9	1001	-	-
+sw_b3_collint_collint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b3_collint_collint_v3s	WRAPPED	9	1001	-	-
+sw_b3_collbool_collbool_v0s	WRAPPED	9	1001	-	-
+sw_b3_collbool_collbool_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b3_collbool_collbool_v3s	WRAPPED	9	1001	-	-
+sw_b3_box_box_v0s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b3_box_box_v0n	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	4	-	-	-
+sw_b3_box_box_v3s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b3_sigma_sigma_v0s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	7	-	-	-
+sw_b3_sigma_sigma_v0n	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	6	-	-	-
+sw_b3_sigma_sigma_v3s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	7	-	-	-
+sw_b3_ge_ge_v0s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	71	-	-	-
+sw_b3_ge_ge_v0n	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	70	-	-	-
+sw_b3_ge_ge_v3s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	71	-	-	-
+sw_b3_optint_optint_v0s	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	9	-	-	-
+sw_b3_optint_optint_v0n	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	8	-	-	-
+sw_b3_optint_optint_v3s	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	9	-	-	-
+sw_b3_avl_avl_v0s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	77	-	-	-
+sw_b3_avl_avl_v0n	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	76	-	-	-
+sw_b3_avl_avl_v3s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	77	-	-	-
+sw_b3_str_str_v0s	SerializerException:Tree version (0) is above activated script version (3)	11	-	-	-
+sw_b3_str_str_v0n	SerializerException:Tree version (0) is above activated script version (3)	10	-	-	-
+sw_b3_str_str_v3s	SerializerException:Tree version (3) is above activated script version (3)	11	-	-	-
+sw_b3_unit_unit_v0s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	5	-	-	-
+sw_b3_unit_unit_v0n	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	4	-	-	-
+sw_b3_unit_unit_v3s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	5	-	-	-
+sw_b3_tuple_tuple_v0s	WRAPPED	9	1001	-	-
+sw_b3_tuple_tuple_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b3_tuple_tuple_v3s	WRAPPED	9	1001	-	-
+sw_b3_func_i_b_func_i_b_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	13	-	-	-
+sw_b3_func_i_b_func_i_b_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	12	-	-	-
+sw_b3_func_i_b_func_i_b_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	13	-	-	-
+sw_b3_func_i_i_func_i_i_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	15	-	-	-
+sw_b3_func_i_i_func_i_i_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	14	-	-	-
+sw_b3_func_i_i_func_i_i_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	15	-	-	-
+sw_b3_height_height_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b3_height_height_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	4	-	-	-
+sw_b3_height_height_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b3_collsigma_collsigma_v0s	WRAPPED	11	1001	-	-
+sw_b3_collsigma_collsigma_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	10	-	-	-
+sw_b3_collsigma_collsigma_v3s	WRAPPED	11	1001	-	-
+sw_b3_int_long_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b3_int_long_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b3_int_long_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b3_long_int_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b3_long_int_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b3_long_int_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b3_byte_int_v0s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b3_byte_int_v0n	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b3_byte_int_v3s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b3_int_bigint_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	8	-	-	-
+sw_b3_int_bigint_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b3_int_bigint_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	8	-	-	-
+sw_b3_bool_int_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+sw_b3_bool_int_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	5	-	-	-
+sw_b3_bool_int_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+sw_b3_collbyte_collint_v0s	WRAPPED	9	1001	-	-
+sw_b3_collbyte_collint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b3_collbyte_collint_v3s	WRAPPED	9	1001	-	-
+sw_b3_height_long_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b3_height_long_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b3_height_long_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b3_long_height_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b3_long_height_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	5	-	-	-
+sw_b3_long_height_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b3_sigma_bool_v0s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	6	-	-	-
+sw_b3_sigma_bool_v0n	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	5	-	-	-
+sw_b3_sigma_bool_v3s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	6	-	-	-
+sw_b3_bool_sigma_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+sw_b3_bool_sigma_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	5	-	-	-
+sw_b3_bool_sigma_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+sw_b3_collbyte_int_v0s	WRAPPED	8	1001	-	-
+sw_b3_collbyte_int_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	7	-	-	-
+sw_b3_collbyte_int_v3s	WRAPPED	8	1001	-	-
+sw_b3_int_collbyte_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	8	-	-	-
+sw_b3_int_collbyte_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b3_int_collbyte_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	8	-	-	-
+sw_b5_bool_bool_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	5	-	-	-
+sw_b5_bool_bool_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	4	-	-	-
+sw_b5_bool_bool_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	5	-	-	-
+sw_b5_byte_byte_v0s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b5_byte_byte_v0n	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b5_byte_byte_v3s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b5_int_int_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b5_int_int_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b5_int_int_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b5_long_long_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b5_long_long_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b5_long_long_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b5_bigint_bigint_v0s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	9	-	-	-
+sw_b5_bigint_bigint_v0n	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	8	-	-	-
+sw_b5_bigint_bigint_v3s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	9	-	-	-
+sw_b5_collbyte_collbyte_v0s	WRAPPED	9	1001	-	-
+sw_b5_collbyte_collbyte_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b5_collbyte_collbyte_v3s	WRAPPED	9	1001	-	-
+sw_b5_collint_collint_v0s	WRAPPED	9	1001	-	-
+sw_b5_collint_collint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b5_collint_collint_v3s	WRAPPED	9	1001	-	-
+sw_b5_collbool_collbool_v0s	WRAPPED	9	1001	-	-
+sw_b5_collbool_collbool_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b5_collbool_collbool_v3s	WRAPPED	9	1001	-	-
+sw_b5_box_box_v0s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b5_box_box_v0n	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	4	-	-	-
+sw_b5_box_box_v3s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b5_sigma_sigma_v0s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	7	-	-	-
+sw_b5_sigma_sigma_v0n	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	6	-	-	-
+sw_b5_sigma_sigma_v3s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	7	-	-	-
+sw_b5_ge_ge_v0s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	71	-	-	-
+sw_b5_ge_ge_v0n	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	70	-	-	-
+sw_b5_ge_ge_v3s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	71	-	-	-
+sw_b5_optint_optint_v0s	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	9	-	-	-
+sw_b5_optint_optint_v0n	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	8	-	-	-
+sw_b5_optint_optint_v3s	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	9	-	-	-
+sw_b5_avl_avl_v0s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	77	-	-	-
+sw_b5_avl_avl_v0n	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	76	-	-	-
+sw_b5_avl_avl_v3s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	77	-	-	-
+sw_b5_str_str_v0s	SerializerException:Tree version (0) is above activated script version (3)	11	-	-	-
+sw_b5_str_str_v0n	SerializerException:Tree version (0) is above activated script version (3)	10	-	-	-
+sw_b5_str_str_v3s	SerializerException:Tree version (3) is above activated script version (3)	11	-	-	-
+sw_b5_unit_unit_v0s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	5	-	-	-
+sw_b5_unit_unit_v0n	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	4	-	-	-
+sw_b5_unit_unit_v3s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	5	-	-	-
+sw_b5_tuple_tuple_v0s	WRAPPED	9	1001	-	-
+sw_b5_tuple_tuple_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b5_tuple_tuple_v3s	WRAPPED	9	1001	-	-
+sw_b5_func_i_b_func_i_b_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	13	-	-	-
+sw_b5_func_i_b_func_i_b_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	12	-	-	-
+sw_b5_func_i_b_func_i_b_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	13	-	-	-
+sw_b5_func_i_i_func_i_i_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	15	-	-	-
+sw_b5_func_i_i_func_i_i_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	14	-	-	-
+sw_b5_func_i_i_func_i_i_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	15	-	-	-
+sw_b5_height_height_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b5_height_height_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	4	-	-	-
+sw_b5_height_height_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b5_collsigma_collsigma_v0s	WRAPPED	11	1001	-	-
+sw_b5_collsigma_collsigma_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	10	-	-	-
+sw_b5_collsigma_collsigma_v3s	WRAPPED	11	1001	-	-
+sw_b5_int_long_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b5_int_long_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b5_int_long_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b5_long_int_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b5_long_int_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b5_long_int_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b5_byte_int_v0s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b5_byte_int_v0n	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b5_byte_int_v3s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b5_int_bigint_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	8	-	-	-
+sw_b5_int_bigint_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b5_int_bigint_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	8	-	-	-
+sw_b5_bool_int_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+sw_b5_bool_int_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	5	-	-	-
+sw_b5_bool_int_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+sw_b5_collbyte_collint_v0s	WRAPPED	9	1001	-	-
+sw_b5_collbyte_collint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b5_collbyte_collint_v3s	WRAPPED	9	1001	-	-
+sw_b5_height_long_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b5_height_long_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b5_height_long_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b5_long_height_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b5_long_height_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	5	-	-	-
+sw_b5_long_height_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b5_sigma_bool_v0s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	6	-	-	-
+sw_b5_sigma_bool_v0n	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	5	-	-	-
+sw_b5_sigma_bool_v3s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	6	-	-	-
+sw_b5_bool_sigma_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+sw_b5_bool_sigma_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	5	-	-	-
+sw_b5_bool_sigma_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+sw_b5_collbyte_int_v0s	WRAPPED	8	1001	-	-
+sw_b5_collbyte_int_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	7	-	-	-
+sw_b5_collbyte_int_v3s	WRAPPED	8	1001	-	-
+sw_b5_int_collbyte_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	8	-	-	-
+sw_b5_int_collbyte_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b5_int_collbyte_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	8	-	-	-
+sw_e5_bool_bool_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	5	-	-	-
+sw_e5_bool_bool_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	4	-	-	-
+sw_e5_bool_bool_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	5	-	-	-
+sw_e5_byte_byte_v0s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SOption (sigma.ast.SByte$ and sigma.ast.SOption are in unnamed 	7	-	-	-
+sw_e5_byte_byte_v0n	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SOption (sigma.ast.SByte$ and sigma.ast.SOption are in unnamed 	6	-	-	-
+sw_e5_byte_byte_v3s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SOption (sigma.ast.SByte$ and sigma.ast.SOption are in unnamed 	7	-	-	-
+sw_e5_int_int_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	7	-	-	-
+sw_e5_int_int_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	6	-	-	-
+sw_e5_int_int_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	7	-	-	-
+sw_e5_long_long_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	7	-	-	-
+sw_e5_long_long_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	6	-	-	-
+sw_e5_long_long_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	7	-	-	-
+sw_e5_bigint_bigint_v0s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBigInt$ and sigma.ast.SOption are in unna	9	-	-	-
+sw_e5_bigint_bigint_v0n	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBigInt$ and sigma.ast.SOption are in unna	8	-	-	-
+sw_e5_bigint_bigint_v3s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBigInt$ and sigma.ast.SOption are in unna	9	-	-	-
+sw_e5_collbyte_collbyte_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	9	-	-	-
+sw_e5_collbyte_collbyte_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	8	-	-	-
+sw_e5_collbyte_collbyte_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	9	-	-	-
+sw_e5_collint_collint_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	9	-	-	-
+sw_e5_collint_collint_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	8	-	-	-
+sw_e5_collint_collint_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	9	-	-	-
+sw_e5_collbool_collbool_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	9	-	-	-
+sw_e5_collbool_collbool_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	8	-	-	-
+sw_e5_collbool_collbool_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	9	-	-	-
+sw_e5_box_box_v0s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBox$ and sigma.ast.SOption are in unnamed mo	5	-	-	-
+sw_e5_box_box_v0n	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBox$ and sigma.ast.SOption are in unnamed mo	4	-	-	-
+sw_e5_box_box_v3s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBox$ and sigma.ast.SOption are in unnamed mo	5	-	-	-
+sw_e5_sigma_sigma_v0s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SOption (sigma.ast.SSigmaProp$ and sigma.ast.SOption are i	7	-	-	-
+sw_e5_sigma_sigma_v0n	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SOption (sigma.ast.SSigmaProp$ and sigma.ast.SOption are i	6	-	-	-
+sw_e5_sigma_sigma_v3s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SOption (sigma.ast.SSigmaProp$ and sigma.ast.SOption are i	7	-	-	-
+sw_e5_ge_ge_v0s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SOption (sigma.ast.SGroupElement$ and sigma.ast.SOption	71	-	-	-
+sw_e5_ge_ge_v0n	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SOption (sigma.ast.SGroupElement$ and sigma.ast.SOption	70	-	-	-
+sw_e5_ge_ge_v3s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SOption (sigma.ast.SGroupElement$ and sigma.ast.SOption	71	-	-	-
+sw_e5_optint_optint_v0s	WRAPPED	9	1001	-	-
+sw_e5_optint_optint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_e5_optint_optint_v3s	WRAPPED	9	1001	-	-
+sw_e5_avl_avl_v0s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SOption (sigma.ast.SAvlTree$ and sigma.ast.SOption are in un	77	-	-	-
+sw_e5_avl_avl_v0n	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SOption (sigma.ast.SAvlTree$ and sigma.ast.SOption are in un	76	-	-	-
+sw_e5_avl_avl_v3s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SOption (sigma.ast.SAvlTree$ and sigma.ast.SOption are in un	77	-	-	-
+sw_e5_str_str_v0s	SerializerException:Tree version (0) is above activated script version (3)	11	-	-	-
+sw_e5_str_str_v0n	SerializerException:Tree version (0) is above activated script version (3)	10	-	-	-
+sw_e5_str_str_v3s	SerializerException:Tree version (3) is above activated script version (3)	11	-	-	-
+sw_e5_unit_unit_v0s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SOption (sigma.ast.SUnit$ and sigma.ast.SOption are in unnamed 	5	-	-	-
+sw_e5_unit_unit_v0n	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SOption (sigma.ast.SUnit$ and sigma.ast.SOption are in unnamed 	4	-	-	-
+sw_e5_unit_unit_v3s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SOption (sigma.ast.SUnit$ and sigma.ast.SOption are in unnamed 	5	-	-	-
+sw_e5_tuple_tuple_v0s	ClassCastException:class sigma.ast.STuple cannot be cast to class sigma.ast.SOption (sigma.ast.STuple and sigma.ast.SOption are in unnamed 	9	-	-	-
+sw_e5_tuple_tuple_v0n	ClassCastException:class sigma.ast.STuple cannot be cast to class sigma.ast.SOption (sigma.ast.STuple and sigma.ast.SOption are in unnamed 	8	-	-	-
+sw_e5_tuple_tuple_v3s	ClassCastException:class sigma.ast.STuple cannot be cast to class sigma.ast.SOption (sigma.ast.STuple and sigma.ast.SOption are in unnamed 	9	-	-	-
+sw_e5_func_i_b_func_i_b_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	13	-	-	-
+sw_e5_func_i_b_func_i_b_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	12	-	-	-
+sw_e5_func_i_b_func_i_b_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	13	-	-	-
+sw_e5_func_i_i_func_i_i_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	15	-	-	-
+sw_e5_func_i_i_func_i_i_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	14	-	-	-
+sw_e5_func_i_i_func_i_i_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SOption (sigma.ast.SFunc and sigma.ast.SOption are in unnamed mo	15	-	-	-
+sw_e5_height_height_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	5	-	-	-
+sw_e5_height_height_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	4	-	-	-
+sw_e5_height_height_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	5	-	-	-
+sw_e5_collsigma_collsigma_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	11	-	-	-
+sw_e5_collsigma_collsigma_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	10	-	-	-
+sw_e5_collsigma_collsigma_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	11	-	-	-
+sw_e5_int_long_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	7	-	-	-
+sw_e5_int_long_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	6	-	-	-
+sw_e5_int_long_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	7	-	-	-
+sw_e5_long_int_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	7	-	-	-
+sw_e5_long_int_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	6	-	-	-
+sw_e5_long_int_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	7	-	-	-
+sw_e5_byte_int_v0s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SOption (sigma.ast.SByte$ and sigma.ast.SOption are in unnamed 	7	-	-	-
+sw_e5_byte_int_v0n	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SOption (sigma.ast.SByte$ and sigma.ast.SOption are in unnamed 	6	-	-	-
+sw_e5_byte_int_v3s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SOption (sigma.ast.SByte$ and sigma.ast.SOption are in unnamed 	7	-	-	-
+sw_e5_int_bigint_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	8	-	-	-
+sw_e5_int_bigint_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	7	-	-	-
+sw_e5_int_bigint_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	8	-	-	-
+sw_e5_bool_int_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	6	-	-	-
+sw_e5_bool_int_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	5	-	-	-
+sw_e5_bool_int_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	6	-	-	-
+sw_e5_collbyte_collint_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	9	-	-	-
+sw_e5_collbyte_collint_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	8	-	-	-
+sw_e5_collbyte_collint_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	9	-	-	-
+sw_e5_height_long_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	6	-	-	-
+sw_e5_height_long_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	5	-	-	-
+sw_e5_height_long_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	6	-	-	-
+sw_e5_long_height_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	6	-	-	-
+sw_e5_long_height_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	5	-	-	-
+sw_e5_long_height_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SOption (sigma.ast.SLong$ and sigma.ast.SOption are in unnamed 	6	-	-	-
+sw_e5_sigma_bool_v0s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SOption (sigma.ast.SSigmaProp$ and sigma.ast.SOption are i	6	-	-	-
+sw_e5_sigma_bool_v0n	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SOption (sigma.ast.SSigmaProp$ and sigma.ast.SOption are i	5	-	-	-
+sw_e5_sigma_bool_v3s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SOption (sigma.ast.SSigmaProp$ and sigma.ast.SOption are i	6	-	-	-
+sw_e5_bool_sigma_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	6	-	-	-
+sw_e5_bool_sigma_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	5	-	-	-
+sw_e5_bool_sigma_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	6	-	-	-
+sw_e5_collbyte_int_v0s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	8	-	-	-
+sw_e5_collbyte_int_v0n	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	7	-	-	-
+sw_e5_collbyte_int_v3s	ClassCastException:class sigma.ast.SCollectionType cannot be cast to class sigma.ast.SOption (sigma.ast.SCollectionType and sigma.ast.SOpti	8	-	-	-
+sw_e5_int_collbyte_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	8	-	-	-
+sw_e5_int_collbyte_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	7	-	-	-
+sw_e5_int_collbyte_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SOption (sigma.ast.SInt$ and sigma.ast.SOption are in unnamed mo	8	-	-	-
+sw_b4_boolx3_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+sw_b4_boolx3_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	5	-	-	-
+sw_b4_boolx3_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+sw_b4_bytex3_v0s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	9	-	-	-
+sw_b4_bytex3_v0n	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	8	-	-	-
+sw_b4_bytex3_v3s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	9	-	-	-
+sw_b4_intx3_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	9	-	-	-
+sw_b4_intx3_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	8	-	-	-
+sw_b4_intx3_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	9	-	-	-
+sw_b4_longx3_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	9	-	-	-
+sw_b4_longx3_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	8	-	-	-
+sw_b4_longx3_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	9	-	-	-
+sw_b4_bigintx3_v0s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	12	-	-	-
+sw_b4_bigintx3_v0n	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	11	-	-	-
+sw_b4_bigintx3_v3s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	12	-	-	-
+sw_b4_collbytex3_v0s	WRAPPED	12	1001	-	-
+sw_b4_collbytex3_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+sw_b4_collbytex3_v3s	WRAPPED	12	1001	-	-
+sw_b4_collintx3_v0s	WRAPPED	12	1001	-	-
+sw_b4_collintx3_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+sw_b4_collintx3_v3s	WRAPPED	12	1001	-	-
+sw_b4_collboolx3_v0s	WRAPPED	12	1001	-	-
+sw_b4_collboolx3_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+sw_b4_collboolx3_v3s	WRAPPED	12	1001	-	-
+sw_b4_boxx3_v0s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b4_boxx3_v0n	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b4_boxx3_v3s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b4_sigmax3_v0s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	9	-	-	-
+sw_b4_sigmax3_v0n	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	8	-	-	-
+sw_b4_sigmax3_v3s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	9	-	-	-
+sw_b4_gex3_v0s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	105	-	-	-
+sw_b4_gex3_v0n	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	104	-	-	-
+sw_b4_gex3_v3s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	105	-	-	-
+sw_b4_optintx3_v0s	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	12	-	-	-
+sw_b4_optintx3_v0n	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	11	-	-	-
+sw_b4_optintx3_v3s	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	12	-	-	-
+sw_b4_avlx3_v0s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	114	-	-	-
+sw_b4_avlx3_v0n	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	113	-	-	-
+sw_b4_avlx3_v3s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	114	-	-	-
+sw_b4_strx3_v0s	SerializerException:Tree version (0) is above activated script version (3)	11	-	-	-
+sw_b4_strx3_v0n	SerializerException:Tree version (0) is above activated script version (3)	10	-	-	-
+sw_b4_strx3_v3s	SerializerException:Tree version (3) is above activated script version (3)	11	-	-	-
+sw_b4_unitx3_v0s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b4_unitx3_v0n	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	5	-	-	-
+sw_b4_unitx3_v3s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b4_tuplex3_v0s	WRAPPED	12	1001	-	-
+sw_b4_tuplex3_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+sw_b4_tuplex3_v3s	WRAPPED	12	1001	-	-
+sw_b4_func_i_bx3_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	18	-	-	-
+sw_b4_func_i_bx3_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	17	-	-	-
+sw_b4_func_i_bx3_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	18	-	-	-
+sw_b4_func_i_ix3_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	21	-	-	-
+sw_b4_func_i_ix3_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	20	-	-	-
+sw_b4_func_i_ix3_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	21	-	-	-
+sw_b4_heightx3_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b4_heightx3_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	5	-	-	-
+sw_b4_heightx3_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b4_collsigmax3_v0s	WRAPPED	15	1001	-	-
+sw_b4_collsigmax3_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	14	-	-	-
+sw_b4_collsigmax3_v3s	WRAPPED	15	1001	-	-
+sw_b4_bool_int_long_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	8	-	-	-
+sw_b4_bool_int_long_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	7	-	-	-
+sw_b4_bool_int_long_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	8	-	-	-
+sw_b4_collbyte_int_int_v0s	WRAPPED	10	1001	-	-
+sw_b4_collbyte_int_int_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	9	-	-	-
+sw_b4_collbyte_int_int_v3s	WRAPPED	10	1001	-	-
+sw_b4_collint_int_func_v0s	WRAPPED	14	1001	-	-
+sw_b4_collint_int_func_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	13	-	-	-
+sw_b4_collint_int_func_v3s	WRAPPED	14	1001	-	-
+sw_b4_avl_collbyte_collbyte_v0s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	46	-	-	-
+sw_b4_avl_collbyte_collbyte_v0n	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	45	-	-	-
+sw_b4_avl_collbyte_collbyte_v3s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	46	-	-	-
+sw_b2_bool_int_none_v0s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	7	-	-	-
+sw_b2_bool_int_none_v0n	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+sw_b2_bool_int_none_v3s	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	7	-	-	-
+sw_b2_collint_bool_none_v0s	AssertionError:assertion failed: Cannot upcast value of type SBoolean to SInt$: only numeric types can be upcasted.	7	-	-	-
+sw_b2_collint_bool_none_v0n	AssertionError:assertion failed: Cannot upcast value of type SBoolean to SInt$: only numeric types can be upcasted.	6	-	-	-
+sw_b2_collint_bool_none_v3s	WRAPPED	8	1001	-	-
+sw_b2_collint_int_some_bool_v0s	WRAPPED	10	1001	-	-
+sw_b2_collint_int_some_bool_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	9	-	-	-
+sw_b2_collint_int_some_bool_v3s	WRAPPED	10	1001	-	-
+sw_b2_byte_int_none_v0s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	8	-	-	-
+sw_b2_byte_int_none_v0n	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b2_byte_int_none_v3s	ClassCastException:class sigma.ast.SByte$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SByte$ and sigma.ast.SCollection are in 	8	-	-	-
+sw_b2_collint_byte_none_v0s	WRAPPED	9	1001	-	-
+sw_b2_collint_byte_none_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b2_collint_byte_none_v3s	WRAPPED	9	1001	-	-
+sw_b2_collint_int_some_byte_v0s	WRAPPED	11	1001	-	-
+sw_b2_collint_int_some_byte_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	10	-	-	-
+sw_b2_collint_int_some_byte_v3s	WRAPPED	11	1001	-	-
+sw_b2_int_int_none_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	8	-	-	-
+sw_b2_int_int_none_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b2_int_int_none_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	8	-	-	-
+sw_b2_collint_int_none_v0s	WRAPPED	9	1001	-	-
+sw_b2_collint_int_none_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b2_collint_int_none_v3s	WRAPPED	9	1001	-	-
+sw_b2_collint_int_some_int_v0s	WRAPPED	11	1001	-	-
+sw_b2_collint_int_some_int_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	10	-	-	-
+sw_b2_collint_int_some_int_v3s	WRAPPED	11	1001	-	-
+sw_b2_long_int_none_v0s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	8	-	-	-
+sw_b2_long_int_none_v0n	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b2_long_int_none_v3s	ClassCastException:class sigma.ast.SLong$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SLong$ and sigma.ast.SCollection are in 	8	-	-	-
+sw_b2_collint_long_none_v0s	AssertionError:assertion failed: Invalid upcast from LongConstant(1) to SInt$: target type should be larger than source type.	8	-	-	-
+sw_b2_collint_long_none_v0n	AssertionError:assertion failed: Invalid upcast from LongConstant(1) to SInt$: target type should be larger than source type.	7	-	-	-
+sw_b2_collint_long_none_v3s	WRAPPED	9	1001	-	-
+sw_b2_collint_int_some_long_v0s	WRAPPED	11	1001	-	-
+sw_b2_collint_int_some_long_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	10	-	-	-
+sw_b2_collint_int_some_long_v3s	WRAPPED	11	1001	-	-
+sw_b2_bigint_int_none_v0s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	9	-	-	-
+sw_b2_bigint_int_none_v0n	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	8	-	-	-
+sw_b2_bigint_int_none_v3s	ClassCastException:class sigma.ast.SBigInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBigInt$ and sigma.ast.SCollection are	9	-	-	-
+sw_b2_collint_bigint_none_v0s	AssertionError:assertion failed: Invalid upcast from ConstantNode(CBigInt(5),SBigInt$) to SInt$: target type should be larger than sour	9	-	-	-
+sw_b2_collint_bigint_none_v0n	AssertionError:assertion failed: Invalid upcast from ConstantNode(CBigInt(5),SBigInt$) to SInt$: target type should be larger than sour	8	-	-	-
+sw_b2_collint_bigint_none_v3s	WRAPPED	10	1001	-	-
+sw_b2_collint_int_some_bigint_v0s	WRAPPED	12	1001	-	-
+sw_b2_collint_int_some_bigint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+sw_b2_collint_int_some_bigint_v3s	WRAPPED	12	1001	-	-
+sw_b2_collbyte_int_none_v0s	WRAPPED	9	1001	-	-
+sw_b2_collbyte_int_none_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b2_collbyte_int_none_v3s	WRAPPED	9	1001	-	-
+sw_b2_collint_collbyte_none_v0s	AssertionError:assertion failed: Cannot upcast value of type Coll[SByte$] to SInt$: only numeric types can be upcasted.	9	-	-	-
+sw_b2_collint_collbyte_none_v0n	AssertionError:assertion failed: Cannot upcast value of type Coll[SByte$] to SInt$: only numeric types can be upcasted.	8	-	-	-
+sw_b2_collint_collbyte_none_v3s	WRAPPED	10	1001	-	-
+sw_b2_collint_int_some_collbyte_v0s	WRAPPED	12	1001	-	-
+sw_b2_collint_int_some_collbyte_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+sw_b2_collint_int_some_collbyte_v3s	WRAPPED	12	1001	-	-
+sw_b2_collint_collint_none_v0s	AssertionError:assertion failed: Cannot upcast value of type Coll[SInt$] to SInt$: only numeric types can be upcasted.	9	-	-	-
+sw_b2_collint_collint_none_v0n	AssertionError:assertion failed: Cannot upcast value of type Coll[SInt$] to SInt$: only numeric types can be upcasted.	8	-	-	-
+sw_b2_collint_collint_none_v3s	WRAPPED	10	1001	-	-
+sw_b2_collint_int_some_collint_v0s	WRAPPED	12	1001	-	-
+sw_b2_collint_int_some_collint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+sw_b2_collint_int_some_collint_v3s	WRAPPED	12	1001	-	-
+sw_b2_collbool_int_none_v0s	WRAPPED	9	1001	-	-
+sw_b2_collbool_int_none_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b2_collbool_int_none_v3s	WRAPPED	9	1001	-	-
+sw_b2_collint_collbool_none_v0s	AssertionError:assertion failed: Cannot upcast value of type Coll[SBoolean] to SInt$: only numeric types can be upcasted.	9	-	-	-
+sw_b2_collint_collbool_none_v0n	AssertionError:assertion failed: Cannot upcast value of type Coll[SBoolean] to SInt$: only numeric types can be upcasted.	8	-	-	-
+sw_b2_collint_collbool_none_v3s	WRAPPED	10	1001	-	-
+sw_b2_collint_int_some_collbool_v0s	WRAPPED	12	1001	-	-
+sw_b2_collint_int_some_collbool_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+sw_b2_collint_int_some_collbool_v3s	WRAPPED	12	1001	-	-
+sw_b2_box_int_none_v0s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b2_box_int_none_v0n	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b2_box_int_none_v3s	ClassCastException:class sigma.ast.SBox$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBox$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b2_collint_box_none_v0s	AssertionError:assertion failed: Cannot upcast value of type SBox to SInt$: only numeric types can be upcasted.	7	-	-	-
+sw_b2_collint_box_none_v0n	AssertionError:assertion failed: Cannot upcast value of type SBox to SInt$: only numeric types can be upcasted.	6	-	-	-
+sw_b2_collint_box_none_v3s	WRAPPED	8	1001	-	-
+sw_b2_collint_int_some_box_v0s	WRAPPED	10	1001	-	-
+sw_b2_collint_int_some_box_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	9	-	-	-
+sw_b2_collint_int_some_box_v3s	WRAPPED	10	1001	-	-
+sw_b2_sigma_int_none_v0s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	8	-	-	-
+sw_b2_sigma_int_none_v0n	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	7	-	-	-
+sw_b2_sigma_int_none_v3s	ClassCastException:class sigma.ast.SSigmaProp$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SSigmaProp$ and sigma.ast.SCollecti	8	-	-	-
+sw_b2_collint_sigma_none_v0s	AssertionError:assertion failed: Cannot upcast value of type SSigmaProp to SInt$: only numeric types can be upcasted.	8	-	-	-
+sw_b2_collint_sigma_none_v0n	AssertionError:assertion failed: Cannot upcast value of type SSigmaProp to SInt$: only numeric types can be upcasted.	7	-	-	-
+sw_b2_collint_sigma_none_v3s	WRAPPED	9	1001	-	-
+sw_b2_collint_int_some_sigma_v0s	WRAPPED	11	1001	-	-
+sw_b2_collint_int_some_sigma_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	10	-	-	-
+sw_b2_collint_int_some_sigma_v3s	WRAPPED	11	1001	-	-
+sw_b2_ge_int_none_v0s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	40	-	-	-
+sw_b2_ge_int_none_v0n	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	39	-	-	-
+sw_b2_ge_int_none_v3s	ClassCastException:class sigma.ast.SGroupElement$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SGroupElement$ and sigma.ast.SCo	40	-	-	-
+sw_b2_collint_ge_none_v0s	AssertionError:assertion failed: Cannot upcast value of type SGroupElement to SInt$: only numeric types can be upcasted.	40	-	-	-
+sw_b2_collint_ge_none_v0n	AssertionError:assertion failed: Cannot upcast value of type SGroupElement to SInt$: only numeric types can be upcasted.	39	-	-	-
+sw_b2_collint_ge_none_v3s	WRAPPED	41	1001	-	-
+sw_b2_collint_int_some_ge_v0s	WRAPPED	43	1001	-	-
+sw_b2_collint_int_some_ge_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	42	-	-	-
+sw_b2_collint_int_some_ge_v3s	WRAPPED	43	1001	-	-
+sw_b2_optint_int_none_v0s	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	9	-	-	-
+sw_b2_optint_int_none_v0n	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	8	-	-	-
+sw_b2_optint_int_none_v3s	ClassCastException:class sigma.ast.SOption cannot be cast to class sigma.ast.SCollection (sigma.ast.SOption and sigma.ast.SCollection are i	9	-	-	-
+sw_b2_collint_optint_none_v0s	AssertionError:assertion failed: Cannot upcast value of type Option[SInt$] to SInt$: only numeric types can be upcasted.	9	-	-	-
+sw_b2_collint_optint_none_v0n	AssertionError:assertion failed: Cannot upcast value of type Option[SInt$] to SInt$: only numeric types can be upcasted.	8	-	-	-
+sw_b2_collint_optint_none_v3s	WRAPPED	10	1001	-	-
+sw_b2_collint_int_some_optint_v0s	WRAPPED	12	1001	-	-
+sw_b2_collint_int_some_optint_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+sw_b2_collint_int_some_optint_v3s	WRAPPED	12	1001	-	-
+sw_b2_avl_int_none_v0s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	43	-	-	-
+sw_b2_avl_int_none_v0n	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	42	-	-	-
+sw_b2_avl_int_none_v3s	ClassCastException:class sigma.ast.SAvlTree$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SAvlTree$ and sigma.ast.SCollection a	43	-	-	-
+sw_b2_collint_avl_none_v0s	AssertionError:assertion failed: Cannot upcast value of type SAvlTree to SInt$: only numeric types can be upcasted.	43	-	-	-
+sw_b2_collint_avl_none_v0n	AssertionError:assertion failed: Cannot upcast value of type SAvlTree to SInt$: only numeric types can be upcasted.	42	-	-	-
+sw_b2_collint_avl_none_v3s	WRAPPED	44	1001	-	-
+sw_b2_collint_int_some_avl_v0s	WRAPPED	46	1001	-	-
+sw_b2_collint_int_some_avl_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	45	-	-	-
+sw_b2_collint_int_some_avl_v3s	WRAPPED	46	1001	-	-
+sw_b2_str_int_none_v0s	SerializerException:Tree version (0) is above activated script version (3)	9	-	-	-
+sw_b2_str_int_none_v0n	SerializerException:Tree version (0) is above activated script version (3)	8	-	-	-
+sw_b2_str_int_none_v3s	SerializerException:Tree version (3) is above activated script version (3)	9	-	-	-
+sw_b2_collint_str_none_v0s	AssertionError:assertion failed: Cannot upcast value of type SString to SInt$: only numeric types can be upcasted.	9	-	-	-
+sw_b2_collint_str_none_v0n	AssertionError:assertion failed: Cannot upcast value of type SString to SInt$: only numeric types can be upcasted.	8	-	-	-
+sw_b2_collint_str_none_v3s	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@1601e47 with bytes [B@3bffddff	11	-	-	-
+sw_b2_collint_int_some_str_v0s	WRAPPED	13	1001	-	-
+sw_b2_collint_int_some_str_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+sw_b2_collint_int_some_str_v3s	WRAPPED	13	1001	-	-
+sw_b2_unit_int_none_v0s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b2_unit_int_none_v0n	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	6	-	-	-
+sw_b2_unit_int_none_v3s	ClassCastException:class sigma.ast.SUnit$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SUnit$ and sigma.ast.SCollection are in 	7	-	-	-
+sw_b2_collint_unit_none_v0s	AssertionError:assertion failed: Cannot upcast value of type SUnit to SInt$: only numeric types can be upcasted.	7	-	-	-
+sw_b2_collint_unit_none_v0n	AssertionError:assertion failed: Cannot upcast value of type SUnit to SInt$: only numeric types can be upcasted.	6	-	-	-
+sw_b2_collint_unit_none_v3s	WRAPPED	8	1001	-	-
+sw_b2_collint_int_some_unit_v0s	WRAPPED	10	1001	-	-
+sw_b2_collint_int_some_unit_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	9	-	-	-
+sw_b2_collint_int_some_unit_v3s	WRAPPED	10	1001	-	-
+sw_b2_tuple_int_none_v0s	WRAPPED	9	1001	-	-
+sw_b2_tuple_int_none_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+sw_b2_tuple_int_none_v3s	WRAPPED	9	1001	-	-
+sw_b2_collint_tuple_none_v0s	AssertionError:assertion failed: Cannot upcast value of type (SInt$,SInt$) to SInt$: only numeric types can be upcasted.	9	-	-	-
+sw_b2_collint_tuple_none_v0n	AssertionError:assertion failed: Cannot upcast value of type (SInt$,SInt$) to SInt$: only numeric types can be upcasted.	8	-	-	-
+sw_b2_collint_tuple_none_v3s	WRAPPED	10	1001	-	-
+sw_b2_collint_int_some_tuple_v0s	WRAPPED	12	1001	-	-
+sw_b2_collint_int_some_tuple_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+sw_b2_collint_int_some_tuple_v3s	WRAPPED	12	1001	-	-
+sw_b2_func_i_b_int_none_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	11	-	-	-
+sw_b2_func_i_b_int_none_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	10	-	-	-
+sw_b2_func_i_b_int_none_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	11	-	-	-
+sw_b2_collint_func_i_b_none_v0s	AssertionError:assertion failed: Cannot upcast value of type (SInt$) => SBoolean to SInt$: only numeric types can be upcasted.	11	-	-	-
+sw_b2_collint_func_i_b_none_v0n	AssertionError:assertion failed: Cannot upcast value of type (SInt$) => SBoolean to SInt$: only numeric types can be upcasted.	10	-	-	-
+sw_b2_collint_func_i_b_none_v3s	WRAPPED	12	1001	-	-
+sw_b2_collint_int_some_func_i_b_v0s	WRAPPED	14	1001	-	-
+sw_b2_collint_int_some_func_i_b_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	13	-	-	-
+sw_b2_collint_int_some_func_i_b_v3s	WRAPPED	14	1001	-	-
+sw_b2_func_i_i_int_none_v0s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	12	-	-	-
+sw_b2_func_i_i_int_none_v0n	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	11	-	-	-
+sw_b2_func_i_i_int_none_v3s	ClassCastException:class sigma.ast.SFunc cannot be cast to class sigma.ast.SCollection (sigma.ast.SFunc and sigma.ast.SCollection are in un	12	-	-	-
+sw_b2_collint_func_i_i_none_v0s	AssertionError:assertion failed: Cannot upcast value of type (SInt$) => SInt$ to SInt$: only numeric types can be upcasted.	12	-	-	-
+sw_b2_collint_func_i_i_none_v0n	AssertionError:assertion failed: Cannot upcast value of type (SInt$) => SInt$ to SInt$: only numeric types can be upcasted.	11	-	-	-
+sw_b2_collint_func_i_i_none_v3s	WRAPPED	13	1001	-	-
+sw_b2_collint_int_some_func_i_i_v0s	WRAPPED	15	1001	-	-
+sw_b2_collint_int_some_func_i_i_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	14	-	-	-
+sw_b2_collint_int_some_func_i_i_v3s	WRAPPED	15	1001	-	-
+sw_b2_height_int_none_v0s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b2_height_int_none_v0n	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	6	-	-	-
+sw_b2_height_int_none_v3s	ClassCastException:class sigma.ast.SInt$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SInt$ and sigma.ast.SCollection are in un	7	-	-	-
+sw_b2_collint_height_none_v0s	WRAPPED	8	1001	-	-
+sw_b2_collint_height_none_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	7	-	-	-
+sw_b2_collint_height_none_v3s	WRAPPED	8	1001	-	-
+sw_b2_collint_int_some_height_v0s	WRAPPED	10	1001	-	-
+sw_b2_collint_int_some_height_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	9	-	-	-
+sw_b2_collint_int_some_height_v3s	WRAPPED	10	1001	-	-
+sw_b2_collsigma_int_none_v0s	ACCEPT	10	-	0807b21401d3040200	-
+sw_b2_collsigma_int_none_v0n	ACCEPT	9	-	00b21401d3040200	-
+sw_b2_collsigma_int_none_v3s	ACCEPT	10	-	0b07b21401d3040200	-
+sw_b2_collint_collsigma_none_v0s	AssertionError:assertion failed: Cannot upcast value of type Coll[SSigmaProp] to SInt$: only numeric types can be upcasted.	10	-	-	-
+sw_b2_collint_collsigma_none_v0n	AssertionError:assertion failed: Cannot upcast value of type Coll[SSigmaProp] to SInt$: only numeric types can be upcasted.	9	-	-	-
+sw_b2_collint_collsigma_none_v3s	WRAPPED	11	1001	-	-
+sw_b2_collint_int_some_collsigma_v0s	WRAPPED	13	1001	-	-
+sw_b2_collint_int_some_collsigma_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	12	-	-	-
+sw_b2_collint_int_some_collsigma_v3s	WRAPPED	13	1001	-	-
+sw_71_00_04_v0s	WRAPPED	5	1001	-	-
+sw_71_00_04_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_00_04_v3s	WRAPPED	5	1001	-	-
+sw_71_00_24_v0s	BufferUnderflowException:	5	-	-	-
+sw_71_00_24_v0n	BufferUnderflowException:	4	-	-	-
+sw_71_00_24_v3s	BufferUnderflowException:	5	-	-	-
+sw_71_00_0e_v0s	WRAPPED	5	1001	-	-
+sw_71_00_0e_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_00_0e_v3s	WRAPPED	5	1001	-	-
+sw_71_00_00_v0s	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@47428937 with bytes [B@3b9d6699	5	-	-	-
+sw_71_00_00_v0n	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@7caa550 with bytes [B@21694e53	4	-	-	-
+sw_71_00_00_v3s	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@72b16078 with bytes [B@22c86919	5	-	-	-
+sw_71_00_6b_v0s	WRAPPED	5	1018	-	-
+sw_71_00_6b_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_00_6b_v3s	WRAPPED	5	1018	-	-
+sw_71_00_09_v0s	WRAPPED	5	1017	-	-
+sw_71_00_09_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_00_09_v3s	WRAPPED	5	1001	-	-
+sw_71_00_08_v0s	ACCEPT	5	-	0803710008	-
+sw_71_00_08_v0n	ACCEPT	4	-	00710008	-
+sw_71_00_08_v3s	ACCEPT	5	-	0b03710008	-
+sw_71_01_04_v0s	WRAPPED	5	1001	-	-
+sw_71_01_04_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_01_04_v3s	WRAPPED	5	1001	-	-
+sw_71_01_24_v0s	BufferUnderflowException:	5	-	-	-
+sw_71_01_24_v0n	BufferUnderflowException:	4	-	-	-
+sw_71_01_24_v3s	BufferUnderflowException:	5	-	-	-
+sw_71_01_0e_v0s	WRAPPED	5	1001	-	-
+sw_71_01_0e_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_01_0e_v3s	WRAPPED	5	1001	-	-
+sw_71_01_00_v0s	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@70fab835 with bytes [B@1b0a7baf	5	-	-	-
+sw_71_01_00_v0n	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@62417a16 with bytes [B@32057e6	4	-	-	-
+sw_71_01_00_v3s	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@26be6ca7 with bytes [B@6ea1bcdc	5	-	-	-
+sw_71_01_6b_v0s	WRAPPED	5	1018	-	-
+sw_71_01_6b_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_01_6b_v3s	WRAPPED	5	1018	-	-
+sw_71_01_09_v0s	WRAPPED	5	1017	-	-
+sw_71_01_09_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_01_09_v3s	WRAPPED	5	1001	-	-
+sw_71_01_08_v0s	ACCEPT	5	-	0803710108	-
+sw_71_01_08_v0n	ACCEPT	4	-	00710108	-
+sw_71_01_08_v3s	ACCEPT	5	-	0b03710108	-
+sw_71_7f_04_v0s	WRAPPED	5	1001	-	-
+sw_71_7f_04_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_7f_04_v3s	WRAPPED	5	1001	-	-
+sw_71_7f_24_v0s	BufferUnderflowException:	5	-	-	-
+sw_71_7f_24_v0n	BufferUnderflowException:	4	-	-	-
+sw_71_7f_24_v3s	BufferUnderflowException:	5	-	-	-
+sw_71_7f_0e_v0s	WRAPPED	5	1001	-	-
+sw_71_7f_0e_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_7f_0e_v3s	WRAPPED	5	1001	-	-
+sw_71_7f_00_v0s	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@759fad4 with bytes [B@64712be	5	-	-	-
+sw_71_7f_00_v0n	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@53499d85 with bytes [B@30ed9c6c	4	-	-	-
+sw_71_7f_00_v3s	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@782a4fff with bytes [B@46c670a6	5	-	-	-
+sw_71_7f_6b_v0s	WRAPPED	5	1018	-	-
+sw_71_7f_6b_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_7f_6b_v3s	WRAPPED	5	1018	-	-
+sw_71_7f_09_v0s	WRAPPED	5	1017	-	-
+sw_71_7f_09_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_7f_09_v3s	WRAPPED	5	1001	-	-
+sw_71_7f_08_v0s	ACCEPT	5	-	0803717f08	-
+sw_71_7f_08_v0n	ACCEPT	4	-	00717f08	-
+sw_71_7f_08_v3s	ACCEPT	5	-	0b03717f08	-
+sw_71_80_04_v0s	WRAPPED	5	1001	-	-
+sw_71_80_04_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_80_04_v3s	WRAPPED	5	1001	-	-
+sw_71_80_24_v0s	BufferUnderflowException:	5	-	-	-
+sw_71_80_24_v0n	BufferUnderflowException:	4	-	-	-
+sw_71_80_24_v3s	BufferUnderflowException:	5	-	-	-
+sw_71_80_0e_v0s	WRAPPED	5	1001	-	-
+sw_71_80_0e_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_80_0e_v3s	WRAPPED	5	1001	-	-
+sw_71_80_00_v0s	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@59fc684e with bytes [B@5ae81e1	5	-	-	-
+sw_71_80_00_v0n	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@2fd1731c with bytes [B@5ae76500	4	-	-	-
+sw_71_80_00_v3s	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@6063d80a with bytes [B@1133ec6e	5	-	-	-
+sw_71_80_6b_v0s	WRAPPED	5	1018	-	-
+sw_71_80_6b_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_80_6b_v3s	WRAPPED	5	1018	-	-
+sw_71_80_09_v0s	WRAPPED	5	1017	-	-
+sw_71_80_09_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_80_09_v3s	WRAPPED	5	1001	-	-
+sw_71_80_08_v0s	ACCEPT	5	-	0803718008	-
+sw_71_80_08_v0n	ACCEPT	4	-	00718008	-
+sw_71_80_08_v3s	ACCEPT	5	-	0b03718008	-
+sw_71_ff_04_v0s	WRAPPED	5	1001	-	-
+sw_71_ff_04_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_ff_04_v3s	WRAPPED	5	1001	-	-
+sw_71_ff_24_v0s	BufferUnderflowException:	5	-	-	-
+sw_71_ff_24_v0n	BufferUnderflowException:	4	-	-	-
+sw_71_ff_24_v3s	BufferUnderflowException:	5	-	-	-
+sw_71_ff_0e_v0s	WRAPPED	5	1001	-	-
+sw_71_ff_0e_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_ff_0e_v3s	WRAPPED	5	1001	-	-
+sw_71_ff_00_v0s	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@355e34c7 with bytes [B@54709809	5	-	-	-
+sw_71_ff_00_v0n	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@2a2da905 with bytes [B@24f360b2	4	-	-	-
+sw_71_ff_00_v3s	InvalidTypePrefix:Cannot deserialize type prefix 0. Unexpected buffer sigma.serialization.SigmaByteReader@60cf80e7 with bytes [B@302fec27	5	-	-	-
+sw_71_ff_6b_v0s	WRAPPED	5	1018	-	-
+sw_71_ff_6b_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_ff_6b_v3s	WRAPPED	5	1018	-	-
+sw_71_ff_09_v0s	WRAPPED	5	1017	-	-
+sw_71_ff_09_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	4	-	-	-
+sw_71_ff_09_v3s	WRAPPED	5	1001	-	-
+sw_71_ff_08_v0s	ACCEPT	5	-	080371ff08	-
+sw_71_ff_08_v0n	ACCEPT	4	-	0071ff08	-
+sw_71_ff_08_v3s	ACCEPT	5	-	0b0371ff08	-
+option-default-bool-expression-e5	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	3	-	-	-
+option-default-bool-tree-00	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	4	-	-	-
+option-default-bool-tree-08	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	5	-	-	-
+option-default-bool-registers-01	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	4	-	-	-
+option-default-bool-context_extension-01	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	5	-	-	-
+option-default-bool-nested-constant	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	8	-	-	-
+option-default-bool-nested-registers	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	9	-	-	-
+option-default-bool-nested-context_extension	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	10	-	-	-
+option-default-bool-nested-tree	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SOption (sigma.ast.SBoolean$ and sigma.ast.SOption are in un	11	-	-	-
+filter-bool-expression-b5	ACCEPT	3	-	-	-
+filter-bool-tree-00	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	4	-	-	-
+filter-bool-tree-08	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	5	-	-	-
+filter-bool-registers-01	ClassCastException:class sigma.ast.Filter cannot be cast to class sigma.ast.EvaluatedValue (sigma.ast.Filter and sigma.ast.EvaluatedValue a	4	-	-	-
+filter-bool-context_extension-01	ClassCastException:class sigma.ast.Filter cannot be cast to class sigma.ast.EvaluatedValue (sigma.ast.Filter and sigma.ast.EvaluatedValue a	5	-	-	-
+filter-bool-nested-constant	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	8	-	-	-
+filter-bool-nested-registers	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	9	-	-	-
+filter-bool-nested-context_extension	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	10	-	-	-
+filter-bool-nested-tree	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	11	-	-	-
+filter-fixed-parent	ACCEPT	5	-	00d1b501010101	-
+filter-fixed-parent-sized	ACCEPT	6	-	0806d1b501010101	-
+filter-read-by-relation	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	7	-	-	-
+filter-read-by-isdefined	ClassCastException:class sigma.ast.SBoolean$ cannot be cast to class sigma.ast.SCollection (sigma.ast.SBoolean$ and sigma.ast.SCollection a	6	-	-	-
+byindex-literal-tuple-00	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	11	-	-	-
+byindex-literal-tuple-0800	WRAPPED	12	1001	-	-
+select-literal-tuple-00	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	9	-	-	-
+select-literal-tuple-0800	WRAPPED	10	1001	-	-
+select-sigma-tuple-00	ACCEPT	9	-	008c860208d308d301	-
+select-sigma-tuple-0800	ACCEPT	10	-	08088c860208d308d301	-

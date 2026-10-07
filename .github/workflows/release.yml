@@ -2,10 +2,11 @@ name: Release binaries
 
 # Triggered by pushing a tag of the form `v*` (e.g. `v0.3.0`), or manually via
 # workflow_dispatch with a `tag` input. Builds ergo-node + ergo-wallet for
-# Linux (glibc + static musl), macOS, and Windows on x86_64. For each platform
-# it publishes the bare binary, a `.tar.gz` / `.zip` archive (binary + README +
-# config + operating docs + licenses), and a `.sha256` for each, all uploaded to
-# the GitHub Release (created if it does not already exist).
+# Linux (glibc + static musl), macOS, and Windows on x86_64, plus native
+# Linux glibc and macOS ARM64. For each platform
+# it packages one combined `.tar.gz` / `.zip` archive (both programs + README +
+# config + operating docs + licenses). Publication validates all six receipts,
+# then uploads only those archives, SHA256SUMS and release.json (eight assets).
 on:
   push:
     tags:
@@ -71,6 +72,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
           - os: macos-latest
             target: x86_64-apple-darwin
           - os: windows-latest
@@ -98,13 +103,18 @@ jobs:
       - name: Build release binaries
         run: cargo build --locked --release --bin ergo-node --bin ergo-wallet --target ${{ matrix.target }}
 
-      - name: Package archives and test extracted binaries
+      - name: Package combined archive and test both extracted binaries
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
         run: python scripts/release.py package --target ${{ matrix.target }} --binaries target/${{ matrix.target }}/release --output release-artifacts
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ matrix.target }}
-          path: release-artifacts/*
+          path: |
+            release-artifacts/public/*
+            release-artifacts/internal/*
           if-no-files-found: error
 
   publish:
@@ -117,6 +127,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
+          pattern: release-*
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,6 +142,15 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
         run: python scripts/release.py verify
+
+      - name: Aggregate and verify exactly eight public assets
+        working-directory: src
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          python scripts/release.py aggregate --input ../artifacts --output ../public
+          python scripts/release.py verify-assets --input ../public
 
       # The release body is the tag's CHANGELOG section. An existing non-empty body is
       # never replaced, so notes edited by hand survive a re-run; a missing section only
@@ -157,6 +177,22 @@ jobs:
             echo "path=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Refuse changes to existing published assets
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        run: python scripts/release.py verify-published --input ../public
+
+      - name: Recheck source and public assets immediately before publication
+        working-directory: src
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          python scripts/release.py verify-assets --input ../public
+          python scripts/release.py verify
+
       - name: Create / update release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
@@ -166,4 +202,6 @@ jobs:
           # -alpha / -beta / -rc suffix.
           prerelease: ${{ contains(needs.resolve.outputs.tag, '-') }}
           body_path: ${{ steps.notes.outputs.path }}
-          files: artifacts/**/*
+          overwrite_files: false
+          fail_on_unmatched_files: true
+          files: public/*

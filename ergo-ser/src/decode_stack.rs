@@ -166,10 +166,10 @@ mod tests {
     #[test]
     fn mixed_register_expression_type_descent_fits_half_the_decode_stack_floor() {
         // At the bottom of 45 boxes, parse 18 unary expressions followed by a
-        // 100-level type descriptor. Types have an independent depth budget.
+        // 9-layer type descriptor. Types allow 8 recursive calls plus an embedded terminal.
         // An empty outer collection needs no values for its nested element type.
         let mut leaf = vec![0xef; 18]; // LogicalNot
-        leaf.extend_from_slice(&[0x0c; 99]); // Coll[...]
+        leaf.extend_from_slice(&[0x0c; 8]); // Coll[...]
         leaf.extend_from_slice(&[0x10, 0]); // Coll[Int], empty outer collection
         let err = decode_on_stack(
             register_transaction(45, &leaf),

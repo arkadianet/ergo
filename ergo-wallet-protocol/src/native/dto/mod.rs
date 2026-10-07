@@ -1,6 +1,7 @@
 pub mod addresses;
 pub mod balance;
 pub mod boxes;
+pub mod jobs;
 pub mod lifecycle;
 pub mod rewards;
 pub mod status;
@@ -10,6 +11,7 @@ pub mod tx_construction;
 pub use addresses::*;
 pub use balance::*;
 pub use boxes::*;
+pub use jobs::*;
 pub use lifecycle::*;
 pub use rewards::*;
 pub use status::*;

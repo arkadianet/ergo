@@ -6,7 +6,7 @@
 //! opcode `0xCF`) and `BoolToSigmaProp` (`sigmaProp(..)`, `0xD1`). Neither
 //! evaluator accepts a residual `0xCF` (`SigmaPropIsProven` has `costKind =
 //! notSupportedError` and no `eval`, transformers.scala:321-329), so a compile
-//! output carrying one is unevaluable (compiler-design-ledger.md D-C3). Scala's GraphBuilding
+//! output carrying one is unevaluable (ergo-compiler/docs/compiler-design-ledger.md D-C3). Scala's GraphBuilding
 //! CANCELS the coercions via two `rewriteDef` fusion rules:
 //!
 //! - **isProven→isValid fusion** (`GraphBuilding.scala:188`,

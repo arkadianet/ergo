@@ -184,7 +184,7 @@ pub static REGISTRY: &[ProtocolEntry] = &[
         family: ProtocolFamily::Rent,
         version: "v1",
         matchers: &[],
-        reference: "dev-docs/demurrage",
+        reference: "docs/miner-operator-controls.md",
         decodable: false,
         note: "recognized; rent-maturity decode TODO (reuse the storage-rent \
                math surface so numbers agree with /state/storage-rent/*)",

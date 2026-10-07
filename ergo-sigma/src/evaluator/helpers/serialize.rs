@@ -353,6 +353,9 @@ pub(crate) fn sigma_to_value_versioned(
 pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalError> {
     use ergo_ser::sigma_value::CollValue;
     match (tpe, val) {
+        (_, SigmaValue::Unevaluated(_)) => Err(EvalError::RuntimeException(
+            "stored child is not an EvaluatedValue (Scala lazy value cast)",
+        )),
         // Unit, Byte, Short no longer erase to Int — typed-carrier
         // invariant on the sigma-value → evaluator boundary.
         (SigmaType::SUnit, SigmaValue::Unit) => Ok(Value::Unit),
@@ -388,6 +391,13 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
         // is an ordinary `Coll` of the item values. The node form is a wire
         // detail preserved for re-serialization, not a value difference.
         (SigmaType::SColl(inner), SigmaValue::ConcreteCollection { items, .. }) => {
+            check_stored_rtype(inner)?;
+            // Scala allocates a typed array for `.value`; a Tuple node returns
+            // Coll[Any], which cannot be stored in a Tuple2 array.
+            for item in items {
+                let value = sigma_to_value(inner, item)?;
+                super::super::opcodes::binding::check_runtime_tuple_type(inner, &value)?;
+            }
             let coll = if matches!(inner.as_ref(), SigmaType::SBoolean) {
                 CollValue::BoolBits(
                     items
@@ -575,7 +585,10 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
             None => Ok(Value::Opt(None)),
         },
         // SBox constant — parse full ErgoBox (candidate + txId + index) with real identity
-        (SigmaType::SBox, SigmaValue::OpaqueBoxBytes(bytes)) => {
+        (
+            SigmaType::SBox,
+            SigmaValue::OpaqueBoxBytes(bytes) | SigmaValue::CanonicalBoxBytes { bytes, .. },
+        ) => {
             use ergo_ser::register::RegisterId;
             let mut r = ergo_primitives::reader::VlqReader::new(bytes);
             let ergo_box = ergo_ser::ergo_box::read_accepted_ergo_box(&mut r).map_err(|e| {
@@ -642,6 +655,9 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
                 .map(|t| (*t.token_id.as_bytes(), t.amount))
                 .collect();
             Ok(Value::InlineBox(Box::new(EvalBox {
+                lazy_vals: std::sync::Arc::new(
+                    crate::evaluator::types::EvalBoxLazyVals::from_candidate(&ergo_box.candidate),
+                ),
                 creation_height: ergo_box.candidate.creation_height,
                 script_bytes: ergo_box.candidate.ergo_tree_bytes().to_vec(),
                 value: ergo_box.candidate.value as i64,
@@ -676,5 +692,34 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
             crate::evaluator::types::EvalHeader::from_header(h, *id),
         ))),
         _ => Err(EvalError::UnsupportedConstant(tpe.clone())),
+    }
+}
+
+/// `Evaluation.stypeToRType` supports only unary, monomorphic functions.
+/// This also runs for empty ConcreteCollections, before allocating their array.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/Evaluation.scala#L18-L56>
+fn check_stored_rtype(tpe: &SigmaType) -> Result<(), EvalError> {
+    match tpe {
+        SigmaType::SFunc {
+            t_dom,
+            t_range,
+            tpe_params,
+        } => {
+            if t_dom.len() != 1 || !tpe_params.is_empty() {
+                return Err(EvalError::RuntimeException(
+                    "unsupported stored function RType",
+                ));
+            }
+            check_stored_rtype(&t_dom[0])?;
+            check_stored_rtype(t_range)
+        }
+        SigmaType::SColl(inner) | SigmaType::SOption(inner) => check_stored_rtype(inner),
+        SigmaType::STuple(items) => {
+            for item in items {
+                check_stored_rtype(item)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
