@@ -18,6 +18,8 @@ infrastructure.
 
 ### Fixed
 
+- Reject non-function option map and filter callbacks, including on empty options.
+- Reject non-Boolean results from invoked collection filter and exists predicates.
 - Require byte collections for blake2b256 and SHA-256 script hashing.
 - Enforce the signed 256-bit result range after big integer shifts.
 - Reject empty signed big integer input to `Global.fromBigEndianBytes`.

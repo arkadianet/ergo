@@ -215,3 +215,10 @@ fn hash_and_byte_consumer_inputs_match_reference() {
     check_vectors("hash");
     check_vectors("hash-extra");
 }
+
+#[test]
+fn collection_predicate_results_match_reference() {
+    check_vectors("predicates");
+    check_vectors("predicate-extra");
+    check_vectors("lambda-sweep");
+}

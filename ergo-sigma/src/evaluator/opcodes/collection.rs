@@ -371,8 +371,18 @@ pub(in crate::evaluator) fn eval_filter(
                     cx.trace,
                 )
                 .and_then(reject_sstring)?;
-                if matches!(keep, Value::Bool(true)) {
-                    result.push(item);
+                // The reference unboxes each invoked predicate result as Boolean.
+                // Empty collections never invoke the callback or perform this cast.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L123-L127
+                match keep {
+                    Value::Bool(true) => result.push(item),
+                    Value::Bool(false) => {}
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "Bool from Filter predicate",
+                            got: format!("{other:?}"),
+                        })
+                    }
                 }
             }
             values_to_collection(coll_kind, result, elem_type)
@@ -570,8 +580,18 @@ pub(in crate::evaluator) fn eval_exists(
                     cx.trace,
                 )
                 .and_then(reject_sstring)?;
-                if matches!(result, Value::Bool(true)) {
-                    return Ok(Value::Bool(true));
+                // Deliberately match the reference's Boolean unboxing failure
+                // instead of treating a non-Boolean result as false.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L160-L164
+                match result {
+                    Value::Bool(true) => return Ok(Value::Bool(true)),
+                    Value::Bool(false) => {}
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "Bool from Exists predicate",
+                            got: format!("{other:?}"),
+                        })
+                    }
                 }
             }
             Ok(Value::Bool(false))
