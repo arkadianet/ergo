@@ -417,7 +417,9 @@ pub(crate) fn verify_nbits(
 ) -> Result<(), DifficultyError> {
     let expected_diff = required_difficulty_checked(child_height, epoch_headers, config)?;
     let expected_nbits = encode_compact_bits(&expected_diff);
-    if actual_nbits == expected_nbits {
+    // Compare values, including the MPI sign, rather than compact encodings.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/src/main/scala/org/ergoplatform/nodeView/history/storage/modifierprocessors/HeadersProcessor.scala#L423
+    if decode_compact_bits_signed(actual_nbits) == num_bigint::BigInt::from(expected_diff) {
         Ok(())
     } else {
         Err(DifficultyError::NbitsMismatch {

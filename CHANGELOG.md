@@ -18,6 +18,8 @@ infrastructure.
 
 ### Fixed
 
+- Compare decoded header difficulty values when validating required difficulty.
+
 - Fail `Header.checkPow` evaluation when the decoded difficulty is zero.
 - Honor the compact difficulty sign when checking header proof of work.
 
