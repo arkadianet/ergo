@@ -58,10 +58,9 @@ pub fn parse_validation_settings_update(
     ErgoValidationSettingsUpdate::deserialize(&buf)
 }
 
-/// Maximum bytes per extension field value — Scala caps `putUByte(length)`
-/// at 255 (`ergo-ser/src/extension.rs`). A cumulative settings blob longer
-/// than this is split across consecutive `0x02` chunk entries.
-const EXTENSION_FIELD_VALUE_MAX: usize = 255;
+/// Scala Extension.FieldValueMaxSize limits each chunk to 64 bytes.
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/settings/ErgoValidationSettings.scala#L74>
+const EXTENSION_FIELD_VALUE_MAX: usize = crate::block::EXTENSION_FIELD_VALUE_MAX_SIZE;
 
 /// Serialize a cumulative `ErgoValidationSettingsUpdate` into its block-
 /// extension fields — the inverse of [`parse_validation_settings_update`],
@@ -75,7 +74,7 @@ const EXTENSION_FIELD_VALUE_MAX: usize = 255;
 /// keyed by ascending chunk index in `key[1]`. The parser concatenates chunks
 /// in index order before deserializing, so the chunk boundary is not consensus-
 /// relevant — only the concatenation is — but the chunking keeps each field
-/// within the 255-byte wire limit.
+/// within the 64-byte validation limit.
 pub fn validation_settings_update_to_extension_fields(
     update: &ErgoValidationSettingsUpdate,
 ) -> Vec<([u8; 2], Vec<u8>)> {

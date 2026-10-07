@@ -18,6 +18,8 @@ infrastructure.
 
 ### Fixed
 
+- Split validation-settings extension values into chunks of at most 64 bytes.
+
 - Apply the running block cost to each input’s evaluation budget and keep mining candidates below the cost ceiling.
 
 ## [0.12.1] - 2026-10-06
