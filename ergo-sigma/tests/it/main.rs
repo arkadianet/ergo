@@ -10,6 +10,7 @@ mod dht_synthetic;
 mod emission_contract_mainnet;
 mod mining_reward_mainnet;
 mod reference_607_sigma_proofs;
+mod reference_evaluation_order;
 mod santa_avl_verify_corpus;
 mod schnorr_mainnet;
 mod shared_sigma_growth;

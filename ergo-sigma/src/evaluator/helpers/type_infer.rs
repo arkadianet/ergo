@@ -233,6 +233,7 @@ pub(crate) fn value_to_sigma_type(val: &Value) -> Option<SigmaType> {
         Value::Header(_) => Some(SigmaType::SHeader),
         Value::CollHeader(_) => Some(SigmaType::SColl(Box::new(SigmaType::SHeader))),
         Value::AvlTree(_) => Some(SigmaType::SAvlTree),
+        Value::Context => Some(SigmaType::SContext),
         Value::Global | Value::Func { .. } => None,
         // Tokens are `Coll[(Coll[Byte], Long)]`.
         Value::Tokens(_) => Some(SigmaType::SColl(Box::new(SigmaType::STuple(vec![

@@ -267,3 +267,19 @@ pub(super) fn exp_signed(
     add_method_cost(cx.cost, COST_EXP)?;
     super::super::sigma::exponentiate(obj_val, exponent)
 }
+
+// The reference method tariff is MultiplyGroup.costKind (40 JIT), with the
+// MethodCall dispatcher charging its separate 4 JIT before the argument.
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/methods.scala#L663-L668
+pub const COST_MULTIPLY: u64 = 40;
+
+pub(super) fn multiply(
+    obj_val: Value,
+    args: &[Expr],
+    cx: &mut EvalCtx<'_>,
+) -> Result<Value, EvalError> {
+    super::check_arity(args, 1)?;
+    let rhs = cx.eval_expr(&args[0])?;
+    add_method_cost(cx.cost, COST_MULTIPLY)?;
+    super::super::sigma::multiply_group(obj_val, rhs)
+}

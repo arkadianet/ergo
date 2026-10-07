@@ -63,9 +63,16 @@ pub(super) fn decode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value,
         }
     };
     add_method_cost(cx.cost, COST_DECODE_NBITS)?;
-    Ok(Value::BigInt(
-        ergo_ser::difficulty::decode_compact_bits_signed(compact as u32),
-    ))
+    let decoded = ergo_ser::difficulty::decode_compact_bits_signed(compact as u32);
+    // The evaluator's numeric result is signed and bounded independently of
+    // the compact codec, which is also used by difficulty / PoW callers.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L194-L197
+    if !super::super::arithmetic::fits_in_256_bits(&decoded) {
+        return Err(EvalError::RuntimeException(
+            "SGlobal.decodeNbits result out of signed 256-bit range",
+        ));
+    }
+    Ok(Value::BigInt(decoded))
 }
 
 // SGlobal(106).some(9, value: T)[T] -> Option[T]
@@ -256,12 +263,9 @@ pub(super) fn deserialize_to(
             got: format!("deserialization error: {e}"),
         }
     })?;
-    if !r.is_empty() {
-        return Err(EvalError::TypeError {
-            expected: "fully consumed SGlobal.deserializeTo bytes",
-            got: format!("{} trailing bytes", r.remaining()),
-        });
-    }
+    // Deliberately ignore trailing bytes for consensus: the reference returns
+    // the parsed value without checking the reader position.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L277-L282
     crate::evaluator::helpers::sigma_to_value_versioned(target_type, &parsed, cx.ctx)
 }
 
@@ -310,7 +314,10 @@ pub(super) fn from_big_endian_bytes(
             a.copy_from_slice(&bytes);
             Ok(Value::Long(i64::from_be_bytes(a)))
         }
-        S::SBigInt if bytes.len() <= 32 => Ok(Value::BigInt(
+        // Java BigInteger rejects an empty signed representation; the unsigned
+        // constructor below accepts it as zero. Preserve that distinction.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L249-L258
+        S::SBigInt if !bytes.is_empty() && bytes.len() <= 32 => Ok(Value::BigInt(
             num_bigint::BigInt::from_signed_bytes_be(&bytes),
         )),
         // SUnsignedBigInt: UNSIGNED big-endian parse (Scala

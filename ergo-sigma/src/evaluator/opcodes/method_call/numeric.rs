@@ -27,11 +27,9 @@ use crate::evaluator::types::{EvalError, Value};
 //  12  shiftLeft            (this, n: SInt)     -> tNum
 //  13  shiftRight           (this, n: SInt)     -> tNum
 //
-// Semantics mirror Java: Byte/Short are promoted to Int before
-// the shift then narrowed back, mod-32 shift count; Int uses
-// mod-32; Long uses mod-64; BigInt accepts any non-negative
-// shift count and rejects negatives as `RuntimeException` (mirrors
-// Scala's `IllegalArgumentException` from `BigInteger.shiftLeft`).
+// Counts must be non-negative and less than the numeric width. Byte/Short
+// promote through Int and narrow the result; right shifts preserve sign.
+// BigInt additionally checks the signed 256-bit result range.
 // bitwiseInverse (2..=6, 8) is a zero-arg method handled by the shared
 // `eval_no_arg_method` table (reachable via 0xDB PropertyCall — the
 // form the compiler emits — and the 0xDC no-arg fallthrough), so it is
@@ -179,6 +177,14 @@ pub(super) fn shift(
         Value::BigInt(v) => {
             let amt = shift as usize;
             let r = if is_left { v << amt } else { v >> amt };
+            // Both reference shift methods apply toSignedBigIntValueExact.
+            // Check the result separately from the count, including -2^255.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/data/CBigInt.scala#L67-L71
+            if !super::super::arithmetic::fits_in_256_bits(&r) {
+                return Err(EvalError::RuntimeException(
+                    "BigInt shift result out of signed 256-bit range",
+                ));
+            }
             Ok(Value::BigInt(r))
         }
         // The `width` match above already rejected non-numeric types.

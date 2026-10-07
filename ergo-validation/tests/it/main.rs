@@ -44,3 +44,5 @@ mod tx_triage_700000;
 mod tx_validation_corpus;
 mod vector_integrity;
 mod votes_first_epoch_oracle;
+
+mod reference_evaluator;

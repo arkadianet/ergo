@@ -53,7 +53,7 @@ use super::cast::apply_pre_v3_auto_upcast;
 /// uses the same bound. We check the value range directly rather than a bit
 /// count because `num_bigint::BigInt::bits()` returns the magnitude width
 /// and would wrongly reject `-2^255`.
-fn fits_in_256_bits(x: &num_bigint::BigInt) -> bool {
+pub(super) fn fits_in_256_bits(x: &num_bigint::BigInt) -> bool {
     let two_pow_255 = num_bigint::BigInt::from(1) << 255u32;
     let min = -&two_pow_255;
     x >= &min && x < &two_pow_255

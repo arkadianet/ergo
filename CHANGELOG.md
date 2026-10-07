@@ -19,11 +19,20 @@ infrastructure.
 ### Fixed
 
 - Compare decoded header difficulty values when validating required difficulty.
-
 - Fail `Header.checkPow` evaluation when the decoded difficulty is zero.
 - Honor the compact difficulty sign when checking header proof of work.
-
 - Interpret sigma proof responses modulo the group order in DLog and DH-tuple verification.
+- Accrue Boolean and option-defined operation costs after evaluating and checking their inputs.
+- Reject non-function option map and filter callbacks, including on empty options.
+- Reject non-Boolean results from invoked collection filter and exists predicates.
+- Require byte collections for blake2b256 and SHA-256 script hashing.
+- Enforce the signed 256-bit result range after big integer shifts.
+- Reject empty signed big integer input to `Global.fromBigEndianBytes`.
+- Enforce the signed 256-bit result range for `Global.decodeNbits`.
+- Return empty byte and bit collections for unsigned big integer zero.
+- Evaluate method wire forms for context inputs, outputs and SELF, option access, and group multiplication.
+- Calculate collection slice costs from the original signed bounds.
+- Allow trailing bytes after values decoded by `Global.deserializeTo`.
 
 ## [0.12.1] - 2026-10-06
 
