@@ -210,6 +210,12 @@ impl NodeConfig {
             Some(s) => s.parse::<StateType>().map_err(|e| format!("[node] {e}"))?,
         };
         let verify_transactions = toml_cfg.node.verify_transactions.unwrap_or(true);
+        let applied_evidence_outbox = toml_cfg.node.applied_evidence_outbox.unwrap_or(false);
+        if applied_evidence_outbox && (state_type != StateType::Utxo || !verify_transactions) {
+            return Err(
+                "[node] applied_evidence_outbox requires fully validating UTXO state".into(),
+            );
+        }
         let utxo_bootstrap = toml_cfg.node.utxo.utxo_bootstrap.unwrap_or(false);
         let nipopow_bootstrap = toml_cfg.node.nipopow.nipopow_bootstrap.unwrap_or(false);
         let p2p_nipopows = toml_cfg.node.nipopow.p2p_nipopows.unwrap_or(2);
@@ -603,6 +609,13 @@ impl NodeConfig {
             }
             None => chain_spec.genesis.header_id,
         };
+
+        if applied_evidence_outbox && genesis_id.is_none() {
+            return Err(
+                "[node] applied_evidence_outbox requires an explicit or network genesis anchor"
+                    .into(),
+            );
+        }
 
         // R5 (per Scala ErgoSettingsReader.consistentSettings:195-196):
         // `nipopow_bootstrap = true` requires a configured genesis id.
@@ -1109,6 +1122,7 @@ impl NodeConfig {
             node_name,
             blocks_to_keep,
             keep_versions,
+            applied_evidence_outbox,
             state_type,
             verify_transactions,
             utxo_bootstrap,

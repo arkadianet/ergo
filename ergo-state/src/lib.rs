@@ -57,6 +57,7 @@ pub(crate) mod digest_store;
 /// from its ADProofs (plus the block's outputs) so the digest backend
 /// can run full transaction validation without a box arena.
 pub(crate) mod digest_utxo_view;
+pub mod evidence;
 /// Header + block-section tables extracted from `store::StateStore`
 /// so a second backend can embed the same redb-backed header index.
 pub(crate) mod header_store;

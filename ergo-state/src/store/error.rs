@@ -56,6 +56,8 @@ pub enum PopowByIdLookup {
 
 #[derive(Debug, Error)]
 pub enum StateError {
+    #[error("applied evidence: {detail}")]
+    AppliedEvidence { detail: String },
     #[error("redb error: {0}")]
     Db(#[source] Box<redb::Error>),
     #[error("redb database error: {0}")]

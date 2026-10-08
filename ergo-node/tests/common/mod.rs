@@ -44,6 +44,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         node_name: "test-node".into(),
         blocks_to_keep: -1,
         keep_versions: ergo_state::store::ROLLBACK_WINDOW,
+        applied_evidence_outbox: false,
         state_type: ergo_node::config::StateType::Utxo,
         verify_transactions: true,
         utxo_bootstrap: false,

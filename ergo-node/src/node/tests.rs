@@ -1334,6 +1334,7 @@ fn cfg_with_mode(
         node_name: "y".into(),
         blocks_to_keep: btk,
         keep_versions: ergo_state::store::ROLLBACK_WINDOW,
+        applied_evidence_outbox: false,
         state_type,
         verify_transactions: vt,
         utxo_bootstrap: false,

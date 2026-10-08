@@ -570,6 +570,10 @@ impl StateStore {
         let (to_remove, to_insert, emission) = changes;
         let digest_before = self.tree.root_digest();
         let cache_advance = voted_params_row.clone();
+        let evidence = self.pending_evidence.take();
+        if let Some(capture) = &evidence {
+            capture.bind(height, header_id, &digest_before, expected_state_root)?;
+        }
 
         let result = self.apply_mutations(UtxoMutation {
             emission,
@@ -581,6 +585,7 @@ impl StateStore {
             to_insert: &to_insert,
             voted_params_row,
             wallet_payload,
+            evidence,
         });
         match result {
             Ok(durability) => {
@@ -675,6 +680,7 @@ impl StateStore {
             to_insert,
             voted_params_row,
             wallet_payload,
+            evidence,
         } = mutation;
 
         let root_id_before = self.tree.root_id();
@@ -754,6 +760,7 @@ impl StateStore {
             (&undo, &emission),
             voted_params_row,
             wallet_payload,
+            evidence,
         );
         let t_persist = t0.elapsed();
 

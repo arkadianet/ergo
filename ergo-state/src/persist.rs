@@ -262,6 +262,8 @@ pub(crate) struct PersistJob {
     /// Send/Sync friction. `None` when no wallet hook is wired (no-
     /// wallet deployments, tests).
     pub wallet_payload: Option<crate::store::WalletApplyPayload>,
+    pub evidence_recording: bool,
+    pub evidence: Option<crate::evidence::CapturedBlock>,
 }
 
 #[derive(Clone, Copy)]
@@ -1205,6 +1207,22 @@ impl PersistPipeline {
             }
         }
 
+        for job in &jobs {
+            crate::evidence::persist_apply(
+                &write_txn,
+                job.evidence_recording,
+                job.height,
+                &job.header_id,
+                job.evidence.as_ref(),
+            )
+            .map_err(|error| {
+                observe_persist_error(
+                    failure_context,
+                    "background_persist_applied_evidence",
+                    error,
+                )
+            })?;
+        }
         let commit_start = std::time::Instant::now();
         write_txn
             .commit()
@@ -1300,6 +1318,8 @@ mod tests {
             parent_header_id: [0u8; 32],
             voted_params_row: None,
             wallet_payload: None,
+            evidence_recording: false,
+            evidence: None,
         }
     }
 

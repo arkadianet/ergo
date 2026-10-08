@@ -542,6 +542,7 @@ struct UtxoMutation<'a> {
     /// on the pipeline path. Either way, chain + wallet commit
     /// together.
     wallet_payload: Option<&'a WalletApplyPayload>,
+    evidence: Option<crate::evidence::CapturedBlock>,
 }
 
 /// Owned wallet-apply payload built at block-apply time on the main
@@ -700,6 +701,9 @@ pub struct StateStore {
     /// Background persist pipeline. When Some, persist_apply sends jobs
     /// to a background thread instead of writing synchronously.
     persist_pipeline: Option<crate::persist::PersistPipeline>,
+    pub(crate) evidence_recording: bool,
+    pub(crate) evidence_anchor: Option<[u8; 32]>,
+    pub(crate) pending_evidence: Option<crate::evidence::CapturedBlock>,
     /// In-memory mirror of `MODE2_TRUST_FIRST_EPOCH_KEY`. `true` after
     /// `install_snapshot_state` until the first post-install epoch
     /// boundary block consumes it via `take_mode2_trust_first_epoch`.
@@ -3614,6 +3618,9 @@ impl StateStore {
     /// and returns `CommitDurability::PendingJob(seq)` so the caller pins
     /// the block's nodes until that job commits. Otherwise it falls back to
     /// a synchronous write transaction and returns `Durable`.
+    // Keep the optional observer explicit alongside the existing persistence
+    // payloads: it must be co-committed in both paths, without changing them.
+    #[allow(clippy::too_many_arguments)]
     fn persist_apply(
         &mut self,
         height: u32,
@@ -3622,6 +3629,7 @@ impl StateStore {
         undo_and_emission: (&UndoEntry, &emission::EmissionTransition),
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
         wallet_payload: Option<&WalletApplyPayload>,
+        evidence: Option<crate::evidence::CapturedBlock>,
     ) -> Result<crate::avl::arena::CommitDurability, StateError> {
         let (undo, emission) = undo_and_emission;
         // Defensive: voted_params_row should be `Some` iff this is an
@@ -3754,6 +3762,8 @@ impl StateStore {
                 parent_header_id,
                 voted_params_row,
                 wallet_payload: wallet_payload_owned,
+                evidence_recording: self.evidence_recording,
+                evidence,
             };
 
             if height.is_multiple_of(1000) || height <= 5 {
@@ -4037,6 +4047,13 @@ impl StateStore {
         }
 
         let t0 = std::time::Instant::now();
+        crate::evidence::persist_apply(
+            &write_txn,
+            self.evidence_recording,
+            height,
+            header_id,
+            evidence.as_ref(),
+        )?;
         write_txn.commit()?;
         let t_commit = t0.elapsed();
 
