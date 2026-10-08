@@ -22,6 +22,10 @@ use ergo_api::auth::{ApiSecurity, API_KEY_HEADER};
 use ergo_api::compat::types::{Parameters, ScalaFullBlock, ScalaInfo, ScalaTransactionInput};
 use ergo_api::compat::NodeChainQuery;
 use ergo_api::emission::{EmissionInfoJson, EmissionSchedule, EmissionScriptsJson};
+use ergo_api::evidence::{
+    CommittedEvidencePage, CommittedEvidenceReader, EvidenceCursor, EvidenceReadError,
+    EvidenceReaderHandle,
+};
 use ergo_api::mining::{MiningApiError, NodeMining};
 use ergo_api::server::{
     established_openapi_operations, legacy_rust_openapi, openapi_operations, router,
@@ -48,9 +52,26 @@ use tower::ServiceExt;
 
 // ----- stubs -----
 
-struct StubReadState;
+struct StubReadState(bool);
+
+struct InventoryEvidenceReader;
+impl CommittedEvidenceReader for InventoryEvidenceReader {
+    fn read_committed(
+        &self,
+        _: Option<&EvidenceCursor>,
+        _: usize,
+    ) -> Result<CommittedEvidencePage, EvidenceReadError> {
+        Err(EvidenceReadError::Unavailable(
+            "inventory-only reader".into(),
+        ))
+    }
+}
 
 impl NodeReadState for StubReadState {
+    fn committed_evidence_reader(&self) -> Option<EvidenceReaderHandle> {
+        self.0
+            .then(|| Arc::new(InventoryEvidenceReader) as EvidenceReaderHandle)
+    }
     fn info(&self) -> ApiInfo {
         ApiInfo {
             agent_name: String::new(),
@@ -430,7 +451,7 @@ const DIFFICULTY_HISTORY_ROUTE: &str = "/api/v1/difficulty/history";
 // ----- helpers -----
 
 fn read() -> Arc<dyn NodeReadState> {
-    Arc::new(StubReadState)
+    Arc::new(StubReadState(false))
 }
 
 fn submit() -> Arc<dyn NodeSubmit> {
@@ -466,7 +487,7 @@ fn ctx(submit: Option<Arc<dyn NodeSubmit>>) -> ServerCtx {
 
 fn fully_wired_ctx() -> ServerCtx {
     ServerCtx {
-        read: read(),
+        read: Arc::new(StubReadState(true)),
         compat: Some(Arc::new(StubCompat)),
         submit: Some(submit()),
         indexer: Some(Arc::new(StubIndexer)),
@@ -633,13 +654,13 @@ async fn canonical_family_inventories_are_bidirectional_and_fully_mounted() {
         fully_wired_ctx(),
         Some(admin()),
         Arc::new(NoopWalletAdmin),
-        None,
+        Some(security()),
     );
     let rust_documented = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI"));
     let scala_documented = scala_openapi_operations();
     assert_eq!(inventory.rust, rust_documented);
     assert_eq!(inventory.scala, scala_documented);
-    assert_eq!(inventory.rust.len(), 180);
+    assert_eq!(inventory.rust.len(), 181);
     assert_eq!(inventory.scala.len(), 125);
     assert!(inventory.rust.is_disjoint(&inventory.scala));
 
@@ -773,7 +794,7 @@ fn production_inventory_tracks_aliases_and_all_conditional_rust_routes() {
         fully_wired_ctx(),
         Some(admin()),
         Arc::new(NoopWalletAdmin),
-        None,
+        Some(security()),
     );
 
     let conditionals = full
@@ -783,6 +804,7 @@ fn production_inventory_tracks_aliases_and_all_conditional_rust_routes() {
         .collect::<std::collections::BTreeSet<_>>();
     let expected = [
         ("/api/v1/node/shutdown", "post"),
+        ("/api/v1/evidence/committed", "get"),
         ("/api/v1/votes", "post"),
         ("/api/v1/difficulty/history", "get"),
         ("/api/v1/votes/history", "get"),
