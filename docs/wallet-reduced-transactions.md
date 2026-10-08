@@ -80,6 +80,44 @@ verification in both directions, and independent QR rendering/scanning.
 Those transport harnesses and SDK dependencies are test tooling, not mobile
 library dependencies or a public QR/UI API.
 
-Direct `Prover::sign` retains its existing conservative script gate in this
-change. Real-context direct signing and service integration are a separate
-review under [#612](https://github.com/arkadianet/ergo/issues/612).
+## Direct signing with an intended context
+
+`Prover::sign` accepts either context type. Existing calls passing
+`&BlockchainStateContext` retain the conservative gate for constant Sigma
+propositions and canonical matured miner rewards. Passing `&SigningContext`
+selects full contract reduction with participant and cost checks, followed by
+proof generation. The explicit context must describe the intended candidate,
+including its actual pre-header fields; committed historical headers alone do
+not determine the next block's miner, timestamp, votes or difficulty.
+
+```rust,ignore
+let context = SigningContext {
+    state_context: &intended_state,
+    header_ids: &committed_header_ids,
+    validation_settings: &active_validation_settings,
+};
+let signed = prover.sign(&unsigned, &spending_boxes, &data_boxes, &context, &hints)?;
+```
+
+The service's `SigningView::intended_candidate_context` defaults to `None`.
+An embedding may return an explicit candidate only when it can supply those
+fields together with its frozen committed view. The service requires matching
+tip, header window, state root, adopted settings and cost parameters, then signs
+and verifies against that same candidate. Pool snapshots forward this optional
+capability. Commitment generation and hint extraction use the same context
+selection and gate.
+
+Each service operation acquires a fresh view. Embeddings and callers must
+freeze the intended candidate throughout a commitment/signing/extraction round
+and never reuse an own nonce after its context changes. Existing service hint
+DTOs do not enforce that ownership; native consuming reduced-bound APIs do.
+
+Direct calls accept references to legacy state contexts, including mutable
+references and borrowed `Box`/`Arc` contexts. Other wrappers must supply their
+underlying state reference explicitly because context selection is now generic.
+
+Standard embedded-node and daemon views still build a synthetic successor
+pre-header and retain the conservative gate. The remote signing protocol does
+not expose a switch that treats those fields as an intended candidate. Adding
+an actual production candidate provider remains separate host work under
+[#612](https://github.com/arkadianet/ergo/issues/612).

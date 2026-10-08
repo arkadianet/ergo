@@ -419,9 +419,12 @@ pub(crate) fn sign_unsigned_tx(
         })
         .collect::<Result<_, _>>()?;
 
-    let signed_tx = prover
-        .sign(unsigned_tx, &boxes_to_spend, &data_boxes, state_ctx, hints)
-        .map_err(map_sign_error)?;
+    let intended = super::chain::intended_signing_context(snapshot)?;
+    let signed_tx = match intended.as_ref() {
+        Some(context) => prover.sign(unsigned_tx, &boxes_to_spend, &data_boxes, context, hints),
+        None => prover.sign(unsigned_tx, &boxes_to_spend, &data_boxes, state_ctx, hints),
+    }
+    .map_err(map_sign_error)?;
 
     let protocol_params = snapshot.protocol_params();
     ergo_validation::tx::structural::validate_structural(&signed_tx, protocol_params)
@@ -431,9 +434,8 @@ pub(crate) fn sign_unsigned_tx(
         &signed_tx,
         &boxes_to_spend,
         &data_boxes,
-        state_ctx,
-        params,
-        snapshot.reemission_rules(),
+        snapshot,
+        intended.as_ref(),
     )?;
 
     Ok(signed_tx)
@@ -459,12 +461,15 @@ pub(crate) fn self_verify_signed_tx(
     tx: &ergo_ser::transaction::Transaction,
     boxes_to_spend: &[ergo_ser::ergo_box::ErgoBox],
     data_boxes: &[ergo_ser::ergo_box::ErgoBox],
-    state_ctx: &ergo_wallet::tx_context::BlockchainStateContext,
-    params: &ergo_wallet::tx_context::BlockchainParameters,
-    reemission: Option<&ergo_validation::ReemissionRuleInputs>,
+    snapshot: &dyn SigningView,
+    intended: Option<&ergo_wallet::tx_context::SigningContext<'_>>,
 ) -> Result<(), WalletAdminError> {
     use ergo_primitives::cost::{CostAccumulator, JitCost};
     use ergo_sigma::reduce::verify_spending_proof_with_context_and_cost;
+    let state_ctx = intended
+        .map(|context| context.state_context)
+        .unwrap_or_else(|| snapshot.state_context());
+    let params = snapshot.signing_params();
 
     // Fail-closed EIP-27 gate: refuse to EMIT a tx that spends reward boxes
     // without burning the re-emission tokens + paying pay-to-reemission. Uses the
@@ -472,7 +477,7 @@ pub(crate) fn self_verify_signed_tx(
     // CANDIDATE height (`tip+1` = `state_ctx.sigma_pre_header.height`) the tx will
     // be validated at — so the wallet never relays/mines a tx the node rejects.
     // No-op off EIP-27 nets (`reemission` is `None`, e.g. testnet).
-    if let Some(rules) = reemission {
+    if let Some(rules) = snapshot.reemission_rules() {
         ergo_validation::verify_reemission_spending(
             tx,
             boxes_to_spend,
@@ -507,8 +512,13 @@ pub(crate) fn self_verify_signed_tx(
         WalletAdminError::Internal("self-verify: tx init cost exceeds limit".into())
     })?;
 
-    let message = ergo_ser::transaction::bytes_to_sign(tx)
-        .map_err(|e| WalletAdminError::Internal(format!("bytes_to_sign: {e:?}")))?;
+    let message = if intended.is_some() {
+        ergo_wallet::proving::prover::Prover::bytes_to_sign_for_signed_tx_bounded(tx)
+            .map_err(|e| WalletAdminError::Internal(format!("bytes_to_sign: {e}")))
+    } else {
+        ergo_ser::transaction::bytes_to_sign(tx)
+            .map_err(|e| WalletAdminError::Internal(format!("bytes_to_sign: {e:?}")))
+    }?;
 
     let all_input_extensions: Vec<ergo_ser::input::ContextExtension> = tx
         .inputs
@@ -516,16 +526,52 @@ pub(crate) fn self_verify_signed_tx(
         .map(|i| i.spending_proof.extension().clone())
         .collect();
 
+    let mut strict_context = intended
+        .map(|context| {
+            let unsigned = ergo_ser::transaction::UnsignedTransaction {
+                inputs: tx
+                    .inputs
+                    .iter()
+                    .map(|input| ergo_ser::input::UnsignedInput {
+                        box_id: input.box_id,
+                        extension: input.spending_proof.extension().clone(),
+                    })
+                    .collect(),
+                data_inputs: tx.data_inputs.clone(),
+                output_candidates: tx.output_candidates.clone(),
+            };
+            context.build_reduction_owned_for_tx(
+                &unsigned,
+                0,
+                boxes_to_spend,
+                data_boxes,
+                params.activated_script_version(),
+            )
+        })
+        .transpose()
+        .map_err(|e| WalletAdminError::Internal(format!("self-verify context: {e}")))?;
+
     for (idx, (input, input_box)) in tx.inputs.iter().zip(boxes_to_spend.iter()).enumerate() {
-        let owned_rc = state_ctx.build_reduction_owned(
-            input_box,
-            input.spending_proof.extension(),
-            boxes_to_spend,
-            data_boxes,
-            &tx.output_candidates,
-            &all_input_extensions,
-        );
-        let ctx = owned_rc.as_borrowed();
+        let mut legacy_context;
+        let ctx = if let Some(owned) = strict_context.as_mut() {
+            owned.self_box = owned.inputs[idx].clone();
+            owned.self_creation_height = input_box.candidate.creation_height;
+            owned.extension = input.spending_proof.extension().values.clone();
+            owned.as_borrowed()
+        } else {
+            legacy_context = state_ctx.build_reduction_owned(
+                input_box,
+                input.spending_proof.extension(),
+                boxes_to_spend,
+                data_boxes,
+                &tx.output_candidates,
+                &all_input_extensions,
+            );
+            legacy_context.validation_settings =
+                snapshot.protocol_params().validation_settings.clone();
+            legacy_context.activated_script_version = params.activated_script_version();
+            legacy_context.as_borrowed()
+        };
         let ergo_tree = input_box.candidate.ergo_tree();
         let ok = verify_spending_proof_with_context_and_cost(
             ergo_tree,
@@ -543,6 +589,10 @@ pub(crate) fn self_verify_signed_tx(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "sign/context_tests.rs"]
+mod context_tests;
 
 #[cfg(test)]
 mod tests {

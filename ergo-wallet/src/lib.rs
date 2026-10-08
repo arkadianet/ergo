@@ -2,7 +2,8 @@
 //!
 //! Covers BIP-39 mnemonics and EIP-3 key derivation (post- and
 //! pre-1627), AES-GCM / PBKDF2 encryption, transaction selection/building, and
-//! Sigma proving with the existing signing gate. File-backed secret
+//! Sigma proving with full contract reduction against an explicit signing
+//! context, and a conservative gate for synthetic contexts. File-backed secret
 //! storage requires `keystore`; the command-line binary requires `cli`.
 //! Orchestration modules live in `ergo-wallet-service`. Convenience
 //! re-exports (`Mnemonic`, `ExtendedSecretKey`, `DerivationPath`, `SecretKey`,

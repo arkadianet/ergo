@@ -318,17 +318,41 @@ pub(crate) fn generate_commitments_impl(
         snapshot.as_ref(),
     )?;
 
-    let state_ctx = snapshot.state_context();
-
+    let intended = super::chain::intended_signing_context(snapshot.as_ref())?;
     let mut rng = ergo_wallet::proving::randomness::OsRngBackend;
-    let tbag = ergo_wallet::proving::commitments::generate_commitments_for_tx(
-        &unsigned_tx,
-        &boxes_to_spend,
-        &data_boxes,
-        state_ctx,
-        &generate_for,
-        &mut rng,
-    )
+    let tbag = match intended.as_ref() {
+        Some(context) => {
+            let prover = ergo_wallet::proving::prover::Prover::new(
+                ergo_wallet::proving::secrets::SecretRegistry::empty(),
+                snapshot.signing_params().clone(),
+            );
+            let reduced = prover
+                .reduce_transaction(&unsigned_tx, &boxes_to_spend, &data_boxes, context)
+                .map_err(|e| {
+                    WalletAdminError::Internal(format!("generateCommitments reduction: {e}"))
+                })?;
+            ergo_wallet::proving::commitments::generate_commitments_for_reduced(
+                &reduced,
+                snapshot.signing_params().block_version,
+                &generate_for,
+                &mut rng,
+            )
+        }
+        None => {
+            ergo_wallet::proving::prover::Prover::require_context_independent_scripts(
+                &boxes_to_spend,
+            )
+            .map_err(super::sign::map_sign_error)?;
+            ergo_wallet::proving::commitments::generate_commitments_for_tx(
+                &unsigned_tx,
+                &boxes_to_spend,
+                &data_boxes,
+                snapshot.state_context(),
+                &generate_for,
+                &mut rng,
+            )
+        }
+    }
     .map_err(|e| WalletAdminError::Internal(format!("generateCommitments: {e}")))?;
 
     let hints_dto = tx_hints_bag_to_dto(&tbag);
@@ -372,16 +396,51 @@ pub(crate) fn extract_hints_impl(
     let data_boxes =
         resolve_data_inputs_for_signed(&tx, request.data_inputs.as_deref(), snapshot.as_ref())?;
 
-    let state_ctx = snapshot.state_context();
-
-    let tbag = ergo_wallet::proving::extract::bag_for_transaction(
-        &tx,
-        &boxes_to_spend,
-        &data_boxes,
-        state_ctx,
-        &real,
-        &simulated,
-    )
+    let intended = super::chain::intended_signing_context(snapshot.as_ref())?;
+    let tbag = match intended.as_ref() {
+        Some(context) => {
+            let unsigned = ergo_ser::transaction::UnsignedTransaction {
+                inputs: tx
+                    .inputs
+                    .iter()
+                    .map(|input| ergo_ser::input::UnsignedInput {
+                        box_id: input.box_id,
+                        extension: input.spending_proof.extension().clone(),
+                    })
+                    .collect(),
+                data_inputs: tx.data_inputs.clone(),
+                output_candidates: tx.output_candidates.clone(),
+            };
+            let prover = ergo_wallet::proving::prover::Prover::new(
+                ergo_wallet::proving::secrets::SecretRegistry::empty(),
+                snapshot.signing_params().clone(),
+            );
+            let reduced = prover
+                .reduce_transaction(&unsigned, &boxes_to_spend, &data_boxes, context)
+                .map_err(|e| WalletAdminError::Internal(format!("extractHints reduction: {e}")))?;
+            ergo_wallet::proving::extract::bag_for_reduced_transaction(
+                &reduced,
+                &tx,
+                snapshot.signing_params().block_version,
+                &real,
+                &simulated,
+            )
+        }
+        None => {
+            ergo_wallet::proving::prover::Prover::require_context_independent_scripts(
+                &boxes_to_spend,
+            )
+            .map_err(super::sign::map_sign_error)?;
+            ergo_wallet::proving::extract::bag_for_transaction(
+                &tx,
+                &boxes_to_spend,
+                &data_boxes,
+                snapshot.state_context(),
+                &real,
+                &simulated,
+            )
+        }
+    }
     .map_err(|e| WalletAdminError::Internal(format!("extractHints: {e}")))?;
 
     let hints_dto = tx_hints_bag_to_dto(&tbag);

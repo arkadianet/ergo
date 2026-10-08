@@ -337,6 +337,55 @@ pub struct SigningContext<'a> {
     pub validation_settings: &'a SigmaValidationSettings,
 }
 
+/// Context selection for direct signing. Existing callers passing only a
+/// [`BlockchainStateContext`] retain the conservative synthetic-context gate.
+/// Passing a [`SigningContext`] explicitly opts into full contract reduction.
+/// The caller is responsible for supplying the intended candidate's context.
+pub enum ProverSigningContext<'a> {
+    Synthetic(&'a BlockchainStateContext),
+    Explicit(SigningContext<'a>),
+}
+
+impl<'a> From<&'a BlockchainStateContext> for ProverSigningContext<'a> {
+    fn from(context: &'a BlockchainStateContext) -> Self {
+        Self::Synthetic(context)
+    }
+}
+
+impl<'a> From<&'a mut BlockchainStateContext> for ProverSigningContext<'a> {
+    fn from(context: &'a mut BlockchainStateContext) -> Self {
+        Self::Synthetic(context)
+    }
+}
+
+impl<'a> From<&'a Box<BlockchainStateContext>> for ProverSigningContext<'a> {
+    fn from(context: &'a Box<BlockchainStateContext>) -> Self {
+        Self::Synthetic(context)
+    }
+}
+
+impl<'a> From<&'a std::sync::Arc<BlockchainStateContext>> for ProverSigningContext<'a> {
+    fn from(context: &'a std::sync::Arc<BlockchainStateContext>) -> Self {
+        Self::Synthetic(context)
+    }
+}
+
+impl<'a> From<&SigningContext<'a>> for ProverSigningContext<'a> {
+    fn from(context: &SigningContext<'a>) -> Self {
+        Self::Explicit(SigningContext {
+            state_context: context.state_context,
+            header_ids: context.header_ids,
+            validation_settings: context.validation_settings,
+        })
+    }
+}
+
+impl<'a> From<SigningContext<'a>> for ProverSigningContext<'a> {
+    fn from(context: SigningContext<'a>) -> Self {
+        Self::Explicit(context)
+    }
+}
+
 fn build_last_block_utxo_root(digest: ADDigest) -> AvlTreeData {
     AvlTreeData {
         digest: digest.as_bytes().to_vec(),
