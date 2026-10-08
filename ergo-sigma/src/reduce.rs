@@ -238,6 +238,44 @@ pub fn verify_spending_proof_with_context_and_cost(
         return Ok(accepted);
     }
 
+    let proposition = reduce_ergo_tree_with_context_and_cost(ergo_tree, ctx, cost)?;
+
+    // Scala `Interpreter.addCryptoCost` adds `estimateCryptoVerifyCost(sb).toBlockCost`,
+    // i.e. the per-input crypto JitCost is truncated to a block-unit multiple before it
+    // joins the running total. Adding the raw JitCost would carry the remainder into
+    // the next input's snap baseline and into the JIT-unit limit check.
+    let crypto_cost = super::crypto_cost::estimate_crypto_cost(&proposition);
+    let crypto_cost_snapped = JitCost::from_jit_block_aligned(crypto_cost);
+    #[cfg(feature = "cost-trace")]
+    super::cost_trace::record(
+        format!("Crypto:{}", crypto_cost_snapped.value()),
+        crypto_cost_snapped.value(),
+        cost.total().value() + crypto_cost_snapped.value(),
+    );
+    cost.add(crypto_cost_snapped)
+        .map_err(|e| VerifySpendingError::Eval(e.into()))?;
+
+    super::verify::verify_sigma_proof(&proposition, proof_bytes, bytes_to_sign)
+        .map_err(VerifySpendingError::Verification)
+}
+
+/// Reduce a full ErgoTree using the same policy and metering as spending validation.
+/// The accumulator includes prior transaction costs and enforces its supplied limit.
+/// Crypto verification cost is separate and is not charged by this operation.
+/// A future script that verification accepts without understanding it cannot be
+/// reduced for signing; this operation rejects that verifier-only soft-fork path.
+pub fn reduce_ergo_tree_with_context_and_cost(
+    ergo_tree: &ErgoTree,
+    ctx: &super::evaluator::ReductionContext<'_>,
+    cost: &mut CostAccumulator,
+) -> Result<SigmaBoolean, VerifySpendingError> {
+    if check_soft_fork_condition(ergo_tree, ctx.activated_script_version)?.is_some() {
+        return Err(VerifySpendingError::Eval(
+            super::evaluator::EvalError::RuntimeException(
+                "cannot reduce an unsupported future script for signing",
+            ),
+        ));
+    }
     // Whole-tree, pre-reduction parity checks Scala performs at context build /
     // deserialize (ContextExtension key domain via `toSigmaContext`; every
     // GroupElement constant on-curve via `GroupElementSerializer.parse`). These
@@ -367,23 +405,7 @@ pub fn verify_spending_proof_with_context_and_cost(
     #[cfg(feature = "cost-trace")]
     super::cost_trace::record_snap(before_snap, cost.total().value());
 
-    // Scala `Interpreter.addCryptoCost` adds `estimateCryptoVerifyCost(sb).toBlockCost`,
-    // i.e. the per-input crypto JitCost is truncated to a block-unit multiple before it
-    // joins the running total. Adding the raw JitCost would carry the remainder into
-    // the next input's snap baseline and into the JIT-unit limit check.
-    let crypto_cost = super::crypto_cost::estimate_crypto_cost(&proposition);
-    let crypto_cost_snapped = JitCost::from_jit_block_aligned(crypto_cost);
-    #[cfg(feature = "cost-trace")]
-    super::cost_trace::record(
-        format!("Crypto:{}", crypto_cost_snapped.value()),
-        crypto_cost_snapped.value(),
-        cost.total().value() + crypto_cost_snapped.value(),
-    );
-    cost.add(crypto_cost_snapped)
-        .map_err(|e| VerifySpendingError::Eval(e.into()))?;
-
-    super::verify::verify_sigma_proof(&proposition, proof_bytes, bytes_to_sign)
-        .map_err(VerifySpendingError::Verification)
+    Ok(proposition)
 }
 
 /// Errors produced by the spending-proof entry points. Variants
@@ -1580,6 +1602,24 @@ mod soft_fork_condition_tests {
     #[test]
     fn spend_under_unsupported_activation_accepts_future_tree_unverified() {
         assert!(verify_at(&tree("0d0208d3"), 4).unwrap());
+    }
+
+    #[test]
+    fn signing_reduction_cannot_turn_verifier_future_script_skip_into_true() {
+        let tree = tree("0d0208d3");
+        let context = super::super::evaluator::ReductionContext {
+            activated_script_version: 4,
+            ergo_tree_version: tree.version,
+            ..super::super::evaluator::ReductionContext::minimal(0, 0)
+        };
+        let mut cost = CostAccumulator::new(JitCost::from_jit(1000));
+        assert!(reduce_ergo_tree_with_context_and_cost(&tree, &context, &mut cost).is_err());
+        assert_eq!(cost.total(), JitCost::ZERO);
+        assert!(
+            verify_spending_proof_with_context_and_cost(&tree, &[], &[], &context, &mut cost,)
+                .unwrap()
+        );
+        assert_eq!(cost.total(), JitCost::ZERO);
     }
 
     // ----- error paths -----

@@ -168,7 +168,9 @@ pub struct TransactionHintsBag {
     pub public_hints: BTreeMap<u32, HintsBag>,
 }
 
-/// Owned, message-bound commitments for the native signing API. This type
+/// Owned, message-bound commitments for the native signing API. Reduced signing
+/// additionally binds the frozen propositions, extensions and declared costs.
+/// This type
 /// deliberately has no `Clone` implementation and never exposes secret hints.
 /// Signing consumes it, including on errors, so its nonce material cannot be
 /// submitted to a second signing operation through this API.
@@ -176,6 +178,7 @@ pub struct TransactionHintsBag {
 pub struct BoundTransactionHints {
     hints: TransactionHintsBag,
     message_hash: [u8; 32],
+    reduced_hash: Option<[u8; 32]>,
 }
 
 impl BoundTransactionHints {
@@ -183,7 +186,22 @@ impl BoundTransactionHints {
         Self {
             hints,
             message_hash: ergo_sigma::blake2b256(message),
+            reduced_hash: None,
         }
+    }
+
+    pub(crate) fn new_for_reduced(
+        hints: TransactionHintsBag,
+        reduced: &crate::ReducedTransaction,
+    ) -> Result<Self, crate::WalletError> {
+        let bytes = reduced.to_bytes()?;
+        let message =
+            crate::proving::prover::Prover::bytes_to_sign_for_tx(&reduced.unsigned_transaction)?;
+        Ok(Self {
+            hints,
+            message_hash: ergo_sigma::blake2b256(&message),
+            reduced_hash: Some(ergo_sigma::blake2b256(&bytes)),
+        })
     }
 
     /// Public commitments to distribute to other participants; nonce material
@@ -195,13 +213,58 @@ impl BoundTransactionHints {
         }
     }
 
+    /// Add another party's public commitments/proof responses without importing
+    /// or cloning secret nonce ownership into this bound signing round.
+    pub fn add_public_hints(
+        &mut self,
+        hints: &TransactionHintsBag,
+    ) -> Result<(), crate::WalletError> {
+        if hints.secret_hints.values().any(|bag| !bag.hints.is_empty())
+            || hints.public_hints.values().any(|bag| {
+                bag.hints
+                    .iter()
+                    .any(|hint| matches!(hint, Hint::OwnCommitment(_)))
+            })
+        {
+            return Err(crate::WalletError::TxBuild(
+                "public hint exchange contains a private nonce".into(),
+            ));
+        }
+        for (index, bag) in &hints.public_hints {
+            self.hints.add_for_input(*index, bag.clone());
+        }
+        Ok(())
+    }
+
     pub(crate) fn into_for_message(
         self,
         message: &[u8],
     ) -> Result<TransactionHintsBag, crate::error::WalletError> {
+        if self.reduced_hash.is_some() {
+            return Err(crate::WalletError::TxBuild(
+                "reduced commitments require the same frozen reduction".into(),
+            ));
+        }
         if self.message_hash != ergo_sigma::blake2b256(message) {
             return Err(crate::error::WalletError::TxBuild(
                 "commitments belong to a different signing message".into(),
+            ));
+        }
+        Ok(self.hints)
+    }
+
+    pub(crate) fn into_for_reduced(
+        self,
+        reduced: &crate::ReducedTransaction,
+    ) -> Result<TransactionHintsBag, crate::WalletError> {
+        let bytes = reduced.to_bytes()?;
+        let message =
+            crate::proving::prover::Prover::bytes_to_sign_for_tx(&reduced.unsigned_transaction)?;
+        if self.reduced_hash != Some(ergo_sigma::blake2b256(&bytes))
+            || self.message_hash != ergo_sigma::blake2b256(&message)
+        {
+            return Err(crate::WalletError::TxBuild(
+                "commitments belong to a different frozen reduction".into(),
             ));
         }
         Ok(self.hints)
@@ -272,6 +335,68 @@ mod tests {
         let bound = BoundTransactionHints::new(bag, b"transaction A");
         assert!(bound.public_hints().secret_hints.is_empty());
         assert!(bound.into_for_message(b"transaction B").is_err());
+    }
+
+    fn sample_reduced_transaction() -> crate::ReducedTransaction {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/wallet/reduced_scala_6_0_7.json"
+        ))
+        .unwrap();
+        let bytes = hex::decode(fixture["cases"][0]["reduced_hex"].as_str().unwrap()).unwrap();
+        crate::ReducedTransaction::from_bytes(&bytes, 4).unwrap()
+    }
+
+    #[test]
+    fn reduced_bound_commitments_reject_proposition_substitution_for_the_same_message() {
+        let reduced = sample_reduced_transaction();
+        let bound =
+            BoundTransactionHints::new_for_reduced(TransactionHintsBag::empty(), &reduced).unwrap();
+        let mut changed = reduced.clone();
+        changed.reduced_inputs[0].sigma = SigmaBoolean::TrivialProp(false);
+        assert_ne!(
+            changed.reduced_inputs[0].sigma,
+            reduced.reduced_inputs[0].sigma
+        );
+        assert_eq!(
+            crate::proving::prover::Prover::bytes_to_sign_for_tx(&reduced.unsigned_transaction)
+                .unwrap(),
+            crate::proving::prover::Prover::bytes_to_sign_for_tx(&changed.unsigned_transaction)
+                .unwrap(),
+        );
+        assert!(bound.into_for_reduced(&changed).is_err());
+
+        let bound =
+            BoundTransactionHints::new_for_reduced(TransactionHintsBag::empty(), &reduced).unwrap();
+        assert!(bound.into_for_reduced(&reduced).is_ok());
+    }
+
+    #[test]
+    fn reduced_bound_commitments_cannot_be_consumed_by_legacy_message_only_signing() {
+        let reduced = sample_reduced_transaction();
+        let message =
+            crate::proving::prover::Prover::bytes_to_sign_for_tx(&reduced.unsigned_transaction)
+                .unwrap();
+        let bound =
+            BoundTransactionHints::new_for_reduced(TransactionHintsBag::empty(), &reduced).unwrap();
+        assert!(bound.into_for_message(&message).is_err());
+
+        let legacy = BoundTransactionHints::new(TransactionHintsBag::empty(), &message);
+        assert!(legacy.into_for_message(&message).is_ok());
+    }
+
+    #[test]
+    fn public_hint_exchange_rejects_private_nonces_even_when_mispartitioned() {
+        let mut bound = BoundTransactionHints::new(TransactionHintsBag::empty(), b"transaction");
+        let mut private = TransactionHintsBag::empty();
+        let bag = HintsBag {
+            hints: vec![Hint::OwnCommitment(sample_own_commitment())],
+        };
+        private.public_hints.insert(0, bag.clone());
+        assert!(bound.add_public_hints(&private).is_err());
+        private.public_hints.clear();
+        private.secret_hints.insert(0, bag);
+        assert!(bound.add_public_hints(&private).is_err());
+        assert_eq!(bound.public_hints(), TransactionHintsBag::empty());
     }
 
     #[test]

@@ -14,6 +14,7 @@ mod node_position_basic;
 mod pre_1627_derivation_oracle;
 mod pre_eip3_path_oracle;
 mod proving_scala_oracle;
+mod reduced_transaction_oracle;
 mod secret_registry_basic;
 #[cfg(feature = "keystore")]
 mod storage_oracle;

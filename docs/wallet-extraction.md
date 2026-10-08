@@ -5,10 +5,14 @@ watch-only daemon against the embedded wallet. Phase 1 landed in main through
 [#381](https://github.com/arkadianet/ergo/pull/381). All seven Phase 2 items
 landed on `integration/wallet-extraction`; [#574](https://github.com/arkadianet/ergo/pull/574)
 completed their refresh and validation. The subsequent main merge carries the
-0.12.3 node changes across the extracted boundaries. Phase 3 started with the
-seed lifecycle host in [#619](https://github.com/arkadianet/ergo/pull/619) and
-hosts the complete wallet engine in the daemon, retaining opt-in
-seed ownership and the existing embedded-node default.
+0.12.3 node changes across the extracted boundaries in
+[#618](https://github.com/arkadianet/ergo/pull/618). Phase 3 is complete on the
+integration branch: [#619](https://github.com/arkadianet/ergo/pull/619) added
+the seed lifecycle host and [#620](https://github.com/arkadianet/ergo/pull/620)
+completed the daemon engine, migration, packaging and portable library work.
+Seed ownership remains opt-in and the embedded node remains the default.
+These are the three documented extraction phases; promoting the integration
+branch to main and choosing a release/cutover are subsequent delivery work.
 
 ## Phase 2 milestones
 
@@ -214,12 +218,16 @@ examples does not change the embedded-node or watch-only-daemon defaults.
 
 ## Parallel library work
 
-[#612](https://github.com/arkadianet/ergo/issues/612) follows after Phase 3
-merges, on its own branch and pull request. It adds EIP-19 serialization checked
-against sigma-rust and AppKit vectors, QR and ErgoPay round trips, and a
-separately reviewed change to context-sensitive `Prover::sign` behavior.
-Phase 3 retains the existing signing script gate unchanged.
+[#612](https://github.com/arkadianet/ergo/issues/612) follows Phase 3 as two
+separate reviews. The first adds explicit-context reduction, EIP-43 reduced
+transaction bytes for EIP-19 cold signing, offline proofs and commitments.
+Its fixtures cross-check AppKit and sigma-rust, including QR and ErgoPay
+round trips. The existing `Prover::sign` gate remains unchanged in that review.
+The second changes direct signing and host integration to use a real,
+authenticated context. See the [library guide](wallet-reduced-transactions.md)
+and [oracle provenance](../test-vectors/wallet/README.md#reduced-transactions-and-cold-transport).
 
+Implemented in [#620](https://github.com/arkadianet/ergo/pull/620),
 [#613](https://github.com/arkadianet/ergo/issues/613) makes the portable
 `ergo-wallet` core the default. The `keystore` feature enables encrypted file
 storage; `cli` enables the binary and includes keystore. Hosts explicitly opt

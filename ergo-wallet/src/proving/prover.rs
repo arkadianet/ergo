@@ -1,4 +1,12 @@
-//! Tx-level signing orchestrator. Single entry point: `Prover::sign`.
+//! Transaction-level signing and explicit-context reduction.
+//!
+//! [`Prover::reduce_transaction`] evaluates input contracts against a caller-supplied
+//! [`crate::tx_context::SigningContext`] and enforces a transaction budget.
+//! [`Prover::sign_reduced`] signs the resulting frozen propositions without script
+//! evaluation or chain access. The caller must review reductions received from an
+//! external party; serialized reduction data does not authenticate chain state.
+//!
+//! The existing [`Prover::sign`] compatibility path remains as follows.
 //!
 //! Mirrors Scala `ErgoProvingInterpreter.sign` /
 //! `ErgoProvingInterpreter.signInputs`. For each input:
@@ -39,16 +47,225 @@ use crate::tx_context::{BlockchainParameters, BlockchainStateContext};
 /// block-level cost parameters.
 pub struct Prover {
     secrets: SecretRegistry,
-    // Retained for future use (e.g. chain-state context derivation). The
-    // authoritative cost-enforcement gate is the bridge self-verify, not
-    // this prover.
-    #[allow(dead_code)]
     params: BlockchainParameters,
 }
 
 impl Prover {
     pub fn new(secrets: SecretRegistry, params: BlockchainParameters) -> Self {
         Self { secrets, params }
+    }
+
+    /// Reduce all contracts against an explicit frozen chain context, enforcing
+    /// the Scala transaction initialization, token access and interpreter budget.
+    pub fn reduce_transaction(
+        &self,
+        tx: &UnsignedTransaction,
+        boxes: &[ErgoBox],
+        data_boxes: &[ErgoBox],
+        context: &crate::tx_context::SigningContext<'_>,
+    ) -> Result<crate::ReducedTransaction, WalletError> {
+        use ergo_primitives::cost::JitCost;
+        use std::collections::BTreeSet;
+        if tx.inputs.is_empty()
+            || tx.output_candidates.is_empty()
+            || tx.inputs.len() != boxes.len()
+            || tx.data_inputs.len() != data_boxes.len()
+            || tx.inputs.len() > i16::MAX as usize
+            || tx.data_inputs.len() > i16::MAX as usize
+            || tx.output_candidates.len() > i16::MAX as usize
+        {
+            return Err(WalletError::TxBuild(
+                "inconsistent or empty transaction participants".into(),
+            ));
+        }
+        let limit = JitCost::from_block_cost(self.params.max_block_cost)
+            .map_err(|e| WalletError::TxBuild(e.to_string()))?;
+        let mut cost = CostAccumulator::new(limit);
+        let add = |acc: &mut CostAccumulator, block: u64| -> Result<(), WalletError> {
+            acc.add(
+                JitCost::from_block_cost(block).map_err(|e| WalletError::TxBuild(e.to_string()))?,
+            )
+            .map_err(|e| WalletError::TxBuild(e.to_string()))
+        };
+        add(&mut cost, self.params.interpreter_init_cost)?;
+        for (n, per) in [
+            (boxes.len(), self.params.input_cost),
+            (data_boxes.len(), self.params.data_input_cost),
+            (tx.output_candidates.len(), self.params.output_cost),
+        ] {
+            add(
+                &mut cost,
+                (n as u64)
+                    .checked_mul(per)
+                    .ok_or_else(|| WalletError::TxBuild("cost overflow".into()))?,
+            )?;
+        }
+        let input_distinct: BTreeSet<_> = boxes
+            .iter()
+            .flat_map(|b| b.candidate.tokens.iter().map(|t| *t.token_id.as_bytes()))
+            .collect();
+        let output_distinct: BTreeSet<_> = tx
+            .output_candidates
+            .iter()
+            .flat_map(|b| b.tokens.iter().map(|t| *t.token_id.as_bytes()))
+            .collect();
+        let token_entries = boxes
+            .iter()
+            .map(|b| b.candidate.tokens.len())
+            .sum::<usize>()
+            + tx.output_candidates
+                .iter()
+                .map(|b| b.tokens.len())
+                .sum::<usize>()
+            + input_distinct.len()
+            + output_distinct.len();
+        add(
+            &mut cost,
+            (token_entries as u64)
+                .checked_mul(self.params.token_access_cost)
+                .ok_or_else(|| WalletError::TxBuild("token cost overflow".into()))?,
+        )?;
+        // Build and check every participant once. Each input shares these frozen
+        // outputs/data/header values; only SELF and its extension change.
+        let mut owned = context.build_reduction_owned_for_tx(
+            tx,
+            0,
+            boxes,
+            data_boxes,
+            self.params.activated_script_version(),
+        )?;
+        let mut reduced_inputs = Vec::with_capacity(boxes.len());
+        for (idx, b) in boxes.iter().enumerate() {
+            // SDK ReducingInterpreter.reduce requires positive remaining budget,
+            // even when a soft-fork reduction will perform no evaluation work.
+            if cost.total() >= limit {
+                return Err(WalletError::TxBuild("reduction cost limit reached".into()));
+            }
+            owned.self_box = owned.inputs[idx].clone();
+            owned.self_creation_height = b.candidate.creation_height;
+            owned.extension = tx.inputs[idx].extension.values.clone();
+            let sigma = ergo_sigma::reduce::reduce_ergo_tree_with_context_and_cost(
+                b.candidate.ergo_tree(),
+                &owned.as_borrowed(),
+                &mut cost,
+            )
+            .map_err(|e| WalletError::TxBuild(e.to_string()))?;
+            reduced_inputs.push(crate::ReducedInput {
+                sigma,
+                cost: cost.total_block_cost(),
+            });
+        }
+        let cost = u32::try_from(cost.total_block_cost())
+            .map_err(|_| WalletError::TxBuild("reduction cost overflow".into()))?;
+        Ok(crate::ReducedTransaction {
+            unsigned_transaction: tx.clone(),
+            reduced_inputs,
+            cost,
+        })
+    }
+
+    /// Sign already reduced contracts without chain access or script evaluation.
+    /// Received reductions must be reviewed by the caller before signing.
+    /// An own nonce in the reusable hints bag must be used for one signing
+    /// operation only. Prefer [`Self::sign_reduced_bound`] for native ownership.
+    pub fn sign_reduced(
+        &self,
+        reduced: &crate::ReducedTransaction,
+        hints: &TransactionHintsBag,
+    ) -> Result<Transaction, WalletError> {
+        self.sign_reduced_inner(reduced, hints, false)
+    }
+
+    /// Produce a first-round transaction proof with another party's public
+    /// commitments. This result may be incomplete and must not be submitted.
+    /// An own nonce in the reusable bag must not be reused in another round.
+    /// Prefer [`Self::sign_reduced_partial_bound`] for native ownership.
+    pub fn sign_reduced_partial(
+        &self,
+        reduced: &crate::ReducedTransaction,
+        hints: &TransactionHintsBag,
+    ) -> Result<Transaction, WalletError> {
+        self.sign_reduced_inner(reduced, hints, true)
+    }
+
+    fn sign_reduced_inner(
+        &self,
+        reduced: &crate::ReducedTransaction,
+        hints: &TransactionHintsBag,
+        partial: bool,
+    ) -> Result<Transaction, WalletError> {
+        use ergo_primitives::cost::JitCost;
+        // Apply wire/depth bounds even to caller-built structures.
+        let bytes = reduced.to_bytes()?;
+        let checked = crate::ReducedTransaction::from_bytes(&bytes, self.params.block_version)?;
+        checked.validate_for_proving()?;
+        let message = Self::bytes_to_sign_for_tx(&checked.unsigned_transaction)?;
+        let mut cost = CostAccumulator::new(
+            JitCost::from_block_cost(self.params.max_block_cost)
+                .map_err(|e| WalletError::TxBuild(e.to_string()))?,
+        );
+        cost.add(
+            JitCost::from_block_cost(u64::from(checked.cost))
+                .map_err(|e| WalletError::TxBuild(e.to_string()))?,
+        )
+        .map_err(|e| WalletError::TxBuild(e.to_string()))?;
+        // Check the complete budget before generating any response, including
+        // when a later input would otherwise exceed the aggregate limit.
+        for reduction in &checked.reduced_inputs {
+            cost.add(JitCost::from_jit_block_aligned(
+                ergo_sigma::crypto_cost::estimate_crypto_cost(&reduction.sigma),
+            ))
+            .map_err(|e| WalletError::TxBuild(e.to_string()))?;
+        }
+        let mut inputs = Vec::with_capacity(checked.reduced_inputs.len());
+        for (idx, (input, reduction)) in checked
+            .unsigned_transaction
+            .inputs
+            .iter()
+            .zip(&checked.reduced_inputs)
+            .enumerate()
+        {
+            let prove = if partial {
+                crate::proving::sigma::prove_sigma_partial
+            } else {
+                prove_sigma
+            };
+            let (proof, _) = prove(
+                &reduction.sigma,
+                &self.secrets,
+                &message,
+                &hints.all_for_input(idx as u32),
+                &mut OsRngBackend,
+            )?;
+            inputs.push(Input {
+                box_id: input.box_id,
+                spending_proof: SpendingProof::new(proof, input.extension.clone())
+                    .map_err(|e| WalletError::TxBuild(e.to_string()))?,
+            });
+        }
+        Ok(Transaction {
+            inputs,
+            data_inputs: checked.unsigned_transaction.data_inputs,
+            output_candidates: checked.unsigned_transaction.output_candidates,
+        })
+    }
+
+    /// Consume nonce-bearing commitments bound to the message and frozen reduction.
+    pub fn sign_reduced_bound(
+        &self,
+        reduced: &crate::ReducedTransaction,
+        commitments: crate::proving::hints::BoundTransactionHints,
+    ) -> Result<Transaction, WalletError> {
+        self.sign_reduced(reduced, &commitments.into_for_reduced(reduced)?)
+    }
+
+    /// First-round partial proof, consuming this party's bound nonces once.
+    pub fn sign_reduced_partial_bound(
+        &self,
+        reduced: &crate::ReducedTransaction,
+        commitments: crate::proving::hints::BoundTransactionHints,
+    ) -> Result<Transaction, WalletError> {
+        self.sign_reduced_partial(reduced, &commitments.into_for_reduced(reduced)?)
     }
 
     /// Native commitment-signing entry point. Consume the commitments and

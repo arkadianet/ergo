@@ -5,11 +5,13 @@
 //!
 //! Mirrors Scala `ErgoLikeContext` / `BlockchainStateContext`.
 
+use crate::WalletError;
 use ergo_primitives::digest::ADDigest;
 use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
 use ergo_ser::input::ContextExtension;
 use ergo_ser::pre_header::CandidatePreHeader;
 use ergo_ser::sigma_value::AvlTreeData;
+use ergo_sigma::evaluator::SigmaValidationSettings;
 use ergo_sigma::evaluator::{EvalBox, EvalHeader, ReductionContext};
 use indexmap::IndexMap;
 
@@ -34,7 +36,7 @@ pub struct BlockchainStateContext {
 /// Per-block parameters used by the prover for cost accounting.
 #[derive(Clone)]
 pub struct BlockchainParameters {
-    /// Maximum aggregate JIT cost the block is allowed to accumulate.
+    /// Maximum aggregate block cost the block is allowed to accumulate.
     pub max_block_cost: u64,
     /// Per-input base cost charged before script evaluation.
     pub input_cost: u64,
@@ -44,7 +46,7 @@ pub struct BlockchainParameters {
     pub output_cost: u64,
     /// Cost per distinct token access across inputs/outputs.
     pub token_access_cost: u64,
-    /// Interpreter initialization cost (constant per block).
+    /// Interpreter initialization cost (constant per transaction).
     pub interpreter_init_cost: u64,
     /// Wire block version (from the block header's version byte).
     pub block_version: u8,
@@ -95,6 +97,7 @@ pub struct ReductionContextOwned {
     pub last_headers: Vec<EvalHeader>,
     pub last_block_utxo_root: Option<AvlTreeData>,
     pub activated_script_version: u8,
+    pub validation_settings: SigmaValidationSettings,
 }
 
 impl ReductionContextOwned {
@@ -102,7 +105,7 @@ impl ReductionContextOwned {
     /// and `verify_spending_proof_with_context_and_cost` require.
     pub fn as_borrowed(&self) -> ReductionContext<'_> {
         ReductionContext {
-            validation_settings: Default::default(),
+            validation_settings: self.validation_settings.clone(),
             height: self.height,
             self_box: Some(&self.self_box),
             self_creation_height: self.self_creation_height,
@@ -229,6 +232,7 @@ impl BlockchainStateContext {
             last_headers,
             last_block_utxo_root,
             activated_script_version: ph.version.wrapping_sub(1),
+            validation_settings: Default::default(),
         }
     }
 }
@@ -323,6 +327,16 @@ fn copy_registers_to_eval(c: &ErgoBoxCandidate) -> [Option<ergo_ser::register::R
     std::array::from_fn(|i| regs.get(i).cloned())
 }
 
+/// An explicit frozen chain context for full contract reduction.
+/// The caller supplies the chain snapshot and its trusted header ids, rather
+/// than re-creating ids from potentially noncanonical wire encodings. The
+/// library checks context coherence; it does not authenticate the chain.
+pub struct SigningContext<'a> {
+    pub state_context: &'a BlockchainStateContext,
+    pub header_ids: &'a [[u8; 32]],
+    pub validation_settings: &'a SigmaValidationSettings,
+}
+
 fn build_last_block_utxo_root(digest: ADDigest) -> AvlTreeData {
     AvlTreeData {
         digest: digest.as_bytes().to_vec(),
@@ -331,5 +345,361 @@ fn build_last_block_utxo_root(digest: ADDigest) -> AvlTreeData {
         remove_allowed: true,
         key_length: 32,
         value_length_opt: None,
+    }
+}
+
+impl SigningContext<'_> {
+    /// Build one input's context without fallback ids or discarded serialization errors.
+    pub fn build_reduction_owned_for_tx(
+        &self,
+        tx: &ergo_ser::transaction::UnsignedTransaction,
+        input_index: usize,
+        inputs: &[ErgoBox],
+        data_inputs: &[ErgoBox],
+        activated_script_version: u8,
+    ) -> Result<ReductionContextOwned, WalletError> {
+        if tx.inputs.len() != inputs.len()
+            || tx.data_inputs.len() != data_inputs.len()
+            || input_index >= inputs.len()
+            || self.header_ids.len() != self.state_context.sigma_last_headers.len()
+            || self.header_ids.len() > 10
+            || tx.inputs.len() > i16::MAX as usize
+            || tx.data_inputs.len() > i16::MAX as usize
+            || tx.output_candidates.is_empty()
+            || tx.output_candidates.len() > i16::MAX as usize
+        {
+            return Err(WalletError::TxBuild(
+                "inconsistent transaction or header context".into(),
+            ));
+        }
+        let ph = &self.state_context.sigma_pre_header;
+        if let Some(header) = self.state_context.sigma_last_headers.first() {
+            if ph.parent_id != self.header_ids[0]
+                || header.height.checked_add(1) != Some(ph.height)
+                || header.state_root != self.state_context.previous_state_digest
+            {
+                return Err(WalletError::TxBuild(
+                    "pre-header or UTXO root differs from chain tip".into(),
+                ));
+            }
+        }
+        for (index, headers) in self.state_context.sigma_last_headers.windows(2).enumerate() {
+            if headers[0].parent_id.as_bytes() != &self.header_ids[index + 1]
+                || headers[1].height.checked_add(1) != Some(headers[0].height)
+            {
+                return Err(WalletError::TxBuild(
+                    "headers are not a contiguous tip-first chain".into(),
+                ));
+            }
+        }
+        // Check serialization bounds without substituting recomputed identities.
+        // A malformed header must not disappear from the context or survive as
+        // an invalid script-visible Header merely because this script ignores it.
+        let mut header_writer = ergo_primitives::writer::VlqWriter::new();
+        for header in &self.state_context.sigma_last_headers {
+            ergo_ser::header::write_header(&mut header_writer, header)
+                .map_err(|e| WalletError::TxBuild(e.to_string()))?;
+        }
+        for (input, b) in tx.inputs.iter().zip(inputs) {
+            if input.box_id
+                != b.box_id()
+                    .map_err(|e| WalletError::TxBuild(e.to_string()))?
+            {
+                return Err(WalletError::TxBuild(
+                    "spending box does not match input id/order".into(),
+                ));
+            }
+        }
+        for (input, b) in tx.data_inputs.iter().zip(data_inputs) {
+            if input.box_id
+                != b.box_id()
+                    .map_err(|e| WalletError::TxBuild(e.to_string()))?
+            {
+                return Err(WalletError::TxBuild(
+                    "data box does not match input id/order".into(),
+                ));
+            }
+        }
+        let message = crate::reduced_message::bytes_to_sign_bounded(
+            tx,
+            crate::reduced::MAX_REDUCED_TRANSACTION_BYTES,
+        )?;
+        let tx_id = ergo_primitives::digest::blake2b256(&message);
+        let mut all_outputs = Vec::with_capacity(tx.output_candidates.len());
+        for (i, candidate) in tx.output_candidates.iter().enumerate() {
+            all_outputs.push(strict_eval_box(&ErgoBox {
+                candidate: candidate.clone(),
+                transaction_id: ergo_primitives::digest::ModifierId::from_bytes(*tx_id.as_bytes()),
+                index: i as u16,
+            })?);
+        }
+        let eval_inputs = inputs
+            .iter()
+            .map(strict_eval_box)
+            .collect::<Result<Vec<_>, _>>()?;
+        let eval_data = data_inputs
+            .iter()
+            .map(strict_eval_box)
+            .collect::<Result<Vec<_>, _>>()?;
+        let last_headers = self
+            .state_context
+            .sigma_last_headers
+            .iter()
+            .zip(self.header_ids)
+            .map(|(h, id)| EvalHeader::from_header(h, *id))
+            .collect();
+        Ok(ReductionContextOwned {
+            height: ph.height,
+            self_box: eval_inputs[input_index].clone(),
+            self_creation_height: inputs[input_index].candidate.creation_height,
+            inputs: eval_inputs,
+            outputs: all_outputs,
+            data_inputs: eval_data,
+            miner_pubkey: ph.miner_pubkey,
+            pre_header_timestamp: ph.timestamp,
+            pre_header_version: ph.version,
+            pre_header_parent_id: ph.parent_id,
+            pre_header_n_bits: ph.n_bits as u64,
+            pre_header_votes: ph.votes,
+            extension: tx.inputs[input_index].extension.values.clone(),
+            input_extensions: tx
+                .inputs
+                .iter()
+                .map(|i| i.extension.values.clone())
+                .collect(),
+            last_headers,
+            last_block_utxo_root: Some(build_last_block_utxo_root(
+                self.state_context.previous_state_digest,
+            )),
+            validation_settings: self.validation_settings.clone(),
+            activated_script_version,
+        })
+    }
+}
+
+fn strict_eval_box(b: &ErgoBox) -> Result<EvalBox, WalletError> {
+    if b.candidate.value > i64::MAX as u64
+        || b.candidate
+            .tokens
+            .iter()
+            .any(|t| t.amount > i64::MAX as u64)
+    {
+        return Err(WalletError::TxBuild("box value exceeds signed Long".into()));
+    }
+    let id = b
+        .box_id()
+        .map_err(|e| WalletError::TxBuild(e.to_string()))?;
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::ergo_box::write_ergo_box(&mut w, b)
+        .map_err(|e| WalletError::TxBuild(e.to_string()))?;
+    Ok(EvalBox {
+        lazy_vals: std::sync::Arc::new(ergo_sigma::evaluator::EvalBoxLazyVals::from_candidate(
+            &b.candidate,
+        )),
+        creation_height: b.candidate.creation_height,
+        script_bytes: b.candidate.ergo_tree_bytes().to_vec(),
+        value: b.candidate.value as i64,
+        id: *id.as_bytes(),
+        transaction_id: *b.transaction_id.as_bytes(),
+        output_index: b.index,
+        registers: copy_registers_to_eval(&b.candidate),
+        tokens: b
+            .candidate
+            .tokens
+            .iter()
+            .map(|t| (*t.token_id.as_bytes(), t.amount))
+            .collect(),
+        raw_bytes: w.result(),
+        register_bytes: b.candidate.register_bytes().to_vec(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_primitives::{
+        digest::{Digest32, ModifierId},
+        group_element::GroupElement,
+        reader::VlqReader,
+    };
+    use ergo_ser::{autolykos::AutolykosSolution, header::Header};
+
+    fn sample_transaction() -> (crate::ReducedTransaction, Vec<ErgoBox>) {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../test-vectors/wallet/reduced_scala_6_0_7.json"
+        ))
+        .unwrap();
+        let row = &fixture["cases"][0];
+        let bytes = hex::decode(row["reduced_hex"].as_str().unwrap()).unwrap();
+        let reduced = crate::ReducedTransaction::from_bytes(&bytes, 4).unwrap();
+        let inputs = row["input_boxes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| {
+                let bytes = hex::decode(value.as_str().unwrap()).unwrap();
+                ergo_ser::ergo_box::read_ergo_box(
+                    &mut VlqReader::new(&bytes).with_activated_script_version(3),
+                )
+                .unwrap()
+            })
+            .collect();
+        (reduced, inputs)
+    }
+
+    fn header(height: u32, parent: [u8; 32]) -> Header {
+        Header {
+            version: 4,
+            parent_id: ModifierId::from_bytes(parent),
+            ad_proofs_root: Digest32::from_bytes([1; 32]),
+            transactions_root: Digest32::from_bytes([2; 32]),
+            state_root: ADDigest::from_bytes([9; 33]),
+            timestamp: 1,
+            extension_root: Digest32::from_bytes([3; 32]),
+            n_bits: 0,
+            height,
+            votes: [0; 3],
+            unparsed_bytes: vec![],
+            solution: AutolykosSolution::V2 {
+                pk: GroupElement::from_bytes(ergo_sigma::evaluator::SECP256K1_GENERATOR),
+                nonce: [0; 8],
+            },
+        }
+    }
+
+    fn state() -> BlockchainStateContext {
+        BlockchainStateContext {
+            sigma_last_headers: vec![header(399_999, [8; 32]), header(399_998, [6; 32])],
+            sigma_pre_header: CandidatePreHeader {
+                version: 4,
+                parent_id: [7; 32],
+                height: 400_000,
+                timestamp: 2,
+                n_bits: 0,
+                votes: [0; 3],
+                miner_pubkey: ergo_sigma::evaluator::SECP256K1_GENERATOR,
+            },
+            previous_state_digest: ADDigest::from_bytes([9; 33]),
+        }
+    }
+
+    #[test]
+    fn explicit_context_preserves_supplied_header_ids_and_validation_settings() {
+        let (reduced, inputs) = sample_transaction();
+        let state = state();
+        let ids = [[7; 32], [8; 32]];
+        let mut settings = SigmaValidationSettings::default();
+        settings
+            .0
+            .insert(1001, ergo_sigma::evaluator::RuleStatus::Disabled);
+        let context = SigningContext {
+            state_context: &state,
+            header_ids: &ids,
+            validation_settings: &settings,
+        };
+        let owned = context
+            .build_reduction_owned_for_tx(&reduced.unsigned_transaction, 0, &inputs, &[], 3)
+            .unwrap();
+        assert_eq!(owned.last_headers[0].id, ids[0]);
+        assert_eq!(owned.last_headers[1].id, ids[1]);
+        assert_ne!(
+            owned.last_headers[0].id,
+            *ergo_ser::header::serialize_header(&state.sigma_last_headers[0])
+                .unwrap()
+                .1
+                .as_bytes(),
+        );
+        assert_eq!(owned.as_borrowed().validation_settings, settings);
+    }
+
+    #[test]
+    fn explicit_context_rejects_mixed_header_snapshots() {
+        let (reduced, inputs) = sample_transaction();
+        let ids = [[7; 32], [8; 32]];
+        let settings = SigmaValidationSettings::default();
+        let build = |state: &BlockchainStateContext, ids: &[[u8; 32]], version| {
+            SigningContext {
+                state_context: state,
+                header_ids: ids,
+                validation_settings: &settings,
+            }
+            .build_reduction_owned_for_tx(
+                &reduced.unsigned_transaction,
+                0,
+                &inputs,
+                &[],
+                version,
+            )
+        };
+        let mut mixed = state();
+        mixed.sigma_pre_header.parent_id = [1; 32];
+        assert!(build(&mixed, &ids, 3).is_err());
+        let mut mixed = state();
+        mixed.previous_state_digest = ADDigest::from_bytes([1; 33]);
+        assert!(build(&mixed, &ids, 3).is_err());
+        let mut mixed = state();
+        mixed.sigma_last_headers[1].height += 1;
+        assert!(build(&mixed, &ids, 3).is_err());
+        let mut mixed = state();
+        mixed.sigma_last_headers[0].parent_id = ModifierId::from_bytes([1; 32]);
+        assert!(build(&mixed, &ids, 3).is_err());
+        let mut mixed = state();
+        mixed.sigma_last_headers[0].unparsed_bytes = vec![1];
+        assert!(build(&mixed, &ids, 3).is_err());
+        assert!(build(&state(), &ids[..1], 3).is_err());
+    }
+
+    #[test]
+    fn activated_script_version_is_independent_of_script_visible_preheader_version() {
+        let (reduced, inputs) = sample_transaction();
+        let state = state();
+        let settings = SigmaValidationSettings::default();
+        let context = SigningContext {
+            state_context: &state,
+            header_ids: &[[7; 32], [8; 32]],
+            validation_settings: &settings,
+        };
+        // Protocol parameters fix activation independently of a mid-epoch
+        // physical header version, as SDK ReducingInterpreter's context does.
+        let owned = context
+            .build_reduction_owned_for_tx(&reduced.unsigned_transaction, 0, &inputs, &[], 2)
+            .unwrap();
+        assert_eq!(owned.as_borrowed().activated_script_version, 2);
+        assert_eq!(owned.as_borrowed().pre_header_version, 4);
+
+        let params = BlockchainParameters {
+            max_block_cost: 1_000_000,
+            input_cost: 2000,
+            data_input_cost: 100,
+            output_cost: 100,
+            token_access_cost: 100,
+            interpreter_init_cost: 10000,
+            block_version: 3,
+        };
+        let prover = crate::proving::prover::Prover::new(
+            crate::proving::secrets::SecretRegistry::empty(),
+            params,
+        );
+        let actual = prover
+            .reduce_transaction(&reduced.unsigned_transaction, &inputs, &[], &context)
+            .unwrap();
+        assert_eq!(actual.to_bytes().unwrap(), reduced.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn strict_context_rejects_unrepresentable_box_values_without_fallback() {
+        let (mut reduced, mut inputs) = sample_transaction();
+        inputs[0].candidate.value = u64::MAX;
+        reduced.unsigned_transaction.inputs[0].box_id = inputs[0].box_id().unwrap();
+        let state = state();
+        let settings = SigmaValidationSettings::default();
+        let context = SigningContext {
+            state_context: &state,
+            header_ids: &[[7; 32], [8; 32]],
+            validation_settings: &settings,
+        };
+        assert!(context
+            .build_reduction_owned_for_tx(&reduced.unsigned_transaction, 0, &inputs, &[], 3)
+            .is_err());
     }
 }
