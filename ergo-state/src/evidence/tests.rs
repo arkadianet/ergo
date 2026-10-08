@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::*;
 use ergo_primitives::digest::{Digest32, ModifierId};
 use ergo_primitives::group_element::GroupElement;
