@@ -20,7 +20,9 @@ jobs:
       - name: Core library feature tests
         run: cargo test --locked -p ergo-wallet --no-default-features
       - name: CLI and keystore compatibility
-        run: cargo test --locked -p ergo-wallet --features cli
+        run: |
+          cargo test --locked -p ergo-wallet --no-default-features --features keystore
+          cargo test --locked -p ergo-wallet --features cli
       - name: Core library clippy
         run: cargo clippy --locked -p ergo-wallet --no-default-features --all-targets -- -D warnings
       - name: Android libraries (no NDK link required)

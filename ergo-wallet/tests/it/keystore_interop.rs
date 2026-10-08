@@ -307,6 +307,7 @@ fn keystore_export_wrong_password_or_nonempty_destination_leaves_files_unchanged
     assert_eq!(std::fs::read(&source).unwrap(), before);
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn cli_export_keystore_reads_password_from_stdin_and_retains_reference_key() {
     let oracle = oracle();

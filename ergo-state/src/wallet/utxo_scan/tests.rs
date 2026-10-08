@@ -581,22 +581,25 @@ fn external_wallet() -> (tempfile::TempDir, Database) {
 #[test]
 fn external_discovery_writes_only_the_wallet_target_and_preserves_honest_coverage() {
     let (source_dir, source, _) = fixture(5);
-    let before = std::fs::read(source_dir.path().join("state.redb")).unwrap();
+    let source_path = source_dir.path().join("state.redb");
+    drop(source);
+    let before = std::fs::read(&source_path).unwrap();
+    let source = redb::ReadOnlyDatabase::open(&source_path).unwrap();
     let (_target_dir, target) = external_wallet();
     let snapshot = source.begin_read().unwrap();
     let result = discover_into(&snapshot, &target, false).unwrap();
     assert_eq!(result.matched_boxes, 4);
     assert!(!result.history_complete);
-    assert_eq!(
-        std::fs::read(source_dir.path().join("state.redb")).unwrap(),
-        before
-    );
-    assert!(coverage(&source.begin_read().unwrap()).unwrap().is_none());
+    assert!(coverage(&snapshot).unwrap().is_none());
+    assert!(super::super::reader::WalletReader::new(&snapshot)
+        .all_boxes()
+        .unwrap()
+        .is_empty());
+    drop(snapshot);
+    drop(source);
     assert!(
-        super::super::reader::WalletReader::new(&source.begin_read().unwrap())
-            .all_boxes()
-            .unwrap()
-            .is_empty()
+        std::fs::read(&source_path).unwrap() == before,
+        "external discovery modified the source database"
     );
     let target_snapshot = target.begin_read().unwrap();
     let reader = super::super::reader::WalletReader::new(&target_snapshot);
@@ -655,22 +658,62 @@ fn external_discovery_checkpoint_uses_source_anchor_and_target_keys() {
 
 #[test]
 fn external_discovery_refuses_pending_jobs_before_mutating_target() {
+    use ergo_wallet_service::wallet::mining_jobs::JOURNAL;
+    use redb::TableHandle;
+
     let (_source_dir, source, _) = fixture(5);
-    let (target_dir, target) = external_wallet();
+    let (_target_dir, target) = external_wallet();
     let txn = crate::begin_write_qr(&target).unwrap();
-    txn.open_table(ergo_wallet_service::wallet::mining_jobs::JOURNAL)
+    txn.open_table(JOURNAL)
         .unwrap()
         .insert(1, r#"{"job":{"state":"queued"}}"#.as_bytes())
         .unwrap();
     txn.commit().unwrap();
-    let before = std::fs::read(target_dir.path().join("wallet.redb")).unwrap();
+    // Snapshot every target table and its exact rows. Opening or closing a
+    // writable redb database can change physical allocator metadata, and its
+    // live file cannot be read directly on Windows.
+    let target_contents = || {
+        let read = target.begin_read().unwrap();
+        let mut tables: Vec<_> = read
+            .list_tables()
+            .unwrap()
+            .map(|handle| handle.name().to_owned())
+            .collect();
+        tables.sort();
+        let mut expected = vec![
+            JOURNAL.name().to_owned(),
+            WALLET_TRACKED_PUBKEYS.name().to_owned(),
+        ];
+        expected.sort();
+        assert_eq!(tables, expected);
+        assert!(read.list_multimap_tables().unwrap().next().is_none());
+        let pubkeys: Vec<_> = read
+            .open_table(WALLET_TRACKED_PUBKEYS)
+            .unwrap()
+            .iter()
+            .unwrap()
+            .map(|row| {
+                let (key, value) = row.unwrap();
+                (key.value(), value.value().to_vec())
+            })
+            .collect();
+        let jobs: Vec<_> = read
+            .open_table(JOURNAL)
+            .unwrap()
+            .iter()
+            .unwrap()
+            .map(|row| {
+                let (key, value) = row.unwrap();
+                (key.value(), value.value().to_vec())
+            })
+            .collect();
+        (tables, pubkeys, jobs)
+    };
+    let before = target_contents();
     let snapshot = source.begin_read().unwrap();
     assert!(discover_into(&snapshot, &target, false)
         .unwrap_err()
         .to_string()
         .contains("non-terminal wallet mining jobs"));
-    assert_eq!(
-        std::fs::read(target_dir.path().join("wallet.redb")).unwrap(),
-        before
-    );
+    assert_eq!(target_contents(), before);
 }
