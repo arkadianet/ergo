@@ -41,6 +41,7 @@ mod block_reassembly;
 mod compat;
 mod emission;
 mod error;
+mod evidence;
 mod nipopow;
 
 use block_reassembly::{
@@ -81,6 +82,7 @@ pub struct SnapshotReadState {
     /// and wall-clock apply age/wedge, written by a plain thread nothing
     /// on the runtime can starve. Overlaid onto `/metrics` per request.
     telemetry: std::sync::Arc<crate::node::telemetry::LiveTelemetry>,
+    committed_evidence: Option<ergo_api::evidence::EvidenceReaderHandle>,
 }
 
 /// Filesystem paths the `/api/v1/host` handler needs to compute per-call
@@ -273,7 +275,14 @@ impl SnapshotReadState {
             voting_targets,
             apply_phase,
             telemetry,
+            committed_evidence: None,
         }
+    }
+
+    pub fn with_committed_evidence(mut self, db: Arc<redb::Database>, anchor: [u8; 32]) -> Self {
+        self.committed_evidence =
+            Some(Arc::new(evidence::CommittedEvidenceBridge::new(db, anchor)));
+        self
     }
 
     /// Wrap as an `Arc<dyn NodeReadState>` for `ergo_api::serve`.
@@ -332,6 +341,9 @@ impl SnapshotReadState {
 }
 
 impl NodeReadState for SnapshotReadState {
+    fn committed_evidence_reader(&self) -> Option<ergo_api::evidence::EvidenceReaderHandle> {
+        self.committed_evidence.clone()
+    }
     fn sync_gauges(&self) -> ergo_api::ApiSyncGauges {
         self.handle.load().gauges
     }

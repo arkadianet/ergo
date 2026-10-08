@@ -20,6 +20,7 @@ pub mod auth;
 pub mod blockchain;
 pub mod compat;
 pub mod emission;
+pub mod evidence;
 pub mod host_guard;
 pub mod mining;
 pub mod script;
