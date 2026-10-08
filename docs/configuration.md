@@ -812,38 +812,42 @@ versioning policy.
 # `ergo-walletd.toml`: the standalone wallet daemon
 
 Everything above configures `ergo-node`. This section configures
-`ergo-walletd`, the **separate, watch-only wallet daemon** documented in
-[`codemap/ergo-walletd.md`](./codemap/ergo-walletd.md). The two files have
-nothing in common except the `network` key: a daemon config is read only by
-`ergo-walletd --config <path>`, and its schema is strict
+`ergo-walletd`, the separate wallet daemon documented in
+[`codemap/ergo-walletd.md`](./codemap/ergo-walletd.md). A daemon config is read
+only by `ergo-walletd --config <path>`, and its schema is strict
 (`deny_unknown_fields`), so a node key pasted into a daemon config is a hard
 parse error rather than a silently ignored line.
 
-A ready-to-use reference config ships at
-[`../ergo-walletd/ergo-walletd.toml`](../ergo-walletd/ergo-walletd.toml); a
-test parses that file against this schema, so the sample and the table cannot
-drift apart.
+The default watch-only reference config ships at
+[`../ergo-walletd/ergo-walletd.toml`](../ergo-walletd/ergo-walletd.toml).
+[`../ergo-walletd/ergo-walletd-seed.toml`](../ergo-walletd/ergo-walletd-seed.toml)
+shows the opt-in encrypted seed lifecycle mode. The config schema rejects
+unknown fields and combinations that mix descriptor and seed ownership.
 
-The daemon is read-only: it holds no signing key, exposes no send/sign/unlock
-route, and its chain client cannot submit. Every balance, box, and transaction
-it reports comes from **confirmed** blocks it has applied — never from a
-mempool or an unconfirmed header.
+`mode = "watch_only"` imports public descriptors and exposes the existing
+read API without opening secret storage. `mode = "seed"` hosts the shared
+wallet engine for encrypted seed lifecycle and key management, protecting all
+local reads and writes with an independent credential. This first Phase 3
+increment cannot construct, sign or send transactions. Balance, box and
+transaction reads remain confirmed-only; no mempool overlay is exposed.
 
 ## `ergo-walletd.toml` top-level keys
 
 | Key | Type | Default | Description |
 |---|---|---|---|
+| `mode` | string | `"watch_only"` | `"watch_only"` requires a public `descriptor_file`. `"seed"` requires `local_api_key_file` and rejects `descriptor_file`. CLI: `--mode <watch-only\|seed>`. |
 | `network` | string | `"mainnet"` | Required network identity: `"mainnet"` or `"testnet"`. Any other value (including `devnet`) is a load error. It selects the base58 address prefix used for descriptor validation and for every address the local API returns, so it **must** match the network the configured `node_url` serves — the daemon cannot infer that from the node. CLI: `--network`. |
-| `data_dir` | string (path) | none (required) | Directory holding `wallet.redb`, the daemon's only database. Created on first start. |
+| `data_dir` | string (path) | none (required) | Directory holding `wallet.redb`. Seed mode also stores encrypted secret files under `wallet/`. Use a fresh, separate directory when creating a seed wallet; there is no automatic migration from an embedded or descriptor wallet. Created on first start. |
 | `node_url` | string (URL) | none (required) | Base URL of the node's operator API. Only `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}` are read. Must be `http`/`https` with a host and no credentials, query, or fragment. CLI: `--node-url`. |
 | `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
-| `descriptor_file` | string (path) | none (required) | Public descriptor file (see [Descriptor file](#descriptor-file)). Size-capped at 16 MiB and validated at load. CLI: `--descriptor-file`. |
+| `descriptor_file` | string (path) | none | Required in `watch_only` mode and rejected in `seed` mode. Public descriptor file (see [Descriptor file](#descriptor-file)); size-capped at 16 MiB and validated at load. CLI: `--descriptor-file`. |
+| `local_api_key_file` | string (path) | none | Required in `seed` mode and rejected in `watch_only` mode. Independent local `api_key` credential protecting all seed-mode reads and writes on both Unix and TCP listeners. Uses the same file-permission, size and header-value checks as `api_key_file`; the two files must contain different credentials. Never forwarded to the node. CLI: `--local-api-key-file`. |
 | `sync_interval` | u64 or string | `15` | Delay after completed sync passes or retryable errors; incomplete passes continue immediately. Accepts plain seconds (`15`) or a duration string (`"500ms"`, `"30s"`, `"2m"`, `"1h"`). `0` is rejected. CLI: `--sync-interval`. |
 | `shutdown_timeout_secs` | u64 | `5` | Maximum seconds to wait for a cancelled sync worker during shutdown. Must be greater than zero. Cancellation prevents subsequent requests and block application; an in-flight blocking HTTP request can finish after the deadline. |
 | `sync_batch` | u32 | `256` | **Apply budget**: the maximum number of blocks *applied* (committed to the wallet database) by one sync pass. Must be `1..=1024`. It is not a request size — a pass may reach the node tip through many HTTP calls, and it is not what bounds a single response. Larger values trade memory and pass latency for fewer passes. CLI: `--sync-batch`. |
 | `blocks_page` | u32 | `1` | **Request budget**: the maximum number of blocks asked for in a single `blocks-since` call, independent of `sync_batch`. Must be `1..=1024`. The wire form hex-encodes every output box, so a page of `N` blocks costs roughly twice their serialized bytes and must fit the daemon's hard 8 MiB response cap. The default `1` is the largest page whose *worst legal* body provably fits that cap (see [The two sync budgets](#the-two-sync-budgets)); raising it is an operator decision made against their own node's `maxBlockSize`. A block too large even for a one-block page is a terminal error naming the cap and the page — the daemon never retries with a smaller page. CLI: `--blocks-page`. |
-| `unix_socket` | string (path) | none | Path of the owner-only Unix socket serving the local read API. See [Socket permissions](#socket-permissions). CLI: `--unix-socket`. |
-| `tcp_fallback` | string (socket addr) | none | Optional TCP listener for the local read API. **Must** be a loopback address; a non-loopback bind is rejected at load, so the read API cannot be exposed to the network by configuration. The TOML key also accepts the alias `tcp_addr`. CLI: `--tcp-fallback`. |
+| `unix_socket` | string (path) | none | Path of the owner-only Unix socket serving the local API. Seed mode still requires the local credential on every request. See [Socket permissions](#socket-permissions). CLI: `--unix-socket`. |
+| `tcp_fallback` | string (socket addr) | none | Optional loopback TCP listener for the local API. A non-loopback bind is rejected at load. Seed mode requires the same local credential used on the Unix socket. Alias: `tcp_addr`. CLI: `--tcp-fallback`. |
 
 At least one of `unix_socket` / `tcp_fallback` is required.
 
@@ -899,7 +903,8 @@ half-edited file cannot leave the daemon listening somewhere unintended.
 
 ## Descriptor file
 
-`descriptor_file` points at the daemon's no-secret input. JSON or TOML, with
+In `watch_only` mode, `descriptor_file` points at the daemon's public input.
+Seed mode rejects this key. JSON or TOML, with
 `descriptors` (or `keys`) as an array of entries:
 
 ```toml
@@ -924,8 +929,7 @@ Validation rules that matter operationally:
 
 - **No secrets.** A `private_key` (or any unknown) field is a parse error, not
   a warning: the schema is strict, so a descriptor file cannot smuggle key
-  material into a watch-only daemon. The daemon itself has no code path that
-  reads or stores a secret key.
+  material into a watch-only daemon. Watch-only mode never opens secret storage.
 - **Keys are validated, not trusted.** Each public key must decode as a
   compressed point *and* render as a P2PK address for the configured
   `network`, so a bad key fails at startup instead of on a read route.
@@ -941,14 +945,62 @@ Validation rules that matter operationally:
   paths, and labels. The daemon exposes persisted scan registrations through
   `/scans` and `/scan/listAll` and rewinds their tracked boxes and transactions
   on reorgs. A fresh descriptor-only database has an empty registry. Registration
-  remains a node capability (`/scan/register`); the daemon's API is read-only.
+  remains a node capability (`/scan/register`); the daemon has no scan mutation
+  routes in either mode.
   `tests/it/scan_registry_rewind.rs` covers the persisted registry's apply and
   rewind behavior, and `tests/it/daemon_boot.rs` covers a fresh database.
 
+## Seed lifecycle API
+
+Start with `mode = "seed"`, a fresh data directory, `local_api_key_file` and
+no `descriptor_file`. The daemon will not automatically migrate embedded
+wallet data or turn an existing descriptor wallet into a seed wallet. Initialize
+or restore through the local API; encrypted files are stored under
+`data_dir/wallet/`. Existing seed wallets always start locked. Unlocking
+reconciles the seed's public keys, and later syncing continues while locked.
+Seed restarts require the daemon's persisted `wallet-mode` marker; an unmarked
+directory containing `wallet.redb`, `wallet/` or `state.redb` is rejected.
+
+Every seed-mode request must contain exactly one `api_key` header matching the
+local credential, on both Unix and TCP listeners. The node credential is
+insufficient. Missing, duplicate or incorrect credentials return `401` before
+body parsing. All seed-mode responses include `Cache-Control: no-store`.
+Lifecycle bodies are capped at 16 KiB, use strict protocol DTOs, and return
+generic parse errors without echoing secret fields. The engine's failed-attempt
+budget protects password and mnemonic checks; internal error details are
+withheld from the local API.
+
+| Method | Route | Request / response |
+|---|---|---|
+| GET | `/api/v1/wallet/lifecycle/status` | `{initialized, locked}` from local state; works while the node is unavailable |
+| POST | `/api/v1/wallet/init` | `{pass, mnemonicPass?, strength?}`; strength is 12, 15, 18, 21 or 24 words, default 24; response `{mnemonic}` |
+| POST | `/api/v1/wallet/restore` | `{mnemonic, mnemonicPass?, pass, derivation}`; derivation is `{type:"eip3"}` or `{type:"legacyPre1627"}` |
+| POST | `/api/v1/wallet/unlock` | `{pass}`; unlock and reconcile public keys |
+| POST | `/api/v1/wallet/lock` | Drop unlocked secret material; idempotent |
+| POST | `/api/v1/wallet/mnemonic/verify` | `{mnemonic, mnemonicPass?}`; response `{matched}` |
+| POST | `/api/v1/wallet/addresses` | `{type:"next"}` or `{type:"path", derivationPath:"m/..."}`; response `{address, derivationPath, index}` |
+| GET | `/api/v1/wallet/change-address` | `{address}`; address may be `null` |
+| PUT | `/api/v1/wallet/change-address` | `{address}`; requires an unlocked seed that owns the tracked address |
+
+These routes are added to the existing read API. `/status` and
+`/api/v1/wallet/status` keep the cursor, node-tip, lag and sync projection;
+seed initialization and lock state live at `/api/v1/wallet/lifecycle/status`.
+Key derivation records a height from a bounded authenticated node-tip request.
+Commands and sync passes share one writer gate. Newly added keys reset history
+in the same transaction, so sync rebuilds their coverage before claiming it.
+A terminal seed-sync failure stays visible while the worker waits; adding a
+new key resets history and resumes replay without a process restart.
+
+Construction, signing, sending, private-key export and engine-rescan routes are
+absent. The lifecycle adapter conservatively treats node pruning as unknown and
+does not support engine block replay. Restore marks historical coverage
+incomplete; normal sync must obtain the required retained history from the node.
+It cannot recover an unavailable history by declaring a restored wallet caught
+up. See [Phase 3's remaining work](wallet-extraction.md#phase-3-daemon-engine-hosting).
+
 ## Socket permissions
 
-The local read API is the daemon's entire trust boundary, so its socket is
-owner-only by construction:
+Both daemon modes restrict their listener addresses and socket permissions:
 
 - The Unix socket is created under a `0o077` umask and then explicitly
   `chmod 0600`; failure to set the mode removes the socket and aborts startup.
@@ -958,20 +1010,25 @@ owner-only by construction:
   connection, or one with a missing/invalid marker, is left alone and startup
   fails. A daemon therefore never steals or clobbers a live socket.
 - The marker and the socket are removed on clean shutdown.
+- Unix connection tasks are tracked and cancelled during listener shutdown;
+  TCP listeners drain gracefully within the configured shutdown deadline.
 - `tcp_fallback`, when used, must bind a loopback address (rejected otherwise).
-- The daemon does **not** add a bearer token or TLS: local socket permissions
-  (or loopback) are the access control. Do not proxy it to a shared host.
+- Watch-only mode uses socket permissions or loopback for access control.
+  Seed mode also requires the independent local `api_key` credential for every
+  read and write. The daemon does not provide TLS or bind non-loopback TCP.
 
 ## `ergo-walletd` CLI flags
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--config`, `-c <path>` | path | `ergo-walletd.toml` | Daemon config file. A missing file is a startup error (the daemon has no built-in defaults for `data_dir`, `node_url`, `api_key_file`, or `descriptor_file`). |
+| `--config`, `-c <path>` | path | `ergo-walletd.toml` | Daemon config file. A missing file is a startup error; required paths and credentials depend on the selected mode. |
+| `--mode <watch-only\|seed>` | string | — | Overrides the file's `mode`. TOML spells the default mode `watch_only`. |
 | `--network <mainnet\|testnet>` | string | — | Overrides the file's `network`. |
 | `--data-dir <path>` | path | — | Overrides `data_dir`. |
 | `--node-url <url>` | string | — | Overrides `node_url`. |
 | `--api-key-file <path>` | path | — | Overrides `api_key_file`. |
 | `--descriptor-file <path>` | path | — | Overrides `descriptor_file`. |
+| `--local-api-key-file <path>` | path | — | Overrides `local_api_key_file` for seed mode. |
 | `--sync-interval <secs>` | u64 | — | Overrides `sync_interval`. |
 | `--sync-batch <n>` | u32 | — | Overrides `sync_batch` (the per-pass apply budget). |
 | `--blocks-page <n>` | u32 | — | Overrides `blocks_page` (the per-request page size). |
@@ -981,5 +1038,5 @@ owner-only by construction:
 Logging uses `tracing` with the `RUST_LOG` filter (default `info`): reorgs and
 retries log at `warn`, protocol violations and other terminal sync failures log
 at `error`. Log lines carry locally generated messages and heights only — never
-the node API key, never a node response body.
+credentials, recovery phrases, passwords or node response bodies.
 See [operator controls](operator-controls.md) for configurable API request budgets, readiness policy, named credentials, runtime changes and durable peer administration.

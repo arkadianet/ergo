@@ -1,6 +1,6 @@
 [package]
 name = "ergo-walletd"
-description = "Standalone watch-only Ergo wallet daemon."
+description = "Standalone Ergo wallet daemon with descriptor and seed wallet modes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -36,6 +36,10 @@ tokio               = { workspace = true, features = ["rt-multi-thread", "macros
 toml                = { workspace = true }
 tracing             = { workspace = true }
 tracing-subscriber  = { workspace = true }
+parking_lot         = { workspace = true }
+async-trait         = { workspace = true }
+subtle              = { workspace = true }
+zeroize             = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 # Safe Unix permission-mask support; sockets are restricted at creation.
@@ -66,11 +70,6 @@ ergo-state = { workspace = true, features = ["test-helpers"] }
 # comparison would be vacuous exactly where it matters. Dev-only: the
 # released binary's dependency graph is unchanged.
 ergo-validation = { workspace = true, features = ["test-helpers"] }
-# TEST-TARGET ONLY. `tests/it/shadow.rs` builds the real production
-# `ergo-node` `WalletStateHook`, whose shared wallet state is a
-# `parking_lot::RwLock<WalletState>`. Same workspace version ergo-node uses,
-# so the lock type is the same type.
-parking_lot    = { workspace = true }
 bincode = { workspace = true }
 redb = { workspace = true }
 

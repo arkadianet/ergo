@@ -225,6 +225,15 @@ Read [contribution rules](CONTRIBUTING.md#test-conventions) and [compatibility p
 - [Compatibility](docs/compatibility.md) · [Operating-mode evidence](docs/compatibility.md#operating-mode-status)
 - [Contributing](CONTRIBUTING.md) · [Releasing](docs/releasing.md) · [Code of conduct](CODE_OF_CONDUCT.md)
 
+The wallet extraction integration also provides `ergo-walletd`, a separate
+daemon built from source. Watch-only remains its default; Phase 3 adds opt-in
+encrypted seed lifecycle and key management through an authenticated local API.
+See the [extraction plan](docs/wallet-extraction.md#phase-3-daemon-engine-hosting),
+[daemon guide](docs/codemap/ergo-walletd.md) and
+[daemon configuration](docs/configuration.md#ergo-walletdtoml-the-standalone-wallet-daemon).
+Daemon transaction construction, signing, sending and embedded-wallet migration
+remain to be implemented.
+
 ## Security
 
 Pre-1.0: **do not use this node for production infrastructure or funds custody.**
@@ -236,9 +245,3 @@ Findings against the dev oracle `sigma-rust` belong upstream.
 
 Dual-licensed under MIT or Apache 2.0, at your option.
 See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
-
-The wallet extraction integration also provides `ergo-walletd`, a separate
-watch-only daemon built from source. See the [daemon guide](docs/codemap/ergo-walletd.md)
-and [daemon configuration](docs/configuration.md#ergo-walletdtoml-the-standalone-wallet-daemon)
-for its descriptor, read-only API, and sync behavior. Hosting the spending engine
-in the daemon is the next extraction phase.

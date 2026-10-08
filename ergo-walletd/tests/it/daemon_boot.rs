@@ -72,6 +72,8 @@ fn write_config(dir: &Path, node_url: &str, socket: &Path) -> PathBuf {
 fn load(config_path: &Path) -> LoadedConfig {
     Config::load(Cli {
         config: config_path.to_path_buf(),
+        mode: None,
+        local_api_key_file: None,
         network: None,
         data_dir: None,
         node_url: None,
@@ -264,6 +266,8 @@ fn daemon_refuses_a_group_readable_api_key_file_and_redacts_its_value() {
     .unwrap();
     let error = Config::load(Cli {
         config: config_path,
+        mode: None,
+        local_api_key_file: None,
         network: None,
         data_dir: None,
         node_url: None,

@@ -244,6 +244,7 @@ pub trait WalletStore: Send + Sync {
 pub struct RedbWalletStore {
     db: Arc<Database>,
     standalone: bool,
+    rebuild_history_on_key_additions: bool,
 }
 
 impl RedbWalletStore {
@@ -251,6 +252,7 @@ impl RedbWalletStore {
         Self {
             db,
             standalone: false,
+            rebuild_history_on_key_additions: false,
         }
     }
 
@@ -270,6 +272,7 @@ impl RedbWalletStore {
         Ok(Self {
             db,
             standalone: true,
+            rebuild_history_on_key_additions: false,
         })
     }
 
@@ -278,7 +281,23 @@ impl RedbWalletStore {
         Ok(Self {
             db,
             standalone: true,
+            rebuild_history_on_key_additions: false,
         })
+    }
+
+    /// Rebuild historical classifications when a tracked key row changes.
+    ///
+    /// A seed-hosted standalone wallet must replay earlier blocks after its
+    /// first unlock or later key derivation. This opt-in policy commits the
+    /// new key together with an empty, invalidated history and a genesis
+    /// cursor, so a crash cannot publish new tracking beside a complete old
+    /// balance. The embedding runtime must serialize these writes with sync
+    /// passes to prevent a page captured before the change from applying
+    /// afterward. Embedded and descriptor-only stores retain their existing
+    /// policy unless this builder is called.
+    pub fn rebuild_history_on_key_additions(mut self) -> Self {
+        self.rebuild_history_on_key_additions = true;
+        self
     }
 
     pub fn attach_write_transaction(txn: &WriteTransaction) -> RedbWalletWrite<'_> {
@@ -286,6 +305,7 @@ impl RedbWalletStore {
             owned: None,
             borrowed: Some(txn),
             standalone: false,
+            rebuild_history_on_key_additions: false,
         }
     }
 
@@ -294,6 +314,7 @@ impl RedbWalletStore {
             owned: None,
             borrowed: Some(txn),
             standalone: true,
+            rebuild_history_on_key_additions: false,
         }
     }
 }
@@ -311,6 +332,7 @@ impl WalletStore for RedbWalletStore {
             owned: Some(begin_write_quick(&self.db)?),
             borrowed: None,
             standalone: self.standalone,
+            rebuild_history_on_key_additions: self.rebuild_history_on_key_additions,
         }))
     }
 }
@@ -328,6 +350,7 @@ impl WalletStore for Database {
             owned: Some(begin_write_quick(self)?),
             borrowed: None,
             standalone: false,
+            rebuild_history_on_key_additions: false,
         }))
     }
 }
@@ -702,6 +725,7 @@ pub struct RedbWalletWrite<'a> {
     owned: Option<WriteTransaction>,
     borrowed: Option<&'a WriteTransaction>,
     standalone: bool,
+    rebuild_history_on_key_additions: bool,
 }
 
 #[allow(clippy::result_large_err)]
@@ -1193,6 +1217,19 @@ impl WalletWrite for RedbWalletWrite<'_> {
         pubkey: [u8; 33],
         meta: &TrackedPubkeyMeta,
     ) -> Result<(), WalletStoreError> {
+        let meta_bytes = bincode::serialize(meta).map_err(|error| {
+            WalletStoreError::Decode(format!("tracked pubkey metadata encode: {error}"))
+        })?;
+        let key = crate::wallet::tables::tracked_pubkey_key(path_idx, &pubkey);
+        let reset_history = self.rebuild_history_on_key_additions && {
+            let tracked = self
+                .txn()
+                .open_table(crate::wallet::tables::WALLET_TRACKED_PUBKEYS)?;
+            let changed = tracked
+                .get(&key)?
+                .is_none_or(|row| row.value().as_slice() != meta_bytes.as_slice());
+            changed
+        };
         if read_wallet_cursor(self.txn())?.is_none()
             && self
                 .txn()
@@ -1214,15 +1251,13 @@ impl WalletWrite for RedbWalletWrite<'_> {
             let id = tip.as_ref().filter(|_| height > 0).map(|tip| &tip.1);
             set_scan_cursor(self.txn(), height, id)?;
         }
-        let meta_bytes = bincode::serialize(meta).map_err(|error| {
-            WalletStoreError::Decode(format!("tracked pubkey metadata encode: {error}"))
-        })?;
         self.txn()
             .open_table(crate::wallet::tables::WALLET_TRACKED_PUBKEYS)?
-            .insert(
-                crate::wallet::tables::tracked_pubkey_key(path_idx, &pubkey),
-                meta_bytes,
-            )?;
+            .insert(key, meta_bytes)?;
+        if reset_history {
+            self.prepare_rescan(0, true)?;
+            self.set_rescan_state(&RescanState::Idle)?;
+        }
         Ok(())
     }
 
@@ -1699,6 +1734,186 @@ mod tests {
             allow_non_contiguous_wallet: false,
         };
         (payload, txs)
+    }
+
+    fn tracked_meta(path: u32) -> TrackedPubkeyMeta {
+        TrackedPubkeyMeta {
+            derivation_path: vec![path],
+            derivation_path_label: String::new(),
+            added_at_height: 0,
+        }
+    }
+
+    fn seed_history(store: &RedbWalletStore) {
+        let mut write = store.begin_write().unwrap();
+        write
+            .insert_tracked_pubkey(0, [1; 33], &tracked_meta(1))
+            .unwrap();
+        write.rebuild_visible_addresses().unwrap();
+        write.set_change_address([1; 33]).unwrap();
+        write.set_derivation_head(7).unwrap();
+        write.put_scan(11, b"{\"scanId\":11}".to_vec(), 11).unwrap();
+        let (payload, transactions) = payload();
+        let block = crate::wallet::scan::RescanBlock {
+            block_id: [0x42; 32],
+            txs: transactions
+                .into_iter()
+                .map(|tx| crate::wallet::scan::RescanTx {
+                    tx_id: tx.tx_id,
+                    inputs: tx.inputs,
+                    outputs: tx.outputs,
+                })
+                .collect(),
+        };
+        write
+            .apply_rescan_block(
+                1,
+                &payload.tracked_p2pk_trees,
+                &payload.cached_pubkeys,
+                &block,
+                None,
+            )
+            .unwrap();
+        write
+            .replace_scan_box(&[11], [2; 32], 1, 0, vec![])
+            .unwrap();
+        write.set_scan_invalidated(false).unwrap();
+        write
+            .set_rescan_state(&RescanState::Failed {
+                height: 1,
+                reason: "previous sync failure".into(),
+            })
+            .unwrap();
+        write.commit().unwrap();
+    }
+
+    fn assert_seeded_history(read: &dyn WalletRead) {
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 1);
+        assert_eq!(read.chain_index_header(1).unwrap(), Some([0x42; 32]));
+        assert_eq!(read.all_boxes().unwrap().len(), 1);
+        assert_eq!(read.all_transactions().unwrap().len(), 1);
+        assert_eq!(read.scan_boxes(11).unwrap().len(), 1);
+        assert!(!read.scan_invalidated().unwrap());
+        assert!(matches!(
+            read.rescan_state().unwrap(),
+            RescanState::Failed { height: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn opt_in_key_changes_reset_history_and_tracking_in_one_commit() {
+        // Both adding a key and changing the persisted path of an existing
+        // key invalidate the historical projection. Identity-preserving
+        // writes are exercised separately below.
+        for (index, key, path, expected_keys) in [(1, [2; 33], 2, 2), (0, [1; 33], 9, 1)] {
+            let dir = tempfile::tempdir().unwrap();
+            let path_on_disk = dir.path().join("wallet.redb");
+            let store = RedbWalletStore::open_standalone(&path_on_disk).unwrap();
+            seed_history(&store);
+            let store = store.rebuild_history_on_key_additions();
+            let old_snapshot = store.read().unwrap();
+            let mut write = store.begin_write().unwrap();
+            write
+                .insert_tracked_pubkey(index, key, &tracked_meta(path))
+                .unwrap();
+            write.rebuild_visible_addresses().unwrap();
+            // No reader sees the new tracking before the reset commits.
+            let before_commit = store.read().unwrap();
+            assert_seeded_history(before_commit.as_ref());
+            assert_eq!(before_commit.tracked_pubkeys_with_paths().unwrap().len(), 1);
+            drop(before_commit);
+            write.commit().unwrap();
+
+            assert_seeded_history(old_snapshot.as_ref());
+            drop(old_snapshot);
+            let read = store.read().unwrap();
+            assert_eq!(
+                read.tracked_pubkeys_with_paths().unwrap().len(),
+                expected_keys
+            );
+            assert!(read.tracked_pubkeys_with_paths().unwrap().iter().any(
+                |(stored_index, stored_key, stored_path)| {
+                    *stored_index == index && *stored_key == key && *stored_path == vec![path]
+                }
+            ));
+            assert_eq!(read.scan_cursor().unwrap().unwrap().height, 0);
+            assert_eq!(read.scan_cursor().unwrap().unwrap().header_id, None);
+            assert_eq!(read.chain_index_header(1).unwrap(), None);
+            assert_eq!(read.applied_header_at_or_below(1).unwrap(), None);
+            assert!(read.all_boxes().unwrap().is_empty());
+            assert!(read.all_transactions().unwrap().is_empty());
+            assert!(read.scan_boxes(11).unwrap().is_empty());
+            assert!(read.scan_invalidated().unwrap());
+            assert_eq!(read.rescan_state().unwrap(), RescanState::Idle);
+            // A history rebuild preserves configuration and key metadata.
+            assert_eq!(read.scan_registry().unwrap().scans.len(), 1);
+            assert_eq!(read.change_address_pubkey().unwrap(), Some([1; 33]));
+            assert_eq!(read.derivation_head().unwrap(), 7);
+            drop(read);
+            drop(store);
+            let reopened = RedbWalletStore::open_standalone(&path_on_disk).unwrap();
+            assert!(reopened.read().unwrap().scan_invalidated().unwrap());
+            assert_eq!(
+                reopened
+                    .read()
+                    .unwrap()
+                    .tracked_pubkeys_with_paths()
+                    .unwrap()
+                    .len(),
+                expected_keys
+            );
+        }
+    }
+
+    #[test]
+    fn aborted_opt_in_key_insert_preserves_tracking_and_synced_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap();
+        seed_history(&store);
+        let store = store.rebuild_history_on_key_additions();
+        {
+            let mut write = store.begin_write().unwrap();
+            write
+                .insert_tracked_pubkey(1, [2; 33], &tracked_meta(2))
+                .unwrap();
+            write.rebuild_visible_addresses().unwrap();
+            // Dropping the write transaction aborts its history reset too.
+        }
+        let read = store.read().unwrap();
+        assert_seeded_history(read.as_ref());
+        assert_eq!(read.tracked_pubkeys_with_paths().unwrap().len(), 1);
+        assert_eq!(read.visible_pubkeys().unwrap(), vec![(0, [1; 33])]);
+    }
+
+    #[test]
+    fn unchanged_opt_in_key_row_preserves_synced_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap();
+        seed_history(&store);
+        let store = store.rebuild_history_on_key_additions();
+        let mut write = store.begin_write().unwrap();
+        write
+            .insert_tracked_pubkey(0, [1; 33], &tracked_meta(1))
+            .unwrap();
+        write.rebuild_visible_addresses().unwrap();
+        write.commit().unwrap();
+        assert_seeded_history(store.read().unwrap().as_ref());
+    }
+
+    #[test]
+    fn default_key_insert_preserves_existing_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap();
+        seed_history(&store);
+        let mut write = store.begin_write().unwrap();
+        write
+            .insert_tracked_pubkey(1, [2; 33], &tracked_meta(2))
+            .unwrap();
+        write.rebuild_visible_addresses().unwrap();
+        write.commit().unwrap();
+        let read = store.read().unwrap();
+        assert_seeded_history(read.as_ref());
+        assert_eq!(read.tracked_pubkeys_with_paths().unwrap().len(), 2);
     }
 
     #[test]

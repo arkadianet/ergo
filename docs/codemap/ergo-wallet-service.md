@@ -25,7 +25,7 @@ tree must not contain `ergo-state`, `ergo-api`, `ergo-node`, `ergo-mempool`,
 the node's production decoder).
 **Depended on by:** `ergo-node`, `ergo-walletd`; `ergo-state` during the
 transitional `ergo-state -> ergo-wallet-service` integration
-**Approx LOC:** ~22K (`src/**/*.rs`, including tests)
+**Approx LOC:** ~29K (`src/**/*.rs`, including tests)
 
 ## Start here
 - `src/lib.rs` — module map and the service's public re-exports.
@@ -40,7 +40,8 @@ transitional `ergo-state -> ergo-wallet-service` integration
 - `src/chain.rs:312` — object-safe `ChainClient` plus neutral tip, snapshot,
   block-range, UTXO, and submit shapes used by the runtime.
 - `src/wallet/store.rs:170` — `WalletStore`/`WalletRead`/`WalletWrite` and the
-  `RedbWalletStore` implementation.
+  `RedbWalletStore` implementation. Seed daemon stores opt into
+  `rebuild_history_on_key_additions()` for atomic history invalidation.
 - `src/wallet/apply/` — chain-apply classification, scan tracking, maturity,
   and rollback hooks; these run inside the state's existing redb transaction.
 - `src/tx_builder.rs` and `src/box_selector/` — pure box selection and
@@ -111,6 +112,8 @@ transitional `ergo-state -> ergo-wallet-service` integration
 - `WalletChainAccess`, `SigningView`, `ChainAccessError` — the engine's chain
   seam. Deliberately separate from `ChainClient` (the daemon's HTTP chain
   contract); the embedded node implements it over committed `ergo-state`.
+  The daemon's `LifecycleChainAccess` implements local cursor and bounded tip
+  reads while refusing signing views and engine rescan replay.
 - `MempoolOverlay`, `TxSubmitter`, `TxSubmitError` — pool and submission
   seams.
 - `RescanCoordinator`, `WalletRescanGuard`, `RescanJob`,
@@ -129,7 +132,8 @@ transitional `ergo-state -> ergo-wallet-service` integration
 - `WalletState`, `HydrationSource` — in-memory wallet projection and its
   persistence input.
 - `WalletStore`, `WalletRead`, `WalletWrite`, `RedbWalletStore` — persistence
-  port and redb implementation.
+  port and redb implementation. `RedbWalletStore::rebuild_history_on_key_additions`
+  enables standalone seed-wallet history resets inside the key-write transaction.
 - `WalletApplyHook`, `WalletApplyPayload`, `WalletWiring`, `RescanGuard` —
   chain-state integration contracts.
 - `WalletScanService`, `WalletScanCursor`, `RescanState` — recovery and cursor
@@ -151,6 +155,9 @@ transitional `ergo-state -> ergo-wallet-service` integration
   `&self`. The engine relies on that ordering for read-then-write sequences
   (scan registry, derivation head) and takes its locks at each command's
   historical granularity. The node's writer task owns its engine by value.
+  The seed daemon's `WalletHost` takes one mutex across every engine command
+  and entire `StandaloneSyncer` pass; a key mutation cannot race a page that
+  captured an older key set.
 - **No process-global wallet state.** Rescan fences, cancellation, the
   shutdown request, and the transition lock live in one `RescanCoordinator`
   per wallet, shared by `Arc` between the engine, the `WalletStateHook` and
@@ -187,6 +194,15 @@ transitional `ergo-state -> ergo-wallet-service` integration
 - **Fail-closed recovery.** Apply generations, fences, rescan state, and the
   durable `scan_invalidated` flag prevent a partial or reorg-conflicted
   replay from silently advancing wallet state.
+- **Atomic history reset on seed key changes.** Standalone stores can opt into
+  `rebuild_history_on_key_additions()`. In that mode, inserting a new tracked
+  key or changing its stored key/metadata clears wallet and scan projections,
+  applied-header indexes and UTXO discovery; sets the cursor to genesis and
+  invalidation to true; and resets rescan state to idle in the same transaction
+  as the key write. Tracked keys, visible addresses, derivation head, change
+  address and scan registry remain. Repeating an identical key row leaves
+  history untouched; failed transactions publish neither the key nor reset.
+  Embedded and ordinary watch stores retain their existing behavior.
 - **Two-direction applied-header index.** The standalone store's applied-header
   history is written in both directions in the same transaction —
   `height -> block id` (`WALLET_APPLIED_HEADERS`) and `block id -> height`
@@ -198,5 +214,7 @@ transitional `ergo-state -> ergo-wallet-service` integration
 - **Transport neutrality.** The service exposes synchronous ports, one async
   submission trait, and owned values. It does not open sockets, spawn a tokio
   runtime, depend on axum, or know the node's command channel. The embedded
-  node is a thin adapter (`ergo-node/src/node/wallet_bridge.rs`); phase 3
-  lets the daemon sign and send through the same engine.
+  node is a thin adapter (`ergo-node/src/node/wallet_bridge.rs`). The first
+  Phase 3 daemon increment hosts lifecycle and key commands through this same
+  engine. Daemon signing and sending require later committed-context, pool
+  and submission adapters; the current daemon exposes neither capability.

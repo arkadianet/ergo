@@ -4,12 +4,17 @@ pub mod api;
 pub mod chain_http;
 pub mod config;
 pub mod descriptor;
+pub mod engine_chain;
+pub mod host;
+pub mod lifecycle_api;
+mod ownership;
 #[cfg(unix)]
 pub mod socket;
+#[cfg(test)]
+mod supervision_tests;
 pub mod sync;
 pub mod tip;
 
-use std::fs;
 use std::sync::Arc;
 
 use ergo_wallet_service::{RedbWalletStore, WalletService};
@@ -26,7 +31,9 @@ use tower::ServiceExt;
 
 use crate::api::ApiContext;
 use crate::chain_http::HttpChainClient;
-use crate::config::{Config, LoadedConfig};
+use crate::config::{ApiKey, Config, ConfigError, LoadedConfig, WalletMode};
+use crate::engine_chain::LifecycleChainAccess;
+use crate::host::WalletHost;
 use crate::sync::{StandaloneSyncer, SyncConfig, SyncError};
 use crate::tip::CachedNodeTip;
 
@@ -38,6 +45,8 @@ pub enum DaemonError {
     Descriptor(#[from] descriptor::DescriptorError),
     #[error(transparent)]
     WalletStore(#[from] ergo_wallet_service::WalletStoreError),
+    #[error(transparent)]
+    Host(#[from] host::HostError),
     #[error(transparent)]
     Chain(#[from] ergo_wallet_service::ChainClientError),
     #[error(transparent)]
@@ -67,24 +76,64 @@ pub struct Daemon {
     service: Arc<WalletService>,
     syncer: Arc<StandaloneSyncer>,
     tip: Arc<CachedNodeTip>,
+    host: Option<WalletHost>,
+    local_api_key: Option<ApiKey>,
 }
 
 /// Blocking startup half. **Call this from outside any Tokio runtime** — see
 /// [`Daemon`] for why.
 pub fn prepare(config: LoadedConfig) -> Result<Daemon, DaemonError> {
-    fs::create_dir_all(&config.config.data_dir)?;
-    let store = Arc::new(RedbWalletStore::open_standalone(
-        config.config.data_dir.join("wallet.redb"),
-    )?);
-    let descriptors =
-        descriptor::parse_file(&config.config.descriptor_file, config.config.network)?;
-    descriptor::import(store.as_ref(), &descriptors)?;
+    match config.config.mode {
+        WalletMode::Seed => {
+            if config.config.descriptor_file.is_some()
+                || config.local_api_key.as_ref().is_none_or(|key| {
+                    key.expose().is_empty() || key.expose() == config.api_key.expose()
+                })
+            {
+                return Err(ConfigError::Invalid(
+                    "seed mode requires a separate local API credential and no descriptor_file"
+                        .into(),
+                )
+                .into());
+            }
+        }
+        WalletMode::WatchOnly if config.local_api_key.is_some() => {
+            return Err(
+                ConfigError::Invalid("local API credential requires seed mode".into()).into(),
+            );
+        }
+        WalletMode::WatchOnly => {}
+    }
+    ownership::claim(&config.config.data_dir, config.config.mode)?;
+    let mut store = RedbWalletStore::open_standalone(config.config.data_dir.join("wallet.redb"))?;
+    if config.config.mode == WalletMode::Seed {
+        store = store.rebuild_history_on_key_additions();
+    }
+    let store = Arc::new(store);
+    if config.config.mode == WalletMode::WatchOnly {
+        let path = config.config.descriptor_file.as_deref().ok_or_else(|| {
+            ConfigError::Invalid("watch_only mode requires descriptor_file".into())
+        })?;
+        let descriptors = descriptor::parse_file(path, config.config.network)?;
+        descriptor::import(store.as_ref(), &descriptors)?;
+    }
     let chain = Arc::new(HttpChainClient::new(
         config.config.node_url.clone(),
         config.api_key.clone(),
     )?);
     let tip = Arc::new(CachedNodeTip::new(chain.clone()));
-    let service = Arc::new(WalletService::new(store, chain));
+    let service = Arc::new(WalletService::new(store.clone(), chain.clone()));
+    let host = if config.config.mode == WalletMode::Seed {
+        Some(WalletHost::new(
+            store.clone(),
+            service.clone(),
+            Arc::new(LifecycleChainAccess::new(store, chain)),
+            &config.config.data_dir,
+            config.config.network,
+        )?)
+    } else {
+        None
+    };
     let syncer = Arc::new(StandaloneSyncer::new(
         service.clone(),
         SyncConfig {
@@ -99,10 +148,12 @@ pub fn prepare(config: LoadedConfig) -> Result<Daemon, DaemonError> {
         service,
         syncer,
         tip,
+        host,
+        local_api_key: config.local_api_key,
     })
 }
 
-/// Async startup half: bind the local read API, run the blocking sync loop on
+/// Async startup half: bind the local API, run the blocking sync loop on
 /// the blocking pool, and supervise both until a signal arrives.
 pub async fn run(daemon: Daemon) -> Result<(), DaemonError> {
     run_until(daemon, shutdown_signal()).await
@@ -125,6 +176,8 @@ where
         service,
         syncer,
         tip,
+        host,
+        local_api_key,
     } = daemon;
     run_listeners(
         syncer,
@@ -135,6 +188,8 @@ where
             tip,
             tip_max_age: ApiContext::default_tip_max_age(config.sync_interval),
         },
+        host,
+        local_api_key,
         shutdown,
     )
     .await
@@ -144,12 +199,19 @@ async fn run_listeners<F>(
     syncer: Arc<StandaloneSyncer>,
     config: &Config,
     context: ApiContext,
+    host: Option<WalletHost>,
+    local_api_key: Option<ApiKey>,
     shutdown: F,
 ) -> Result<(), DaemonError>
 where
     F: std::future::Future<Output = Result<(), DaemonError>>,
 {
-    let router = api::router(context);
+    let router = match (&host, local_api_key) {
+        (Some(host), Some(key)) => api::seed_router(context, host.clone(), key),
+        (None, None) => api::router(context),
+        _ => return Err(DaemonError::Server("inconsistent wallet API mode".into())),
+    };
+    let (api_shutdown_tx, api_shutdown_rx) = tokio::sync::watch::channel(());
     let mut listeners = tokio::task::JoinSet::new();
     let tcp_listener = if let Some(address) = config.tcp_fallback {
         tracing::info!(%address, "wallet API listening on loopback TCP");
@@ -170,22 +232,32 @@ where
     };
     if let Some(listener) = tcp_listener {
         let tcp_router = router.clone();
+        let shutdown = api_shutdown_rx.clone();
         listeners.spawn(async move {
             axum::serve(listener, tcp_router)
+                .with_graceful_shutdown(listener_shutdown(shutdown))
                 .await
                 .map_err(|error| DaemonError::Server(error.to_string()))
         });
     }
     #[cfg(unix)]
     if let Some(listener) = unix_listener {
-        listeners.spawn(serve_unix(listener, router));
+        listeners.spawn(serve_unix(listener, router, api_shutdown_rx));
     }
     if listeners.is_empty() {
         return Err(DaemonError::Server(
             "no local API listener configured".to_string(),
         ));
     }
-    let result = supervise_sync(syncer, config, listeners, shutdown).await;
+    let result = supervise_sync(
+        syncer,
+        config,
+        host,
+        Some(api_shutdown_tx),
+        listeners,
+        shutdown,
+    )
+    .await;
     #[cfg(unix)]
     if let Some(mut guard) = unix_guard {
         guard.cleanup();
@@ -196,6 +268,8 @@ where
 async fn supervise_sync<F>(
     syncer: Arc<StandaloneSyncer>,
     config: &Config,
+    host: Option<WalletHost>,
+    api_shutdown: Option<tokio::sync::watch::Sender<()>>,
     mut listeners: tokio::task::JoinSet<Result<(), DaemonError>>,
     shutdown: F,
 ) -> Result<(), DaemonError>
@@ -205,14 +279,20 @@ where
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
     let interval = config.sync_interval;
     let worker_syncer = syncer.clone();
-    let worker = tokio::task::spawn_blocking(move || {
+    let worker_host = host.clone();
+    let mut worker = tokio::task::spawn_blocking(move || {
         let syncer = worker_syncer;
+        let mut terminal_tracking = None;
         loop {
             if syncer.is_cancelled() {
                 return;
             }
-            match syncer.sync_once() {
-                Ok(report) => {
+            let pass = match &worker_host {
+                Some(host) => host.sync_once_with_recovery(&syncer, &mut terminal_tracking),
+                None => syncer.sync_once().map(Some),
+            };
+            match pass {
+                Ok(Some(report)) => {
                     tracing::info!(
                         wallet_height = report.wallet_height,
                         blocks_processed = report.blocks_processed,
@@ -223,13 +303,20 @@ where
                         continue;
                     }
                 }
+                Ok(None) => {}
                 Err(SyncError::Cancelled) => return,
                 Err(error) if error.retryable() => {
                     tracing::warn!(error = %error, "wallet sync transport unavailable; retrying");
                 }
                 Err(error) => {
                     tracing::error!(%error, "wallet sync stopped; inspect /status for the terminal failure");
-                    return;
+                    if worker_host.is_none() {
+                        return;
+                    }
+                    // Park instead of repeatedly retrying a terminal error.
+                    // The host captured this pass's tracked rows under the
+                    // writer. Only an actual key/history reset requests a
+                    // new replay; stale failure metadata cannot do so.
                 }
             }
             match shutdown_rx.recv_timeout(interval) {
@@ -238,22 +325,60 @@ where
             }
         }
     });
-    let result = tokio::select! {
-        result = shutdown => result,
-        Some(result) = listeners.join_next(), if !listeners.is_empty() => {
-            match result {
-                Ok(Ok(())) => Err(DaemonError::Server("local API listener stopped".to_string())),
-                Ok(Err(error)) => Err(error),
-                Err(error) => Err(DaemonError::Server(error.to_string())),
+    tokio::pin!(shutdown);
+    let mut worker_finished = false;
+    let result = loop {
+        tokio::select! {
+            result = &mut shutdown => break result,
+            Some(result) = listeners.join_next(), if !listeners.is_empty() => {
+                break match result {
+                    Ok(Ok(())) => Err(DaemonError::Server("local API listener stopped".to_string())),
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(DaemonError::Server(error.to_string())),
+                };
+            }
+            result = &mut worker, if !worker_finished => {
+                worker_finished = true;
+                if let Err(error) = result {
+                    break Err(DaemonError::Server(format!("wallet sync task failed: {error}")));
+                }
+                // A recorded terminal sync failure leaves authenticated
+                // status available; a worker panic shuts the daemon down.
             }
         }
     };
+    if let Some(host) = &host {
+        host.begin_shutdown();
+    }
     syncer.cancel();
     drop(shutdown_tx);
     let deadline = tokio::time::Instant::now() + config.shutdown_timeout;
-    listeners.shutdown().await;
-    if tokio::time::timeout_at(deadline, worker).await.is_err() {
+    if let Some(shutdown) = api_shutdown {
+        let _ = shutdown.send(());
+        if tokio::time::timeout_at(deadline, async {
+            while listeners.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
+        {
+            listeners.shutdown().await;
+        }
+    } else {
+        listeners.shutdown().await;
+    }
+    if !worker_finished && tokio::time::timeout_at(deadline, worker).await.is_err() {
         tracing::warn!("wallet sync request did not finish before the shutdown timeout");
+    }
+    if let Some(host) = host {
+        match tokio::time::timeout_at(deadline, host.shutdown()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(DaemonError::Server(error.to_string())),
+            Err(_) => {
+                // spawn_blocking drains and locks the engine even if this
+                // supervisor's bounded wait expires.
+                tracing::warn!("wallet commands did not drain before the shutdown timeout");
+            }
+        }
     }
     result
 }
@@ -262,12 +387,18 @@ where
 async fn serve_unix(
     listener: tokio::net::UnixListener,
     router: axum::Router,
+    mut shutdown: tokio::sync::watch::Receiver<()>,
 ) -> Result<(), DaemonError> {
+    let mut connections = tokio::task::JoinSet::new();
     loop {
-        let (stream, _) = listener
-            .accept()
-            .await
-            .map_err(|error| DaemonError::Server(error.to_string()))?;
+        let (stream, _) = tokio::select! {
+            _ = shutdown.changed() => {
+                connections.shutdown().await;
+                return Ok(());
+            }
+            Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+            result = listener.accept() => result.map_err(|error| DaemonError::Server(error.to_string()))?,
+        };
         let service =
             router
                 .clone()
@@ -275,12 +406,16 @@ async fn serve_unix(
                     request.map(axum::body::Body::new)
                 });
         let service = TowerToHyperService::new(service);
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let _ = Builder::new(TokioExecutor::new())
                 .serve_connection_with_upgrades(TokioIo::new(stream), service)
                 .await;
         });
     }
+}
+
+async fn listener_shutdown(mut shutdown: tokio::sync::watch::Receiver<()>) {
+    let _ = shutdown.changed().await;
 }
 
 /// SIGINT / SIGTERM, mapped to a future that completes when either arrives. A
@@ -329,6 +464,7 @@ mod review_tests {
         released: (Mutex<bool>, Condvar),
         block: bool,
         release_on_cancel: bool,
+        panic_on_blocks: AtomicBool,
     }
 
     impl TestChain {
@@ -338,6 +474,7 @@ mod review_tests {
                 released: (Mutex::new(false), Condvar::new()),
                 block,
                 release_on_cancel: true,
+                panic_on_blocks: AtomicBool::new(false),
             })
         }
     }
@@ -359,6 +496,10 @@ mod review_tests {
             &self,
             request: BlocksSinceRequest,
         ) -> Result<BlocksSinceResponse, ChainClientError> {
+            assert!(
+                !self.panic_on_blocks.load(Ordering::SeqCst),
+                "test sync worker panic"
+            );
             self.entered.store(true, Ordering::SeqCst);
             if self.block {
                 let mut released = self.released.0.lock().unwrap();
@@ -406,11 +547,13 @@ mod review_tests {
         ));
         Daemon {
             config: Config {
+                mode: WalletMode::WatchOnly,
                 network: config::Network::Mainnet,
                 data_dir: dir.path().to_owned(),
                 node_url: "http://127.0.0.1:9053/".parse().unwrap(),
                 api_key_file: dir.path().join("key"),
-                descriptor_file: dir.path().join("descriptor"),
+                descriptor_file: Some(dir.path().join("descriptor")),
+                local_api_key_file: None,
                 sync_interval: Duration::from_secs(60),
                 shutdown_timeout: Duration::from_millis(500),
                 sync_batch: 1,
@@ -421,6 +564,8 @@ mod review_tests {
             service,
             syncer,
             tip,
+            host: None,
+            local_api_key: None,
         }
     }
 
@@ -430,7 +575,15 @@ mod review_tests {
     {
         let mut listeners = tokio::task::JoinSet::new();
         listeners.spawn(std::future::pending::<Result<(), DaemonError>>());
-        supervise_sync(daemon.syncer, &daemon.config, listeners, shutdown).await
+        supervise_sync(
+            daemon.syncer,
+            &daemon.config,
+            daemon.host,
+            None,
+            listeners,
+            shutdown,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -527,6 +680,7 @@ mod review_tests {
             released: (Mutex::new(false), Condvar::new()),
             block: true,
             release_on_cancel: false,
+            panic_on_blocks: AtomicBool::new(false),
         });
         let mut daemon = daemon(&dir, chain.clone());
         daemon.config.shutdown_timeout = Duration::from_millis(25);
@@ -614,5 +768,42 @@ mod review_tests {
         .unwrap();
         shutdown_tx.send(()).unwrap();
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_worker_panic_stops_seed_admission_and_cancels_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = TestChain::new(false);
+        chain.panic_on_blocks.store(true, Ordering::SeqCst);
+        let mut daemon = daemon(&dir, chain.clone());
+        let host = WalletHost::new(
+            daemon.service.store().clone(),
+            daemon.service.clone(),
+            Arc::new(LifecycleChainAccess::new(
+                daemon.service.store().clone(),
+                chain,
+            )),
+            dir.path(),
+            config::Network::Mainnet,
+        )
+        .unwrap();
+        host.init("pass".into(), String::new(), 12).await.unwrap();
+        host.unlock("pass".into()).await.unwrap();
+        daemon.host = Some(host.clone());
+        let syncer = daemon.syncer.clone();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_without_binding(daemon, std::future::pending()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, Err(DaemonError::Server(message)) if message.contains("wallet sync task failed"))
+        );
+        assert!(syncer.is_cancelled());
+        assert!(matches!(
+            host.status().await,
+            Err(ergo_wallet_protocol::WalletAdminError::ShuttingDown)
+        ));
     }
 }

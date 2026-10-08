@@ -7,10 +7,12 @@
 # Every key is documented by type in
 # docs/configuration.md#ergo-walletdtoml-the-standalone-wallet-daemon.
 #
-# This daemon is WATCH-ONLY and READ-ONLY. It has no signing key, no send
-# route, and no submit path; it tracks the public keys listed in the descriptor
-# file and reports what it finds in confirmed blocks.
+# This config selects WATCH-ONLY mode, the default. It has no secret storage
+# or mutable API; it tracks the public keys listed in the descriptor file and
+# reports what it finds in confirmed blocks. For the opt-in encrypted seed
+# lifecycle API, use ergo-walletd-seed.toml with a separate data directory.
 
+mode = "watch_only"
 network  = "mainnet"             # "mainnet" | "testnet" (required identity;
                                  # default "mainnet"). Decides the address
                                  # prefix used for every address the local API

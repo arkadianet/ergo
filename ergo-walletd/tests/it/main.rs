@@ -5,9 +5,11 @@
 #[cfg(unix)]
 mod daemon_boot;
 mod http_client;
+mod lifecycle;
 mod node_api;
 mod routes;
 mod scan_registry_rewind;
+mod seed_daemon_boot;
 mod shadow;
 mod store_reopen;
 mod support;
