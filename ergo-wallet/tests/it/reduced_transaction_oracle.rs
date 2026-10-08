@@ -816,3 +816,65 @@ fn reduced_endpoints_use_active_parameters_independently_of_preheader_version() 
             "script version {tree_version}, active block parameters {block_version}, physical preheader 3: {result:?}");
     }
 }
+
+#[test]
+fn transaction_reduction_rejects_verifier_only_validation_soft_forks() {
+    use ergo_ser::{
+        ergo_box::ErgoBoxCandidate,
+        ergo_tree::read_ergo_tree,
+        sigma_type::SigmaType,
+        sigma_value::{CollValue, SigmaValue},
+    };
+    use ergo_sigma::evaluator::RuleStatus;
+
+    let fixture = fixture();
+    let row = &fixture["cases"][0];
+    let state = state();
+    for (script, rule, payload) in [
+        ("08020402", 1001, None), // Retained parser validation failure.
+        ("00d1d40100", 1000, Some(vec![0x04, 0x02])), // Deserialize type mismatch.
+    ] {
+        let bytes = hex::decode(script).unwrap();
+        let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+        let mut input = boxes(row, "input_boxes").remove(0);
+        input.candidate = ErgoBoxCandidate::new(
+            input.candidate.value,
+            tree,
+            input.candidate.creation_height,
+            input.candidate.tokens.clone(),
+            input.candidate.additional_registers().clone(),
+        )
+        .unwrap();
+        let mut tx = reduced(row).unsigned_transaction;
+        tx.inputs[0].box_id = input.box_id().unwrap();
+        if let Some(payload) = payload {
+            tx.inputs[0].extension.values.insert(
+                0,
+                (
+                    SigmaType::SColl(Box::new(SigmaType::SByte)),
+                    SigmaValue::Coll(CollValue::Bytes(payload)),
+                ),
+            );
+        }
+        let mut settings = SigmaValidationSettings::default();
+        settings.0.insert(rule, RuleStatus::Replaced(2000));
+        let context = SigningContext {
+            state_context: &state,
+            header_ids: &[],
+            validation_settings: &settings,
+        };
+        for block_version in [3, 4] {
+            let mut params = parameters(1_000_000);
+            params.block_version = block_version;
+            let error = Prover::new(SecretRegistry::empty(), params)
+                .reduce_transaction(&tx, std::slice::from_ref(&input), &[], &context)
+                .expect_err(
+                    "unknown scripts must not produce reduced True inputs for cold signing",
+                );
+            assert!(
+                error.to_string().contains("cannot reduce"),
+                "script {script}, replaced rule {rule}, active block version {block_version}: {error}",
+            );
+        }
+    }
+}
