@@ -2,7 +2,7 @@
 //!
 //! Reduction freezes script evaluation; signing needs only this object and secrets.
 //! A received reduction is a claim by its producer, not proof of chain validity.
-use crate::{proving::prover::Prover, WalletError};
+use crate::WalletError;
 use ergo_primitives::{reader::VlqReader, writer::VlqWriter};
 use ergo_ser::{
     input::UnsignedInput,
@@ -10,7 +10,8 @@ use ergo_ser::{
     transaction::{read_transaction, UnsignedTransaction},
 };
 
-/// Bound untrusted offline payloads before allocation or proof generation.
+/// Maximum offline wire payload. Decoding and extension scratch work have
+/// separate finite bounds; this is not a bound on total process memory.
 pub const MAX_REDUCED_TRANSACTION_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,7 +66,8 @@ impl ReducedTransaction {
         Ok(())
     }
 
-    /// Serialize exactly as Scala SDK ReducedErgoLikeTransaction.serializer.
+    /// Serialize as Scala SDK ReducedErgoLikeTransaction.serializer, with the
+    /// wallet's wire, depth and caller-built extension work limits.
     pub fn to_bytes(&self) -> Result<Vec<u8>, WalletError> {
         if self.reduced_inputs.len() != self.unsigned_transaction.inputs.len()
             || self.cost > i32::MAX as u32
@@ -133,7 +135,11 @@ impl ReducedTransaction {
             data_inputs: tx.data_inputs,
             output_candidates: tx.output_candidates,
         };
-        if Prover::bytes_to_sign_for_tx(&unsigned_transaction)? != message {
+        if crate::reduced_message::bytes_to_sign_bounded(
+            &unsigned_transaction,
+            MAX_REDUCED_TRANSACTION_BYTES,
+        )? != message
+        {
             return Err(invalid("noncanonical reduced transaction message"));
         }
         let mut reduced_inputs = Vec::with_capacity(unsigned_transaction.inputs.len());

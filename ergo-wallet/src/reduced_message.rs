@@ -6,14 +6,15 @@
 
 use std::collections::BTreeMap;
 
-use ergo_primitives::writer::VlqWriter;
+use ergo_primitives::{digest::Digest32, writer::VlqWriter};
 use ergo_ser::{
     autolykos::AutolykosSolution,
-    input::{write_context_extension, ContextExtension},
+    ergo_box::ErgoBoxCandidate,
+    input::{write_context_extension, ContextExtension, DataInput},
     opcode::{children, Expr, Payload},
     sigma_type::SigmaType,
     sigma_value::{write_sigma_boolean_bounded, CollValue, SigmaValue},
-    transaction::UnsignedTransaction,
+    transaction::{Transaction, UnsignedTransaction},
 };
 
 use crate::WalletError;
@@ -29,30 +30,66 @@ pub(crate) fn bytes_to_sign_bounded(
     tx: &UnsignedTransaction,
     max_bytes: usize,
 ) -> Result<Vec<u8>, WalletError> {
-    if [
-        tx.inputs.len(),
-        tx.data_inputs.len(),
-        tx.output_candidates.len(),
-    ]
-    .into_iter()
-    .any(|n| n > u16::MAX as usize)
+    bytes_to_sign_from_parts(
+        tx.inputs
+            .iter()
+            .map(|input| (&input.box_id, BorrowedExtension::Parsed(&input.extension))),
+        &tx.data_inputs,
+        &tx.output_candidates,
+        max_bytes,
+    )
+}
+
+pub(crate) fn bytes_to_sign_bounded_signed(
+    tx: &Transaction,
+    max_bytes: usize,
+) -> Result<Vec<u8>, WalletError> {
+    bytes_to_sign_from_parts(
+        tx.inputs.iter().map(|input| {
+            (
+                &input.box_id,
+                BorrowedExtension::Canonical(input.spending_proof.extension_bytes()),
+            )
+        }),
+        &tx.data_inputs,
+        &tx.output_candidates,
+        max_bytes,
+    )
+}
+
+enum BorrowedExtension<'a> {
+    Parsed(&'a ContextExtension),
+    // Consensus bytes_to_sign uses the canonical cache, not received bytes.
+    Canonical(&'a [u8]),
+}
+
+fn bytes_to_sign_from_parts<'a>(
+    inputs: impl ExactSizeIterator<Item = (&'a Digest32, BorrowedExtension<'a>)>,
+    data_inputs: &[DataInput],
+    output_candidates: &[ErgoBoxCandidate],
+    max_bytes: usize,
+) -> Result<Vec<u8>, WalletError> {
+    let inputs_len = inputs.len();
+    if [inputs_len, data_inputs.len(), output_candidates.len()]
+        .into_iter()
+        .any(|n| n > u16::MAX as usize)
     {
         return Err(invalid("transaction collection exceeds wire bound"));
     }
 
     // Count a lower bound before building the token table or serializing any
     // extension. Large cached trees/registers are rejected without cloning.
-    let mut minimum = vlq_len(tx.inputs.len() as u64)
-        + vlq_len(tx.data_inputs.len() as u64)
-        + vlq_len(tx.output_candidates.len() as u64)
+    let mut minimum = vlq_len(inputs_len as u64)
+        + vlq_len(data_inputs.len() as u64)
+        + vlq_len(output_candidates.len() as u64)
         + 1; // empty token-table count
-    add_size(&mut minimum, tx.inputs.len().saturating_mul(34), max_bytes)?;
+    add_size(&mut minimum, inputs_len.saturating_mul(34), max_bytes)?;
     add_size(
         &mut minimum,
-        tx.data_inputs.len().saturating_mul(32),
+        data_inputs.len().saturating_mul(32),
         max_bytes,
     )?;
-    for output in &tx.output_candidates {
+    for output in output_candidates {
         if output.tokens.len() > u8::MAX as usize {
             return Err(invalid("output token collection exceeds wire bound"));
         }
@@ -83,38 +120,43 @@ pub(crate) fn bytes_to_sign_bounded(
     // The map also avoids its linear search for each indexed output token.
     let mut indexes = BTreeMap::<[u8; 32], u32>::new();
     let mut token_ids = Vec::new();
-    for output in &tx.output_candidates {
+    for output in output_candidates {
         for token in &output.tokens {
             let id = *token.token_id.as_bytes();
-            if !indexes.contains_key(&id) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = indexes.entry(id) {
                 add_size(&mut minimum, 32, max_bytes)?;
                 let index = token_ids.len() as u32;
-                indexes.insert(id, index);
+                entry.insert(index);
                 token_ids.push(id);
             }
         }
     }
 
     let mut message = BoundedWriter::new(max_bytes);
-    message.unsigned(tx.inputs.len() as u64)?;
-    for input in &tx.inputs {
-        message.bytes(input.box_id.as_bytes())?;
+    message.unsigned(inputs_len as u64)?;
+    for (box_id, extension) in inputs {
+        message.bytes(box_id.as_bytes())?;
         message.byte(0)?; // empty signed proof, not the unsigned wire format
-        preflight_extension(&input.extension)?;
-        let mut extension = VlqWriter::new();
-        write_context_extension(&mut extension, &input.extension).map_err(write_error)?;
-        message.bytes(extension.as_slice())?;
+        match extension {
+            BorrowedExtension::Parsed(extension) => {
+                preflight_extension(extension)?;
+                let mut encoded = VlqWriter::new();
+                write_context_extension(&mut encoded, extension).map_err(write_error)?;
+                message.bytes(encoded.as_slice())?;
+            }
+            BorrowedExtension::Canonical(bytes) => message.bytes(bytes)?,
+        }
     }
-    message.unsigned(tx.data_inputs.len() as u64)?;
-    for input in &tx.data_inputs {
+    message.unsigned(data_inputs.len() as u64)?;
+    for input in data_inputs {
         message.bytes(input.box_id.as_bytes())?;
     }
     message.unsigned(token_ids.len() as u64)?;
     for id in &token_ids {
         message.bytes(id)?;
     }
-    message.unsigned(tx.output_candidates.len() as u64)?;
-    for output in &tx.output_candidates {
+    message.unsigned(output_candidates.len() as u64)?;
+    for output in output_candidates {
         message.unsigned(output.value)?;
         message.bytes(
             output
@@ -124,7 +166,7 @@ pub(crate) fn bytes_to_sign_bounded(
         message.unsigned(u64::from(output.creation_height))?;
         message.byte(output.tokens.len() as u8)?;
         for token in &output.tokens {
-            let index = indexes[&*token.token_id.as_bytes()];
+            let index = indexes[token.token_id.as_bytes()];
             message.unsigned(u64::from(index))?;
             message.unsigned(token.amount)?;
         }
@@ -303,11 +345,13 @@ impl Preflight {
                 legacy_bytes,
             } => {
                 self.charge(bytes.len())?;
-                if let Ok(bytes) = canonical_bytes {
-                    self.charge(bytes.len())?;
-                }
-                if let Some(Ok(bytes)) = legacy_bytes {
-                    self.charge(bytes.len())?;
+                for cache in std::iter::once(canonical_bytes).chain(legacy_bytes.iter()) {
+                    match cache {
+                        Ok(bytes) => self.charge(bytes.len())?,
+                        Err(ergo_ser::error::WriteError::InvalidData(message)) => {
+                            self.charge(message.len())?;
+                        }
+                    }
                 }
             }
             SigmaValue::Header(header, _) => {
@@ -316,7 +360,15 @@ impl Preflight {
                     self.charge(d.len())?;
                 }
             }
-            _ => {}
+            SigmaValue::Unit
+            | SigmaValue::Boolean(_)
+            | SigmaValue::Byte(_)
+            | SigmaValue::Short(_)
+            | SigmaValue::Int(_)
+            | SigmaValue::Long(_)
+            | SigmaValue::GroupElement(_)
+            | SigmaValue::GroupGenerator
+            | SigmaValue::Opt(None) => {}
         }
         Ok(())
     }
@@ -328,7 +380,12 @@ impl Preflight {
                 self.tpe(tpe, depth + 1)?;
                 self.value(val, depth + 1)?;
             }
-            Expr::Unparsed(tree) => self.charge(tree.bytes.len())?,
+            Expr::Unparsed(tree) => {
+                self.charge(tree.bytes.len())?;
+                if let Some((_, args)) = &tree.validation_error {
+                    self.charge(args.len())?;
+                }
+            }
             Expr::Op(node) => {
                 match &node.payload {
                     Payload::TaggedVar { tpe, .. } | Payload::ValDef { tpe, .. } => {
@@ -412,11 +469,14 @@ mod tests {
     use super::*;
     use crate::{proving::prover::Prover, ReducedTransaction};
     use ergo_primitives::digest::Digest32;
+    use ergo_primitives::reader::VlqReader;
     use ergo_ser::{
         ergo_box::ErgoBoxCandidate,
+        input::read_spending_proof,
         register::{AdditionalRegisters, RegisterValue},
         sigma_value::SigmaBoolean,
         token::Token,
+        transaction::{bytes_to_sign, read_transaction},
     };
 
     fn fixtures() -> serde_json::Value {
@@ -435,6 +495,14 @@ mod tests {
         .unsigned_transaction
     }
 
+    fn signed_transaction(row: &serde_json::Value) -> Transaction {
+        let bytes = hex::decode(row["scala_signed_hex"].as_str().unwrap()).unwrap();
+        let mut reader = VlqReader::new(&bytes).with_activated_script_version(3);
+        let tx = read_transaction(&mut reader).unwrap();
+        assert_eq!(reader.remaining(), 0);
+        tx
+    }
+
     #[test]
     fn bounded_messages_match_the_original_writer_and_exact_size_boundary() {
         for row in fixtures()["cases"].as_array().unwrap() {
@@ -446,6 +514,69 @@ mod tests {
             );
             assert!(bytes_to_sign_bounded(&tx, expected.len() - 1).is_err());
         }
+    }
+
+    #[test]
+    fn signed_messages_match_appkit_and_ignore_only_signature_proof_bytes() {
+        for row in fixtures()["cases"].as_array().unwrap() {
+            let mut tx = signed_transaction(row);
+            let expected = bytes_to_sign(&tx).unwrap();
+            assert_eq!(
+                expected,
+                hex::decode(row["unsigned_message_hex"].as_str().unwrap()).unwrap()
+            );
+            assert_eq!(
+                bytes_to_sign_bounded_signed(&tx, expected.len()).unwrap(),
+                expected
+            );
+            assert!(bytes_to_sign_bounded_signed(&tx, expected.len() - 1).is_err());
+            tx.inputs[0].spending_proof.proof = vec![0xAA; 1024];
+            assert_eq!(
+                bytes_to_sign_bounded_signed(&tx, expected.len()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn signed_messages_use_canonical_extension_cache_instead_of_received_encoding() {
+        let mut tx = signed_transaction(&fixtures()["cases"][0]);
+        // Empty proof plus one TrueLeaf extension: Scala signs a canonical
+        // Boolean Constant, while the accepted received bytes remain distinct.
+        let mut reader = VlqReader::new(&[0, 1, 7, 0x7F]);
+        tx.inputs[0].spending_proof = read_spending_proof(&mut reader).unwrap();
+        let proof = &tx.inputs[0].spending_proof;
+        assert_ne!(proof.extension_bytes(), proof.received_extension_bytes());
+        let expected = bytes_to_sign(&tx).unwrap();
+        assert_eq!(
+            bytes_to_sign_bounded_signed(&tx, expected.len()).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn signed_extra_outputs_and_token_tables_obey_the_same_resource_caps() {
+        let row = &fixtures()["cases"][0];
+        let mut tx = signed_transaction(row);
+        let budget = bytes_to_sign(&tx).unwrap().len();
+        tx.output_candidates.push(tx.output_candidates[0].clone());
+        assert!(bytes_to_sign_bounded_signed(&tx, budget).is_err());
+
+        let mut tx = signed_transaction(row);
+        tx.output_candidates[0].tokens = (0..255)
+            .map(|n: u32| {
+                let mut id = [0; 32];
+                id[..4].copy_from_slice(&n.to_be_bytes());
+                Token {
+                    token_id: Digest32::from_bytes(id),
+                    amount: 1,
+                }
+            })
+            .collect();
+        assert!(bytes_to_sign_bounded_signed(&tx, 4096)
+            .unwrap_err()
+            .to_string()
+            .contains("resource bound"));
     }
 
     #[test]

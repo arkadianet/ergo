@@ -11,7 +11,9 @@ Build an `UnsignedTransaction` and resolve its spending and data boxes in
 exact transaction order. Supply `tx_context::SigningContext` with the frozen
 chain state, original serialized header IDs and active validation settings.
 The caller authenticates that snapshot; the library checks its internal
-coherence, activation version and participant identities.
+coherence and participant identities. Active parameters determine script
+activation independently of the pre-header's physical version; these can
+differ across an epoch transition.
 
 `Prover::reduce_transaction` evaluates scripts in that context and returns a
 `ReducedTransaction`. It charges transaction initialization, participant and
@@ -26,6 +28,9 @@ active block version: the format has no separate version byte. Parsing enforces
 canonical message bytes, empty input proofs, complete consumption, group-point
 validity, size and tree-depth limits. Ordinary node transaction bytes and JSON
 unsigned transactions are different formats.
+The offline payload cap is 1 MiB. Caller-built extensions also pass a depth
+and finite work preflight before canonical serialization; that scratch-work
+allowance is larger than the wire cap.
 
 `Prover::sign_reduced` proves the frozen propositions without a chain lookup
 or another script evaluation. Trivial true produces an empty proof; DLog,
@@ -36,9 +41,15 @@ The host must review the transaction and trust or independently reproduce its
 reduction before authorizing a signature. Full structural, economic and chain
 validation still belongs to the host/node.
 
+This reducer has no AppKit `tokensToBurn` intent parameter. It does not check
+ERG/token conservation, valid mint IDs or approved burns; construction and
+validation layers own that policy. Matching SDK reduction bytes and costs
+does not imply matching the SDK's higher-level asset-intent validation.
+
 ## Multi-party commitments
 
-Use `generate_reduced_commitments_bound` for native signing rounds. The bound
+Use `proving::commitments::generate_bound_commitments_for_reduced` for native
+signing rounds. The bound
 bag commits to both the transaction message and the complete reduced wire
 representation. Consume it through `sign_reduced_bound` or
 `sign_reduced_partial_bound` once; a changed transaction or changed reduction

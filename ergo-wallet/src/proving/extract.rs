@@ -222,10 +222,14 @@ pub fn bag_for_reduced_transaction(
 ) -> Result<crate::proving::hints::TransactionHintsBag, WalletError> {
     let checked = crate::ReducedTransaction::from_bytes(&reduced.to_bytes()?, block_version)?;
     checked.validate_for_proving()?;
-    let expected =
-        crate::proving::prover::Prover::bytes_to_sign_for_tx(&checked.unsigned_transaction)?;
-    let message = ergo_ser::transaction::bytes_to_sign(tx)
-        .map_err(|e| WalletError::TxBuild(e.to_string()))?;
+    let expected = crate::reduced_message::bytes_to_sign_bounded(
+        &checked.unsigned_transaction,
+        crate::reduced::MAX_REDUCED_TRANSACTION_BYTES,
+    )?;
+    let message = crate::reduced_message::bytes_to_sign_bounded_signed(
+        tx,
+        crate::reduced::MAX_REDUCED_TRANSACTION_BYTES,
+    )?;
     if message != expected {
         return Err(WalletError::TxBuild(
             "signed transaction differs from reduction".into(),

@@ -45,6 +45,10 @@ object ReducedTransactionOracle extends App {
   val pre=CPreHeader(4.toByte,Colls.fromArray(Array.fill(32)(0.toByte)),3L,0L,400000,
     p.head.value.toGroupElement,Colls.fromArray(Array.fill(3)(0.toByte)))
   val state=CBlockchainStateContext(Colls.emptyColl[Header],Colls.fromArray(Array.fill(33)(0.toByte)),pre)
+  val olderPhysicalPre=CPreHeader(3.toByte,Colls.fromArray(Array.fill(32)(0.toByte)),3L,0L,400000,
+    p.head.value.toGroupElement,Colls.fromArray(Array.fill(3)(0.toByte)))
+  val olderHeaderState=CBlockchainStateContext(Colls.emptyColl[Header],
+    Colls.fromArray(Array.fill(33)(0.toByte)),olderPhysicalPre)
   val reducer=new ReducingInterpreter(params)
   val c1=keys(1).publicImage.value.toGroupElement
   val c2=DLogProverInput(BigInteger.valueOf(6)).publicImage.value.toGroupElement
@@ -84,6 +88,10 @@ object ReducedTransactionOracle extends App {
     val unreduced=UnreducedTransaction(unsigned,boxes.map(b=>ExtendedInputBox(b,extension)),data,IndexedSeq.empty)
     val reduced=reducer.reduceTransaction(unreduced,state,0)
     val encoded=reduced.toHex
+    // SDK activation uses params.blockVersion independently of script-visible
+    // preHeader.version; the physical tip may still be older within an epoch.
+    assert(reducer.reduceTransaction(unreduced,olderHeaderState,0).toHex==encoded,
+      "Active parameters must not be replaced by the physical pre-header version")
     val parsed=ReducedTransaction.fromHex(encoded)
     assert(parsed.toHex==encoded)
     // Exercise actual AppKit cold APIs, not only the shared SDK serializer.

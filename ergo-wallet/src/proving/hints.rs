@@ -195,8 +195,10 @@ impl BoundTransactionHints {
         reduced: &crate::ReducedTransaction,
     ) -> Result<Self, crate::WalletError> {
         let bytes = reduced.to_bytes()?;
-        let message =
-            crate::proving::prover::Prover::bytes_to_sign_for_tx(&reduced.unsigned_transaction)?;
+        let message = crate::reduced_message::bytes_to_sign_bounded(
+            &reduced.unsigned_transaction,
+            crate::reduced::MAX_REDUCED_TRANSACTION_BYTES,
+        )?;
         Ok(Self {
             hints,
             message_hash: ergo_sigma::blake2b256(&message),
@@ -258,8 +260,10 @@ impl BoundTransactionHints {
         reduced: &crate::ReducedTransaction,
     ) -> Result<TransactionHintsBag, crate::WalletError> {
         let bytes = reduced.to_bytes()?;
-        let message =
-            crate::proving::prover::Prover::bytes_to_sign_for_tx(&reduced.unsigned_transaction)?;
+        let message = crate::reduced_message::bytes_to_sign_bounded(
+            &reduced.unsigned_transaction,
+            crate::reduced::MAX_REDUCED_TRANSACTION_BYTES,
+        )?;
         if self.reduced_hash != Some(ergo_sigma::blake2b256(&bytes))
             || self.message_hash != ergo_sigma::blake2b256(&message)
         {

@@ -739,38 +739,80 @@ fn qr_transport_oracle_rejects_missing_duplicate_and_mixed_direction_pages() {
 }
 
 #[test]
-fn reduced_endpoints_use_the_callers_active_block_version_and_refuse_mixed_contexts() {
+fn reduced_endpoints_use_active_parameters_independently_of_preheader_version() {
     let fixture = fixture();
-    let row = &fixture["cases"][1]; // Version-zero P2PK is supported before/after activation.
+    let row = &fixture["cases"][1]; // Version-zero P2PK spans these activation epochs.
     let encoded = hex::decode(row["reduced_hex"].as_str().unwrap()).unwrap();
+    let inputs = boxes(row, "input_boxes");
     for block_version in [2, 3, 4] {
         let frozen = ReducedTransaction::from_bytes(&encoded, block_version).unwrap();
         assert_eq!(frozen.to_bytes().unwrap(), encoded);
-        let mut state = state();
-        state.sigma_pre_header.version = block_version;
-        let settings = SigmaValidationSettings::default();
-        let context = SigningContext {
-            state_context: &state,
-            header_ids: &[],
-            validation_settings: &settings,
-        };
+        for preheader_version in [3, 4] {
+            let mut state = state();
+            state.sigma_pre_header.version = preheader_version;
+            let settings = SigmaValidationSettings::default();
+            let context = SigningContext {
+                state_context: &state,
+                header_ids: &[],
+                validation_settings: &settings,
+            };
+            let mut params = parameters(1_000_000);
+            params.block_version = block_version;
+            let owned = context
+                .build_reduction_owned_for_tx(
+                    &frozen.unsigned_transaction,
+                    0,
+                    &inputs,
+                    &[],
+                    params.activated_script_version(),
+                )
+                .unwrap();
+            assert_eq!(owned.pre_header_version, preheader_version);
+            assert_eq!(owned.activated_script_version, block_version - 1);
+            // Active parameters can differ from the physical header mid-epoch.
+            let reducer = Prover::new(SecretRegistry::empty(), params);
+            assert_eq!(
+                reducer
+                    .reduce_transaction(&frozen.unsigned_transaction, &inputs, &[], &context)
+                    .unwrap()
+                    .to_bytes()
+                    .unwrap(),
+                encoded
+            );
+        }
+    }
+    let settings = SigmaValidationSettings::default();
+    let mut state = state();
+    state.sigma_pre_header.version = 3;
+    let context = SigningContext {
+        state_context: &state,
+        header_ids: &[],
+        validation_settings: &settings,
+    };
+    for (tree_version, block_version, accepted) in [(3, 4, true), (3, 3, false), (5, 5, false)] {
+        let mut input = inputs[0].clone();
+        let mut tree = input.candidate.ergo_tree().clone();
+        tree.version = tree_version;
+        tree.has_size = true;
+        input.candidate = ergo_ser::ergo_box::ErgoBoxCandidate::new(
+            input.candidate.value,
+            tree,
+            input.candidate.creation_height,
+            input.candidate.tokens.clone(),
+            input.candidate.additional_registers().clone(),
+        )
+        .unwrap();
+        let mut tx = reduced(row).unsigned_transaction;
+        tx.inputs[0].box_id = input.box_id().unwrap();
         let mut params = parameters(1_000_000);
         params.block_version = block_version;
-        let reducer = Prover::new(SecretRegistry::empty(), params.clone());
-        let inputs = boxes(row, "input_boxes");
-        assert_eq!(
-            reducer
-                .reduce_transaction(&frozen.unsigned_transaction, &inputs, &[], &context)
-                .unwrap()
-                .to_bytes()
-                .unwrap(),
-            encoded
+        let result = Prover::new(SecretRegistry::empty(), params).reduce_transaction(
+            &tx,
+            &[input],
+            &[],
+            &context,
         );
-        // Parameters and pre-header belong to one activated protocol snapshot.
-        params.block_version = block_version + 1;
-        let mismatched = Prover::new(SecretRegistry::empty(), params);
-        assert!(mismatched
-            .reduce_transaction(&frozen.unsigned_transaction, &inputs, &[], &context)
-            .is_err());
+        assert_eq!(result.is_ok(), accepted,
+            "script version {tree_version}, active block parameters {block_version}, physical preheader 3: {result:?}");
     }
 }

@@ -57,6 +57,10 @@ impl Prover {
 
     /// Reduce all contracts against an explicit frozen chain context, enforcing
     /// the Scala transaction initialization, token access and interpreter budget.
+    /// This checks participant identity and script evaluation, not transaction
+    /// validity or asset intent. The caller validates ERG/token conservation,
+    /// mint IDs, approved burns, output constraints and network-specific rules.
+    /// Unlike AppKit's higher-level reducer, this API has no `tokensToBurn` policy.
     pub fn reduce_transaction(
         &self,
         tx: &UnsignedTransaction,
@@ -76,6 +80,22 @@ impl Prover {
         {
             return Err(WalletError::TxBuild(
                 "inconsistent or empty transaction participants".into(),
+            ));
+        }
+        // Reject caller-built message amplification before cloning participants
+        // or allocating distinct-token tables. This is the offline API's
+        // resource policy; the consensus transaction writer remains unchanged.
+        crate::reduced_message::bytes_to_sign_bounded(
+            tx,
+            crate::reduced::MAX_REDUCED_TRANSACTION_BYTES,
+        )?;
+        if boxes
+            .iter()
+            .chain(data_boxes)
+            .any(|b| b.candidate.tokens.len() > u8::MAX as usize)
+        {
+            return Err(WalletError::TxBuild(
+                "input token collection exceeds wire bound".into(),
             ));
         }
         let limit = JitCost::from_block_cost(self.params.max_block_cost)
@@ -199,7 +219,10 @@ impl Prover {
         let bytes = reduced.to_bytes()?;
         let checked = crate::ReducedTransaction::from_bytes(&bytes, self.params.block_version)?;
         checked.validate_for_proving()?;
-        let message = Self::bytes_to_sign_for_tx(&checked.unsigned_transaction)?;
+        let message = crate::reduced_message::bytes_to_sign_bounded(
+            &checked.unsigned_transaction,
+            crate::reduced::MAX_REDUCED_TRANSACTION_BYTES,
+        )?;
         let mut cost = CostAccumulator::new(
             JitCost::from_block_cost(self.params.max_block_cost)
                 .map_err(|e| WalletError::TxBuild(e.to_string()))?,

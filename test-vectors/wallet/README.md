@@ -83,7 +83,10 @@ sum across inputs. `reduction_cost` includes interpreter initialization,
 input/data-input/output access, token access and script evaluation. AppKit's
 signed `crypto_cost` is an additional cost; signing checks the sum before
 producing proofs. Rust reductions, including reductions made without secrets,
-must match every cumulative cost and the complete reduced wire bytes.
+must match every cumulative cost and the complete reduced wire bytes. The SDK
+also checks identical reductions with active parameter block version 4 and
+physical pre-header version 3: activation follows parameters independently of
+the script-visible pre-header, as required for transitions within an epoch.
 
 Transport fields follow [EIP-19](https://github.com/ergoplatform/eips/blob/5cb67888f59683b1d4f3a382fa3dabe208088105/eip-0019.md)
 and [EIP-20](https://github.com/ergoplatform/eips/blob/5cb67888f59683b1d4f3a382fa3dabe208088105/eip-0020.md).
