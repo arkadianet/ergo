@@ -2,8 +2,10 @@
 //! passes share the same gate, so a key mutation cannot race a page that was
 //! classified with an older key set. Blocking work stays off Tokio workers.
 
+use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -15,8 +17,8 @@ use ergo_wallet_protocol::scala::admin_advanced::{
 use ergo_wallet_protocol::scala::types::WalletStatus;
 use ergo_wallet_protocol::WalletAdminError;
 use ergo_wallet_service::engine::{
-    NoopMempoolOverlay, RescanCoordinator, TxSubmitError, TxSubmitter, WalletChainAccess,
-    WalletEngine, WalletEngineConfig, WalletEngineParts,
+    MempoolOverlay, NoopMempoolOverlay, RescanCoordinator, TxSubmitError, TxSubmitter,
+    WalletChainAccess, WalletEngine, WalletEngineConfig, WalletEngineParts,
 };
 use ergo_wallet_service::state::WalletState;
 use ergo_wallet_service::wallet::hydration::HydrationSnapshot;
@@ -31,6 +33,29 @@ use crate::sync::{StandaloneSyncer, SyncError, SyncReport};
 /// Includes the running command and commands waiting for the writer. A burst
 /// of password guesses cannot create an unbounded blocking-thread backlog.
 const MAX_ADMITTED_COMMANDS: usize = 32;
+
+/// Called under the writer immediately before a command consumes node state.
+/// Implementations replace their chain, pool and reservation views together,
+/// and fail before entering the engine if any required component is missing.
+pub trait SpendingPreparation: Send + Sync {
+    fn refresh(&self) -> Result<WalletEngineConfig, WalletAdminError>;
+    /// Release command-local pinned state, including on errors or unwinding.
+    fn finish(&self) {}
+}
+
+struct SpendingScope(Arc<dyn SpendingPreparation>);
+impl Drop for SpendingScope {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
+}
+
+pub struct SpendingCapabilities {
+    pub chain: Arc<dyn WalletChainAccess>,
+    pub preparation: Arc<dyn SpendingPreparation>,
+    pub submitter: Arc<dyn TxSubmitter>,
+    pub mempool: Arc<dyn MempoolOverlay>,
+}
 
 #[derive(Debug, Error)]
 pub enum HostError {
@@ -49,16 +74,25 @@ struct Inner {
     store: Arc<dyn WalletStore>,
     closing: AtomicBool,
     admission: Arc<Semaphore>,
+    preparation: Option<Arc<dyn SpendingPreparation>>,
+    submitter: Arc<dyn TxSubmitter>,
+    rescan: Arc<RescanCoordinator>,
+    rescan_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    recovery_generation: AtomicU64,
 }
 
 /// The tracked rows used by a failed pass. Compare the committed key set,
 /// rather than failure metadata: recording Failed itself can fail under an
 /// I/O error, and an old Idle marker is not a request to retry that pass.
-pub(crate) struct TrackingSnapshot(Vec<ergo_wallet_service::wallet::reader::TrackedAddressMeta>);
+pub(crate) struct TrackingSnapshot(
+    Vec<ergo_wallet_service::wallet::reader::TrackedAddressMeta>,
+    u64,
+);
 
 impl TrackingSnapshot {
     fn matches(&self, rows: &Self) -> bool {
-        self.0.len() == rows.0.len()
+        self.1 == rows.1
+            && self.0.len() == rows.0.len()
             && self.0.iter().zip(&rows.0).all(|(left, right)| {
                 left.path_idx == right.path_idx
                     && left.pubkey == right.pubkey
@@ -95,6 +129,36 @@ impl WalletHost {
         data_dir: &Path,
         network: Network,
     ) -> Result<Self, HostError> {
+        Self::construct(store, service, chain, data_dir, network, None)
+    }
+
+    /// Host the complete engine using one shared, coherently refreshed node
+    /// adapter. Construction does not require a reachable node.
+    pub fn with_spending(
+        store: Arc<dyn WalletStore>,
+        service: Arc<WalletService>,
+        capabilities: SpendingCapabilities,
+        data_dir: &Path,
+        network: Network,
+    ) -> Result<Self, HostError> {
+        Self::construct(
+            store,
+            service,
+            capabilities.chain.clone(),
+            data_dir,
+            network,
+            Some(capabilities),
+        )
+    }
+
+    fn construct(
+        store: Arc<dyn WalletStore>,
+        service: Arc<WalletService>,
+        chain: Arc<dyn WalletChainAccess>,
+        data_dir: &Path,
+        network: Network,
+        capabilities: Option<SpendingCapabilities>,
+    ) -> Result<Self, HostError> {
         let secret_dir = data_dir.join("wallet");
         let mut storage = SecretStorage::open(secret_dir.clone());
         let read = store.read()?;
@@ -118,7 +182,18 @@ impl WalletHost {
         state
             .hydrate_from_reader(&hydration, network.prefix())
             .map_err(|error| HostError::Hydration(error.to_string()))?;
-        let engine = WalletEngine::new(WalletEngineParts {
+        let rescan = Arc::new(RescanCoordinator::new());
+        ergo_wallet_service::engine::recover_interrupted_rescan(store.as_ref(), rescan.as_ref())?;
+        let submitter: Arc<dyn TxSubmitter> = capabilities.as_ref().map_or_else(
+            || Arc::new(DisabledSubmitter) as Arc<dyn TxSubmitter>,
+            |capabilities| capabilities.submitter.clone(),
+        );
+        let mempool: Arc<dyn MempoolOverlay> = capabilities.as_ref().map_or_else(
+            || Arc::new(NoopMempoolOverlay::new()) as Arc<dyn MempoolOverlay>,
+            |capabilities| capabilities.mempool.clone(),
+        );
+        let preparation = capabilities.map(|capabilities| capabilities.preparation);
+        let mut engine = WalletEngine::new(WalletEngineParts {
             storage: Arc::new(RwLock::new(storage)),
             state: Arc::new(RwLock::new(state)),
             store: store.clone(),
@@ -126,29 +201,43 @@ impl WalletHost {
             config: WalletEngineConfig {
                 network: network.prefix(),
                 expose_private_keys: false,
-                // Lifecycle-only hosting never builds/signs/submits. These
-                // values must come from the authenticated node contract
-                // before spending capabilities are enabled.
+                // Replaced under the writer before each spending command.
                 reemission: None,
                 min_relay_fee_nano_erg: 0,
                 max_tx_size_bytes: 0,
             },
-            submitter: Arc::new(DisabledSubmitter),
-            mempool: Arc::new(NoopMempoolOverlay::new()),
+            submitter: submitter.clone(),
+            mempool,
             service: Some(service),
-            rescan: Arc::new(RescanCoordinator::new()),
+            rescan: rescan.clone(),
         });
+        engine
+            .recover_mining_jobs()
+            .map_err(|error| HostError::Hydration(error.to_string()))?;
         Ok(Self {
             inner: Arc::new(Inner {
                 engine: Mutex::new(engine),
                 store,
                 closing: AtomicBool::new(false),
                 admission: Arc::new(Semaphore::new(MAX_ADMITTED_COMMANDS)),
+                preparation,
+                submitter,
+                rescan,
+                rescan_task: Mutex::new(None),
+                recovery_generation: AtomicU64::new(0),
             }),
         })
     }
 
-    async fn call<T, F>(&self, command: F) -> Result<T, WalletAdminError>
+    pub(crate) async fn call<T, F>(&self, command: F) -> Result<T, WalletAdminError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut WalletEngine) -> Result<T, WalletAdminError> + Send + 'static,
+    {
+        self.call_inner(command, false).await
+    }
+
+    async fn call_inner<T, F>(&self, command: F, during_rescan: bool) -> Result<T, WalletAdminError>
     where
         T: Send + 'static,
         F: FnOnce(&mut WalletEngine) -> Result<T, WalletAdminError> + Send + 'static,
@@ -174,6 +263,11 @@ impl WalletHost {
             let mut engine = inner.engine.lock();
             if inner.closing.load(Ordering::SeqCst) {
                 return Err(WalletAdminError::ShuttingDown);
+            }
+            if !during_rescan && inner.rescan.task_active() {
+                return Err(WalletAdminError::RescanUnavailable(
+                    "wallet rescan is running".into(),
+                ));
             }
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| command(&mut engine))) {
                 Ok(result) => result,
@@ -203,8 +297,122 @@ impl WalletHost {
         }
     }
 
+    pub(crate) async fn call_async<T, F>(&self, command: F) -> Result<T, WalletAdminError>
+    where
+        T: Send + 'static,
+        F: for<'a> FnOnce(
+                &'a mut WalletEngine,
+            )
+                -> Pin<Box<dyn Future<Output = Result<T, WalletAdminError>> + Send + 'a>>
+            + Send
+            + 'static,
+    {
+        let runtime = tokio::runtime::Handle::current();
+        self.call(move |engine| runtime.block_on(command(engine)))
+            .await
+    }
+
+    pub(crate) async fn call_spending<T, F>(&self, command: F) -> Result<T, WalletAdminError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut WalletEngine) -> Result<T, WalletAdminError> + Send + 'static,
+    {
+        let preparation = self.inner.preparation.clone();
+        self.call(move |engine| {
+            let preparation = preparation.ok_or_else(|| {
+                WalletAdminError::StaleChainTip("wallet spending is unavailable".into())
+            })?;
+            let scope = SpendingScope(preparation);
+            engine.refresh_spending_config(scope.0.refresh()?);
+            command(engine)
+        })
+        .await
+    }
+
+    pub(crate) async fn call_spending_async<T, F>(&self, command: F) -> Result<T, WalletAdminError>
+    where
+        T: Send + 'static,
+        F: for<'a> FnOnce(
+                &'a mut WalletEngine,
+            )
+                -> Pin<Box<dyn Future<Output = Result<T, WalletAdminError>> + Send + 'a>>
+            + Send
+            + 'static,
+    {
+        let runtime = tokio::runtime::Handle::current();
+        self.call_spending(move |engine| runtime.block_on(command(engine)))
+            .await
+    }
+
+    pub(crate) fn submitter(&self) -> Arc<dyn TxSubmitter> {
+        self.inner.submitter.clone()
+    }
+
+    /// Claim the rescan while holding the writer. Its background replay is
+    /// the sole public-state writer until the coordinator releases its fence.
+    pub async fn rescan(&self, from_height: u32) -> Result<(), WalletAdminError> {
+        let inner = self.inner.clone();
+        self.call_spending(move |engine| {
+            let job = engine.prepare_rescan(from_height)?;
+            inner.recovery_generation.fetch_add(1, Ordering::SeqCst);
+            let owner = inner.clone();
+            let task = tokio::task::spawn_blocking(move || {
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run())).is_err() {
+                    owner.closing.store(true, Ordering::SeqCst);
+                    owner.admission.close();
+                    let _ = owner.engine.lock().lock();
+                }
+            });
+            *inner.rescan_task.lock() = Some(task);
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn tick_mining_jobs(&self) -> Result<(), WalletAdminError> {
+        let preparation = self.inner.preparation.clone();
+        self.call_async(move |engine| {
+            Box::pin(async move {
+                let jobs = engine.mining_jobs()?;
+                if !jobs
+                    .items
+                    .iter()
+                    .any(|job| !job.state.terminal() || job.tx_id.is_some())
+                {
+                    return Ok(());
+                }
+                let preparation = preparation.ok_or_else(|| {
+                    WalletAdminError::StaleChainTip("wallet spending is unavailable".into())
+                })?;
+                let scope = SpendingScope(preparation);
+                engine.refresh_spending_config(scope.0.refresh()?);
+                engine.tick_mining_jobs().await
+            })
+        })
+        .await
+    }
+
     pub async fn status(&self) -> Result<WalletStatus, WalletAdminError> {
-        self.call(|engine| engine.status()).await
+        self.call_inner(|engine| engine.status(), true).await
+    }
+
+    pub async fn native_status(
+        &self,
+    ) -> Result<ergo_wallet_protocol::native::dto::WalletStatusDto, WalletAdminError> {
+        let preparation = self.inner.preparation.clone();
+        self.call_inner(
+            move |engine| {
+                // Pruning and EIP-27 are properties of a validated node view.
+                // Keep that view pinned until status finishes reading it.
+                let scope = preparation.map(SpendingScope);
+                if let Some(scope) = &scope {
+                    engine.refresh_spending_config(scope.0.refresh()?);
+                }
+                engine.native_status()
+            },
+            true,
+        )
+        .await
     }
 
     pub async fn init(
@@ -233,7 +441,7 @@ impl WalletHost {
     }
 
     pub async fn lock(&self) -> Result<(), WalletAdminError> {
-        self.call(|engine| engine.lock()).await
+        self.call_inner(|engine| engine.lock(), true).await
     }
 
     pub async fn check(
@@ -280,7 +488,13 @@ impl WalletHost {
         if self.inner.closing.load(Ordering::SeqCst) {
             return Err(SyncError::Cancelled);
         }
-        let tracking = TrackingSnapshot(self.inner.store.read()?.tracked_addresses_with_meta()?);
+        if self.inner.rescan.task_active() {
+            return Ok(None);
+        }
+        let tracking = TrackingSnapshot(
+            self.inner.store.read()?.tracked_addresses_with_meta()?,
+            self.inner.recovery_generation.load(Ordering::SeqCst),
+        );
         if terminal_tracking
             .as_ref()
             .is_some_and(|failed| failed.matches(&tracking))
@@ -294,6 +508,20 @@ impl WalletHost {
         let result = syncer.sync_once().map(Some);
         if result
             .as_ref()
+            .is_ok_and(|report| report.as_ref().is_some_and(|report| report.completed))
+        {
+            let read = self.inner.store.read()?;
+            if !read.scan_invalidated()?
+                && matches!(read.rescan_state()?, ergo_wallet_service::RescanState::Idle)
+            {
+                // A key/history reset can recover an earlier failed rescan
+                // through ordinary sync. Release only an inactive generation,
+                // after its complete durable history is valid again.
+                self.inner.rescan.clear_guards();
+            }
+        }
+        if result
+            .as_ref()
             .is_err_and(|error| !error.retryable() && !matches!(error, SyncError::Cancelled))
         {
             *terminal_tracking = Some(tracking);
@@ -305,18 +533,38 @@ impl WalletHost {
     pub fn begin_shutdown(&self) {
         self.inner.closing.store(true, Ordering::SeqCst);
         self.inner.admission.close();
+        self.inner.rescan.request_shutdown();
     }
 
     /// Drain work that already acquired the writer, then erase the unlocked
     /// master key. Commands waiting for it observe the shutdown latch.
     pub async fn shutdown(&self) -> Result<(), WalletAdminError> {
         self.begin_shutdown();
-        let inner = self.inner.clone();
-        tokio::task::spawn_blocking(move || inner.engine.lock().lock())
-            .await
-            .map_err(|error| {
+        // Schedule the key-erasure barrier before any cancellable await.
+        // A rescan command which already owns the writer can still publish
+        // its task; taking that slot before this barrier would miss it.
+        let owner = self.inner.clone();
+        let barrier = tokio::task::spawn_blocking(move || owner.engine.lock().lock());
+        let owner = self.inner.clone();
+        let finalizer = tokio::spawn(async move {
+            let drained = barrier.await;
+            let task = owner.rescan_task.lock().take();
+            let replay = match task {
+                Some(task) => task.await,
+                None => Ok(()),
+            };
+            let erased = drained.map_err(|error| {
                 WalletAdminError::Internal(format!("wallet shutdown task failed: {error}"))
-            })?
+            })?;
+            erased?;
+            replay.map_err(|error| {
+                WalletAdminError::Internal(format!("wallet rescan task failed: {error}"))
+            })
+        });
+        // Dropping the caller's wait does not cancel the finalizer or barrier.
+        finalizer.await.map_err(|error| {
+            WalletAdminError::Internal(format!("wallet shutdown finalizer failed: {error}"))
+        })?
     }
 }
 
@@ -682,6 +930,52 @@ mod tests {
                 Err(WalletAdminError::ShuttingDown)
             ));
         }
+        assert!(!host.inner.engine.lock().status().unwrap().is_unlocked);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_replay_published_by_an_admitted_command() {
+        let fixture = Fixture::new();
+        let host = fixture.host().unwrap();
+        restore_and_unlock(&host).await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (publish_tx, publish_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let command_host = host.clone();
+        let owner = host.inner.clone();
+        let command = tokio::spawn(async move {
+            command_host
+                .call(move |_| {
+                    entered_tx.send(()).unwrap();
+                    publish_rx.recv().unwrap();
+                    // Rescan prepares under the writer and publishes its task
+                    // before releasing it. Reproduce that publication boundary.
+                    *owner.rescan_task.lock() = Some(tokio::spawn(async move {
+                        finish_rx.await.unwrap();
+                    }));
+                    Ok(())
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        let shutdown_host = host.clone();
+        let mut shutdown = tokio::spawn(async move { shutdown_host.shutdown().await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !host.inner.closing.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        publish_tx.send(()).unwrap();
+        command.await.unwrap().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut shutdown)
+                .await
+                .is_err()
+        );
+        finish_tx.send(()).unwrap();
+        shutdown.await.unwrap().unwrap();
         assert!(!host.inner.engine.lock().status().unwrap().is_unlocked);
     }
 

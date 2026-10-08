@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en" class="theme-dark">
+<head>
+<meta charset="utf-8">
+<title>Ergo Wallet</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/tokens.css">
+<link rel="stylesheet" href="/components.css">
+<link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+<a class="skip-link" href="#main-content">Skip to wallet</a>
+<div class="app">
+  <nav class="side" aria-label="Wallet">
+    <div class="side__brand"><span class="side__product"><b class="side__wordmark">ERGO <span>WALLET</span></b></span></div>
+    <div class="side__nav"><a class="side__link" href="/wallet">Wallet</a></div>
+    <div class="side__foot"><button class="side__link side__link--mini" id="auth-chip" type="button">Authorize</button></div>
+  </nav>
+  <main class="main" id="main-content" tabindex="-1">
+    <div class="workspace-bar"><nav class="workspace-location" aria-label="Location"><span>Wallet workspace</span></nav></div>
+    <section id="section-wallet" class="section" aria-label="Wallet"></section>
+  </main>
+</div>
+<dialog id="auth-dialog" class="dialog"></dialog>
+<script type="module" src="/js/wallet-app.js"></script>
+</body>
+</html>

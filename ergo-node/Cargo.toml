@@ -22,7 +22,7 @@ ergo-ser        = { workspace = true }
 ergo-chain-spec = { workspace = true }
 ergo-crypto     = { workspace = true }
 ergo-validation = { workspace = true }
-ergo-wallet        = { workspace = true }
+ergo-wallet        = { workspace = true, features = ["keystore"] }
 ergo-wallet-service = { workspace = true }
 ergo-wallet-protocol = { workspace = true }
 ergo-state      = { workspace = true }
@@ -67,6 +67,9 @@ k256               = { workspace = true }
 rand               = { workspace = true }
 zeroize            = { workspace = true }
 ergo-sigma         = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 axum = { workspace = true }

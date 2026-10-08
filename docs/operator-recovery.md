@@ -106,7 +106,10 @@ persisted tracked public keys are sufficient. It works after snapshot bootstrap
 and with block pruning enabled. It requires a UTXO backend. Custom scan
 registries currently require the existing historical rescan; discovery refuses
 to advance their cursor with incomplete coverage. Discovery also refuses while
-any non-terminal wallet mining jobs exist: finish or cancel them first. Their
+wallet mining jobs remain scheduler-owned, including mined/conflicted records
+with a transaction ID that follow chain reorganizations. Cancel queued private
+work before stopping. Retained records can be explicitly quarantined during
+[copy cutover](wallet-extraction.md#migration-and-rollback). Their
 deadline fallback needs wallet transaction history, which discovery replaces.
 Pinned input reservations live in the job journal and are not stored in the box
 or transaction rows discovery rebuilds.

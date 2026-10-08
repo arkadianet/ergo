@@ -196,6 +196,15 @@ impl WalletEngine {
         &self.config
     }
 
+    /// Refresh admission and consensus rules from the same frozen context
+    /// used by this command's chain and mempool adapters. Operator privileges
+    /// and the selected network remain properties of the owning process.
+    pub fn refresh_spending_config(&mut self, mut config: WalletEngineConfig) {
+        config.network = self.config.network;
+        config.expose_private_keys = self.config.expose_private_keys;
+        self.config = config;
+    }
+
     /// Refuse commands that consume scan results while the durable history
     /// is invalidated. Status, recovery, keys and registry administration stay
     /// available independently of wallet history.

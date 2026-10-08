@@ -821,15 +821,16 @@ parse error rather than a silently ignored line.
 The default watch-only reference config ships at
 [`../ergo-walletd/ergo-walletd.toml`](../ergo-walletd/ergo-walletd.toml).
 [`../ergo-walletd/ergo-walletd-seed.toml`](../ergo-walletd/ergo-walletd-seed.toml)
-shows the opt-in encrypted seed lifecycle mode. The config schema rejects
+shows the opt-in encrypted seed mode. The config schema rejects
 unknown fields and combinations that mix descriptor and seed ownership.
 
 `mode = "watch_only"` imports public descriptors and exposes the existing
 read API without opening secret storage. `mode = "seed"` hosts the shared
-wallet engine for encrypted seed lifecycle and key management, protecting all
-local reads and writes with an independent credential. This first Phase 3
-increment cannot construct, sign or send transactions. Balance, box and
-transaction reads remain confirmed-only; no mempool overlay is exposed.
+wallet engine for encrypted seed lifecycle, transaction construction, signing,
+submission, scans/rescans and durable private mining jobs. An independent
+credential protects all local reads and writes. Seed-mode native balance reads
+can include an explicitly requested mempool delta; watch-only reads remain
+confirmed-only.
 
 ## `ergo-walletd.toml` top-level keys
 
@@ -838,8 +839,8 @@ transaction reads remain confirmed-only; no mempool overlay is exposed.
 | `mode` | string | `"watch_only"` | `"watch_only"` requires a public `descriptor_file`. `"seed"` requires `local_api_key_file` and rejects `descriptor_file`. CLI: `--mode <watch-only\|seed>`. |
 | `network` | string | `"mainnet"` | Required network identity: `"mainnet"` or `"testnet"`. Any other value (including `devnet`) is a load error. It selects the base58 address prefix used for descriptor validation and for every address the local API returns, so it **must** match the network the configured `node_url` serves — the daemon cannot infer that from the node. CLI: `--network`. |
 | `data_dir` | string (path) | none (required) | Directory holding `wallet.redb`. Seed mode also stores encrypted secret files under `wallet/`. Use a fresh, separate directory when creating a seed wallet; there is no automatic migration from an embedded or descriptor wallet. Created on first start. |
-| `node_url` | string (URL) | none (required) | Base URL of the node's operator API. Only `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}` are read. Must be `http`/`https` with a host and no credentials, query, or fragment. CLI: `--node-url`. |
-| `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
+| `node_url` | string (URL) | none (required) | Base URL of the node API. Watch-only mode reads `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}`. Seed mode also uses coherent spending context, tip-bound block replay, transaction admission/submission and `/api/v1/mining/private-transactions` queue operations. Must be `http`/`https` with a host and no credentials, query, or fragment. CLI: `--node-url`. |
+| `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Scoped credentials need `wallet`; seed private mining jobs additionally need `operator`. An `admin` credential or the legacy master key also authorizes these requests. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
 | `descriptor_file` | string (path) | none | Required in `watch_only` mode and rejected in `seed` mode. Public descriptor file (see [Descriptor file](#descriptor-file)); size-capped at 16 MiB and validated at load. CLI: `--descriptor-file`. |
 | `local_api_key_file` | string (path) | none | Required in `seed` mode and rejected in `watch_only` mode. Independent local `api_key` credential protecting all seed-mode reads and writes on both Unix and TCP listeners. Uses the same file-permission, size and header-value checks as `api_key_file`; the two files must contain different credentials. Never forwarded to the node. CLI: `--local-api-key-file`. |
 | `sync_interval` | u64 or string | `15` | Delay after completed sync passes or retryable errors; incomplete passes continue immediately. Accepts plain seconds (`15`) or a duration string (`"500ms"`, `"30s"`, `"2m"`, `"1h"`). `0` is rejected. CLI: `--sync-interval`. |
@@ -950,7 +951,7 @@ Validation rules that matter operationally:
   `tests/it/scan_registry_rewind.rs` covers the persisted registry's apply and
   rewind behavior, and `tests/it/daemon_boot.rs` covers a fresh database.
 
-## Seed lifecycle API
+## Seed wallet API
 
 Start with `mode = "seed"`, a fresh data directory, `local_api_key_file` and
 no `descriptor_file`. The daemon will not automatically migrate embedded
@@ -961,7 +962,7 @@ reconciles the seed's public keys, and later syncing continues while locked.
 Seed restarts require the daemon's persisted `wallet-mode` marker; an unmarked
 directory containing `wallet.redb`, `wallet/` or `state.redb` is rejected.
 
-Every seed-mode request must contain exactly one `api_key` header matching the
+Every seed-mode API request must contain exactly one `api_key` header matching the
 local credential, on both Unix and TCP listeners. The node credential is
 insufficient. Missing, duplicate or incorrect credentials return `401` before
 body parsing. All seed-mode responses include `Cache-Control: no-store`.
@@ -982,21 +983,23 @@ withheld from the local API.
 | GET | `/api/v1/wallet/change-address` | `{address}`; address may be `null` |
 | PUT | `/api/v1/wallet/change-address` | `{address}`; requires an unlocked seed that owns the tracked address |
 
-These routes are added to the existing read API. `/status` and
-`/api/v1/wallet/status` keep the cursor, node-tip, lag and sync projection;
-seed initialization and lock state live at `/api/v1/wallet/lifecycle/status`.
-Key derivation records a height from a bounded authenticated node-tip request.
-Commands and sync passes share one writer gate. Newly added keys reset history
-in the same transaction, so sync rebuilds their coverage before claiming it.
-A terminal seed-sync failure stays visible while the worker waits; adding a
-new key resets history and resumes replay without a process restart.
+Seed mode also serves shared engine selection/build/sign/send, reward sweeps,
+multisig, scan/rescan and private mining-job routes, including Scala adapters.
+Transaction/scan bodies have a separate 8 MiB limit. Private-key export keeps
+its disabled operator default. `/api/v1/wallet/status` refreshes a validated
+node context for pruning and EIP-27 flags, and returns `node_unavailable` when
+the node cannot provide it. `/status` retains cursor, node-tip, lag and sync diagnostics.
+The static wallet UI is public so a browser can enter its local credential.
+All API reads and writes remain authenticated.
 
-Construction, signing, sending, private-key export and engine-rescan routes are
-absent. The lifecycle adapter conservatively treats node pruning as unknown and
-does not support engine block replay. Restore marks historical coverage
-incomplete; normal sync must obtain the required retained history from the node.
-It cannot recover an unavailable history by declaring a restored wallet caught
-up. See [Phase 3's remaining work](wallet-extraction.md#phase-3-daemon-engine-hosting).
+Commands and sync share a writer; actual key additions atomically reset history.
+Spending refreshes complete coherent node/pool context and fails before the
+engine when required data cannot be validated. Rescans fence mutations and
+suspend sync while their cancellable supervised replay runs. Restore marks
+unknown/pruned historical coverage incomplete; neither sync nor discovery
+invents unavailable historical transactions. See
+[daemon engine hosting and cutover](wallet-extraction.md#phase-3-daemon-engine-hosting)
+for migration, background jobs, API boundaries and deployment.
 
 ## Socket permissions
 

@@ -11,7 +11,7 @@ Read the [security policy](SECURITY.md) and [compatibility limits](docs/compatib
 ### Download
 
 Download the archive for your platform from [GitHub Releases](https://github.com/arkadianet/ergo/releases).
-Each archive holds both programs, `ergo-node` and the `ergo-wallet` CLI, with
+Each archive holds `ergo-node`, the `ergo-wallet` CLI and `ergo-walletd`, with
 config templates and docs. These six platforms are built by the
 [release workflow](.github/workflows/release.yml):
 
@@ -179,7 +179,7 @@ From a source checkout:
 
 ```bash
 cargo build --locked --release -p ergo-node
-cargo build --locked --release -p ergo-wallet
+cargo build --locked --release -p ergo-wallet --features cli
 ./target/release/ergo-node --config ergo-node/ergo-node.toml
 ```
 

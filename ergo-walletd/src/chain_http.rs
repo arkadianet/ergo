@@ -197,6 +197,15 @@ impl HttpChainClient {
         allow_not_found: bool,
         deadline: Option<Duration>,
     ) -> Result<Option<Vec<u8>>, ChainClientError> {
+        self.outside_runtime(|| self.request_bytes_blocking(path, allow_not_found, deadline))
+    }
+
+    fn request_bytes_blocking(
+        &self,
+        path: &str,
+        allow_not_found: bool,
+        deadline: Option<Duration>,
+    ) -> Result<Option<Vec<u8>>, ChainClientError> {
         let response = self.send(path, deadline)?;
         if response.status().is_success() {
             return read_body(response, self.max_response_body_bytes)
@@ -293,16 +302,100 @@ impl HttpChainClient {
     /// a smaller page, so retrying could not help, and `SyncError` treats a
     /// protocol failure as terminal — the pass fails closed instead of looping.
     fn page_bytes(&self, path: &str, blocks: u32) -> Result<Vec<u8>, ChainClientError> {
-        let response = self.send(path, None)?;
-        if !response.status().is_success() {
-            return Err(self.status_error(response)?);
-        }
-        read_page(response, self.max_response_body_bytes, blocks)
+        self.outside_runtime(|| {
+            let response = self.send(path, None)?;
+            if !response.status().is_success() {
+                return Err(self.status_error(response)?);
+            }
+            read_page(response, self.max_response_body_bytes, blocks)
+        })
     }
 
-    fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ChainClientError> {
+    pub(crate) fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ChainClientError> {
         let body = self.get_bytes(path)?;
         parse_json(&body)
+    }
+
+    /// Bounded authenticated RPC transport for spend and private-queue ports.
+    /// Callers parse the typed success/error body; credentials never enter it.
+    pub(crate) fn rpc(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<(StatusCode, Vec<u8>), ChainClientError> {
+        self.outside_runtime(move || self.rpc_blocking(method, path, body, timeout))
+    }
+
+    fn rpc_blocking(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<(StatusCode, Vec<u8>), ChainClientError> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(ChainClientError::ShuttingDown(
+                "wallet daemon shutdown".into(),
+            ));
+        }
+        let url = self
+            .base_url
+            .join(path)
+            .map_err(|_| ChainClientError::Protocol("invalid chain RPC URL".into()))?;
+        let value = HeaderValue::from_bytes(self.api_key.expose())
+            .map_err(|_| ChainClientError::Protocol("API key is not a valid header".into()))?;
+        let mut request = self
+            .client
+            .request(method, url)
+            .header(API_KEY_HEADER, value)
+            .timeout(timeout);
+        if let Some(body) = body {
+            let bytes = serde_json::to_vec(&body)
+                .map_err(|_| ChainClientError::Protocol("invalid chain RPC request".into()))?;
+            if bytes.len() > MAX_RESPONSE_BODY_BYTES {
+                return Err(ChainClientError::Protocol(
+                    "chain RPC request exceeds byte cap".into(),
+                ));
+            }
+            request = request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(bytes);
+        }
+        let response = request.send().map_err(map_transport_error)?;
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(ChainClientError::ShuttingDown(
+                "wallet daemon shutdown".into(),
+            ));
+        }
+        let status = response.status();
+        let bytes =
+            read_body(response, self.max_response_body_bytes).map_err(ChainClientError::from)?;
+        Ok((status, bytes))
+    }
+
+    /// Engine send futures also call synchronous chain ports. Even a host
+    /// blocking-pool thread is inside Tokio while `Handle::block_on` polls
+    /// that future, where reqwest's blocking transport would panic. Keep the
+    /// complete request and response lifetime on a scoped worker in that case;
+    /// the existing per-request deadline still bounds the operation.
+    fn outside_runtime<T, F>(&self, operation: F) -> Result<T, ChainClientError>
+    where
+        T: Send,
+        F: FnOnce() -> Result<T, ChainClientError> + Send,
+    {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return operation();
+        }
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .name("wallet-chain-http".into())
+                .spawn_scoped(scope, operation)
+                .map_err(|_| ChainClientError::Transport("HTTP worker could not start".into()))?
+                .join()
+                .map_err(|_| ChainClientError::Transport("HTTP worker failed".into()))?
+        })
     }
 
     fn get_json_optional<T: DeserializeOwned>(
@@ -316,6 +409,47 @@ impl HttpChainClient {
 }
 
 impl ChainClient for HttpChainClient {
+    fn spending_context(&self) -> Result<wire::SpendingContext, ChainClientError> {
+        self.get_json("api/v1/chain/spending-context")
+    }
+
+    fn block_at(&self, height: u32, tip: CommittedTip) -> Result<ChainBlock, ChainClientError> {
+        let response: wire::BlockAtResponse = self.get_json(&format!(
+            "api/v1/chain/wallet-blocks/{height}?tip={}&tipHeight={}",
+            hex::encode(tip.header_id),
+            tip.height
+        ))?;
+        let actual = neutral_tip(response.tip)?;
+        if actual != tip {
+            return Err(ChainClientError::stale_tip(tip, actual));
+        }
+        let block = neutral_block(response.block)?;
+        if block.height != height {
+            return Err(ChainClientError::Protocol(
+                "block-at returned wrong height".into(),
+            ));
+        }
+        Ok(block)
+    }
+
+    fn admit_transaction(
+        &self,
+        request: wire::SubmitRequest,
+    ) -> Result<wire::AdmissionResponse, ChainClientError> {
+        let (status, bytes) = self.rpc(
+            reqwest::Method::POST,
+            "api/v1/chain/admission",
+            Some(
+                serde_json::to_value(request)
+                    .map_err(|_| ChainClientError::Protocol("invalid admission request".into()))?,
+            ),
+            Duration::from_secs(10),
+        )?;
+        if !status.is_success() {
+            return Err(rpc_status_error(status));
+        }
+        parse_json(&bytes)
+    }
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
@@ -387,7 +521,17 @@ impl ChainClient for HttpChainClient {
             .strip_prefix(self.base_url.as_str())
             .ok_or_else(|| ChainClientError::Protocol("box endpoint URL escaped base".to_string()))?
             .to_string();
-        let Some(response) = self.get_json_optional::<wire::BoxLookupResponse>(&path)? else {
+        let response = match self.get_json_optional::<wire::BoxLookupResponse>(&path) {
+            Err(ChainClientError::Conflict) => {
+                let actual = self.committed_tip_within(Duration::from_secs(5))?;
+                if actual != expected_tip {
+                    return Err(ChainClientError::stale_tip(expected_tip, actual));
+                }
+                return Err(ChainClientError::Conflict);
+            }
+            result => result?,
+        };
+        let Some(response) = response else {
             return Ok(UtxoLookup {
                 tip: expected_tip,
                 utxo: None,
@@ -409,8 +553,57 @@ impl ChainClient for HttpChainClient {
         })
     }
 
-    fn submit(&self, _request: SubmitRequest) -> Result<SubmitResponse, ChainClientError> {
-        Err(ChainClientError::Unsupported)
+    fn submit(&self, request: SubmitRequest) -> Result<SubmitResponse, ChainClientError> {
+        let (status, bytes) = self.rpc(
+            reqwest::Method::POST,
+            "api/v1/chain/transactions",
+            Some(
+                serde_json::json!({"transaction": hex::encode(request.transaction),
+                "snapshotId": request.snapshot_id.map(hex::encode)}),
+            ),
+            Duration::from_secs(10),
+        )?;
+        if !status.is_success() && status != StatusCode::BAD_REQUEST {
+            return Err(rpc_status_error(status));
+        }
+        let response: wire::SubmitResponse = parse_json(&bytes)?;
+        match response {
+            wire::SubmitResponse::Accepted { tip, tx_id } => Ok(SubmitResponse::Accepted {
+                tip: neutral_tip(tip)?,
+                tx_id: decode_id(&tx_id, "transaction id")?,
+            }),
+            wire::SubmitResponse::Duplicate { tip, tx_id } => Ok(SubmitResponse::Duplicate {
+                tip: neutral_tip(tip)?,
+                tx_id: decode_id(&tx_id, "transaction id")?,
+            }),
+            wire::SubmitResponse::Rejected {
+                tip,
+                reason,
+                detail,
+            } => Ok(SubmitResponse::Rejected {
+                tip: neutral_tip(tip)?,
+                reason: match reason {
+                    wire::SubmitError::Duplicate => {
+                        ergo_wallet_service::chain::SubmitError::Duplicate
+                    }
+                    wire::SubmitError::Invalid => ergo_wallet_service::chain::SubmitError::Invalid,
+                    wire::SubmitError::Fee => ergo_wallet_service::chain::SubmitError::Fee,
+                },
+                detail,
+            }),
+        }
+    }
+}
+
+pub(crate) fn rpc_status_error(status: StatusCode) -> ChainClientError {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ChainClientError::Unauthorized,
+        StatusCode::CONFLICT => ChainClientError::Conflict,
+        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
+            ChainClientError::Timeout("node RPC timed out".into())
+        }
+        StatusCode::TOO_MANY_REQUESTS => ChainClientError::Overloaded("node RPC overloaded".into()),
+        _ => ChainClientError::Unavailable(format!("node RPC returned HTTP {status}")),
     }
 }
 
@@ -492,7 +685,7 @@ fn parse_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, ChainClientError> {
         .map_err(|_| ChainClientError::Protocol("invalid chain JSON response".to_string()))
 }
 
-fn decode_id(value: &str, field: &str) -> Result<[u8; 32], ChainClientError> {
+pub(crate) fn decode_id(value: &str, field: &str) -> Result<[u8; 32], ChainClientError> {
     wire::validate_id32(value, field)
         .map_err(|_| ChainClientError::Protocol(format!("invalid {field} in chain response")))?;
     hex::decode(value)
@@ -503,14 +696,14 @@ fn decode_id(value: &str, field: &str) -> Result<[u8; 32], ChainClientError> {
         })
 }
 
-fn decode_hex(value: &str, field: &str) -> Result<Vec<u8>, ChainClientError> {
+pub(crate) fn decode_hex(value: &str, field: &str) -> Result<Vec<u8>, ChainClientError> {
     wire::validate_hex_bytes(value, field)
         .map_err(|_| ChainClientError::Protocol(format!("invalid {field} in chain response")))?;
     hex::decode(value)
         .map_err(|_| ChainClientError::Protocol(format!("invalid {field} in chain response")))
 }
 
-fn canonical_box(
+pub(crate) fn canonical_box(
     bytes: &[u8],
     field: &str,
 ) -> Result<ergo_ser::ergo_box::ErgoBox, ChainClientError> {
@@ -547,7 +740,7 @@ fn box_assets_match(ergo_box: &ergo_ser::ergo_box::ErgoBox, right: &[([u8; 32], 
             })
 }
 
-fn neutral_tip(tip: wire::ChainTip) -> Result<CommittedTip, ChainClientError> {
+pub(crate) fn neutral_tip(tip: wire::ChainTip) -> Result<CommittedTip, ChainClientError> {
     let header_id = decode_id(&tip.header_id, "header_id")?;
     if tip.height > 0 && header_id == [0; 32] {
         return Err(ChainClientError::Protocol(
@@ -1246,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_snapshot_and_box_lookup_and_submits_are_disabled() {
+    fn parses_snapshot_and_box_lookup() {
         let (url, handle) = serve_once(|path, _| {
             assert_eq!(path, "/api/v1/chain/snapshot");
             format!(
@@ -1287,14 +1480,78 @@ mod tests {
             .lookup_utxo(box_id, CommittedTip::new(1, [1; 32]))
             .unwrap();
         assert_eq!(lookup.utxo.unwrap().box_id, box_id);
-        assert!(matches!(
-            client.submit(ergo_wallet_service::SubmitRequest {
-                transaction: vec![1],
-                snapshot_id: None,
-            }),
-            Err(ChainClientError::Unsupported)
-        ));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn legacy_submit_sends_authenticated_anchored_bytes_and_parses_acceptance() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            server_calls.fetch_add(1, Ordering::SeqCst);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let (header_end, body_length) = loop {
+                let mut buffer = [0; 1024];
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0, "request must contain headers and body");
+                request.extend_from_slice(&buffer[..count]);
+                assert!(request.len() <= 4096);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..end]).unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .expect("submission has a bounded Content-Length");
+                    if request.len() >= end + 4 + length {
+                        break (end + 4, length);
+                    }
+                }
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            assert!(headers.starts_with("POST /api/v1/chain/transactions HTTP/1.1\r\n"));
+            assert!(headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("api_key: secret")));
+            let body: serde_json::Value =
+                serde_json::from_slice(&request[header_end..header_end + body_length]).unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({"transaction":"aabb", "snapshotId":id(1)})
+            );
+            let body = serde_json::json!({"status":"accepted", "tip":{"height":1,"headerId":id(1)}, "txId":id(7)}).to_string();
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+        });
+        let client = HttpChainClient::with_timeouts(
+            Url::parse(&format!("http://{address}/")).unwrap(),
+            ApiKey::from_test(b"secret".to_vec()),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(
+            client
+                .submit(SubmitRequest {
+                    transaction: vec![0xaa, 0xbb],
+                    snapshot_id: Some([1; 32])
+                })
+                .unwrap(),
+            SubmitResponse::Accepted {
+                tip: CommittedTip::new(1, [1; 32]),
+                tx_id: [7; 32]
+            }
+        );
+        handle.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

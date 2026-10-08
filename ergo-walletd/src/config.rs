@@ -202,8 +202,14 @@ fn default_blocks_page() -> u32 {
 }
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = "ergo-walletd", about = "Standalone Ergo wallet daemon")]
+#[command(
+    name = "ergo-walletd",
+    version,
+    about = "Standalone Ergo wallet daemon"
+)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
     #[arg(long, short = 'c', default_value = "ergo-walletd.toml")]
     pub config: PathBuf,
     #[arg(long, value_enum)]
@@ -230,6 +236,12 @@ pub struct Cli {
     pub unix_socket: Option<PathBuf>,
     #[arg(long)]
     pub tcp_fallback: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum CliCommand {
+    /// Copy a stopped embedded wallet into a fresh standalone seed directory.
+    Migrate(crate::migration::MigrateArgs),
 }
 
 #[derive(Clone)]
@@ -807,6 +819,7 @@ mod tests {
         )
         .unwrap();
         let loaded = Config::load(Cli {
+            command: None,
             config: config_path,
             mode: None,
             local_api_key_file: None,

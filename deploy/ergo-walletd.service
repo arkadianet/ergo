@@ -1,0 +1,40 @@
+[Unit]
+Description=Ergo standalone wallet daemon
+Documentation=https://github.com/arkadianet/ergo/blob/main/docs/wallet-extraction.md
+After=network-online.target ergo-node.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+User=ergo-walletd
+StateDirectory=ergo-walletd
+StateDirectoryMode=0700
+RuntimeDirectory=ergo-walletd
+RuntimeDirectoryMode=0700
+ConfigurationDirectory=ergo-walletd
+WorkingDirectory=/var/lib/ergo-walletd
+# Source credential files must be readable only by their administrator.
+# systemd presents private copies to the dynamic service account.
+LoadCredential=node-api-key:/etc/ergo-walletd/node-api-key
+LoadCredential=wallet-api-key:/etc/ergo-walletd/wallet-api-key
+ExecStart=/usr/local/bin/ergo-walletd --config /etc/ergo-walletd/walletd.toml --data-dir /var/lib/ergo-walletd --api-key-file ${CREDENTIALS_DIRECTORY}/node-api-key --local-api-key-file ${CREDENTIALS_DIRECTORY}/wallet-api-key --unix-socket /run/ergo-walletd/wallet.sock
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=60s
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

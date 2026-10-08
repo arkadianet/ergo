@@ -168,6 +168,25 @@ impl WalletChainError {
 }
 
 pub trait WalletChain: Send + Sync {
+    fn block_at(
+        &self,
+        _height: u32,
+        _tip: wallet_chain_wire::ChainTip,
+    ) -> Result<wallet_chain_wire::BlockAtResponse, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+
+    fn admit_transaction(
+        &self,
+        _request: wallet_chain_wire::SubmitRequest,
+    ) -> Result<wallet_chain_wire::AdmissionResponse, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+
+    fn spending_context(&self) -> Result<wallet_chain_wire::SpendingContext, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+
     fn tip(&self) -> Result<wallet_chain_wire::ChainTip, WalletChainError> {
         Err(WalletChainError::Unsupported)
     }

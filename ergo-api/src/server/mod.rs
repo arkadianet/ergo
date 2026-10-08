@@ -114,6 +114,9 @@ pub struct ServerCtx {
     /// the API is unaffected. The integrator mounts a real handle when
     /// `[mining].enabled = true`.
     pub mining: Option<Arc<dyn crate::mining::NodeMining>>,
+    /// Optional durable private queue retained with mining disabled. Operator
+    /// list/cancel routes use it without enabling candidate or import routes.
+    pub private_queue: Option<Arc<dyn crate::mining::NodeMining>>,
     /// Scala-compat `/emission/at/{height}` schedule view. `None` ⇒ the
     /// route is not mounted (404). Production always wires it — the
     /// schedule is static per-network math, valid in every node mode.
@@ -194,6 +197,7 @@ pub fn serve_on(
         network,
         chain_params: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported,
@@ -605,6 +609,7 @@ pub fn router_with_wallet(
         network,
         chain_params: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported,
@@ -752,6 +757,7 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
         network,
         chain_params,
         mining,
+        private_queue,
         emission,
         emission_scripts,
         utxo_reads_supported,
@@ -1063,6 +1069,7 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
         chain: v1_op_chain,
         admin: v1_op_admin,
         mining: v1_op_mining,
+        private_queue,
         network,
     };
     // Scan registry + account-abstraction group (`/api/v1/scan/*`,

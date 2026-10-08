@@ -105,6 +105,24 @@ pub fn router(context: ApiContext) -> Router {
         .with_state(state)
 }
 
+/// Preserve the daemon's short diagnostic/read aliases in seed mode. Native
+/// wallet reads are supplied separately by the complete engine adapter.
+pub(crate) fn short_router(context: ApiContext) -> Router {
+    Router::new()
+        .route("/status", get(status))
+        .route("/balance", get(balance))
+        .route("/balances", get(balance))
+        .route("/boxes", get(boxes))
+        .route("/boxes/:id", get(box_by_id))
+        .route("/transactions", get(transactions))
+        .route("/transactions/:id", get(transaction_by_id))
+        .route("/scans", get(scans))
+        .route("/addresses", get(addresses))
+        .route("/api/v1/scans", get(scans))
+        .route("/api/v1/scan/listAll", get(scans))
+        .with_state(ApiState { context })
+}
+
 /// Status projection: the durable scan cursor, the node tip the sync loop last
 /// observed, and the `lag` / `sync` state derived from them.
 ///

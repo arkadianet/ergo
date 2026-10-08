@@ -12,7 +12,7 @@ use crate::mining::PrivateTransactionRequest;
     operation_id = "v1_mining_private_transactions_get", tag = "mining",
     responses((status = 200, description = "Owner-only private queue")), security(("ApiKeyAuth" = [])))]
 pub(crate) async fn list(State(s): State<OperatorState>) -> Response {
-    let m = match s.mining() {
+    let m = match s.private_queue() {
         Ok(m) => m,
         Err(e) => return *e,
     };
@@ -68,7 +68,7 @@ pub(crate) async fn submit(
     params(("tx_id" = String, Path, description = "Private transaction id")),
     responses((status = 200, description = "Transaction withdrawn and inputs released", body = crate::mining::PrivateTransactionEntry)), security(("ApiKeyAuth" = [])))]
 pub(crate) async fn cancel(State(s): State<OperatorState>, Path(tx_id): Path<String>) -> Response {
-    let m = match s.mining() {
+    let m = match s.private_queue() {
         Ok(m) => m,
         Err(e) => return *e,
     };

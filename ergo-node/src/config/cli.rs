@@ -60,6 +60,10 @@ pub enum Command {
     /// Discover tracked wallet holdings from current UTXOs; no historical blocks required.
     WalletScanUtxo {
         data_dir: PathBuf,
+        /// Standalone wallet directory; stop the daemon before discovery.
+        /// Omit to retain the embedded wallet target.
+        #[arg(long)]
+        wallet_data_dir: Option<PathBuf>,
         /// Discard a previous checkpoint and start at the current committed tip.
         #[arg(long)]
         restart: bool,

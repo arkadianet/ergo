@@ -32,7 +32,7 @@ Validate the opposite direction with a newly generated Rust wallet:
 
 ```bash
 wallet_oracle_dir=$(mktemp -d)
-cargo run -p ergo-wallet --example export_keystore_oracle -- "$wallet_oracle_dir"
+cargo run -p ergo-wallet --features keystore --example export_keystore_oracle -- "$wallet_oracle_dir"
 scala-cli run scripts/jvm_keystore_oracle/KeystoreOracle.scala --server=false -- \
   verify "$wallet_oracle_dir/$(ls "$wallet_oracle_dir")"
 ```

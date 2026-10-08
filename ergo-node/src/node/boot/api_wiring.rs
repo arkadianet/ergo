@@ -155,15 +155,28 @@ struct WalletChainWiring {
     api: Option<Arc<dyn ergo_api::WalletChain>>,
 }
 
-fn build_wallet_chain_wiring(
-    store: &ergo_state::StateBackendKind,
-    wallet_store: Option<&Arc<dyn ergo_wallet_service::wallet::WalletStore>>,
-    submit_bridge: Arc<dyn ergo_api::NodeSubmit>,
+#[derive(Default)]
+struct WalletChainConfig {
     is_pruned: bool,
     reemission_rules: Option<ergo_validation::ReemissionRuleInputs>,
     reemission_inputs: Vec<ergo_wallet_service::chain::ReemissionInput>,
     private_queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
+    spending: Option<(crate::snapshot::SnapshotHandle, u64, usize)>,
+}
+
+fn build_wallet_chain_wiring(
+    store: &ergo_state::StateBackendKind,
+    wallet_store: Option<&Arc<dyn ergo_wallet_service::wallet::WalletStore>>,
+    submit_bridge: Arc<dyn ergo_api::NodeSubmit>,
+    config: WalletChainConfig,
 ) -> WalletChainWiring {
+    let WalletChainConfig {
+        is_pruned,
+        reemission_rules,
+        reemission_inputs,
+        private_queue,
+        spending,
+    } = config;
     let is_utxo_backend = store.as_utxo().is_some();
     if let Some(wallet_store) = wallet_store {
         let reader = store.reader_handle();
@@ -174,13 +187,16 @@ fn build_wallet_chain_wiring(
                 is_pruned,
                 reemission_rules.clone(),
             )
-            .with_private_queue(private_queue),
+            .with_private_queue(private_queue.clone()),
         );
-        let client = Arc::new(
+        let mut client =
             super::super::wallet_bridge::InProcessChainClient::new(reader, submit_bridge.clone())
                 .with_state_accessor(accessor.clone())
-                .with_reemission_inputs(reemission_inputs.clone()),
-        );
+                .with_reemission_inputs(reemission_inputs.clone());
+        if let Some((snapshot, fee, size)) = spending {
+            client = client.with_spending_context(snapshot, fee, size, private_queue);
+        }
+        let client = Arc::new(client);
         let api = is_utxo_backend.then(|| {
             Arc::new(super::super::wallet_bridge::WalletChainAdapter::new(
                 client.clone() as Arc<dyn ergo_wallet_service::chain::ChainClient>,
@@ -191,15 +207,23 @@ fn build_wallet_chain_wiring(
             api,
         }
     } else if is_utxo_backend {
-        let client = Arc::new(
-            super::super::wallet_bridge::InProcessChainClient::from_chain_reader(
-                store.reader_handle(),
-                submit_bridge,
+        let reader = store.reader_handle();
+        let accessor = Arc::new(
+            super::super::wallet_bridge::ChainStateAccessorImpl::chain_only(
+                reader.clone(),
                 is_pruned,
                 reemission_rules,
             )
-            .with_reemission_inputs(reemission_inputs),
+            .with_private_queue(private_queue.clone()),
         );
+        let mut client =
+            super::super::wallet_bridge::InProcessChainClient::new(reader, submit_bridge)
+                .with_state_accessor(accessor)
+                .with_reemission_inputs(reemission_inputs);
+        if let Some((snapshot, fee, size)) = spending {
+            client = client.with_spending_context(snapshot, fee, size, private_queue);
+        }
+        let client = Arc::new(client);
         WalletChainWiring {
             writer: None,
             api: Some(Arc::new(
@@ -333,10 +357,17 @@ pub(super) async fn bind(
         store,
         wallet_store.as_ref(),
         submit_bridge.clone(),
-        is_pruned,
-        reemission_rules,
-        reemission_inputs,
-        private_queue.clone(),
+        WalletChainConfig {
+            is_pruned,
+            reemission_rules,
+            reemission_inputs,
+            private_queue: private_queue.clone(),
+            spending: Some((
+                snapshot_publisher.handle(),
+                config.mempool_config.min_relay_fee_nano_erg,
+                config.mempool_config.max_tx_size_bytes,
+            )),
+        },
     );
 
     let mut wallet_session_id = 0;
@@ -593,6 +624,15 @@ pub(super) async fn bind(
         network: network_prefix,
         chain_params: Some(scala_compat_bridge_arc.clone().into_chain_params()),
         mining: mining_bridge.clone(),
+        private_queue: if mining_bridge.is_none() {
+            private_queue.clone().map(|queue| {
+                Arc::new(super::super::wallet_bridge::StoredPrivateQueueBridge::new(
+                    queue,
+                )) as Arc<dyn ergo_api::NodeMining>
+            })
+        } else {
+            None
+        },
         // Static per-network schedule math — always wired.
         // Public route by Scala parity (no withAuth).
         emission: Some(Arc::new(crate::api_bridge::EmissionScheduleBridge::new(
@@ -957,15 +997,8 @@ mod tests {
         let backend = ergo_state::StateBackendKind::Utxo(state);
         let submit = submit_bridge();
 
-        let external = build_wallet_chain_wiring(
-            &backend,
-            None,
-            submit.clone(),
-            false,
-            None,
-            Vec::new(),
-            None,
-        );
+        let external =
+            build_wallet_chain_wiring(&backend, None, submit.clone(), WalletChainConfig::default());
         assert!(external.writer.is_none());
         assert!(external.api.is_some());
 
@@ -974,10 +1007,7 @@ mod tests {
             &backend,
             Some(&wallet_store),
             submit,
-            false,
-            None,
-            Vec::new(),
-            None,
+            WalletChainConfig::default(),
         );
         assert!(embedded.writer.is_some());
         assert!(embedded.api.is_some());
@@ -1001,10 +1031,7 @@ mod tests {
             &backend,
             None,
             submit_bridge(),
-            false,
-            None,
-            Vec::new(),
-            None,
+            WalletChainConfig::default(),
         );
         assert!(wiring.writer.is_none());
         assert!(wiring.api.is_none());

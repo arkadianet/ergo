@@ -286,6 +286,7 @@ fn app(configured: bool, dispatch: Arc<Dispatch>) -> axum::Router {
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: Some(dispatch.clone()),
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,

@@ -7,7 +7,7 @@
 //! the funded selection for the transaction builder to handle.
 
 use super::{BoxSelector, BoxSummary, SelectionResult, SelectionTarget};
-use ergo_wallet::error::WalletError;
+use crate::error::WalletError;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 

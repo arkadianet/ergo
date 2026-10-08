@@ -461,6 +461,7 @@ async fn get(failure: Failure, uri: &str) -> (StatusCode, serde_json::Value) {
             network: NetworkPrefix::Mainnet,
             chain_params: None,
             mining: None,
+            private_queue: None,
             emission: Some(Arc::new(Emission)),
             emission_scripts: None,
             utxo_reads_supported: true,

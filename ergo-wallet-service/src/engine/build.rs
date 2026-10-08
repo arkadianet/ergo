@@ -219,7 +219,8 @@ fn build_unsigned_tx_with_options(
             Vec::with_capacity(explicit_inputs.len());
         // EIP-27 rules for this net (None off EIP-27); per-input (value, token)
         // captured for the shared re-emission obligation below.
-        let reemission_rules = chain.reemission_rules();
+        let owned_reemission = chain.reemission_rules_owned();
+        let reemission_rules = owned_reemission.as_ref();
         let mut per_input_reemission: Vec<(u64, u64)> = Vec::with_capacity(explicit_inputs.len());
         let mut selected: Vec<SelectedInputInfo> = Vec::with_capacity(explicit_inputs.len());
 
@@ -550,7 +551,8 @@ fn build_unsigned_tx_with_options(
             })
             .collect::<Result<_, WalletAdminError>>()?;
 
-        let reemission_rules = chain.reemission_rules();
+        let owned_reemission = chain.reemission_rules_owned();
+        let reemission_rules = owned_reemission.as_ref();
         let selector = crate::box_selector::default::DefaultBoxSelector;
         let builder = crate::tx_builder::UnsignedTxBuilder {
             available_summaries: &summaries,
@@ -969,7 +971,8 @@ pub(crate) fn select_boxes_impl(
 
     let (summaries, _) = selection_candidates(&req.inputs, state, store, chain, mempool)?;
 
-    let reemission = chain.reemission_rules();
+    let owned_reemission = chain.reemission_rules_owned();
+    let reemission = owned_reemission.as_ref();
     let reemission_height = chain
         .tip_height()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?
@@ -1238,7 +1241,7 @@ pub(crate) fn build_transaction_impl_with_snapshot(
                         ));
                     }
                     if chain
-                        .reemission_rules()
+                        .reemission_rules_owned()
                         .is_some_and(|rules| rules.reemission_token_id == id)
                     {
                         return Err(WalletAdminError::ReemissionSpendNotAllowed(

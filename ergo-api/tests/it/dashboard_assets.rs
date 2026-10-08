@@ -74,6 +74,7 @@ fn app() -> axum::Router {
         chain_params: None,
         wallet_chain: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,

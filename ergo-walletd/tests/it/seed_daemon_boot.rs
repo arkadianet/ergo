@@ -72,6 +72,7 @@ fn write_config(
 
 fn load(path: &Path) -> LoadedConfig {
     Config::load(Cli {
+        command: None,
         config: path.to_path_buf(),
         mode: None,
         local_api_key_file: None,
@@ -301,7 +302,7 @@ fn seed_daemon_loads_separate_credentials_syncs_and_restarts_locked() {
             &client,
             &daemon,
             Method::GET,
-            "/api/v1/wallet/status",
+            "/status",
             None,
         ));
         if status["scanCursor"]["height"] == TIP_HEIGHT
@@ -323,7 +324,7 @@ fn seed_daemon_loads_separate_credentials_syncs_and_restarts_locked() {
         "/api/v1/wallet/addresses",
         None,
     ));
-    // The daemon's tracked-address read includes master and first EIP-3 child.
+    // Native addresses expose persisted master and first EIP-3 child metadata.
     assert_eq!(addresses_before["items"].as_array().unwrap().len(), 2);
     // Shut down while unlocked; prepare must never resurrect the master key.
     daemon.stop();

@@ -173,6 +173,11 @@ pub trait WalletChainAccess: Send + Sync {
     fn reemission_rules(&self) -> Option<&ReemissionRuleInputs> {
         None
     }
+    /// Owned rule inputs for adapters whose operation context is refreshed
+    /// under a host writer gate. Embedded accessors retain their borrowed API.
+    fn reemission_rules_owned(&self) -> Option<ReemissionRuleInputs> {
+        self.reemission_rules().cloned()
+    }
     /// Fetch the block at `height` for rescan replay. `Ok(None)` means the
     /// requested block is unavailable (pruned or not yet downloaded).
     fn read_block_at(&self, height: u32) -> Result<Option<RescanBlock>, RescanReadError>;

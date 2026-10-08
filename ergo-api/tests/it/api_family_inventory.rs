@@ -207,8 +207,11 @@ fn canonical_rust_openapi_is_the_union_of_both_fragments_and_known_aliases() {
         operation("/api/v1/transactions-psbt/{psbt_id}/finalize", "post"),
         operation("/api/v1/chain/tip", "get"),
         operation("/api/v1/chain/snapshot", "get"),
+        operation("/api/v1/chain/spending-context", "get"),
         operation("/api/v1/chain/boxes/{id}", "get"),
         operation("/api/v1/chain/blocks-since", "get"),
+        operation("/api/v1/chain/wallet-blocks/{height}", "get"),
+        operation("/api/v1/chain/admission", "post"),
         operation("/api/v1/chain/transactions", "post"),
     ]);
     assert!(required.is_subset(&operations));
@@ -220,6 +223,17 @@ fn wallet_chain_operations_have_unique_ids_and_runtime_error_schemas() {
     let operations = [
         ("/api/v1/chain/tip", "get", "wallet_chain_tip"),
         ("/api/v1/chain/snapshot", "get", "wallet_chain_snapshot"),
+        (
+            "/api/v1/chain/spending-context",
+            "get",
+            "wallet_spending_context",
+        ),
+        (
+            "/api/v1/chain/wallet-blocks/{height}",
+            "get",
+            "wallet_chain_block_at",
+        ),
+        ("/api/v1/chain/admission", "post", "wallet_chain_admission"),
         ("/api/v1/chain/boxes/{id}", "get", "wallet_chain_box_lookup"),
         (
             "/api/v1/chain/blocks-since",
@@ -284,6 +298,21 @@ fn wallet_chain_operations_have_unique_ids_and_runtime_error_schemas() {
     assert_eq!(
         response_schema_ref(blocks_since, "410"),
         "#/components/schemas/WalletChainPrunedBlocksSinceResponse"
+    );
+    let block_at = get_operation(&document, "/api/v1/chain/wallet-blocks/{height}", "get");
+    assert_eq!(
+        response_schema_ref(block_at, "410"),
+        "#/components/schemas/WalletChainPrunedBlocksSinceResponse"
+    );
+    let admission = get_operation(&document, "/api/v1/chain/admission", "post");
+    assert_eq!(
+        response_schema_ref(admission, "200"),
+        "#/components/schemas/WalletChainAdmissionResponse"
+    );
+    let spending = get_operation(&document, "/api/v1/chain/spending-context", "get");
+    assert_eq!(
+        response_schema_ref(spending, "200"),
+        "#/components/schemas/WalletSpendingContext"
     );
 
     let reemission = &document["components"]["schemas"]["WalletChainReemissionInput"];

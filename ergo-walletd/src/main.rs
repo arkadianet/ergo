@@ -1,10 +1,26 @@
 use clap::Parser;
-use ergo_walletd::config::Cli;
+use ergo_walletd::config::{Cli, CliCommand};
 use ergo_walletd::{init_logging, prepare, run};
 
 fn main() {
     init_logging();
     let cli = Cli::parse();
+    if let Some(CliCommand::Migrate(args)) = &cli.command {
+        match ergo_walletd::migration::migrate(args) {
+            Ok(report) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .expect("migration report is serializable")
+                );
+                return;
+            }
+            Err(error) => {
+                eprintln!("ergo-walletd: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     let config = match ergo_walletd::config::Config::load(cli) {
         Ok(config) => config,
         Err(error) => {

@@ -1249,6 +1249,50 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/chain/admission:
+    post:
+      tags:
+      - chain
+      operationId: wallet_chain_admission
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WalletChainSubmitRequest'
+        required: true
+      responses:
+        '200':
+          description: Exact node admission outcome with structured rejection reason
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainAdmissionResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Committed tip changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Node unavailable or overloaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Admission timed out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/chain/blocks:
     get:
       tags:
@@ -1979,6 +2023,35 @@ paths:
                 $ref: '#/components/schemas/V1Error'
       security:
       - ApiKeyAuth: []
+  /api/v1/chain/spending-context:
+    get:
+      tags:
+      - chain
+      summary: |-
+        The owned signing view includes private input reservations and therefore
+        shares the chain router's operator authentication and heavy-read budget.
+      operationId: wallet_spending_context
+      responses:
+        '200':
+          description: Versioned owned signing and complete mempool context, bounded to 8 MiB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletSpendingContext'
+        '500':
+          description: Chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Context unavailable, too large, or another response in flight
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/chain/tip:
     get:
       tags:
@@ -2049,6 +2122,67 @@ paths:
                 $ref: '#/components/schemas/V1Error'
         '504':
           description: Node transaction admission timed out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/chain/wallet-blocks/{height}:
+    get:
+      tags:
+      - chain
+      operationId: wallet_chain_block_at
+      parameters:
+      - name: height
+        in: path
+        description: Committed block height
+        required: true
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: tip
+        in: query
+        description: Expected committed header id
+        required: true
+        schema:
+          type: string
+      - name: tipHeight
+        in: query
+        description: Expected committed tip height
+        required: true
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      responses:
+        '200':
+          description: Block anchored to the expected committed tip
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainBlockAtResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Committed tip changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '410':
+          description: Requested history pruned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainPrunedBlocksSinceResponse'
+        '503':
+          description: Chain adapter unavailable
           content:
             application/json:
               schema:
@@ -12628,6 +12762,45 @@ components:
           type: integer
           format: int32
           minimum: 0
+    WalletChainAdmissionResponse:
+      oneOf:
+      - type: object
+        required:
+        - txId
+        - status
+        properties:
+          status:
+            type: string
+            enum:
+            - accepted
+          txId:
+            type: string
+      - type: object
+        required:
+        - txId
+        - status
+        properties:
+          status:
+            type: string
+            enum:
+            - duplicate
+          txId:
+            type: string
+      - type: object
+        required:
+        - reason
+        - status
+        properties:
+          detail:
+            type:
+            - string
+            - 'null'
+          reason:
+            type: string
+          status:
+            type: string
+            enum:
+            - rejected
     WalletChainAsset:
       type: object
       required:
@@ -12666,6 +12839,16 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/WalletChainTransaction'
+    WalletChainBlockAtResponse:
+      type: object
+      required:
+      - tip
+      - block
+      properties:
+        block:
+          $ref: '#/components/schemas/WalletChainBlock'
+        tip:
+          $ref: '#/components/schemas/WalletChainTip'
     WalletChainBlocksSinceResponse:
       oneOf:
       - type: object
@@ -12974,6 +13157,276 @@ components:
           items:
             $ref: '#/components/schemas/WalletChainOutput'
         txId:
+          type: string
+    WalletSpendingContext:
+      type: object
+      required:
+      - version
+      - network
+      - tip
+      - headers
+      - preHeader
+      - preHeaderSource
+      - previousStateDigest
+      - parameters
+      - validationSettings
+      - pruned
+      - minRelayFeeNanoErg
+      - maxTxSizeBytes
+      - mempoolSequence
+      - mempoolTransactions
+      - privateMiningConfigured
+      - privateReservedInputs
+      properties:
+        headers:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainHeader'
+        maxTxSizeBytes:
+          type: integer
+          format: int32
+          minimum: 0
+        mempoolSequence:
+          type: integer
+          format: int64
+          minimum: 0
+        mempoolTransactions:
+          type: array
+          items:
+            type: string
+        minRelayFeeNanoErg:
+          type: integer
+          format: int64
+          minimum: 0
+        minimumHistoryHeight:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        network:
+          type: string
+        parameters:
+          $ref: '#/components/schemas/WalletSpendingParameters'
+        preHeader:
+          $ref: '#/components/schemas/WalletSpendingPreHeader'
+        preHeaderSource:
+          $ref: '#/components/schemas/WalletSpendingPreHeaderSource'
+        previousStateDigest:
+          type: string
+        privateMiningConfigured:
+          type: boolean
+        privateQueueRevision:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        privateReservedInputs:
+          type: array
+          items:
+            type: string
+        pruned:
+          type: boolean
+        reemission:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/WalletSpendingReemissionRules'
+        tip:
+          $ref: '#/components/schemas/WalletChainTip'
+        validationSettings:
+          type: string
+        version:
+          type: integer
+          format: int32
+          minimum: 0
+    WalletSpendingEmissionRules:
+      type: object
+      required:
+      - monetary
+      - emissionNftId
+      - emissionTree
+      properties:
+        emissionNftId:
+          type: string
+        emissionTree:
+          type: string
+        monetary:
+          $ref: '#/components/schemas/WalletSpendingMonetaryParameters'
+    WalletSpendingMonetaryParameters:
+      type: object
+      required:
+      - fixedRate
+      - fixedRatePeriod
+      - epochLength
+      - oneEpochReduction
+      - foundersInitialReward
+      - minerRewardDelay
+      properties:
+        epochLength:
+          type: integer
+          format: int32
+          minimum: 0
+        fixedRate:
+          type: integer
+          format: int64
+          minimum: 0
+        fixedRatePeriod:
+          type: integer
+          format: int32
+          minimum: 0
+        foundersInitialReward:
+          type: integer
+          format: int64
+          minimum: 0
+        minerRewardDelay:
+          type: integer
+          format: int32
+          minimum: 0
+        oneEpochReduction:
+          type: integer
+          format: int64
+          minimum: 0
+    WalletSpendingParameters:
+      type: object
+      required:
+      - missingCoreParameters
+      - epochStartHeight
+      - blockVersion
+      - storageFeeFactor
+      - minValuePerByte
+      - maxBlockSize
+      - maxBlockCost
+      - tokenAccessCost
+      - inputCost
+      - dataInputCost
+      - outputCost
+      - extra
+      - proposedUpdate
+      - activatedUpdate
+      properties:
+        activatedUpdate:
+          type: string
+        announcedSettings:
+          type:
+          - string
+          - 'null'
+        blockVersion:
+          type: integer
+          format: int32
+          minimum: 0
+        dataInputCost:
+          type: integer
+          format: int32
+        epochStartHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        extra:
+          type: array
+          items:
+            type: array
+            items: false
+            prefixItems:
+            - type: integer
+              format: int32
+              minimum: 0
+            - type: integer
+              format: int32
+        inputCost:
+          type: integer
+          format: int32
+        maxBlockCost:
+          type: integer
+          format: int32
+        maxBlockSize:
+          type: integer
+          format: int32
+        minValuePerByte:
+          type: integer
+          format: int32
+        missingCoreParameters:
+          type: integer
+          format: int32
+          minimum: 0
+        outputCost:
+          type: integer
+          format: int32
+        proposedUpdate:
+          type: string
+        storageFeeFactor:
+          type: integer
+          format: int32
+        subblocksPerBlock:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        tokenAccessCost:
+          type: integer
+          format: int32
+    WalletSpendingPreHeader:
+      type: object
+      required:
+      - version
+      - parentId
+      - height
+      - timestamp
+      - nBits
+      - votes
+      - minerPubkey
+      properties:
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        minerPubkey:
+          type: string
+        nBits:
+          type: integer
+          format: int32
+          minimum: 0
+        parentId:
+          type: string
+        timestamp:
+          type: integer
+          format: int64
+          minimum: 0
+        version:
+          type: integer
+          format: int32
+          minimum: 0
+        votes:
+          type: array
+          items:
+            type: integer
+            format: int32
+            minimum: 0
+    WalletSpendingPreHeaderSource:
+      type: string
+      enum:
+      - syntheticCommittedTip
+    WalletSpendingReemissionRules:
+      type: object
+      required:
+      - checkRules
+      - activationHeight
+      - reemissionTokenId
+      - payToReemissionTree
+      properties:
+        activationHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        checkRules:
+          type: boolean
+        emission:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/WalletSpendingEmissionRules'
+        payToReemissionTree:
+          type: string
+        reemissionTokenId:
           type: string
     WatchRequest:
       type: object

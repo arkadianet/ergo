@@ -47,6 +47,7 @@ pub mod modifier_id;
 pub mod opcode;
 pub mod popow_header;
 pub mod popow_proof;
+pub mod pre_header;
 pub mod register;
 pub mod scala_hamt;
 pub mod sigma_type;

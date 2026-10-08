@@ -5,11 +5,14 @@ pub mod chain_http;
 pub mod config;
 pub mod descriptor;
 pub mod engine_chain;
+pub mod full_api;
 pub mod host;
 pub mod lifecycle_api;
+pub mod migration;
 mod ownership;
 #[cfg(unix)]
 pub mod socket;
+pub mod spending;
 #[cfg(test)]
 mod supervision_tests;
 pub mod sync;
@@ -32,8 +35,8 @@ use tower::ServiceExt;
 use crate::api::ApiContext;
 use crate::chain_http::HttpChainClient;
 use crate::config::{ApiKey, Config, ConfigError, LoadedConfig, WalletMode};
-use crate::engine_chain::LifecycleChainAccess;
-use crate::host::WalletHost;
+use crate::host::{SpendingCapabilities, WalletHost};
+use crate::spending::RemoteSpendingAccess;
 use crate::sync::{StandaloneSyncer, SyncConfig, SyncError};
 use crate::tip::CachedNodeTip;
 
@@ -105,6 +108,7 @@ pub fn prepare(config: LoadedConfig) -> Result<Daemon, DaemonError> {
         WalletMode::WatchOnly => {}
     }
     ownership::claim(&config.config.data_dir, config.config.mode)?;
+    ownership::claim_network(&config.config.data_dir, config.config.network)?;
     let mut store = RedbWalletStore::open_standalone(config.config.data_dir.join("wallet.redb"))?;
     if config.config.mode == WalletMode::Seed {
         store = store.rebuild_history_on_key_additions();
@@ -124,10 +128,20 @@ pub fn prepare(config: LoadedConfig) -> Result<Daemon, DaemonError> {
     let tip = Arc::new(CachedNodeTip::new(chain.clone()));
     let service = Arc::new(WalletService::new(store.clone(), chain.clone()));
     let host = if config.config.mode == WalletMode::Seed {
-        Some(WalletHost::new(
+        let spending = Arc::new(RemoteSpendingAccess::new(
+            store.clone(),
+            chain,
+            config.config.network,
+        ));
+        Some(WalletHost::with_spending(
             store.clone(),
             service.clone(),
-            Arc::new(LifecycleChainAccess::new(store, chain)),
+            SpendingCapabilities {
+                chain: spending.clone(),
+                preparation: spending.clone(),
+                submitter: spending.clone(),
+                mempool: spending,
+            },
             &config.config.data_dir,
             config.config.network,
         )?)
@@ -280,6 +294,26 @@ where
     let interval = config.sync_interval;
     let worker_syncer = syncer.clone();
     let worker_host = host.clone();
+    let (jobs_shutdown, mut jobs_stopped) = tokio::sync::watch::channel(());
+    let mut jobs = tokio::task::JoinSet::new();
+    if let Some(host) = host.clone() {
+        jobs.spawn(async move {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(2));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = jobs_stopped.changed() => return,
+                    _ = ticks.tick() => {
+                        match host.tick_mining_jobs().await {
+                            Ok(()) => {}
+                            Err(ergo_wallet_protocol::WalletAdminError::ShuttingDown) => return,
+                            Err(error) => tracing::warn!(%error, "wallet mining job poll deferred"),
+                        }
+                    }
+                }
+            }
+        });
+    }
     let mut worker = tokio::task::spawn_blocking(move || {
         let syncer = worker_syncer;
         let mut terminal_tracking = None;
@@ -330,6 +364,12 @@ where
     let result = loop {
         tokio::select! {
             result = &mut shutdown => break result,
+            Some(result) = jobs.join_next(), if !jobs.is_empty() => {
+                break Err(DaemonError::Server(match result {
+                    Ok(()) => "wallet mining job worker stopped".to_string(),
+                    Err(error) => format!("wallet mining job worker failed: {error}"),
+                }));
+            }
             Some(result) = listeners.join_next(), if !listeners.is_empty() => {
                 break match result {
                     Ok(Ok(())) => Err(DaemonError::Server("local API listener stopped".to_string())),
@@ -351,6 +391,7 @@ where
         host.begin_shutdown();
     }
     syncer.cancel();
+    let _ = jobs_shutdown.send(());
     drop(shutdown_tx);
     let deadline = tokio::time::Instant::now() + config.shutdown_timeout;
     if let Some(shutdown) = api_shutdown {
@@ -368,6 +409,14 @@ where
     }
     if !worker_finished && tokio::time::timeout_at(deadline, worker).await.is_err() {
         tracing::warn!("wallet sync request did not finish before the shutdown timeout");
+    }
+    if tokio::time::timeout_at(deadline, async {
+        while jobs.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        jobs.shutdown().await;
     }
     if let Some(host) = host {
         match tokio::time::timeout_at(deadline, host.shutdown()).await {
@@ -436,6 +485,16 @@ async fn shutdown_signal() -> Result<(), DaemonError> {
     }
     #[cfg(not(unix))]
     {
+        #[cfg(windows)]
+        {
+            let mut stop = tokio::signal::windows::ctrl_break()
+                .map_err(|error| DaemonError::Server(error.to_string()))?;
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => result.map_err(|error| DaemonError::Server(error.to_string())),
+                _ = stop.recv() => Ok(()),
+            }
+        }
+        #[cfg(not(windows))]
         tokio::signal::ctrl_c()
             .await
             .map_err(|error| DaemonError::Server(error.to_string()))
@@ -451,6 +510,7 @@ pub fn init_logging() {
 #[cfg(all(test, unix))]
 mod review_tests {
     use super::*;
+    use crate::engine_chain::LifecycleChainAccess;
     use ergo_wallet_service::{
         BlocksSinceRequest, BlocksSinceResponse, ChainBlock, ChainClient, ChainClientError,
         ChainSnapshot, CommittedTip, ForwardBlocksSince, SubmitRequest, SubmitResponse, UtxoLookup,

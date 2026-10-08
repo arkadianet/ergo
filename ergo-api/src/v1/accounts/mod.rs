@@ -75,6 +75,11 @@ pub(super) fn map_wallet_err(e: WalletAdminError) -> Response {
             "the wallet is shutting down",
             String::new(),
         ),
+        E::NodeUnavailable(_) => (
+            Reason::StateUnavailable,
+            "the node spending context is unavailable",
+            String::new(),
+        ),
         E::Uninitialized => (
             Reason::WalletUninitialized,
             "the wallet is not initialized",
