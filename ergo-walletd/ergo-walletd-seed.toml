@@ -1,4 +1,4 @@
-# Ergo standalone wallet daemon — opt-in seed lifecycle config.
+# Ergo standalone wallet daemon — opt-in seed wallet config.
 #
 #   ergo-walletd --config ergo-walletd-seed.toml
 #
@@ -6,8 +6,8 @@
 # authenticated local API; this does not migrate an embedded or watch wallet.
 # Existing seed wallets restart locked. No descriptor_file is accepted.
 #
-# This first Phase 3 increment supports lifecycle and key management only.
-# Transaction construction, signing, sending and private-key export are absent.
+# Seed mode hosts lifecycle, construction, signing, sending, scans and jobs.
+# Private-key export retains its disabled operator default.
 # See docs/wallet-extraction.md and docs/configuration.md for the route inventory.
 
 mode = "seed"

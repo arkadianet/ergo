@@ -635,6 +635,7 @@ fn build_app_with_mempool(
             network: NetworkPrefix::Mainnet,
             chain_params: None,
             mining: None,
+            private_queue: None,
             emission: None,
             emission_scripts: None,
             utxo_reads_supported: true,

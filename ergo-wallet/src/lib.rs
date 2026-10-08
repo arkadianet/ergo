@@ -1,31 +1,36 @@
 //! Ergo HD wallet.
 //!
 //! Covers BIP-39 mnemonics and EIP-3 key derivation (post- and
-//! pre-1627), AES-GCM / PBKDF2 encrypted secret storage, sigma
-//! proving (single- and multi-sig with hint-bag inputs), and secret storage.
+//! pre-1627), AES-GCM / PBKDF2 encryption, transaction selection/building, and
+//! Sigma proving with the existing signing gate. File-backed secret
+//! storage requires `keystore`; the command-line binary requires `cli`.
 //! Orchestration modules live in `ergo-wallet-service`. Convenience
 //! re-exports (`Mnemonic`, `ExtendedSecretKey`, `DerivationPath`, `SecretKey`,
 //! `WalletError`) live at the crate root.
 
 pub mod address;
+pub mod box_selector;
 pub mod derivation;
 pub mod encryption;
 pub mod error;
 pub mod extended_key;
+pub mod master;
 pub mod mnemonic;
 pub mod proving;
 pub mod secret;
+#[cfg(feature = "keystore")]
 pub mod storage;
+pub mod tx_builder;
 pub mod tx_context;
 
 pub use derivation::DerivationPath;
 pub use error::WalletError;
 pub use extended_key::{ExtendedPublicKey, ExtendedSecretKey, ExtendedSecretKeyLegacy};
+pub use master::{UnlockedMaster, UnlockedSecret};
 pub use mnemonic::Mnemonic;
 pub use secret::SecretKey;
-pub use storage::{
-    EncryptedSecret, LockState as WalletLockState, SecretStorage, UnlockedMaster, UnlockedSecret,
-};
+#[cfg(feature = "keystore")]
+pub use storage::{EncryptedSecret, LockState as WalletLockState, SecretStorage};
 
 /// Derive the standard EIP-3 first-address public key
 /// (`m/44'/429'/0'/0/0`) from a BIP39 seed using post-1627

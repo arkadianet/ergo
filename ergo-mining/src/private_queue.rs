@@ -475,6 +475,19 @@ impl PrivateTransactionQueue {
             .collect()
     }
 
+    /// Reservations and the revision which owns them, under one queue lock.
+    pub fn reservation_snapshot(&self) -> (u64, BTreeSet<[u8; 32]>) {
+        let queue = self.lock();
+        let inputs = queue
+            .records
+            .values()
+            .filter(|r| r.entry.state.reserves_inputs())
+            .flat_map(|r| &r.entry.input_ids)
+            .filter_map(|id| decode_id(id).ok())
+            .collect();
+        (queue.revision, inputs)
+    }
+
     /// Freeze both public-admission guards under one queue lock.
     pub fn guard_snapshot(&self) -> (HashSet<[u8; 32]>, BTreeSet<[u8; 32]>) {
         let queue = self.lock();

@@ -127,7 +127,7 @@ cargo check --workspace --tests
 
 # Release builds of the binaries.
 cargo build --release -p ergo-node
-cargo build --release -p ergo-wallet
+cargo build --release -p ergo-wallet --features cli
 cargo build --release -p ergo-walletd
 ```
 

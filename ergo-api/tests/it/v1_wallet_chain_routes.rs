@@ -357,6 +357,7 @@ fn production_app_with_security(
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
@@ -481,6 +482,8 @@ async fn wallet_chain_routes_require_the_v1_api_key() {
     let cases = [
         (Method::GET, "/api/v1/chain/tip", Body::empty()),
         (Method::GET, "/api/v1/chain/snapshot", Body::empty()),
+        (Method::GET, "/api/v1/chain/spending-context", Body::empty()),
+        (Method::GET, "/api/v1/chain/wallet-blocks/1", Body::empty()),
         (
             Method::GET,
             &format!(
@@ -502,6 +505,11 @@ async fn wallet_chain_routes_require_the_v1_api_key() {
             Method::POST,
             "/api/v1/chain/transactions",
             Body::from(r#"{"transaction":"00"}"#),
+        ),
+        (
+            Method::POST,
+            "/api/v1/chain/admission",
+            Body::from("{malformed private transaction"),
         ),
     ];
     for (method, uri, body) in cases {

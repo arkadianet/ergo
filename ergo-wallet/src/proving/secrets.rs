@@ -11,8 +11,8 @@
 
 use crate::derivation::DerivationPath;
 use crate::error::WalletError;
+use crate::master::UnlockedMaster;
 use crate::proving::external::ProverExternalSecret;
-use crate::storage::UnlockedMaster;
 use k256::Scalar;
 use std::collections::BTreeMap;
 use zeroize::{ZeroizeOnDrop, Zeroizing};

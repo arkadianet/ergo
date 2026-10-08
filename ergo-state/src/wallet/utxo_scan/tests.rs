@@ -556,3 +556,121 @@ fn pending_wallet_jobs_refuse_discovery_without_erasing_history() {
         bytes
     );
 }
+
+fn external_wallet() -> (tempfile::TempDir, Database) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::create(dir.path().join("wallet.redb")).unwrap();
+    let txn = crate::begin_write_qr(&db).unwrap();
+    let pk: [u8; 33] = hex::decode(PK).unwrap().try_into().unwrap();
+    let meta = super::super::types::TrackedPubkeyMeta {
+        derivation_path: vec![],
+        derivation_path_label: String::new(),
+        added_at_height: 0,
+    };
+    txn.open_table(WALLET_TRACKED_PUBKEYS)
+        .unwrap()
+        .insert(
+            tracked_pubkey_key(0, &pk),
+            bincode::serialize(&meta).unwrap(),
+        )
+        .unwrap();
+    txn.commit().unwrap();
+    (dir, db)
+}
+
+#[test]
+fn external_discovery_writes_only_the_wallet_target_and_preserves_honest_coverage() {
+    let (source_dir, source, _) = fixture(5);
+    let before = std::fs::read(source_dir.path().join("state.redb")).unwrap();
+    let (_target_dir, target) = external_wallet();
+    let snapshot = source.begin_read().unwrap();
+    let result = discover_into(&snapshot, &target, false).unwrap();
+    assert_eq!(result.matched_boxes, 4);
+    assert!(!result.history_complete);
+    assert_eq!(
+        std::fs::read(source_dir.path().join("state.redb")).unwrap(),
+        before
+    );
+    assert!(coverage(&source.begin_read().unwrap()).unwrap().is_none());
+    assert!(
+        super::super::reader::WalletReader::new(&source.begin_read().unwrap())
+            .all_boxes()
+            .unwrap()
+            .is_empty()
+    );
+    let target_snapshot = target.begin_read().unwrap();
+    let reader = super::super::reader::WalletReader::new(&target_snapshot);
+    assert_eq!(reader.all_boxes().unwrap().len(), 4);
+    assert!(reader.all_transactions().unwrap().is_empty());
+    assert_eq!(coverage(&target_snapshot).unwrap(), Some(result));
+    for wallet_box in reader.all_boxes().unwrap() {
+        assert!(!inclusion_height_known(&target_snapshot, wallet_box.box_id).unwrap());
+    }
+}
+
+#[test]
+fn external_discovery_checkpoint_uses_source_anchor_and_target_keys() {
+    let (_source_dir, source, boxes) = fixture(40);
+    let (_target_dir, target) = external_wallet();
+    let snapshot = source.begin_read().unwrap();
+    let mut job = Job {
+        version: 1,
+        tip: inspect_tip(&snapshot).unwrap(),
+        pubkeys: vec![PK.into()],
+        last_key: Some(boxes[16].0),
+        visited: 17,
+        matched: 0,
+    };
+    let mut pending = Vec::new();
+    for (id, bytes) in &boxes[..17] {
+        let b = ergo_ser::ergo_box::read_ergo_box(&mut VlqReader::new(bytes)).unwrap();
+        if b.index != 1 {
+            job.matched += 1;
+            pending.push((*id, bytes.clone()));
+        }
+    }
+    checkpoint(&target, &job, &mut pending).unwrap();
+    assert_eq!(
+        discover_into(&snapshot, &target, false)
+            .unwrap()
+            .matched_boxes,
+        39
+    );
+    // A stale source anchor cannot reuse the external target's checkpoint.
+    checkpoint(&target, &job, &mut pending).unwrap();
+    drop(snapshot);
+    crate::maintenance::test_set_tip(&source, 1001);
+    let snapshot = source.begin_read().unwrap();
+    assert!(discover_into(&snapshot, &target, false)
+        .unwrap_err()
+        .to_string()
+        .contains("checkpoint tip"));
+    assert_eq!(
+        discover_into(&snapshot, &target, true)
+            .unwrap()
+            .anchor_height,
+        1001
+    );
+}
+
+#[test]
+fn external_discovery_refuses_pending_jobs_before_mutating_target() {
+    let (_source_dir, source, _) = fixture(5);
+    let (target_dir, target) = external_wallet();
+    let txn = crate::begin_write_qr(&target).unwrap();
+    txn.open_table(ergo_wallet_service::wallet::mining_jobs::JOURNAL)
+        .unwrap()
+        .insert(1, r#"{"job":{"state":"queued"}}"#.as_bytes())
+        .unwrap();
+    txn.commit().unwrap();
+    let before = std::fs::read(target_dir.path().join("wallet.redb")).unwrap();
+    let snapshot = source.begin_read().unwrap();
+    assert!(discover_into(&snapshot, &target, false)
+        .unwrap_err()
+        .to_string()
+        .contains("non-terminal wallet mining jobs"));
+    assert_eq!(
+        std::fs::read(target_dir.path().join("wallet.redb")).unwrap(),
+        before
+    );
+}

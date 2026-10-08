@@ -363,28 +363,7 @@ async fn secret_bodies_are_strict_bounded_and_never_echoed_in_errors() {
 }
 
 #[tokio::test]
-async fn seed_mode_has_no_spending_or_private_key_routes_and_watch_mode_stays_secret_free() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = app(&dir, Arc::new(NoChain));
-    for route in [
-        "/api/v1/wallet/transactions/sign",
-        "/api/v1/wallet/transactions/send",
-        "/api/v1/wallet/transactions/build",
-        "/api/v1/wallet/private-key",
-        "/wallet/getPrivateKey",
-    ] {
-        let (status, _) = response(&app, Method::POST, route, None).await;
-        // Transaction reads have an existing /transactions/:id route, so an
-        // absent POST can be 405 rather than 404. Neither mounts spending.
-        assert!(
-            matches!(
-                status,
-                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
-            ),
-            "{route}: {status}"
-        );
-    }
-    drop(app);
+async fn watch_mode_stays_secret_free() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
     let watch = router(context(store, Arc::new(NoChain)));

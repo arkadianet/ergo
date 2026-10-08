@@ -950,7 +950,7 @@ Validation rules that matter operationally:
   `tests/it/scan_registry_rewind.rs` covers the persisted registry's apply and
   rewind behavior, and `tests/it/daemon_boot.rs` covers a fresh database.
 
-## Seed lifecycle API
+## Seed wallet API
 
 Start with `mode = "seed"`, a fresh data directory, `local_api_key_file` and
 no `descriptor_file`. The daemon will not automatically migrate embedded
@@ -961,7 +961,7 @@ reconciles the seed's public keys, and later syncing continues while locked.
 Seed restarts require the daemon's persisted `wallet-mode` marker; an unmarked
 directory containing `wallet.redb`, `wallet/` or `state.redb` is rejected.
 
-Every seed-mode request must contain exactly one `api_key` header matching the
+Every seed-mode API request must contain exactly one `api_key` header matching the
 local credential, on both Unix and TCP listeners. The node credential is
 insufficient. Missing, duplicate or incorrect credentials return `401` before
 body parsing. All seed-mode responses include `Cache-Control: no-store`.
@@ -982,21 +982,23 @@ withheld from the local API.
 | GET | `/api/v1/wallet/change-address` | `{address}`; address may be `null` |
 | PUT | `/api/v1/wallet/change-address` | `{address}`; requires an unlocked seed that owns the tracked address |
 
-These routes are added to the existing read API. `/status` and
-`/api/v1/wallet/status` keep the cursor, node-tip, lag and sync projection;
-seed initialization and lock state live at `/api/v1/wallet/lifecycle/status`.
-Key derivation records a height from a bounded authenticated node-tip request.
-Commands and sync passes share one writer gate. Newly added keys reset history
-in the same transaction, so sync rebuilds their coverage before claiming it.
-A terminal seed-sync failure stays visible while the worker waits; adding a
-new key resets history and resumes replay without a process restart.
+Seed mode also serves shared engine selection/build/sign/send, reward sweeps,
+multisig, scan/rescan and private mining-job routes, including Scala adapters.
+Transaction/scan bodies have a separate 8 MiB limit. Private-key export keeps
+its disabled operator default. `/api/v1/wallet/status` refreshes a validated
+node context for pruning and EIP-27 flags, and returns `node_unavailable` when
+the node cannot provide it. `/status` retains cursor, node-tip, lag and sync diagnostics.
+The static wallet UI is public so a browser can enter its local credential.
+All API reads and writes remain authenticated.
 
-Construction, signing, sending, private-key export and engine-rescan routes are
-absent. The lifecycle adapter conservatively treats node pruning as unknown and
-does not support engine block replay. Restore marks historical coverage
-incomplete; normal sync must obtain the required retained history from the node.
-It cannot recover an unavailable history by declaring a restored wallet caught
-up. See [Phase 3's remaining work](wallet-extraction.md#phase-3-daemon-engine-hosting).
+Commands and sync share a writer; actual key additions atomically reset history.
+Spending refreshes complete coherent node/pool context and fails before the
+engine when required data cannot be validated. Rescans fence mutations and
+suspend sync while their cancellable supervised replay runs. Restore marks
+unknown/pruned historical coverage incomplete; neither sync nor discovery
+invents unavailable historical transactions. See
+[daemon engine hosting and cutover](wallet-extraction.md#phase-3-daemon-engine-hosting)
+for migration, background jobs, API boundaries and deployment.
 
 ## Socket permissions
 

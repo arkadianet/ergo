@@ -113,13 +113,25 @@ fn checkpoint(
 /// may be resumed only at the identical root/tip with identical tracked keys.
 pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, StateError> {
     let snapshot = db.begin_read()?;
-    let tip = inspect_tip(&snapshot)?;
+    discover_into(&snapshot, db, restart)
+}
+
+/// Verify the stopped node's committed UTXO snapshot while writing discovery
+/// staging and wallet projections only into the independently locked target.
+/// The caller validates target ownership/network before entering this adapter.
+pub fn discover_into(
+    snapshot: &ReadTransaction,
+    db: &Database,
+    restart: bool,
+) -> Result<DiscoveryCoverage, StateError> {
+    let wallet_snapshot = db.begin_read()?;
+    let tip = inspect_tip(snapshot)?;
     if tip.state_type.as_deref().is_some_and(|kind| kind != "utxo") || tip.state_root.is_none() {
         return Err(StateError::WalletDiscoveryUnavailable(
             "discovery requires an initialized UTXO backend".into(),
         ));
     }
-    let pubkeys: BTreeSet<Vec<u8>> = super::reader::WalletReader::new(&snapshot)
+    let pubkeys: BTreeSet<Vec<u8>> = super::reader::WalletReader::new(&wallet_snapshot)
         .tracked_pubkeys_with_paths()?
         .into_iter()
         .map(|(_, pk, _)| pk.to_vec())
@@ -127,7 +139,7 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
     if pubkeys.is_empty() {
         return Err(StateError::WalletDiscoveryUnavailable("no persisted tracked keys; initialize/restore and unlock the wallet before stopping the node".into()));
     }
-    match snapshot.open_table(WALLET_SCANS) {
+    match wallet_snapshot.open_table(WALLET_SCANS) {
         Ok(scans) => {
             use redb::ReadableTableMetadata;
             if !scans.is_empty()? {
@@ -137,13 +149,13 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
         Err(redb::TableError::TableDoesNotExist(_)) => {}
         Err(e) => return Err(e.into()),
     }
-    if !super::mining_jobs::pending_jobs(&snapshot)?.is_empty() {
+    if !super::mining_jobs::pending_jobs(&wallet_snapshot)?.is_empty() {
         return Err(StateError::WalletDiscoveryUnavailable(
             "non-terminal wallet mining jobs require wallet history; finish or cancel them before discovery".into(),
         ));
     }
     let key_strings: Vec<_> = pubkeys.iter().map(hex::encode).collect();
-    let previous = match snapshot.open_table(JOB) {
+    let previous = match wallet_snapshot.open_table(JOB) {
         Ok(table) => table
             .get(())?
             .map(|v| serde_json::from_slice::<Job>(&v.value()).map_err(|e| corrupt(e.to_string())))
@@ -174,14 +186,14 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
     };
     let resume_key = job.last_key;
     let resumed_staging = if resume_key.is_some() {
-        Some(snapshot.open_table(STAGING)?)
+        Some(wallet_snapshot.open_table(STAGING)?)
     } else {
         None
     };
     let mut pending = Vec::new();
     let mut pending_bytes = 0usize;
     let mut verified_matches = 0u64;
-    let verified = visit_utxos(&snapshot, |id, bytes, ergo_box| {
+    let verified = visit_utxos(snapshot, |id, bytes, ergo_box| {
         let tree = ergo_box.candidate.ergo_tree_bytes();
         let owned = tree.len() == 36 && tree[..3] == [0, 8, 0xcd] && pubkeys.contains(&tree[3..]);
         let reward = ergo_wallet::proving::miner_reward::extract_miner_reward_pubkey(tree)

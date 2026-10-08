@@ -358,13 +358,7 @@ impl Drop for NodeApi {
 /// adapter is built from a *cloneable* `ChainStoreReader`, so the server keeps
 /// serving the same store across a rollback/re-apply (the reorg test).
 pub(crate) fn serve_node_api(store: &StateStore) -> NodeApi {
-    let security = Arc::new(
-        ApiSecurity::new(ApiSecurity::hash_key(NODE_API_KEY)).expect("valid api_key hash"),
-    );
-    let governor = Governor::new(GovernorConfig::default()).expect("valid governor config");
-    // The real production adapter: ergo-node's in-process chain client over the
-    // real StateStore, behind ergo-api's `WalletChain` trait object.
-    let chain_client = Arc::new(
+    let client = Arc::new(
         ergo_node::node::wallet_bridge::InProcessChainClient::from_chain_reader(
             store.reader_handle(),
             None::<Arc<dyn ergo_api::NodeSubmit>>,
@@ -372,6 +366,23 @@ pub(crate) fn serve_node_api(store: &StateStore) -> NodeApi {
             None,
         ),
     );
+    serve_node_client(client)
+}
+
+pub(crate) fn serve_node_client(chain_client: Arc<dyn ChainClient>) -> NodeApi {
+    serve_node_client_with_governor(chain_client, GovernorConfig::default())
+}
+
+pub(crate) fn serve_node_client_with_governor(
+    chain_client: Arc<dyn ChainClient>,
+    config: GovernorConfig,
+) -> NodeApi {
+    let security = Arc::new(
+        ApiSecurity::new(ApiSecurity::hash_key(NODE_API_KEY)).expect("valid api_key hash"),
+    );
+    let governor = Governor::new(config).expect("valid governor config");
+    // The real production adapter: ergo-node's in-process chain client over the
+    // real StateStore, behind ergo-api's `WalletChain` trait object.
     let chain: Arc<dyn WalletChain> =
         ergo_node::node::wallet_bridge::WalletChainAdapter::new(chain_client).into_dyn();
     let router = wallet_chain_router(
@@ -380,6 +391,10 @@ pub(crate) fn serve_node_api(store: &StateStore) -> NodeApi {
         V1AuthConfig::new(Some(security)).into_shared(),
     );
 
+    serve_node_router(router)
+}
+
+pub(crate) fn serve_node_router(router: axum::Router) -> NodeApi {
     let std_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = std_listener.local_addr().unwrap();
     std_listener.set_nonblocking(true).unwrap();

@@ -42,7 +42,7 @@ cargo check --locked --workspace --tests
 
 # Release builds of the two shipped binaries.
 cargo build --locked --release -p ergo-node
-cargo build --locked --release -p ergo-wallet
+cargo build --locked --release -p ergo-wallet --features cli
 ```
 
 ## Test workflow

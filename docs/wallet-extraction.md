@@ -5,8 +5,10 @@ watch-only daemon against the embedded wallet. Phase 1 landed in main through
 [#381](https://github.com/arkadianet/ergo/pull/381). All seven Phase 2 items
 landed on `integration/wallet-extraction`; [#574](https://github.com/arkadianet/ergo/pull/574)
 completed their refresh and validation. The subsequent main merge carries the
-0.12.3 node changes across the extracted boundaries. Phase 3 has started with
-opt-in daemon seed lifecycle hosting; spending support remains a later increment.
+0.12.3 node changes across the extracted boundaries. Phase 3 started with the
+seed lifecycle host in [#619](https://github.com/arkadianet/ergo/pull/619) and
+hosts the complete wallet engine in the daemon, retaining opt-in
+seed ownership and the existing embedded-node default.
 
 ## Phase 2 milestones
 
@@ -25,7 +27,8 @@ opt-in daemon seed lifecycle hosting; spending support remains a later increment
 - `ergo-wallet-protocol` owns transport-neutral DTOs and wallet error mappings.
   Its normal dependency graph has no node, storage or executor dependency.
 - `ergo-wallet-service` owns the wallet engine, stores, scan/sync implementation,
-  selection and transaction construction. Chain snapshots, coherent mempool
+  persistence and operation coordination. Pure selection and construction
+  live in `ergo-wallet` with service compatibility exports. Chain snapshots, coherent mempool
   overlays and transaction submission enter through capability traits. The
   service's normal graph has no `ergo-node`, `ergo-state`, `ergo-api`,
   `ergo-mempool` or Tokio dependency.
@@ -34,11 +37,11 @@ opt-in daemon seed lifecycle hosting; spending support remains a later increment
   co-commit with chain rows in the same `state.redb` transaction.
 - `ergo-walletd` owns a separate `wallet.redb`, resumes from a durable cursor,
   and defaults to a watch-only local read API. Opt-in seed mode hosts
-  `WalletEngine` for encrypted seed lifecycle and key management through an
-  authenticated local API. Both modes authenticate header identity and box
+  `WalletEngine` for lifecycle, selection, construction, signing, sending,
+  scans, rescans and finite private mining jobs through an authenticated API. Both modes authenticate header identity and box
   IDs, while trusting the node for chain validity and transaction membership.
-  Balance and sync-status projections remain confirmed-only; neither daemon
-  mode can build, sign or submit transactions yet.
+  Watch reads and short diagnostic projections remain confirmed-only. Seed
+  routes use the shared engine and coherently captured node/pool state.
 
 `[wallet] mode = "embedded"` remains the default. External mode skips embedded
 wallet boot, secrets, writer and apply hooks. Privileged wallet routes require
@@ -57,12 +60,12 @@ records; the node supplies private queue access and bounded background RPCs.
 Discovery retains its anchor and incomplete-history metadata without inventing
 historical inclusion heights. It uses the current workspace toolchain
 and dependency lock. Legacy redb files require the existing offline copy
-migration; this format migration is separate from a future embedded-to-daemon
-wallet cutover.
+migration; this file-format migration is separate from the explicit
+embedded-to-daemon wallet cutover below.
 
 ## Completion checks
 
-Phase 2 completion requires the workspace formatting/fragment checks,
+Phase 2 and Phase 3 completion require the workspace formatting/fragment checks,
 all-target/all-feature Clippy, workspace tests and doctests, strict rustdoc,
 dependency-boundary checks and CI shard coverage. The dedicated shadow gate is
 `scripts/shadow-compare.sh --all`: both negative controls plus the synthetic,
@@ -70,74 +73,153 @@ reorg, node/daemon restart, rescan and mainnet 1–1000 scenarios must run.
 
 ## Phase 3: daemon engine hosting
 
-The first Phase 3 increment implements local seed lifecycle and key management
-through the shared `WalletEngine`. `mode = "watch_only"` remains the daemon's
-default: it imports public descriptors, opens no secret storage and exposes
-the existing read API. `mode = "seed"` requires a separate data directory,
-an independent `local_api_key_file` credential and no `descriptor_file`.
-On first use, initialize or restore through the API; the daemon does not
-automatically import an embedded wallet or turn a descriptor wallet into a
-seed wallet. Existing seed wallets restart locked.
-The persisted `wallet-mode` marker identifies daemon-owned seed data; an
-unmarked directory with `wallet.redb`, `wallet/` or `state.redb` is rejected.
+`mode = "watch_only"` remains the daemon default. Seed hosting is explicit:
+use `mode = "seed"`, a fresh separate data directory, no `descriptor_file`,
+and two different protected credentials. `api_key_file` authenticates outbound
+node requests; `local_api_key_file` authenticates local wallet operations.
+Seed wallets restart locked. Persisted public keys continue syncing while locked.
+The durable `wallet-mode` and `wallet-network` markers prevent incompatible
+ownership and network changes.
 
-The outbound `api_key_file` authenticates node chain requests. The independent
-`local_api_key_file` authenticates every seed-mode API request, including reads,
-on both Unix sockets and loopback TCP. The two files must contain different
-credentials. Authentication runs before secret-body parsing; requests are
-bounded, password-guess budgets remain in the engine, and all seed-mode
-responses carry `Cache-Control: no-store`.
+The seed daemon serves the shared native `/api/v1/wallet/*` operations, Scala
+`/wallet/*` and `/scan/*` adapters, native scan/watch-account routes, and wallet
+private-queue operations. These include selection, build, sign, signed or
+intent send, reward sweeps, key management, scan management, full/partial
+rescan, multisig commitments/hints and durable private mining jobs. The separate
+`/status` diagnostic projection reports cursor, tip, lag and sync failures;
+`/api/v1/wallet/status` uses the shared engine's native status schema and a
+refreshed node context for pruning and EIP-27 flags. It returns a typed
+`node_unavailable` error when that context cannot be obtained.
+`/api/v1/wallet/lifecycle/status` returns local `{initialized, locked}` flags
+without requiring a reachable node. Private-key export retains its disabled
+operator default.
 
-The additional native routes are:
+Every seed API request requires exactly one local `api_key` header, on both
+Unix sockets and loopback TCP. Authentication precedes parsing. Secret bodies
+are limited to 16 KiB; transaction and scan bodies are bounded separately at
+8 MiB. Responses use the appropriate native or Scala error envelope, with
+internal details withheld and `Cache-Control: no-store`. The engine retains
+password/mnemonic attempt budgets. Public static wallet UI assets use CSP and
+no-store; the browser enters a separate daemon credential, never the node key.
 
-| Method | Path | Behavior |
-|---|---|---|
-| GET | `/api/v1/wallet/lifecycle/status` | Local `initialized` and `locked` flags; no node connection needed |
-| POST | `/api/v1/wallet/init` | Create an encrypted seed; return the recovery phrase once |
-| POST | `/api/v1/wallet/restore` | Restore a recovery phrase with an explicit derivation mode |
-| POST | `/api/v1/wallet/unlock` | Unlock and reconcile derived public keys |
-| POST | `/api/v1/wallet/lock` | Drop the unlocked secret |
-| POST | `/api/v1/wallet/mnemonic/verify` | Check the recovery phrase through the engine's attempt budget |
-| POST | `/api/v1/wallet/addresses` | Derive the next key or an explicit path |
-| GET / PUT | `/api/v1/wallet/change-address` | Read or update the tracked, owned change address |
+Spending commands refresh one versioned authenticated node context under the
+wallet writer. It contains committed header bytes and original header IDs,
+adopted validation settings, complete protocol and re-emission parameters,
+relay limits and pruning/history availability, a coherent immutable mempool
+publication, and private-queue reservations with their revision. Responses are
+bounded and validated before entering the engine; failures cannot become an
+empty pool or default consensus settings. UTXO lookups and admission retain the
+committed-tip guard. Node admission remains responsible for current conflicts;
+a context does not reserve inputs against concurrent external transactions.
+The preheader's provenance is explicit: a deterministic next-block estimate
+cannot promise the timestamp/miner fields of a future mined block.
 
-`/status` and `/api/v1/wallet/status` keep the Phase 2 cursor, node-tip, lag and
-sync projection. The separate lifecycle status avoids claiming that a local
-seed has a complete spending view. Commands and sync passes share one writer
-gate. Adding keys resets historical scan state in the transaction that adds
-them, and syncing waits until keys are known. Persisted public keys continue
-syncing while the secret is locked.
-A terminal seed-sync failure remains visible until a new-key history reset
-requests replay, which resumes without restarting the process.
+Lifecycle, public-key writes, sync and spending share one engine writer.
+Actual key additions reset history atomically. Rescan claims its fence under
+that writer, suspends normal public-state mutations and sync, and owns a
+supervised cancellable replay. `/status` and local lifecycle status remain
+available. An explicit rescan also unparks a terminal sync failure. Mining jobs
+recover their durable journal on boot and poll through the same writer; exact
+signed bytes are persisted before private admission and retried idempotently.
+Shutdown closes admission, cancels replay, stops listeners/workers and erases
+unlocked secrets after admitted commands drain.
 
-This increment deliberately has no construction, signing, sending or private-key
-export routes. The node's pruning policy is unknown to the lifecycle adapter,
-and engine block replay is unavailable. A restored wallet's historical balance
-is established by normal daemon sync against the required retained history;
-restore never claims that an unavailable history has been recovered.
+### Migration and rollback
 
-The remaining Phase 3 work is to provide a coherent committed node context,
-active validation settings and re-emission rules, a coherent mempool overlay,
-and submission adapters before exposing construction, signing and sending.
-Embedded-to-daemon data/secret migration, daemon release packaging and service
-deployment, API/UI parity and the eventual compatibility/default policy also
-need explicit completion criteria. The lifecycle increment does not change the
-node's default embedded-wallet policy.
+Stop the embedded node and retain a complete backup. If its database uses an
+old redb format, first run the existing `ergo-node migrate-redb` copy migration.
+Upgrade the embedded wallet application schema with the current node before
+cutover. Before stopping, cancel queued wallet jobs and withdraw their private
+transactions through the wallet/node APIs. Mined and conflicted job records
+with a transaction ID still belong to the scheduler because they follow that
+transaction through chain reorganizations. Default migration refuses these
+retained records as well as unfinished jobs.
+
+```sh
+ergo-walletd migrate --source-data-dir /path/to/node-data \
+  --destination /path/to/new-wallet-data --network mainnet
+```
+
+If reviewed job records still retain scheduler ownership, explicitly quarantine
+the journal in the private migration copy:
+
+```sh
+ergo-walletd migrate --source-data-dir /path/to/node-data \
+  --destination /path/to/new-wallet-data --network mainnet \
+  --quarantine-mining-jobs
+```
+
+This preserves every complete job record and its signed bytes in
+`wallet_mining_jobs_quarantined_v1`, retains the next job ID, and leaves the
+destination's active journal empty. The report records the quarantine count.
+The original database remains byte-for-byte unchanged. The flag does not
+withdraw or copy the node's private queue: queued transactions can still run
+when mining is enabled, so cancel unwanted entries before stopping the node.
+The daemon's builder continues to exclude the node's reserved private inputs.
+
+For a custom secret-store location, add `--source-secret-dir /path/to/secrets`.
+The destination must not exist and its parent must exist. The tool exclusively
+locks the raw stopped source, opens and recovers only a private temporary copy,
+and copies supported wallet tables into a fresh `wallet.redb`. It preserves
+keys, derivation head, change address, balances/history, scans, discovery
+coverage and applied-header anchors; chain databases are not copied. It copies
+the original encrypted secret bytes without decrypting them. Typed row
+comparison and source/secret byte checks run before publication. Unknown wallet
+tables, unfinished discovery work, invalid anchors, scheduler-owned jobs without
+explicit quarantine, and existing paths fail closed. `migration.json` records
+content hashes and row counts.
+An interrupted publication remains unmarked and cannot be adopted as a seed
+wallet; inspect and retain that directory before retrying at another path.
+
+Point the seed config at the resulting directory with the recorded network.
+Set the node's `[wallet] mode = "external"` and its daemon address, retain the
+original node directory, and pin a mining reward public key if mining is used.
+Start the node and daemon, inspect authenticated status/balances/addresses,
+and unlock only when needed. The node returns ownership guidance and never
+proxies secrets or runs a second wallet writer.
+
+For rollback, stop both processes before changing ownership. Stop using the
+standalone directory and restore the node's embedded config and original
+wallet directory. Its retained cursor catches up against retained chain
+history; transactions sent since cutover still exist on chain and must be
+rescanned before trusting the old balance. Do not run both owners concurrently.
+The original job journal and node private queue also remain available; review
+their approvals before restoring embedded ownership, because retained work may
+resume after a rollback.
+Current-UTXO discovery retains its incomplete-history metadata rather than
+inventing historical inclusion heights. See [standalone offline discovery](wallet-extraction-offline-discovery.md)
+for the stopped-node traversal command and its ownership/network checks.
+
+### Distribution and deployment
+
+Release archives include `ergo-walletd`, both daemon config templates, the
+wallet documentation and [the systemd unit](../deploy/ergo-walletd.service).
+All extracted binaries are version/help checked. Wallet smoke checks exercise
+independent API authentication, seed initialization/unlock, graceful stop and
+locked reopen, without a remote node. Windows templates use loopback TCP;
+Unix deployments may use the owner-only socket.
+
+For systemd, install the binary and sample unit, create
+`/etc/ergo-walletd/walletd.toml` from the seed template, and provision distinct
+owner-only `/etc/ergo-walletd/node-api-key` and `wallet-api-key` files.
+The unit uses `LoadCredential` to present private credential copies to its
+dynamic account, with state under `/var/lib/ergo-walletd` and the socket under
+`/run/ergo-walletd`. Its default Unix socket is suitable for local clients;
+configure loopback TCP for a browser. Adjust `shutdown_timeout_secs` for the
+node's bounded RPC deadline and set `TimeoutStopSec` above it. Installing these
+examples does not change the embedded-node or watch-only-daemon defaults.
 
 ## Parallel library work
 
-Two library workstreams support the extraction and Argus integration:
+[#612](https://github.com/arkadianet/ergo/issues/612) follows after Phase 3
+merges, on its own branch and pull request. It adds EIP-19 serialization checked
+against sigma-rust and AppKit vectors, QR and ErgoPay round trips, and a
+separately reviewed change to context-sensitive `Prover::sign` behavior.
+Phase 3 retains the existing signing script gate unchanged.
 
-- [#613](https://github.com/arkadianet/ergo/issues/613): make `ergo-wallet`
-  embeddable by making CLI and file-keystore dependencies optional and adding
-  Android compile checks. This dependency split is a separate workstream from
-  daemon lifecycle hosting.
-- [#612](https://github.com/arkadianet/ergo/issues/612): reduce transactions
-  against real chain context, implement EIP-19 encoding and reduced signing,
-  and verify contract-input proofs against Scala fixtures. This enables
-  Argus contract signing, offline signing and ErgoPay.
-
-Daemon hosting and EIP-19 can proceed alongside the library dependency split.
-Making the synthetic signing context and its validation dependency optional
-in #613 follows the real-context API in #612. Neither issue is a prerequisite
-for the Phase 2 watch-only acceptance boundary.
+[#613](https://github.com/arkadianet/ergo/issues/613) makes the portable
+`ergo-wallet` core the default. The `keystore` feature enables encrypted file
+storage; `cli` enables the binary and includes keystore. Hosts explicitly opt
+into keystore. Portable master keys, selection and construction avoid node,
+redb, Tokio, CLI and file-keystore dependencies. CI checks both Android library
+targets without an NDK link and guards the normal no-default dependency graph.

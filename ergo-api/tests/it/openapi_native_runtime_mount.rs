@@ -482,6 +482,7 @@ fn ctx(submit: Option<Arc<dyn NodeSubmit>>) -> ServerCtx {
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
@@ -502,6 +503,7 @@ fn fully_wired_ctx() -> ServerCtx {
         network: NetworkPrefix::Mainnet,
         chain_params: Some(Arc::new(StubChainParams)),
         mining: Some(Arc::new(StubMining)),
+        private_queue: None,
         emission: Some(Arc::new(StubEmission)),
         emission_scripts: Some(Arc::new(EmissionScriptsJson {
             emission: String::new(),

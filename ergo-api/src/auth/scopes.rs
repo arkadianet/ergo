@@ -87,7 +87,17 @@ const SCOPES: &[(&str, &str, CredentialScope)] = &[
     ("GET", "/api/v1/chain/blocks-since", CredentialScope::Wallet),
     ("GET", "/api/v1/chain/boxes/{id}", CredentialScope::Wallet),
     ("GET", "/api/v1/chain/snapshot", CredentialScope::Wallet),
+    (
+        "GET",
+        "/api/v1/chain/spending-context",
+        CredentialScope::Wallet,
+    ),
     ("GET", "/api/v1/chain/tip", CredentialScope::Wallet),
+    (
+        "GET",
+        "/api/v1/chain/wallet-blocks/{height}",
+        CredentialScope::Wallet,
+    ),
     (
         "GET",
         "/api/v1/diagnostics/activity",
@@ -227,6 +237,7 @@ const SCOPES: &[(&str, &str, CredentialScope)] = &[
         CredentialScope::Admin,
     ),
     ("POST", "/api/v1/accounts/watch", CredentialScope::Wallet),
+    ("POST", "/api/v1/chain/admission", CredentialScope::Wallet),
     (
         "POST",
         "/api/v1/chain/transactions",

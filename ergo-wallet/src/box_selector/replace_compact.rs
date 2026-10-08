@@ -10,7 +10,7 @@
 
 use super::{BoxSelector, BoxSummary, SelectionResult, SelectionTarget};
 use crate::box_selector::default::DefaultBoxSelector;
-use ergo_wallet::error::WalletError;
+use crate::error::WalletError;
 
 pub struct ReplaceCompactCollectBoxSelector;
 

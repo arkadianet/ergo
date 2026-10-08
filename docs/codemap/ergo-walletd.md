@@ -1,39 +1,34 @@
 # ergo-walletd
 
-**Purpose:** The standalone Ergo wallet daemon. It owns a separate redb wallet
-database, pulls chain data over the node's `/api/v1/chain/*` HTTP surface, and
-serves a local HTTP API. The default `watch_only` mode imports public
-descriptors and serves reads. Opt-in `seed` mode hosts the existing
-`WalletEngine` for encrypted seed lifecycle, key derivation and change-address
-management. Signing and submission remain unavailable in both modes.
+**Purpose:** The standalone wallet process owns `wallet.redb`, its encrypted
+seed store in opt-in seed mode, and a supervised engine writer. Watch-only
+mode imports public descriptors and retains confirmed read projections. Seed
+mode serves the shared engine's native and Scala APIs, spending, scans, rescans,
+private mining jobs, and public wallet UI assets. See
+[wallet extraction and cutover](../wallet-extraction.md) for operational policy.
 
-**Depends on (workspace):** `ergo-wallet`, `ergo-wallet-service`,
-`ergo-wallet-protocol`, `ergo-primitives`, `ergo-ser`
-**Normal dependency boundary:** the five workspace crates above plus `axum`,
-`hyper`, `hyper-util`, `tower`, `clap`, `hex`, Unix-only `rustix`, `reqwest`, `serde`,
-`serde_json`, `thiserror`, `tokio`, `toml`, `tracing`, `tracing-subscriber`,
-`parking_lot`, `async-trait`, `subtle`, and `zeroize`. It deliberately does **not** depend on `ergo-node`,
-`ergo-api`, `ergo-state`, `ergo-mempool`, `ergo-sync`, or `ergo-chain-spec`: the
-daemon talks to a node over HTTP, not through the node's internals. Network
-identity is therefore a *config* value (`config::Network`) mapped to
-`ergo_ser::address::NetworkPrefix`, not a chain-spec lookup.
-**Test-only dependency boundary:** `ergo-node`, `ergo-api`, `ergo-state` (with
-`test-helpers`), `ergo-validation` (with `test-helpers`),
-`redb`, and `bincode` are `[dev-dependencies]` **only**. `ergo-node`,
-`ergo-api`, and `ergo-state` exist so `tests/it/node_api.rs` and
-`tests/it/daemon_boot.rs` and `tests/it/seed_daemon_boot.rs` can stand up the
-*real* node chain API in-process — a
-real `StateStore`, the real `InProcessChainClient` + `WalletChainAdapter`, the
-real `ergo-api` router with its real `api_key` gate — and drive the real daemon
-client and sync loop over real HTTP against it, instead of a hand-rolled stub.
-`ergo-validation` exists for `tests/it/shadow.rs`, which
-has to build a real `CheckedBlock` for the production `StateStore::apply_block`
-and the real `WalletStateHook` the node wires (see "The embedded-vs-daemon
-shadow harness"). The node/API/state test crates never enter the released
-binary's dependency graph. `parking_lot` is now also a normal dependency for
-the seed host's shared writer and wallet-state locks.
-**Depended on by:** nothing in the workspace (it is a leaf binary)
-**Approx LOC:** ~7.7K (`src/**/*.rs`) plus ~7.3K of integration tests
+**Normal dependency boundary:** Wallet/service/protocol crates plus pure
+consensus and wire dependencies (`ergo-primitives`, `ergo-ser`,
+`ergo-chain-spec`, `ergo-validation`, `ergo-sigma`, `ergo-rest-json`). The host
+uses redb for explicit copy migration, bounded HTTP/RPC, Axum/Hyper/Tokio for
+local serving and supervision, protected file/CLI/config support and zeroizing
+credentials. No normal `ergo-node`, `ergo-state`, `ergo-api`, `ergo-mempool` or
+`ergo-sync` dependency enters the daemon. Node, state, API, mempool and mining
+crates are test-only for real HTTP, shadow and private-reservation fixtures.
+
+**Phase 3 hosting:** `host.rs` owns command admission, blocking engine work,
+command-scoped spending refresh/release, rescan fencing and secret erasure.
+`spending.rs` implements chain/signing, coherent pool and bounded submission
+ports over authenticated versioned HTTP. `full_api/` owns complete native and
+Scala adapters plus a wallet-only UI; watch read behavior remains in `api.rs`.
+`migration.rs` handles stopped-source locking, private-copy export and encrypted
+secret publication. Pure wallet dependencies and optional host features are described
+in [ergo-wallet](ergo-wallet.md); the shared persistence/engine behavior lives
+in [ergo-wallet-service](ergo-wallet-service.md).
+
+The historical read/sync details below describe the watch-only adapter and the
+short diagnostic routes. Seed native routes use engine schemas and capabilities
+as described above; confirmed-only comparison is the Phase 2 shadow boundary.
 
 ## Start here
 - `src/main.rs` — process entry. **Blocking first, async second**: load the
@@ -47,7 +42,9 @@ the seed host's shared writer and wallet-state locks.
   `read_api_key` (the node/local API-key file permission gate).
 - `src/host.rs` — `WalletHost`: locked seed startup, typed engine commands,
   bounded admission and the shared sync writer gate.
-- `src/lifecycle_api.rs` — authenticated seed API around the confirmed reads.
+- `src/lifecycle_api.rs` — seed API authentication and local lifecycle status.
+- `src/full_api/` — native/Scala engine adapters and wallet UI assets.
+- `src/spending.rs` — bounded coherent node context, mempool and submission ports.
 - `src/engine_chain.rs` — `LifecycleChainAccess`: local cursor and bounded
   node-tip reads; no signing or engine rescan replay.
 - `src/ownership.rs` — durable `wallet-mode` marker and data-directory policy.
@@ -73,8 +70,8 @@ the seed host's shared writer and wallet-state locks.
   reject cross-mode reuse and require fresh seed directories.
 - `src/host.rs` — seed metadata/public-cache hydration, one engine writer,
   typed lifecycle/key wrappers, sync serialization and shutdown key erasure.
-- `src/lifecycle_api.rs` — authenticated native lifecycle and key routes;
-  strict request bodies, body-size cap and `Cache-Control: no-store`.
+- `src/lifecycle_api.rs` — authentication before body parsing and the local
+  lifecycle-status projection; `full_api/` supplies strict native/Scala handlers.
 - `src/engine_chain.rs` — capability-limited `WalletChainAccess` adapter.
 - `src/descriptor.rs` — descriptor parsing/validation and idempotent import
   into the wallet's tracked-pubkey tables.
@@ -111,11 +108,12 @@ the seed host's shared writer and wallet-state locks.
 
 ## The local read API
 
-Every read route is a `GET`; each is mounted twice, at a short path and under
+In default watch mode every read route is a `GET`; each is mounted twice, at a short path and under
 `/api/v1/wallet/*`. `READ_ROUTE_INVENTORY` is the pinned list and is asserted by
 `tests/it/routes.rs`, which also asserts that the default watch router leaves
-wallet lifecycle, signing, and private-key routes unmounted. Seed mode mounts
-the additional lifecycle routes below and authenticates every read too.
+wallet lifecycle, signing, and private-key routes unmounted. Seed mode retains
+short diagnostic reads and projects native wallet routes through the full engine;
+every seed-mode API read and write is authenticated.
 
 | Route | Response |
 |---|---|
@@ -135,7 +133,8 @@ parameters; anything else is a `400`.
 protected `local_api_key_file` containing a different credential from the
 node's `api_key_file`. The local credential protects all seed-mode reads and
 writes on both listener types. Authentication precedes request-body parsing;
-duplicate key headers are refused, request bodies are capped at 16 KiB, and
+duplicate key headers are refused, secret bodies are capped at 16 KiB, transaction
+bodies at 8 MiB, and
 every response carries `Cache-Control: no-store`. Native errors keep their
 stable reason codes; internal error text and malformed secret bodies are not
 echoed to callers.
@@ -149,10 +148,12 @@ echoed to callers.
 | `POST /api/v1/wallet/addresses` | Derive the next EIP-3 key or a requested path |
 | `GET`, `PUT /api/v1/wallet/change-address` | Read or update the persisted owned change address |
 
-The confirmed `/status` route retains `WatchOnlyWalletStatusDto`; lifecycle
-state has its own route rather than changing that existing response. Address
-reads retain the daemon's tracked-key projection, including its tracked
-master key, rather than the embedded wallet's visibility-filtered list.
+The short `/status` route retains `WatchOnlyWalletStatusDto`; lifecycle
+state has its own entirely local route. Native `/api/v1/wallet/status` uses the
+engine projection and refreshes committed node context for pruning/EIP-27 flags;
+an unavailable node returns `503 node_unavailable`. Native balance, address,
+transaction, scan, key, signing, sending and private job routes use the shared
+engine, while the Scala compatibility routes serve the existing wallet UI.
 
 `WalletHost` opens `data_dir/wallet` with `SecretStorage`, validates metadata,
 hydrates public caches from one store snapshot, and always starts locked.
@@ -160,8 +161,8 @@ Malformed metadata or hydration errors stop startup; public wallet rows
 without an encrypted seed are refused. `ownership::claim` persists the mode
 before database creation, protects Unix seed directories with `0700`, rejects
 cross-mode reuse, and treats an unmarked Phase 2 database as watch-only. Watch
-startup also refuses a `wallet` secret directory. Data migration remains
-separate work.
+startup also refuses a `wallet` secret directory. Explicit stopped-source copy
+cutover is implemented by `migration.rs`; no startup path adopts embedded data.
 
 Every lifecycle/key command runs on a blocking worker under the same mutex
 as an entire sync pass. At most 32 commands are admitted; overload returns
@@ -172,12 +173,14 @@ commits a new/changed key together with invalidation, a genesis cursor and
 cleared history, so initial unlock and later key derivation cannot miss older
 funds. Failed unlocks and derivations leave existing history untouched.
 
-`LifecycleChainAccess` reads the wallet height locally and uses a fresh bounded
-node-tip request for a derived key's addition height. Unknown pruning policy
-is treated conservatively; signing views and engine block replay are refused.
-The host supplies an empty mempool and a disabled submitter and exposes no
-build/sign/send wrappers. Full committed validation context, remote pool
-snapshots and delivery adapters are later Phase 3 increments.
+`LifecycleChainAccess` remains the capability-limited adapter for local lifecycle
+embedders. Production seed mode installs `RemoteSpendingAccess`: each spending
+command refreshes coherent committed context and pool/private reservations under
+the writer, then releases them after the command. Signing, sending, job creation
+and cancellation use this path. Private queue reads and cancellation remain
+available when candidate mining is disabled; new private imports require mining.
+Rescan runs as a supervised engine job and fences conflicting commands while
+local status and lock remain available.
 
 Shutdown closes admission before cancelling sync. Queued commands return
 `503 shutting_down`; work already holding the writer finishes before the
@@ -475,8 +478,8 @@ reached the limiter and needs no change.
   by applied blocks, never by the mempool or unconfirmed headers, so every
   balance, box, and transaction read is confirmed. `/balance` reports
   `confirmed == available` and `reserved == immature == "0"`; `unconfirmed` and
-  `reemission` are `null`. Seed key changes reset history for replay; neither
-  mode can submit a spend. These
+  `reemission` are `null`. Seed key changes reset history for replay; seed spending uses the
+  shared engine rather than these diagnostic projections. These
   are values the daemon *computes* from applied blocks, not the embedded wallet's
   values re-served verbatim — see "Known deviations" §1 for the exact
   differences and what they mean for comparison against an embedded wallet.
@@ -494,8 +497,8 @@ reached the limiter and needs no change.
 - **Capability-limited hosting.** Watch routes are read-only. Seed mode adds
   lifecycle/key writes through `WalletEngine`, with one gate shared with
   complete sync passes and atomic history resets on actual key additions.
-  Neither mode mounts signing/submission routes; `HttpChainClient::submit`
-  returns `ChainClientError::Unsupported`.
+  Seed routes include signing and submission through authenticated
+  command-scoped adapters; watch routes remain read-only.
 - **Loopback by construction.** `tcp_fallback` must be a loopback address; the
   Unix socket is created under a `0o077` umask and `chmod 0600`, with a
   `<socket>.owner` marker (`ergo-walletd-socket:<pid>:<nanos>`) so a stale

@@ -15,23 +15,37 @@ use crate::v1::auth::{require_tier, Tier, V1AuthConfig};
 use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::governor::{governor_mw, Governor, RouteClass};
 
+#[path = "wallet_chain_spending_schema.rs"]
+mod spending_schema;
+pub use spending_schema::*;
+
 pub const DEFAULT_BLOCKS_SINCE_LIMIT: u32 = 100;
 pub const MAX_BLOCKS_SINCE_LIMIT: u32 = 1024;
 pub const MAX_BLOCKS_PER_RESPONSE: u32 = MAX_BLOCKS_SINCE_LIMIT;
 pub const MAX_BLOCKS_PER_REQUEST: u32 = MAX_BLOCKS_PER_RESPONSE;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct WalletChainState {
     pub chain: Option<Arc<dyn WalletChain>>,
+    spending_admission: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for WalletChainState {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
 impl WalletChainState {
     pub fn new(chain: Option<Arc<dyn WalletChain>>) -> Self {
-        Self { chain }
+        Self {
+            chain,
+            spending_admission: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
     }
 
     pub fn with_chain(chain: Arc<dyn WalletChain>) -> Self {
-        Self { chain: Some(chain) }
+        Self::new(Some(chain))
     }
 
     fn chain(&self) -> Result<&Arc<dyn WalletChain>, Box<Response>> {
@@ -616,14 +630,17 @@ pub fn wallet_chain_router(
     let reads: Router<WalletChainState> = Router::new()
         .route("/api/v1/chain/tip", get(tip))
         .route("/api/v1/chain/snapshot", get(snapshot))
+        .route("/api/v1/chain/spending-context", get(spending_context))
         .route("/api/v1/chain/boxes/:id", get(box_lookup))
         .route("/api/v1/chain/blocks-since", get(blocks_since))
+        .route("/api/v1/chain/wallet-blocks/:height", get(block_at))
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::HeavyRead),
             governor_mw,
         ));
     let writes: Router<WalletChainState> = Router::new()
         .route("/api/v1/chain/transactions", post(submit))
+        .route("/api/v1/chain/admission", post(admit_transaction))
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::Compute),
             governor_mw,
@@ -635,4 +652,173 @@ pub fn wallet_chain_router(
             require_tier,
         ))
         .with_state(state)
+}
+
+/// The owned signing view includes private input reservations and therefore
+/// shares the chain router's operator authentication and heavy-read budget.
+#[utoipa::path(
+    get, path = "/api/v1/chain/spending-context", tag = "chain", operation_id = "wallet_spending_context",
+    responses(
+        (status = 200, description = "Versioned owned signing and complete mempool context, bounded to 8 MiB", body = WalletSpendingContext),
+        (status = 503, description = "Context unavailable, too large, or another response in flight", body = V1Error),
+        (status = 500, description = "Chain adapter failure", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn spending_context(State(state): State<WalletChainState>) -> Response {
+    let chain = match state.chain() {
+        Ok(chain) => chain.clone(),
+        Err(response) => return *response,
+    };
+    let permit = match state.spending_admission.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return map_chain_error(WalletChainError::Overloaded(
+                "a spending context response is already in flight".into(),
+            ))
+        }
+    };
+    // Keep admission inside the blocking work and then attached to the bytes.
+    // A disconnected caller cannot release it while capture still runs, and a
+    // slow receiver cannot accumulate another full-pool allocation on this node.
+    match tokio::task::spawn_blocking(move || {
+        let response = chain.spending_context()?;
+        let mut buffer = BoundedContextBuffer(Vec::new());
+        serde_json::to_writer(&mut buffer, &response).map_err(|_| {
+            WalletChainError::Overloaded("spending context exceeds its wire budget".into())
+        })?;
+        Ok::<_, WalletChainError>(AdmittedContextBytes {
+            bytes: buffer.0,
+            _permit: permit,
+        })
+    })
+    .await
+    {
+        Ok(Ok(bytes)) => (
+            [
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+                (axum::http::header::CONTENT_TYPE, "application/json"),
+            ],
+            axum::body::Bytes::from_owner(bytes),
+        )
+            .into_response(),
+        Ok(Err(error)) => map_chain_error(error),
+        Err(_) => map_chain_error(WalletChainError::Internal(
+            "spending context worker failed".into(),
+        )),
+    }
+}
+
+struct BoundedContextBuffer(Vec<u8>);
+impl std::io::Write for BoundedContextBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.0.len().saturating_add(bytes.len()) > wire::MAX_SPENDING_CONTEXT_BYTES {
+            return Err(std::io::Error::other("spending context exceeds byte cap"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct AdmittedContextBytes {
+    bytes: Vec<u8>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+impl AsRef<[u8]> for AdmittedContextBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BlockAtQuery {
+    tip: String,
+    tip_height: u32,
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/chain/wallet-blocks/{height}", tag = "chain", operation_id = "wallet_chain_block_at",
+    params(("height" = u32, Path, description = "Committed block height"),
+        ("tip" = String, Query, description = "Expected committed header id"),
+        ("tipHeight" = u32, Query, description = "Expected committed tip height")),
+    responses(
+        (status = 200, description = "Block anchored to the expected committed tip", body = WalletChainBlockAtResponse),
+        (status = 400, description = "Invalid request", body = V1Error),
+        (status = 409, description = "Committed tip changed", body = V1Error),
+        (status = 410, description = "Requested history pruned", body = WalletChainPrunedBlocksSinceResponse),
+        (status = 503, description = "Chain adapter unavailable", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn block_at(
+    State(state): State<WalletChainState>,
+    Path(height): Path<u32>,
+    V1Query(query): V1Query<BlockAtQuery>,
+) -> Response {
+    if height == 0 || height > query.tip_height {
+        return invalid_params(
+            "block height is outside the committed range",
+            "supply height 1..=tipHeight",
+        );
+    }
+    if let Err(response) = validate_id(&query.tip, "tip") {
+        return *response;
+    }
+    let chain = match state.chain() {
+        Ok(chain) => chain.clone(),
+        Err(response) => return *response,
+    };
+    let tip = wire::ChainTip {
+        height: query.tip_height,
+        header_id: query.tip,
+    };
+    let tip_chain = chain.clone();
+    match run_chain(chain, move |chain| chain.block_at(height, tip)).await {
+        Ok(response) => Json(response).into_response(),
+        Err(WalletChainError::HistoryPruned { minimum_height }) => {
+            match run_chain(tip_chain, |chain| chain.committed_tip()).await {
+                Ok(tip) => render_blocks_since(wire::BlocksSinceResponse::Pruned(
+                    wire::PrunedBlocksSince {
+                        tip,
+                        minimum_height,
+                    },
+                )),
+                Err(error) => map_chain_error(error),
+            }
+        }
+        Err(error) => map_chain_error(error),
+    }
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/chain/admission", tag = "chain", operation_id = "wallet_chain_admission",
+    request_body = WalletChainSubmitRequest,
+    responses(
+        (status = 200, description = "Exact node admission outcome with structured rejection reason", body = WalletChainAdmissionResponse),
+        (status = 400, description = "Invalid request", body = V1Error),
+        (status = 409, description = "Committed tip changed", body = V1Error),
+        (status = 503, description = "Node unavailable or overloaded", body = V1Error),
+        (status = 504, description = "Admission timed out", body = V1Error),
+    ),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn admit_transaction(
+    State(state): State<WalletChainState>,
+    V1Json(request): V1Json<wire::SubmitRequest>,
+) -> Response {
+    if request.transaction.is_empty() {
+        return invalid_params("transaction is empty", "supply signed transaction bytes");
+    }
+    let chain = match state.chain() {
+        Ok(chain) => chain.clone(),
+        Err(response) => return *response,
+    };
+    match run_chain(chain, move |chain| chain.admit_transaction(request)).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => map_chain_error(error),
+    }
 }

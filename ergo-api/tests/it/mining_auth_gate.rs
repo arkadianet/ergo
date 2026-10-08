@@ -96,6 +96,7 @@ fn app_with_mining_and_security(
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: Some(mining),
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,

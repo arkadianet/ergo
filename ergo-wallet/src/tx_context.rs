@@ -8,9 +8,9 @@
 use ergo_primitives::digest::ADDigest;
 use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
 use ergo_ser::input::ContextExtension;
+use ergo_ser::pre_header::CandidatePreHeader;
 use ergo_ser::sigma_value::AvlTreeData;
 use ergo_sigma::evaluator::{EvalBox, EvalHeader, ReductionContext};
-use ergo_validation::pre_header::{build_last_block_utxo_root, CandidatePreHeader};
 use indexmap::IndexMap;
 
 /// Blockchain state snapshot needed for signing.
@@ -54,7 +54,7 @@ impl BlockchainParameters {
     /// Returns `block_version - 1`, the activated script version the
     /// evaluator uses to gate soft-fork method calls.
     pub fn activated_script_version(&self) -> u8 {
-        ergo_validation::derive_activated_script_version(self.block_version)
+        self.block_version.wrapping_sub(1)
     }
 }
 
@@ -228,7 +228,7 @@ impl BlockchainStateContext {
             input_extensions,
             last_headers,
             last_block_utxo_root,
-            activated_script_version: ergo_validation::derive_activated_script_version(ph.version),
+            activated_script_version: ph.version.wrapping_sub(1),
         }
     }
 }
@@ -321,4 +321,15 @@ fn candidate_to_eval_box_simple(c: &ErgoBoxCandidate, index: usize) -> EvalBox {
 fn copy_registers_to_eval(c: &ErgoBoxCandidate) -> [Option<ergo_ser::register::RegisterValue>; 6] {
     let regs = &c.additional_registers().registers;
     std::array::from_fn(|i| regs.get(i).cloned())
+}
+
+fn build_last_block_utxo_root(digest: ADDigest) -> AvlTreeData {
+    AvlTreeData {
+        digest: digest.as_bytes().to_vec(),
+        insert_allowed: true,
+        update_allowed: true,
+        remove_allowed: true,
+        key_length: 32,
+        value_length_opt: None,
+    }
 }

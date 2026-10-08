@@ -422,6 +422,23 @@ impl TryFrom<(&ergo_wallet_protocol::chain::BoxLookupRequest, CommittedTip)> for
 }
 
 pub trait ChainClient: Send + Sync {
+    fn block_at(&self, _height: u32, _tip: CommittedTip) -> Result<ChainBlock, ChainClientError> {
+        Err(ChainClientError::Unsupported)
+    }
+
+    fn admit_transaction(
+        &self,
+        _request: ergo_wallet_protocol::chain::SubmitRequest,
+    ) -> Result<ergo_wallet_protocol::chain::AdmissionResponse, ChainClientError> {
+        Err(ChainClientError::Unsupported)
+    }
+
+    fn spending_context(
+        &self,
+    ) -> Result<ergo_wallet_protocol::chain::SpendingContext, ChainClientError> {
+        Err(ChainClientError::Unsupported)
+    }
+
     /// Stop starting requests during shutdown. Blocking implementations may
     /// finish an in-flight request, but must not start another one.
     fn cancel(&self) {}

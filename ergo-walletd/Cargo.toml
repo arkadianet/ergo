@@ -17,11 +17,15 @@ name = "ergo-walletd"
 path = "src/main.rs"
 
 [dependencies]
-ergo-wallet          = { workspace = true }
+ergo-wallet          = { workspace = true, features = ["keystore"] }
 ergo-wallet-protocol = { workspace = true }
 ergo-wallet-service  = { workspace = true }
 ergo-primitives      = { workspace = true }
 ergo-ser             = { workspace = true }
+ergo-chain-spec      = { workspace = true }
+ergo-rest-json       = { workspace = true }
+ergo-validation      = { workspace = true }
+ergo-sigma           = { workspace = true }
 axum                = { workspace = true }
 hyper               = { workspace = true }
 hyper-util          = { workspace = true }
@@ -40,13 +44,16 @@ parking_lot         = { workspace = true }
 async-trait         = { workspace = true }
 subtle              = { workspace = true }
 zeroize             = { workspace = true }
+redb                = { workspace = true }
+tempfile            = { workspace = true }
+sha2                = { workspace = true }
+base64              = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 # Safe Unix permission-mask support; sockets are restricted at creation.
 rustix = { workspace = true, features = ["fs", "process"] }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 # TEST-TARGET ONLY. The daemon's normal dependency boundary deliberately
 # excludes the node crates (it talks to a node over HTTP). The integration
 # test in `tests/it/node_api.rs` stands up the *real* `ergo-api` chain
@@ -58,6 +65,8 @@ tempfile = { workspace = true }
 ergo-api = { workspace = true }
 ergo-node = { workspace = true }
 ergo-state = { workspace = true, features = ["test-helpers"] }
+ergo-mining = { workspace = true }
+ergo-mempool = { workspace = true }
 # TEST-TARGET ONLY, and only because of `tests/it/shadow.rs`. The shadow
 # harness drives the *embedded* side through the production
 # `StateStore::apply_block`, whose argument is a `CheckedBlock`. Building
@@ -71,7 +80,6 @@ ergo-state = { workspace = true, features = ["test-helpers"] }
 # released binary's dependency graph is unchanged.
 ergo-validation = { workspace = true, features = ["test-helpers"] }
 bincode = { workspace = true }
-redb = { workspace = true }
 
 [[test]]
 name = "it"

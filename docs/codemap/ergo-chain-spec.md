@@ -33,7 +33,7 @@
 ## Invariants & contracts
 - **Network-parameter authority.** This crate owns the canonical per-network constants (magic, address prefix, difficulty/voting/monetary/reemission schedules, genesis digest + header id, seed peers, checkpoint). Every value carries a Scala-conf source citation in its doc comment; the inline `oracle parity` tests assert byte/value equality against those references. When upstream Scala moves (mainnet `2cdbb8c`, testnet v6.0.3), re-extract `test-vectors/` and re-run these tests.
 - **No discrimination leak.** `Network::Mainnet`/`Testnet` is meant to be branched on only inside the `for_network` constructors; consumers borrow narrow `&DifficultyParams`/`&VotingParams`/etc. views through narrow views; launch/context adapters and telemetry also consume the network discriminant.
-- **Charter boundary.** Types, constants, constructors only — no validation, no I/O, no runtime services, no broad node state. Genesis-box JSON is embedded but *parsed* elsewhere (`ergo-node::genesis::parse_genesis_boxes`).
+- **Charter boundary.** Types, constants, constructors and pure obligation arithmetic — no validation, no I/O, no runtime services, no broad node state. Genesis-box JSON is embedded but *parsed* elsewhere (`ergo-node::genesis::parse_genesis_boxes`).
 - **Absence encoded explicitly, not via sentinels.** Networks lacking a feature carry `None` rather than a magic height: testnet has no EIP-37 boundary (`eip37_epoch_length`/`eip37_activation_height` = `None`), no v1→v2 transition (`V2Activation`/`version2_activation` = `None`, the launch row is version 4; the captured version-1 height-one genesis is a separate header exception), and no EIP-27 reemission (`ChainSpec.reemission = None`).
 - **Genesis digest width.** `GenesisParams.state_digest` is 33 bytes (32-byte AVL digest + 1-byte tree-height marker), not 32; `header_id` is the height-1 header id the NiPoPoW verifier anchors on.
 - **Hardcoded-hex soundness.** The private `parse_*_hex` helpers `.expect()` on decode failure — a malformed literal is a compile-baked panic, acceptable because the inputs are constant source strings, not runtime data.
@@ -44,3 +44,8 @@ The `ARCHITECTURE.md` crate-layering section places this crate in L2 and summari
 Testnet launch authority and finite early-header observations are shipped in
 `test-vectors/testnet/initial-context/`; proposals 215/409 are separate from
 empty activated settings. Existing stored height-zero rows are not rewritten.
+
+`src/reemission.rs` owns portable EIP-27 rule input types and the shared pure
+`reemission_obligation_core` calculation. The validator reexports these types
+and function; wallet construction and consensus verification retain one burn
+calculation without a portable-wallet dependency on validation.

@@ -11,7 +11,7 @@
 //! `Network::Mainnet`/`Network::Testnet` discrimination only lives in
 //! the constructor site.
 //!
-//! Charter: types, constants, constructors only. No validation logic,
+//! Charter: types, constants, constructors and pure obligation arithmetic. No validation logic,
 //! no I/O, no runtime services, no broad node state.
 //!
 //! Scala provenance: mainnet values reference `ergoplatform/ergo` at
@@ -1481,3 +1481,8 @@ mod tests {
         );
     }
 }
+
+pub mod reemission;
+pub use reemission::{
+    reemission_obligation_core, EmissionRuleInputs, ReemissionObligation, ReemissionRuleInputs,
+};

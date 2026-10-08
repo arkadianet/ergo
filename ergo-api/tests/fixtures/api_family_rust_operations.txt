@@ -28,6 +28,7 @@ post /api/v1/boxes/unspent/by-ergo-tree
 get /api/v1/boxes/unspent/by-template/{template_hash}
 get /api/v1/boxes/unspent/by-token/{token_id}
 get /api/v1/boxes/{box_id}
+post /api/v1/chain/admission
 get /api/v1/chain/blocks
 get /api/v1/chain/blocks-since
 get /api/v1/chain/blocks/at-height/{height}
@@ -42,8 +43,10 @@ get /api/v1/chain/modifiers/{modifier_id}
 get /api/v1/chain/proofs/{header_id}
 get /api/v1/chain/proofs/{header_id}/transactions/{tx_id}
 get /api/v1/chain/snapshot
+get /api/v1/chain/spending-context
 get /api/v1/chain/tip
 post /api/v1/chain/transactions
+get /api/v1/chain/wallet-blocks/{height}
 get /api/v1/diagnostics
 get /api/v1/diagnostics/activity
 get /api/v1/diagnostics/candidate-build

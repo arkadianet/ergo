@@ -19,30 +19,35 @@ indexmap         = { workspace = true }
 ergo-sigma       = { workspace = true }
 gf2_192          = { workspace = true }
 ergo-ser         = { workspace = true }
-ergo-validation  = { workspace = true }
+ergo-chain-spec  = { workspace = true }
 k256        = { workspace = true, features = ["arithmetic"] }
-md5         = { workspace = true }
+md5         = { workspace = true, optional = true }
 pbkdf2      = { workspace = true }
 sha2        = { workspace = true }
-uuid        = { workspace = true }
+uuid        = { workspace = true, optional = true }
 hmac        = { workspace = true }
 bip39       = { workspace = true }
 zeroize     = { workspace = true }
-rpassword   = { workspace = true }
+rpassword   = { workspace = true, optional = true }
 hex         = { workspace = true }
 thiserror   = { workspace = true }
 serde       = { workspace = true, features = ["derive"] }
 serde_json  = { workspace = true }
 rand        = { workspace = true }
-tempfile    = { workspace = true }
-clap        = { workspace = true, features = ["derive"] }
+tempfile    = { workspace = true, optional = true }
+clap        = { workspace = true, features = ["derive"], optional = true }
 
 [features]
+default = []
+# Filesystem keystore and operator CLI are explicit capabilities.
+keystore = ["dep:md5", "dep:uuid", "dep:tempfile"]
+cli = ["keystore", "dep:clap", "dep:rpassword"]
 # Exposes deterministic test-only RNG types (Sha256DerivedRng) for
 # integration tests in tests/*.  Never enable in production builds.
 test-utils = []
 
 [dev-dependencies]
+tempfile = { workspace = true }
 ergo-primitives = { workspace = true }
 ergo-sigma      = { workspace = true }
 hex             = { workspace = true }
@@ -57,6 +62,7 @@ predicates      = "3"
 [[bin]]
 name = "ergo-wallet"
 path = "src/bin/ergo-wallet.rs"
+required-features = ["cli"]
 
 # Separate target preserves its required-feature gate.
 [[test]]
@@ -80,3 +86,7 @@ workspace = true
 [[example]]
 name = "reference_sigma_responses"
 required-features = ["test-utils"]
+
+[[example]]
+name = "export_keystore_oracle"
+required-features = ["keystore"]

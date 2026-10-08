@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import posixpath
 import re
 import secrets
+import signal
 import stat
 import shutil
 import socket
@@ -34,7 +35,7 @@ TARGETS = (
     "x86_64-pc-windows-msvc",
 )
 TAG_PATTERN = re.compile(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?")
-DOCS = ("operating.md", "configuration.md", "compatibility.md", "logging.md", "operator-controls.md", "deployment.md", "operator-recovery.md")
+DOCS = ("operating.md", "configuration.md", "compatibility.md", "logging.md", "operator-controls.md", "deployment.md", "operator-recovery.md", "wallet-extraction.md")
 
 
 def validate_tag(tag, version):
@@ -169,6 +170,84 @@ def checksum(path):
     return digest
 
 
+def smoke_walletd(binary, config_template, work):
+    """Exercise packaged seed hosting without a remote node or public network."""
+    port = free_port()
+    work.mkdir()
+    node_key, local_key, password = (secrets.token_hex(32) for _ in range(3))
+    for name, value in (("node.key", node_key), ("wallet.key", local_key)):
+        descriptor = os.open(work / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(value)
+    config = config_template.read_text(encoding="utf-8")
+    values = {"network": "testnet", "data_dir": str(work / "data"),
+              "node_url": f"http://127.0.0.1:{free_port()}",
+              "api_key_file": str(work / "node.key"), "local_api_key_file": str(work / "wallet.key")}
+    for name, value in values.items():
+        config, count = re.subn(rf"(?m)^{name}\s*=.*$", lambda _: f"{name} = {json.dumps(value)}", config)
+        if count != 1:
+            raise ValueError(f"seed daemon sample missing {name}")
+    config = re.sub(r"(?m)^unix_socket\s*=.*$", "# Unix socket omitted for portable release smoke.", config)
+    config = configure_section(config, "api", {"tcp_fallback": json.dumps(f"127.0.0.1:{port}")})
+    path = work / "walletd.toml"
+    path.write_text(config, encoding="utf-8")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def request(route, *, authenticated=True, body=None):
+        headers = {"api_key": local_key} if authenticated else {}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        query = urllib.request.Request(f"http://127.0.0.1:{port}{route}", headers=headers, data=data)
+        try:
+            response = opener.open(query, timeout=3)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            return response.status, response.headers, json.loads(response.read())
+
+    command = [str(binary), "--config", str(path)]
+    for boot in ("fresh", "reopen"):
+        log_path = work / f"{boot}.log"
+        with log_path.open("wb") as log:
+            process = subprocess.Popen(command, stdout=log, stderr=log,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0)
+            try:
+                deadline = time.monotonic() + 60
+                while True:
+                    if process.poll() is not None:
+                        raise RuntimeError(f"walletd {boot} exited with {process.returncode}")
+                    try:
+                        status, headers, state = request("/api/v1/wallet/lifecycle/status")
+                        break
+                    except (urllib.error.URLError, TimeoutError, OSError):
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("walletd lifecycle API unavailable") from None
+                        time.sleep(0.1)
+                if status != 200 or headers.get("Cache-Control") != "no-store" or state != {"initialized": boot == "reopen", "locked": True}:
+                    raise RuntimeError("walletd seed status or cache policy differs")
+                if request("/api/v1/wallet/lifecycle/status", authenticated=False)[0] != 401:
+                    raise RuntimeError("walletd seed read accepted missing credential")
+                if boot == "fresh":
+                    if request("/api/v1/wallet/init", body={"pass": password, "strength": 12})[0] != 200:
+                        raise RuntimeError("walletd seed initialization failed")
+                    if request("/api/v1/wallet/unlock", body={"pass": password})[0] != 200:
+                        raise RuntimeError("walletd seed unlock failed")
+                    if request("/api/v1/wallet/lifecycle/status")[2] != {"initialized": True, "locked": False}:
+                        raise RuntimeError("walletd initialized seed did not unlock")
+                process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
+                if process.wait(timeout=30) != 0:
+                    raise RuntimeError("walletd graceful shutdown failed")
+            except Exception as error:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=10)
+                raise RuntimeError(f"{error}\n{log_path.read_text(encoding='utf-8', errors='replace')[-8000:]}") from error
+    if not (work / "data/wallet.redb").is_file() or len(list((work / "data/wallet").glob("*.json"))) != 1:
+        raise RuntimeError("walletd did not retain exactly one encrypted seed and standalone database")
+
+
 def packaged_document(content, document, stage, source_sha, *, extension="", root=ROOT):
     """Adapt archive commands and keep omitted source references revision-pinned."""
     source_document = "docs/release-quickstart.md" if document == "README.md" else document
@@ -198,6 +277,7 @@ cp config/ergo-node.toml ./ergo-node.toml
     elif document == "README.md":
         content = content.replace("./ergo-node ", f"./ergo-node{extension} ")
         content = content.replace("Use `ergo-wallet --help`", f"Use `./ergo-wallet{extension} --help`")
+        content = content.replace("./ergo-walletd --help", f"./ergo-walletd{extension} --help")
     content = content.replace("../ergo-node/ergo-node.toml", "../config/ergo-node.toml")
 
     def rewrite_link(match):
@@ -232,9 +312,11 @@ SUPPORT_FILES = (
     "README.md", "LICENSE-MIT", "LICENSE-APACHE", "CHANGELOG.md", "SECURITY.md",
     "ARCHITECTURE.md", "rust-toolchain.toml", *(f"docs/{doc}" for doc in DOCS),
     "config/ergo-node.toml", "config/ergo-node.toml.example",
-    "deploy/compose.yml", "deploy/ergo-node.service", "deploy/ergo-node.container.toml",
+    "config/ergo-walletd.toml", "config/ergo-walletd-seed.toml",
+    "deploy/compose.yml", "deploy/ergo-node.service", "deploy/ergo-node.container.toml", "deploy/ergo-walletd.service",
 )
-SMOKE_CHECKS = {"help": True, "versions": True, "devnet_boot_reopen_shutdown": True}
+SMOKE_CHECKS = {"help": True, "versions": True, "devnet_boot_reopen_shutdown": True,
+                "walletd_seed_auth_reopen_shutdown": True}
 
 
 def write_json(path, value):
@@ -258,7 +340,7 @@ def archive_name(target):
 
 def executable_names(target):
     extension = ".exe" if target.endswith("windows-msvc") else ""
-    return tuple(name + extension for name in ("ergo-node", "ergo-wallet"))
+    return tuple(name + extension for name in ("ergo-node", "ergo-wallet", "ergo-walletd"))
 
 
 def validate_identity(info, tag, sha):
@@ -278,7 +360,7 @@ def validate_target(info, target):
         raise ValueError("invalid target metadata")
     executables = info.get("executables")
     if not isinstance(executables, dict) or set(executables) != set(executable_names(target)):
-        raise ValueError("expected both target executable names")
+        raise ValueError("expected all target executable names")
     for executable in executables.values():
         if (not isinstance(executable, dict) or set(executable) != {"sha256"}
                 or not isinstance(executable["sha256"], str)
@@ -415,8 +497,12 @@ def package(target, binaries, output, *, tag=None, sha=None, root=ROOT):
                 continue
             destination = stage / file
             destination.parent.mkdir(parents=True, exist_ok=True)
-            source = root / "ergo-node" / destination.name if file.startswith("config/") else root / file
+            source = root / ("ergo-walletd" if destination.name.startswith("ergo-walletd") else "ergo-node") / destination.name if file.startswith("config/") else root / file
             shutil.copy2(source, destination)
+            if extension and destination.name.startswith("ergo-walletd"):
+                contents = re.sub(r"(?m)^unix_socket\s*=.*$", "# Unix sockets are unavailable on Windows.", destination.read_text(encoding="utf-8"))
+                contents = configure_section(contents, "api", {"tcp_fallback": '"127.0.0.1:3033"'})
+                destination.write_text(contents, encoding="utf-8", newline="\n")
         shutil.copytree(root / "deploy", stage / "deploy")
         for document in stage.rglob("*.md"):
             document.write_text(packaged_document(
@@ -444,9 +530,10 @@ def package(target, binaries, output, *, tag=None, sha=None, root=ROOT):
         smoke_work = temp / "node-smoke"
         smoke_work.mkdir()
         smoke_node(extracted / ("ergo-node" + extension), extracted / "config/ergo-node.toml", smoke_work)
+        smoke_walletd(extracted / ("ergo-walletd" + extension), extracted / "config/ergo-walletd-seed.toml", temp / "walletd-smoke")
         receipt["smoke"] = dict(SMOKE_CHECKS)
         write_json(internal / f"receipt-{target}.json", receipt)
-    print(f"packaged {target}: both versions/help, combined archive, offline boot/reopen/shutdown passed")
+    print(f"packaged {target}: all versions/help, node and walletd offline boot/reopen/shutdown passed")
 
 
 def transport_files(directory):

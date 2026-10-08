@@ -221,7 +221,11 @@ pub fn run(command: &crate::config::Command) -> Result<String> {
                 .utxo
                 .ok_or_else(|| fail("logical UTXO statistics require a UTXO backend"))?,
         )?,
-        Command::WalletScanUtxo { data_dir, restart } => {
+        Command::WalletScanUtxo {
+            data_dir,
+            wallet_data_dir,
+            restart,
+        } => {
             match fs::symlink_metadata(data_dir.join(MANIFEST)) {
                 Ok(_) => {
                     return Err(fail(
@@ -231,13 +235,101 @@ pub fn run(command: &crate::config::Command) -> Result<String> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            let database = redb::Database::open(data_dir.join("state.redb"))?;
-            serde_json::to_value(ergo_state::wallet::utxo_scan::discover(
-                &database, *restart,
-            )?)?
+            if let Some(wallet_data_dir) = wallet_data_dir {
+                serde_json::to_value(discover_external_wallet(
+                    data_dir,
+                    wallet_data_dir,
+                    *restart,
+                )?)?
+            } else {
+                let database = redb::Database::open(data_dir.join("state.redb"))?;
+                serde_json::to_value(ergo_state::wallet::utxo_scan::discover(
+                    &database, *restart,
+                )?)?
+            }
         }
     };
     Ok(serde_json::to_string_pretty(&value)?)
+}
+
+fn read_wallet_marker(directory: &Path, name: &str) -> Result<String> {
+    let path = directory.join(name);
+    if !fs::symlink_metadata(&path)?.is_file() {
+        return Err(fail(format!(
+            "external wallet {name} must be a regular file"
+        )));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(fail("external wallet marker changed type"));
+    }
+    let mut text = String::new();
+    file.take(32).read_to_string(&mut text)?;
+    if text.len() > 24 {
+        return Err(fail("external wallet marker is invalid"));
+    }
+    Ok(text.trim().to_owned())
+}
+
+/// The node owns verified chain traversal; the wallet daemon owns the target
+/// projection and seeds. This command needs neither a password nor a secret.
+fn discover_external_wallet(
+    data_dir: &Path,
+    wallet_data_dir: &Path,
+    restart: bool,
+) -> Result<ergo_state::wallet::utxo_scan::DiscoveryCoverage> {
+    if !matches!(
+        read_wallet_marker(wallet_data_dir, "wallet-mode")?.as_str(),
+        "seed" | "watch_only"
+    ) {
+        return Err(fail("external wallet has an invalid mode marker"));
+    }
+    let target_network = read_wallet_marker(wallet_data_dir, "wallet-network")?;
+    if !matches!(target_network.as_str(), "mainnet" | "testnet" | "devnet") {
+        return Err(fail("external wallet has an invalid network marker"));
+    }
+    let source_path = data_dir.join("state.redb");
+    let target_path = wallet_data_dir.join("wallet.redb");
+    for path in [&source_path, &target_path] {
+        if !fs::symlink_metadata(path)?.is_file() {
+            return Err(fail(
+                "wallet discovery database paths must be regular files",
+            ));
+        }
+    }
+    if fs::canonicalize(&source_path)? == fs::canonicalize(&target_path)? {
+        return Err(fail(
+            "external wallet database must differ from the node state database",
+        ));
+    }
+    let source = ReadOnlyDatabase::open(&source_path)
+        .map_err(|error| database_access_error("state.redb", error, cfg!(windows)))?;
+    let snapshot = source.begin_read()?;
+    let source_network = ergo_state::maintenance::committed_network(&snapshot)?;
+    if source_network.to_string() != target_network {
+        return Err(fail(
+            "external wallet network differs from the committed node network",
+        ));
+    }
+    // Database::open never creates a fresh target. Its exclusive lock refuses
+    // a live daemon before any staging or wallet-table mutation can occur.
+    let target = redb::Database::open(&target_path).map_err(|error| {
+        fail(format!(
+            "cannot lock wallet.redb; stop the wallet daemon before discovery: {error}"
+        ))
+    })?;
+    Ok(ergo_state::wallet::utxo_scan::discover_into(
+        &snapshot, &target, restart,
+    )?)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -891,6 +983,144 @@ mod tests {
         dir
     }
 
+    fn external_wallet_directory(network: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("wallet-mode"), b"seed\n").unwrap();
+        fs::write(dir.path().join("wallet-network"), format!("{network}\n")).unwrap();
+        // The command must never inspect or copy this deliberately opaque seed.
+        fs::create_dir(dir.path().join("wallet")).unwrap();
+        fs::write(
+            dir.path().join("wallet/encrypted-seed"),
+            b"opaque external secret",
+        )
+        .unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let txn = ergo_state::begin_write_qr(&db).unwrap();
+        let pk: [u8; 33] =
+            hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let meta = ergo_wallet_service::wallet::types::TrackedPubkeyMeta {
+            derivation_path: vec![],
+            derivation_path_label: String::new(),
+            added_at_height: 0,
+        };
+        txn.open_table(ergo_wallet_service::wallet::tables::WALLET_TRACKED_PUBKEYS)
+            .unwrap()
+            .insert(
+                ergo_wallet_service::wallet::tables::tracked_pubkey_key(0, &pk),
+                bincode::serialize(&meta).unwrap(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+        drop(db);
+        dir
+    }
+
+    #[test]
+    fn external_wallet_discovery_preserves_source_chain_and_encrypted_seeds() {
+        let data = seeded_directory();
+        let wallet = external_wallet_directory("mainnet");
+        let chain_before = digest_file(&data.path().join("state.redb")).unwrap();
+        let embedded_secret = fs::read(data.path().join("wallet/encrypted-seed")).unwrap();
+        let external_secret = fs::read(wallet.path().join("wallet/encrypted-seed")).unwrap();
+        let output = run(&crate::config::Command::WalletScanUtxo {
+            data_dir: data.path().into(),
+            wallet_data_dir: Some(wallet.path().into()),
+            restart: false,
+        })
+        .unwrap();
+        let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["history_complete"], false);
+        assert_eq!(result["anchor_height"], 0);
+        assert_eq!(
+            digest_file(&data.path().join("state.redb")).unwrap(),
+            chain_before
+        );
+        assert_eq!(
+            fs::read(data.path().join("wallet/encrypted-seed")).unwrap(),
+            embedded_secret
+        );
+        assert_eq!(
+            fs::read(wallet.path().join("wallet/encrypted-seed")).unwrap(),
+            external_secret
+        );
+        let source = ReadOnlyDatabase::open(data.path().join("state.redb")).unwrap();
+        assert!(
+            ergo_wallet_service::wallet::utxo_scan::coverage(&source.begin_read().unwrap())
+                .unwrap()
+                .is_none()
+        );
+        let target = ReadOnlyDatabase::open(wallet.path().join("wallet.redb")).unwrap();
+        assert!(
+            ergo_wallet_service::wallet::utxo_scan::coverage(&target.begin_read().unwrap())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn external_wallet_discovery_refuses_missing_mode_wrong_network_and_running_owners() {
+        let data = seeded_directory();
+        let wallet = external_wallet_directory("testnet");
+        let target_before = digest_file(&wallet.path().join("wallet.redb")).unwrap();
+        assert!(discover_external_wallet(data.path(), wallet.path(), false)
+            .unwrap_err()
+            .to_string()
+            .contains("network differs"));
+        assert_eq!(
+            digest_file(&wallet.path().join("wallet.redb")).unwrap(),
+            target_before
+        );
+        fs::write(wallet.path().join("wallet-network"), b"mainnet\n").unwrap();
+        fs::remove_file(wallet.path().join("wallet-mode")).unwrap();
+        assert!(discover_external_wallet(data.path(), wallet.path(), false).is_err());
+        fs::write(wallet.path().join("wallet-mode"), b"seed\n").unwrap();
+        let target = redb::Database::open(wallet.path().join("wallet.redb")).unwrap();
+        let target_locked = digest_file(&wallet.path().join("wallet.redb")).unwrap();
+        assert!(discover_external_wallet(data.path(), wallet.path(), false)
+            .unwrap_err()
+            .to_string()
+            .contains("stop the wallet daemon"));
+        assert_eq!(
+            digest_file(&wallet.path().join("wallet.redb")).unwrap(),
+            target_locked
+        );
+        drop(target);
+        // Opening the simulated owner changes redb's recovery header; compare
+        // each rejected discovery with the bytes left by that owner's close.
+        let target_closed = digest_file(&wallet.path().join("wallet.redb")).unwrap();
+        let source = redb::Database::open(data.path().join("state.redb")).unwrap();
+        assert!(discover_external_wallet(data.path(), wallet.path(), false)
+            .unwrap_err()
+            .to_string()
+            .contains("stop the node first"));
+        drop(source);
+        assert_eq!(
+            digest_file(&wallet.path().join("wallet.redb")).unwrap(),
+            target_closed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_wallet_discovery_rejects_symlink_markers_without_opening_seeds() {
+        let data = seeded_directory();
+        let wallet = external_wallet_directory("mainnet");
+        fs::remove_file(wallet.path().join("wallet-mode")).unwrap();
+        std::os::unix::fs::symlink("wallet/encrypted-seed", wallet.path().join("wallet-mode"))
+            .unwrap();
+        assert!(discover_external_wallet(data.path(), wallet.path(), false)
+            .unwrap_err()
+            .to_string()
+            .contains("regular file"));
+        assert_eq!(
+            fs::read(wallet.path().join("wallet/encrypted-seed")).unwrap(),
+            b"opaque external secret"
+        );
+    }
+
     #[test]
     fn verified_backup_restore_preserves_real_genesis_and_operator_files() {
         let data = seeded_directory();
@@ -1289,6 +1519,7 @@ mod tests {
         let before = digest_file(&dest.join("state.redb")).unwrap();
         let error = run(&crate::config::Command::WalletScanUtxo {
             data_dir: dest.clone(),
+            wallet_data_dir: None,
             restart: false,
         })
         .unwrap_err();
@@ -1369,6 +1600,13 @@ mod tests {
             vec!["ergo-node", "doctor", "/data"],
             vec!["ergo-node", "utxo-stats", "/data"],
             vec!["ergo-node", "wallet-scan-utxo", "/data", "--restart"],
+            vec![
+                "ergo-node",
+                "wallet-scan-utxo",
+                "/data",
+                "--wallet-data-dir",
+                "/wallet",
+            ],
         ] {
             assert!(crate::config::Cli::try_parse_from(args)
                 .unwrap()

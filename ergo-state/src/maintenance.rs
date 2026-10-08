@@ -135,6 +135,19 @@ pub fn inspect_tip(txn: &ReadTransaction) -> Result<MaintenanceTip, StateError> 
     })
 }
 
+/// Identify the verified committed chain for an external wallet operation.
+/// A pruned chain uses its persisted emission identity; retained canonical
+/// genesis headers are an independent fallback for legacy state databases.
+pub fn committed_network(txn: &ReadTransaction) -> Result<ergo_chain_spec::Network, StateError> {
+    inspect_tip(txn)?;
+    ergo_wallet_service::wallet::migration::source_network(txn).map_err(|error| match error {
+        ergo_wallet_service::WalletStoreError::Decode(reason) => {
+            StateError::WalletDiscoveryUnavailable(reason)
+        }
+        error => error.into(),
+    })
+}
+
 fn verify_tip_header(
     txn: &ReadTransaction,
     chain: &ChainStateMeta,

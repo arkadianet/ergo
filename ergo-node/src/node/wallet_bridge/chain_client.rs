@@ -25,6 +25,9 @@ const MAX_BLOCKS_PER_RESPONSE: u32 = 1_024;
 const MAX_ANCESTOR_WALK: u32 = 4_096;
 const SUBMIT_WAIT: Duration = Duration::from_secs(6);
 
+#[path = "spending_context.rs"]
+mod spending_context;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SubmitFailureClass {
     Duplicate,
@@ -67,6 +70,7 @@ pub struct InProcessChainClient {
     state: Option<Arc<dyn WalletChainAccess>>,
     submitter: Option<Arc<dyn ergo_api::NodeSubmit>>,
     reemission_inputs: Vec<ReemissionInput>,
+    spending: Option<spending_context::SpendingProvider>,
     #[cfg(test)]
     tip_movement_hook: Option<Arc<dyn Fn() -> Result<(), ChainClientError> + Send + Sync>>,
 }
@@ -81,6 +85,7 @@ impl InProcessChainClient {
             state: None,
             submitter: submitter.into_chain_submitter(),
             reemission_inputs: Vec::new(),
+            spending: None,
             #[cfg(test)]
             tip_movement_hook: None,
         }
@@ -92,6 +97,7 @@ impl InProcessChainClient {
             state: None,
             submitter: None,
             reemission_inputs: Vec::new(),
+            spending: None,
             #[cfg(test)]
             tip_movement_hook: None,
         }
@@ -137,6 +143,22 @@ impl InProcessChainClient {
 
     pub fn with_reemission_inputs(mut self, inputs: Vec<ReemissionInput>) -> Self {
         self.reemission_inputs = inputs;
+        self
+    }
+
+    pub fn with_spending_context(
+        mut self,
+        snapshot: crate::snapshot::SnapshotHandle,
+        min_relay_fee_nano_erg: u64,
+        max_tx_size_bytes: usize,
+        private_queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
+    ) -> Self {
+        self.spending = Some(spending_context::SpendingProvider {
+            snapshot,
+            min_relay_fee_nano_erg,
+            max_tx_size_bytes,
+            private_queue,
+        });
         self
     }
 
@@ -881,6 +903,49 @@ impl WalletChainAdapter {
 }
 
 impl WalletChain for WalletChainAdapter {
+    fn block_at(
+        &self,
+        height: u32,
+        tip: wire::ChainTip,
+    ) -> Result<wire::BlockAtResponse, WalletChainError> {
+        let tip = CommittedTip::new(tip.height, decode_wire_id(&tip.header_id, "tip")?);
+        let block = self
+            .client
+            .block_at(height, tip.clone())
+            .map_err(map_service_error)?;
+        let wire::BlocksSinceResponse::Forward(mut response) = wire_blocks_since(
+            BlocksSinceResponse::Forward(ergo_wallet_service::chain::ForwardBlocksSince {
+                tip,
+                blocks: vec![block],
+            }),
+        )?
+        else {
+            unreachable!()
+        };
+        Ok(wire::BlockAtResponse {
+            tip: response.tip,
+            block: response.blocks.remove(0),
+        })
+    }
+
+    fn admit_transaction(
+        &self,
+        request: wire::SubmitRequest,
+    ) -> Result<wire::AdmissionResponse, WalletChainError> {
+        let expected_header_id = request.snapshot_id.clone();
+        match self.client.admit_transaction(request) {
+            Err(ChainClientError::Conflict) if expected_header_id.is_some() => {
+                Err(WalletChainError::StaleTipId {
+                    expected_header_id: expected_header_id.expect("checked snapshot id"),
+                    actual: wire_tip(self.client.committed_tip().map_err(map_service_error)?)?,
+                })
+            }
+            result => result.map_err(map_service_error),
+        }
+    }
+    fn spending_context(&self) -> Result<wire::SpendingContext, WalletChainError> {
+        self.client.spending_context().map_err(map_service_error)
+    }
     fn tip(&self) -> Result<wire::ChainTip, WalletChainError> {
         wire_tip(self.client.committed_tip().map_err(map_service_error)?)
     }
@@ -978,6 +1043,63 @@ impl WalletChain for WalletChainAdapter {
 }
 
 impl ChainClient for InProcessChainClient {
+    fn block_at(&self, height: u32, tip: CommittedTip) -> Result<ChainBlock, ChainClientError> {
+        self.ensure_tip(&tip)?;
+        if height == 0 || height > tip.height {
+            return Err(ChainClientError::Protocol(
+                "block height is outside committed range".into(),
+            ));
+        }
+        let minimum = self
+            .reader
+            .minimal_full_block_height()
+            .map_err(|e| Self::state_error("retained history", e))?;
+        if height < minimum {
+            return Err(ChainClientError::HistoryPruned {
+                minimum_height: Some(minimum),
+            });
+        }
+        let block = self.block_from_state(height)?;
+        self.ensure_tip_unchanged(&tip)?;
+        Ok(block)
+    }
+
+    fn admit_transaction(
+        &self,
+        request: wire::SubmitRequest,
+    ) -> Result<wire::AdmissionResponse, ChainClientError> {
+        let tip = self.tip_from_state()?;
+        if request
+            .snapshot_id
+            .as_ref()
+            .is_some_and(|id| id != &hex::encode(tip.header_id))
+        {
+            return Err(ChainClientError::Conflict);
+        }
+        let bytes = hex::decode(&request.transaction)
+            .map_err(|_| ChainClientError::Protocol("invalid signed transaction hex".into()))?;
+        let tx_id = hex::encode(self.tx_id_from_bytes(&bytes)?);
+        let result = self.submit_bytes(bytes);
+        self.ensure_tip_unchanged(&tip)?;
+        Ok(match result {
+            Ok(actual) if actual == tx_id => wire::AdmissionResponse::Accepted { tx_id },
+            Ok(_) => {
+                return Err(ChainClientError::Protocol(
+                    "admission returned a different transaction id".into(),
+                ))
+            }
+            Err(error) if error.reason == "duplicate" => {
+                wire::AdmissionResponse::Duplicate { tx_id }
+            }
+            Err(error) => wire::AdmissionResponse::Rejected {
+                reason: error.reason,
+                detail: error.detail,
+            },
+        })
+    }
+    fn spending_context(&self) -> Result<wire::SpendingContext, ChainClientError> {
+        spending_context::capture(self)
+    }
     fn committed_tip(&self) -> Result<CommittedTip, ChainClientError> {
         self.tip_from_state()
     }

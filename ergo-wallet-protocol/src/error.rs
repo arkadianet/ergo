@@ -12,6 +12,7 @@ pub enum WalletAdminError {
     ChangeAddressUntracked,
     BadRequest(String),
     StaleChainTip(String),
+    NodeUnavailable(String),
     Internal(String),
     Forbidden(String),
     WalletExists,
@@ -71,6 +72,7 @@ impl WalletErrorSurface {
                 WalletAdminError::ChangeAddressUntracked => "change_address_untracked",
                 WalletAdminError::BadRequest(_) => "bad_request",
                 WalletAdminError::StaleChainTip(_) => "stale_chain_tip",
+                WalletAdminError::NodeUnavailable(_) => "node_unavailable",
                 WalletAdminError::Internal(_) => "internal",
                 WalletAdminError::Forbidden(_) => "forbidden",
                 WalletAdminError::WalletExists => "wallet_exists",
@@ -101,6 +103,7 @@ impl WalletErrorSurface {
                 WalletAdminError::ChangeAddressUntracked => "change_address_untracked",
                 WalletAdminError::BadRequest(_) => "bad_request",
                 WalletAdminError::StaleChainTip(_) => "stale_chain_tip",
+                WalletAdminError::NodeUnavailable(_) => "node_unavailable",
                 WalletAdminError::Internal(_) => "internal",
                 WalletAdminError::Forbidden(_) => "sensitive_op_disabled",
                 WalletAdminError::WalletExists => "wallet_exists",
@@ -127,7 +130,7 @@ impl WalletErrorSurface {
         };
         let status = match self {
             Self::Scala => match error {
-                WalletAdminError::ShuttingDown => 503,
+                WalletAdminError::ShuttingDown | WalletAdminError::NodeUnavailable(_) => 503,
                 WalletAdminError::ScanInvalidated => 409,
                 WalletAdminError::WrongPassword => 401,
                 WalletAdminError::StaleChainTip(_) | WalletAdminError::RescanUnavailable(_) => 409,
@@ -154,7 +157,7 @@ impl WalletErrorSurface {
                 | WalletAdminError::RescanUnavailable(_)
                 | WalletAdminError::WalletExists
                 | WalletAdminError::DerivationPathExists => 409,
-                WalletAdminError::ShuttingDown => 503,
+                WalletAdminError::ShuttingDown | WalletAdminError::NodeUnavailable(_) => 503,
                 WalletAdminError::ScanInvalidated => 409,
                 WalletAdminError::WrongPassword => 401,
                 WalletAdminError::Internal(_) => 500,
@@ -215,6 +218,7 @@ impl WalletAdminError {
             Self::ChangeAddressUntracked => "change_address_untracked",
             Self::BadRequest(_) => "bad_request",
             Self::StaleChainTip(_) => "stale_chain_tip",
+            Self::NodeUnavailable(_) => "node_unavailable",
             Self::Internal(_) => "internal",
             Self::Forbidden(_) => "forbidden",
             Self::WalletExists => "wallet_exists",
@@ -238,6 +242,7 @@ impl WalletAdminError {
 
     pub fn detail(&self) -> Option<&str> {
         match self {
+            Self::NodeUnavailable(_) => None,
             Self::ScanInvalidated => {
                 Some("wallet scan invalidated — run wallet-scan-utxo offline or a full rescan (fromHeight=0)")
             }
@@ -270,6 +275,7 @@ impl fmt::Display for WalletAdminError {
             Self::ChangeAddressUntracked => f.write_str("change address untracked"),
             Self::BadRequest(value) => write!(f, "bad request: {value}"),
             Self::StaleChainTip(value) => write!(f, "stale chain tip: {value}"),
+            Self::NodeUnavailable(value) => write!(f, "node unavailable: {value}"),
             Self::Internal(value) => write!(f, "internal: {value}"),
             Self::Forbidden(value) => write!(f, "forbidden: {value}"),
             Self::WalletExists => f.write_str("wallet already exists"),
@@ -301,6 +307,18 @@ impl std::error::Error for WalletAdminError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_unavailable_is_service_unavailable_without_remote_details_on_both_surfaces() {
+        let error =
+            WalletAdminError::NodeUnavailable("upstream response with private details".into());
+        for surface in [WalletErrorSurface::Scala, WalletErrorSurface::NativeV1] {
+            let mapped = surface.map(&error);
+            assert_eq!(mapped.status, 503);
+            assert_eq!(mapped.reason, "node_unavailable");
+            assert_eq!(mapped.detail, None);
+        }
+    }
 
     #[test]
     fn surfaces_preserve_their_different_statuses_and_reasons() {

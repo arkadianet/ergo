@@ -4,6 +4,7 @@
 // TCP, so it still covers the daemon on Windows.
 #[cfg(unix)]
 mod daemon_boot;
+mod full_api;
 mod http_client;
 mod lifecycle;
 mod node_api;
@@ -11,6 +12,7 @@ mod routes;
 mod scan_registry_rewind;
 mod seed_daemon_boot;
 mod shadow;
+mod spending_context;
 mod store_reopen;
 mod support;
 mod sync;

@@ -95,9 +95,35 @@ fn private_mining_unavailable() -> TxSubmitError {
 }
 
 /// Map a submit error to a native [`WalletAdminError`]. A `duplicate` reason is the
-/// caller's concern (handled as idempotent-accepted upstream); other reasons are a
-/// client-correctable rejection (`bad_request` carrying the typed reason).
+/// caller's concern (handled as idempotent-accepted upstream). Explicit node
+/// transport failures preserve availability and stale-tip status; admission
+/// rejections remain client-correctable `bad_request` errors.
 pub fn map_submit_error(e: TxSubmitError) -> WalletAdminError {
+    match e.reason.as_str() {
+        "stale_chain_tip" => {
+            return WalletAdminError::StaleChainTip("the node tip changed during admission".into())
+        }
+        "shutting_down" => return WalletAdminError::ShuttingDown,
+        "unauthorized"
+        | "node_rpc_failed"
+        | "node_rpc_worker_failed"
+        | "invalid_node_response"
+        | "invalid_node_transaction_id"
+        | "signing_context_unavailable"
+        | "private_mining_unavailable"
+        | "timeout"
+        | "overloaded"
+        | "pool_full"
+        | "budget_exhausted"
+        | "ibd_gated"
+        | "tip_unready"
+        | "unsupported"
+        | "route_disabled"
+        | "disabled" => {
+            return WalletAdminError::NodeUnavailable("node admission unavailable".into())
+        }
+        _ => {}
+    }
     WalletAdminError::BadRequest(match e.detail {
         Some(d) => format!("submit rejected ({}): {d}", e.reason),
         None => format!("submit rejected: {}", e.reason),
@@ -107,6 +133,33 @@ pub fn map_submit_error(e: TxSubmitError) -> WalletAdminError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_failures_preserve_unavailability_and_stale_tip_without_details() {
+        for reason in [
+            "timeout",
+            "unauthorized",
+            "node_rpc_failed",
+            "ibd_gated",
+            "private_mining_unavailable",
+        ] {
+            let error = map_submit_error(TxSubmitError {
+                reason: reason.into(),
+                detail: Some("private upstream detail".into()),
+            });
+            let status = ergo_wallet_protocol::WalletErrorSurface::NativeV1.map(&error);
+            assert_eq!(status.status, 503);
+            assert_eq!(status.reason, "node_unavailable");
+            assert_eq!(status.detail, None);
+        }
+        assert!(matches!(
+            map_submit_error(TxSubmitError {
+                reason: "stale_chain_tip".into(),
+                detail: None
+            }),
+            WalletAdminError::StaleChainTip(_)
+        ));
+    }
 
     /// A `duplicate` submit reason is handled as idempotent-accept upstream; any
     /// other submit reason maps to a client `bad_request` carrying the typed reason.

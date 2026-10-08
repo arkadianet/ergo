@@ -220,6 +220,7 @@ mod tests {
         group_element::GroupElement,
         reader::VlqReader,
     };
+    use ergo_ser::pre_header::CandidatePreHeader;
     use ergo_ser::{
         ergo_box::{ErgoBox, ErgoBoxCandidate},
         ergo_tree::read_ergo_tree,
@@ -227,7 +228,6 @@ mod tests {
         register::AdditionalRegisters,
         transaction::Transaction,
     };
-    use ergo_validation::pre_header::CandidatePreHeader;
 
     // ----- helpers -----
 

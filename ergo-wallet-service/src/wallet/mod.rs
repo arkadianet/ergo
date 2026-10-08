@@ -15,6 +15,7 @@ pub mod apply;
 pub mod error;
 pub mod hydration;
 pub mod maturity;
+pub mod migration;
 pub mod mining_jobs;
 pub mod reader;
 pub mod scan;

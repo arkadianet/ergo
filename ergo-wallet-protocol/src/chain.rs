@@ -2,6 +2,9 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+mod spending;
+pub use spending::*;
+
 pub const CHAIN_API_VERSION: u16 = 1;
 pub const CHAIN_WIRE_VERSION: u16 = CHAIN_API_VERSION;
 pub type ChainApiVersion = u16;

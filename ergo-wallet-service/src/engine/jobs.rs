@@ -564,7 +564,8 @@ fn aggregated_output(
     tracked_destination(ctx, destination)?;
     let mut value = 0u64;
     let mut tokens = BTreeMap::<[u8; 32], u64>::new();
-    let rules = ctx.chain.reemission_rules();
+    let owned_rules = ctx.chain.reemission_rules_owned();
+    let rules = owned_rules.as_ref();
     let height = ctx.chain.tip_height().map_err(internal)?.saturating_add(1);
     let obligation = rules.map(|rules| {
         ergo_validation::reemission_obligation_core(

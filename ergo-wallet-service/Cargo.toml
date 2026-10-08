@@ -9,8 +9,9 @@ repository.workspace = true
 publish    = false
 
 [dependencies]
-ergo-wallet          = { workspace = true }
+ergo-wallet          = { workspace = true, features = ["keystore"] }
 ergo-wallet-protocol = { workspace = true }
+ergo-chain-spec      = { workspace = true }
 ergo-primitives      = { workspace = true }
 ergo-ser             = { workspace = true }
 ergo-validation      = { workspace = true }

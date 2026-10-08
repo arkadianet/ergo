@@ -1,14 +1,13 @@
 # ergo-wallet
 
-**Purpose:** HD wallet cryptography and secret storage. Owns BIP39
-mnemonics, post-/pre-1627 BIP32 derivation, P2PK address rendering, encrypted
-Scala-compatible secret files, sigma-proof production (single- and multi-sig
-hint bags), and the wallet CLI. Wallet orchestration, persistence, scans, box
-selection, and transaction construction now live in `ergo-wallet-service`;
-wire DTOs live in `ergo-wallet-protocol`.
+**Purpose:** Portable wallet cryptography, pure box selection and transaction
+construction. Owns mnemonics, HD keys, P2PK addresses, sigma proving and hint bags.
+Filesystem keystore support and the CLI are opt-in features. Orchestration,
+persistence and scans live in `ergo-wallet-service`; wire DTOs live in
+`ergo-wallet-protocol`.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-sigma,
-ergo-validation, gf2_192
+ergo-chain-spec, gf2_192. No validation/state/node/runtime dependency.
 **Depended on by:** (see codemap index)
 
 ## Start here
@@ -44,9 +43,15 @@ ergo-validation, gf2_192
   `Zeroizing` (ciphertext and caller-owned inputs do not).
 - `src/storage.rs` — encrypted-secret-file format (`EncryptedSecret`,
   `CipherParams`, `uuid_from_ciphertext`), `SecretStorage` lock/unlock
-  state machine, `UnlockedMaster`/`UnlockedSecret`.
+  state machine (requires `keystore`).
+- `src/master.rs` — portable zeroized `UnlockedMaster`/`UnlockedSecret`,
+  available without filesystem support. Storage compatibility reexports retain
+  the existing import paths when `keystore` is enabled.
 - `src/tx_context.rs` — `BlockchainStateContext`, `BlockchainParameters`,
   `ReductionContextOwned`: per-input evaluation context for `Prover::sign`.
+  Candidate pre-header types come from `ergo-ser` without a validation dependency.
+- `src/box_selector/`, `src/tx_builder.rs` — pure selection/building, including
+  explicit mint/burn requests and the shared EIP-27 obligation arithmetic.
 - `src/proving/` — sigma proving subsystem (see below).
 - `src/proving/sigma/` — compound-proof composition: `build` (phase 1 tree
   walk), `finalize` (challenge propagation + GF(2^192) threshold), `serialize`
@@ -55,7 +60,8 @@ ergo-validation, gf2_192
   `address`.
 
 ### `src/proving/` submodules
-- `prover.rs` — `Prover::sign` tx-level orchestrator + script gate.
+- `prover.rs` — `Prover::sign` tx-level orchestrator and script gate;
+  `sign_bound` consumes native transaction-bound commitment hints.
 - `secrets.rs` — `SecretRegistry`: `ProveDlog(pk) → Scalar` / DHT lookup;
   zeroized storage.
 - `external.rs` — `ProverExternalSecret`: decoded external secret for the
@@ -132,11 +138,18 @@ The orchestration and persistence module map is in
   returning (`SelfVerifyFailed` otherwise) — a produced proof must survive the
   verifier unmodified (`src/proving/sigma/mod.rs`). Threshold challenges use
   Lagrange interpolation over GF(2^192).
-- **Script gate at signing.** `Prover::sign` rejects any input whose ErgoTree
-  is not bare ProveDlog/ProveDHTuple or a matured miner-reward wrapper, because
-  context-sensitive scripts could self-verify against the synthetic pre-header
-  yet fail the chain's real context (`src/proving/prover.rs:90-106`). Cost
-  enforcement is NOT done here — the bridge self-verify is authoritative.
+- **Script gate at signing.** `Prover::sign` retains its existing support for
+  bare ProveDlog/ProveDHTuple and canonical matured miner-reward wrappers.
+  Context-sensitive scripts remain gated because the candidate pre-header can
+  be synthetic. The prover records reduction costs; the service's self-verify
+  applies authoritative chain cost limits before returning signed bytes.
+  Full contract signing and reduced transaction interchange are deferred to
+  [#612](https://github.com/arkadianet/ergo/issues/612), after Phase 3 merges.
+- **Portable capability boundary.** Defaults enable no host features. `keystore`
+  adds file storage and md5/uuid/tempfile; `cli` adds keystore plus clap/rpassword.
+  Existing node, state, service and daemon consumers opt into keystore explicitly.
+  `scripts/check-wallet-portable.py` checks the normal dependency graph; CI checks
+  core libraries on aarch64/x86_64 Android without an NDK link.
 - **Change-address ownership.** The persisted change address must be owned by
   the active master key: both the unlock-time boot check and the node's
   update path re-derive the recorded path and reject a mismatch

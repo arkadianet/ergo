@@ -2248,6 +2248,7 @@ fn build_compat_app_digest_backend() -> axum::Router {
             network: ergo_ser::address::NetworkPrefix::Mainnet,
             chain_params: None,
             mining: None,
+            private_queue: None,
             emission: None,
             emission_scripts: None,
             utxo_reads_supported: false,

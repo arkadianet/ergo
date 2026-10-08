@@ -67,6 +67,9 @@ pub use chain_snapshot::ChainSnapshot;
 /// block apply / rollback.
 pub use ergo_wallet_service::engine::WalletStateHook;
 
+mod stored_queue_api;
+pub use stored_queue_api::StoredPrivateQueueBridge;
+
 /// Production `TxSubmitter` backed by the node's `NodeSubmit` bridge.
 pub struct NodeSubmitAdapter {
     inner: Arc<dyn ergo_api::traits::NodeSubmit>,

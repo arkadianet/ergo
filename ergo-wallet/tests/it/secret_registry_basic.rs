@@ -4,7 +4,7 @@ use ergo_wallet::derivation::DerivationPath;
 use ergo_wallet::extended_key::ExtendedSecretKey;
 use ergo_wallet::mnemonic::Mnemonic;
 use ergo_wallet::proving::secrets::SecretRegistry;
-use ergo_wallet::storage::UnlockedMaster;
+use ergo_wallet::UnlockedMaster;
 use std::collections::BTreeMap;
 
 // ----- happy path -----

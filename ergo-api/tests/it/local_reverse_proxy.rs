@@ -68,6 +68,7 @@ fn app(local_reverse_proxy: bool) -> axum::Router {
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,

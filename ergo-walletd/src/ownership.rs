@@ -6,9 +6,36 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
-use crate::config::{ConfigError, WalletMode};
+use crate::config::{ConfigError, Network, WalletMode};
 
 const MARKER: &str = "wallet-mode";
+
+/// Persist network identity separately from address rendering. Offline chain
+/// adapters use this marker without loading a daemon config or any secret.
+pub(crate) fn claim_network(data_dir: &Path, network: Network) -> Result<(), ConfigError> {
+    let path = data_dir.join("wallet-network");
+    let expected = format!("{}\n", network.as_str());
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(&path) {
+        Ok(mut file) => {
+            file.write_all(expected.as_bytes())?;
+            file.sync_all()?;
+            #[cfg(unix)]
+            fs::File::open(data_dir)?.sync_all()?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            validate_contents(&path, &expected)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
 
 pub(crate) fn claim(data_dir: &Path, mode: WalletMode) -> Result<(), ConfigError> {
     create_data_directory(data_dir, mode)?;
@@ -110,9 +137,13 @@ fn protect_seed_directory(data_dir: &Path, mode: WalletMode) -> Result<(), Confi
 }
 
 fn validate(marker: &Path, mode: WalletMode) -> Result<(), ConfigError> {
+    validate_contents(marker, &format!("{}\n", mode.as_str()))
+}
+
+fn validate_contents(marker: &Path, expected: &str) -> Result<(), ConfigError> {
     let invalid = || {
         ConfigError::Invalid(
-            "data_dir wallet-mode does not match the configured mode; use a separate data_dir"
+            "data_dir wallet ownership or network does not match configuration; use a separate data_dir"
                 .into(),
         )
     };
@@ -134,7 +165,7 @@ fn validate(marker: &Path, mode: WalletMode) -> Result<(), ConfigError> {
     }
     let mut contents = String::new();
     file.take(32).read_to_string(&mut contents)?;
-    if contents != format!("{}\n", mode.as_str()) {
+    if contents != expected {
         return Err(invalid());
     }
     Ok(())

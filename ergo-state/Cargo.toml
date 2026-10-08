@@ -29,7 +29,7 @@ ergo-chain-spec   = { workspace = true }
 ergo-crypto       = { workspace = true }
 ergo-validation   = { workspace = true }
 ergo-sigma        = { workspace = true }
-ergo-wallet       = { workspace = true }
+ergo-wallet       = { workspace = true, features = ["keystore"] }
 ergo-wallet-service = { workspace = true }
 ergo_avltree_rust = { workspace = true }
 bincode           = { workspace = true }
