@@ -427,11 +427,13 @@ impl SigningContext<'_> {
         let tx_id = ergo_primitives::digest::blake2b256(&message);
         let mut all_outputs = Vec::with_capacity(tx.output_candidates.len());
         for (i, candidate) in tx.output_candidates.iter().enumerate() {
-            all_outputs.push(strict_eval_box(&ErgoBox {
-                candidate: candidate.clone(),
-                transaction_id: ergo_primitives::digest::ModifierId::from_bytes(*tx_id.as_bytes()),
-                index: i as u16,
-            })?);
+            // A new output is sealed in Scala's default VersionContext(1,1),
+            // even when its candidate was parsed under a newer script version.
+            all_outputs.push(strict_eval_box(&ErgoBox::new(
+                candidate.clone(),
+                ergo_primitives::digest::ModifierId::from_bytes(*tx_id.as_bytes()),
+                i as u16,
+            ))?);
         }
         let eval_inputs = inputs
             .iter()
@@ -489,9 +491,9 @@ fn strict_eval_box(b: &ErgoBox) -> Result<EvalBox, WalletError> {
     let id = b
         .box_id()
         .map_err(|e| WalletError::TxBuild(e.to_string()))?;
-    let mut w = ergo_primitives::writer::VlqWriter::new();
-    ergo_ser::ergo_box::write_ergo_box(&mut w, b)
-        .map_err(|e| WalletError::TxBuild(e.to_string()))?;
+    // Confirmed boxes retain their received whole-box bytes. A structured
+    // reserialization may normalize accepted encodings and change ExtractBytes.
+    let raw_bytes = b.bytes().map_err(|e| WalletError::TxBuild(e.to_string()))?;
     Ok(EvalBox {
         lazy_vals: std::sync::Arc::new(ergo_sigma::evaluator::EvalBoxLazyVals::from_candidate(
             &b.candidate,
@@ -509,7 +511,7 @@ fn strict_eval_box(b: &ErgoBox) -> Result<EvalBox, WalletError> {
             .iter()
             .map(|t| (*t.token_id.as_bytes(), t.amount))
             .collect(),
-        raw_bytes: w.result(),
+        raw_bytes,
         register_bytes: b.candidate.register_bytes().to_vec(),
     })
 }
@@ -701,5 +703,127 @@ mod tests {
         assert!(context
             .build_reduction_owned_for_tx(&reduced.unsigned_transaction, 0, &inputs, &[], 3)
             .is_err());
+    }
+
+    #[test]
+    fn strict_context_preserves_received_input_and_data_box_bytes() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../test-vectors/scala/box-cached-identity/cases.json"
+        ))
+        .unwrap();
+        let (sample, _) = sample_transaction();
+        let state = state();
+        let settings = SigmaValidationSettings::default();
+        let context = SigningContext {
+            state_context: &state,
+            header_ids: &[[7; 32], [8; 32]],
+            validation_settings: &settings,
+        };
+        for case in fixture["cases"].as_array().unwrap() {
+            let bytes = hex::decode(case["cached"].as_str().unwrap()).unwrap();
+            let activation = case["activation"].as_str().unwrap().parse().unwrap();
+            let input = ergo_ser::ergo_box::read_ergo_box(
+                &mut VlqReader::new(&bytes).with_activated_script_version(activation),
+            )
+            .unwrap();
+            // The JVM captures pin the distinction independently of this builder.
+            assert_ne!(
+                bytes,
+                ergo_ser::ergo_box::serialize_ergo_box(&input).unwrap()
+            );
+            let mut tx = sample.unsigned_transaction.clone();
+            tx.inputs[0].box_id = input.box_id().unwrap();
+            tx.data_inputs = vec![ergo_ser::input::DataInput {
+                box_id: input.box_id().unwrap(),
+            }];
+            let owned = context
+                .build_reduction_owned_for_tx(
+                    &tx,
+                    0,
+                    std::slice::from_ref(&input),
+                    std::slice::from_ref(&input),
+                    activation,
+                )
+                .unwrap();
+            for actual in [&owned.self_box, &owned.inputs[0], &owned.data_inputs[0]] {
+                assert_eq!(actual.raw_bytes, bytes);
+                assert_eq!(hex::encode(actual.id), case["id"].as_str().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn strict_context_seals_standalone_v3_output_candidates_in_default_version() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../test-vectors/santa/transaction/v6/authored/evaluated-values-spend.json"
+        ))
+        .unwrap();
+        let (sample, inputs) = sample_transaction();
+        let state = state();
+        let settings = SigmaValidationSettings::default();
+        let context = SigningContext {
+            state_context: &state,
+            header_ids: &[[7; 32], [8; 32]],
+            validation_settings: &settings,
+        };
+        // Independently captured JVM 6.0.7 outputs, also pinned by ergo-ser's
+        // evaluated_output_box_bytes_and_ids_match_jvm_607 oracle test.
+        for (name, captured_hex) in [
+            ("bwr-v0-reader-17-accept#51", "8094ebdc030008d30100018602040204020c010fefd92e5160fa3744d9d593ced322a23a92c03321fa4635da5e479db21600"),
+            ("bytes-v3-reader-50-accept#60", "8094ebdc030008d301000186020402040250d469d61784a71ef1102a56f25674663b684c68483fb0dcc69e619aa7a0887300"),
+        ] {
+            let entry = fixture["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .unwrap();
+            let tx_bytes = hex::decode(entry["tx_bytes_hex"].as_str().unwrap()).unwrap();
+            let source = ergo_ser::transaction::read_transaction(
+                &mut VlqReader::new(&tx_bytes).with_activated_script_version(3),
+            )
+            .unwrap();
+            // A direct caller may obtain a candidate from a standalone box,
+            // which retains the v3 register node forms instead of sealing it.
+            let mut wire = ergo_primitives::writer::VlqWriter::new();
+            ergo_ser::ergo_box::write_ergo_box_candidate_versioned(
+                &mut wire,
+                &source.output_candidates[0],
+                3,
+            )
+            .unwrap();
+            wire.put_bytes(ergo_ser::transaction::transaction_id(&source).unwrap().as_bytes());
+            wire.put_u16(0);
+            let standalone = wire.result();
+            let parsed = ergo_ser::ergo_box::read_ergo_box(
+                &mut VlqReader::new(&standalone).with_activated_script_version(3),
+            )
+            .unwrap();
+            assert_eq!(parsed.candidate.box_serialization_version(), 3);
+            assert_ne!(hex::encode(&standalone), captured_hex);
+            let mut tx = sample.unsigned_transaction.clone();
+            tx.output_candidates = vec![parsed.candidate];
+            let message = crate::reduced_message::bytes_to_sign_bounded(
+                &tx,
+                crate::reduced::MAX_REDUCED_TRANSACTION_BYTES,
+            )
+            .unwrap();
+            let tx_id = ergo_primitives::digest::blake2b256(&message);
+            // Substitute only the new transaction suffix into the JVM's bytes;
+            // its captured candidate prefix supplies the independent expectation.
+            let mut expected = hex::decode(captured_hex).unwrap();
+            expected.truncate(expected.len() - 33);
+            expected.extend_from_slice(tx_id.as_bytes());
+            expected.push(0);
+            let owned = context
+                .build_reduction_owned_for_tx(&tx, 0, &inputs, &[], 3)
+                .unwrap();
+            assert_eq!(owned.outputs[0].raw_bytes, expected, "{name}");
+            assert_eq!(
+                owned.outputs[0].id,
+                *ergo_primitives::digest::blake2b256(&expected).as_bytes(),
+                "{name}",
+            );
+        }
     }
 }
