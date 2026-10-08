@@ -512,8 +512,13 @@ pub(crate) fn self_verify_signed_tx(
         WalletAdminError::Internal("self-verify: tx init cost exceeds limit".into())
     })?;
 
-    let message = ergo_ser::transaction::bytes_to_sign(tx)
-        .map_err(|e| WalletAdminError::Internal(format!("bytes_to_sign: {e:?}")))?;
+    let message = if intended.is_some() {
+        ergo_wallet::proving::prover::Prover::bytes_to_sign_for_signed_tx_bounded(tx)
+            .map_err(|e| WalletAdminError::Internal(format!("bytes_to_sign: {e}")))
+    } else {
+        ergo_ser::transaction::bytes_to_sign(tx)
+            .map_err(|e| WalletAdminError::Internal(format!("bytes_to_sign: {e:?}")))
+    }?;
 
     let all_input_extensions: Vec<ergo_ser::input::ContextExtension> = tx
         .inputs

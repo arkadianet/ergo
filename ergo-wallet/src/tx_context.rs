@@ -358,6 +358,18 @@ impl<'a> From<&'a mut BlockchainStateContext> for ProverSigningContext<'a> {
     }
 }
 
+impl<'a> From<&'a Box<BlockchainStateContext>> for ProverSigningContext<'a> {
+    fn from(context: &'a Box<BlockchainStateContext>) -> Self {
+        Self::Synthetic(context)
+    }
+}
+
+impl<'a> From<&'a std::sync::Arc<BlockchainStateContext>> for ProverSigningContext<'a> {
+    fn from(context: &'a std::sync::Arc<BlockchainStateContext>) -> Self {
+        Self::Synthetic(context)
+    }
+}
+
 impl<'a> From<&SigningContext<'a>> for ProverSigningContext<'a> {
     fn from(context: &SigningContext<'a>) -> Self {
         Self::Explicit(SigningContext {

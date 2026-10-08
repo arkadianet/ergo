@@ -14,7 +14,8 @@ use ergo_primitives::{
 };
 use ergo_ser::{
     autolykos::AutolykosSolution,
-    ergo_box::{read_ergo_box, ErgoBox},
+    ergo_box::{read_ergo_box, ErgoBox, ErgoBoxCandidate},
+    ergo_tree::read_ergo_tree,
     header::{serialize_header, Header},
     transaction::UnsignedTransaction,
 };
@@ -234,18 +235,19 @@ fn sign_with_view(
     unsigned: &UnsignedTransaction,
     view: &dyn SigningView,
 ) -> Result<ergo_ser::transaction::Transaction, WalletAdminError> {
+    sign_with_hints(unsigned, view, &TransactionHintsBag::empty())
+}
+
+fn sign_with_hints(
+    unsigned: &UnsignedTransaction,
+    view: &dyn SigningView,
+    hints: &TransactionHintsBag,
+) -> Result<ergo_ser::transaction::Transaction, WalletAdminError> {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(redb::Database::create(dir.path().join("wallet.redb")).unwrap());
     let store = RedbWalletStore::new(db);
     let storage = ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet"));
-    sign_unsigned_tx(
-        unsigned,
-        &storage,
-        &store,
-        view,
-        &external_secrets(),
-        &TransactionHintsBag::empty(),
-    )
+    sign_unsigned_tx(unsigned, &storage, &store, view, &external_secrets(), hints)
 }
 
 #[test]
@@ -255,6 +257,11 @@ fn intended_host_signs_and_self_verifies_all_reference_contracts() {
         let signed = sign_with_view(&reduced.unsigned_transaction, &view)
             .unwrap_or_else(|error| panic!("{}: {error}", row["name"]));
         let message = ergo_ser::transaction::bytes_to_sign(&signed).unwrap();
+        assert_eq!(
+            ergo_wallet::proving::prover::Prover::bytes_to_sign_for_signed_tx_bounded(&signed)
+                .unwrap(),
+            message,
+        );
         for (input, reduction) in signed.inputs.iter().zip(&reduced.reduced_inputs) {
             assert!(ergo_sigma::verify::verify_sigma_proof(
                 &reduction.sigma,
@@ -264,6 +271,54 @@ fn intended_host_signs_and_self_verifies_all_reference_contracts() {
             .unwrap());
         }
     }
+}
+
+#[test]
+fn intended_timestamp_is_used_for_both_signing_and_self_verification() {
+    let fixture = fixture();
+    let (mut reduced, mut view) = case(&fixture["cases"][0]);
+    let original = view.utxos[reduced.unsigned_transaction.inputs[0].box_id.as_bytes()].clone();
+    // sigmaProp(CONTEXT.preHeader.timestamp == 3L). This observes the field
+    // that intentionally differs between the controlled intended/synthetic views.
+    let bytes = hex::decode("00d193db6903db6503fe0506").unwrap();
+    let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+    let input = ErgoBox::new(
+        ErgoBoxCandidate::new(
+            original.candidate.value,
+            tree,
+            original.candidate.creation_height,
+            original.candidate.tokens.clone(),
+            original.candidate.additional_registers().clone(),
+        )
+        .unwrap(),
+        original.transaction_id,
+        original.index,
+    );
+    reduced.unsigned_transaction.inputs[0].box_id = input.box_id().unwrap();
+    view.utxos.clear();
+    view.utxos
+        .insert(*input.box_id().unwrap().as_bytes(), input.clone());
+    let signed = sign_with_view(&reduced.unsigned_transaction, &view).unwrap();
+    assert!(signed.inputs[0].spending_proof.proof.is_empty());
+
+    let mut changed = view.clone();
+    changed
+        .intended
+        .as_mut()
+        .unwrap()
+        .sigma_pre_header
+        .timestamp = 2;
+    assert!(sign_with_view(&reduced.unsigned_transaction, &changed).is_err());
+    let changed_context = changed.intended_candidate_context().unwrap();
+    assert!(
+        self_verify_signed_tx(&signed, &[input], &[], &changed, Some(&changed_context)).is_err()
+    );
+    let mut synthetic = view;
+    synthetic.intended = None;
+    assert!(matches!(
+        sign_with_view(&reduced.unsigned_transaction, &synthetic),
+        Err(WalletAdminError::UnsupportedScript),
+    ));
 }
 
 #[test]
@@ -301,9 +356,17 @@ fn intended_host_rejects_context_from_another_tip_root_settings_or_budget() {
     let mut mixed = view.clone();
     mixed.signing.input_cost += 1;
     assert!(sign_with_view(&reduced.unsigned_transaction, &mixed).is_err());
+    let mut mixed = view.clone();
+    mixed.signing.input_cost += 1;
+    mixed.protocol.input_cost = mixed.signing.input_cost;
+    assert!(matches!(
+        super::super::chain::intended_signing_context(&mixed),
+        Err(WalletAdminError::Internal(_)),
+    ));
     let mut limited = view;
     limited.signing.max_block_cost = u64::from(reduced.cost) - 1;
     limited.protocol.max_block_cost = limited.signing.max_block_cost;
+    limited.active.max_block_cost = limited.signing.max_block_cost as i32;
     assert!(sign_with_view(&reduced.unsigned_transaction, &limited).is_err());
 }
 
@@ -340,7 +403,16 @@ fn multisig_host_uses_same_context_selection_as_signing() {
     )
     .unwrap();
     assert!(!hints.hints.secret_hints["0"].is_empty());
-    let signed = sign_with_view(&reduced.unsigned_transaction, &view).unwrap();
+    let internal_hints = crate::engine::hints_codec::tx_hints_bag_from_dto(&hints.hints).unwrap();
+    let commitment = internal_hints.public_hints[&0]
+        .hints
+        .iter()
+        .find(|hint| matches!(hint, ergo_wallet::proving::hints::Hint::RealCommitment(_)))
+        .unwrap()
+        .clone();
+    // Use the generated private nonce exactly once, together with its public
+    // commitment. Extraction must recover that actual commitment from the proof.
+    let signed = sign_with_hints(&reduced.unsigned_transaction, &view, &internal_hints).unwrap();
     let extraction = HintExtractionRequest {
         tx: hex::encode(serialize_signed_tx(&signed).unwrap()),
         real: vec![hex::encode(point(1))],
@@ -355,6 +427,12 @@ fn multisig_host_uses_same_context_selection_as_signing() {
     )
     .unwrap();
     assert!(!hints.hints.public_hints["0"].is_empty());
+    let extracted = crate::engine::hints_codec::tx_hints_bag_from_dto(&hints.hints).unwrap();
+    assert!(extracted.public_hints[&0].hints.contains(&commitment));
+    assert!(extracted.public_hints[&0]
+        .hints
+        .iter()
+        .any(|hint| matches!(hint, ergo_wallet::proving::hints::Hint::RealSecretProof(_))));
     let mut synthetic = view;
     synthetic.intended = None;
     assert!(matches!(

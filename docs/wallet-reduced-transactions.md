@@ -107,6 +107,15 @@ and verifies against that same candidate. Pool snapshots forward this optional
 capability. Commitment generation and hint extraction use the same context
 selection and gate.
 
+Each service operation acquires a fresh view. Embeddings and callers must
+freeze the intended candidate throughout a commitment/signing/extraction round
+and never reuse an own nonce after its context changes. Existing service hint
+DTOs do not enforce that ownership; native consuming reduced-bound APIs do.
+
+Direct calls accept references to legacy state contexts, including mutable
+references and borrowed `Box`/`Arc` contexts. Other wrappers must supply their
+underlying state reference explicitly because context selection is now generic.
+
 Standard embedded-node and daemon views still build a synthetic successor
 pre-header and retain the conservative gate. The remote signing protocol does
 not expose a switch that treats those fields as an intended candidate. Adding

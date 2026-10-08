@@ -306,6 +306,9 @@ impl Prover {
     /// must be used for only one signing operation. For explicit-context nonce
     /// ownership, reduce once and use [`Self::sign_reduced_bound`]. Legacy
     /// callers can use [`Self::sign_bound`].
+    /// Borrowed and mutably borrowed legacy contexts, and borrowed `Box`/`Arc`
+    /// contexts, convert directly. Other context wrappers must expose their
+    /// underlying reference before calling this generic method.
     pub fn sign<'context>(
         &self,
         unsigned_tx: &UnsignedTransaction,
@@ -470,5 +473,17 @@ impl Prover {
         };
         bytes_to_sign(&placeholder_tx)
             .map_err(|e| WalletError::TxBuild(format!("bytes_to_sign: {e:?}")))
+    }
+
+    /// Compute the canonical Fiat-Shamir message of a signed transaction while
+    /// ignoring its proofs. Uses the same bounded serializer as offline
+    /// reduction, including its fixed reduced-transaction byte cap and indexed
+    /// token lookup, so explicit-context hosts can verify without rebuilding
+    /// an unbounded transaction message.
+    pub fn bytes_to_sign_for_signed_tx_bounded(tx: &Transaction) -> Result<Vec<u8>, WalletError> {
+        crate::reduced_message::bytes_to_sign_bounded_signed(
+            tx,
+            crate::reduced::MAX_REDUCED_TRANSACTION_BYTES,
+        )
     }
 }

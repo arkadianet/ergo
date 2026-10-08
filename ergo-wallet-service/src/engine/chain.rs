@@ -112,6 +112,7 @@ pub(crate) fn intended_signing_context(
     let state = context.state_context;
     let signing = view.signing_params();
     let protocol = view.protocol_params();
+    let active = view.active_params();
     if context.header_ids != view.header_ids()
         || state.sigma_last_headers.as_slice() != view.headers()
         || state.previous_state_digest != view.state_context().previous_state_digest
@@ -123,6 +124,16 @@ pub(crate) fn intended_signing_context(
         || signing.token_access_cost != protocol.token_access_cost
         || signing.block_version != protocol.block_version
         || signing.interpreter_init_cost != ergo_validation::INTERPRETER_INIT_COST
+        || active.missing_core_parameters != protocol.missing_core_parameters
+        || active.block_version != protocol.block_version
+        || active.storage_fee_factor != protocol.storage_fee_factor
+        || u64::try_from(active.min_value_per_byte).ok() != Some(protocol.min_value_per_byte)
+        || u32::try_from(active.max_block_size).ok() != Some(protocol.max_block_size)
+        || u64::try_from(active.max_block_cost).ok() != Some(protocol.max_block_cost)
+        || u64::try_from(active.input_cost).ok() != Some(protocol.input_cost)
+        || u64::try_from(active.data_input_cost).ok() != Some(protocol.data_input_cost)
+        || u64::try_from(active.output_cost).ok() != Some(protocol.output_cost)
+        || u64::try_from(active.token_access_cost).ok() != Some(protocol.token_access_cost)
         || context.header_ids.len() < tip.height.min(10) as usize
         || context.header_ids.first() != Some(&tip.header_id)
         || state.sigma_last_headers.first().map(|header| header.height) != Some(tip.height)
