@@ -1,18 +1,38 @@
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use ergo_ser::address::NetworkPrefix;
 use reqwest::Url;
 use serde::Deserialize;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 const MAX_API_KEY_BYTES: usize = 4096;
 const MAX_DESCRIPTOR_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Whether this daemon tracks public descriptors or owns an encrypted seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum WalletMode {
+    #[default]
+    WatchOnly,
+    Seed,
+}
+
+impl WalletMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WatchOnly => "watch_only",
+            Self::Seed => "seed",
+        }
+    }
+}
 
 /// Which Ergo network the daemon reports. The value is required to be one of
 /// the two public networks (it defaults to mainnet when the key is absent, and
@@ -94,6 +114,8 @@ pub struct ApiSection {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
+    #[serde(default)]
+    pub mode: WalletMode,
     /// Required network identity. Absent means `mainnet`; any value other
     /// than `mainnet`/`testnet` is rejected at load.
     #[serde(default)]
@@ -101,7 +123,8 @@ pub struct FileConfig {
     pub data_dir: PathBuf,
     pub node_url: String,
     pub api_key_file: PathBuf,
-    pub descriptor_file: PathBuf,
+    pub descriptor_file: Option<PathBuf>,
+    pub local_api_key_file: Option<PathBuf>,
     #[serde(
         default = "default_sync_interval",
         alias = "sync_interval_secs",
@@ -179,13 +202,12 @@ fn default_blocks_page() -> u32 {
 }
 
 #[derive(Debug, Clone, Parser)]
-#[command(
-    name = "ergo-walletd",
-    about = "Standalone watch-only Ergo wallet daemon"
-)]
+#[command(name = "ergo-walletd", about = "Standalone Ergo wallet daemon")]
 pub struct Cli {
     #[arg(long, short = 'c', default_value = "ergo-walletd.toml")]
     pub config: PathBuf,
+    #[arg(long, value_enum)]
+    pub mode: Option<WalletMode>,
     #[arg(long)]
     pub network: Option<Network>,
     #[arg(long)]
@@ -196,6 +218,8 @@ pub struct Cli {
     pub api_key_file: Option<PathBuf>,
     #[arg(long)]
     pub descriptor_file: Option<PathBuf>,
+    #[arg(long)]
+    pub local_api_key_file: Option<PathBuf>,
     #[arg(long)]
     pub sync_interval: Option<u64>,
     #[arg(long)]
@@ -209,7 +233,7 @@ pub struct Cli {
 }
 
 #[derive(Clone)]
-pub struct ApiKey(Vec<u8>);
+pub struct ApiKey(Zeroizing<Vec<u8>>);
 
 impl ApiKey {
     pub fn expose(&self) -> &[u8] {
@@ -218,7 +242,7 @@ impl ApiKey {
 
     #[doc(hidden)]
     pub fn from_test(value: Vec<u8>) -> Self {
-        Self(value)
+        Self(Zeroizing::new(value))
     }
 }
 
@@ -230,11 +254,13 @@ impl std::fmt::Debug for ApiKey {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub mode: WalletMode,
     pub network: Network,
     pub data_dir: PathBuf,
     pub node_url: Url,
     pub api_key_file: PathBuf,
-    pub descriptor_file: PathBuf,
+    pub descriptor_file: Option<PathBuf>,
+    pub local_api_key_file: Option<PathBuf>,
     pub sync_interval: Duration,
     pub shutdown_timeout: Duration,
     pub sync_batch: u32,
@@ -247,6 +273,7 @@ pub struct Config {
 pub struct LoadedConfig {
     pub config: Config,
     pub api_key: ApiKey,
+    pub local_api_key: Option<ApiKey>,
 }
 
 impl Config {
@@ -256,6 +283,9 @@ impl Config {
         let mut file: FileConfig = toml::from_str(&contents)
             .map_err(|error| ConfigError::File(format!("{}: {error}", cli.config.display())))?;
         file = merge_api_section(file)?;
+        if let Some(value) = cli.mode {
+            file.mode = value;
+        }
         if let Some(value) = cli.network {
             file.network = value;
         }
@@ -269,7 +299,10 @@ impl Config {
             file.api_key_file = value;
         }
         if let Some(value) = cli.descriptor_file {
-            file.descriptor_file = value;
+            file.descriptor_file = Some(value);
+        }
+        if let Some(value) = cli.local_api_key_file {
+            file.local_api_key_file = Some(value);
         }
         if let Some(value) = cli.sync_interval {
             file.sync_interval = value;
@@ -288,8 +321,28 @@ impl Config {
         }
         let config = Self::from_file(file)?;
         let api_key = read_api_key(&config.api_key_file)?;
-        validate_file_size(&config.descriptor_file)?;
-        Ok(LoadedConfig { config, api_key })
+        if let Some(path) = &config.descriptor_file {
+            validate_file_size(path)?;
+        }
+        let local_api_key = config
+            .local_api_key_file
+            .as_deref()
+            .map(read_api_key)
+            .transpose()?;
+        if local_api_key
+            .as_ref()
+            .is_some_and(|key| key.expose() == api_key.expose())
+        {
+            return Err(ConfigError::Invalid(
+                "local_api_key_file must contain a different credential from api_key_file"
+                    .to_string(),
+            ));
+        }
+        Ok(LoadedConfig {
+            config,
+            api_key,
+            local_api_key,
+        })
     }
 
     pub fn from_file(file: FileConfig) -> Result<Self, ConfigError> {
@@ -298,10 +351,39 @@ impl Config {
                 "data_dir must not be empty".to_string(),
             ));
         }
-        if file.descriptor_file.as_os_str().is_empty() {
-            return Err(ConfigError::Invalid(
-                "descriptor_file must not be empty".to_string(),
-            ));
+        match file.mode {
+            WalletMode::WatchOnly => {
+                if file
+                    .descriptor_file
+                    .as_ref()
+                    .is_none_or(|path| path.as_os_str().is_empty())
+                {
+                    return Err(ConfigError::Invalid(
+                        "watch_only mode requires descriptor_file".to_string(),
+                    ));
+                }
+                if file.local_api_key_file.is_some() {
+                    return Err(ConfigError::Invalid(
+                        "local_api_key_file requires seed mode".to_string(),
+                    ));
+                }
+            }
+            WalletMode::Seed => {
+                if file.descriptor_file.is_some() {
+                    return Err(ConfigError::Invalid(
+                        "seed mode does not accept descriptor_file".to_string(),
+                    ));
+                }
+                if file
+                    .local_api_key_file
+                    .as_ref()
+                    .is_none_or(|path| path.as_os_str().is_empty())
+                {
+                    return Err(ConfigError::Invalid(
+                        "seed mode requires local_api_key_file".to_string(),
+                    ));
+                }
+            }
         }
         if file.api_key_file.as_os_str().is_empty() {
             return Err(ConfigError::Invalid(
@@ -361,11 +443,13 @@ impl Config {
             ));
         }
         Ok(Self {
+            mode: file.mode,
             network: file.network,
             data_dir: file.data_dir,
             node_url,
             api_key_file: file.api_key_file,
             descriptor_file: file.descriptor_file,
+            local_api_key_file: file.local_api_key_file,
             sync_interval: Duration::from_secs(file.sync_interval),
             shutdown_timeout: Duration::from_secs(file.shutdown_timeout_secs),
             sync_batch: file.sync_batch,
@@ -395,18 +479,36 @@ fn merge_api_section(mut file: FileConfig) -> Result<FileConfig, ConfigError> {
 }
 
 pub fn read_api_key(path: &Path) -> Result<ApiKey, ConfigError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| ConfigError::ApiKeyPermissions(format!("{}: {error}", path.display())))?;
+    if !metadata.file_type().is_file() {
+        return Err(ConfigError::ApiKeyPermissions(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| ConfigError::ApiKeyPermissions(format!("{}: {error}", path.display())))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(ConfigError::ApiKeyPermissions(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let metadata = fs::symlink_metadata(path).map_err(|error| {
-            ConfigError::ApiKeyPermissions(format!("{}: {error}", path.display()))
-        })?;
-        if !metadata.file_type().is_file() {
-            return Err(ConfigError::ApiKeyPermissions(format!(
-                "{} is not a regular file",
-                path.display()
-            )));
-        }
         if metadata.permissions().mode() & 0o077 != 0 {
             return Err(ConfigError::ApiKeyPermissions(format!(
                 "{} must not be accessible by group or other users",
@@ -414,22 +516,21 @@ pub fn read_api_key(path: &Path) -> Result<ApiKey, ConfigError> {
             )));
         }
     }
-    let bytes = fs::read(path)
+    let mut bytes = Zeroizing::new(Vec::new());
+    file.take((MAX_API_KEY_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
         .map_err(|error| ConfigError::ApiKey(format!("{}: {error}", path.display())))?;
     if bytes.len() > MAX_API_KEY_BYTES {
         return Err(ConfigError::ApiKey("file is too large".to_string()));
     }
-    let value = bytes
-        .strip_suffix(b"\n")
-        .unwrap_or(&bytes)
-        .strip_suffix(b"\r")
-        .unwrap_or_else(|| bytes.strip_suffix(b"\n").unwrap_or(&bytes));
+    let value = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+    let value = value.strip_suffix(b"\r").unwrap_or(value);
     if value.is_empty() || value.iter().any(|byte| *byte < 0x20 || *byte == 0x7f) {
         return Err(ConfigError::ApiKey(
             "file must contain one non-empty header-safe value".to_string(),
         ));
     }
-    Ok(ApiKey(value.to_vec()))
+    Ok(ApiKey(Zeroizing::new(value.to_vec())))
 }
 
 fn validate_file_size(path: &Path) -> Result<(), ConfigError> {
@@ -455,11 +556,13 @@ mod tests {
 
     fn base_file() -> FileConfig {
         FileConfig {
+            mode: WalletMode::WatchOnly,
+            local_api_key_file: None,
             network: Network::Mainnet,
             data_dir: PathBuf::from("/tmp/ergo-walletd-test"),
             node_url: "http://127.0.0.1:9053".to_string(),
             api_key_file: PathBuf::from("/tmp/api-key"),
-            descriptor_file: PathBuf::from("/tmp/descriptors.toml"),
+            descriptor_file: Some(PathBuf::from("/tmp/descriptors.toml")),
             sync_interval: 1,
             shutdown_timeout_secs: 5,
             sync_batch: 10,
@@ -468,6 +571,98 @@ mod tests {
             tcp_fallback: Some("127.0.0.1:3033".parse().unwrap()),
             api: None,
         }
+    }
+
+    #[test]
+    fn modes_require_their_own_inputs() {
+        let mut file = base_file();
+        assert_eq!(
+            Config::from_file(file.clone()).unwrap().mode,
+            WalletMode::WatchOnly
+        );
+        file.descriptor_file = None;
+        assert!(Config::from_file(file.clone()).is_err());
+        file.mode = WalletMode::Seed;
+        assert!(Config::from_file(file.clone()).is_err());
+        file.local_api_key_file = Some(PathBuf::from("local-key"));
+        assert_eq!(
+            Config::from_file(file.clone()).unwrap().mode,
+            WalletMode::Seed
+        );
+        file.descriptor_file = Some(PathBuf::from("descriptor"));
+        assert!(Config::from_file(file.clone()).is_err());
+        file.mode = WalletMode::WatchOnly;
+        assert!(Config::from_file(file).is_err());
+    }
+
+    #[test]
+    fn seed_configuration_loads_separate_redacted_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let node_key = dir.path().join("node-key");
+        let local_key = dir.path().join("local-key");
+        for path in [&node_key, &local_key] {
+            fs::write(path, b"same-secret\n").unwrap();
+            #[cfg(unix)]
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let config_path = dir.path().join("seed.toml");
+        fs::write(&config_path, format!(
+            "mode = \"seed\"\ndata_dir = {}\nnode_url = \"http://127.0.0.1:9053\"\napi_key_file = {}\nlocal_api_key_file = {}\ntcp_fallback = \"127.0.0.1:3033\"\n",
+            toml::Value::String(dir.path().join("data").to_str().unwrap().into()),
+            toml::Value::String(node_key.to_str().unwrap().into()),
+            toml::Value::String(local_key.to_str().unwrap().into()),
+        )).unwrap();
+        let cli = Cli::parse_from([
+            std::ffi::OsStr::new("ergo-walletd"),
+            std::ffi::OsStr::new("--config"),
+            config_path.as_os_str(),
+        ]);
+        let error = Config::load(cli.clone()).unwrap_err();
+        assert!(error.to_string().contains("different credential"));
+        assert!(!error.to_string().contains("same-secret"));
+        fs::write(&local_key, b"local-only-secret\n").unwrap();
+        let loaded = Config::load(cli).unwrap();
+        assert_eq!(loaded.api_key.expose(), b"same-secret");
+        assert_eq!(
+            loaded.local_api_key.as_ref().unwrap().expose(),
+            b"local-only-secret"
+        );
+        let debug = format!("{loaded:?}");
+        assert!(!debug.contains("same-secret"));
+        assert!(!debug.contains("local-only-secret"));
+        assert!(loaded.config.descriptor_file.is_none());
+    }
+
+    #[test]
+    fn api_key_file_read_is_bounded_and_header_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        fs::write(&path, b"value\r\n").unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_api_key(&path).unwrap().expose(), b"value");
+        for bytes in [
+            vec![b'x'; MAX_API_KEY_BYTES + 1],
+            b"value\nextra".to_vec(),
+            vec![],
+        ] {
+            fs::write(&path, bytes).unwrap();
+            assert!(read_api_key(&path).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_key_reader_refuses_symlinks_and_public_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        fs::write(&path, b"value").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_api_key(&path).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(path, &link).unwrap();
+        assert!(read_api_key(&link).is_err());
     }
 
     #[test]
@@ -568,6 +763,26 @@ mod tests {
     }
 
     #[test]
+    fn bundled_seed_config_matches_the_schema() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ergo-walletd-seed.toml");
+        let file: FileConfig = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let file = merge_api_section(file).unwrap();
+        #[cfg(not(unix))]
+        assert!(
+            matches!(Config::from_file(file), Err(ConfigError::Invalid(message))
+            if message == "unix_socket is not supported on this platform")
+        );
+        #[cfg(unix)]
+        {
+            let config = Config::from_file(file).unwrap();
+            assert_eq!(config.mode, WalletMode::Seed);
+            assert!(config.descriptor_file.is_none());
+            assert!(config.local_api_key_file.is_some());
+            assert!(config.unix_socket.is_some());
+        }
+    }
+
+    #[test]
     fn cli_network_overrides_the_file_value() {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("api-key");
@@ -593,6 +808,8 @@ mod tests {
         .unwrap();
         let loaded = Config::load(Cli {
             config: config_path,
+            mode: None,
+            local_api_key_file: None,
             network: Some(Network::Testnet),
             data_dir: None,
             node_url: None,

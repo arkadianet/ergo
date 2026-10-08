@@ -1,0 +1,34 @@
+# Ergo standalone wallet daemon — opt-in seed lifecycle config.
+#
+#   ergo-walletd --config ergo-walletd-seed.toml
+#
+# Start with a fresh, separate data_dir. Initialize or restore through the
+# authenticated local API; this does not migrate an embedded or watch wallet.
+# Existing seed wallets restart locked. No descriptor_file is accepted.
+#
+# This first Phase 3 increment supports lifecycle and key management only.
+# Transaction construction, signing, sending and private-key export are absent.
+# See docs/wallet-extraction.md and docs/configuration.md for the route inventory.
+
+mode = "seed"
+network = "mainnet"                # Must match the node's network.
+data_dir = "./ergo-walletd-seed-data" # wallet.redb and encrypted files in wallet/.
+node_url = "http://127.0.0.1:9099"
+
+# Outbound node credential: only used for authenticated chain HTTP requests.
+api_key_file = "./node-api-key"
+# Independent local credential: every read and write requires its value in
+# the api_key header, on Unix sockets and TCP alike. The two credential files
+# must contain different values. Both must be regular, owner-only files
+# (chmod 600 on Unix), with one non-empty header-safe value of at most 4 KiB.
+local_api_key_file = "./wallet-api-key"
+
+shutdown_timeout_secs = 5
+sync_interval = "15s"
+sync_batch = 256
+blocks_page = 1
+
+[api]
+unix_socket = "./ergo-walletd-seed.sock" # Created owner-only, mode 0600.
+# TCP is optional and must bind loopback; it uses the same local credential.
+# tcp_fallback = "127.0.0.1:3033"

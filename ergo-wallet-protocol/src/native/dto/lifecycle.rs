@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use super::status::DerivationMode;
 
+/// Local seed lifecycle, independent of the daemon's confirmed-chain status.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleStatusDto {
+    pub initialized: bool,
+    pub locked: bool,
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UnlockRequest {

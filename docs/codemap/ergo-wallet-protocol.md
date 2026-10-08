@@ -12,7 +12,7 @@ async runtime, or signing implementation.
 crate, `redb`, `tokio`, `axum`, or `utoipa`; this boundary is checked by
 `tests/dependency_boundary.rs`.
 **Depended on by:** `ergo-api`, `ergo-wallet-service`, `ergo-node`, `ergo-walletd`
-**Approx LOC:** ~2.5K (`src/**/*.rs`)
+**Approx LOC:** ~3.8K (`src/**/*.rs`)
 
 ## Start here
 - `src/lib.rs` — module tree, root re-exports, and the compatibility
@@ -23,6 +23,8 @@ crate, `redb`, `tokio`, `axum`, or `utoipa`; this boundary is checked by
 - `src/error.rs:3` — the shared `WalletAdminError` taxonomy and stable reason
   strings used by adapters.
 - `src/native/dto/` — DTOs for the native `/api/v1/wallet/*` surface.
+- `src/native/dto/lifecycle.rs` — strict seed/password lifecycle requests,
+  mnemonic response types and the daemon's local `LifecycleStatusDto`.
 - `src/scala/` — Scala-compatible lifecycle, query, scan, sending, and
   multi-sig wire shapes.
 
@@ -46,7 +48,11 @@ crate, `redb`, `tokio`, `axum`, or `utoipa`; this boundary is checked by
 - `BlocksSinceResponse` — tagged `Forward`, `Ancestor`, and `Pruned` results.
 - `SubmitRequest`, `SubmitResponse` — neutral transaction submission shapes.
 - `WalletAdminError` — shared lifecycle, authorization, and transaction error
-  vocabulary.
+  vocabulary, including `ShuttingDown` (`503 shutting_down`) for closed
+  wallet command admission.
+- `LifecycleStatusDto { initialized, locked }` — the daemon's local seed
+  status, separate from `WatchOnlyWalletStatusDto`'s confirmed sync projection
+  and the embedded `WalletStatusDto`.
 - `native::dto::*` and `scala::*` — adapter-facing DTO families; the
   protocol does not implement their routes.
 
@@ -60,6 +66,10 @@ crate, `redb`, `tokio`, `axum`, or `utoipa`; this boundary is checked by
 - **Stable shape tags.** Chain and submit responses retain explicit tagged
   variants, and Scala-facing DTOs preserve their camelCase or explicitly
   documented wire names.
+- **Strict lifecycle bodies.** Native seed/password requests reject unknown
+  fields. Their `Debug` implementations redact passwords and recovery phrases;
+  mnemonic-bearing responses are redacted too. Body-size limits, authentication,
+  response caching and key erasure remain adapter/host policy.
 - **Dependency isolation.** No consensus acceptance, UTXO lookup, secret
   handling, storage schema, or async/runtime behavior belongs in this crate.
 - The normal dependency boundary is intentionally narrower than the

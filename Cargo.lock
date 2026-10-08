@@ -1207,6 +1207,7 @@ dependencies = [
 name = "ergo-walletd"
 version = "0.12.3"
 dependencies = [
+ "async-trait",
  "axum",
  "bincode",
  "clap",
@@ -1228,6 +1229,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1235,6 +1237,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

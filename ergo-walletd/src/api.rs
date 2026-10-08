@@ -25,6 +25,8 @@ use serde::Deserialize;
 use crate::config::Network;
 use crate::tip::CachedNodeTip;
 
+pub use crate::lifecycle_api::seed_router;
+
 /// Everything a local read route needs. The daemon is read-only, so this is
 /// the complete surface: the wallet service, the network that decides address
 /// rendering, and the cached node tip so a read never blocks on a chain probe.

@@ -1,46 +1,56 @@
 # ergo-walletd
 
-**Purpose:** The standalone watch-only Ergo wallet daemon. It is a separate
-process from the node: it owns its own redb wallet database, pulls chain data
-over the node's `/api/v1/chain/*` HTTP surface, and serves a **read-only** local
-HTTP API. It never holds a secret key, never signs, never submits, and has no
-route that can spend.
+**Purpose:** The standalone Ergo wallet daemon. It owns a separate redb wallet
+database, pulls chain data over the node's `/api/v1/chain/*` HTTP surface, and
+serves a local HTTP API. The default `watch_only` mode imports public
+descriptors and serves reads. Opt-in `seed` mode hosts the existing
+`WalletEngine` for encrypted seed lifecycle, key derivation and change-address
+management. Signing and submission remain unavailable in both modes.
 
 **Depends on (workspace):** `ergo-wallet`, `ergo-wallet-service`,
 `ergo-wallet-protocol`, `ergo-primitives`, `ergo-ser`
 **Normal dependency boundary:** the five workspace crates above plus `axum`,
 `hyper`, `hyper-util`, `tower`, `clap`, `hex`, Unix-only `rustix`, `reqwest`, `serde`,
-`serde_json`, `thiserror`, `tokio`, `toml`, `tracing`, and
-`tracing-subscriber`. It deliberately does **not** depend on `ergo-node`,
+`serde_json`, `thiserror`, `tokio`, `toml`, `tracing`, `tracing-subscriber`,
+`parking_lot`, `async-trait`, `subtle`, and `zeroize`. It deliberately does **not** depend on `ergo-node`,
 `ergo-api`, `ergo-state`, `ergo-mempool`, `ergo-sync`, or `ergo-chain-spec`: the
 daemon talks to a node over HTTP, not through the node's internals. Network
 identity is therefore a *config* value (`config::Network`) mapped to
 `ergo_ser::address::NetworkPrefix`, not a chain-spec lookup.
 **Test-only dependency boundary:** `ergo-node`, `ergo-api`, `ergo-state` (with
-`test-helpers`), `ergo-validation` (with `test-helpers`), `parking_lot`,
+`test-helpers`), `ergo-validation` (with `test-helpers`),
 `redb`, and `bincode` are `[dev-dependencies]` **only**. `ergo-node`,
 `ergo-api`, and `ergo-state` exist so `tests/it/node_api.rs` and
-`tests/it/daemon_boot.rs` can stand up the *real* node chain API in-process — a
+`tests/it/daemon_boot.rs` and `tests/it/seed_daemon_boot.rs` can stand up the
+*real* node chain API in-process — a
 real `StateStore`, the real `InProcessChainClient` + `WalletChainAdapter`, the
 real `ergo-api` router with its real `api_key` gate — and drive the real daemon
 client and sync loop over real HTTP against it, instead of a hand-rolled stub.
-`ergo-validation` and `parking_lot` exist only for `tests/it/shadow.rs`, which
+`ergo-validation` exists for `tests/it/shadow.rs`, which
 has to build a real `CheckedBlock` for the production `StateStore::apply_block`
 and the real `WalletStateHook` the node wires (see "The embedded-vs-daemon
-shadow harness"). They never enter the released binary's dependency graph;
-`Cargo.toml` carries the same note per dependency.
+shadow harness"). The node/API/state test crates never enter the released
+binary's dependency graph. `parking_lot` is now also a normal dependency for
+the seed host's shared writer and wallet-state locks.
 **Depended on by:** nothing in the workspace (it is a leaf binary)
-**Approx LOC:** ~4.8K (`src/**/*.rs`) plus ~6.2K of integration tests
+**Approx LOC:** ~7.7K (`src/**/*.rs`) plus ~7.3K of integration tests
 
 ## Start here
 - `src/main.rs` — process entry. **Blocking first, async second**: load the
   config, call `prepare`, *then* build the runtime and `block_on(run(..))`. The
   split is load-bearing, not stylistic — see "Startup is two phases" below.
-- `src/lib.rs` — `prepare` (blocking: open the store, import descriptors, build
-  the blocking chain client, wire the syncer/tip) and `run` / `run_until` (async:
+- `src/lib.rs` — `prepare` (blocking: claim mode ownership, open the store,
+  import watch descriptors or build a locked seed host, construct the blocking
+  chain client and wire the syncer/tip) and `run` / `run_until` (async:
   bind the listeners, supervise the blocking sync loop and the join set).
-- `src/config.rs:26` — `Network`, `FileConfig`, `Cli`, `Config`, and
-  `read_api_key` (the API-key file permission gate).
+- `src/config.rs` — `WalletMode`, `Network`, `FileConfig`, `Cli`, `Config`, and
+  `read_api_key` (the node/local API-key file permission gate).
+- `src/host.rs` — `WalletHost`: locked seed startup, typed engine commands,
+  bounded admission and the shared sync writer gate.
+- `src/lifecycle_api.rs` — authenticated seed API around the confirmed reads.
+- `src/engine_chain.rs` — `LifecycleChainAccess`: local cursor and bounded
+  node-tip reads; no signing or engine rescan replay.
+- `src/ownership.rs` — durable `wallet-mode` marker and data-directory policy.
 - `src/descriptor.rs:68` — `parse_file` / `parse_text` / `import`: the
   no-secret descriptor boundary.
 - `src/sync.rs:106` — `StandaloneSyncer` / `sync_once`: the forward/reorg/pruned
@@ -56,8 +66,16 @@ shadow harness"). They never enter the released binary's dependency graph;
   marker and owner-only permissions.
 
 ## Modules
-- `src/config.rs` — TOML/CLI schema, validation, and the secret-adjacent file
-  policy (API-key file must not be group/other readable; key never logged).
+- `src/config.rs` — TOML/CLI schema, mode validation, and credential file
+  policy (API-key files must not be group/other readable; keys are redacted
+  and held in zeroizing buffers).
+- `src/ownership.rs` — claim the data directory's mode before opening redb;
+  reject cross-mode reuse and require fresh seed directories.
+- `src/host.rs` — seed metadata/public-cache hydration, one engine writer,
+  typed lifecycle/key wrappers, sync serialization and shutdown key erasure.
+- `src/lifecycle_api.rs` — authenticated native lifecycle and key routes;
+  strict request bodies, body-size cap and `Cache-Control: no-store`.
+- `src/engine_chain.rs` — capability-limited `WalletChainAccess` adapter.
 - `src/descriptor.rs` — descriptor parsing/validation and idempotent import
   into the wallet's tracked-pubkey tables.
 - `src/sync.rs` — bounded rescan/forward sync, reorg rewind and rebuild,
@@ -74,7 +92,7 @@ shadow harness"). They never enter the released binary's dependency graph;
 - `src/tip.rs` — node-tip cache with a capped fallback probe.
 
 ## Key types, traits & functions
-- `config::Config`, `config::FileConfig`, `config::Cli`, `config::Network`,
+- `config::Config`, `config::FileConfig`, `config::Cli`, `config::WalletMode`, `config::Network`,
   `config::ApiKey` — the operator surface.
 - `descriptor::DescriptorEntry`, `descriptor::ImportReport`,
   `descriptor::parse_file`, `descriptor::import` — descriptor boundary.
@@ -85,14 +103,19 @@ shadow harness"). They never enter the released binary's dependency graph;
 - `chain_http::HttpChainClient` — the only place a node URL is used.
 - `api::ApiContext`, `api::router`, `api::READ_ROUTE_INVENTORY` — the read-only
   API and its test-pinned route list.
+- `host::WalletHost`, `host::HostError` — seed host and startup failures.
+- `api::seed_router`, `lifecycle_api::LIFECYCLE_ROUTE_INVENTORY` — authenticated
+  seed routes plus the existing read projections.
+- `engine_chain::LifecycleChainAccess` — engine cursor/tip capability adapter.
 - `tip::CachedNodeTip`, `tip::PROBE_TIMEOUT` — `/status` tip source.
 
 ## The local read API
 
-Every route is a `GET`; each is mounted twice, at a short path and under
+Every read route is a `GET`; each is mounted twice, at a short path and under
 `/api/v1/wallet/*`. `READ_ROUTE_INVENTORY` is the pinned list and is asserted by
-`tests/it/routes.rs`, which also asserts that wallet lifecycle, signing, and
-private-key routes return `404`.
+`tests/it/routes.rs`, which also asserts that the default watch router leaves
+wallet lifecycle, signing, and private-key routes unmounted. Seed mode mounts
+the additional lifecycle routes below and authenticates every read too.
 
 | Route | Response |
 |---|---|
@@ -106,6 +129,63 @@ private-key routes return `404`.
 `offset` (default 0) and `limit` (default 50, max 16384) are the only query
 parameters; anything else is a `400`.
 
+## Opt-in seed lifecycle
+
+`mode = "seed"` requires a fresh `data_dir`, no `descriptor_file`, and a
+protected `local_api_key_file` containing a different credential from the
+node's `api_key_file`. The local credential protects all seed-mode reads and
+writes on both listener types. Authentication precedes request-body parsing;
+duplicate key headers are refused, request bodies are capped at 16 KiB, and
+every response carries `Cache-Control: no-store`. Native errors keep their
+stable reason codes; internal error text and malformed secret bodies are not
+echoed to callers.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/v1/wallet/lifecycle/status` | `LifecycleStatusDto { initialized, locked }`, entirely local |
+| `POST /api/v1/wallet/init`, `/restore` | Publish a new encrypted seed through `WalletEngine`; do not overwrite an existing wallet |
+| `POST /api/v1/wallet/unlock`, `/lock` | Authenticate or erase the in-memory master key |
+| `POST /api/v1/wallet/mnemonic/verify` | Verify the recovery phrase through the engine's attempt budget |
+| `POST /api/v1/wallet/addresses` | Derive the next EIP-3 key or a requested path |
+| `GET`, `PUT /api/v1/wallet/change-address` | Read or update the persisted owned change address |
+
+The confirmed `/status` route retains `WatchOnlyWalletStatusDto`; lifecycle
+state has its own route rather than changing that existing response. Address
+reads retain the daemon's tracked-key projection, including its tracked
+master key, rather than the embedded wallet's visibility-filtered list.
+
+`WalletHost` opens `data_dir/wallet` with `SecretStorage`, validates metadata,
+hydrates public caches from one store snapshot, and always starts locked.
+Malformed metadata or hydration errors stop startup; public wallet rows
+without an encrypted seed are refused. `ownership::claim` persists the mode
+before database creation, protects Unix seed directories with `0700`, rejects
+cross-mode reuse, and treats an unmarked Phase 2 database as watch-only. Watch
+startup also refuses a `wallet` secret directory. Data migration remains
+separate work.
+
+Every lifecycle/key command runs on a blocking worker under the same mutex
+as an entire sync pass. At most 32 commands are admitted; overload returns
+`429 rate_limited`. Engine password and seed checks retain their independent
+failed-attempt budgets. Sync waits until persisted tracked keys exist. Seed
+stores opt into `RedbWalletStore::rebuild_history_on_key_additions()`, which
+commits a new/changed key together with invalidation, a genesis cursor and
+cleared history, so initial unlock and later key derivation cannot miss older
+funds. Failed unlocks and derivations leave existing history untouched.
+
+`LifecycleChainAccess` reads the wallet height locally and uses a fresh bounded
+node-tip request for a derived key's addition height. Unknown pruning policy
+is treated conservatively; signing views and engine block replay are refused.
+The host supplies an empty mempool and a disabled submitter and exposes no
+build/sign/send wrappers. Full committed validation context, remote pool
+snapshots and delivery adapters are later Phase 3 increments.
+
+Shutdown closes admission before cancelling sync. Queued commands return
+`503 shutting_down`; work already holding the writer finishes before the
+engine locks. A command panic closes admission and locks the engine before
+releasing that writer. The bounded supervisor wait may expire while a blocking
+request finishes, but pending cleanup and the host's final drop still erase
+the unlocked key.
+
 ## Startup is two phases
 
 `reqwest`'s blocking client owns a private Tokio runtime, created and dropped
@@ -114,7 +194,8 @@ that is inside an async context, and `reqwest` drops a *shell* runtime while it
 is entered in exactly that case, so building the client from an `async fn` (or
 under `#[tokio::main]`) **panics before the daemon's first log line** in a
 `debug_assertions` build. `main` therefore does all blocking work in
-`prepare` — store open, descriptor import, `HttpChainClient::new` — and only
+`prepare` — mode claim, store open, descriptor import or seed-host hydration,
+`HttpChainClient::new` — and only
 then constructs the runtime and enters `run`. Nothing in `run` can construct a
 client: it takes a `Daemon`, not a `LoadedConfig`.
 
@@ -125,7 +206,8 @@ is deliberately **no** runtime check inside `with_timeouts`: `Handle::try_curren
 is `Ok` on a blocking-pool thread (where the build is safe) as well as on an
 entered worker (where it panics), so a check built on it would reject the one
 context that works. The invariant is documented, enforced structurally by
-`main`, and exercised end-to-end by `tests/it/daemon_boot.rs`.
+`main`, and exercised end-to-end by `tests/it/daemon_boot.rs` and
+`tests/it/seed_daemon_boot.rs`.
 
 `run_until(daemon, shutdown)` is `run` with the shutdown trigger injected
 (`run` passes SIGINT/SIGTERM). Only the tests use it — signalling the harness
@@ -253,9 +335,14 @@ and `WALLET_SCAN_TXS`.
 | `tests/it/http_client.rs` | `HttpChainClient` wire parsing and status→error mapping against a one-shot TCP responder (the `api_key` header, `410` pruning, `404`, canonical box/tip identity). |
 | `tests/it/node_api.rs` | The **real** node chain API in-process: a seeded `ergo-state` `StateStore`, the real `ergo-node` `InProcessChainClient` + `WalletChainAdapter`, the real `ergo-api` `/api/v1/chain/*` router with its real `ApiSecurity` gate, driven by the real daemon client and `StandaloneSyncer` over real HTTP. Covers tip, forward/bounded/empty `blocks-since`, the genesis-cursor wire contract, the `api_key` gate (present/wrong/absent), a daemon restart against an existing database, and a real `rollback_to` + re-apply reorg the daemon rewinds and follows. Also the **paging contract on realistic blocks**: ~1.5 MiB blocks of real ErgoBoxes where a three-block page cannot fit the 8 MiB cap, so the default one-block page completes the pass and an unbounded page fails closed on the first response. |
 | `tests/it/daemon_boot.rs` | The full production startup shape — config + 0600 api-key file + descriptor file, `prepare` on a non-runtime thread, runtime + `run_until` on another — then the read API over the real Unix socket, the sync loop reaching the real node tip, the `0400`/`0600` socket mode, the empty `/scans`, the `404` write routes, and the socket-guard cleanup on shutdown. Plus the api-key permission gate and `Debug` redaction. |
+| `tests/it/seed_daemon_boot.rs` | Config → real seed TCP API → authenticated real-node sync; distinct node/local credentials, locked restart with persisted addresses, mode ownership, and refusal of implicit watch/seed migration. |
+| `tests/it/lifecycle.rs` | Real hosted engine through seed routes: authentication before parsing, native errors, secret response policy, lifecycle/key persistence, wrong-password budget, and unchanged default watch routes. |
+| `src/host.rs` unit tests | Locked boot/restart, atomic first-key replay reset, no-key sync pause, shared command/sync writer, bounded admission, shutdown queue rejection and panic key erasure. |
+| `src/engine_chain.rs`, `src/ownership.rs` unit tests | Local lifecycle during node outage, bounded tip capability, unsupported signing/replay, mode markers and seed directory permissions. |
+| `src/supervision_tests.rs` | A seed terminal failure stays parked until a key reset permits replay; idle Unix keep-alive connections close on shutdown and release redb for immediate reopen. The real seed TCP boot test also holds pooled connections across shutdown before restarting. |
 | `tests/it/scan_registry_rewind.rs` | `rewind_to_ancestor` → `rewind_scans_from_height` with a **non-empty** registry: seeded `WALLET_SCAN_BOXES` / `_INDEX` / `_TXS`, the post-boundary rows removed, the pre-boundary spend restored to `Unspent`, the reverse index trimmed to the surviving box, the tx rows keyed by height, and the restored box still reachable through the index. |
 | `tests/it/sync.rs` | The sync state machine against a scripted node: paging limits, the page budget bounding every request independently of the apply budget, an out-of-range page failing before the node is called, an oversized page failing closed with one request and no loop, ancestor rewind, pruned history, conflict retry, gap/duplicate/parent-mismatch terminal errors, unprogressing-rewind bound, tip publication, and the durable-write count of a caught-up pass (no `running` on an idle tick). |
-| `tests/it/routes.rs` | `READ_ROUTE_INVENTORY` is the only mounted surface, and every lifecycle/signing/private-key route is `404`. |
+| `tests/it/routes.rs` | `READ_ROUTE_INVENTORY` is the only default watch surface, and its lifecycle/signing/private-key routes are `404`. |
 | `tests/it/store_reopen.rs` | The standalone store reopens with its keys, cursor, and cleared invalidation flag. |
 | `tests/it/shadow.rs` | The **shadow harness** (see its own section below): embedded vs daemon over the same blocks, plus the cheap negative controls that keep the comparison honest. Its five scenarios are `#[ignore]`d — run with `scripts/shadow-compare.sh` or the `wallet-shadow` CI job. |
 
@@ -388,25 +475,32 @@ reached the limiter and needs no change.
   by applied blocks, never by the mempool or unconfirmed headers, so every
   balance, box, and transaction read is confirmed. `/balance` reports
   `confirmed == available` and `reserved == immature == "0"`; `unconfirmed` and
-  `reemission` are `null`. There is no route that can change a balance. These
+  `reemission` are `null`. Seed key changes reset history for replay; neither
+  mode can submit a spend. These
   are values the daemon *computes* from applied blocks, not the embedded wallet's
   values re-served verbatim — see "Known deviations" §1 for the exact
   differences and what they mean for comparison against an embedded wallet.
-- **No-secret boundary.** The daemon reads public data only. The descriptor file
+- **Watch descriptor boundary.** The default watch mode reads public wallet data only. The descriptor file
   carries compressed public keys, derivation paths, and labels — anything else
   (a `private_key` field, a non-secp256k1 curve) is a hard parse error. The
   store keeps 33-byte pubkeys and renders base58 addresses at read time, so the
-  network prefix is never baked into persistent state. The only secret-adjacent
-  file is the *node* API key, which is read from disk with a permission check
-  (rejecting group/other-readable files), held in a `Debug`-redacted `ApiKey`,
-  sent only as a request header, and never logged.
-- **Read-only.** No route mutates wallet state, and `HttpChainClient::submit`
-  returns `ChainClientError::Unsupported`. The daemon cannot spend, sign, or
-  unlock anything.
+  network prefix is never baked into persistent state. Watch mode loads the
+  node API credential but never constructs secret storage. Seed mode owns its
+  encrypted secret directory and requires a separate local API credential;
+  credentials are permission-checked, redacted and zeroized on drop.
+- **Mode ownership.** A durable `wallet-mode` marker prevents reuse between
+  watch and seed modes. An unmarked database can only resume as watch-only;
+  seed migration is not inferred from persisted public keys.
+- **Capability-limited hosting.** Watch routes are read-only. Seed mode adds
+  lifecycle/key writes through `WalletEngine`, with one gate shared with
+  complete sync passes and atomic history resets on actual key additions.
+  Neither mode mounts signing/submission routes; `HttpChainClient::submit`
+  returns `ChainClientError::Unsupported`.
 - **Loopback by construction.** `tcp_fallback` must be a loopback address; the
   Unix socket is created under a `0o077` umask and `chmod 0600`, with a
   `<socket>.owner` marker (`ergo-walletd-socket:<pid>:<nanos>`) so a stale
-  socket is reclaimed but a live one is never stolen.
+  socket is reclaimed but a live one is never stolen. Seed-mode authentication
+  protects both Unix and TCP listeners.
 - **Network identity is configuration.** `network` (`mainnet` | `testnet`,
   default `mainnet`, any other value rejected) is threaded into descriptor
   validation and into every address this API renders. The daemon cannot infer
@@ -415,7 +509,11 @@ reached the limiter and needs no change.
 - **Fail-closed sync.** A page that breaks height, parent, or duplicate
   invariants, an ancestor that does not rewind, and a second reorg deeper than
   retained history after a full rebuild are terminal: the durable rescan state
-  becomes `failed`; syncing stops and the read API stays available. A reorg that *does* rewind is a warn and
+  becomes `failed`; syncing pauses and the read API stays available (authenticated
+  in seed mode). The seed worker compares committed tracked-key rows under
+  the writer gate while parked; an actual key change permits replay without
+  restarting, even if recording the failure metadata had failed.
+  The watch worker stops on terminal failure. A sync-worker panic stops the daemon. A reorg that *does* rewind is a warn and
   a continue — the old fixed "8 rebuilds per batch" cap is gone. Terminal and
   retryable failures log at `error`/`warn` with locally generated text only.
 - **Bounded reads.** `/status` never blocks on an unbounded node request: it
@@ -430,4 +528,14 @@ reached the limiter and needs no change.
   has work, i.e. below the at-tip check, so a caught-up daemon costs the single
   `idle` write per tick instead of `running` followed by `idle`.
 
-A pass that exhausts its block budget continues immediately. Completed passes and retryable errors wait for `sync_interval`; terminal errors stop syncing while `/status` remains available. `shutdown_timeout_secs` (default 5) bounds shutdown waiting, with cancellation checked between blocks, retries, and HTTP requests. An in-flight blocking HTTP request may finish after this deadline, but cancellation prevents subsequent block application.
+A pass that exhausts its block budget continues immediately. Completed passes,
+seed passes with no keys, and retryable errors wait for `sync_interval`;
+terminal errors suspend syncing while `/status` remains available. Seed workers
+remain parked until committed tracked-key rows change.
+`shutdown_timeout_secs` (default 5) bounds shutdown waiting, with cancellation
+checked between blocks, retries, and HTTP requests. An in-flight blocking HTTP
+request may finish after this deadline, but cancellation prevents subsequent
+block application. Seed admission closes before cancellation, queued commands
+are rejected, and the hosted engine locks after work holding its writer drains.
+Listener shutdown closes idle TCP connections and drains the Unix listener's
+owned connection set before releasing the database for restart.
