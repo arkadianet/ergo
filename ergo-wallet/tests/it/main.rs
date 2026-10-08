@@ -1,6 +1,7 @@
 mod aes_gcm_pbkdf2_oracle;
 mod bip32_oracle;
 mod bip39_oracle;
+mod direct_context_signing;
 #[cfg(feature = "cli")]
 mod cli_smoke;
 mod ergo_p2pk_address_oracle;

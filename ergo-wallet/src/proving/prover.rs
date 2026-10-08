@@ -1,34 +1,15 @@
 //! Transaction-level signing and explicit-context reduction.
 //!
-//! [`Prover::reduce_transaction`] evaluates input contracts against a caller-supplied
-//! [`crate::tx_context::SigningContext`] and enforces a transaction budget.
-//! [`Prover::sign_reduced`] signs the resulting frozen propositions without script
-//! evaluation or chain access. The caller must review reductions received from an
-//! external party; serialized reduction data does not authenticate chain state.
+//! [`Prover::sign`] preserves the conservative script gate when passed the
+//! legacy [`BlockchainStateContext`]. A caller passing an explicit
+//! [`crate::tx_context::SigningContext`] signs by reducing all contracts once
+//! against its intended candidate context, then proving the frozen propositions.
+//! The caller supplies chain trust and must check that the transaction is valid
+//! for the context where it will be submitted.
 //!
-//! The existing [`Prover::sign`] compatibility path remains as follows.
-//!
-//! Mirrors Scala `ErgoProvingInterpreter.sign` /
-//! `ErgoProvingInterpreter.signInputs`. For each input:
-//!
-//! 1. **Script gate**: reject any input whose ErgoTree is not in the
-//!    currently-supported set (bare ProveDlog/ProveDHTuple or matured
-//!    miner-reward wrapper). Context-sensitive scripts verified against a
-//!    synthetic context could self-verify against a different context than
-//!    the chain uses, producing proofs that the chain rejects.
-//! 2. Build a per-input `ReductionContext` from the frozen
-//!    `BlockchainStateContext` + box/tx data.
-//! 3. Try `trivial_reduce` (cheap path for bare P2PK scripts); fall back
-//!    to `reduce_expr_with_cost` for wrapper scripts.
-//! 4. Pass the residual `SigmaBoolean` to `prove_sigma`.
-//! 5. Wrap proof bytes into `SpendingProof::new`.
-//!
-//! Cost enforcement is NOT performed here. The bridge self-verify
-//! (`self_verify_signed_tx` in `wallet_bridge.rs`) applies the authoritative
-//! chain-parity cost gate after signing and rejects any cost overage.
-//!
-//! The script gate in step 1 can be lifted once the evaluation context is
-//! derived from committed chain state rather than a synthetic pre-header.
+//! [`Prover::reduce_transaction`] and [`Prover::sign_reduced`] enforce reduction
+//! and proof budgets. The legacy path still relies on host self-verification for
+//! consensus cost enforcement and structural validation.
 
 use ergo_primitives::cost::CostAccumulator;
 use ergo_ser::ergo_box::ErgoBox;
@@ -312,24 +293,61 @@ impl Prover {
         )
     }
 
-    /// Sign `unsigned_tx`. `boxes_to_spend` MUST be in the same order as
-    /// `unsigned_tx.inputs`; `hints` defaults to empty for single-sig.
+    /// Sign `unsigned_tx` using the selected context.
     ///
-    /// **Script gate**: rejects any input whose ErgoTree is not in the
-    /// currently-supported set:
-    /// - Bare `ProveDlog` / `ProveDHTuple` (trivial_reduce returns Ok).
-    /// - Canonical miner-reward wrapper `{ HEIGHT >= R_4 && proveDlog(R_5) }`
-    ///   (detected by `proving::miner_reward::extract_miner_reward_pubkey`).
+    /// Passing `&BlockchainStateContext` preserves the legacy gate: only
+    /// constant Sigma propositions and canonical matured miner rewards are
+    /// supported. Passing `&SigningContext` explicitly selects full contract
+    /// reduction against the caller's intended candidate, with cost enforcement.
+    /// Inputs and data boxes must match transaction order. Neither context form
+    /// replaces structural or consensus validation by the transaction's host.
     ///
-    /// Context-sensitive scripts could self-verify against the synthetic
-    /// pre-header but fail on the chain's real context. This gate can be
-    /// lifted once the context is derived from committed chain state.
-    ///
-    /// Returns the fully-signed `Transaction` or a `WalletError`.
-    /// This low-level Scala-compatible API accepts reusable bags. An own
-    /// commitment nonce MUST be used for only one signing operation. Prefer
-    /// [`Self::sign_bound`] for native commitment ownership.
-    pub fn sign(
+    /// This low-level API accepts reusable hints bags. An own commitment nonce
+    /// must be used for only one signing operation. For explicit-context nonce
+    /// ownership, reduce once and use [`Self::sign_reduced_bound`]. Legacy
+    /// callers can use [`Self::sign_bound`].
+    pub fn sign<'context>(
+        &self,
+        unsigned_tx: &UnsignedTransaction,
+        boxes_to_spend: &[ErgoBox],
+        data_boxes: &[ErgoBox],
+        context: impl Into<crate::tx_context::ProverSigningContext<'context>>,
+        hints: &TransactionHintsBag,
+    ) -> Result<Transaction, WalletError> {
+        match context.into() {
+            crate::tx_context::ProverSigningContext::Synthetic(context) => {
+                self.sign_synthetic(unsigned_tx, boxes_to_spend, data_boxes, context, hints)
+            }
+            crate::tx_context::ProverSigningContext::Explicit(context) => self.sign_reduced(
+                &self.reduce_transaction(unsigned_tx, boxes_to_spend, data_boxes, &context)?,
+                hints,
+            ),
+        }
+    }
+
+    /// Preserve the synthetic-context script gate for host operations that
+    /// reduce contracts before commitment generation or hint extraction.
+    pub fn require_context_independent_scripts(boxes: &[ErgoBox]) -> Result<(), WalletError> {
+        // Script gate: reject unsupported script families before
+        // reaching the (synthetic-context) self-verify.
+        for (idx, input_box) in boxes.iter().enumerate() {
+            let ergo_tree = input_box.candidate.ergo_tree();
+            let is_trivially_reducible = ergo_sigma::reduce::trivial_reduce(ergo_tree).is_ok();
+            let is_miner_reward =
+                extract_miner_reward_pubkey(input_box.candidate.ergo_tree_bytes()).is_some();
+            if !is_trivially_reducible && !is_miner_reward {
+                return Err(WalletError::TxBuild(format!(
+                    "input {idx} has an unsupported script family; \
+                     only bare ProveDlog/ProveDHTuple and matured miner-reward \
+                     boxes are currently spendable"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn sign_synthetic(
         &self,
         unsigned_tx: &UnsignedTransaction,
         boxes_to_spend: &[ErgoBox],
@@ -352,21 +370,7 @@ impl Prover {
             )));
         }
 
-        // Script gate: reject unsupported script families before
-        // reaching the (synthetic-context) self-verify.
-        for (idx, input_box) in boxes_to_spend.iter().enumerate() {
-            let ergo_tree = input_box.candidate.ergo_tree();
-            let is_trivially_reducible = ergo_sigma::reduce::trivial_reduce(ergo_tree).is_ok();
-            let is_miner_reward =
-                extract_miner_reward_pubkey(input_box.candidate.ergo_tree_bytes()).is_some();
-            if !is_trivially_reducible && !is_miner_reward {
-                return Err(WalletError::TxBuild(format!(
-                    "input {idx} has an unsupported script family; \
-                     only bare ProveDlog/ProveDHTuple and matured miner-reward \
-                     boxes are currently spendable"
-                )));
-            }
-        }
+        Self::require_context_independent_scripts(boxes_to_spend)?;
 
         let message = Self::bytes_to_sign_for_tx(unsigned_tx)?;
 

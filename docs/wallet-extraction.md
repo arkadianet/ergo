@@ -223,8 +223,10 @@ separate reviews. The first adds explicit-context reduction, EIP-43 reduced
 transaction bytes for EIP-19 cold signing, offline proofs and commitments.
 Its fixtures cross-check AppKit and sigma-rust, including QR and ErgoPay
 round trips. The existing `Prover::sign` gate remains unchanged in that review.
-The second changes direct signing and host integration to use a real,
-authenticated context. See the [library guide](wallet-reduced-transactions.md)
+The second adds direct signing with an explicit intended candidate and an
+optional host capability tied to its committed view. Standard embedded-node
+and daemon views retain their synthetic-context script gate until an actual
+candidate provider supplies the full context. See the [library guide](wallet-reduced-transactions.md)
 and [oracle provenance](../test-vectors/wallet/README.md#reduced-transactions-and-cold-transport).
 
 Implemented in [#620](https://github.com/arkadianet/ergo/pull/620),

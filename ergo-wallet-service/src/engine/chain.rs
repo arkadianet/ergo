@@ -20,7 +20,7 @@
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::Header;
 use ergo_validation::{ActiveProtocolParameters, ProtocolParams, ReemissionRuleInputs};
-use ergo_wallet::tx_context::{BlockchainParameters, BlockchainStateContext};
+use ergo_wallet::tx_context::{BlockchainParameters, BlockchainStateContext, SigningContext};
 use ergo_wallet_protocol::WalletAdminError;
 use thiserror::Error;
 
@@ -70,6 +70,13 @@ pub fn map_chain_error(error: ChainAccessError) -> WalletAdminError {
 /// every read is answered from the same committed tip, so a signature and
 /// its verification can never mix two tips.
 pub trait SigningView: Send + Sync {
+    /// An embedding may supply the full context of an intended candidate.
+    /// Returning `Some` enables context-sensitive signing. Committed headers
+    /// alone do not make a synthetic successor pre-header a real candidate;
+    /// standard embedded and remote views therefore retain this default.
+    fn intended_candidate_context(&self) -> Option<SigningContext<'_>> {
+        None
+    }
     /// The committed full-block tip this view was taken at.
     fn tip(&self) -> CommittedTip;
     /// The last (at most ten) applied headers, newest first.
@@ -92,6 +99,43 @@ pub trait SigningView: Send + Sync {
     fn lookup_utxo(&self, box_id: &[u8; 32]) -> Result<Option<ErgoBox>, ChainAccessError>;
 }
 
+/// Tie an explicitly selected candidate to the same committed view that answers
+/// UTXO lookups. Its miner/time/votes/difficulty may be candidate-specific, but
+/// its parent, headers, root and adopted validation settings must be this view's.
+pub(crate) fn intended_signing_context(
+    view: &dyn SigningView,
+) -> Result<Option<SigningContext<'_>>, WalletAdminError> {
+    let Some(context) = view.intended_candidate_context() else {
+        return Ok(None);
+    };
+    let tip = view.tip();
+    let state = context.state_context;
+    let signing = view.signing_params();
+    let protocol = view.protocol_params();
+    if context.header_ids != view.header_ids()
+        || state.sigma_last_headers.as_slice() != view.headers()
+        || state.previous_state_digest != view.state_context().previous_state_digest
+        || context.validation_settings != &protocol.validation_settings
+        || signing.max_block_cost != protocol.max_block_cost
+        || signing.input_cost != protocol.input_cost
+        || signing.data_input_cost != protocol.data_input_cost
+        || signing.output_cost != protocol.output_cost
+        || signing.token_access_cost != protocol.token_access_cost
+        || signing.block_version != protocol.block_version
+        || signing.interpreter_init_cost != ergo_validation::INTERPRETER_INIT_COST
+        || context.header_ids.len() < tip.height.min(10) as usize
+        || context.header_ids.first() != Some(&tip.header_id)
+        || state.sigma_last_headers.first().map(|header| header.height) != Some(tip.height)
+        || state.sigma_pre_header.parent_id != tip.header_id
+        || tip.height.checked_add(1) != Some(state.sigma_pre_header.height)
+    {
+        return Err(WalletAdminError::Internal(
+            "intended candidate context does not belong to the committed signing view".into(),
+        ));
+    }
+    Ok(Some(context))
+}
+
 /// A committed signing view extended with a retained pool-parent snapshot.
 /// Consensus context remains pinned to the committed chain; pool inputs are
 /// resolved only from the publication captured during selection.
@@ -112,6 +156,9 @@ impl PoolSigningView {
 }
 
 impl SigningView for PoolSigningView {
+    fn intended_candidate_context(&self) -> Option<SigningContext<'_>> {
+        self.inner.intended_candidate_context()
+    }
     fn tip(&self) -> CommittedTip {
         self.inner.tip()
     }
