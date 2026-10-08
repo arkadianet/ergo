@@ -389,7 +389,8 @@ mod network_tests {
     #[test]
     fn network_uses_canonical_genesis_when_legacy_emission_identity_is_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Database::create(dir.path().join("source.redb")).unwrap();
+        let source_path = dir.path().join("source.redb");
+        let db = Database::create(&source_path).unwrap();
         let txn = db.begin_write().unwrap();
         txn.open_table(TableDefinition::<&str, &[u8]>::new("chain_state_meta"))
             .unwrap()
@@ -400,14 +401,16 @@ mod network_tests {
             .insert(1, GenesisParams::testnet().header_id.unwrap().as_slice())
             .unwrap();
         txn.commit().unwrap();
-        let before = std::fs::read(dir.path().join("source.redb")).unwrap();
-        assert_eq!(
-            source_network(&redb::ReadableDatabase::begin_read(&db).unwrap()).unwrap(),
-            Network::Testnet
-        );
-        assert_eq!(
-            std::fs::read(dir.path().join("source.redb")).unwrap(),
-            before
+        drop(db);
+        let before = std::fs::read(&source_path).unwrap();
+        let db = redb::ReadOnlyDatabase::open(&source_path).unwrap();
+        let snapshot = redb::ReadableDatabase::begin_read(&db).unwrap();
+        assert_eq!(source_network(&snapshot).unwrap(), Network::Testnet);
+        drop(snapshot);
+        drop(db);
+        assert!(
+            std::fs::read(&source_path).unwrap() == before,
+            "network inspection modified the source database"
         );
     }
 }
