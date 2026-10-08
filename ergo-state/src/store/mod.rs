@@ -3618,6 +3618,9 @@ impl StateStore {
     /// and returns `CommitDurability::PendingJob(seq)` so the caller pins
     /// the block's nodes until that job commits. Otherwise it falls back to
     /// a synchronous write transaction and returns `Durable`.
+    // Keep the optional observer explicit alongside the existing persistence
+    // payloads: it must be co-committed in both paths, without changing them.
+    #[allow(clippy::too_many_arguments)]
     fn persist_apply(
         &mut self,
         height: u32,
