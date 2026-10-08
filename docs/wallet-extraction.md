@@ -77,6 +77,9 @@ reorg, node/daemon restart, rescan and mainnet 1–1000 scenarios must run.
 use `mode = "seed"`, a fresh separate data directory, no `descriptor_file`,
 and two different protected credentials. `api_key_file` authenticates outbound
 node requests; `local_api_key_file` authenticates local wallet operations.
+An outbound scoped node credential needs `wallet` and, for private mining jobs,
+`operator`. An `admin` credential or the legacy master key also authorizes these
+requests.
 Seed wallets restart locked. Persisted public keys continue syncing while locked.
 The durable `wallet-mode` and `wallet-network` markers prevent incompatible
 ownership and network changes.

@@ -2,10 +2,10 @@
 use super::{
     cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page},
     facade::WalletApi,
-    native::StrictJson,
+    native::{CollectionJson, CollectionQuery},
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -117,6 +117,7 @@ pub(super) enum Reason {
     Invalid,
     InvalidAddress,
     InvalidCursor,
+    InvalidParams,
     MissingSecret,
     NodeUnavailable,
     RateLimited,
@@ -148,6 +149,7 @@ impl Reason {
             Self::Invalid => axum::http::StatusCode::from_u16(400).expect("valid status"),
             Self::InvalidAddress => axum::http::StatusCode::from_u16(400).expect("valid status"),
             Self::InvalidCursor => axum::http::StatusCode::from_u16(400).expect("valid status"),
+            Self::InvalidParams => axum::http::StatusCode::BAD_REQUEST,
             Self::NodeUnavailable => axum::http::StatusCode::SERVICE_UNAVAILABLE,
             Self::MissingSecret => axum::http::StatusCode::from_u16(409).expect("valid status"),
             Self::RateLimited => axum::http::StatusCode::from_u16(429).expect("valid status"),
@@ -362,9 +364,9 @@ struct ScanIdCursor {
 /// T1. Reuses the scan primitive; no second tracking mechanism.
 pub(crate) async fn watch_register(
     State(state): State<AccountsState>,
-    body: StrictJson<WatchRequest>,
+    body: CollectionJson<WatchRequest>,
 ) -> Response {
-    let StrictJson(body) = body;
+    let CollectionJson(body) = body;
     if let Err(_e) = decode_address_to_tree_bytes(&body.address, state.network) {
         return v1_error(
             Reason::InvalidAddress,
@@ -393,9 +395,9 @@ pub(crate) async fn watch_register(
 /// predicate the scan was registered with.
 pub(crate) async fn watch_list(
     State(state): State<AccountsState>,
-    q: Query<WatchListQuery>,
+    q: CollectionQuery<WatchListQuery>,
 ) -> Response {
-    let Query(q) = q;
+    let CollectionQuery(q) = q;
     let limit = clamp_limit(q.limit, 50, 500);
     let after = match decode_opt_cursor::<ScanIdCursor>(q.cursor.as_deref()) {
         Ok(c) => c.map(|c| c.after),
@@ -492,9 +494,9 @@ pub(crate) struct PrivateKeyRequest {
 /// T0/T1 and, under hard-deny, from any non-loopback caller.
 pub(crate) async fn private_key(
     State(state): State<AccountsState>,
-    body: StrictJson<PrivateKeyRequest>,
+    body: CollectionJson<PrivateKeyRequest>,
 ) -> Response {
-    let StrictJson(body) = body;
+    let CollectionJson(body) = body;
     if !body.acknowledge {
         return v1_error(
             Reason::AcknowledgementRequired,

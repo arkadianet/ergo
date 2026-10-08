@@ -5,10 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::super::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
-use super::super::native::StrictJson;
+use super::super::native::{CollectionJson, CollectionQuery};
 use super::{map_wallet_err, AccountsState};
 use super::{v1_error, Reason};
-use axum::extract::Query;
 use ergo_wallet_protocol::scala::scan::{ScanBoxFilter, ScanDto, ScanRequestDto};
 use ergo_wallet_protocol::scala::types;
 
@@ -121,9 +120,9 @@ struct OffsetCursor {
 /// `POST /api/v1/scan/scans` — register a scan, returning its allocated id.
 pub async fn register(
     State(state): State<AccountsState>,
-    body: StrictJson<ScanRegisterRequest>,
+    body: CollectionJson<ScanRegisterRequest>,
 ) -> Response {
-    let StrictJson(body) = body;
+    let CollectionJson(body) = body;
     let req = ScanRequestDto {
         scan_name: body.name,
         tracking_rule: body.tracking_rule,
@@ -142,8 +141,8 @@ pub async fn register(
 
 /// `GET /api/v1/scan/scans?limit=&cursor=` — every registered scan, ascending
 /// by `scan_id`, cursor-paginated on that natural key.
-pub async fn list(State(state): State<AccountsState>, q: Query<ListQuery>) -> Response {
-    let Query(q) = q;
+pub async fn list(State(state): State<AccountsState>, q: CollectionQuery<ListQuery>) -> Response {
+    let CollectionQuery(q) = q;
     let limit = clamp_limit(q.limit, SCAN_DEFAULT_LIMIT, SCAN_LIST_MAX_LIMIT);
     let after = match decode_opt_cursor::<ScanIdCursor>(q.cursor.as_deref()) {
         Ok(c) => c.map(|c| c.after),
@@ -201,7 +200,7 @@ pub async fn deregister(State(state): State<AccountsState>, Path(scan_id): Path<
 pub async fn watch_unspent(
     State(state): State<AccountsState>,
     Path(scan_id): Path<u16>,
-    q: Query<ScanBoxQuery>,
+    q: CollectionQuery<ScanBoxQuery>,
 ) -> Response {
     let scans = match state.admin.list_scans().await {
         Ok(s) => s,
@@ -220,9 +219,9 @@ pub async fn watch_unspent(
 pub async fn unspent(
     State(state): State<AccountsState>,
     Path(scan_id): Path<u16>,
-    q: Query<ScanBoxQuery>,
+    q: CollectionQuery<ScanBoxQuery>,
 ) -> Response {
-    let Query(q) = q;
+    let CollectionQuery(q) = q;
     let limit = clamp_limit(q.limit, SCAN_DEFAULT_LIMIT, SCAN_BOX_MAX_LIMIT);
     let off = match decode_opt_cursor::<OffsetCursor>(q.cursor.as_deref()) {
         Ok(c) => c.map(|c| c.off).unwrap_or(0),
@@ -264,9 +263,9 @@ pub async fn unspent(
 pub async fn transactions(
     State(state): State<AccountsState>,
     Path(scan_id): Path<u16>,
-    q: Query<ListQuery>,
+    q: CollectionQuery<ListQuery>,
 ) -> Response {
-    let Query(q) = q;
+    let CollectionQuery(q) = q;
     let limit = clamp_limit(q.limit, SCAN_DEFAULT_LIMIT, SCAN_LIST_MAX_LIMIT);
     let off = match decode_opt_cursor::<OffsetCursor>(q.cursor.as_deref()) {
         Ok(c) => c.map(|c| c.off).unwrap_or(0),
@@ -305,9 +304,9 @@ pub async fn transactions(
 pub async fn attach_box(
     State(state): State<AccountsState>,
     Path(scan_id): Path<u16>,
-    body: StrictJson<AttachBoxRequest>,
+    body: CollectionJson<AttachBoxRequest>,
 ) -> Response {
-    let StrictJson(body) = body;
+    let CollectionJson(body) = body;
     match state.admin.scan_add_box(vec![scan_id], body.box_json).await {
         Ok(box_id) => Json(json!({ "box_id": box_id })).into_response(),
         Err(e) => map_wallet_err(e),

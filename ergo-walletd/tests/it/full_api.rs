@@ -354,6 +354,146 @@ async fn native_and_compat_inventory_is_mounted_and_auth_precedes_payload_parsin
 }
 
 #[tokio::test]
+async fn collection_parse_errors_preserve_v1_envelopes_redaction_and_authentication_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, _, _) = app(&dir);
+    for (method, path, body, reason) in [
+        (
+            "POST",
+            "/api/v1/scan/scans",
+            "{private-collection-marker",
+            "bad_request",
+        ),
+        (
+            "POST",
+            "/api/v1/accounts/watch",
+            r#"{"address":"private-collection-marker","unknownSecret":"private-collection-marker"}"#,
+            "bad_request",
+        ),
+        (
+            "POST",
+            "/api/v1/accounts/private-key",
+            r#"{"address":"private-collection-marker","acknowledge":"private-collection-marker"}"#,
+            "bad_request",
+        ),
+        (
+            "GET",
+            "/api/v1/scan/scans?limit=private-collection-marker",
+            "",
+            "invalid_params",
+        ),
+        (
+            "GET",
+            "/api/v1/accounts/watch?limit=private-collection-marker",
+            "",
+            "invalid_params",
+        ),
+        (
+            "GET",
+            "/api/v1/scan/scans/1000/unspent?min_confirmations=private-collection-marker",
+            "",
+            "invalid_params",
+        ),
+    ] {
+        for key in [None, Some("wrong-local-key")] {
+            let (status, response) = request(&app, method, path, key, body).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path}: {response}"
+            );
+            assert_eq!(response["reason"], "unauthorized");
+        }
+        let (status, response) = request(&app, method, path, Some(KEY), body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{method} {path}: {response}"
+        );
+        assert_eq!(response["error"]["reason"], reason);
+        assert!(response["error"]["message"].is_string());
+        assert!(response["error"]["detail"].is_string());
+        assert!(response.get("reason").is_none());
+        assert!(!response.to_string().contains("private-collection-marker"));
+    }
+    let oversized = "private-collection-marker".repeat(1024);
+    let (status, response) = request(
+        &app,
+        "POST",
+        "/api/v1/accounts/private-key",
+        Some(KEY),
+        &oversized,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response["error"]["reason"], "bad_request");
+    assert!(!response.to_string().contains("private-collection-marker"));
+
+    for content_type in [None, Some("text/plain")] {
+        for key in [None, Some(KEY)] {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/api/v1/accounts/watch");
+            if let Some(content_type) = content_type {
+                builder = builder.header(header::CONTENT_TYPE, content_type);
+            }
+            if let Some(key) = key {
+                builder = builder.header("api_key", key);
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    builder
+                        .body(Body::from(r#"{"address":"private-collection-marker"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(
+                response.status(),
+                if key.is_some() {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::UNAUTHORIZED
+                }
+            );
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            if key.is_some() {
+                assert_eq!(response["error"]["reason"], "bad_request");
+                assert_eq!(response["error"]["message"], "request body is malformed");
+            } else {
+                assert_eq!(response["reason"], "unauthorized");
+            }
+            assert!(!response.to_string().contains("private-collection-marker"));
+        }
+    }
+
+    let (status, response) = request(
+        &app,
+        "GET",
+        "/api/v1/scan/scans?cursor=invalid",
+        Some(KEY),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response["error"]["reason"], "invalid_cursor");
+    let (status, response) = request(
+        &app,
+        "POST",
+        "/api/v1/wallet/init",
+        Some(KEY),
+        "{private-collection-marker",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response["reason"], "bad_request");
+    assert!(response.get("error").is_none());
+}
+
+#[tokio::test]
 async fn locked_wallet_send_uses_the_engine_and_never_submits() {
     let dir = tempfile::tempdir().unwrap();
     let (app, spy, store) = app(&dir);

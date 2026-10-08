@@ -87,6 +87,64 @@ fn validate_hex32(s: &str) -> Result<String, NativeErr> {
 /// 400. The centralized strict extractor the design mandates for the write surface.
 pub(crate) struct StrictJson<T>(pub T);
 
+/// Native scan/account collections retain embedded V1 JSON/content-type checks
+/// and error envelopes, with bounded bodies and redacted rejection details.
+pub(crate) struct CollectionJson<T>(pub T);
+
+#[async_trait::async_trait]
+impl<T, S> axum::extract::FromRequest<S> for CollectionJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        <Json<T> as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map(|Json(value)| Self(value))
+            .map_err(|rejection| {
+                let mut response = super::accounts::v1_error(
+                    super::accounts::Reason::BadRequest,
+                    "request body is malformed",
+                    "invalid request body",
+                );
+                if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                    *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+                }
+                response
+            })
+    }
+}
+
+/// Collection query parsing keeps V1 `invalid_params` without echoing values.
+pub(crate) struct CollectionQuery<T>(pub T);
+
+#[async_trait::async_trait]
+impl<T, S> axum::extract::FromRequestParts<S> for CollectionQuery<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        <Query<T> as axum::extract::FromRequestParts<S>>::from_request_parts(parts, state)
+            .await
+            .map(|Query(value)| Self(value))
+            .map_err(|_| {
+                super::accounts::v1_error(
+                    super::accounts::Reason::InvalidParams,
+                    "query parameters are malformed",
+                    "invalid query parameters",
+                )
+            })
+    }
+}
+
 #[async_trait::async_trait]
 impl<T, S> axum::extract::FromRequest<S> for StrictJson<T>
 where

@@ -821,15 +821,16 @@ parse error rather than a silently ignored line.
 The default watch-only reference config ships at
 [`../ergo-walletd/ergo-walletd.toml`](../ergo-walletd/ergo-walletd.toml).
 [`../ergo-walletd/ergo-walletd-seed.toml`](../ergo-walletd/ergo-walletd-seed.toml)
-shows the opt-in encrypted seed lifecycle mode. The config schema rejects
+shows the opt-in encrypted seed mode. The config schema rejects
 unknown fields and combinations that mix descriptor and seed ownership.
 
 `mode = "watch_only"` imports public descriptors and exposes the existing
 read API without opening secret storage. `mode = "seed"` hosts the shared
-wallet engine for encrypted seed lifecycle and key management, protecting all
-local reads and writes with an independent credential. This first Phase 3
-increment cannot construct, sign or send transactions. Balance, box and
-transaction reads remain confirmed-only; no mempool overlay is exposed.
+wallet engine for encrypted seed lifecycle, transaction construction, signing,
+submission, scans/rescans and durable private mining jobs. An independent
+credential protects all local reads and writes. Seed-mode native balance reads
+can include an explicitly requested mempool delta; watch-only reads remain
+confirmed-only.
 
 ## `ergo-walletd.toml` top-level keys
 
@@ -838,8 +839,8 @@ transaction reads remain confirmed-only; no mempool overlay is exposed.
 | `mode` | string | `"watch_only"` | `"watch_only"` requires a public `descriptor_file`. `"seed"` requires `local_api_key_file` and rejects `descriptor_file`. CLI: `--mode <watch-only\|seed>`. |
 | `network` | string | `"mainnet"` | Required network identity: `"mainnet"` or `"testnet"`. Any other value (including `devnet`) is a load error. It selects the base58 address prefix used for descriptor validation and for every address the local API returns, so it **must** match the network the configured `node_url` serves — the daemon cannot infer that from the node. CLI: `--network`. |
 | `data_dir` | string (path) | none (required) | Directory holding `wallet.redb`. Seed mode also stores encrypted secret files under `wallet/`. Use a fresh, separate directory when creating a seed wallet; there is no automatic migration from an embedded or descriptor wallet. Created on first start. |
-| `node_url` | string (URL) | none (required) | Base URL of the node's operator API. Only `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}` are read. Must be `http`/`https` with a host and no credentials, query, or fragment. CLI: `--node-url`. |
-| `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
+| `node_url` | string (URL) | none (required) | Base URL of the node API. Watch-only mode reads `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}`. Seed mode also uses coherent spending context, tip-bound block replay, transaction admission/submission and `/api/v1/mining/private-transactions` queue operations. Must be `http`/`https` with a host and no credentials, query, or fragment. CLI: `--node-url`. |
+| `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Scoped credentials need `wallet`; seed private mining jobs additionally need `operator`. An `admin` credential or the legacy master key also authorizes these requests. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
 | `descriptor_file` | string (path) | none | Required in `watch_only` mode and rejected in `seed` mode. Public descriptor file (see [Descriptor file](#descriptor-file)); size-capped at 16 MiB and validated at load. CLI: `--descriptor-file`. |
 | `local_api_key_file` | string (path) | none | Required in `seed` mode and rejected in `watch_only` mode. Independent local `api_key` credential protecting all seed-mode reads and writes on both Unix and TCP listeners. Uses the same file-permission, size and header-value checks as `api_key_file`; the two files must contain different credentials. Never forwarded to the node. CLI: `--local-api-key-file`. |
 | `sync_interval` | u64 or string | `15` | Delay after completed sync passes or retryable errors; incomplete passes continue immediately. Accepts plain seconds (`15`) or a duration string (`"500ms"`, `"30s"`, `"2m"`, `"1h"`). `0` is rejected. CLI: `--sync-interval`. |

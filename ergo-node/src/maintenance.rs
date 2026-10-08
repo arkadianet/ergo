@@ -1076,17 +1076,44 @@ mod tests {
         fs::write(wallet.path().join("wallet-network"), b"mainnet\n").unwrap();
         fs::remove_file(wallet.path().join("wallet-mode")).unwrap();
         assert!(discover_external_wallet(data.path(), wallet.path(), false).is_err());
+        assert_eq!(
+            digest_file(&wallet.path().join("wallet.redb")).unwrap(),
+            target_before
+        );
         fs::write(wallet.path().join("wallet-mode"), b"seed\n").unwrap();
         let target = redb::Database::open(wallet.path().join("wallet.redb")).unwrap();
-        let target_locked = digest_file(&wallet.path().join("wallet.redb")).unwrap();
+        // Windows prevents raw reads of the live owner's redb file. Compare
+        // the complete table inventory and exact rows through that owner.
+        let target_contents = || {
+            use ergo_wallet_service::wallet::tables::WALLET_TRACKED_PUBKEYS;
+            use redb::ReadableTable;
+
+            let read = target.begin_read().unwrap();
+            let tables: Vec<_> = read
+                .list_tables()
+                .unwrap()
+                .map(|handle| handle.name().to_owned())
+                .collect();
+            assert_eq!(tables, vec![WALLET_TRACKED_PUBKEYS.name().to_owned()]);
+            assert!(read.list_multimap_tables().unwrap().next().is_none());
+            let pubkeys: Vec<_> = read
+                .open_table(WALLET_TRACKED_PUBKEYS)
+                .unwrap()
+                .iter()
+                .unwrap()
+                .map(|row| {
+                    let (key, value) = row.unwrap();
+                    (key.value(), value.value().to_vec())
+                })
+                .collect();
+            (tables, pubkeys)
+        };
+        let target_locked = target_contents();
         assert!(discover_external_wallet(data.path(), wallet.path(), false)
             .unwrap_err()
             .to_string()
             .contains("stop the wallet daemon"));
-        assert_eq!(
-            digest_file(&wallet.path().join("wallet.redb")).unwrap(),
-            target_locked
-        );
+        assert_eq!(target_contents(), target_locked);
         drop(target);
         // Opening the simulated owner changes redb's recovery header; compare
         // each rejected discovery with the bytes left by that owner's close.

@@ -15,7 +15,8 @@ network = "mainnet"                # Must match the node's network.
 data_dir = "./ergo-walletd-seed-data" # wallet.redb and encrypted files in wallet/.
 node_url = "http://127.0.0.1:9099"
 
-# Outbound node credential: only used for authenticated chain HTTP requests.
+# Outbound node credential for authenticated chain and private queue requests.
+# Scoped keys need wallet, plus operator for private mining jobs/queue access.
 api_key_file = "./node-api-key"
 # Independent local credential: every read and write requires its value in
 # the api_key header, on Unix sockets and TCP alike. The two credential files
