@@ -17,6 +17,8 @@ pub mod extended_key;
 pub mod master;
 pub mod mnemonic;
 pub mod proving;
+pub mod reduced;
+mod reduced_message;
 pub mod secret;
 #[cfg(feature = "keystore")]
 pub mod storage;
@@ -28,6 +30,7 @@ pub use error::WalletError;
 pub use extended_key::{ExtendedPublicKey, ExtendedSecretKey, ExtendedSecretKeyLegacy};
 pub use master::{UnlockedMaster, UnlockedSecret};
 pub use mnemonic::Mnemonic;
+pub use reduced::{ReducedInput, ReducedTransaction};
 pub use secret::SecretKey;
 #[cfg(feature = "keystore")]
 pub use storage::{EncryptedSecret, LockState as WalletLockState, SecretStorage};

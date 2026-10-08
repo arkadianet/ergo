@@ -211,6 +211,47 @@ pub fn bag_for_transaction(
     Ok(tbag)
 }
 
+/// Extract distributed-signing hints using frozen reductions, with no reevaluation.
+/// Reject a signed transaction whose message differs from the frozen unsigned one.
+pub fn bag_for_reduced_transaction(
+    reduced: &crate::ReducedTransaction,
+    tx: &ergo_ser::transaction::Transaction,
+    block_version: u8,
+    real_secrets: &[SigmaBoolean],
+    simulated_secrets: &[SigmaBoolean],
+) -> Result<crate::proving::hints::TransactionHintsBag, WalletError> {
+    let checked = crate::ReducedTransaction::from_bytes(&reduced.to_bytes()?, block_version)?;
+    checked.validate_for_proving()?;
+    let expected = crate::reduced_message::bytes_to_sign_bounded(
+        &checked.unsigned_transaction,
+        crate::reduced::MAX_REDUCED_TRANSACTION_BYTES,
+    )?;
+    let message = crate::reduced_message::bytes_to_sign_bounded_signed(
+        tx,
+        crate::reduced::MAX_REDUCED_TRANSACTION_BYTES,
+    )?;
+    if message != expected {
+        return Err(WalletError::TxBuild(
+            "signed transaction differs from reduction".into(),
+        ));
+    }
+    let mut cost = CostAccumulator::new(HINT_EXTRACTION_COST_LIMIT);
+    let mut bag = crate::proving::hints::TransactionHintsBag::empty();
+    for (idx, (input, reduction)) in tx.inputs.iter().zip(&checked.reduced_inputs).enumerate() {
+        bag.replace_for_input(
+            idx as u32,
+            bag_for_multisig_with_cost(
+                &reduction.sigma,
+                &input.spending_proof.proof,
+                real_secrets,
+                simulated_secrets,
+                &mut cost,
+            )?,
+        );
+    }
+    Ok(bag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

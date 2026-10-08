@@ -29,3 +29,42 @@ jobs:
         run: |
           cargo check --locked -p ergo-wallet -p ergo-sigma -p ergo-ser -p ergo-primitives --lib --no-default-features --target aarch64-linux-android
           cargo check --locked -p ergo-wallet -p ergo-sigma -p ergo-ser -p ergo-primitives --lib --no-default-features --target x86_64-linux-android
+
+  reduced-interop:
+    name: Reduced transaction interoperability
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        id: rust
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: VirtusLab/scala-cli-setup@c33dfbf1a5f16ee60efff453b7f9a987d2b6955b
+        with:
+          scala-cli-version: ${{ steps.rust.outputs.scala_cli }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: |
+            . -> target
+            scripts/sigma_rust_reduced_oracle -> target
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/coursier
+          key: reduced-oracle-${{ hashFiles('scripts/jvm_reduced_transaction_oracle/ReducedTransactionOracle.scala') }}
+      - name: Regenerate pinned AppKit reductions and cold requests
+        run: |
+          scala-cli run scripts/jvm_reduced_transaction_oracle/ReducedTransactionOracle.scala --server=false --jvm 17 > "$RUNNER_TEMP/reduced-scala.json"
+          python3 scripts/check-reduced-oracle.py test-vectors/wallet/reduced_scala_6_0_7.json "$RUNNER_TEMP/reduced-scala.json"
+      - name: Native codec, cost, nonce and cold transport checks
+        run: |
+          export ERGO_REDUCED_PROOFS_FILE="$RUNNER_TEMP/rust-reduced-proofs.json"
+          cargo test --locked -p ergo-wallet --no-default-features --test it reduced_transaction_oracle
+      - name: Verify Rust proofs through AppKit cold signing APIs
+        run: scala-cli run scripts/jvm_reduced_transaction_oracle/ReducedTransactionOracle.scala --server=false --jvm 17 -- verify "$RUNNER_TEMP/rust-reduced-proofs.json"
+      - name: sigma-rust wire, proof, QR image and ErgoPay checks
+        run: cargo run --locked --manifest-path scripts/sigma_rust_reduced_oracle/Cargo.toml -- test-vectors/wallet/reduced_scala_6_0_7.json "$RUNNER_TEMP/rust-reduced-proofs.json"

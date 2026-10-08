@@ -226,13 +226,17 @@ Read [contribution rules](CONTRIBUTING.md#test-conventions) and [compatibility p
 - [Contributing](CONTRIBUTING.md) · [Releasing](docs/releasing.md) · [Code of conduct](CODE_OF_CONDUCT.md)
 
 The wallet extraction integration also provides `ergo-walletd`, a separate
-daemon built from source. Watch-only remains its default; Phase 3 adds opt-in
-encrypted seed lifecycle and key management through an authenticated local API.
+daemon built from source. Watch-only remains its default; completed Phase 3 adds
+opt-in seed hosting for lifecycle, key management, transaction construction,
+signing and sending, scans/rescans and private mining jobs through an authenticated
+local API. Offline migration and discovery, release packaging and deployment
+guidance are included.
 See the [extraction plan](docs/wallet-extraction.md#phase-3-daemon-engine-hosting),
 [daemon guide](docs/codemap/ergo-walletd.md) and
 [daemon configuration](docs/configuration.md#ergo-walletdtoml-the-standalone-wallet-daemon).
-Daemon transaction construction, signing, sending and embedded-wallet migration
-remain to be implemented.
+The default wallet library core is portable, with optional CLI/keystore features
+and Android checks. EIP-19 reduced transactions and independently reviewed
+real-context contract signing are tracked in [#612](https://github.com/arkadianet/ergo/issues/612).
 
 ## Security
 

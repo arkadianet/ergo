@@ -233,3 +233,43 @@ pub fn generate_commitments_for_tx(
 
     Ok(tbag)
 }
+
+/// Generate bounded commitments from an already reduced transaction.
+/// No box lookup or script evaluation is performed.
+pub fn generate_commitments_for_reduced(
+    reduced: &crate::ReducedTransaction,
+    block_version: u8,
+    generate_for: &[SigmaBoolean],
+    rng: &mut dyn ProvingRng,
+) -> Result<crate::proving::hints::TransactionHintsBag, WalletError> {
+    let checked = crate::ReducedTransaction::from_bytes(&reduced.to_bytes()?, block_version)?;
+    checked.validate_for_proving()?;
+    let mut cost = ergo_primitives::cost::CostAccumulator::new(
+        ergo_primitives::cost::JitCost::from_jit(100_000_000),
+    );
+    for input in &checked.reduced_inputs {
+        cost.add(ergo_sigma::crypto_cost::estimate_crypto_cost(&input.sigma))
+            .map_err(|e| WalletError::TxBuild(e.to_string()))?;
+    }
+    let mut bag = crate::proving::hints::TransactionHintsBag::empty();
+    for (idx, input) in checked.reduced_inputs.iter().enumerate() {
+        bag.replace_for_input(
+            idx as u32,
+            generate_commitments_for(&input.sigma, generate_for, rng)?,
+        );
+    }
+    Ok(bag)
+}
+
+/// Consume-once commitments bound to this message and exact frozen reduction.
+pub fn generate_bound_commitments_for_reduced(
+    reduced: &crate::ReducedTransaction,
+    block_version: u8,
+    generate_for: &[SigmaBoolean],
+    rng: &mut dyn ProvingRng,
+) -> Result<crate::proving::hints::BoundTransactionHints, WalletError> {
+    crate::proving::hints::BoundTransactionHints::new_for_reduced(
+        generate_commitments_for_reduced(reduced, block_version, generate_for, rng)?,
+        reduced,
+    )
+}

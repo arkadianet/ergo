@@ -185,6 +185,70 @@ fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoole
     }
 }
 
+/// Serialize a standalone proposition only after bounding its expanded wire size
+/// and reference reader depth. Shared child graphs are measured without expansion.
+pub fn write_sigma_boolean_bounded(
+    w: &mut VlqWriter,
+    sigma: &SigmaBoolean,
+    max_bytes: usize,
+) -> Result<(), WriteError> {
+    fn vlq_len(n: usize) -> usize {
+        let bits = usize::BITS - n.leading_zeros();
+        bits.max(1).div_ceil(7) as usize
+    }
+    let invalid =
+        || WriteError::InvalidData("sigma proposition exceeds wire size/depth bound".into());
+    let mut sizes = std::collections::HashMap::<*const SigmaBoolean, (usize, usize)>::new();
+    let mut pending = vec![(sigma, false)];
+    while let Some((node, ready)) = pending.pop() {
+        let key = node as *const SigmaBoolean;
+        if sizes.contains_key(&key) {
+            continue;
+        }
+        let children = match node {
+            SigmaBoolean::Cand(c)
+            | SigmaBoolean::Cor(c)
+            | SigmaBoolean::Cthreshold { children: c, .. } => Some(c),
+            _ => None,
+        };
+        if !ready {
+            if let Some(children) = children {
+                if children.len() > u16::MAX as usize {
+                    return Err(invalid());
+                }
+                pending.push((node, true));
+                pending.extend(children.iter().rev().map(|c| (c, false)));
+                continue;
+            }
+        }
+        let mut depth = 1;
+        let mut bytes = match node {
+            SigmaBoolean::TrivialProp(_) => 1,
+            SigmaBoolean::ProveDlog(_) => 34,
+            SigmaBoolean::ProveDHTuple { .. } => 133,
+            SigmaBoolean::Cand(c) | SigmaBoolean::Cor(c) => 1 + vlq_len(c.len()),
+            SigmaBoolean::Cthreshold { k, children } => {
+                if !is_valid_cthreshold_shape(*k, children.len()) {
+                    return Err(invalid());
+                }
+                1 + vlq_len(usize::from(*k)) + vlq_len(children.len())
+            }
+        };
+        if let Some(children) = children {
+            for child in children.iter() {
+                let (n, d) = sizes[&(child as *const SigmaBoolean)];
+                bytes = bytes.checked_add(n).ok_or_else(invalid)?;
+                depth = depth.max(d + 1);
+            }
+        }
+        if bytes > max_bytes || depth > MAX_SIGMA_TREE_DEPTH {
+            return Err(invalid());
+        }
+        sizes.insert(key, (bytes, depth));
+    }
+    write_sigma_boolean(w, sigma)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

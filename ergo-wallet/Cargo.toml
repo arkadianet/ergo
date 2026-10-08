@@ -47,6 +47,7 @@ cli = ["keystore", "dep:clap", "dep:rpassword"]
 test-utils = []
 
 [dev-dependencies]
+base64 = { workspace = true }
 tempfile = { workspace = true }
 ergo-primitives = { workspace = true }
 ergo-sigma      = { workspace = true }

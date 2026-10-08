@@ -1143,6 +1143,7 @@ version = "0.12.3"
 dependencies = [
  "aes-gcm",
  "assert_cmd",
+ "base64",
  "bip39",
  "clap",
  "ergo-chain-spec",
