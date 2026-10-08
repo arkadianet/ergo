@@ -775,7 +775,11 @@ mod tests {
             submitter.clone(),
         );
         let response = engine
-            .native_send_transaction(SendTxRequest::Intent { intent })
+            .native_send_transaction(SendTxRequest::Intent {
+                intent,
+                delivery: Default::default(),
+                private_options: None,
+            })
             .await
             .unwrap();
 

@@ -239,7 +239,7 @@ impl WalletAdminError {
     pub fn detail(&self) -> Option<&str> {
         match self {
             Self::ScanInvalidated => {
-                Some("wallet scan invalidated — run a full rescan (fromHeight=0)")
+                Some("wallet scan invalidated — run wallet-scan-utxo offline or a full rescan (fromHeight=0)")
             }
             Self::BadRequest(d)
             | Self::StaleChainTip(d)
@@ -260,7 +260,7 @@ impl fmt::Display for WalletAdminError {
         match self {
             Self::ShuttingDown => f.write_str("wallet shutting down"),
             Self::ScanInvalidated => {
-                f.write_str("wallet scan invalidated — run a full rescan (fromHeight=0)")
+                f.write_str("wallet scan invalidated — run wallet-scan-utxo offline or a full rescan (fromHeight=0)")
             }
             Self::Uninitialized => f.write_str("wallet uninitialized"),
             Self::Locked => f.write_str("wallet locked"),

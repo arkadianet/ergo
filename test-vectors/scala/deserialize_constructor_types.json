@@ -1,0 +1,327 @@
+{
+  "oracle": "sigma-state 6.0.7, scripts/jvm_deserialize_oracle/ConstructorOracle.scala",
+  "cases": [
+    {
+      "name": "tuple-index",
+      "tree_version": 0,
+      "bytes_hex": "b2860204000400040000",
+      "phase": "TYPE",
+      "result": "SAny"
+    },
+    {
+      "name": "option-get-index",
+      "tree_version": 0,
+      "bytes_hex": "e4b2860204000400040000",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "filter-index",
+      "tree_version": 0,
+      "bytes_hex": "b5b2860204000400040000d90101040101",
+      "phase": "TYPE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "sizeof-filter",
+      "tree_version": 0,
+      "bytes_hex": "b1b5b2860204000400040000d90101040101",
+      "phase": "TYPE",
+      "result": "SInt$"
+    },
+    {
+      "name": "eq-filter",
+      "tree_version": 0,
+      "bytes_hex": "93b5b2860204000400040000d90101040101b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "if-filter",
+      "tree_version": 0,
+      "bytes_hex": "950101b5b2860204000400040000d90101040101b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "plus-filter",
+      "tree_version": 0,
+      "bytes_hex": "9ab5b2860204000400040000d901010401010400",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "bool-filter",
+      "tree_version": 0,
+      "bytes_hex": "d1b5b2860204000400040000d90101040101",
+      "phase": "TYPE",
+      "result": "SSigmaProp"
+    },
+    {
+      "name": "negation-bool",
+      "tree_version": 0,
+      "bytes_hex": "f00101",
+      "phase": "DECODE_FAIL",
+      "result": "IllegalArgumentException"
+    },
+    {
+      "name": "numeric-cast-nonnumeric-target",
+      "tree_version": 0,
+      "bytes_hex": "7e040208",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "tuple-filter",
+      "tree_version": 0,
+      "bytes_hex": "8602b5b2860204000400040000d901010401010400",
+      "phase": "TYPE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "function-filter",
+      "tree_version": 0,
+      "bytes_hex": "d9010104b5b2860204000400040000d90101040101",
+      "phase": "TYPE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "option-getelse-filter",
+      "tree_version": 0,
+      "bytes_hex": "e5b5b2860204000400040000d901010401010400",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "byindex-filter",
+      "tree_version": 0,
+      "bytes_hex": "b2b5b2860204000400040000d90101040101040000",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "concrete-filter",
+      "tree_version": 0,
+      "bytes_hex": "83010c04b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "valdef-filter",
+      "tree_version": 0,
+      "bytes_hex": "d601b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "tuple-index",
+      "tree_version": 3,
+      "bytes_hex": "b2860204000400040000",
+      "phase": "TYPE",
+      "result": "SAny"
+    },
+    {
+      "name": "option-get-index",
+      "tree_version": 3,
+      "bytes_hex": "e4b2860204000400040000",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "filter-index",
+      "tree_version": 3,
+      "bytes_hex": "b5b2860204000400040000d90101040101",
+      "phase": "TYPE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "sizeof-filter",
+      "tree_version": 3,
+      "bytes_hex": "b1b5b2860204000400040000d90101040101",
+      "phase": "TYPE",
+      "result": "SInt$"
+    },
+    {
+      "name": "eq-filter",
+      "tree_version": 3,
+      "bytes_hex": "93b5b2860204000400040000d90101040101b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "if-filter",
+      "tree_version": 3,
+      "bytes_hex": "950101b5b2860204000400040000d90101040101b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "plus-filter",
+      "tree_version": 3,
+      "bytes_hex": "9ab5b2860204000400040000d901010401010400",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "bool-filter",
+      "tree_version": 3,
+      "bytes_hex": "d1b5b2860204000400040000d90101040101",
+      "phase": "TYPE",
+      "result": "SSigmaProp"
+    },
+    {
+      "name": "negation-bool",
+      "tree_version": 3,
+      "bytes_hex": "f00101",
+      "phase": "DECODE_FAIL",
+      "result": "IllegalArgumentException"
+    },
+    {
+      "name": "numeric-cast-nonnumeric-target",
+      "tree_version": 3,
+      "bytes_hex": "7e040208",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "tuple-filter",
+      "tree_version": 3,
+      "bytes_hex": "8602b5b2860204000400040000d901010401010400",
+      "phase": "TYPE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "function-filter",
+      "tree_version": 3,
+      "bytes_hex": "d9010104b5b2860204000400040000d90101040101",
+      "phase": "TYPE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "option-getelse-filter",
+      "tree_version": 3,
+      "bytes_hex": "e5b5b2860204000400040000d901010401010400",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "byindex-filter",
+      "tree_version": 3,
+      "bytes_hex": "b2b5b2860204000400040000d90101040101040000",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "concrete-filter",
+      "tree_version": 3,
+      "bytes_hex": "83010c04b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "valdef-filter",
+      "tree_version": 3,
+      "bytes_hex": "d601b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "fold-filter-zero",
+      "tree_version": 0,
+      "bytes_hex": "b0830004b5b2860204000400040000d90101040101d902010402040400",
+      "phase": "TYPE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "sigmabytes-filter",
+      "tree_version": 0,
+      "bytes_hex": "d0b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "isdefined-filter",
+      "tree_version": 0,
+      "bytes_hex": "e6b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "isdefined-scalar",
+      "tree_version": 0,
+      "bytes_hex": "e60400",
+      "phase": "TYPE",
+      "result": "SBoolean"
+    },
+    {
+      "name": "if-scalar-condition",
+      "tree_version": 0,
+      "bytes_hex": "95040001010100",
+      "phase": "TYPE",
+      "result": "SBoolean"
+    },
+    {
+      "name": "byindex-filter-index",
+      "tree_version": 0,
+      "bytes_hex": "b2830004b5b2860204000400040000d9010104010100",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "map-filter-input",
+      "tree_version": 0,
+      "bytes_hex": "adb5b2860204000400040000d90101040101d90101047201",
+      "phase": "TYPE",
+      "result": "Coll[SInt$]"
+    },
+    {
+      "name": "fold-filter-zero",
+      "tree_version": 3,
+      "bytes_hex": "b0830004b5b2860204000400040000d90101040101d902010402040400",
+      "phase": "TYPE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "sigmabytes-filter",
+      "tree_version": 3,
+      "bytes_hex": "d0b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "isdefined-filter",
+      "tree_version": 3,
+      "bytes_hex": "e6b5b2860204000400040000d90101040101",
+      "phase": "DECODE_FAIL",
+      "result": "ClassCastException"
+    },
+    {
+      "name": "isdefined-scalar",
+      "tree_version": 3,
+      "bytes_hex": "e60400",
+      "phase": "TYPE",
+      "result": "SBoolean"
+    },
+    {
+      "name": "if-scalar-condition",
+      "tree_version": 3,
+      "bytes_hex": "95040001010100",
+      "phase": "TYPE",
+      "result": "SBoolean"
+    },
+    {
+      "name": "byindex-filter-index",
+      "tree_version": 3,
+      "bytes_hex": "b2830004b5b2860204000400040000d9010104010100",
+      "phase": "TYPE",
+      "result": "SInt$"
+    },
+    {
+      "name": "map-filter-input",
+      "tree_version": 3,
+      "bytes_hex": "adb5b2860204000400040000d90101040101d90101047201",
+      "phase": "TYPE",
+      "result": "Coll[SInt$]"
+    }
+  ]
+}

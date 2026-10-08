@@ -1,0 +1,214 @@
+up_eq_upcast_byte_long__long_v0_a1	ACCEPT	15	-	c0843d00d19302020502070000	-
+up_eq_upcast_byte_long__long_v0_a3	ACCEPT	15	-	c0843d00d19302020502070000	-
+up_eq_upcast_byte_long__long_v3_a1	ACCEPT	16	-	c0843d0b08d1937e0202050502070000	-
+up_eq_upcast_byte_long__long_v3_a3	ACCEPT	16	-	c0843d0b08d1937e0202050502070000	-
+up_eq_byte__long_v0_a1	ACCEPT	13	-	c0843d00d19302020502070000	-
+up_eq_byte__long_v0_a3	ACCEPT	13	-	c0843d00d19302020502070000	-
+up_eq_byte__long_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConstantNode(2,SByte$)(tpe:	11	-	-	-
+up_eq_byte__long_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConstantNode(2,SByte$)(tpe:	11	-	-	-
+up_eq_upcast_long_byte__long_v0_a1	ACCEPT	15	-	c0843d00d1937e0502050502070000	-
+up_eq_upcast_long_byte__long_v0_a3	ACCEPT	15	-	c0843d00d1937e0502050502070000	-
+up_eq_upcast_long_byte__long_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Upcast(LongConstant(1),SByt	13	-	-	-
+up_eq_upcast_long_byte__long_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Upcast(LongConstant(1),SByt	13	-	-	-
+up_eq_height__long_v0_a1	ACCEPT	12	-	c0843d00d1937ea3050502070000	-
+up_eq_height__long_v0_a3	ACCEPT	12	-	c0843d00d1937ea3050502070000	-
+up_eq_height__long_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Height$(163)(tpe: SInt$), L	10	-	-	-
+up_eq_height__long_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Height$(163)(tpe: SInt$), L	10	-	-	-
+up_eq_long__height_v0_a1	ACCEPT	12	-	c0843d00d19305027ea305070000	-
+up_eq_long__height_v0_a3	ACCEPT	12	-	c0843d00d19305027ea305070000	-
+up_eq_long__height_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (LongConstant(1)(tpe: SLong$	10	-	-	-
+up_eq_long__height_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (LongConstant(1)(tpe: SLong$	10	-	-	-
+up_plus_byte__long_v0_a1	ACCEPT	16	-	c0843d00d1939a020205020502070000	-
+up_plus_byte__long_v0_a3	ACCEPT	16	-	c0843d00d1939a020205020502070000	-
+up_plus_byte__long_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Plus(ConstantNode(2,SByte$)	14	-	-	-
+up_plus_byte__long_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Plus(ConstantNode(2,SByte$)	14	-	-	-
+up_plus_int__bigint_v0_a1	ACCEPT	18	-	c0843d00d1939a0402060105060105070000	-
+up_plus_int__bigint_v0_a3	ACCEPT	18	-	c0843d00d1939a0402060105060105070000	-
+up_plus_int__bigint_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Plus(IntConstant(1), Consta	16	-	-	-
+up_plus_int__bigint_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Plus(IntConstant(1), Consta	16	-	-	-
+up_eq_downcast_long_byte__byte_v0_a1	ACCEPT	15	-	c0843d00d1937d0502020202070000	-
+up_eq_downcast_long_byte__byte_v0_a3	ACCEPT	15	-	c0843d00d1937d0502020202070000	-
+up_eq_downcast_long_byte__byte_v3_a1	ACCEPT	16	-	c0843d0b08d1937d0502020202070000	-
+up_eq_downcast_long_byte__byte_v3_a3	ACCEPT	16	-	c0843d0b08d1937d0502020202070000	-
+up_eq_upcast_height_long__long_v0_a1	ACCEPT	14	-	c0843d00d1937ea3050502070000	-
+up_eq_upcast_height_long__long_v0_a3	ACCEPT	14	-	c0843d00d1937ea3050502070000	-
+up_eq_upcast_height_long__long_v3_a1	ACCEPT	15	-	c0843d0b07d1937ea3050502070000	-
+up_eq_upcast_height_long__long_v3_a3	ACCEPT	15	-	c0843d0b07d1937ea3050502070000	-
+up_eq_upcast_byte_long__upcast_byte_long_v0_a1	ACCEPT	17	-	c0843d00d19302020202070000	-
+up_eq_upcast_byte_long__upcast_byte_long_v0_a3	ACCEPT	17	-	c0843d00d19302020202070000	-
+up_eq_upcast_byte_long__upcast_byte_long_v3_a1	ACCEPT	18	-	c0843d0b0ad1937e0202057e020205070000	-
+up_eq_upcast_byte_long__upcast_byte_long_v3_a3	ACCEPT	18	-	c0843d0b0ad1937e0202057e020205070000	-
+up_eq_upcast_byte_int__long_v0_a1	ACCEPT	15	-	c0843d00d1937e0202050502070000	-
+up_eq_upcast_byte_int__long_v0_a3	ACCEPT	15	-	c0843d00d1937e0202050502070000	-
+up_eq_upcast_byte_int__long_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Upcast(ConstantNode(2,SByte	13	-	-	-
+up_eq_upcast_byte_int__long_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Upcast(ConstantNode(2,SByte	13	-	-	-
+up_lt_byte__int_v0_a1	ACCEPT	13	-	c0843d00d18f02020402070000	-
+up_lt_byte__int_v0_a3	ACCEPT	13	-	c0843d00d18f02020402070000	-
+up_lt_byte__int_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConstantNode(2,SByte$)(tpe:	11	-	-	-
+up_lt_byte__int_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConstantNode(2,SByte$)(tpe:	11	-	-	-
+up_min_byte__int_v0_a1	ACCEPT	16	-	c0843d00d193a1020204020402070000	-
+up_min_byte__int_v0_a3	ACCEPT	16	-	c0843d00d193a1020204020402070000	-
+up_min_byte__int_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Min(ConstantNode(2,SByte$),	14	-	-	-
+up_min_byte__int_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (Min(ConstantNode(2,SByte$),	14	-	-	-
+up_bitor_byte__int_v0_a1	ACCEPT	16	-	c0843d00d1937ef202020402040402070000	-
+up_bitor_byte__int_v0_a3	ACCEPT	16	-	c0843d00d1937ef202020402040402070000	-
+up_bitor_byte__int_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (BitOp(ConstantNode(2,SByte$	14	-	-	-
+up_bitor_byte__int_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (BitOp(ConstantNode(2,SByte$	14	-	-	-
+up_eq_coll_byte__coll_int_v0_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConstantNode(Coll(-86),Coll	12	-	-	-
+up_eq_coll_byte__coll_int_v0_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConstantNode(Coll(-86),Coll	12	-	-	-
+up_eq_coll_byte__coll_int_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConstantNode(Coll(-86),Coll	13	-	-	-
+up_eq_coll_byte__coll_int_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConstantNode(Coll(-86),Coll	13	-	-	-
+up_if_byte_long_v0_a1	ACCEPT	17	-	c0843d00d1937e95010102020502050502070000	-
+up_if_byte_long_v0_a3	ACCEPT	17	-	c0843d00d1937e95010102020502050502070000	-
+up_if_byte_long_v3_a1	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (If(TrueLeaf,ConstantNode(2,	15	-	-	-
+up_if_byte_long_v3_a3	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (If(TrueLeaf,ConstantNode(2,	15	-	-	-
+r3_lt_height_long	ACCEPT	12	-	c0843d00d18f7ea3050502070000	-
+r3_gt_long_height	ACCEPT	12	-	c0843d00d19105027ea305070000	-
+r3_neq_height_long	ACCEPT	12	-	c0843d00d1947ea3050502070000	-
+r3_eq_sizeof_long	ACCEPT	15	-	c0843d00d1937eb10e01aa050502070000	-
+r3_eq_height_bigint	ACCEPT	13	-	c0843d00d1937ea306060105070000	-
+r3_eq_plus_height_long	ACCEPT	15	-	c0843d00d1939a7ea30505020502070000	-
+r3_eq_extractamount_int	ACCEPT	13	-	c0843d00d193c1a70402070000	-
+r3_eq_int_extractamount	ACCEPT	13	-	c0843d00d1930402c1a7070000	-
+r3_eq_height_int	ACCEPT	12	-	c0843d00d193a30402070000	-
+r3_le_height_long	ACCEPT	12	-	c0843d00d1907ea3050502070000	-
+r3_ge_height_short	ACCEPT	12	-	c0843d00d192a30302070000	-
+r3_eq_if_height_long	ACCEPT	16	-	c0843d00d1937e950101a30502050502070000	-
+r3_eq_neg_byte_int	ACCEPT	14	-	c0843d00d1937ef00202040402070000	-
+r3_eq_sizeof_long_sizeof	ACCEPT	17	-	c0843d00d193b10e01aab10e01aa070000	-
+r3_eq_height_long_pad	ACCEPT	12	-	c0843d00d1937ea3050502070000	-
+r3_eq_height_long_v1s	ACCEPT	13	-	c0843d0907d1937ea3050502070000	-
+r3_eq_height_long_v2s	ACCEPT	13	-	c0843d0a07d1937ea3050502070000	-
+r3_lt_height_long_v2s	ACCEPT	13	-	c0843d0a07d18f7ea3050502070000	-
+relation-8f-box	ACCEPT	45	-	c0843d00d18f7ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	box_id=5edb9e5ae3ede64a1aff7308a55ed43637045ac9895b29859646a48396ccd325 bytes_is_received=true
+relation-8f-constant	ACCEPT	46	-	63c0843d00d18f7ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	SBox
+relation-8f-registers	ACCEPT	47	-	0163c0843d00d18f7ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-8f-context_extension	ACCEPT	48	-	010063c0843d00d18f7ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-8f-tree	ACCEPT	51	-	1b330163c0843d00d18f7ea305050201000000000000000000000000000000000000000000000000000000000000000000000008d3	-
+relation-8f-expression	ACCEPT	5	-	-	-
+relation-90-box	ACCEPT	45	-	c0843d00d1907ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	box_id=ea2ef5d83d540810d6ec5e0e63cc2f6fffa201965b0eff2914a0fe49b35dc70c bytes_is_received=true
+relation-90-constant	ACCEPT	46	-	63c0843d00d1907ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	SBox
+relation-90-registers	ACCEPT	47	-	0163c0843d00d1907ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-90-context_extension	ACCEPT	48	-	010063c0843d00d1907ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-90-tree	ACCEPT	51	-	1b330163c0843d00d1907ea305050201000000000000000000000000000000000000000000000000000000000000000000000008d3	-
+relation-90-expression	ACCEPT	5	-	-	-
+relation-91-box	ACCEPT	45	-	c0843d00d1917ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	box_id=d3e9eb296486029e1b78e8ef822d67af9d7bbb9008a514fb33e4a415178c6954 bytes_is_received=true
+relation-91-constant	ACCEPT	46	-	63c0843d00d1917ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	SBox
+relation-91-registers	ACCEPT	47	-	0163c0843d00d1917ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-91-context_extension	ACCEPT	48	-	010063c0843d00d1917ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-91-tree	ACCEPT	51	-	1b330163c0843d00d1917ea305050201000000000000000000000000000000000000000000000000000000000000000000000008d3	-
+relation-91-expression	ACCEPT	5	-	-	-
+relation-92-box	ACCEPT	45	-	c0843d00d1927ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	box_id=86f38d1a3ab2cf18f843eabcd7021af3411180e6be03f0d188346631e4befbee bytes_is_received=true
+relation-92-constant	ACCEPT	46	-	63c0843d00d1927ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	SBox
+relation-92-registers	ACCEPT	47	-	0163c0843d00d1927ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-92-context_extension	ACCEPT	48	-	010063c0843d00d1927ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-92-tree	ACCEPT	51	-	1b330163c0843d00d1927ea305050201000000000000000000000000000000000000000000000000000000000000000000000008d3	-
+relation-92-expression	ACCEPT	5	-	-	-
+relation-93-box	ACCEPT	45	-	c0843d00d1937ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	box_id=3753bde087340d35fdd4672acad091f0184c50fb7135544ca7d5d835097b9362 bytes_is_received=true
+relation-93-constant	ACCEPT	46	-	63c0843d00d1937ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	SBox
+relation-93-registers	ACCEPT	47	-	0163c0843d00d1937ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-93-context_extension	ACCEPT	48	-	010063c0843d00d1937ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-93-tree	ACCEPT	51	-	1b330163c0843d00d1937ea305050201000000000000000000000000000000000000000000000000000000000000000000000008d3	-
+relation-93-expression	ACCEPT	5	-	-	-
+relation-94-box	ACCEPT	45	-	c0843d00d1947ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	box_id=52475f1a505ba050169fcc4a04731d6ebfce0b59980b61924d9f364d974130d1 bytes_is_received=true
+relation-94-constant	ACCEPT	46	-	63c0843d00d1947ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	SBox
+relation-94-registers	ACCEPT	47	-	0163c0843d00d1947ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-94-context_extension	ACCEPT	48	-	010063c0843d00d1947ea3050502010000000000000000000000000000000000000000000000000000000000000000000000	-
+relation-94-tree	ACCEPT	51	-	1b330163c0843d00d1947ea305050201000000000000000000000000000000000000000000000000000000000000000000000008d3	-
+relation-94-expression	ACCEPT	5	-	-	-
+relation-options-mismatch-v0-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SLong$])(tp	9	-	-	-
+relation-options-mismatch-v0-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SLong$])(tp	8	-	-	-
+relation-options-mismatch-v1-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SLong$])(tp	10	-	-	-
+relation-options-mismatch-v1-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SLong$])(tp	8	-	-	-
+relation-options-mismatch-v3-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SLong$])(tp	10	-	-	-
+relation-options-mismatch-v3-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SLong$])(tp	8	-	-	-
+relation-options-match-v0-tree	ACCEPT	9	-	00d193e30004e30104	-
+relation-options-match-v0-expression	ACCEPT	8	-	-	-
+relation-options-match-v1-tree	ACCEPT	10	-	0908d193e30004e30104	-
+relation-options-match-v1-expression	ACCEPT	8	-	-	-
+relation-options-match-v3-tree	ACCEPT	10	-	0b08d193e30004e30104	-
+relation-options-match-v3-expression	ACCEPT	8	-	-	-
+relation-collections-mismatch-v0-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConcreteCollection(WrappedA	13	-	-	-
+relation-collections-mismatch-v0-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConcreteCollection(WrappedA	12	-	-	-
+relation-collections-mismatch-v1-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConcreteCollection(WrappedA	14	-	-	-
+relation-collections-mismatch-v1-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConcreteCollection(WrappedA	12	-	-	-
+relation-collections-mismatch-v3-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConcreteCollection(WrappedA	14	-	-	-
+relation-collections-mismatch-v3-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ConcreteCollection(WrappedA	12	-	-	-
+relation-collections-match-v0-tree	ACCEPT	13	-	00d19383010404008301040400	-
+relation-collections-match-v0-expression	ACCEPT	12	-	-	-
+relation-collections-match-v1-tree	ACCEPT	14	-	090cd19383010404008301040400	-
+relation-collections-match-v1-expression	ACCEPT	12	-	-	-
+relation-collections-match-v3-tree	ACCEPT	14	-	0b0cd19383010404008301040400	-
+relation-collections-match-v3-expression	ACCEPT	12	-	-	-
+relation-tuple-index-any-mismatch-v0-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ByIndex(Tuple(Vector(IntCon	15	-	-	-
+relation-tuple-index-any-mismatch-v0-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ByIndex(Tuple(Vector(IntCon	14	-	-	-
+relation-tuple-index-any-mismatch-v1-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ByIndex(Tuple(Vector(IntCon	16	-	-	-
+relation-tuple-index-any-mismatch-v1-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ByIndex(Tuple(Vector(IntCon	14	-	-	-
+relation-tuple-index-any-mismatch-v3-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ByIndex(Tuple(Vector(IntCon	16	-	-	-
+relation-tuple-index-any-mismatch-v3-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (ByIndex(Tuple(Vector(IntCon	14	-	-	-
+relation-tuple-index-any-match-v0-tree	ACCEPT	23	-	00d193b2860204020404040000b2860204020404040000	-
+relation-tuple-index-any-match-v0-expression	ACCEPT	22	-	-	-
+relation-tuple-index-any-match-v1-tree	ACCEPT	24	-	0916d193b2860204020404040000b2860204020404040000	-
+relation-tuple-index-any-match-v1-expression	ACCEPT	22	-	-	-
+relation-tuple-index-any-match-v3-tree	ACCEPT	24	-	0b16d193b2860204020404040000b2860204020404040000	-
+relation-tuple-index-any-match-v3-expression	ACCEPT	22	-	-	-
+relation-functions-mismatch-v0-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (FuncValue(WrappedArray((1,S	15	-	-	-
+relation-functions-mismatch-v0-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (FuncValue(WrappedArray((1,S	14	-	-	-
+relation-functions-mismatch-v1-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (FuncValue(WrappedArray((1,S	16	-	-	-
+relation-functions-mismatch-v1-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (FuncValue(WrappedArray((1,S	14	-	-	-
+relation-functions-mismatch-v3-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (FuncValue(WrappedArray((1,S	16	-	-	-
+relation-functions-mismatch-v3-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (FuncValue(WrappedArray((1,S	14	-	-	-
+relation-functions-match-v0-tree	ACCEPT	15	-	00d193d90101050400d90101050400	-
+relation-functions-match-v0-expression	ACCEPT	14	-	-	-
+relation-functions-match-v1-tree	ACCEPT	16	-	090ed193d90101050400d90101050400	-
+relation-functions-match-v1-expression	ACCEPT	14	-	-	-
+relation-functions-match-v3-tree	ACCEPT	16	-	0b0ed193d90101050400d90101050400	-
+relation-functions-match-v3-expression	ACCEPT	14	-	-	-
+relation-options-any-mismatch-v0-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SAny])(tpe:	9	-	-	-
+relation-options-any-mismatch-v0-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SAny])(tpe:	8	-	-	-
+relation-options-any-mismatch-v1-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SAny])(tpe:	10	-	-	-
+relation-options-any-mismatch-v1-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SAny])(tpe:	8	-	-	-
+relation-options-any-mismatch-v3-tree	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SAny])(tpe:	10	-	-	-
+relation-options-any-mismatch-v3-expression	ConstraintFailed:Failed constraint sigma.ast.Constraints$SameType2$@5db4c359 for binary operation parameters (GetVar(0,Option[SAny])(tpe:	8	-	-	-
+relation-options-any-match-v0-tree	ACCEPT	9	-	00d193e30004e30104	-
+relation-options-any-match-v0-expression	ACCEPT	8	-	-	-
+relation-options-any-match-v1-tree	ACCEPT	10	-	0908d193e30004e30104	-
+relation-options-any-match-v1-expression	ACCEPT	8	-	-	-
+relation-options-any-match-v3-tree	ACCEPT	10	-	0b08d193e30004e30104	-
+relation-options-any-match-v3-expression	ACCEPT	8	-	-	-
+logical-ec-mixed-numeric-v0-tree	ACCEPT	6	-	00d1eca30502	-
+logical-ec-mixed-numeric-v0-expression	ACCEPT	5	-	-	-
+logical-ec-mixed-numeric-v1-tree	ACCEPT	7	-	0905d1eca30502	-
+logical-ec-mixed-numeric-v1-expression	ACCEPT	5	-	-	-
+logical-ec-mixed-numeric-v3-tree	ACCEPT	7	-	0b05d1eca30502	-
+logical-ec-mixed-numeric-v3-expression	ACCEPT	5	-	-	-
+logical-ec-deferred-filter-v0-tree	ACCEPT	7	-	00d1ecb5010101010101	-
+logical-ec-deferred-filter-v0-expression	ACCEPT	6	-	-	-
+logical-ec-deferred-filter-v1-tree	ACCEPT	8	-	0909d1ecb5010101010101	-
+logical-ec-deferred-filter-v1-expression	ACCEPT	6	-	-	-
+logical-ec-deferred-filter-v3-tree	ACCEPT	8	-	0b09d1ecb5010101010101	-
+logical-ec-deferred-filter-v3-expression	ACCEPT	6	-	-	-
+logical-ed-mixed-numeric-v0-tree	ACCEPT	6	-	00d1eda30502	-
+logical-ed-mixed-numeric-v0-expression	ACCEPT	5	-	-	-
+logical-ed-mixed-numeric-v1-tree	ACCEPT	7	-	0905d1eda30502	-
+logical-ed-mixed-numeric-v1-expression	ACCEPT	5	-	-	-
+logical-ed-mixed-numeric-v3-tree	ACCEPT	7	-	0b05d1eda30502	-
+logical-ed-mixed-numeric-v3-expression	ACCEPT	5	-	-	-
+logical-ed-deferred-filter-v0-tree	ACCEPT	7	-	00d1edb5010101010101	-
+logical-ed-deferred-filter-v0-expression	ACCEPT	6	-	-	-
+logical-ed-deferred-filter-v1-tree	ACCEPT	8	-	0909d1edb5010101010101	-
+logical-ed-deferred-filter-v1-expression	ACCEPT	6	-	-	-
+logical-ed-deferred-filter-v3-tree	ACCEPT	8	-	0b09d1edb5010101010101	-
+logical-ed-deferred-filter-v3-expression	ACCEPT	6	-	-	-
+logical-f4-mixed-numeric-v0-tree	ACCEPT	6	-	00d1f4a30502	-
+logical-f4-mixed-numeric-v0-expression	ACCEPT	5	-	-	-
+logical-f4-mixed-numeric-v1-tree	ACCEPT	7	-	0905d1f4a30502	-
+logical-f4-mixed-numeric-v1-expression	ACCEPT	5	-	-	-
+logical-f4-mixed-numeric-v3-tree	ACCEPT	7	-	0b05d1f4a30502	-
+logical-f4-mixed-numeric-v3-expression	ACCEPT	5	-	-	-
+logical-f4-deferred-filter-v0-tree	ACCEPT	7	-	00d1f4b5010101010101	-
+logical-f4-deferred-filter-v0-expression	ACCEPT	6	-	-	-
+logical-f4-deferred-filter-v1-tree	ACCEPT	8	-	0909d1f4b5010101010101	-
+logical-f4-deferred-filter-v1-expression	ACCEPT	6	-	-	-
+logical-f4-deferred-filter-v3-tree	ACCEPT	8	-	0b09d1f4b5010101010101	-
+logical-f4-deferred-filter-v3-expression	ACCEPT	6	-	-	-

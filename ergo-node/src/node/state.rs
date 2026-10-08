@@ -191,6 +191,11 @@ pub(crate) struct NodeState {
     /// target it backs off to one cycle every 30s. Same gentleness
     /// guarantee as the old fixed 30s, with no cold-start penalty.
     pub(super) last_dial_at: Instant,
+    /// Independent recovery cadence; None makes startup recovery immediate.
+    pub(super) last_recovery_dial_at: Option<Instant>,
+    /// Recovery batch index; each batch dials the next addresses in priority
+    /// order, so a sweep reaches every eligible address.
+    pub(super) recovery_dial_rotation: usize,
     /// Timestamp of the most recent periodic-gossip `GetPeers` send.
     /// Gates the gossip path so we ask one random connected peer for
     /// its peer list every `GOSSIP_INTERVAL` — independent of the
@@ -361,6 +366,8 @@ pub(crate) struct NodeState {
     /// otherwise advertise another block this node rejects. Cleared when a
     /// block applies (the full tip moves); see `block_relay`.
     pub(super) mined_apply_failed_parent: Option<[u8; 32]>,
+    /// Event-driven private mining queue lifecycle; see `private_mining`.
+    pub(super) private_mining: super::private_mining::PrivateLifecycle,
     /// True for a non-loopback API bind or `config.api_local_reverse_proxy`.
     /// The `api_key` gate never covers `POST /transactions*` /
     /// `/api/v1/mempool/{submit,check}` (read/submit routes are

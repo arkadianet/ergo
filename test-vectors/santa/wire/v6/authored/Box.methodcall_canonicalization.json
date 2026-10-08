@@ -1,0 +1,86 @@
+{
+  "entries": [
+    {
+      "name": "sbox-constant-methodcall",
+      "kind": "Constant",
+      "bytes_hex": "63c0843d00d1e6dc650bfe000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "63c0843d00d1e6db650bfe0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400"
+    },
+    {
+      "name": "sbox-in-register-methodcall",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d301000163c0843d00d1e6dc650bfe000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "c0843d0008d301000163c0843d00d1e6db650bfe0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "sbox-in-extension-methodcall",
+      "kind": "Transaction",
+      "bytes_hex": "01000000000000000000000000000000000000000000000000000000000000000000010163c0843d00d1e6dc650bfe000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "01000000000000000000000000000000000000000000000000000000000000000000010163c0843d00d1e6db650bfe0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400000001c0843d0008d3010000"
+    },
+    {
+      "name": "sbox-in-output-register-methodcall",
+      "kind": "Transaction",
+      "bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d301000163c0843d00d1e6dc650bfe000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "0100000000000000000000000000000000000000000000000000000000000000000000000001c0843d0008d301000163c0843d00d1e6db650bfe0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400"
+    },
+    {
+      "name": "sbox-in-script-constant-methodcall",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d19363c0843d00d1e6dc650bfe000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d6640063c0843d00d1e6dc650bfe000100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "00d19363c0843d00d1e6db650bfe0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d6640063c0843d00d1e6db650bfe0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400"
+    },
+    {
+      "name": "methodcall-expression-in-register",
+      "kind": "Box",
+      "bytes_hex": "c0843d0008d3010001830104dc0c010e02010200000000000000000000000000000000000000000000000000000000000000000000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "methodcall-expression-in-extension",
+      "kind": "Transaction",
+      "bytes_hex": "010000000000000000000000000000000000000000000000000000000000000000000101830104dc0c010e02010200000001c0843d0008d3010000",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "error": "errored"
+    },
+    {
+      "name": "methodcall-script-size",
+      "kind": "ErgoTree",
+      "bytes_hex": "00d193dc0c010e020102000404",
+      "version": {
+        "activated": 3,
+        "ergoTree": 3
+      },
+      "expected_bytes_hex": "00d193db0c010e0201020404"
+    }
+  ],
+  "op": "Box.methodcall_canonicalization",
+  "schema": "santa-wire/v1"
+}

@@ -61,11 +61,15 @@ fn check_soft_fork_condition(
         Expr::Unparsed(tree) if tree.validation_error.is_some() => 0,
         _ => ergo_tree.version,
     };
-    if activated_script_version > MAX_SUPPORTED_SCRIPT_VERSION {
+    // Deliberately match the JVM signed-byte consensus quirk: negative
+    // activation is below every tree version, rather than a future soft fork.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/interpreter/Interpreter.scala#L298-L331
+    let activated_script_version = activated_script_version as i8;
+    if activated_script_version > MAX_SUPPORTED_SCRIPT_VERSION as i8 {
         if tree_version > MAX_SUPPORTED_SCRIPT_VERSION {
             return Ok(Some(true));
         }
-    } else if tree_version > activated_script_version {
+    } else if (tree_version as i8) > activated_script_version {
         return Err(VerifySpendingError::Eval(
             super::evaluator::EvalError::TreeVersionAboveActivated {
                 tree_version,
@@ -272,10 +276,12 @@ pub fn verify_spending_proof_with_context_and_cost(
         let mut substituted_cost = cost.clone();
         let checked = substituted_cost.add(subst);
         soft_fork_cost = Some(substituted_cost.clone());
-        if checked.is_err() || ctx.activated_script_version >= V6_SOFT_FORK_VERSION {
+        if checked.is_err() || (ctx.activated_script_version as i8) >= V6_SOFT_FORK_VERSION as i8 {
             // Preserve charged-to-failure cost, including the discarded-context
             // branch; the successful pre-A6 path keeps the original accumulator.
             *cost = substituted_cost;
+        } else {
+            cost.observe_checked_cost(substituted_cost.checked_peak());
         }
         checked.map_err(|e| VerifySpendingError::Eval(e.into()))?;
     }
@@ -340,7 +346,9 @@ pub fn verify_spending_proof_with_context_and_cost(
                     // Interpreter.scala:249 uses (TrueSigmaProp, context1), discarding
                     // partial substitution charges even before A6. The evaluator then
                     // charges the inline constant (5 JIT), NOT the trivial fast path.
-                    *cost = soft_fork_cost.expect("validation rule arises during substitution");
+                    cost.restore_cost(
+                        soft_fork_cost.expect("validation rule arises during substitution"),
+                    );
                     cost.add(crate::cost_table::INLINE_CONSTANT)
                         .map_err(|e| VerifySpendingError::Eval(e.into()))?;
                     SigmaBoolean::TrivialProp(true)
@@ -1548,6 +1556,25 @@ mod soft_fork_condition_tests {
         assert!(verify_at(&tree("080208d3"), 0).unwrap());
     }
 
+    #[test]
+    fn signed_negative_activation_rejects_before_reduction_or_soft_fork() {
+        for activated in [-1i8, -57, -128] {
+            for hex in ["080208d3", "0d0208d3"] {
+                assert!(matches!(
+                    verify_at(&tree(hex), activated as u8),
+                    Err(VerifySpendingError::Eval(
+                        super::super::evaluator::EvalError::TreeVersionAboveActivated {
+                            activated_script_version,
+                            ..
+                        }
+                    )) if activated_script_version == activated
+                ));
+            }
+        }
+        // -128 - 1 wraps back to 127: the unsupported-activation path remains.
+        assert!(verify_at(&tree("0d0208d3"), 127).unwrap());
+    }
+
     /// `Interpreter.scala:304-318`: an activated version this interpreter does
     /// not implement AND a tree needing it → accepted without verification.
     #[test]
@@ -1573,7 +1600,7 @@ mod soft_fork_condition_tests {
                     },
                 )) => {
                     assert_eq!(tree_version, t.version);
-                    assert_eq!(activated_script_version, activated);
+                    assert_eq!(activated_script_version, activated as i8);
                 }
                 other => panic!(
                     "{hex} at activated {activated}: expected the version reject, got {other:?}"
@@ -1582,3 +1609,7 @@ mod soft_fork_condition_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "reduce/deserialization_607.rs"]
+mod deserialization_607;

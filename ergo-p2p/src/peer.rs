@@ -70,7 +70,7 @@ pub type PeerId = SocketAddr;
 
 /// Treat an IPv4-mapped IPv6 socket as the same host as its IPv4 form when
 /// enforcing address budgets. Native IPv6 addresses retain their identity.
-pub(crate) fn canonical_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+pub fn canonical_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
     match ip {
         std::net::IpAddr::V6(ip) => ip
             .to_ipv4_mapped()

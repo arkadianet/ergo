@@ -63,7 +63,16 @@ pub(super) fn decode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value,
         }
     };
     add_method_cost(cx.cost, COST_DECODE_NBITS)?;
-    Ok(Value::BigInt(decode_compact_bits(compact)))
+    let decoded = ergo_ser::difficulty::decode_compact_bits_signed(compact as u32);
+    // The evaluator's numeric result is signed and bounded independently of
+    // the compact codec, which is also used by difficulty / PoW callers.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L194-L197
+    if !super::super::arithmetic::fits_in_256_bits(&decoded) {
+        return Err(EvalError::RuntimeException(
+            "SGlobal.decodeNbits result out of signed 256-bit range",
+        ));
+    }
+    Ok(Value::BigInt(decoded))
 }
 
 // SGlobal(106).some(9, value: T)[T] -> Option[T]
@@ -225,19 +234,43 @@ pub(super) fn deserialize_to(
     // `sigma_to_value_versioned` handle SHeader and enforce that gate
     // (GHSA-hfj8-hjph-7r78); a pre-v3 ErgoTree calling
     // deserializeTo[SHeader] is rejected here, matching the reference.
-    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+    // DataSerializer(SBox) -> ErgoBox.parse -> deserializeErgoTree inherits
+    // the executing VersionContext. A high-version nested tree throws a hard
+    // SerializerException (wrapped by reflective invocation on the JVM).
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L277-L282
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/DataSerializer.scala#L33-L38
+    let mut r = ergo_primitives::reader::VlqReader::new(&bytes)
+        .with_activated_script_version(cx.ctx.activated_script_version);
+    r.set_ergo_tree_version(Some(cx.ctx.ergo_tree_version));
     let parsed = ergo_ser::sigma_value::read_value(&mut r, target_type).map_err(|e| {
+        // DataSerializer preserves ValidationException, including rule 1020.
+        // It arises during evaluation and remains a hard spend failure.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/methods.scala
+        if let ergo_primitives::reader::ReadError::SigmaValidation { rule_id, args, .. } = e {
+            // Not the substitution soft-fork (TrueSigmaProp at the pre-substitution
+            // cost). A tree without deserialize nodes evaluates through evalToCrypto,
+            // with no soft-fork catch, so the failure is hard. A tree with them
+            // evaluates in reduceToCryptoJITC, whose trySoftForkable would yield
+            // TrueProp at the post-substitution cost for a soft-forkable rule; under
+            // the node's current settings none of the rules raised here qualifies
+            // (1020 is absent from them, and replaced 1007/1008/1011 are not
+            // tolerated after v6), so it is hard there too.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/interpreter/Interpreter.scala#L171-L186
+            return EvalError::EvaluationValidation { rule_id, args };
+        }
         EvalError::TypeError {
             expected: "valid data-serialized value for SGlobal.deserializeTo",
             got: format!("deserialization error: {e}"),
         }
     })?;
-    if !r.is_empty() {
-        return Err(EvalError::TypeError {
-            expected: "fully consumed SGlobal.deserializeTo bytes",
-            got: format!("{} trailing bytes", r.remaining()),
-        });
-    }
+    // DataSerializer decodes every GroupElement it reads, including those in a
+    // Box's script and registers and a Header's PoW solution, so an off-curve
+    // point fails deserializeTo for every target type.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L277-L282
+    crate::evaluator::dispatch::validate_recorded_group_elements(r.group_elements())?;
+    // Deliberately ignore trailing bytes for consensus: the reference returns
+    // the parsed value without checking the reader position.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L277-L282
     crate::evaluator::helpers::sigma_to_value_versioned(target_type, &parsed, cx.ctx)
 }
 
@@ -286,7 +319,10 @@ pub(super) fn from_big_endian_bytes(
             a.copy_from_slice(&bytes);
             Ok(Value::Long(i64::from_be_bytes(a)))
         }
-        S::SBigInt if bytes.len() <= 32 => Ok(Value::BigInt(
+        // Java BigInteger rejects an empty signed representation; the unsigned
+        // constructor below accepts it as zero. Preserve that distinction.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/data/CSigmaDslBuilder.scala#L249-L258
+        S::SBigInt if !bytes.is_empty() && bytes.len() <= 32 => Ok(Value::BigInt(
             num_bigint::BigInt::from_signed_bytes_be(&bytes),
         )),
         // SUnsignedBigInt: UNSIGNED big-endian parse (Scala
@@ -535,7 +571,7 @@ fn visit_serialization_puts(
                 }
             }
         }
-        (T::SBox, Sv::OpaqueBoxBytes(bytes)) => {
+        (T::SBox, Sv::OpaqueBoxBytes(bytes) | Sv::CanonicalBoxBytes { bytes, .. }) => {
             let mut r = ergo_primitives::reader::VlqReader::new(bytes);
             let candidate =
                 ergo_ser::ergo_box::read_accepted_ergo_box_candidate(&mut r).map_err(|e| {
@@ -707,40 +743,6 @@ fn encode_compact_bits(value: &num_bigint::BigInt) -> i64 {
 /// mantissa from the lower 24 bits, sign-extends, and zero-pads
 /// out to `size` bytes. The MSB of the first mantissa byte is the
 /// MPI-style sign bit: when set, negate the resulting magnitude.
-fn decode_compact_bits(compact: i64) -> num_bigint::BigInt {
-    let size = ((compact >> 24) & 0xFF) as usize;
-    if size == 0 {
-        return num_bigint::BigInt::from(0);
-    }
-    let mut mantissa = Vec::with_capacity(size);
-    if size >= 1 {
-        mantissa.push(((compact >> 16) & 0xFF) as u8);
-    }
-    if size >= 2 {
-        mantissa.push(((compact >> 8) & 0xFF) as u8);
-    }
-    if size >= 3 {
-        mantissa.push((compact & 0xFF) as u8);
-    }
-    // Zero-pad on the right out to `size` total bytes — Scala's
-    // `decodeMPI` reads the full length, treating the unread tail
-    // as zero (this is the difference between "23 bits of
-    // mantissa" and "the mantissa scaled to size bytes").
-    while mantissa.len() < size {
-        mantissa.push(0);
-    }
-    let negative = !mantissa.is_empty() && (mantissa[0] & 0x80) != 0;
-    if !mantissa.is_empty() {
-        mantissa[0] &= 0x7F;
-    }
-    let mag = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &mantissa);
-    if negative {
-        -mag
-    } else {
-        mag
-    }
-}
-
 /// Truncate a `BigInt` to the low 64 bits, matching Java's
 /// `BigInteger.longValue()` semantics — wraps around modulo 2^64
 /// without panicking on out-of-range values.

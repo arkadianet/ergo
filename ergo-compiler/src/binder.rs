@@ -77,7 +77,7 @@ pub enum BindError {
     /// PartialFunction UNCONDITIONALLY (SigmaBinder.scala:105-109), so a
     /// non-matching shape is a `scala.MatchError` crash → REJECT. Verdict
     /// parity holds; the class tag differs (deviation D-T8: Scala has no dedicated
-    /// class for this crash; we use `InvalidArguments`; see compiler-design-ledger.md § "Known M2
+    /// class for this crash; we use `InvalidArguments`; see ergo-compiler/docs/compiler-design-ledger.md § "Known M2
     /// deviations" D-T8), positioned at the Apply.
     #[error("{msg} (offset {pos})")]
     InvalidArguments { pos: Pos, msg: String },

@@ -44,6 +44,7 @@ pub fn rust_swagger_html() -> &'static str {
 // ES modules for the overhauled dashboard, served under `/js/`.
 pub const JS_API_CLIENT: &str = include_str!("../web/js/api-client.js");
 pub const JS_AUTH: &str = include_str!("../web/js/auth.js");
+pub const JS_CAPABILITIES: &str = include_str!("../web/js/capabilities.js");
 pub const JS_FORMAT: &str = include_str!("../web/js/format.js");
 pub const JS_FEE_STATS: &str = include_str!("../web/js/fee-stats.js");
 pub const JS_ROUTER: &str = include_str!("../web/js/router.js");
@@ -61,16 +62,21 @@ pub const JS_STORAGE_RENT: &str = include_str!("../web/js/storage-rent.js");
 pub const JS_WORKSPACE_SEARCH: &str = include_str!("../web/js/workspace-search.js");
 pub const JS_EXPLORER: &str = include_str!("../web/js/explorer.js");
 pub const JS_TOKEN_META: &str = include_str!("../web/js/token-meta.js");
+pub const JS_TRANSACTION_SOURCE: &str = include_str!("../web/js/transaction-source.js");
 pub const JS_PEERS: &str = include_str!("../web/js/peers.js");
 pub const JS_MEMPOOL: &str = include_str!("../web/js/mempool.js");
 pub const JS_VOTING: &str = include_str!("../web/js/voting.js");
 pub const JS_WALLET: &str = include_str!("../web/js/wallet.js");
+pub const JS_WALLET_PRIVATE: &str = include_str!("../web/js/wallet-private.js");
+pub const JS_WALLET_MAINTENANCE: &str = include_str!("../web/js/wallet-maintenance.js");
 pub const JS_WALLET_BUILDER: &str = include_str!("../web/js/wallet-builder.js");
 pub const JS_WALLET_TRANSACTION: &str = include_str!("../web/js/wallet-transaction.js");
 pub const JS_MINERS: &str = include_str!("../web/js/miners.js");
 pub const JS_MINING: &str = include_str!("../web/js/mining.js");
+pub const JS_MINING_INSPECTOR: &str = include_str!("../web/js/mining-inspector.js");
 pub const JS_MINING_WORK: &str = include_str!("../web/js/mining-work.js");
 pub const JS_MINING_REWARD: &str = include_str!("../web/js/mining-reward.js");
+pub const JS_MINING_POLICY: &str = include_str!("../web/js/mining-policy.js");
 pub const JS_WS_CLIENT: &str = include_str!("../web/js/ws-client.js");
 pub const JS_APP: &str = include_str!("../web/js/app.js");
 

@@ -119,6 +119,7 @@ fn block(height: u32) -> ApiRecentBlock {
         ts_unix_ms: 1_700_000_000_000 + height as u64,
         txs: height,
         size_bytes: 1000 + height as u64,
+        fee_observation: None,
         delivered_by: None,
         miner_pk: Some(format!("02{height:064x}")),
         miner_address: Some(format!("9addr{height}")),

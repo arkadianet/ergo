@@ -812,3 +812,61 @@ mod tests {
         assert_eq!(order_key(&t, Order::FirstSeen), 9);
     }
 }
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FeeEstimateQuery {
+    target_wait_seconds: Option<u32>,
+    tx_size_bytes: Option<u32>,
+    tx_cost_units: Option<u64>,
+}
+
+/// Read-only fee forecast with coverage. Unknown data yields a 200 response
+/// with available=false and null amounts; this does not pretend confirmation.
+#[utoipa::path(
+    get, path = "/api/v1/mempool/fee-estimate", operation_id = "v1_mempool_fee_estimate_get", tag = "mempool",
+    params(
+        ("target_wait_seconds" = Option<u32>, Query, description = "Desired wait, default 120; 1..=86400"),
+        ("tx_size_bytes" = Option<u32>, Query, description = "Signed transaction size, default 1000; 1..=1048576"),
+        ("tx_cost_units" = Option<u64>, Query, description = "Optional validation cost, default 0 (unknown); pool competition still includes observed costs"),
+    ),
+    responses(
+        (status = 200, description = "Observed capacity forecast or explicit insufficient_data", body = crate::types::ApiFeeEstimate),
+        (status = 400, description = "Invalid query parameters", body = V1Error),
+        (status = 503, description = "Chain reader or estimate capability unavailable", body = V1Error),
+    ),
+)]
+pub(crate) async fn fee_estimate(
+    State(s): State<V1State>,
+    V1Query(q): V1Query<FeeEstimateQuery>,
+) -> Response {
+    let seconds = q.target_wait_seconds.unwrap_or(120);
+    let size = q.tx_size_bytes.unwrap_or(1000);
+    if !(1..=86400).contains(&seconds) || !(1..=1_048_576).contains(&size) {
+        return v1_error(
+            Reason::InvalidParams,
+            "fee estimate parameters outside bounds",
+            "target_wait_seconds must be 1..=86400 and tx_size_bytes 1..=1048576",
+        );
+    }
+    let chain = match s.chain() {
+        Ok(chain) => chain.clone(),
+        Err(error) => return *error,
+    };
+    s.blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            match chain.pool_fee_estimate(
+                u64::from(seconds) * 1000,
+                size,
+                q.tx_cost_units.unwrap_or(0),
+            ) {
+                Some(estimate) => Json(estimate).into_response(),
+                None => v1_error(
+                    Reason::RouteUnavailable,
+                    "fee estimate capability unavailable",
+                    "this node adapter does not supply observed fee estimates",
+                ),
+            }
+        })
+        .await
+}

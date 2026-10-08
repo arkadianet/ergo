@@ -1,0 +1,4 @@
+<configuration>
+  <!-- Keep oracle TSV stdout clean; rejection diagnostics go to stderr. -->
+  <root level="OFF"/>
+</configuration>

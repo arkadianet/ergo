@@ -24,6 +24,62 @@ pub fn validate_interlinks(
     parent_header: &Header,
     parent_extension: &Extension,
 ) -> Result<(), BlockValidationError> {
+    validate_interlinks_active(extension, parent_header, parent_extension, true, true)
+}
+
+/// Validate interlinks using the optional prior context and its rule settings.
+/// The unavailable-context predicate (413) is distinct from encoding (401)
+/// and structure (402); disabling it permits assembling a suffix context.
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/history/storage/modifierprocessors/ExtensionValidator.scala#L27>
+pub fn validate_interlinks_with_settings(
+    extension: &Extension,
+    header: &Header,
+    parent_header: Option<&Header>,
+    parent_extension: Option<&Extension>,
+    settings: &crate::ErgoValidationSettings,
+) -> Result<(), BlockValidationError> {
+    validate_interlinks_with_context(extension, header, parent_header, parent_extension, |id| {
+        !settings.is_rule_disabled(id)
+    })
+}
+
+pub(crate) fn validate_interlinks_with_context(
+    extension: &Extension,
+    header: &Header,
+    parent_header: Option<&Header>,
+    parent_extension: Option<&Extension>,
+    active: impl Fn(u16) -> bool,
+) -> Result<(), BlockValidationError> {
+    match (parent_header, parent_extension) {
+        (Some(parent), Some(previous)) => {
+            validate_interlinks_active(extension, parent, previous, active(401), active(402))
+        }
+        _ if !active(413)
+            || crate::popow::algos::is_genesis(header)
+            || parent_extension.is_none() =>
+        {
+            Ok(())
+        }
+        _ => Err(BlockValidationError::InterlinkStructureMismatch {
+            expected_len: 0,
+            got_len: 0,
+            reason: "prior header unavailable for interlinks".to_owned(),
+        }),
+    }
+}
+
+/// Independent encoding and structure rule gates from the parent settings.
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/nodeView/history/storage/modifierprocessors/ExtensionValidator.scala#L27>
+pub(crate) fn validate_interlinks_active(
+    extension: &Extension,
+    parent_header: &Header,
+    parent_extension: &Extension,
+    encoding_active: bool,
+    structure_active: bool,
+) -> Result<(), BlockValidationError> {
+    if !encoding_active && !structure_active {
+        return Ok(());
+    }
     let to_kv = |fields: &[ergo_ser::extension::ExtensionField]| -> Vec<(Vec<u8>, Vec<u8>)> {
         fields
             .iter()
@@ -31,8 +87,24 @@ pub fn validate_interlinks(
             .collect()
     };
 
-    let current_links = crate::popow::algos::unpack_interlinks(&to_kv(&extension.fields))
-        .map_err(|reason| BlockValidationError::InvalidInterlinkEncoding { reason })?;
+    let current_links = match crate::popow::algos::unpack_interlinks(&to_kv(&extension.fields)) {
+        Ok(links) => links,
+        Err(reason) if encoding_active => {
+            return Err(BlockValidationError::InvalidInterlinkEncoding { reason })
+        }
+        // Two independent JVM Failure values are unequal. Deliberately reject
+        // structure even when the encoding rule is disabled for consensus.
+        Err(reason) => {
+            return Err(BlockValidationError::InterlinkStructureMismatch {
+                expected_len: 0,
+                got_len: 0,
+                reason,
+            })
+        }
+    };
+    if !structure_active {
+        return Ok(());
+    }
 
     let parent_links =
         match crate::popow::algos::unpack_interlinks(&to_kv(&parent_extension.fields)) {

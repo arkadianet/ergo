@@ -119,6 +119,8 @@ impl Default for RedbCacheBudgets {
 
 #[derive(Debug)]
 pub struct NodeConfig {
+    /// Apply re-emission validation rules. Defaults off; mining enables it.
+    pub check_reemission_rules: bool,
     pub network: Network,
     /// Shared chain specification. Constructed once via
     /// [`ChainSpec::for_network`] and cloned into long-lived services.
@@ -198,6 +200,10 @@ pub struct NodeConfig {
     /// AVL arena clean-node LRU budget (separate from redb caches), in bytes. None → use store default.
     pub cache_bytes: Option<usize>,
     pub redb_cache_budgets: RedbCacheBudgets,
+    /// Upgrade legacy file-format databases before opening any node storage.
+    pub auto_upgrade_legacy: bool,
+    /// Retain stale derived indexer data during automatic upgrades (default false).
+    pub auto_upgrade_keep_stale_indexer: bool,
     /// Script-validation checkpoint: blocks at or below this height skip
     /// per-input ErgoScript evaluation. `None` → fully validate every block.
     /// `Some((h, id))` → skip below `h`, assert observed header_id at `h`
@@ -230,6 +236,12 @@ pub struct NodeConfig {
     /// `ergo_api::auth::ApiSecurity` to gate `/wallet/*` and
     /// `/node/shutdown`.
     pub api_key_hash: Option<String>,
+    /// Explicit Scala-compatible access for the four legacy mining routes.
+    /// Supplied-transaction candidates and all v1 routes remain authenticated.
+    pub allow_unauthenticated_legacy_mining: bool,
+    pub api_scoped_keys: Vec<ergo_api::auth::ScopedCredentialConfig>,
+    pub api_limits: ergo_api::operator_control::ApiLimits,
+    pub api_readiness: ergo_api::operator_control::ProbePolicy,
     /// `[api] allowed_hosts` — extra `Host` header values the DNS-
     /// rebinding guard accepts, beyond `localhost` / `127.0.0.1` /
     /// `::1` / the literal bind address (which are always allowed on a

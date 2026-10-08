@@ -110,6 +110,7 @@ fn write_transaction_tail(
     data_inputs: &[DataInput],
     token_table: &[TokenId],
     output_candidates: &[ErgoBoxCandidate],
+    received_tree_sizes: bool,
 ) -> Result<(), WriteError> {
     w.put_u16(data_inputs.len() as u16);
     for di in data_inputs {
@@ -121,7 +122,11 @@ fn write_transaction_tail(
     }
     w.put_u16(output_candidates.len() as u16);
     for out in output_candidates {
-        write_ergo_box_candidate_indexed(w, out, token_table)?;
+        if received_tree_sizes {
+            crate::ergo_box::write_ergo_box_candidate_indexed_for_wire_check(w, out, token_table)?;
+        } else {
+            write_ergo_box_candidate_indexed(w, out, token_table)?;
+        }
     }
     Ok(())
 }
@@ -162,6 +167,25 @@ fn read_transaction_tail_after_inputs(
 /// (full spending proofs), data inputs, the per-tx distinct token ID
 /// table, and outputs serialized in indexed mode against that table.
 pub fn write_transaction(w: &mut VlqWriter, tx: &Transaction) -> Result<(), WriteError> {
+    write_transaction_inner(w, tx, false)
+}
+
+/// Serialize for the wire canonicality check, preserving parser-accepted
+/// context-extension encodings and declared output tree sizes. Scala accepts
+/// TrueLeaf/FalseLeaf in extensions and mismatched tree sizes, but normalizes
+/// both in bytesToSign. Other fields use the normal canonical encoders.
+pub fn write_transaction_preserving_extension_encodings(
+    w: &mut VlqWriter,
+    tx: &Transaction,
+) -> Result<(), WriteError> {
+    write_transaction_inner(w, tx, true)
+}
+
+fn write_transaction_inner(
+    w: &mut VlqWriter,
+    tx: &Transaction,
+    received_extensions: bool,
+) -> Result<(), WriteError> {
     let token_table = extract_distinct_token_ids(&tx.output_candidates);
     check_transaction_collection_bounds(
         tx.inputs.len(),
@@ -171,9 +195,26 @@ pub fn write_transaction(w: &mut VlqWriter, tx: &Transaction) -> Result<(), Writ
     )?;
     w.put_u16(tx.inputs.len() as u16);
     for input in &tx.inputs {
-        write_input(w, input)?;
+        if received_extensions {
+            w.put_bytes(input.box_id.as_bytes());
+            let proof = &input.spending_proof;
+            if proof.proof.len() > u16::MAX as usize {
+                return Err(WriteError::InvalidData("spending proof exceeds u16".into()));
+            }
+            w.put_u16(proof.proof.len() as u16);
+            w.put_bytes(&proof.proof);
+            w.put_bytes(proof.received_extension_bytes());
+        } else {
+            write_input(w, input)?;
+        }
     }
-    write_transaction_tail(w, &tx.data_inputs, &token_table, &tx.output_candidates)
+    write_transaction_tail(
+        w,
+        &tx.data_inputs,
+        &token_table,
+        &tx.output_candidates,
+        received_extensions,
+    )
 }
 
 /// Decode the wire form produced by [`write_transaction`].
@@ -245,7 +286,13 @@ pub fn write_unsigned_transaction(
     for input in &utx.inputs {
         write_unsigned_input(w, input)?;
     }
-    write_transaction_tail(w, &utx.data_inputs, &token_table, &utx.output_candidates)
+    write_transaction_tail(
+        w,
+        &utx.data_inputs,
+        &token_table,
+        &utx.output_candidates,
+        false,
+    )
 }
 
 /// Decode the wire form produced by [`write_unsigned_transaction`].
@@ -293,7 +340,13 @@ pub fn bytes_to_sign_into(w: &mut VlqWriter, tx: &Transaction) -> Result<(), Wri
     for input in &tx.inputs {
         write_input_to_sign(w, input)?;
     }
-    write_transaction_tail(w, &tx.data_inputs, &token_table, &tx.output_candidates)
+    write_transaction_tail(
+        w,
+        &tx.data_inputs,
+        &token_table,
+        &tx.output_candidates,
+        false,
+    )
 }
 
 /// Serialize a signed transaction in bytes_to_sign form: each input's proof
@@ -393,10 +446,11 @@ mod tests {
         format!("{:02x}{:02x}{body}", 0x08 | version, body.len() / 2)
     }
 
-    /// A `Coll^n[Byte]` register constant, one element per level and the
-    /// innermost collection empty: reading it takes `1 + n` levels.
-    fn nested_byte_coll(n: usize) -> String {
-        format!("{}1a{}00", "0c".repeat(n - 2), "01".repeat(n - 1))
+    /// An n-deep tuple-node register with a Byte constant leaf.
+    fn nested_tuple_value(n: usize) -> String {
+        // AST tuple nodes have no type descriptors on the wire, so this tests
+        // leaked VALUE levels independently of the new TypeSerializer limit.
+        format!("{}0200", "8601".repeat(n))
     }
 
     /// An `SBox` constant: an output (txid 0, index 0) under `tree`.
@@ -841,6 +895,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wire_check_preserves_declared_tree_size_but_signing_recomputes_it() {
+        let prefix = hex::decode(
+            "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d",
+        )
+        .unwrap();
+        let mut canonical = prefix.clone();
+        canonical.extend_from_slice(&[0x08, 2, 0x08, 0xd3, 1, 0, 0]);
+        for declared in [0, 1, 2, 3, 127, 128, i32::MAX as u32, 1 << 31, u32::MAX] {
+            let mut w = VlqWriter::new();
+            w.put_bytes(&prefix);
+            w.put_u8(0x08);
+            w.put_u32(declared);
+            w.put_bytes(&[0x08, 0xd3, 1, 0, 0]);
+            let received = w.result();
+            let mut r = VlqReader::new(&received).with_activated_script_version(3);
+            let tx = read_transaction(&mut r).unwrap();
+            assert!(r.is_empty());
+            let mut w = VlqWriter::new();
+            write_transaction_preserving_extension_encodings(&mut w, &tx).unwrap();
+            assert_eq!(w.result(), received, "declared={declared}");
+            assert_eq!(
+                bytes_to_sign(&tx).unwrap(),
+                canonical,
+                "declared={declared}"
+            );
+        }
+        // The exception is limited to the size slot. A normalized body still
+        // differs in the wire check, preserving the existing acceptance gates.
+        let mut received = prefix;
+        received.extend_from_slice(&[0x08, 2, 0xd1, 0x7f, 1, 0, 0]); // sigmaProp(TrueLeaf)
+        let tx = read_transaction(&mut VlqReader::new(&received)).unwrap();
+        let mut w = VlqWriter::new();
+        write_transaction_preserving_extension_encodings(&mut w, &tx).unwrap();
+        assert_ne!(w.result(), received);
+    }
+
     /// Scala oracle vector: a 1-in / 1-out transaction whose input's
     /// ContextExtension carries a `Tuple` node (`0x86`) at var 1 and a
     /// `ConcreteCollection` (`0x83`) at var 2. `ErgoTransactionSerializer`
@@ -1124,8 +1215,8 @@ mod tests {
     /// value, a data value or a `SigmaBoolean` and down only when it returns.
     /// A size-delimited tree that degrades keeps every level open at the
     /// throw for the rest of the transaction's reader. Each case puts
-    /// `Coll^n[Byte]` (`1 + n` levels) in a later register, at the boundary.
-    /// JVM (`ErgoSerdeOracle.scala`, sigma-state 6.0.6, `transaction@3`): the
+    /// n tuple nodes and a Byte constant in a later register, at the boundary.
+    /// JVM (SantaWireOracle.scala, sigma-state 6.0.7, transaction@3): the
     /// accepted twin ACCEPT, the rejected one REJECT
     /// DeserializeCallDepthExceeded.
     ///
@@ -1140,8 +1231,8 @@ mod tests {
     ///   `LogicalNot`, the constant's value and data frames: 10), also when
     ///   the option holds a box whose own tree would leak 10 more;
     /// - a tree wrapped only for its non-`SigmaProp` root has returned every
-    ///   level (0: 109 accepts);
-    /// - two degraded outputs add up (20: 89 accepts);
+    ///   level (0: 108 accepts);
+    /// - two degraded outputs add up (20: 88 accepts);
     /// - the degraded box's own registers count it too;
     /// - so does a tree degrading inside an `SBox` register constant or
     ///   context-extension value: its box's frames return, the tree's 10 stay.
@@ -1156,9 +1247,9 @@ mod tests {
             2,
             &format!("d1{}246301{}", "ef".repeat(7), &box_constant(LEAKS_10)[2..]),
         );
-        let reg = |n| vec![nested_byte_coll(n)];
+        let reg = |n| vec![nested_tuple_value(n)];
         let mut cases = Vec::new();
-        for (n, accept) in [(99, true), (100, false)] {
+        for (n, accept) in [(98, true), (99, false)] {
             let later = output(TRUE_TREE, &reg(n));
             cases.extend([
                 (
@@ -1196,7 +1287,7 @@ mod tests {
                 ),
             ]);
         }
-        for (n, accept) in [(99, true), (100, false)] {
+        for (n, accept) in [(98, true), (99, false)] {
             let later = output(TRUE_TREE, &reg(n));
             cases.push((
                 "option",
@@ -1209,7 +1300,7 @@ mod tests {
                 accept,
             ));
         }
-        for (n, accept) in [(109, true), (110, false)] {
+        for (n, accept) in [(108, true), (109, false)] {
             let later = output(TRUE_TREE, &reg(n));
             cases.push((
                 "root",
@@ -1217,7 +1308,7 @@ mod tests {
                 accept,
             ));
         }
-        for (n, accept) in [(89, true), (90, false)] {
+        for (n, accept) in [(88, true), (89, false)] {
             let outputs = [
                 output(LEAKS_10, &[]),
                 output(LEAKS_10, &[]),

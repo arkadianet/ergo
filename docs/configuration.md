@@ -7,6 +7,88 @@ node — it is not the reference node, and several config keys exist
 specifically to mirror Scala's `consistentSettings` checks. Keys whose
 behavior follows Scala are noted as such below.
 
+## New-install setup
+
+`ergo-node init` is the recommended first step for a new installation. With a
+TTY it explains and prompts for missing choices; otherwise it requires
+`--preset`, `--sync`, `--network`, and a mining `--reward` choice and exits 2
+if anything is missing. `--non-interactive` always disables prompts.
+
+```sh
+ergo-node init --data-dir ./ergo-data
+# Or preview an unattended wallet installation without writing:
+ergo-node init --preset wallet --sync genesis --network mainnet \
+  --data-dir ./ergo-data --non-interactive --dry-run --json
+```
+
+The wizard resolves paths to absolute paths, validates generated TOML using the
+node's loader, saves an API secret first and then publishes the new config.
+It prints the exact start command with explicit `--config` and `--data-dir`,
+the dashboard URL, key-file path, and next steps. `--dry-run` writes nothing
+and elides the API hash in its config preview; `--json` returns a plan with
+`schema_version = 1`, paths, config contents, disk recommendation, warnings,
+reward address (when supplied), and next steps. No mode prints the secret.
+
+| Preset | Indexer | External mining | Storage-rent claims | Sync choices |
+|---|---|---|---|---|
+| `wallet` | off | off | off | fast, genesis |
+| `mining-fast` | off | on | off | fast, genesis |
+| `mining-full` | on | on | on | genesis |
+| `explorer` | on | off | off | genesis |
+| `archival` | off | off | off | genesis |
+
+All presets enable the mempool and write `[node] state_type = "utxo"`,
+`verify_transactions = true`, and `blocks_to_keep = -1`. Fast sync writes
+`[node.utxo] utxo_bootstrap = true`, `[node.nipopow] nipopow_bootstrap = true`
+and `p2p_nipopows = 2`. It avoids historical replay, with download time depending
+on peers and bandwidth, and requires `--accept-unanchored-bootstrap` or a
+separate interactive consent: snapshot trust is provisional, so **cross-check
+the installed UTXO root** against an independently trusted node. Genesis sync
+sets both bootstrap flags false and takes hours to days. Explorer and full
+mining also need historical index catch-up.
+
+Mining requires `--reward wallet` or `--reward public-key`. Wallet rewards omit
+`miner_public_key_hex`; initialize and **unlock** the node wallet in the
+dashboard before work is served. Public-key rewards require
+`--miner-public-key HEX`, a valid 33-byte compressed secp256k1 point beginning
+with `02` or `03`. The wizard displays its P2PK address for the selected
+network and requests confirmation in interactive mode. Use
+[ergo-solo's Stratum bridge](https://github.com/arkadianet/ergo-stratum-rs) or
+[the Lithos guide](lithos.md) to connect external miners.
+
+`--network mainnet|testnet` selects embedded network seeds. `--api-bind ADDR`
+defaults to `127.0.0.1:9099`. An explicit non-loopback bind also writes
+`[api] public_bind = true` to satisfy the loader and reports that transaction
+submission remains publicly callable; privileged routes still require the key.
+`--p2p-bind ADDR` and `--declared-addr ADDR` write `[peers] bind_addr` and
+`declared_addr` only when supplied; inbound connections need a listener and
+port forwarding. The wizard never writes a peer list, voting targets,
+private-key exposure, or unauthenticated legacy mining.
+
+`--data-dir PATH` defaults to `./ergo-data`; `--config PATH` defaults to
+`<data-dir>/ergo-node.toml` and must end in `.toml`, so it cannot take the
+place of a file the node keeps in its data directory. The resolved data
+directory is stored in the config.
+The secret is `<config-dir>/secrets/api-key`: send its contents in the `api_key`
+header or enter them in the dashboard. Unix directory/file modes are
+`0700`/`0600`; Windows inherits ACLs, so use a directory only you can read.
+Existing secret directories must already have mode `0700` on Unix.
+
+The wizard queries free space on the data filesystem, or its nearest existing
+ancestor. Recommended free space (**provisional**) on mainnet is 100 GiB for
+wallet or mining-fast with fast sync, 150 GiB for either with genesis sync or
+archival, and 250 GiB for explorer or mining-full. On testnet the same tiers
+are 20, 30 and 50 GiB. A lower reading requires
+`--allow-low-disk` or interactive confirmation; an unknown reading warns and
+continues. These budgets are recommendations, not storage limits.
+
+V1 creates new configurations only, installs no service, and edits no existing
+files. It refuses existing config/key paths, including symlinks. Fast sync
+requires a new or empty data directory to prevent bootstrapping over node data.
+Use the printed start command, then press Ctrl-C and wait for graceful shutdown
+to stop. For existing installations, edit the configuration deliberately and
+use the standalone `api-key` command when a new credential is needed.
+
 ## Resolution model
 
 Values are resolved from three sources, highest precedence first:
@@ -65,6 +147,7 @@ existing configs before upgrading.
 | `blocks_to_keep` | i32 | `-1` | Pruning suffix length. `-1` = full archive (keep every block). `N > 0` = retain a pruned suffix of `N` blocks. `0` is reserved for the headers-only combo (see below). Values below `-1` are rejected. A positive `N` must be at least the rollback-window floor (`keep_versions + SAFETY_MARGIN`); a smaller value is rejected because a reorg could otherwise need evicted block sections. |
 | `keep_versions` | u32 | `200` | Undo-retention window = the deepest chain reorg the node can serve (Scala `keepVersions` parity — same default). Raising it lets the node follow deeper best-chain reorgs at a linear undo-log disk cost; the same value is wired into the extra-index store so the indexer can follow any reorg the state performs. `0` is rejected (a store that can never roll back would wedge on any reorg). Prospective only: undo entries already pruned under a smaller window stay gone, so a raise takes full effect `keep_versions` blocks later. If the best-header chain ever forks deeper than this window, the node cannot reorg onto it and reports a terminal `sync_wedged` state (`/health` = `wedged`, HTTP 503) — the only recovery is a resync. |
 | `state_type` | string | `"utxo"` | State backend. `"utxo"` keeps the full UTXO set on disk (wire byte 0); `"digest"` keeps only the authenticated root digest and a header window (wire byte 1). Case-insensitive. `"digest"` supports the digest-verifier and headers-only combinations below. |
+| `check_reemission_rules` | bool | `false` | Apply re-emission token allocation and reward-spending validation (rule 123). Enabled automatically when mining is enabled, including `--mining-enabled`. |
 | `verify_transactions` | bool | `true` | When `false`, the node syncs headers only and downloads no block sections. Requires `state_type = "digest"` (Scala rule R1) and is accepted only in the headers-only combo below. |
 
 **Digest combinations.** Mode 5 verifies full blocks with AD proofs:
@@ -139,7 +222,7 @@ settings, verifying final roots and reopen before comparing throughput and RSS.
 
 Start with the 1 GiB default for full-mainnet replay, then compare the same
 height interval and validation settings before changing it. The
-[measured cache comparison](perf/ibd-baseline-2026-09-30.md) found no material
+measured cache comparison found no material
 benefit from 16, 128 or 1024 MiB budgets on blocks 851..1000: that small AVL
 working set fit all three. This supports a smaller budget for that workload,
 but does not establish a full-mainnet minimum or optimal budget.
@@ -181,7 +264,11 @@ Operator webhook registrations, HMAC secrets, bounded delivery history and pendi
 retry state are stored in `<data_dir>/webhooks.redb`. The file uses owner-only
 permissions on Unix. Back up this private database with the node data directory.
 A failed open, corrupt snapshot or failed commit disables webhook management and
-outbound deliveries until restart; other API routes remain available.
+outbound deliveries until restart; other API routes remain available. If the
+notification database cannot open or its cursor cannot initialize safely,
+live realtime and durable replay are disabled too. See
+[notification storage recovery](events.md#recovering-notification-storage)
+for backup, compatibility and corruption recovery steps.
 On a commit error, RAM changes are rolled back, but a failed disk flush may leave
 either atomic snapshot visible after restart. A failed API request can therefore
 have persisted; reconcile registrations and delivery history after reopening.
@@ -280,6 +367,46 @@ to retries and cannot be bypassed by alternate routing.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `api_key_hash` | string (hex) | none | Lowercase Base16 of `Blake2b256(<secret>)`. Optional; privileged routes fail closed when absent. Must be exactly 64 lowercase hex characters (`0-9`, `a-f`); uppercase or mixed case is rejected for canonical-form parity. Supplied hashes are validated even when the API is disabled. |
+| `keys` | array of tables | `[]` | Named scoped credentials; use `[[api.security.keys]]` as described below. Requires a master `api_key_hash`. |
+| `allow_unauthenticated_legacy_mining` | bool | `false` | Explicit Scala/Lithos compatibility: permits unauthenticated `GET /mining/candidate`, `POST /mining/solution`, and reward address/public-key reads. Requires `api_key_hash` when the API is enabled. Supplied-transaction candidate endpoints and all v1 operator routes remain authenticated. |
+
+`[[api.security.keys]]` defines named credentials with `id`, `hash`, `scopes`
+(`mining`, `wallet`, `operator`, `admin`) and `revoked` (default `false`). Scoped
+keys require a master hash. Set `revoked = true` for denial that survives a data
+wipe or old backup restore; API revocations use a data-directory ledger.
+Scoped `mining` keys authorize `POST /mining/candidateWithTxs`,
+`POST /mining/candidateWithTxsAndPk` and
+`POST /api/v1/mining/candidate-with-txs`. These supplied-transaction routes
+require a key even when `allow_unauthenticated_legacy_mining = true`. The flag
+is boot-only; runtime `PATCH /api/v1/node/config` changes only `api_limits`
+and `readiness`.
+
+### `[api.limits]` and `[api.readiness]`
+
+| Limit key | Default | Meaning |
+|---|---|---|
+| `refill_per_sec` | `20.0` | Tokens added per second. |
+| `burst` | `40.0` | Maximum bucket size; must admit each request class. |
+| `cheap_weight` | `1.0` | Tokens per cheap read. |
+| `heavy_weight` | `4.0` | Tokens per heavy read. |
+| `compute_weight` | `10.0` | Tokens per compute request. |
+| `max_tracked_ips` | `65536` | Bucket table bound (`1..1000000`). |
+| `idle_prune_after_secs` | `600` | Idle bucket retention (`1..86400`). |
+
+| Readiness key | Default | Meaning |
+|---|---|---|
+| `heartbeat_max_age_ms` | `600000` | Maximum idle action-loop heartbeat age. Active applies below the 600-second stuck threshold remain live. |
+| `snapshot_max_age_ms` | `30000` | Maximum runtime snapshot age. |
+| `tip_max_age_ms` | `7200000` | Maximum chain-tip age; two hours accommodates normal block gaps. |
+| `require_indexer` | `false` | Require a healthy indexer caught up to the chain. |
+| `require_wallet` | `false` | Require a healthy wallet caught up to the chain. |
+
+Rates/weights must be finite and positive. Age thresholds accept
+`1000..86400000` milliseconds. Limits and readiness can also be changed for the
+current process with `PATCH /api/v1/node/config`. Authentication, proxy trust
+and other boot settings require a restart. Probes have their own unthrottled
+mount. See [operator controls](operator-controls.md) for scope assignments,
+revocation durability and runtime patch examples.
 
 ### `[api.script]`
 
@@ -309,8 +436,8 @@ The API distinguishes public routes from privileged routes:
 |---|---|
 | `/wallet/*`, `/scan/*`, `/api/v1/wallet/*` | Dashboard `/`, `/wallet/ui*` redirects, swagger |
 | `POST /node/shutdown`, `POST /api/v1/node/shutdown`, `POST /peers/connect`, `POST /api/v1/votes`, `POST /blocks` | Read REST, including `GET /api/v1/votes`, `/info`, `/blocks/*`, `/peers/*`, `/blockchain/*` |
-| `/mining/*` (candidate, solution, reward address/public key) | Transaction submission/checks: `POST /transactions`, `/transactions/bytes`, `/transactions/check`, `/transactions/checkBytes`, `/api/v1/mempool/{submit,check}` |
-| `/api/v1/chain/{tip,snapshot,boxes,blocks-since,transactions}`; v1 Operator/Admin routes (node config, network controls, mining controls, operator votes, scans, account management/PSBT, watch writes, private-key export, webhooks); script compute when configured to require a key | Public v1 queries including watch-only account reads, `/emission/*`, `/utils/*`, `/metrics` |
+| `/mining/*` (including supplied-transaction candidates; the four legacy routes can be explicitly opened as above) | Transaction submission/checks: `POST /transactions`, `/transactions/bytes`, `/transactions/check`, `/transactions/checkBytes`, `/api/v1/mempool/{submit,check}` |
+| v1 Operator/Admin routes (node config, network controls, mining controls, operator votes, scans, account management/PSBT, watch writes, private-key export, webhooks); script compute when configured to require a key | Public v1 queries including watch-only account reads, `/emission/*`, `/utils/*`, `/metrics` |
 
 The whole wallet, scan and node prefixes are gated, including unknown subpaths;
 other unmatched paths return `404`. Public means no API-key authentication;
@@ -387,18 +514,49 @@ Consequences:
   enforcing here by default would risk breaking that setup for no
   defensive gain.
 
-Generate a hash from a RANDOM secret (never a guessable word) with, for
-example:
+Generate a random API secret with the standalone command (no config or data
+directory is needed):
 
-```bash
-secret=$(openssl rand -hex 32)
-printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
+```sh
+ergo-node api-key generate --secret-file ./api-secret.key
 ```
 
-Save `$secret` somewhere safe — it is the plaintext `api_key` clients send;
-the hash above is what goes in `api_key_hash`. The shipped
-templates contain no credential. Add the generated hash under `[api.security]`
-and restart to unlock privileged routes; the API is already enabled.
+The command saves a new 64-character lowercase hex secret in `api-secret.key`
+and prints only its configuration hash:
+
+```toml
+[api.security]
+api_key_hash = "<64 lowercase hex hash>"
+```
+
+Paste the printed section into your config (or add the hash to an existing
+`[api.security]` section), then restart the node. Send the **secret**, never
+the hash, in the `api_key` header or enter it in the dashboard. Keep the secret
+file safe: it is created with mode `0600` on Unix. On Windows it inherits the
+parent's ACL; choose a directory only you can read. The parent directory must
+already exist (it may be reached through a symlink). Generation refuses any
+existing destination, including a symlink, and removes the new file if writing
+it fails. Use a new file path for each new credential.
+The command does not edit your config or initialize node data.
+
+To hash an existing secret without writing any files:
+
+```sh
+ergo-node api-key hash --secret-file ./api-secret.key
+# Or pipe a secret into: ergo-node api-key hash --stdin
+```
+
+Hashing accepts 1–1024 printable non-space ASCII bytes, removes exactly one
+trailing LF or CRLF, and rejects other whitespace, controls and non-ASCII
+bytes. Both modes support `--json`; output includes `schema_version: 1` and
+`api_key_hash`, plus `secret_file` for generation, and never includes the secret.
+The shipped templates contain no credential; privileged routes stay locked
+until you configure a hash and restart. The API is already enabled.
+
+As in Scala, a running node can also hash a secret: `POST /utils/hash/blake2b`
+with the secret as a JSON string returns the same `api_key_hash`. Use it only
+over loopback (the secret travels in the request), and generate the secret
+randomly rather than choosing a memorable one.
 
 **Upgrade:** operators running the bundled file directly lose the old known
 `hello` key. Privileged calls using it now fail until they set their own
@@ -494,9 +652,26 @@ either way.
 | `miner_public_key_hex` | string (hex) | none | 33-byte compressed secp256k1 public key (66 hex chars) for the reward output. **Optional in embedded mode**: when set, it is the pinned reward pubkey; when omitted, the wallet's EIP-3 first-address key is resolved at candidate time. It is **required when `[wallet] mode = "external"` and mining is enabled**, because external mode has no wallet tables to resolve. A value that is present must be well-formed (66 hex chars → 33 bytes) or load fails. CLI flag: `--mining-public-key`. |
 | `block_candidate_generation_interval_ms` | u64 | `250` | Minimum interval (ms) between same-parent mempool-refresh signals; must be at least 50. The first pool change after a quiet interval signals immediately. Changes within the interval share a deadline and refresh the latest pool snapshot when it expires, independently of the mempool polling tick. Applied-parent changes bypass this interval; header-only changes do not rebuild work once mining has started. Lower values refresh transaction contents sooner but increase build load and churn of the 16 retained templates. |
 | `use_external_miner` | bool | `true` | Must be `true` — an internal CPU miner is not supported, so `false` is rejected at load. |
-| `candidate_base_cache` | bool | `false` | With the default `false`, candidate proofs load only authenticated AVL operation paths from the committed snapshot and retain no full-tree graph between builds. Legacy v1 nodes without child labels may require subtree reads. Setting `true` enables the alternative cache of the hydrated AVL working set between candidate builds, keyed on the committed tip. Same-tip rebuilds reuse the tree and loaded paths; transaction validation and proof generation for changed transaction sets still run. Independently of this setting, the worker can reuse a prior state root and proof for an identical applied parent and ordered transaction bytes after fresh transaction validation. When the tip advances by exactly one block, the engine attempts a single-step incremental advance of the cached tree (replaying the new block's UTXO changes, verifying the resulting digest) before falling back to full rehydration. Full rehydration is always the fallback on multi-block jumps, reorgs, decode errors, or digest mismatches. Holds the full UTXO AVL node graph resident — multi-GB on a mainnet archival node, scaling with the UTXO-set size — so enable it only on a mining node with RAM headroom. |
+| `candidate_base_cache` | bool | `false` | With the default `false`, candidate proofs load only authenticated AVL operation paths from the committed snapshot and retain no full-tree graph between builds. Legacy v1 nodes without child labels may require subtree reads. Setting `true` enables the alternative cache of the hydrated AVL working set between candidate builds, keyed on the committed tip. Same-tip rebuilds reuse the tree and loaded paths; transaction validation and proof generation for changed transaction sets still run. Independently of this setting, the worker can reuse a prior state root and proof for an identical applied parent and ordered transaction bytes after fresh transaction validation. When the committed tip moves, the engine walks back at most six headers to the cached tip or to one of up to three retained ancestor trees, and replays the stored blocks from there. It checks each block's state root against its header and the final root against the committed state. This covers growth by a few blocks and reorgs up to three deep. Full rehydration remains the fallback beyond that window, and on missing data, decode or prover errors, or digest mismatches. Holds the full UTXO AVL node graph resident — multi-GB on a mainnet archival node, scaling with the UTXO-set size — so enable it only on a mining node with RAM headroom. |
 | `claim_storage_rent` | bool | `false` | When `true`, the node sweeps storage-rent-eligible boxes into a self-claim transaction paid to the miner's reward key, inserted ahead of mempool selection so any conflicting fee-bearing claim on the same box is excluded. Opt-in: it changes block contents and seizes rent to the miner. Requires `[indexer] enabled = true` (see cross-section rules). While the index backfills, enumeration may be partial but never claims an invalid box — a lagging index only under-collects. |
 | `max_storage_rent_claims` | u32 | `4096` | Safety ceiling on the number of storage-rent boxes swept into one block's self-claim. The block's cost and size budgets are the real binding limit (typically ~3,700 boxes by cost on mainnet); this cap prevents unbounded iteration. Lower it to leave more room for fee-paying user transactions. Only meaningful when `claim_storage_rent = true`. |
+
+The node also accepts authenticated `POST /mining/candidateWithTxs` (a JSON
+transaction array) and `POST /mining/candidateWithTxsAndPk` (`{"txs": [...],
+"pk": "<compressed public key>"}`). Valid supplied transactions are selected
+in request order ahead of automatic rent claims and mempool transactions. They
+may have no fee and may spend earlier package outputs; they still undergo full
+consensus validation and block cost/size limits. Invalid or nonfitting members
+are omitted. The returned `proof.msgPreimage` and `proof.txProofs` prove the
+members actually included in the final candidate. The v1 equivalent accepts
+either request shape at `POST /api/v1/mining/candidate-with-txs`.
+
+Requests are limited to 1024 transactions and 2 MiB, with at most two packages
+queued or building. Builds run on the existing serial worker and cancel when
+the caller disconnects or the tip changes. Requested jobs retain their own
+bounded history (16 templates) independently of ordinary refreshes; solo reads
+always use the operator's reward key. Explicit-key jobs must submit that key.
+See [Lithos integration](lithos.md) for client configuration and keystore export.
 
 Storage-rent claims enforce distinct context-extension variable 127 values from height 1,885,000 on every network, matching Scala 6.0.7. This consensus check applies to blocks regardless of `reject_storage_rent_txs`. The self-collector gives each fully consumed input a separate miner output from that height; if proceeds cannot cover the additional outputs' dust floors, the batch is skipped. Earlier blocks retain the historical rules.
 
@@ -762,21 +937,13 @@ Validation rules that matter operationally:
   API renders base58 at read time, so changing `network` changes the addresses
   the API returns without touching the database. (The chain history itself
   still has to be re-synced from the new network's node.)
-- **The descriptor file cannot register a scan.** The wallet-service that backs
-  the daemon also supports the node's `/scan/*` registry, and the sync loop
-  feeds it (`sync::scan_records`) whenever that registry is non-empty. The
-  descriptor schema above is the daemon's *only* input for it and admits public
-  keys, paths, and labels — no tracking rule — so **in the standalone daemon the
-  registry is always empty**: `/scans` and `/scan/listAll` always return `[]`,
-  and `WALLET_SCAN_BOXES` / `_INDEX` / `_TXS` stay empty. Scan registration is a
-  node capability (`ergo-api`'s `/scan/register`), not a daemon one, and is
-  deliberately not re-exposed here: a tracking rule is a *predicate* over
-  arbitrary box contents, which is a materially different trust decision from
-  "a list of public keys I want watched". A reorg still rewinds and replays the
-  wallet correctly — the scan tables simply have nothing to rewind.
-  `tests/it/scan_registry_rewind.rs` covers the non-empty-registry rewind path by
-  seeding a scan through the store's own `put_scan` write API, and
-  `tests/it/daemon_boot.rs` pins the empty-registry production behaviour.
+- **The descriptor file cannot register a scan.** It admits public keys,
+  paths, and labels. The daemon exposes persisted scan registrations through
+  `/scans` and `/scan/listAll` and rewinds their tracked boxes and transactions
+  on reorgs. A fresh descriptor-only database has an empty registry. Registration
+  remains a node capability (`/scan/register`); the daemon's API is read-only.
+  `tests/it/scan_registry_rewind.rs` covers the persisted registry's apply and
+  rewind behavior, and `tests/it/daemon_boot.rs` covers a fresh database.
 
 ## Socket permissions
 
@@ -815,3 +982,4 @@ Logging uses `tracing` with the `RUST_LOG` filter (default `info`): reorgs and
 retries log at `warn`, protocol violations and other terminal sync failures log
 at `error`. Log lines carry locally generated messages and heights only — never
 the node API key, never a node response body.
+See [operator controls](operator-controls.md) for configurable API request budgets, readiness policy, named credentials, runtime changes and durable peer administration.

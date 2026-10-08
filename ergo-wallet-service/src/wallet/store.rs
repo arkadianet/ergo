@@ -57,6 +57,33 @@ pub enum RescanState {
 pub type TrackedPubkeyPath = (u64, [u8; 33], Vec<u32>);
 
 pub trait WalletRead {
+    fn box_bytes(&self, _box_id: &[u8; 32]) -> Result<Option<Vec<u8>>, WalletStoreError> {
+        Ok(None)
+    }
+    fn mining_job_records(&self) -> Result<Vec<(u64, Vec<u8>)>, WalletStoreError> {
+        Err(WalletStoreError::decode(
+            "mining job journal reads are unsupported",
+        ))
+    }
+    fn mining_job_next_id(&self) -> Result<u64, WalletStoreError> {
+        Err(WalletStoreError::decode(
+            "mining job journal reads are unsupported",
+        ))
+    }
+    fn discovery_coverage(
+        &self,
+    ) -> Result<Option<super::utxo_scan::DiscoveryCoverage>, WalletStoreError> {
+        Ok(None)
+    }
+    fn discovery_uncovered_pubkeys(
+        &self,
+        _coverage: &super::utxo_scan::DiscoveryCoverage,
+    ) -> Result<Vec<String>, WalletStoreError> {
+        Ok(Vec::new())
+    }
+    fn inclusion_height_known(&self, _box_id: [u8; 32]) -> Result<bool, WalletStoreError> {
+        Ok(true)
+    }
     fn scan_cursor(&self) -> Result<Option<WalletScanCursor>, WalletStoreError>;
     fn chain_index_header(&self, height: u32) -> Result<Option<[u8; 32]>, WalletStoreError>;
     /// Highest header actually applied by this wallet at or below `height`.
@@ -103,6 +130,26 @@ pub trait WalletRead {
 }
 
 pub trait WalletWrite {
+    fn mining_job_next_id(&self) -> Result<u64, WalletStoreError> {
+        Err(WalletStoreError::decode(
+            "mining job journal reads are unsupported",
+        ))
+    }
+    fn set_mining_job_next_id(&mut self, _id: u64) -> Result<(), WalletStoreError> {
+        Err(WalletStoreError::decode(
+            "mining job journal writes are unsupported",
+        ))
+    }
+    fn put_mining_job_record(&mut self, _id: u64, _record: &[u8]) -> Result<(), WalletStoreError> {
+        Err(WalletStoreError::decode(
+            "mining job journal writes are unsupported",
+        ))
+    }
+    fn remove_mining_job_record(&mut self, _id: u64) -> Result<(), WalletStoreError> {
+        Err(WalletStoreError::decode(
+            "mining job journal writes are unsupported",
+        ))
+    }
     fn set_scan_invalidated(&mut self, invalidated: bool) -> Result<(), WalletStoreError>;
     fn clear_scan_registry(&mut self) -> Result<(), WalletStoreError>;
     fn set_rescan_state(&mut self, state: &RescanState) -> Result<(), WalletStoreError>;
@@ -297,6 +344,50 @@ impl RedbWalletRead {
 }
 
 impl WalletRead for RedbWalletRead {
+    fn box_bytes(&self, box_id: &[u8; 32]) -> Result<Option<Vec<u8>>, WalletStoreError> {
+        match self.txn.open_table(crate::wallet::tables::WALLET_BOX_BYTES) {
+            Ok(table) => Ok(table.get(box_id)?.map(|row| row.value())),
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    fn mining_job_records(&self) -> Result<Vec<(u64, Vec<u8>)>, WalletStoreError> {
+        let table = match self.txn.open_table(super::mining_jobs::JOURNAL) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut records = Vec::new();
+        for row in table.iter()? {
+            let (id, value) = row?;
+            if records.len() >= 256 || value.value().len() > 512 * 1024 {
+                return Err(WalletStoreError::decode("job journal bounds exceeded"));
+            }
+            records.push((id.value(), value.value().to_vec()));
+        }
+        Ok(records)
+    }
+    fn mining_job_next_id(&self) -> Result<u64, WalletStoreError> {
+        match self.txn.open_table(super::mining_jobs::META) {
+            Ok(table) => Ok(table.get("next_id")?.map_or(1, |row| row.value())),
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(1),
+            Err(error) => Err(error.into()),
+        }
+    }
+    fn discovery_coverage(
+        &self,
+    ) -> Result<Option<super::utxo_scan::DiscoveryCoverage>, WalletStoreError> {
+        super::utxo_scan::coverage(&self.txn)
+    }
+    fn discovery_uncovered_pubkeys(
+        &self,
+        coverage: &super::utxo_scan::DiscoveryCoverage,
+    ) -> Result<Vec<String>, WalletStoreError> {
+        super::utxo_scan::uncovered_pubkeys(&self.txn, coverage)
+    }
+    fn inclusion_height_known(&self, box_id: [u8; 32]) -> Result<bool, WalletStoreError> {
+        super::utxo_scan::inclusion_height_known(&self.txn, box_id)
+    }
     fn scan_cursor(&self) -> Result<Option<WalletScanCursor>, WalletStoreError> {
         self.reader().scan_cursor().map_err(Into::into)
     }
@@ -366,15 +457,15 @@ impl WalletRead for RedbWalletRead {
     }
 
     fn scan_invalidated(&self) -> Result<bool, WalletStoreError> {
-        let table = match self
+        let persisted = match self
             .txn
             .open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)
         {
-            Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+            Ok(table) => table.get(())?.is_some_and(|row| row.value()),
+            Err(redb::TableError::TableDoesNotExist(_)) => false,
             Err(error) => return Err(error.into()),
         };
-        Ok(table.get(())?.map(|row| row.value()).unwrap_or(false))
+        Ok(persisted || super::utxo_scan::requires_discovery(&self.txn)?)
     }
 
     fn rescan_state(&self) -> Result<RescanState, WalletStoreError> {
@@ -841,6 +932,31 @@ impl crate::wallet::RescanGuard for RollbackGuard {
 }
 
 impl WalletWrite for RedbWalletWrite<'_> {
+    fn mining_job_next_id(&self) -> Result<u64, WalletStoreError> {
+        Ok(self
+            .txn()
+            .open_table(super::mining_jobs::META)?
+            .get("next_id")?
+            .map_or(1, |row| row.value()))
+    }
+    fn set_mining_job_next_id(&mut self, id: u64) -> Result<(), WalletStoreError> {
+        self.txn()
+            .open_table(super::mining_jobs::META)?
+            .insert("next_id", id)?;
+        Ok(())
+    }
+    fn put_mining_job_record(&mut self, id: u64, record: &[u8]) -> Result<(), WalletStoreError> {
+        self.txn()
+            .open_table(super::mining_jobs::JOURNAL)?
+            .insert(id, record)?;
+        Ok(())
+    }
+    fn remove_mining_job_record(&mut self, id: u64) -> Result<(), WalletStoreError> {
+        self.txn()
+            .open_table(super::mining_jobs::JOURNAL)?
+            .remove(id)?;
+        Ok(())
+    }
     fn set_scan_invalidated(&mut self, invalidated: bool) -> Result<(), WalletStoreError> {
         self.txn()
             .open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)?
@@ -1163,6 +1279,12 @@ impl WalletWrite for RedbWalletWrite<'_> {
             clear_standalone_headers(self.txn(), start_height)?;
         }
         if start_height == 0 {
+            self.txn()
+                .open_table(crate::wallet::tables::WALLET_UTXO_DISCOVERY)?
+                .remove(())?;
+            self.txn()
+                .open_table(crate::wallet::tables::WALLET_DISCOVERED_BOXES)?
+                .retain(|_, _| false)?;
             self.set_scan_invalidated(true)?;
             if scan_rebuild {
                 clear_scan_tracking(self.txn())?;

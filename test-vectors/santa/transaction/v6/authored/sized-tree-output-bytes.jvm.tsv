@@ -1,0 +1,5 @@
+output-declared-over-accept#0	true	12635
+output-declared-under-accept#1	true	12635
+output-declared-true-control-accept#2	true	12635
+output-declared-over-propbytes-reencoded-reject#3	false	null
+output-declared-over-bytes-raw-reject#4	false	null

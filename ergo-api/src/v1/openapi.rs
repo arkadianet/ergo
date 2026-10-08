@@ -46,7 +46,11 @@ operator diagnostics, webhooks, real-time WebSocket subscriptions, the scan/acco
 operator controls. The canonical complete document is served at `/api-docs/openapi-rust.yaml`. \
 Every error from these routes follows the nested error envelope \
 (`error.reason`/`error.message`/`error.detail`); `reason` is the stable machine-readable field to switch on. Query \
-`GET /api/v1/node/health` to confirm a running node's state."
+`GET /api/v1/node/health` to confirm a running node's state. Realtime and webhook cursors \
+(`seq`, `previous_seq`, `event_seq`, `since`, `next_seq`, `oldest_seq`, `latest_seq`, `last_seq` and persistence \
+watermarks) are unsigned 64-bit JSON integers and can exceed 2^53-1 after crash reservations. Clients must \
+preserve them exactly with a lossless JSON parser; JavaScript Number and ordinary JSON.parse are unsafe. \
+Use BigInt with a lossless parser and send cursor query parameters as decimal text."
     ),
     paths(
         crate::v1::accounts::scan::register,
@@ -71,6 +75,11 @@ Every error from these routes follows the nested error envelope \
         crate::v1::operator::node::identity,
         crate::v1::operator::node::host,
         crate::v1::operator::node::health,
+        crate::v1::operator::node::startup,
+        crate::v1::operator::node::liveness,
+        crate::v1::operator::node::readiness,
+        crate::v1::operator::node::credentials,
+        crate::v1::operator::node::revoke_credential,
         crate::v1::operator::node::version,
         crate::v1::operator::node::config_get,
         crate::v1::operator::node::config_patch,
@@ -80,21 +89,31 @@ Every error from these routes follows the nested error envelope \
         crate::v1::operator::network::sync_info,
         crate::v1::operator::network::track_info,
         crate::v1::operator::network::connect,
+        crate::v1::operator::network::disconnect,
+        crate::v1::operator::network::remove,
         crate::v1::operator::network::blacklist_add,
         crate::v1::operator::network::blacklist_remove,
         crate::v1::operator::mining::miner_stats,
         crate::v1::operator::mining::status,
         crate::v1::operator::mining::candidate,
+        crate::v1::operator::mining::candidate_details,
+        crate::v1::operator::mining_policy::get,
+        crate::v1::operator::mining_policy::set,
+        crate::v1::operator::mining::history,
         crate::v1::operator::mining::solution,
         crate::v1::operator::mining::reward_address,
         crate::v1::operator::mining::reward_pubkey,
         crate::v1::operator::mining::candidate_with_txs,
+        crate::v1::operator::private_mining::list,
+        crate::v1::operator::private_mining::submit,
+        crate::v1::operator::private_mining::cancel,
         crate::v1::operator::voting::votes,
         crate::v1::operator::voting::history,
         crate::v1::operator::voting::candidate,
         crate::v1::operator::voting::operator_votes_get,
         crate::v1::operator::voting::operator_votes_set,
         crate::v1::realtime::ws::ws_handler,
+        crate::v1::realtime::history::replay,
         crate::v1::routes::chain::list_blocks,
         crate::v1::routes::chain::block_by_id,
         crate::v1::routes::chain::block_transactions,
@@ -135,6 +154,7 @@ Every error from these routes follows the nested error envelope \
         crate::v1::routes::mempool::by_box_id,
         crate::v1::routes::mempool::by_token_id,
         crate::v1::routes::mempool::fee_histogram,
+        crate::v1::routes::mempool::fee_estimate,
         crate::v1::routes::transactions::tx_by_id,
         crate::v1::routes::transactions::submit,
         crate::v1::routes::transactions::check,
@@ -218,12 +238,19 @@ Every error from these routes follows the nested error envelope \
             crate::v1::routes::wallet_chain::WalletChainSubmitResponse,
             crate::v1::routes::wallet_chain::WalletChainSubmitBadRequest,
             crate::v1::operator::mining::MiningStatus,
+            crate::mining::RentSelfClaimState,
             crate::v1::operator::mining::RewardAddress,
             crate::v1::operator::mining::RewardPubkey,
             crate::v1::operator::network::BlacklistedPeer,
             crate::v1::operator::network::SyncInfoEntry,
             crate::v1::operator::network::TrackInfo,
             crate::v1::operator::node::NodeVersion,
+            crate::operator_control::ApiLimits,
+            crate::operator_control::ProbePolicy,
+            crate::operator_control::ProbeReport,
+            crate::operator_control::RuntimeConfigPatch,
+            crate::auth::CredentialInfo,
+            crate::v1::operator::network::BanRequest,
             crate::v1::operator::voting::ConfiguredVote,
             crate::v1::operator::voting::PublicVotes,
             crate::v1::operator::voting::SetVotesRequest,
@@ -325,7 +352,5 @@ pub(crate) struct V1OpenApi;
 /// rather than a runtime condition, so this panics instead of serving an
 /// empty spec (mirrors `crate::server::native_openapi_yaml`).
 pub fn v1_openapi_yaml() -> String {
-    V1OpenApi::openapi()
-        .to_yaml()
-        .expect("openapi yaml serialize")
+    crate::server::serialize_openapi_yaml(&V1OpenApi::openapi())
 }

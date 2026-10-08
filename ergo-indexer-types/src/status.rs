@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 /// confirmed the canonical tip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexerStatus {
+    /// Schema conversion is running; the store is unavailable for reads.
+    Migrating,
     /// Initial state on successful boot; `indexed_height < committed_tip.height`.
     Syncing,
     /// Last poll observed `indexed_height >= committed_tip.height`.

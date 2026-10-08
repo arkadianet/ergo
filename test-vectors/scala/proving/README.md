@@ -1,6 +1,6 @@
 # Scala signing oracle — verify-side parity
 
-**Audit reference:** `docs/audit-2.md` C6 / line 162.
+**Scope:** Scala signing verification parity.
 
 **Closure status:** verify-side residuals closed (Phase 8d). Prove-side byte
 parity remains deferred — Codex's strict-supervisor review classed it as

@@ -42,7 +42,7 @@ use super::context_extension::{read_context_extension, write_context_extension, 
 /// parsed [`ContextExtension`] keeps each node's identity. So for every
 /// canonically-encoded transaction these bytes equal the wire slice they
 /// replace.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct SpendingProof {
     /// Raw signature / sigma proof bytes.
     pub proof: Vec<u8>,
@@ -54,9 +54,28 @@ pub struct SpendingProof {
     /// use the cached bytes) from inspection.
     pub(crate) extension: ContextExtension,
     extension_bytes: Vec<u8>,
+    // Parser-accepted extension encoding, used only by validation's wire check.
+    // Signing and transaction IDs always use the canonical extension_bytes.
+    received_extension_bytes: Option<Vec<u8>>,
+}
+
+impl PartialEq for SpendingProof {
+    fn eq(&self, other: &Self) -> bool {
+        self.proof == other.proof
+            && self.extension == other.extension
+            && self.extension_bytes == other.extension_bytes
+    }
 }
 
 impl SpendingProof {
+    /// The extension's accepted received encoding, for transaction wire checks.
+    /// It must not be used for signing or IDs.
+    pub fn received_extension_bytes(&self) -> &[u8] {
+        self.received_extension_bytes
+            .as_deref()
+            .unwrap_or(&self.extension_bytes)
+    }
+
     /// Borrow the parsed context extension committed to by `proof`. Read-only:
     /// the wire-byte cache (`extension_bytes`) is fixed at construction, so
     /// mutation would desync serialization — rebuild via [`SpendingProof::new`]
@@ -77,6 +96,7 @@ impl SpendingProof {
             proof,
             extension,
             extension_bytes,
+            received_extension_bytes: None,
         })
     }
 
@@ -110,6 +130,7 @@ impl SpendingProof {
             proof,
             extension,
             extension_bytes,
+            received_extension_bytes: None,
         }
     }
 
@@ -163,6 +184,7 @@ impl SpendingProof {
             proof,
             extension,
             extension_bytes: w.result(),
+            received_extension_bytes: None,
         })
     }
 
@@ -204,18 +226,27 @@ pub fn write_spending_proof(w: &mut VlqWriter, sp: &SpendingProof) -> Result<(),
 pub fn read_spending_proof(r: &mut VlqReader) -> Result<SpendingProof, ReadError> {
     let proof_len = r.get_u16()? as usize;
     let proof = r.get_bytes(proof_len)?.to_vec();
+    let extension_start = r.position();
     let extension = read_context_extension(r)?;
+    let received = r.data_slice(extension_start, r.position()).to_vec();
     // Canonical re-encoding, NOT the verbatim wire slice — the transaction id
     // hashes what `ContextExtension.serializer.serialize` produces from the
     // parsed extension, and the reference canonicalizes `7f` / `80` / `0105`
     // on that path. See the `SpendingProof` doc comment.
     let mut w = VlqWriter::new();
-    write_context_extension(&mut w, &extension)
-        .map_err(|e| ReadError::InvalidData(format!("extension re-serialize: {e}")))?;
+    super::context_extension::write_context_extension_versioned(
+        &mut w,
+        &extension,
+        r.activated_script_version().unwrap_or(3),
+    )
+    .map_err(|e| ReadError::InvalidData(format!("extension re-serialize: {e}")))?;
+    let extension_bytes = w.result();
+    let received_extension_bytes = (received != extension_bytes).then_some(received);
     Ok(SpendingProof {
         proof,
         extension,
-        extension_bytes: w.result(),
+        extension_bytes,
+        received_extension_bytes,
     })
 }
 

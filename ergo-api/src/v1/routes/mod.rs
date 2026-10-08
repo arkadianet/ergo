@@ -120,6 +120,11 @@ impl V1State {
         })?;
         match idx.status() {
             IndexerStatus::CaughtUp => Ok(idx),
+            IndexerStatus::Migrating => Err(Box::new(v1_error(
+                Reason::IndexerSyncing,
+                "the extra index is migrating",
+                "retry once GET /api/v1/indexer/status reports caught up",
+            ))),
             IndexerStatus::Syncing => Err(Box::new(v1_error(
                 Reason::IndexerSyncing,
                 "the extra index is still syncing",
@@ -365,6 +370,7 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             get(mempool::transaction_by_id),
         )
         .route("/api/v1/mempool/fee-histogram", get(mempool::fee_histogram))
+        .route("/api/v1/mempool/fee-estimate", get(mempool::fee_estimate))
         // ----- protocols/* registry discovery (static, indexer-free) -----
         .route("/api/v1/protocols", get(decode::list_protocols))
         .route(
@@ -400,6 +406,10 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
 
     // Heavy reads — full-block payloads, paginated / scan / range surfaces.
     let heavy: Router<V1State> = Router::new()
+        .route(
+            "/api/v1/events/replay",
+            get(crate::v1::realtime::history::replay),
+        )
         // ----- chain/blocks -----
         .route("/api/v1/chain/blocks", get(chain::list_blocks))
         .route("/api/v1/chain/blocks/by-ids", post(chain::blocks_by_ids))

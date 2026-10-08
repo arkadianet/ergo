@@ -21,6 +21,7 @@ mod blocks_proof_for_tx_parity;
 mod boundary;
 mod compat_blocks_submit_route;
 mod compat_submit_routes;
+mod dashboard_assets;
 mod difficulty_history_route;
 mod events_endpoint;
 mod extra_index_router_walk;

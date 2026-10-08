@@ -371,8 +371,18 @@ pub(in crate::evaluator) fn eval_filter(
                     cx.trace,
                 )
                 .and_then(reject_sstring)?;
-                if matches!(keep, Value::Bool(true)) {
-                    result.push(item);
+                // The reference unboxes each invoked predicate result as Boolean.
+                // Empty collections never invoke the callback or perform this cast.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L123-L127
+                match keep {
+                    Value::Bool(true) => result.push(item),
+                    Value::Bool(false) => {}
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "Bool from Filter predicate",
+                            got: format!("{other:?}"),
+                        })
+                    }
                 }
             }
             values_to_collection(coll_kind, result, elem_type)
@@ -514,7 +524,7 @@ pub(in crate::evaluator) fn map_values(
             }
             let result = infer_collection(result, &body, &param_bindings, cx.constants)?;
             // Only PairOfCols.map leaves a Tuple2 array for pre-JIT append.
-            if cx.ctx.activated_script_version < 2 && maps_pair_columns {
+            if (cx.ctx.activated_script_version as i8) < 2 && maps_pair_columns {
                 if let Value::CollGeneric(items, elem_type) = result {
                     if matches!(elem_type.as_ref(), SigmaType::STuple(ts) if ts.len() == 2) {
                         return Ok(Value::CollLegacyPair(items, elem_type, None));
@@ -570,8 +580,18 @@ pub(in crate::evaluator) fn eval_exists(
                     cx.trace,
                 )
                 .and_then(reject_sstring)?;
-                if matches!(result, Value::Bool(true)) {
-                    return Ok(Value::Bool(true));
+                // Deliberately match the reference's Boolean unboxing failure
+                // instead of treating a non-Boolean result as false.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L160-L164
+                match result {
+                    Value::Bool(true) => return Ok(Value::Bool(true)),
+                    Value::Bool(false) => {}
+                    other => {
+                        return Err(EvalError::TypeError {
+                            expected: "Bool from Exists predicate",
+                            got: format!("{other:?}"),
+                        })
+                    }
                 }
             }
             Ok(Value::Bool(false))
@@ -601,7 +621,7 @@ fn append_values(left: Value, right: Value, cx: &EvalCtx<'_>) -> Result<Value, E
     let elem_type = coll_elem_type(&left).unwrap_or(SigmaType::SAny);
     // CollsOverArrays.scala:50,184: VersionContext.current.isJitActivated
     // (activation >= 2) fixes Tuple2 array concatenation and truncates zip sides.
-    if cx.ctx.activated_script_version < 2 {
+    if (cx.ctx.activated_script_version as i8) < 2 {
         if let Value::CollLegacyPair(items, _, None) = &left {
             if !items.is_empty() {
                 return Err(EvalError::TypeError {
@@ -684,7 +704,7 @@ pub(in crate::evaluator) fn eval_slice(
 ) -> Result<Value, EvalError> {
     let coll = cx.eval_expr(coll_expr)?;
     let from = match cx.eval_expr(from_expr)? {
-        Value::Int(v) => v.max(0) as usize,
+        Value::Int(v) => v,
         other => {
             return Err(EvalError::TypeError {
                 expected: "Int for Slice from",
@@ -693,7 +713,7 @@ pub(in crate::evaluator) fn eval_slice(
         }
     };
     let until = match cx.eval_expr(until_expr)? {
-        Value::Int(v) => v.max(0) as usize,
+        Value::Int(v) => v,
         other => {
             return Err(EvalError::TypeError {
                 expected: "Int for Slice until",
@@ -704,14 +724,13 @@ pub(in crate::evaluator) fn eval_slice(
     let elem_type = coll_elem_type(&coll).unwrap_or(SigmaType::SAny);
     let (kind, items) = collection_to_values(coll, cx.ctx)?;
     let len = items.len();
-    // Cost is charged on the **pre-len-clamp** range size to match
-    // Scala's `transformers.scala::Slice.eval`, which charges
-    // `Math.max(0, until - from)` over the user-supplied bounds
-    // (after the per-arg `max(0)` clamp). Charging only over the
-    // post-clamp `sliced.len()` under-charges when `until > len` —
-    // a consensus-loosening direction.
-    let cost_n = until.saturating_sub(from) as u32;
+    // Deliberately match JVM Int overflow on the raw operands for consensus;
+    // collection bounds are clamped only after calculating the charged length.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/transformers.scala#L94-L102
+    let cost_n = until.wrapping_sub(from).max(0) as u32;
     add_cost_per_item(cx.cost, 0xB4, cost_n)?;
+    let from = from.max(0) as usize;
+    let until = until.max(0) as usize;
     let from_clamped = from.min(len);
     let until_clamped = until.min(len);
     let sliced: Vec<Value> = if from_clamped <= until_clamped {

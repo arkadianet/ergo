@@ -56,6 +56,12 @@ pub enum PopowByIdLookup {
 
 #[derive(Debug, Error)]
 pub enum StateError {
+    #[error("operator command interrupted")]
+    OperatorInterrupted,
+    #[error("wallet UTXO discovery unavailable: {0}")]
+    WalletDiscoveryUnavailable(String),
+    #[error("wallet UTXO discovery checkpoint needs restart: {0}")]
+    WalletDiscoveryRestartRequired(String),
     /// Invalid manifest metadata after independently authenticating every chunk.
     #[error("invalid snapshot manifest: {0}")]
     InvalidSnapshotManifest(String),

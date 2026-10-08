@@ -5,7 +5,7 @@
 #   ergo-walletd --config ergo-walletd.toml
 #
 # Every key is documented by type in
-# ../docs/configuration.md#ergo-walletdtoml-the-standalone-wallet-daemon.
+# docs/configuration.md#ergo-walletdtoml-the-standalone-wallet-daemon.
 #
 # This daemon is WATCH-ONLY and READ-ONLY. It has no signing key, no send
 # route, and no submit path; it tracks the public keys listed in the descriptor

@@ -1,5 +1,5 @@
 //! Incident snapshots — the forensics capstone of the logging overhaul
-//! (`dev-docs/logging-overhaul-DESIGN.md` §4).
+//! (see `docs/logging.md`, Incident snapshots).
 //!
 //! A bounded ring captures structured events at INFO and above (the
 //! minute-cadence gauge lines included). The first ERROR carrying a new

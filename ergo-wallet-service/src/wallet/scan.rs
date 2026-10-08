@@ -215,6 +215,13 @@ impl WalletScanService {
         requested: u32,
         _tip_height: u32,
     ) -> Result<(), RescanError> {
+        if requested > 0 && store.read()?.discovery_coverage()?.is_some() {
+            return Err(RescanError::Matcher {
+                height: requested,
+                reason: "UTXO-discovered wallets require a full historical rebuild (fromHeight=0)"
+                    .into(),
+            });
+        }
         if requested > 0 && store.read()?.scan_invalidated()? {
             return Err(RescanError::InvalidStart {
                 requested,

@@ -1,6 +1,6 @@
 # Coll.updated index-bounds rejection parity
 
-**Audit reference:** `docs/audit-2.md` C7 (negative collection index parity).
+**Scope:** Negative collection index rejection parity.
 
 ## Oracle source
 
@@ -29,6 +29,7 @@ Pre-Phase-8a, the Rust code silently no-op'd both negative-index (via
 
 `reference/sigmastate-interpreter/data/shared/src/main/scala/sigma/ast/methods.scala::updated_eval`:
 
+<!-- doc-links: example -->
 ```scala
 def updated_eval[A](mc, coll, index, elem) = {
   val costKind = m.costKind.asInstanceOf[PerItemCost]

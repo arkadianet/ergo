@@ -113,3 +113,45 @@ test('parallel confirmations cannot send twice', async () => {
   await assert.rejects(() => session.confirm()); resolve(ok({ isUnlocked: true })); await pending;
   assert.equal(calls.filter(c => c[0] === 'submitSigned').length, 1);
 });
+
+test('zero-fee plans require explicit mining-only delivery', async () => {
+  const draft = makeIntent(recipients(), '0', balance, address);
+  assert.equal(draft.fee, '0');
+  const { session, calls } = setup();
+  await assert.rejects(() => session.build(draft), /mining-only/);
+  assert.equal(calls.length, 0);
+});
+
+test('private delivery and deadlines survive caller edits and uncertain retries', async () => {
+  let attempt = 0, release;
+  const { session, calls } = setup({
+    build: () => new Promise(r => release = r),
+    submitSigned: async () => ++attempt === 1 ? { ok: false, reason: 'Connection lost' } : ok({ accepted: true, txId }),
+  });
+  const options = { expires_at_ms: 2000000000000, expires_at_height: 2000000, priority: 4, label: 'own block' };
+  const original = structuredClone(options);
+  const pending = session.build(intent(), 'mine_private', options);
+  options.expires_at_height = 1; options.label = 'mutated';
+  release(ok(plan())); await pending;
+  await assert.rejects(() => session.confirm(), /Connection lost/);
+  await session.confirm();
+  assert.equal(calls.filter(c => c[0] === 'sign').length, 1);
+  for (const call of calls.filter(c => c[0] === 'submitSigned')) {
+    assert.equal(call[2], 'mine_private');
+    assert.deepEqual(call[3], original);
+    assert.deepEqual(call[1], { type: 'bytes', bytes: 'cafe' });
+  }
+});
+
+// Legacy status returns the persisted invalidation message, while native
+// errors use a code. Both must guide a pruned restore to offline discovery.
+test('wallet recovery banner recognizes persisted legacy invalidation', async () => {
+  const { walletRecoveryMessage } = await import('../js/wallet-transaction.js');
+  for (const error of ['scan_invalidated', 'wallet scan invalidated — run a full rescan (fromHeight=0)']) {
+    assert.match(walletRecoveryMessage(error), /wallet-scan-utxo/);
+    assert.match(walletRecoveryMessage(error), /pruned or snapshot/);
+    assert.match(walletRecoveryMessage(error), /balances and boxes are unavailable/);
+  }
+  assert.equal(walletRecoveryMessage(''), null);
+  assert.equal(walletRecoveryMessage(undefined), null);
+});

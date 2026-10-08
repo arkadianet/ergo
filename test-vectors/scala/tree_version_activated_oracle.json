@@ -1,5 +1,5 @@
 {
-  "_source": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala (sigma-state 6.0.6 + ergo-core 6.0.6), runs 2026-09-30 with the <surface>@<activated> spec; `oracle` is the JVM output line verbatim",
+  "_source": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala (sigma-state 6.0.6 + ergo-core 6.0.6), runs 2026-09-30 with the <surface>@<activated> spec; `oracle` is the JVM output line verbatim; later vectors from the same oracle on sigma-state/ergo-core 6.0.7",
   "_rule": "VersionContext.scala:20 require(activatedVersion < JitActivationVersion(2) || ergoTreeVersion <= activatedVersion); a failing require is re-thrown by ErgoTreeSerializer.deserializeErgoTree as a SerializerException (hard reject, size bit or not); below activated 2 the require is inert and a failing body is kept as UnparsedErgoTree when the size bit is set",
   "_issue": "#327",
   "vectors": [
@@ -295,8 +295,7 @@
       "activated_version": 1,
       "hex": "0d0208d3",
       "oracle": "ACCEPT P:d3|5",
-      "note": "v5 + size bit, sigmaProp(true)",
-      "node_known_gap": "the node wraps every tree above MAX_SUPPORTED_TREE_VERSION (3) opaquely at parse and cannot reduce it, while the JVM parses a v5 body below activated 2 and reduces it; unreachable on the spend path because checkSoftForkCondition (Interpreter.scala:325-328) rejects a v5 tree at activated < 2 first — see verify@1 0d0208d3"
+      "note": "v5 + size bit, sigmaProp(true)"
     },
     {
       "surface": "reduce",
@@ -367,6 +366,720 @@
       "hex": "cd07021a8e6f59fd4a",
       "oracle": "REJECT InterpreterException",
       "note": "mainnet block 545,684 tx[1] output[0] ergoTree (UnparsedErgoTree below activated 2); `verify` = Interpreter.verify with the tree deserialized under the default (stored-box) context, empty proof/message: checkSoftForkCondition (Interpreter.scala:325-328) runs before reduction"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0c0208d3",
+      "oracle": "ACCEPT 0c0208d3",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0c0208d392a7210000",
+      "oracle": "ACCEPT c0843d0c0208d392a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0c0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0c0208d392a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0c0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0c0208d392a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0c0104",
+      "oracle": "REJECT BufferUnderflowException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0c010492a7210000",
+      "oracle": "ACCEPT c0843d0c010492a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0c0104",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0c010492a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0c0104",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0c010492a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0c01ff",
+      "oracle": "REJECT ArrayIndexOutOfBoundsException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, unknown opcode body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0c01ff92a7210000",
+      "oracle": "REJECT ConstraintFailed",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, unknown opcode body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0c01ff",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, unknown opcode body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0c01ff92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, unknown opcode body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0c01ff",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, unknown opcode body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0c01ff92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, unknown opcode body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0c06d191a3048000",
+      "oracle": "ACCEPT 0c05d191a30400",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0c06d191a304800092a7210000",
+      "oracle": "ACCEPT c0843d0c05d191a3040092a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0c06d191a3048000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0c06d191a304800092a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0c06d191a3048000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0c06d191a304800092a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0c02021a",
+      "oracle": "ACCEPT 0c02021a",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0c02021a92a7210000",
+      "oracle": "ACCEPT c0843d0c02021a92a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0c02021a",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0c02021a92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0c02021a",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0c02021a92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "1c050108d37300",
+      "oracle": "ACCEPT 1c050108d37300",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, segregated constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d1c050108d3730092a7210000",
+      "oracle": "ACCEPT c0843d1c050108d3730092a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, segregated constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "1c050108d37300",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, segregated constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d1c050108d3730092a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 4, segregated constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0d0208d3",
+      "oracle": "ACCEPT 0d0208d3",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0d0208d392a7210000",
+      "oracle": "ACCEPT c0843d0d0208d392a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0d0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0d0208d392a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0d0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0d0208d392a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0d0104",
+      "oracle": "REJECT BufferUnderflowException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0d010492a7210000",
+      "oracle": "ACCEPT c0843d0d010492a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0d0104",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0d010492a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0d0104",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0d010492a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0d01ff",
+      "oracle": "REJECT ArrayIndexOutOfBoundsException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, unknown opcode body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0d01ff92a7210000",
+      "oracle": "REJECT ConstraintFailed",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, unknown opcode body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0d01ff",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, unknown opcode body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0d01ff92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, unknown opcode body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0d01ff",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, unknown opcode body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0d01ff92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, unknown opcode body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0d06d191a3048000",
+      "oracle": "ACCEPT 0d05d191a30400",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0d06d191a304800092a7210000",
+      "oracle": "ACCEPT c0843d0d05d191a3040092a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0d06d191a3048000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0d06d191a304800092a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0d06d191a3048000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0d06d191a304800092a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0d02021a",
+      "oracle": "ACCEPT 0d02021a",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0d02021a92a7210000",
+      "oracle": "ACCEPT c0843d0d02021a92a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0d02021a",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0d02021a92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0d02021a",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0d02021a92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "1d050108d37300",
+      "oracle": "ACCEPT 1d050108d37300",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, segregated constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d1d050108d3730092a7210000",
+      "oracle": "ACCEPT c0843d1d050108d3730092a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, segregated constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "1d050108d37300",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, segregated constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d1d050108d3730092a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 5, segregated constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0f0208d3",
+      "oracle": "ACCEPT 0f0208d3",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0f0208d392a7210000",
+      "oracle": "ACCEPT c0843d0f0208d392a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0f0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0f0208d392a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0f0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0f0208d392a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, valid SigmaProp body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0f0104",
+      "oracle": "REJECT BufferUnderflowException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0f010492a7210000",
+      "oracle": "ACCEPT c0843d0f010492a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0f0104",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0f010492a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0f0104",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0f010492a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, truncated Int constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0f01ff",
+      "oracle": "REJECT ArrayIndexOutOfBoundsException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, unknown opcode body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0f01ff92a7210000",
+      "oracle": "REJECT ConstraintFailed",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, unknown opcode body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0f01ff",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, unknown opcode body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0f01ff92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, unknown opcode body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0f01ff",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, unknown opcode body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0f01ff92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, unknown opcode body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0f06d191a3048000",
+      "oracle": "ACCEPT 0f05d191a30400",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0f06d191a304800092a7210000",
+      "oracle": "ACCEPT c0843d0f05d191a3040092a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0f06d191a3048000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0f06d191a304800092a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0f06d191a3048000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0f06d191a304800092a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, non-minimal Int VLQ (re-serializes canonically)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0f02021a",
+      "oracle": "ACCEPT 0f02021a",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d0f02021a92a7210000",
+      "oracle": "ACCEPT c0843d0f02021a92a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0f02021a",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843d0f02021a92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0f02021a",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d0f02021a92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, Byte root (rule 1001 wrap)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "1f050108d37300",
+      "oracle": "ACCEPT 1f050108d37300",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, segregated constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843d1f050108d3730092a7210000",
+      "oracle": "ACCEPT c0843d1f050108d3730092a7210000",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, segregated constant body"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "1f050108d37300",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, segregated constant body"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843d1f050108d3730092a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "sigma-state/ergo-core 6.0.7 oracle: tree version 7, segregated constant body"
     }
   ],
   "_surfaces": {

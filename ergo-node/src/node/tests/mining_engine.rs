@@ -187,6 +187,9 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
     // Intent whose expected_parent / expected_height can never become
     // commit-visible: committed height is 0, intent expects height 5.
     let intent = BuildIntent {
+        private_transactions: std::sync::Arc::new(Vec::new()),
+        operator_generation: 0,
+        operator_owned: true,
         expected_parent: [0x42u8; 32],
         expected_height: 5,
         mempool: Arc::new(MempoolReadSnapshot::empty()),
@@ -354,6 +357,9 @@ async fn visibility_retry_budget_resets_on_parent_change() {
     // Step 1 — Intent A: parent [0x42;32], height 5 — commit-visible never
     // (genesis store has height 0, intent expects height 5).
     let intent_a = BuildIntent {
+        private_transactions: std::sync::Arc::new(Vec::new()),
+        operator_generation: 0,
+        operator_owned: true,
         expected_parent: [0x42u8; 32],
         expected_height: 5,
         mempool: Arc::new(MempoolReadSnapshot::empty()),
@@ -404,6 +410,9 @@ async fn visibility_retry_budget_resets_on_parent_change() {
     // because B's parent differs from A's, the `budget_parent` guard resets
     // `attempts = 0`.  A's remaining retries are abandoned silently.
     let intent_b = BuildIntent {
+        private_transactions: std::sync::Arc::new(Vec::new()),
+        operator_generation: 0,
+        operator_owned: true,
         expected_parent: [0x43u8; 32],
         expected_height: 5,
         mempool: Arc::new(MempoolReadSnapshot::empty()),

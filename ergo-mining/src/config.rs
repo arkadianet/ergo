@@ -94,6 +94,10 @@ pub struct MiningConfig {
     #[serde(default = "default_max_storage_rent_claims")]
     pub max_storage_rent_claims: u32,
 
+    /// Block contents, rent budgets and token-preservation preferences.
+    #[serde(default)]
+    pub block_policy: crate::policy::BlockPolicy,
+
     /// `true`: the candidate engine keeps the hydrated AVL working set resident
     /// between candidate builds, keyed on the committed tip. Same-tip rebuilds
     /// reuse the tree and loaded paths, while changed transaction sets still pay
@@ -198,6 +202,7 @@ impl Default for MiningConfig {
             use_external_miner: default_use_external_miner(),
             claim_storage_rent: false,
             max_storage_rent_claims: default_max_storage_rent_claims(),
+            block_policy: crate::policy::BlockPolicy::default(),
             candidate_base_cache: false,
             offline_generation: false,
             extension_fields: Vec::new(),
@@ -216,6 +221,7 @@ impl MiningConfig {
     /// subsystem is spawned so a misconfigured node refuses to start
     /// rather than silently failing later.
     pub fn validate(&self) -> Result<(), MiningError> {
+        self.block_policy.validate()?;
         if !self.enabled {
             return Ok(());
         }

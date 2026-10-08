@@ -65,6 +65,7 @@ pub mod config;
 mod dto;
 mod hints_codec;
 mod hook;
+pub mod jobs;
 mod keys;
 pub mod mempool;
 mod multisig;
@@ -135,6 +136,30 @@ pub struct WalletEngine {
 }
 
 impl WalletEngine {
+    pub fn mining_jobs(
+        &self,
+    ) -> Result<ergo_wallet_protocol::WalletJobs, ergo_wallet_protocol::WalletAdminError> {
+        jobs::list(self.store.as_ref())
+    }
+    pub async fn create_mining_job(
+        &mut self,
+        request: ergo_wallet_protocol::WalletJobRequest,
+    ) -> Result<ergo_wallet_protocol::WalletJob, ergo_wallet_protocol::WalletAdminError> {
+        jobs::create_owned(self, request).await
+    }
+    pub async fn cancel_mining_job(
+        &mut self,
+        id: &str,
+    ) -> Result<ergo_wallet_protocol::WalletJob, ergo_wallet_protocol::WalletAdminError> {
+        jobs::cancel(self, id).await
+    }
+    pub fn recover_mining_jobs(&mut self) -> Result<(), ergo_wallet_protocol::WalletAdminError> {
+        jobs::recover_preparing(self.store.as_ref())
+    }
+    pub async fn tick_mining_jobs(&mut self) -> Result<(), ergo_wallet_protocol::WalletAdminError> {
+        jobs::tick(self).await
+    }
+
     pub fn new(parts: WalletEngineParts) -> Self {
         let WalletEngineParts {
             storage,

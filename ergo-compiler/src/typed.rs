@@ -118,7 +118,7 @@ pub enum ConstPayload {
     /// the Scala `Ecp.toString` affine `(x_hex,y_hex,1)` form.
     GroupElement([u8; 33]),
     /// Opaque SigmaProp payload — an env-injected label with no curve bytes;
-    /// not emittable (compiler-design-ledger.md D-E3). Real keys use [`ConstPayload::ProveDlog`].
+    /// not emittable (ergo-compiler/docs/compiler-design-ledger.md D-E3). Real keys use [`ConstPayload::ProveDlog`].
     SigmaProp(String),
     /// `SigmaPropConstant(ProveDlog(pubkey))` produced by the binder's PK rule
     /// (SigmaBinder.scala:105-106, SigmaPredef.scala:159-166).

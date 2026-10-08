@@ -13,10 +13,10 @@ use crate::tx::{
     CheckedTransaction,
 };
 
-use super::extension::validate_extension_structural;
+use super::extension::validate_extension_structural_active;
 use super::fork_vote::validate_fork_vote;
-use super::interlinks::validate_interlinks;
-use super::layering::{build_tx_layers, TxLayerInput, TxLayerResult};
+use super::interlinks::validate_interlinks_with_context;
+use super::layering::{build_tx_layers, TxLayerInput, TxLayerResult, TxLayerSuccess};
 use super::overlay::BlockUtxoOverlay;
 use super::size::check_block_transactions_size;
 use super::{BlockValidationContext, BlockValidationError, CheckedBlock};
@@ -103,6 +103,17 @@ pub fn validate_full_block_with_costs(
     extension: &Extension,
     ctx: &BlockValidationContext<'_>,
 ) -> Result<(CheckedBlock, Vec<(usize, u64)>), BlockValidationError> {
+    validate_full_block_sequential_impl(checked_header, block_transactions, extension, ctx)
+}
+
+// Also used by the parallel path only when block-unit truncation can hide a
+// per-input JIT limit failure.
+fn validate_full_block_sequential_impl(
+    checked_header: CheckedHeader,
+    block_transactions: &BlockTransactions,
+    extension: &Extension,
+    ctx: &BlockValidationContext<'_>,
+) -> Result<(CheckedBlock, Vec<(usize, u64)>), BlockValidationError> {
     let mut costs = Vec::new();
     let header = checked_header.header();
     let header_id = checked_header.header_id();
@@ -158,7 +169,9 @@ pub fn validate_full_block_with_costs(
     // 2.6. Fork-vote prohibited-window check (Scala rule 407).
     // No-op when no soft-fork is in progress (ctx.soft_fork_state
     // is None) OR when the header doesn't cast a SoftFork vote.
-    validate_fork_vote(header, ctx.soft_fork_state.as_ref())?;
+    if ctx.is_rule_active(407) {
+        validate_fork_vote(header, ctx.soft_fork_state.as_ref())?;
+    }
 
     // 3. Transactions root
     let txs = &block_transactions.transactions;
@@ -220,16 +233,20 @@ pub fn validate_full_block_with_costs(
     // extension can't force the O(N²) duplicate scan as a DoS — the
     // root match cryptographically binds the extension to the header
     // before we walk its fields.
-    validate_extension_structural(extension, header.height)?;
+    validate_extension_structural_active(extension, header.height, |id| ctx.is_rule_active(id))?;
 
     // 4a.5. Interlink validation (rules 401, 402). Skipped when the
     // parent extension isn't on the context — that's Scala's
     // `exIlUnableToValidate` recoverable path. Production callers
     // wire `parent_extension` from the store for the consensus-path
     // enforcement; pre-NiPoPoW or genesis paths pass `None`.
-    if let Some(parent_ext) = ctx.parent_extension {
-        validate_interlinks(extension, ctx.parent.header(), parent_ext)?;
-    }
+    validate_interlinks_with_context(
+        extension,
+        header,
+        Some(ctx.parent.header()),
+        ctx.parent_extension,
+        |id| ctx.is_rule_active(id),
+    )?;
 
     // 4b. Block-transactions section size (rule 306).
     // Same defensive ordering as 4a: runs AFTER the transactions
@@ -237,11 +254,19 @@ pub fn validate_full_block_with_costs(
     // the re-serialize work as a DoS vector. Mirrors Scala's order
     // at `ErgoStateContext.appendFullBlock:308-310` (extension
     // validation → block-tx-size → ex-size).
-    check_block_transactions_size(
-        block_transactions,
-        header.version,
-        ctx.rule_306_max_block_size,
-    )?;
+    if ctx.is_rule_active(306) {
+        check_block_transactions_size(
+            block_transactions,
+            header.version,
+            ctx.params
+                .block_rule_inputs
+                .as_ref()
+                .map_or(Some(ctx.rule_306_max_block_size), |parent| {
+                    parent.max_block_size
+                })
+                .ok_or(BlockValidationError::MissingProtocolParameter { id: 3 })?,
+        )?;
+    }
 
     // 5. Per-tx validation with intra-block UTXO overlay
     // Scala-parity header window: only the first 9 ancestors reach the
@@ -324,6 +349,20 @@ pub fn validate_full_block_with_costs(
             }
         })?;
         let mut cost = CostAccumulator::new(block_cap);
+        // ErgoState threads the running block cost into validateStateful;
+        // every input checks the remaining budget before JIT truncation.
+        // https://github.com/ergoplatform/ergo/blob/v6.0.7/src/main/scala/org/ergoplatform/nodeView/state/ErgoState.scala#L140-L157
+        // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala#L135-L136
+        cost.add(JitCost::from_block_cost(total_block_cost).map_err(|e| {
+            BlockValidationError::Transaction {
+                index: i,
+                error: ValidationError::JitCostOverflow(e.to_string()),
+            }
+        })?)
+        .map_err(|e| BlockValidationError::Transaction {
+            index: i,
+            error: ValidationError::JitCostOverflow(e.to_string()),
+        })?;
 
         let mut tx_cx = crate::tx::TxValidationCtx {
             ctx: &tx_ctx,
@@ -346,8 +385,8 @@ pub fn validate_full_block_with_costs(
         )
         .map_err(|e| BlockValidationError::Transaction { index: i, error: e })?;
 
-        costs.push((i, cost.total_block_cost()));
-        total_block_cost += cost.total_block_cost();
+        costs.push((i, cost.total_block_cost() - total_block_cost));
+        total_block_cost = cost.total_block_cost();
         overlay.apply_tx(i, checked.transaction());
         checked_txs.push(checked);
     }
@@ -456,7 +495,9 @@ fn validate_full_block_parallel_impl(
 
     // 2.6. Fork-vote prohibited-window check (Scala rule 407).
     // Mirror of sequential step 2.6.
-    validate_fork_vote(header, ctx.soft_fork_state.as_ref())?;
+    if ctx.is_rule_active(407) {
+        validate_fork_vote(header, ctx.soft_fork_state.as_ref())?;
+    }
 
     let txs = &block_transactions.transactions;
     let mut tx_ids: Vec<Vec<u8>> = Vec::with_capacity(txs.len());
@@ -521,15 +562,27 @@ fn validate_full_block_parallel_impl(
     // bound the bytes to the header, so an unbound adversarial
     // payload can't trip the O(N²) duplicate scan / re-serialize
     // walks as a DoS vector.
-    validate_extension_structural(extension, header.height)?;
-    if let Some(parent_ext) = ctx.parent_extension {
-        validate_interlinks(extension, ctx.parent.header(), parent_ext)?;
-    }
-    check_block_transactions_size(
-        block_transactions,
-        header.version,
-        ctx.rule_306_max_block_size,
+    validate_extension_structural_active(extension, header.height, |id| ctx.is_rule_active(id))?;
+    validate_interlinks_with_context(
+        extension,
+        header,
+        Some(ctx.parent.header()),
+        ctx.parent_extension,
+        |id| ctx.is_rule_active(id),
     )?;
+    if ctx.is_rule_active(306) {
+        check_block_transactions_size(
+            block_transactions,
+            header.version,
+            ctx.params
+                .block_rule_inputs
+                .as_ref()
+                .map_or(Some(ctx.rule_306_max_block_size), |parent| {
+                    parent.max_block_size
+                })
+                .ok_or(BlockValidationError::MissingProtocolParameter { id: 3 })?,
+        )?;
+    }
 
     // Layered parallel tx validation
     let layering = build_tx_layers(txs)?;
@@ -556,7 +609,7 @@ fn validate_full_block_parallel_impl(
 
     let mut overlay = BlockUtxoOverlay::new(ctx.utxo, txs);
     let mut checked_slots: Vec<Option<CheckedTransaction>> = (0..txs.len()).map(|_| None).collect();
-    let mut total_block_cost: u64 = 0;
+    let mut tx_budgets = vec![(0, JitCost::ZERO); txs.len()];
 
     for layer in &layering.layers {
         // Step 1: resolve inputs + serialize tx_bytes serially. The overlay
@@ -656,7 +709,14 @@ fn validate_full_block_parallel_impl(
                     ),
                 };
                 match result {
-                    Ok(checked) => (i, Ok((checked, cost.total_block_cost()))),
+                    Ok(checked) => (
+                        i,
+                        Ok(TxLayerSuccess {
+                            checked,
+                            block_cost: cost.total_block_cost(),
+                            checked_peak: cost.checked_peak(),
+                        }),
+                    ),
                     Err(e) => (i, Err(e)),
                 }
             })
@@ -670,11 +730,10 @@ fn validate_full_block_parallel_impl(
         // The owned `ValidationError` is taken directly from
         // the parallel result, not reconstructed by re-running the
         // failing tx through a second validator instance.
-        let mut successes: Vec<(usize, CheckedTransaction, u64)> =
-            Vec::with_capacity(layer_results.len());
+        let mut successes = Vec::with_capacity(layer_results.len());
         for (i, outcome) in layer_results {
             match outcome {
-                Ok((checked, cost)) => successes.push((i, checked, cost)),
+                Ok(success) => successes.push((i, success)),
                 Err(error) => {
                     return Err(BlockValidationError::Transaction { index: i, error });
                 }
@@ -684,14 +743,47 @@ fn validate_full_block_parallel_impl(
         // Step 4: commit successful layer results. Overlay.apply_tx is
         // deterministic — applied in ascending tx index, matching the
         // sequential path's commit order.
-        for (i, checked, tx_cost) in successes {
-            total_block_cost += tx_cost;
-            overlay.apply_tx(i, checked.transaction());
-            checked_slots[i] = Some(checked);
-            if let Some(ref mut v) = costs_out {
-                v.push((i, tx_cost));
-            }
+        for (i, success) in successes {
+            tx_budgets[i] = (success.block_cost, success.checked_peak);
+            overlay.apply_tx(i, success.checked.transaction());
+            checked_slots[i] = Some(success.checked);
         }
+    }
+
+    // Fold in block order, independent of dependency-layer scheduling. The peak
+    // includes checks whose charges were later rounded or discarded by the JVM.
+    // Most inputs discard at most nine JIT units; pre-A6 deserialization and
+    // soft-fork recovery can discard larger charges. Keep those checks deliberately
+    // for consensus without changing the returned transaction cost.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/interpreter/Interpreter.scala#L246-L259
+    let mut total_block_cost = 0u64;
+    let mut needs_recheck = false;
+    let cap_jit = ctx.params.max_block_cost.saturating_mul(10);
+    for (tx_cost, peak) in &tx_budgets {
+        needs_recheck |= peak.value() > cap_jit.saturating_sub(total_block_cost.saturating_mul(10));
+        total_block_cost += tx_cost;
+    }
+    // Only transactions whose checked peak reaches the remaining budget need
+    // the sequential path. Blocks above the cap already reject below.
+    if !skip_scripts && needs_recheck && total_block_cost <= ctx.params.max_block_cost {
+        let (block, costs) = validate_full_block_sequential_impl(
+            checked_header,
+            block_transactions,
+            extension,
+            ctx,
+        )?;
+        if let Some(out) = costs_out {
+            out.extend(costs);
+        }
+        return Ok(block);
+    }
+    if let Some(ref mut out) = costs_out {
+        out.extend(
+            tx_budgets
+                .into_iter()
+                .enumerate()
+                .map(|(index, (cost, _))| (index, cost)),
+        );
     }
 
     if total_block_cost > ctx.params.max_block_cost {

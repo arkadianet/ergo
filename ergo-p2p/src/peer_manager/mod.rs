@@ -11,7 +11,7 @@
 //! ranking with throughput metrics and randomization is queued for a
 //! follow-up pass.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,6 +27,7 @@ use crate::peer::{
 
 mod known_peer;
 pub mod limits;
+mod operator;
 mod persistence;
 pub mod routability;
 
@@ -47,16 +48,11 @@ use known_peer::{backoff_for, known_peer_keep_priority};
 
 // ---- PeerManager ----
 
-/// Hard cap on the ban list, in memory and mirrored to the persisted BANS
-/// table. Without it, an adversary holding an IPv6 /64 can mint unlimited
-/// source addresses and each handshake-reject (1-year "permanent" ban)
-/// adds a resident entry plus a durable redb row — slow-burn memory/disk
-/// exhaustion across restarts (audit M-6). 10k entries at ~100 B/row is a
-/// few MB of state; genuine ban pressure on honest deployments sits
-/// orders of magnitude below this. Eviction order: soonest-expiring first
-/// (temporary bans before permanent), so the least-valuable entries leave
-/// first and the cap degrades gracefully instead of refusing new bans.
+/// Bound live ban memory under handshake/penalty pressure. Automatic bans are
+/// process-local and use at most 8976 entries; operators have reserved capacity
+/// and can reclaim automatic slots up to this total limit.
 pub(crate) const MAX_BANS: usize = 10_000;
+const OPERATOR_BAN_RESERVE: usize = 1024;
 
 /// Cadence for the expired-ban sweep. Expired entries stop being enforced
 /// immediately (`is_banned` checks `until`), but without a sweep they stay
@@ -86,6 +82,10 @@ pub struct PeerManager {
     /// Ban list: IP → ban expiry. Separate from peers so bans survive disconnection.
     bans: HashMap<IpAddr, BanEntry>,
     known_addresses: Vec<KnownPeer>,
+    /// Recovery attempts do not feed dial backoff. Keep the marker through
+    /// removal/timeout until success or the next registration, so a late
+    /// failure event from the same attempt cannot escalate backoff either.
+    recovery_dials: HashSet<SocketAddr>,
     our_session_id: i64,
     limits: PeerLimits,
     /// Persistent address book. Optional so tests and callers that don't
@@ -129,6 +129,7 @@ pub struct PeerManager {
 struct BanEntry {
     until: Instant,
     count: u32,
+    operator: bool,
 }
 
 impl PeerManager {
@@ -141,6 +142,7 @@ impl PeerManager {
             peers: HashMap::new(),
             bans: HashMap::new(),
             known_addresses: Vec::new(),
+            recovery_dials: HashSet::new(),
             our_session_id: session_id,
             limits,
             book: None,
@@ -191,7 +193,20 @@ impl PeerManager {
     /// Attempt to register a new outbound connection. Returns Err if limits prevent it.
     pub fn register_outbound(&mut self, addr: PeerId, now: Instant) -> Result<(), ConnectError> {
         self.check_can_connect(addr, now)?;
+        self.recovery_dials.remove(&addr);
         self.peers.insert(addr, PeerInfo::new_outbound(addr, now));
+        Ok(())
+    }
+
+    /// Register a starvation-recovery dial under the usual connection limits.
+    /// Failures of this attempt leave both memory and the address book alone.
+    pub fn register_recovery_outbound(
+        &mut self,
+        addr: PeerId,
+        now: Instant,
+    ) -> Result<(), ConnectError> {
+        self.register_outbound(addr, now)?;
+        self.recovery_dials.insert(addr);
         Ok(())
     }
 
@@ -207,6 +222,7 @@ impl PeerManager {
         if inbound_count >= max_inbound {
             return Err(ConnectError::TooManyInbound);
         }
+        self.recovery_dials.remove(&addr);
         self.peers.insert(addr, PeerInfo::new_inbound(addr, now));
         Ok(())
     }
@@ -765,7 +781,8 @@ impl PeerManager {
             if new_priority <= worst_priority {
                 return AddKnownOutcome::DroppedPoolFull;
             }
-            self.known_addresses.swap_remove(worst_idx);
+            let removed = self.known_addresses.swap_remove(worst_idx);
+            self.recovery_dials.remove(&removed.addr);
         }
 
         self.known_addresses.push(KnownPeer {
@@ -799,13 +816,19 @@ impl PeerManager {
                 entry.until = entry.until.max(until);
                 entry.count = entry.count.max(count);
             })
-            .or_insert(BanEntry { until, count });
+            .or_insert(BanEntry {
+                until,
+                count,
+                operator: true,
+            });
     }
 
     /// Record a dial failure against a known address. Increments the
     /// consecutive-failure counter and stamps `last_failure = now` so
     /// `addresses_to_connect` will skip this address until the backoff
     /// window elapses (see `DIAL_BACKOFF_SECS`).
+    ///
+    /// Recovery attempts are a no-op in memory and on disk.
     ///
     /// Fully a no-op — in memory *and* on disk — for an address the dial
     /// pool does not hold. Backoff is a fact about an address we chose to
@@ -819,6 +842,9 @@ impl PeerManager {
     /// stub is routable enough to survive the boot purge and be replayed
     /// into the dial pool (issue #298 review, P1-1).
     pub fn mark_dial_failed(&mut self, addr: &SocketAddr, now: Instant) {
+        if self.recovery_dials.contains(addr) {
+            return;
+        }
         let Some(k) = self.known_addresses.iter_mut().find(|k| k.addr == *addr) else {
             return;
         };
@@ -830,6 +856,7 @@ impl PeerManager {
     /// Record a successful handshake. Clears the backoff state so future
     /// failures start fresh from the shortest delay.
     pub fn mark_dial_succeeded(&mut self, addr: &SocketAddr, now: Instant) {
+        self.recovery_dials.remove(addr);
         if let Some(k) = self.known_addresses.iter_mut().find(|k| k.addr == *addr) {
             k.last_failure = None;
             k.consecutive_failures = 0;
@@ -943,6 +970,49 @@ impl PeerManager {
             .take(limit)
             .map(|k| k.addr)
             .collect()
+    }
+
+    /// Select up to four backoff-bypassing addresses only when starved.
+    /// Seeds precede previously seen peers, then fewer failures and older
+    /// failures win. `rotation` is the recovery batch index: batch `n`
+    /// starts `n` batches into that order and wraps, so successive batches
+    /// sweep every eligible address instead of retrying a leading group that
+    /// never answers. Recovery failures leave the order unchanged, so the
+    /// sweep is stable. Routability, bans, existing sessions and connection
+    /// limits still apply.
+    pub fn addresses_for_recovery(
+        &self,
+        now: Instant,
+        limit: usize,
+        rotation: usize,
+    ) -> Vec<SocketAddr> {
+        if self.connected_count() > 0 || !self.addresses_to_connect(now, 1).is_empty() {
+            return Vec::new();
+        }
+        let priority = |k: &KnownPeer| {
+            (
+                !k.origin.is_seed(),
+                k.last_seen.is_none(),
+                k.consecutive_failures,
+                k.last_failure,
+            )
+        };
+        let mut eligible: Vec<_> = self
+            .known_addresses
+            .iter()
+            .filter(|k| {
+                (k.origin.is_seed() || is_routable_for_p2p(&k.addr, self.allow_local))
+                    && self.check_can_connect(k.addr, now).is_ok()
+            })
+            .collect();
+        eligible.sort_by_key(|k| (priority(k), k.addr));
+        let take = limit.min(4).min(self.outbound_deficit());
+        if take == 0 || eligible.is_empty() {
+            return Vec::new();
+        }
+        let offset = rotation.wrapping_mul(take) % eligible.len();
+        eligible.rotate_left(offset);
+        eligible.into_iter().take(take).map(|k| k.addr).collect()
     }
 
     /// Whether we need more outbound connections.
@@ -1122,6 +1192,13 @@ impl PeerManager {
         // Bans are IP-wide, including other ports and pending handshakes.
         self.peers
             .retain(|addr, _| crate::peer::canonical_ip(addr.ip()) != ip);
+        if self
+            .bans
+            .get(&ip)
+            .is_some_and(|entry| entry.operator && now < entry.until)
+        {
+            return;
+        }
         let existing_count = self.bans.get(&ip).map(|e| e.count).unwrap_or(0);
         let duration = if permanent {
             Duration::from_secs(365 * 24 * 60 * 60)
@@ -1139,31 +1216,31 @@ impl PeerManager {
             BanEntry {
                 until: now + duration,
                 count,
+                operator: false,
             },
         );
-        self.persist_ban(ip, duration, count, permanent);
-        self.enforce_ban_cap_to(MAX_BANS);
+        let operators = self.bans.values().filter(|entry| entry.operator).count();
+        self.enforce_ban_cap_to(
+            (MAX_BANS - OPERATOR_BAN_RESERVE).min(MAX_BANS.saturating_sub(operators)),
+        );
     }
 
-    /// Keep the ban list within `max`, evicting soonest-expiring entries
-    /// first (temporary before permanent — `permanent` bans carry a 1-year
-    /// `until`, so pure expiry ordering already deprioritizes them).
-    /// Evicted IPs are dropped from the persisted table too, so both
-    /// representations stay within cap. Production passes [`MAX_BANS`];
+    /// Limit automatic entries, reserving capacity for operator bans. Automatic
+    /// pressure never evicts an operator entry. Production reserves 1024 slots;
     /// tests pass a smaller bound to exercise the eviction path without
     /// ten thousand redb writes.
     fn enforce_ban_cap_to(&mut self, max: usize) {
-        while self.bans.len() > max {
+        while self.bans.values().filter(|entry| !entry.operator).count() > max {
             let Some(victim) = self
                 .bans
                 .iter()
+                .filter(|(_, entry)| !entry.operator)
                 .min_by_key(|(_, entry)| entry.until)
                 .map(|(ip, _)| *ip)
             else {
                 break;
             };
             self.bans.remove(&victim);
-            self.unban_persisted(victim);
         }
     }
 
@@ -1187,8 +1264,9 @@ impl PeerManager {
             .map(|(ip, _)| *ip)
             .collect();
         for ip in &expired {
-            self.bans.remove(ip);
-            self.unban_persisted(*ip);
+            if self.bans.remove(ip).is_some_and(|entry| entry.operator) {
+                self.unban_persisted(*ip);
+            }
         }
         expired.len()
     }

@@ -874,6 +874,7 @@ fn make_verifier_context<'a>(
 fn eval_box_from_ergo(b: &ErgoBox) -> ergo_sigma::evaluator::EvalBox {
     let id = b.box_id().map(|id| *id.as_bytes()).unwrap_or([0u8; 32]);
     ergo_sigma::evaluator::EvalBox {
+        lazy_vals: Default::default(),
         creation_height: b.candidate.creation_height,
         script_bytes: b.candidate.ergo_tree_bytes().to_vec(),
         value: b.candidate.value as i64,
@@ -890,6 +891,7 @@ fn eval_box_from_ergo(b: &ErgoBox) -> ergo_sigma::evaluator::EvalBox {
 /// Build a minimal `EvalBox` from an output candidate.
 fn eval_box_from_candidate(c: &ErgoBoxCandidate, index: usize) -> ergo_sigma::evaluator::EvalBox {
     ergo_sigma::evaluator::EvalBox {
+        lazy_vals: Default::default(),
         creation_height: c.creation_height,
         script_bytes: c.ergo_tree_bytes().to_vec(),
         value: c.value as i64,
@@ -1149,4 +1151,42 @@ fn prover_refuses_unsupported_script() {
         matches!(err, ergo_wallet::WalletError::TxBuild(_)),
         "expected TxBuild rejection for unsupported-family script, got {err:?}",
     );
+}
+
+#[test]
+fn generated_leaf_responses_are_canonical_scalars() {
+    let secret = test_scalar(0x10);
+    let pk = pubkey_from_scalar(&secret);
+    let real = dlog_proposition(&pk);
+    let (dht, _) = dht_proposition(&test_scalar(0x20));
+    let props = [
+        real.clone(),
+        cor(vec![real.clone(), dht]),
+        SigmaBoolean::Cthreshold {
+            k: 1,
+            children: vec![
+                real,
+                dlog_proposition(&pubkey_from_scalar(&test_scalar(0x30))),
+            ]
+            .into(),
+        },
+    ];
+    let registry = registry_with_dlog(&pk, secret);
+    for seed in 0..32u8 {
+        for proposition in &props {
+            let (proof, _) = prove_sigma(
+                proposition,
+                &registry,
+                b"canonical response",
+                &HintsBag::empty(),
+                &mut Sha256DerivedRng::from_seed([seed; 32]),
+            )
+            .unwrap();
+            for leaf in ergo_sigma::verify::extract_proof_leaves(proposition, &proof).unwrap() {
+                assert!(bool::from(
+                    Scalar::from_repr(leaf.response.into()).is_some()
+                ));
+            }
+        }
+    }
 }

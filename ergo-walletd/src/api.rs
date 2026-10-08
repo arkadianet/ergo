@@ -200,36 +200,32 @@ async fn boxes(
 ) -> Result<Json<BoxPage>, ApiError> {
     let (offset, limit) = page_bounds(query)?;
     let service = state.context.service;
-    let (mut values, as_of) = tokio::task::spawn_blocking(move || {
-        let values = service.confirmed_boxes()?;
-        let as_of = service
-            .store()
-            .read()?
-            .scan_cursor()?
-            .map(|cursor| cursor.height)
-            .unwrap_or(0);
-        Ok::<_, ergo_wallet_service::WalletServiceError>((values, as_of))
+    let page = tokio::task::spawn_blocking(move || {
+        let read = service.store().read()?;
+        let mut values = read.unspent_boxes()?;
+        let as_of = read.scan_cursor()?.map(|cursor| cursor.height).unwrap_or(0);
+        values.sort_by(|left, right| {
+            right
+                .creation_height
+                .cmp(&left.creation_height)
+                .then_with(|| right.box_id.cmp(&left.box_id))
+        });
+        let total = values.len() as u32;
+        let items = values
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(|value| box_dto(&value, read.as_ref()))
+            .collect::<Result<Vec<_>, ApiError>>()?;
+        Ok::<_, ApiError>(BoxPage {
+            items,
+            total,
+            as_of,
+        })
     })
     .await
     .map_err(|_| ApiError::internal("boxes task failed".to_string()))??;
-    values.sort_by(|left, right| {
-        right
-            .creation_height
-            .cmp(&left.creation_height)
-            .then_with(|| right.box_id.cmp(&left.box_id))
-    });
-    let total = values.len() as u32;
-    let items = values
-        .into_iter()
-        .skip(offset as usize)
-        .take(limit as usize)
-        .map(|value| box_dto(&value))
-        .collect::<Result<Vec<_>, ApiError>>()?;
-    Ok(Json(BoxPage {
-        items,
-        total,
-        as_of,
-    }))
+    Ok(Json(page))
 }
 
 async fn box_by_id(
@@ -238,11 +234,17 @@ async fn box_by_id(
 ) -> Result<Response, ApiError> {
     let id = decode_id(&id)?;
     let service = state.context.service;
-    let value = tokio::task::spawn_blocking(move || service.confirmed_box_by_id(&id))
-        .await
-        .map_err(|_| ApiError::internal("box task failed".to_string()))??;
+    let value = tokio::task::spawn_blocking(move || {
+        let read = service.store().read()?;
+        read.box_by_id(&id)?
+            .filter(|value| matches!(value.status, BoxStatus::Confirmed))
+            .map(|value| box_dto(&value, read.as_ref()))
+            .transpose()
+    })
+    .await
+    .map_err(|_| ApiError::internal("box task failed".to_string()))??;
     match value {
-        Some(value) => Ok(Json(box_dto(&value)?).into_response()),
+        Some(value) => Ok(Json(value).into_response()),
         None => Err(ApiError::not_found("box_not_found")),
     }
 }
@@ -441,7 +443,26 @@ fn balance_dto(value: &Balance, height: u32) -> WalletBalanceDto {
     }
 }
 
-fn box_dto(value: &WalletBox) -> Result<WalletBoxSummary, ApiError> {
+fn box_dto(
+    value: &WalletBox,
+    read: &dyn ergo_wallet_service::WalletRead,
+) -> Result<WalletBoxSummary, ApiError> {
+    let declared_creation_height = if matches!(value.status, BoxStatus::Spent { .. }) {
+        None
+    } else {
+        read.box_bytes(&value.box_id)?
+            .map(|bytes| {
+                let mut reader = ergo_primitives::reader::VlqReader::new(&bytes).trusted();
+                let ergo_box = ergo_ser::ergo_box::read_ergo_box(&mut reader).map_err(|error| {
+                    ApiError::internal(format!("stored wallet box decode: {error}"))
+                })?;
+                if !reader.is_empty() {
+                    return Err(ApiError::internal("stored wallet box has trailing bytes"));
+                }
+                Ok(ergo_box.candidate.creation_height)
+            })
+            .transpose()?
+    };
     Ok(WalletBoxSummary {
         box_id: hex::encode(value.box_id),
         value: value.value.to_string(),
@@ -456,6 +477,8 @@ fn box_dto(value: &WalletBox) -> Result<WalletBoxSummary, ApiError> {
         creation_tx_id: hex::encode(value.creation_tx_id),
         creation_output_index: value.creation_output_index,
         creation_height: value.creation_height,
+        inclusion_height_known: read.inclusion_height_known(value.box_id)?,
+        declared_creation_height,
         status: match value.status {
             BoxStatus::Confirmed => BoxStatusDto::Confirmed,
             BoxStatus::Immature { matures_at } => BoxStatusDto::Immature {

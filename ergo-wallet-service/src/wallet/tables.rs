@@ -203,6 +203,14 @@ pub const WALLET_SCAN_INVALIDATED: TableDefinition<(), bool> =
 pub const WALLET_RESCAN_STATE: TableDefinition<(), Vec<u8>> =
     TableDefinition::new("wallet_rescan_state");
 
+/// Atomic publication metadata for current-UTXO discovery. JSON, versioned.
+pub const WALLET_UTXO_DISCOVERY: TableDefinition<(), Vec<u8>> =
+    TableDefinition::new("wallet_utxo_discovery");
+/// Boxes whose inclusion heights are unknown; value is the script creation
+/// height, used to reconstruct mining-reward maturity during rollback.
+pub const WALLET_DISCOVERED_BOXES: TableDefinition<[u8; 32], u32> =
+    TableDefinition::new("wallet_discovered_boxes");
+
 /// Pack a `(derivation_path_index, pubkey)` pair into a 41-byte
 /// `WALLET_TRACKED_PUBKEYS` key. Big-endian u64 prefix sorts
 /// the table in derivation-order.

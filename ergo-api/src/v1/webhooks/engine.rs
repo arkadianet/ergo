@@ -139,6 +139,9 @@ struct Inner {
     next_wh: u64,
     next_dl: u64,
     highest_seq: u64,
+    replay_seq: u64,
+    persisted_replay_seq: u64,
+    replay_checkpoint_at: u64,
     storage_failed: bool,
     /// The bus pre-filter shared with the worker's subscription: the union of
     /// all active webhooks' channel keys. Kept in sync on every mutation so the
@@ -163,6 +166,8 @@ struct StoredState {
     next_wh: u64,
     next_dl: u64,
     highest_seq: u64,
+    #[serde(default)]
+    replay_seq: Option<u64>,
 }
 
 impl StoredState {
@@ -174,6 +179,7 @@ impl StoredState {
             next_wh: inner.next_wh,
             next_dl: inner.next_dl,
             highest_seq: inner.highest_seq,
+            replay_seq: Some(inner.replay_seq),
         }
     }
 }
@@ -197,6 +203,9 @@ impl WebhookEngine {
                 next_wh: 1,
                 next_dl: 1,
                 highest_seq: 0,
+                replay_seq: 0,
+                persisted_replay_seq: 0,
+                replay_checkpoint_at: 0,
                 storage_failed: false,
                 filter: None,
             }),
@@ -224,6 +233,7 @@ impl WebhookEngine {
                 || saved.next_dl == 0
                 || saved.next_dl == u64::MAX
                 || saved.highest_seq >= u64::MAX - 1
+                || saved.replay_seq.is_some_and(|seq| seq >= u64::MAX - 1)
             {
                 return Err("unsupported or out-of-bounds webhook snapshot".into());
             }
@@ -262,6 +272,8 @@ impl WebhookEngine {
             inner.next_wh = saved.next_wh;
             inner.next_dl = saved.next_dl;
             inner.highest_seq = saved.highest_seq;
+            inner.replay_seq = saved.replay_seq.unwrap_or(saved.highest_seq);
+            inner.persisted_replay_seq = inner.replay_seq;
         }
         engine.store = Some(store);
         // Prove the store is writable before accepting any registrations.
@@ -296,11 +308,20 @@ impl WebhookEngine {
 
     fn mutate<R>(&self, action: impl FnOnce(&mut Inner) -> R) -> Result<R, String> {
         let mut inner = self.lock();
+        self.mutate_locked(&mut inner, false, action)
+    }
+
+    fn mutate_locked<R>(
+        &self,
+        inner: &mut Inner,
+        persist_cursor: bool,
+        action: impl FnOnce(&mut Inner) -> R,
+    ) -> Result<R, String> {
         if inner.storage_failed {
             return Err("webhook store is unavailable".into());
         }
         let previous = self.store.as_ref().map(|_| inner.clone());
-        let result = action(&mut inner);
+        let result = action(inner);
         if let Some(store) = &self.store {
             if previous.as_ref().is_some_and(|before| {
                 before.subs == inner.subs
@@ -308,25 +329,73 @@ impl WebhookEngine {
                     && before.next_wh == inner.next_wh
                     && before.next_dl == inner.next_dl
                     && before.highest_seq == inner.highest_seq
+                    && before.replay_seq == inner.replay_seq
+                    && (!persist_cursor || before.persisted_replay_seq == inner.replay_seq)
             }) {
                 return Ok(result);
             }
-            let saved = serde_json::to_vec(&StoredState::capture(&inner))
+            let saved = serde_json::to_vec(&StoredState::capture(inner))
                 .map_err(|e| e.to_string())
                 .and_then(|bytes| store.commit(&bytes));
             if let Err(error) = saved {
                 *inner = previous.expect("durable mutations snapshot their previous state");
                 inner.storage_failed = true;
-                Self::resync_filter(&inner);
+                Self::resync_filter(inner);
                 tracing::error!(%error, "webhook persistence failed; delivery and management disabled until restart");
                 return Err(error);
             }
         }
+        inner.persisted_replay_seq = inner.replay_seq;
         Ok(result)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Cursor through which source observations have been admitted or skipped.
+    pub fn replay_seq(&self) -> u64 {
+        self.lock().replay_seq
+    }
+
+    pub(crate) fn earliest_active_start(&self) -> Option<u64> {
+        self.lock()
+            .subs
+            .values()
+            .filter(|sub| sub.active)
+            .map(|sub| sub.start_seq)
+            .min()
+    }
+
+    /// Save a catch-up boundary only after every matching event was admitted.
+    pub fn checkpoint_replay(&self, seq: u64) {
+        let _ = self.mutate(|g| {
+            g.replay_seq = g.replay_seq.max(seq);
+        });
+    }
+
+    /// Save any lazy admission cursor before the worker releases its store.
+    pub(crate) fn flush_replay(&self) -> Result<(), String> {
+        self.mutate_locked(&mut self.lock(), true, |_| {})
+    }
+
+    /// Do not silently continue after losing source history. Open obligations
+    /// stay retained; subscriptions visibly pause until the operator reconciles
+    /// from REST and explicitly re-enables them.
+    pub fn record_source_gap(&self, latest_seq: u64) {
+        let _ = self.mutate(|g| {
+            for sub in g
+                .subs
+                .values_mut()
+                .filter(|sub| sub.active && sub.start_seq < latest_seq)
+            {
+                sub.active = false;
+                sub.health = WebhookHealth::Disabled;
+                sub.auto_disabled_reason = Some(AutoDisabledReason::SourceGap);
+            }
+            g.replay_seq = g.replay_seq.max(latest_seq);
+            Self::resync_filter(g);
+        });
     }
 
     /// Attach the worker's bus pre-filter Arc and seed it with the current
@@ -349,6 +418,19 @@ impl WebhookEngine {
         min_confirmations: u32,
         now_unix_ms: u64,
     ) -> Result<Subscription, RegisterError> {
+        self.register_after(url, channels, secret, min_confirmations, now_unix_ms, 0)
+    }
+
+    /// Production registration boundary from the bus, persisted with the key.
+    pub fn register_after(
+        &self,
+        url: String,
+        channels: Vec<String>,
+        secret: Option<String>,
+        min_confirmations: u32,
+        now_unix_ms: u64,
+        start_seq: u64,
+    ) -> Result<Subscription, RegisterError> {
         if channels.len() > MAX_CHANNELS_PER_WEBHOOK {
             return Err(RegisterError::TooManyChannels);
         }
@@ -369,6 +451,7 @@ impl WebhookEngine {
                 active: true,
                 min_confirmations,
                 created_at_unix_ms: now_unix_ms,
+                start_seq,
                 consecutive_failures: 0,
                 health: WebhookHealth::Delivered,
                 last_delivery_at_unix_ms: None,
@@ -421,11 +504,23 @@ impl WebhookEngine {
     /// counter + health so a re-enabled hook starts clean. Returns the
     /// updated subscription, or `None` if unknown.
     pub fn set_active(&self, webhook_id: &str, active: bool) -> Option<Subscription> {
+        self.set_active_after(webhook_id, active, 0)
+    }
+
+    /// Resume after the operator's reconciled bus boundary, preserving already
+    /// admitted obligations while excluding observations from the pause.
+    pub fn set_active_after(
+        &self,
+        webhook_id: &str,
+        active: bool,
+        start_seq: u64,
+    ) -> Option<Subscription> {
         self.mutate(|g| {
             let updated = {
                 let sub = g.subs.get_mut(webhook_id)?;
                 sub.active = active;
                 if active {
+                    sub.start_seq = sub.start_seq.max(start_seq);
                     sub.consecutive_failures = 0;
                     sub.health = WebhookHealth::Delivered;
                     sub.auto_disabled_reason = None;
@@ -462,60 +557,157 @@ impl WebhookEngine {
     /// delivery (deduped on `(webhook_id, event_seq)`). Returns the number of
     /// deliveries enqueued. Called by the worker for every bus event.
     pub fn enqueue_matches(&self, event: &RealtimeEvent, now_unix_ms: u64) -> usize {
-        self.mutate(|g| {
-            if event.seq >= u64::MAX - 1 {
-                return 0;
+        self.admit_matches_inner(event, now_unix_ms, false).0
+    }
+
+    fn admit_matches_inner(
+        &self,
+        event: &RealtimeEvent,
+        now_unix_ms: u64,
+        checkpoint: bool,
+    ) -> (usize, bool) {
+        self.mutate(|g| Self::admit_event(g, event, now_unix_ms, checkpoint))
+            .unwrap_or((0, false))
+    }
+
+    /// Admit a bounded source page with one snapshot write. Pages which only
+    /// skip observations update RAM cheaply; their cursor is saved at least
+    /// every 1024 skips or five seconds while subscriptions remain active.
+    pub(crate) fn admit_page(
+        &self,
+        events: &[Arc<RealtimeEvent>],
+        through: u64,
+        now_unix_ms: u64,
+    ) -> bool {
+        let mut g = self.lock();
+        if g.storage_failed {
+            return false;
+        }
+        if !g.subs.values().any(|sub| sub.active) {
+            return true;
+        }
+        let creates_delivery = events.iter().any(|event| {
+            g.subs.values().any(|sub| {
+                Self::matches_event(sub, event)
+                    && !g.dedupe.contains(&(sub.webhook_id.clone(), event.seq))
+            })
+        });
+        if !creates_delivery {
+            let seq = g.replay_seq.max(through);
+            if seq == g.persisted_replay_seq {
+                return true;
             }
-            // Snapshot the matching subs first (immutable borrow) to avoid holding
-            // a mutable borrow of `subs` while mutating `deliveries`.
-            let hits: Vec<(String, String)> = g
-                .subs
-                .values()
-                .filter(|s| s.matches(&event.routes, event.confirmed))
-                .map(|s| {
-                    let channel = matched_channel(s, &event.routes);
-                    (s.webhook_id.clone(), channel)
-                })
-                .collect();
-            let mut enqueued = 0;
-            for (webhook_id, channel) in hits {
-                let key = (webhook_id.clone(), event.seq);
-                if g.dedupe.contains(&key) {
-                    continue;
+            let persist = seq.saturating_sub(g.persisted_replay_seq) >= 1024
+                || now_unix_ms.saturating_sub(g.replay_checkpoint_at) >= 5000;
+            if !persist {
+                g.replay_seq = seq;
+                return true;
+            }
+        }
+        self.mutate_locked(&mut g, true, |g| {
+            for event in events {
+                if !Self::admit_event(g, event, now_unix_ms, true).1 {
+                    return false;
                 }
-                let Some(next_dl) = g.next_dl.checked_add(1).filter(|next| *next != u64::MAX)
-                else {
-                    continue;
-                };
-                let delivery_id = format!("dl_{:016x}", g.next_dl);
-                let body = render_body(&webhook_id, &delivery_id, &channel, event);
-                let delivery = Delivery {
-                    delivery_id,
-                    webhook_id,
-                    event_seq: event.seq,
-                    channel,
-                    event_kind: event.event.into(),
-                    body,
-                    event_unix_ms: event.emitted_at_unix_ms,
-                    status: DeliveryStatus::Pending,
-                    attempts: 0,
-                    last_attempt_at_unix_ms: None,
-                    response_code: None,
-                    next_retry_at_unix_ms: Some(now_unix_ms),
-                };
-                let inner = &mut *g;
-                inner.dedupe.insert(key);
-                if push_bounded(&mut inner.deliveries, &mut inner.dedupe, delivery) {
-                    inner.next_dl = next_dl;
-                    enqueued += 1;
-                }
             }
-            if enqueued > 0 {
-                g.highest_seq = g.highest_seq.max(event.seq);
-            }
-            enqueued
+            g.replay_seq = g.replay_seq.max(through);
+            g.replay_checkpoint_at = now_unix_ms;
+            true
         })
-        .unwrap_or(0)
+        .unwrap_or(false)
+    }
+
+    fn matches_event(sub: &Subscription, event: &RealtimeEvent) -> bool {
+        event.seq > sub.start_seq
+            && sub.matches(
+                &event.routes,
+                event.confirmed
+                    || matches!(
+                        event.event,
+                        "box_reverted" | "box_unspent" | "token_reverted"
+                    ),
+            )
+    }
+
+    fn admit_event(
+        g: &mut Inner,
+        event: &RealtimeEvent,
+        now_unix_ms: u64,
+        checkpoint: bool,
+    ) -> (usize, bool) {
+        if event.seq >= u64::MAX - 1 {
+            return (0, false);
+        }
+        // Snapshot the matching subs first (immutable borrow) to avoid holding
+        // a mutable borrow of `subs` while mutating `deliveries`.
+        let hits: Vec<(String, String)> = g
+            .subs
+            .values()
+            .filter(|s| Self::matches_event(s, event))
+            .map(|s| {
+                let channel = matched_channel(s, &event.routes);
+                (s.webhook_id.clone(), channel)
+            })
+            .collect();
+        let hits: Vec<_> = hits
+            .into_iter()
+            .filter(|(id, _)| !g.dedupe.contains(&(id.clone(), event.seq)))
+            .collect();
+        let room = DELIVERY_RING_CAP.saturating_sub(g.deliveries.len())
+            + g.deliveries
+                .iter()
+                .filter(|delivery| !delivery.status.is_open())
+                .count();
+        if hits.len() > room
+            || g.next_dl
+                .checked_add(hits.len() as u64)
+                .is_none_or(|next| next == u64::MAX)
+        {
+            return (0, false);
+        }
+        let mut enqueued = 0;
+        let mut complete = true;
+        for (webhook_id, channel) in hits {
+            let key = (webhook_id.clone(), event.seq);
+            if g.dedupe.contains(&key) {
+                continue;
+            }
+            let Some(next_dl) = g.next_dl.checked_add(1).filter(|next| *next != u64::MAX) else {
+                complete = false;
+                continue;
+            };
+            let delivery_id = format!("dl_{:016x}", g.next_dl);
+            let body = render_body(&webhook_id, &delivery_id, &channel, event);
+            let delivery = Delivery {
+                delivery_id,
+                webhook_id,
+                event_seq: event.seq,
+                channel,
+                event_kind: event.event.into(),
+                body,
+                event_unix_ms: event.emitted_at_unix_ms,
+                status: DeliveryStatus::Pending,
+                attempts: 0,
+                last_attempt_at_unix_ms: None,
+                response_code: None,
+                next_retry_at_unix_ms: Some(now_unix_ms),
+            };
+            let inner = &mut *g;
+            inner.dedupe.insert(key);
+            if push_bounded(&mut inner.deliveries, &mut inner.dedupe, delivery) {
+                inner.next_dl = next_dl;
+                enqueued += 1;
+            } else {
+                complete = false;
+            }
+        }
+        if enqueued > 0 {
+            g.highest_seq = g.highest_seq.max(event.seq);
+        }
+        if complete && checkpoint {
+            g.replay_seq = g.replay_seq.max(event.seq);
+        }
+        (enqueued, complete)
     }
 
     /// The scheduler: collect deliveries that are due now (`next_retry_at <=
@@ -822,7 +1014,7 @@ fn render_body(
     channel: &str,
     event: &RealtimeEvent,
 ) -> String {
-    let v = json!({
+    let mut v = json!({
         "webhook_id": webhook_id,
         "delivery_id": delivery_id,
         "channel": channel,
@@ -833,6 +1025,12 @@ fn render_body(
         "confirmed": event.confirmed,
         "data": event.data,
     });
+    if let Some(previous_seq) = event.previous_seq {
+        v["previous_seq"] = json!(previous_seq);
+    }
+    if let Some(height) = event.height {
+        v["height"] = json!(height);
+    }
     serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -937,6 +1135,154 @@ mod tests {
             store,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn confirmed_only_hooks_receive_reorg_inverses_with_original_cursor() {
+        let engine = WebhookEngine::new(Default::default());
+        let subscription = engine
+            .register(
+                "https://receiver.example/hook".into(),
+                vec!["address:owner".into()],
+                None,
+                1,
+                0,
+            )
+            .unwrap();
+        let mut event = blocks_event(1, true);
+        event.routes = vec!["address:owner".into()];
+        event.event = "box_created";
+        assert_eq!(engine.enqueue_matches(&event, 0), 1);
+        event.seq = 2;
+        event.confirmed = false;
+        event.event = "box_reverted";
+        event.previous_seq = Some(1);
+        assert_eq!(engine.enqueue_matches(&event, 0), 1);
+        let delivery = engine
+            .deliveries_for(&subscription.webhook_id, 0, 1)
+            .remove(0);
+        let body: serde_json::Value = serde_json::from_str(&delivery.body).unwrap();
+        assert_eq!(body["previous_seq"], 1);
+        assert_eq!(body["confirmed"], false);
+        assert_eq!(body["height"], 100);
+        event.seq = 3;
+        event.event = "tx_accepted";
+        assert_eq!(engine.enqueue_matches(&event, 0), 0);
+    }
+
+    #[test]
+    fn skipped_cursor_is_persisted_when_idle_checkpoint_deadline_expires() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        register_blocks(&engine);
+        let mut event = blocks_event(1, true);
+        event.routes = vec!["peers".into()];
+        assert!(engine.admit_page(&[Arc::new(event)], 1, 1));
+        assert_eq!(engine.replay_seq(), 1);
+        let saved_cursor = || {
+            let value: serde_json::Value =
+                serde_json::from_slice(&store.load().unwrap().unwrap()).unwrap();
+            value["replay_seq"].as_u64().unwrap()
+        };
+        assert_eq!(saved_cursor(), 0);
+        assert!(engine.admit_page(&[], 1, 4999));
+        assert_eq!(saved_cursor(), 0);
+        assert!(engine.admit_page(&[], 1, 5000));
+        assert_eq!(saved_cursor(), 1);
+    }
+
+    #[test]
+    fn durable_multi_hook_admission_is_atomic_when_only_one_slot_remains() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        let first = register_blocks(&engine);
+        engine
+            .mutate(|g| {
+                for seq in 1..DELIVERY_RING_CAP as u64 {
+                    assert_eq!(
+                        WebhookEngine::admit_event(g, &blocks_event(seq, true), 0, true).0,
+                        1
+                    );
+                }
+            })
+            .unwrap();
+        let second = register_blocks(&engine);
+        let event = Arc::new(blocks_event(DELIVERY_RING_CAP as u64, true));
+        assert!(!engine.admit_page(std::slice::from_ref(&event), event.seq, 0));
+        assert_eq!(
+            engine
+                .deliveries_for(&first.webhook_id, 0, DELIVERY_RING_CAP)
+                .len(),
+            DELIVERY_RING_CAP - 1
+        );
+        assert!(engine.deliveries_for(&second.webhook_id, 0, 10).is_empty());
+        assert_eq!(engine.replay_seq(), event.seq - 1);
+        drop(engine);
+        let engine = durable(store.clone());
+        let due = engine.take_due(0).remove(0);
+        engine.record_result(&due.delivery_id, DeliveryOutcome::Success(204), 1);
+        assert!(engine.admit_page(std::slice::from_ref(&event), event.seq, 2));
+        assert_eq!(engine.replay_seq(), event.seq);
+        let first_delivery = engine.deliveries_for(&first.webhook_id, 0, 1).remove(0);
+        let second_delivery = engine.deliveries_for(&second.webhook_id, 0, 1).remove(0);
+        drop(engine);
+        let engine = durable(store);
+        assert_eq!(
+            engine.deliveries_for(&first.webhook_id, 0, 1)[0].delivery_id,
+            first_delivery.delivery_id
+        );
+        assert_eq!(
+            engine.deliveries_for(&second.webhook_id, 0, 1)[0].delivery_id,
+            second_delivery.delivery_id
+        );
+        assert!(engine.admit_page(std::slice::from_ref(&event), event.seq, 3));
+        assert_eq!(engine.deliveries_for(&second.webhook_id, 0, 10).len(), 1);
+    }
+
+    #[test]
+    fn restart_preserves_registration_boundary_checkpoint_and_source_gap_pause() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        let sub = engine
+            .register_after(
+                "https://receiver.example/hook".into(),
+                vec!["blocks".into()],
+                None,
+                1,
+                0,
+                20,
+            )
+            .unwrap();
+        assert_eq!(engine.enqueue_matches(&blocks_event(19, true), 0), 0);
+        assert_eq!(engine.enqueue_matches(&blocks_event(21, true), 0), 1);
+        engine.checkpoint_replay(25);
+        drop(engine);
+        let engine = durable(store.clone());
+        assert_eq!(engine.replay_seq(), 25);
+        assert_eq!(engine.get(&sub.webhook_id).unwrap().start_seq, 20);
+        engine.record_source_gap(50);
+        drop(engine);
+        let engine = durable(store);
+        assert_eq!(engine.replay_seq(), 50);
+        assert_eq!(
+            engine.get(&sub.webhook_id).unwrap().auto_disabled_reason,
+            Some(AutoDisabledReason::SourceGap)
+        );
+        assert_eq!(engine.deliveries_for(&sub.webhook_id, 0, 10).len(), 1);
+    }
+
+    #[test]
+    fn failed_replay_checkpoint_does_not_advance_acknowledged_source_state() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        engine.checkpoint_replay(7);
+        store.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        engine.checkpoint_replay(8);
+        assert!(!engine.is_available());
+        assert_eq!(engine.replay_seq(), 7);
+        drop(engine);
+        store.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(durable(store).replay_seq(), 7);
     }
 
     // ----- round-trips -----

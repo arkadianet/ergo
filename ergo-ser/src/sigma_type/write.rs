@@ -5,10 +5,10 @@ use crate::error::WriteError;
 use ergo_primitives::writer::VlqWriter;
 
 use super::{
-    SigmaType, COLL_CODE, COLL_COLL_CODE, FUNC_CODE, MAX_TYPE_DEPTH, OPTION_CODE, OPTION_COLL_CODE,
-    PAIR1_CODE, PAIR2_CODE, PAIR_SYM_CODE, SANY_CODE, SAVL_TREE_CODE, SBOX_CODE, SCONTEXT_CODE,
-    SGLOBAL_CODE, SHEADER_CODE, SPREHEADER_CODE, SSTRING_CODE, STYPEVAR_CODE, SUNIT_CODE,
-    TUPLE_CODE,
+    SigmaType, COLL_CODE, COLL_COLL_CODE, FUNC_CODE, MAX_TYPE_WRITE_DEPTH, OPTION_CODE,
+    OPTION_COLL_CODE, PAIR1_CODE, PAIR2_CODE, PAIR_SYM_CODE, SANY_CODE, SAVL_TREE_CODE, SBOX_CODE,
+    SCONTEXT_CODE, SGLOBAL_CODE, SHEADER_CODE, SPREHEADER_CODE, SSTRING_CODE, STYPEVAR_CODE,
+    SUNIT_CODE, TUPLE_CODE,
 };
 
 /// Pending work in wire order, stored in reverse on the heap stack.
@@ -45,9 +45,9 @@ fn write_one<'a>(
     depth: usize,
     stack: &mut Vec<Work<'a>>,
 ) -> Result<(), WriteError> {
-    if depth > MAX_TYPE_DEPTH {
+    if depth > MAX_TYPE_WRITE_DEPTH {
         return Err(WriteError::InvalidData(format!(
-            "type recursion depth exceeds maximum ({MAX_TYPE_DEPTH})"
+            "type recursion depth exceeds maximum ({MAX_TYPE_WRITE_DEPTH})"
         )));
     }
     match t {
@@ -374,7 +374,7 @@ mod tests {
     fn write_type_reader_max_depth_on_8mib_stack() {
         on_8mib_stack(|| {
             for shape in 0..=7 {
-                let bytes = deep_wire(shape, MAX_TYPE_DEPTH);
+                let bytes = deep_wire(shape, super::super::MAX_TYPE_DEPTH);
                 let mut r = VlqReader::new(&bytes);
                 let parsed = read_type(&mut r).expect("reader must accept its depth boundary");
                 assert!(r.is_empty());
@@ -388,7 +388,7 @@ mod tests {
                 drop(parsed);
             }
             // A compressed terminal can contain two constructors at depth MAX.
-            let mut bytes = vec![COLL_CODE; MAX_TYPE_DEPTH];
+            let mut bytes = vec![COLL_CODE; super::super::MAX_TYPE_DEPTH];
             bytes.push(COLL_COLL_CODE + 2);
             let parsed = read_type(&mut VlqReader::new(&bytes)).unwrap();
             assert_eq!(encode(&parsed), bytes);
@@ -399,22 +399,22 @@ mod tests {
     fn write_type_past_max_depth_on_8mib_stack() {
         on_8mib_stack(|| {
             for t in [
-                nested_coll(MAX_TYPE_DEPTH + 1, SigmaType::SBox),
-                nested_coll(MAX_TYPE_DEPTH + 3, SigmaType::SByte),
+                nested_coll(MAX_TYPE_WRITE_DEPTH + 1, SigmaType::SBox),
+                nested_coll(MAX_TYPE_WRITE_DEPTH + 3, SigmaType::SByte),
                 // Equal compound children used to invoke unbounded derived Eq
                 // before the writer could reach its depth guard.
                 SigmaType::STuple(vec![
-                    nested_coll(MAX_TYPE_DEPTH + 4_000, SigmaType::SByte),
-                    nested_coll(MAX_TYPE_DEPTH + 4_000, SigmaType::SByte),
+                    nested_coll(MAX_TYPE_WRITE_DEPTH + 4_000, SigmaType::SByte),
+                    nested_coll(MAX_TYPE_WRITE_DEPTH + 4_000, SigmaType::SByte),
                 ]),
             ] {
                 let err = write_err(&t);
                 assert!(matches!(err, WriteError::InvalidData(msg)
-                    if msg == format!("type recursion depth exceeds maximum ({MAX_TYPE_DEPTH})")));
+                    if msg == format!("type recursion depth exceeds maximum ({MAX_TYPE_WRITE_DEPTH})")));
             }
             // Pin compressed prefixes against the reader's refusal too.
             for shape in 0..=7 {
-                let bytes = deep_wire(shape, MAX_TYPE_DEPTH + 2);
+                let bytes = deep_wire(shape, MAX_TYPE_WRITE_DEPTH + 2);
                 assert!(read_type(&mut VlqReader::new(&bytes)).is_err());
             }
         });
@@ -490,9 +490,16 @@ mod tests {
             prop_assert_eq!(&bytes, &reference);
             for wire in [&bytes, &reference] {
                 let mut r = VlqReader::new(wire);
-                let parsed = read_type(&mut r).unwrap();
-                prop_assert!(r.is_empty());
-                prop_assert_eq!(&parsed, &t);
+                match read_type(&mut r) {
+                    Ok(parsed) => {
+                        prop_assert!(r.is_empty());
+                        prop_assert_eq!(&parsed, &t);
+                    }
+                    // 6.0.7 bounds reading, while the writer intentionally
+                    // retains its unbounded Scala wire behavior.
+                    Err(ergo_primitives::reader::ReadError::DepthLimitExceeded { max: 8 }) => {},
+                    other => panic!("unexpected type-reader result: {other:?}"),
+                }
             }
         }
     }

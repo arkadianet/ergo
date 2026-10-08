@@ -33,6 +33,9 @@
 //! absent, and only allows the request through unconditionally when
 //! *both* are absent.
 //!
+//! Startup, liveness and readiness GET/HEAD probes bypass this guard; their
+//! reports disclose only availability and required dependency heights.
+//!
 //! Enforcement posture:
 //! * Loopback binds (`127.0.0.1`, `::1`, an IPv4-mapped IPv6 loopback
 //!   like `::ffff:127.0.0.1`, …) are always checked — the loopback bind
@@ -123,6 +126,10 @@ impl HostAllowlist {
             allowed.push((bind_addr.ip().to_string(), None));
         }
         allowed.extend(allowed_hosts.iter().map(|h| split_host_port(h)));
+        // Keep the first copy of each entry: a loopback bind repeats a
+        // default, and `allowed_hosts` may too. Matching is unchanged.
+        let mut seen = std::collections::HashSet::new();
+        allowed.retain(|(host, port)| seen.insert((host.to_ascii_lowercase(), *port)));
         Self { enforce, allowed }
     }
 
@@ -228,7 +235,14 @@ pub async fn require_allowed_host(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    if allowlist.enforce() {
+    let probe = matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) && matches!(
+        req.uri().path(),
+        "/api/v1/node/startup" | "/api/v1/node/liveness" | "/api/v1/node/readiness"
+    );
+    if allowlist.enforce() && !probe {
         match req.headers().get(header::HOST) {
             Some(header_val) => match header_val.to_str() {
                 Ok(host) => {
@@ -276,6 +290,26 @@ mod tests {
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn describe_lists_each_entry_once() {
+        let list = allowlist(
+            "127.0.0.1:9053",
+            &["LOCALHOST", "node.example", "node.example:443"],
+        );
+        assert_eq!(
+            list.describe(),
+            [
+                "localhost",
+                "127.0.0.1",
+                "::1",
+                "node.example",
+                "node.example:443"
+            ]
+        );
+        assert!(list.permits("127.0.0.1:9053"));
+        assert!(list.permits("localhost"));
+    }
 
     #[test]
     fn split_host_port_plain_host_no_port() {

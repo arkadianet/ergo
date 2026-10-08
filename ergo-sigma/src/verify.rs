@@ -235,8 +235,7 @@ pub enum SigmaVerifyError {
     /// Carries a short label identifying which point.
     #[error("invalid point in proposition: {0}")]
     InvalidPoint(String),
-    /// `Cand` / `Cor` / `Cthreshold` proposition has no children — the
-    /// proof is structurally invalid.
+    /// `Cor` proposition has no last child for challenge computation.
     #[error("empty children in conjecture")]
     EmptyChildren,
     #[error("invalid Cthreshold: k={k}, n={n}")]
@@ -423,10 +422,17 @@ fn parse_and_compute_challenges(
                 commitment: None,
             },
             SigmaBoolean::Cand(children) | SigmaBoolean::Cor(children) => {
-                if children.is_empty() {
+                let is_and = matches!(prop, SigmaBoolean::Cand(_));
+                // Deliberately match the JVM consensus quirk: CAND's empty loop
+                // builds an unchecked node, while COR indexes its last child
+                // and fails. The empty AND still needs its Fiat-Shamir challenge.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/SigSerializer.scala#L210-L240
+                // The proposition's child count is read as an unsigned short;
+                // Fiat-Shamir framing below uses signed-short bits separately.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/data/SigmaBoolean.scala#L80-L86
+                if children.is_empty() && !is_and {
                     return Err(SigmaVerifyError::EmptyChildren);
                 }
-                let is_and = matches!(prop, SigmaBoolean::Cand(_));
                 frame = Some(Frame {
                     node: index,
                     children,
@@ -452,16 +458,29 @@ fn parse_and_compute_challenges(
             }
             SigmaBoolean::Cthreshold { k, children } => {
                 let n = validate_cthreshold_shape(*k, children)?;
-                if children.is_empty() {
-                    return Err(SigmaVerifyError::EmptyChildren);
-                }
+                // Deliberately match the JVM consensus quirk: k=0, n=0 parses
+                // a constant polynomial and an unchecked node with no children.
+                // Constructor bounds above still reject every invalid shape.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/SigSerializer.scala#L242-L263
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/UncheckedTree.scala#L46-L54
                 let n_coeffs = n
                     .checked_sub(usize::from(*k))
                     .ok_or(SigmaVerifyError::InvalidThreshold { k: *k, n })?;
                 let coeff_size = SOUNDNESS_BYTES
                     .checked_mul(n_coeffs)
                     .ok_or(SigmaVerifyError::ProofTooShort { offset: *offset })?;
-                let coeff_bytes = read_bytes(proof, offset, coeff_size)?;
+                // Deliberately match the JVM consensus quirk: readBytesChecked
+                // consumes whatever remains and only warns on a short read.
+                // GF2_192_Poly uses length / 24 complete coefficients, ignoring
+                // the consumed partial coefficient. Costs still use n-k.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/SigSerializer.scala#L156-L163
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/SigSerializer.scala#L247-L253
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/crypto/GF2_192_Poly.scala#L50-L58
+                let start = (*offset).min(proof.len());
+                let count = coeff_size.min(proof.len() - start);
+                *offset = start + count;
+                let complete_count = count / SOUNDNESS_BYTES * SOUNDNESS_BYTES;
+                let coeff_bytes = &proof[start..start + complete_count];
                 let coeff0: [u8; SOUNDNESS_BYTES] = challenge
                     .as_slice()
                     .try_into()
@@ -469,7 +488,7 @@ fn parse_and_compute_challenges(
                 let polynomial = gf2_192::gf2_192poly::Gf2_192Poly::try_from(
                     gf2_192::gf2_192poly::CoefficientsByteRepr {
                         coeff0,
-                        more_coeffs: &coeff_bytes,
+                        more_coeffs: coeff_bytes,
                     },
                 )
                 .map_err(|_| SigmaVerifyError::ProofTooShort { offset: *offset })?;
@@ -562,6 +581,10 @@ fn compute_commitments(mut tree: UncheckedTree) -> Result<UncheckedTree, SigmaVe
 /// Serialize the proof tree for Fiat-Shamir hashing.
 /// Matches Scala `FiatShamirTree.toBytes`.
 fn fiat_shamir_tree_to_bytes(tree: &UncheckedTree) -> Vec<u8> {
+    // Deliberately match the JVM consensus quirk: children.length.toShort
+    // wraps counts above 32767 in Fiat-Shamir framing, even though the wire
+    // proposition's getUShort keeps its unsigned count (e.g. 40000 children).
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/UnprovenTree.scala#L267-L289
     const INTERNAL_NODE_PREFIX: u8 = 0;
     const LEAF_PREFIX: u8 = 1;
     const AND_CONJECTURE: u8 = 0;
@@ -753,6 +776,44 @@ mod tests {
     }
 
     #[test]
+    fn empty_conjectures_require_their_fiat_shamir_challenge() {
+        let message = b"empty conjecture consensus regression";
+        for (prop, fs_bytes) in [
+            (SigmaBoolean::Cand(vec![].into()), vec![0, 0, 0, 0]),
+            (threshold_prop(0, 0), vec![0, 2, 0, 0, 0]),
+            (
+                SigmaBoolean::Cand(vec![threshold_prop(0, 0)].into()),
+                vec![0, 0, 0, 1, 0, 2, 0, 0, 0],
+            ),
+        ] {
+            let mut input = fs_bytes;
+            input.extend_from_slice(message);
+            let mut proof = blake2b256(&input)[..SOUNDNESS_BYTES].to_vec();
+            assert!(verify_sigma_proof(&prop, &proof, message).unwrap());
+            assert!(extract_proof_leaves(&prop, &proof).unwrap().is_empty());
+            assert!(!verify_sigma_proof(&prop, &[], message).unwrap());
+            assert!(matches!(
+                verify_sigma_proof(&prop, &proof[..SOUNDNESS_BYTES - 1], message),
+                Err(SigmaVerifyError::ProofTooShort { .. })
+            ));
+            proof[0] ^= 1;
+            assert!(!verify_sigma_proof(&prop, &proof, message).unwrap());
+        }
+        assert!(matches!(
+            verify_sigma_proof(
+                &SigmaBoolean::Cor(vec![].into()),
+                &[0; SOUNDNESS_BYTES],
+                message
+            ),
+            Err(SigmaVerifyError::EmptyChildren)
+        ));
+        assert!(matches!(
+            verify_sigma_proof(&threshold_prop(1, 0), &[0; SOUNDNESS_BYTES], message),
+            Err(SigmaVerifyError::InvalidThreshold { k: 1, n: 0 })
+        ));
+    }
+
+    #[test]
     fn cthreshold_invalid_shapes_return_typed_errors() {
         for (k, n) in [(2u16, 1usize), (u16::MAX, 1), (0, 256)] {
             let prop = threshold_prop(k, n);
@@ -790,6 +851,84 @@ mod tests {
                 result,
                 Err(SigmaVerifyError::InvalidThreshold { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn threshold_short_coefficients_consume_partials_and_keep_complete_coefficients() {
+        let challenge = [0x37; SOUNDNESS_BYTES];
+        let coefficients: Vec<u8> = (0..3 * SOUNDNESS_BYTES).map(|i| i as u8 + 1).collect();
+        for k in 0..=3 {
+            let prop = SigmaBoolean::Cthreshold {
+                k,
+                children: vec![SigmaBoolean::Cand(vec![].into()); 3].into(),
+            };
+            let requested = (3 - k as usize) * SOUNDNESS_BYTES;
+            for available in 0..=requested {
+                let mut proof = challenge.to_vec();
+                proof.extend_from_slice(&coefficients[..available]);
+                let mut offset = 0;
+                let parsed =
+                    parse_and_compute_challenges(&prop, &proof, &mut offset, None).unwrap();
+                assert_eq!(offset, proof.len(), "k={k}, available={available}");
+                let complete = available / SOUNDNESS_BYTES * SOUNDNESS_BYTES;
+                let polynomial = gf2_192::gf2_192poly::Gf2_192Poly::try_from(
+                    gf2_192::gf2_192poly::CoefficientsByteRepr {
+                        coeff0: challenge,
+                        more_coeffs: &coefficients[..complete],
+                    },
+                )
+                .unwrap();
+                let UncheckedNode::Threshold { children, .. } = &parsed.nodes[0] else {
+                    panic!("threshold root expected");
+                };
+                for (i, child) in children.iter().enumerate() {
+                    let expected: [u8; SOUNDNESS_BYTES] = polynomial.evaluate((i + 1) as u8).into();
+                    assert_eq!(parsed.nodes[*child].challenge(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn truncated_threshold_proofs_verify_under_and_or_and_threshold_parents() {
+        let threshold = SigmaBoolean::Cthreshold {
+            k: 1,
+            children: vec![SigmaBoolean::Cand(vec![].into()); 3].into(),
+        };
+        // Independent Fiat-Shamir framing: threshold(1,3), then three AND(0)s.
+        let threshold_fs = [0, 2, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        for (prop, prefix) in [
+            (threshold.clone(), vec![]),
+            (
+                SigmaBoolean::Cand(vec![threshold.clone()].into()),
+                vec![0, 0, 0, 1],
+            ),
+            (
+                SigmaBoolean::Cor(vec![threshold.clone()].into()),
+                vec![0, 1, 0, 1],
+            ),
+            (
+                SigmaBoolean::Cthreshold {
+                    k: 1,
+                    children: vec![threshold].into(),
+                },
+                vec![0, 2, 1, 0, 1],
+            ),
+        ] {
+            let message = b"truncated threshold regression";
+            let mut hash_input = prefix;
+            hash_input.extend_from_slice(&threshold_fs);
+            hash_input.extend_from_slice(message);
+            let challenge = blake2b256(&hash_input);
+            for available in 0..=2 * SOUNDNESS_BYTES {
+                let mut proof = challenge[..SOUNDNESS_BYTES].to_vec();
+                proof.extend(vec![0xa5; available]);
+                assert!(
+                    verify_sigma_proof(&prop, &proof, message).unwrap(),
+                    "{available}"
+                );
+            }
         }
     }
 

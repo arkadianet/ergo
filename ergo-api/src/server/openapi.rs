@@ -21,6 +21,15 @@ use crate::types::{
     ApiWeightFunction, HealthStatus, RawTransactionBytes, SyncStateLabel,
 };
 
+pub(crate) fn serialize_openapi_yaml(spec: &OpenApiDocument) -> String {
+    // JSON text preserves field order and normalizes arbitrary-precision numbers
+    // before YAML serialization can expose serde_json's private Number mapping.
+    let json = serde_json::to_string(spec).expect("OpenAPI JSON serialize");
+    let value: serde_norway::Value =
+        serde_norway::from_str(&json).expect("OpenAPI JSON parse as YAML");
+    serde_norway::to_string(&value).expect("OpenAPI YAML serialize")
+}
+
 /// OpenAPI aggregator for the Rust-native `/api/v1/*` surface.
 ///
 /// Defined here in `server.rs` so the derive can name the private handler
@@ -79,6 +88,9 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         crate::wallet::native::sign_transaction,
         crate::wallet::native::send_transaction,
         crate::wallet::native::retrieve_rewards,
+        crate::wallet::native::jobs::list,
+        crate::wallet::native::jobs::create,
+        crate::wallet::native::jobs::cancel,
     ),
     components(schemas(
         crate::types::ApiActivityRecord,
@@ -131,7 +143,15 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         crate::wallet::native::schema::UnconfirmedDeltaDto,
         crate::wallet::native::schema::ScopeDto,
         crate::wallet::native::schema::WalletAssetDto,
+        crate::wallet::native::schema::WalletJobTask,
+        crate::wallet::native::schema::WalletJobRequest,
+        crate::wallet::native::schema::WalletJobState,
+        crate::wallet::native::schema::WalletJob,
+        crate::wallet::native::schema::WalletJobs,
         crate::wallet::native::schema::WalletStatusDto,
+        crate::wallet::native::schema::DiscoveryCoverageDto,
+        crate::wallet::native::schema::TxDelivery,
+        crate::mining::PrivateTransactionOptions,
         crate::wallet::native::schema::NetworkDto,
         crate::wallet::native::schema::RescanStateDto,
         crate::wallet::native::schema::WalletAddressDto,
@@ -692,11 +712,8 @@ pub fn rust_openapi_json() -> &'static OpenApiDocument {
 }
 
 pub fn rust_openapi_yaml() -> &'static str {
-    static RUST_OPENAPI_YAML: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        rust_openapi_json()
-            .to_yaml()
-            .expect("OpenAPI YAML serialize")
-    });
+    static RUST_OPENAPI_YAML: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| serialize_openapi_yaml(rust_openapi_json()));
     RUST_OPENAPI_YAML.as_str()
 }
 
@@ -729,10 +746,34 @@ fn exclude_from_scala_openapi(path: &str) -> bool {
                 | "/transactions/unconfirmed/outputs/byErgoTree"
                 | "/transactions/unconfirmed/outputs/byTokenId/{tokenId}"
                 | "/transactions/unconfirmed/outputs/byRegisters"
-                | "/mining/candidateWithTxs"
                 | "/utxo/getBoxesBinaryProof"
                 | "/script/executeWithContext"
         )
+}
+
+pub(super) fn mining_policy_openapi_yaml(source: &'static str) -> String {
+    let mut document: serde_norway::Value =
+        serde_norway::from_str(source).expect("OpenAPI document parses");
+    for (path, method) in [
+        ("/mining/candidate", "get"),
+        ("/mining/solution", "post"),
+        ("/mining/rewardAddress", "get"),
+        ("/mining/rewardPublicKey", "get"),
+    ] {
+        let operation = document
+            .get_mut("paths")
+            .and_then(|paths| paths.get_mut(path))
+            .and_then(|item| item.get_mut(method))
+            .and_then(serde_norway::Value::as_mapping_mut)
+            .unwrap_or_else(|| {
+                panic!("OpenAPI legacy mining operation is missing or invalid: {method} {path}")
+            });
+        operation.insert(
+            serde_norway::Value::String("security".into()),
+            serde_norway::Value::Sequence(Vec::new()),
+        );
+    }
+    serde_norway::to_string(&document).expect("OpenAPI document serializes")
 }
 
 pub fn scala_openapi_yaml() -> &'static str {
@@ -823,14 +864,32 @@ pub fn scala_openapi_operations() -> BTreeSet<RouteOperation> {
 /// bug rather than a runtime condition, so this panics instead of serving
 /// an empty spec.
 pub fn native_openapi_yaml() -> String {
-    NativeOpenApi::openapi()
-        .to_yaml()
-        .expect("openapi yaml serialize")
+    serialize_openapi_yaml(&NativeOpenApi::openapi())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(
+        expected = "OpenAPI legacy mining operation is missing or invalid: get /mining/rewardPublicKey"
+    )]
+    fn mining_policy_openapi_rejects_missing_path() {
+        mining_policy_openapi_yaml(
+            "paths:\n  /mining/candidate:\n    get: {}\n  /mining/solution:\n    post: {}\n  /mining/rewardAddress:\n    get: {}\n",
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "OpenAPI legacy mining operation is missing or invalid: get /mining/rewardPublicKey"
+    )]
+    fn mining_policy_openapi_rejects_missing_method() {
+        mining_policy_openapi_yaml(
+            "paths:\n  /mining/candidate:\n    get: {}\n  /mining/solution:\n    post: {}\n  /mining/rewardAddress:\n    get: {}\n  /mining/rewardPublicKey:\n    post: {}\n",
+        );
+    }
 
     // ----- happy path -----
 

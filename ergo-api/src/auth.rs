@@ -43,6 +43,13 @@ use serde_json::json;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
+mod credentials;
+mod scopes;
+pub use credentials::{
+    validate_credentials, CredentialInfo, CredentialScope, ScopedCredentialConfig,
+};
+pub use scopes::required_scope;
+
 /// HTTP header name carrying the operator's plaintext API key. Matches
 /// Scala `ApiRoute.apiKeyHeaderName = "api_key"`.
 pub const API_KEY_HEADER: &str = "api_key";
@@ -60,6 +67,8 @@ pub struct ApiSecurity {
     /// secret API key. Always 64 chars. Compared in constant time
     /// against the hex digest of incoming `api_key` header bytes.
     api_key_hash_hex: String,
+    allow_unauthenticated_legacy_mining: bool,
+    credentials: Option<Arc<credentials::CredentialRegistry>>,
 }
 
 /// Validation errors for the operator-supplied `api_key_hash`. Surfaced
@@ -95,7 +104,73 @@ impl ApiSecurity {
         {
             return Err(ApiSecurityError::InvalidChars);
         }
-        Ok(Self { api_key_hash_hex })
+        Ok(Self {
+            api_key_hash_hex,
+            allow_unauthenticated_legacy_mining: false,
+            credentials: None,
+        })
+    }
+
+    /// Explicit Scala mining compatibility. Candidate transaction injection
+    /// and the v1 operator API always retain authentication.
+    pub fn with_unauthenticated_legacy_mining(mut self, allow: bool) -> Self {
+        self.allow_unauthenticated_legacy_mining = allow;
+        self
+    }
+
+    pub fn allow_unauthenticated_legacy_mining(&self) -> bool {
+        self.allow_unauthenticated_legacy_mining
+    }
+
+    pub fn with_credentials(
+        mut self,
+        keys: Vec<ScopedCredentialConfig>,
+        ledger: std::path::PathBuf,
+    ) -> Result<Self, String> {
+        validate_credentials(&keys, Some(&self.api_key_hash_hex))?;
+        if keys.is_empty() {
+            return Ok(self);
+        }
+        self.credentials = Some(Arc::new(credentials::CredentialRegistry::load(
+            keys, ledger,
+        )?));
+        Ok(self)
+    }
+
+    pub fn authorize(&self, presented_key: &[u8], method: &str, path: &str, admin: bool) -> bool {
+        if self.verify(presented_key) {
+            return true;
+        }
+        let Some(scope) = required_scope(method, path) else {
+            return false;
+        };
+        self.credentials.as_ref().is_some_and(|keys| {
+            keys.authorize(
+                &Self::hash_key(presented_key),
+                if admin { CredentialScope::Admin } else { scope },
+            )
+        })
+    }
+
+    pub fn credentials(&self) -> Vec<CredentialInfo> {
+        self.credentials
+            .as_ref()
+            .map(|keys| keys.list())
+            .unwrap_or_default()
+    }
+
+    pub fn revoke_credential(
+        &self,
+        id: &str,
+    ) -> Result<(), crate::operator_control::OperatorControlError> {
+        self.credentials
+            .as_ref()
+            .ok_or_else(|| {
+                crate::operator_control::OperatorControlError::Unavailable(
+                    "scoped credentials are unavailable".into(),
+                )
+            })?
+            .revoke(id)
     }
 
     /// Lowercase Base16 (hex) of the Blake2b-256 of `raw_key`. Matches
@@ -161,9 +236,16 @@ pub(crate) fn reject_unconfigured() -> Response {
 }
 
 pub(crate) fn request_is_authorized(sec: &ApiSecurity, req: &Request<Body>) -> bool {
-    req.headers()
-        .get(API_KEY_HEADER)
-        .is_some_and(|header_val| sec.verify(header_val.as_bytes()))
+    req.headers().get(API_KEY_HEADER).is_some_and(|header_val| {
+        sec.authorize(
+            header_val.as_bytes(),
+            req.method().as_str(),
+            req.extensions()
+                .get::<axum::extract::MatchedPath>()
+                .map_or(req.uri().path(), |path| path.as_str()),
+            false,
+        )
+    })
 }
 
 /// Post-auth catch-all for unknown subpaths under a gated prefix

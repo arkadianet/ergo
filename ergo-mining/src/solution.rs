@@ -195,6 +195,7 @@ mod tests {
         Candidate {
             header: h.clone(),
             validation_ctx,
+            observation: Default::default(),
             transactions: Vec::new(),
             ad_proof_bytes: Vec::new(),
             extension_fields: Vec::new(),

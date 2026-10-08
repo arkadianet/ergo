@@ -1,0 +1,11 @@
+bv2-tree-v2-reject#0	false	null
+bv2-tree-v1-accept#1	true	12105
+bv5-tree-v4-unverified-accept#2	true	12100
+bv5-tree-v5-unverified-accept#3	true	12100
+bv5-tree-v3-verified-accept#4	true	12105
+bv5-tree-v4-false-unverified-accept#5	true	12100
+bv5-tree-v3-false-reject#6	false	null
+bv0-tree-v0-reject#7	false	null
+bv128-tree-v0-verified-accept#8	true	12105
+bv128-tree-v4-unverified-accept#9	true	12100
+bv200-tree-v0-reject#10	false	null

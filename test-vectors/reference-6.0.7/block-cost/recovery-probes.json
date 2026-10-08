@@ -1,0 +1,140 @@
+{
+  "block_version" : 4,
+  "replaced_rules" : [
+    [
+      1000,
+      1001
+    ]
+  ],
+  "sigma_state_jar" : "sigma-state_2.12-6.0.7.jar",
+  "ergo_core_jar" : "ergo-core_2.12.jar",
+  "tx0_original_cost" : 18124,
+  "tx1_cost_alone" : 18124,
+  "tx2_cost_alone" : 12108,
+  "sum" : 30232,
+  "tx1_bytes" : "0456d19ba9258fbeeea376fc134a810baf16cb4494dc817ce8ab5b5d612bf25d060000270ce04401d3a07068185101dcc6f7afc67dc6611c4c8fd5571827230eef717000006ca21c507712bd5f71b1d65f88407d37edb4f0f76e2f0d284f9fb579de7db6a60000dc774a9ef68e32433cb601cc572d5a4f97b00c46fc210ee169fe6e521043b35c000000000180d0acf30e0008cd023d0faf2ff3580ce38cf6f5a003416f0e9039e388dc2ea8300395603757e6a846e8070000",
+  "tx2_bytes" : "01d39e40691eef7d8db4cd32a300cc40f33831149b32a7c3a0e0235a3ecb1ea8b60001010eeb070ee807000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000018094ebdc030008cd023d0faf2ff3580ce38cf6f5a003416f0e9039e388dc2ea8300395603757e6a846e8070000",
+  "boxes1" : [
+    "8094ebdc0300d1dad90101017201010101e80700000b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b00",
+    "8094ebdc0300d1dad90101017201010101e80700000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c01",
+    "8094ebdc0300d1dad90101017201010101e80700000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d02",
+    "8094ebdc0300d1dad90101017201010101e80700000e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e03"
+  ],
+  "boxes2" : [
+    "8094ebdc0300d40801e8070000151515151515151515151515151515151515151515151515151515151515151500"
+  ],
+  "runs" : [
+    {
+      "transactions" : [
+        "tx1",
+        "tx2"
+      ],
+      "limit" : 30232,
+      "verdict" : "Reject",
+      "failed_tx" : "tx2",
+      "error" : "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. 0d4e0331be1e7cd6fc434a394e6cb509c61411bd5dfdf64cd9d1874c49bcb806: #0 => Failure(sigma.exceptions.CostLimitException: Estimated execution cost 2014 exceeds the limit 8)",
+      "accumulated" : 18124,
+      "per_tx" : [
+        {
+          "tx" : "tx1",
+          "tx_cost" : 18124,
+          "accumulated_after" : 18124
+        }
+      ]
+    },
+    {
+      "transactions" : [
+        "tx1",
+        "tx2"
+      ],
+      "limit" : 30233,
+      "verdict" : "Reject",
+      "failed_tx" : "tx2",
+      "error" : "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. 0d4e0331be1e7cd6fc434a394e6cb509c61411bd5dfdf64cd9d1874c49bcb806: #0 => Failure(sigma.exceptions.CostLimitException: Estimated execution cost 2014 exceeds the limit 9)",
+      "accumulated" : 18124,
+      "per_tx" : [
+        {
+          "tx" : "tx1",
+          "tx_cost" : 18124,
+          "accumulated_after" : 18124
+        }
+      ]
+    },
+    {
+      "transactions" : [
+        "tx1",
+        "tx2"
+      ],
+      "limit" : 32237,
+      "verdict" : "Reject",
+      "failed_tx" : "tx2",
+      "error" : "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. 0d4e0331be1e7cd6fc434a394e6cb509c61411bd5dfdf64cd9d1874c49bcb806: #0 => Failure(sigma.exceptions.CostLimitException: Estimated execution cost 2014 exceeds the limit 2013)",
+      "accumulated" : 18124,
+      "per_tx" : [
+        {
+          "tx" : "tx1",
+          "tx_cost" : 18124,
+          "accumulated_after" : 18124
+        }
+      ]
+    },
+    {
+      "transactions" : [
+        "tx1",
+        "tx2"
+      ],
+      "limit" : 32238,
+      "verdict" : "Accept",
+      "failed_tx" : null,
+      "error" : null,
+      "accumulated" : 30232,
+      "per_tx" : [
+        {
+          "tx" : "tx1",
+          "tx_cost" : 18124,
+          "accumulated_after" : 18124
+        },
+        {
+          "tx" : "tx2",
+          "tx_cost" : 12108,
+          "accumulated_after" : 30232
+        }
+      ]
+    },
+    {
+      "transactions" : [
+        "tx2",
+        "tx1"
+      ],
+      "limit" : 30233,
+      "verdict" : "Accept",
+      "failed_tx" : null,
+      "error" : null,
+      "accumulated" : 30232,
+      "per_tx" : [
+        {
+          "tx" : "tx2",
+          "tx_cost" : 12108,
+          "accumulated_after" : 12108
+        },
+        {
+          "tx" : "tx1",
+          "tx_cost" : 18124,
+          "accumulated_after" : 30232
+        }
+      ]
+    },
+    {
+      "transactions" : [
+        "tx2"
+      ],
+      "limit" : 12109,
+      "verdict" : "Reject",
+      "failed_tx" : "tx2",
+      "error" : "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. 0d4e0331be1e7cd6fc434a394e6cb509c61411bd5dfdf64cd9d1874c49bcb806: #0 => Failure(sigma.exceptions.CostLimitException: Estimated execution cost 2014 exceeds the limit 9)",
+      "accumulated" : 0,
+      "per_tx" : [
+      ]
+    }
+  ]
+}

@@ -31,6 +31,11 @@ pub(super) trait ParityNormalize {
         false
     }
 
+    /// Compact type codes can expand past the independent 6.0.7 read bound.
+    fn has_type_depth_expansion(&self) -> bool {
+        false
+    }
+
     /// A Boolean leaf becomes a constant whose data read adds one level.
     fn has_depth_expanding_boolean(&self) -> bool {
         false
@@ -62,7 +67,6 @@ macro_rules! unchanged {
 unchanged!(
     u8,
     u32,
-    SigmaType,
     Header,
     ADProofs,
     Token,
@@ -72,7 +76,68 @@ unchanged!(
     NipopowProof
 );
 
+// Diagnostics only: use the actual type writer and reader, so the exception
+// requires an existing parsed type whose canonical bytes exceed the JVM limit.
+// https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/serialization/TypeSerializer.scala#L134-L137
+impl ParityNormalize for SigmaType {
+    fn parity_normalized(&self, _after_write: bool) -> impl PartialEq {
+        self.clone()
+    }
+    fn has_type_depth_expansion(&self) -> bool {
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        if ergo_ser::sigma_type::write_type(&mut w, self).is_err() {
+            return false;
+        }
+        let bytes = w.result();
+        let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+        r.set_ergo_tree_version(Some(3));
+        matches!(
+            ergo_ser::sigma_type::read_type(&mut r),
+            Err(ergo_primitives::reader::ReadError::DepthLimitExceeded { max: 8 })
+        )
+    }
+}
+
+fn expr_has_type_depth_expansion(expr: &Expr) -> bool {
+    for (_, node) in ergo_ser::opcode::preorder(expr) {
+        let found = match node {
+            Expr::Const { tpe, val } => {
+                tpe.has_type_depth_expansion() || val.has_type_depth_expansion()
+            }
+            Expr::Op(IrNode { payload, .. }) => match payload {
+                Payload::TaggedVar { tpe, .. } => tpe
+                    .as_ref()
+                    .is_some_and(ParityNormalize::has_type_depth_expansion),
+                Payload::ExtractRegisterAs { tpe, .. }
+                | Payload::GetVar { tpe, .. }
+                | Payload::DeserializeContext { tpe, .. }
+                | Payload::DeserializeRegister { tpe, .. }
+                | Payload::NoneValue { tpe }
+                | Payload::NumericCast { tpe, .. } => tpe.has_type_depth_expansion(),
+                Payload::ConcreteCollection { elem_type, .. } => {
+                    elem_type.has_type_depth_expansion()
+                }
+                Payload::MethodCall { type_args, .. } => type_args.has_type_depth_expansion(),
+                Payload::FuncValue { args, .. } => args.iter().any(|(_, t)| {
+                    t.as_ref()
+                        .is_some_and(ParityNormalize::has_type_depth_expansion)
+                }),
+                Payload::FunDef { tpe_args, .. } => tpe_args.has_type_depth_expansion(),
+                _ => false,
+            },
+            Expr::Unparsed(_) => false,
+        };
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
 impl<A: ParityNormalize, B: ParityNormalize> ParityNormalize for (A, B) {
+    fn has_type_depth_expansion(&self) -> bool {
+        self.0.has_type_depth_expansion() || self.1.has_type_depth_expansion()
+    }
     fn has_pending_upcast_strip(&self) -> bool {
         self.0.has_pending_upcast_strip() || self.1.has_pending_upcast_strip()
     }
@@ -97,6 +162,9 @@ impl<A: ParityNormalize, B: ParityNormalize> ParityNormalize for (A, B) {
     }
 }
 impl<T: ParityNormalize> ParityNormalize for Vec<T> {
+    fn has_type_depth_expansion(&self) -> bool {
+        self.iter().any(ParityNormalize::has_type_depth_expansion)
+    }
     fn has_pending_upcast_strip(&self) -> bool {
         self.iter().any(ParityNormalize::has_pending_upcast_strip)
     }
@@ -121,22 +189,66 @@ impl<T: ParityNormalize> ParityNormalize for Vec<T> {
     }
 }
 
-fn normalize_value(value: &mut SigmaValue) {
+fn normalize_value(value: &mut SigmaValue, version: u8, after_write: bool) {
     match value {
         SigmaValue::Header(_, id) => *id = [0; 32],
+        SigmaValue::CanonicalBoxBytes {
+            bytes,
+            canonical_bytes,
+            legacy_bytes,
+        } => {
+            // The JVM structured writer canonicalizes the nested box while
+            // its received identity remains cached until the next read.
+            // Compare that one documented write effect, preserving all others.
+            let canonical = if version < 3 {
+                legacy_bytes.as_ref().unwrap_or(canonical_bytes)
+            } else {
+                canonical_bytes
+            };
+            let received = if after_write {
+                canonical.as_ref().unwrap_or(bytes)
+            } else {
+                bytes
+            };
+            *value = SigmaValue::OpaqueBoxBytes(received.clone());
+        }
         SigmaValue::Coll(CollValue::Values(items))
         | SigmaValue::Tuple(items)
         | SigmaValue::ConcreteCollection { items, .. } => {
-            items.iter_mut().for_each(normalize_value);
+            items
+                .iter_mut()
+                .for_each(|x| normalize_value(x, version, after_write));
         }
-        SigmaValue::Opt(Some(inner)) => normalize_value(inner),
+        SigmaValue::Opt(Some(inner)) => normalize_value(inner, version, after_write),
+        SigmaValue::Unevaluated(expr) => normalize_expr(expr, version, after_write),
         _ => {}
     }
 }
 impl ParityNormalize for SigmaValue {
+    fn has_type_depth_expansion(&self) -> bool {
+        match self {
+            SigmaValue::OpaqueBoxBytes(bytes) | SigmaValue::CanonicalBoxBytes { bytes, .. } => {
+                let mut r =
+                    ergo_primitives::reader::VlqReader::new(bytes).with_activated_script_version(3);
+                ergo_ser::ergo_box::read_ergo_box(&mut r)
+                    .is_ok_and(|b| b.has_type_depth_expansion())
+            }
+            SigmaValue::Coll(CollValue::Values(items)) | SigmaValue::Tuple(items) => {
+                items.has_type_depth_expansion()
+            }
+            SigmaValue::ConcreteCollection { elem_type, items } => {
+                elem_type.has_type_depth_expansion() || items.has_type_depth_expansion()
+            }
+            SigmaValue::Opt(Some(inner)) => inner.has_type_depth_expansion(),
+            SigmaValue::Unevaluated(expr) => expr_has_type_depth_expansion(expr),
+            _ => false,
+        }
+    }
     fn retained_boxes(&self) -> Vec<&[u8]> {
         match self {
-            SigmaValue::OpaqueBoxBytes(bytes) => vec![bytes.as_slice()],
+            SigmaValue::OpaqueBoxBytes(bytes) | SigmaValue::CanonicalBoxBytes { bytes, .. } => {
+                vec![bytes.as_slice()]
+            }
             SigmaValue::Coll(CollValue::Values(items))
             | SigmaValue::Tuple(items)
             | SigmaValue::ConcreteCollection { items, .. } => items.retained_boxes(),
@@ -144,9 +256,9 @@ impl ParityNormalize for SigmaValue {
             _ => Vec::new(),
         }
     }
-    fn parity_normalized(&self, _after_write: bool) -> impl PartialEq {
+    fn parity_normalized(&self, after_write: bool) -> impl PartialEq {
         let mut value = self.clone();
-        normalize_value(&mut value);
+        normalize_value(&mut value, 3, after_write);
         value
     }
     fn header_values(&self) -> Vec<(&Header, [u8; 32])> {
@@ -178,7 +290,7 @@ fn normalize_expr(expr: &mut Expr, version: u8, after_write: bool) {
     }
     let node = match expr {
         Expr::Const { val, .. } => {
-            normalize_value(val);
+            normalize_value(val, version, after_write);
             return;
         }
         Expr::Unparsed(opaque) => {
@@ -238,6 +350,10 @@ fn normalize_expr(expr: &mut Expr, version: u8, after_write: bool) {
     };
     for child in children {
         normalize_expr(child, version, after_write);
+    }
+    // MethodCall.companion chooses PropertyCall for an empty argument list.
+    if after_write && matches!(&node.payload, Payload::MethodCall { args, .. } if args.is_empty()) {
+        node.opcode = 0xdb;
     }
     // ByIndexSerializer.parse reinserts an Int Upcast for a byte/short index
     // before v3. Model that context after the writer's one-level stripping.
@@ -325,6 +441,9 @@ fn has_pending_strip(expr: &Expr) -> bool {
     children.into_iter().any(has_pending_strip)
 }
 impl ParityNormalize for ErgoTree {
+    fn has_type_depth_expansion(&self) -> bool {
+        self.constants.has_type_depth_expansion() || expr_has_type_depth_expansion(&self.body)
+    }
     fn wire_position_limit(&self) -> Option<usize> {
         Some(4096)
     }
@@ -430,7 +549,26 @@ macro_rules! view {
         );
     };
     ($ty:ty, $v:ident, $after_write:ident, $body:expr, $headers:expr, $boxes:expr, $pending:expr, $limit:expr, $bools:expr) => {
+        view!(
+            $ty,
+            $v,
+            $after_write,
+            $body,
+            $headers,
+            $boxes,
+            $pending,
+            $limit,
+            $bools,
+            false
+        );
+    };
+    ($ty:ty, $v:ident, $after_write:ident, $body:expr, $headers:expr, $boxes:expr, $pending:expr, $limit:expr, $bools:expr, $types:expr) => {
         impl ParityNormalize for $ty {
+            fn has_type_depth_expansion(&self) -> bool {
+                let $v = self;
+                let _ = $v;
+                $types
+            }
             fn wire_position_limit(&self) -> Option<usize> {
                 $limit
             }
@@ -462,26 +600,37 @@ macro_rules! view {
 view!(
     RegisterValue,
     v,
-    (v.tpe.clone(), v.value.parity_normalized(false)),
+    after_write,
+    (v.tpe.clone(), v.value.parity_normalized(after_write)),
     v.value.header_values(),
-    v.value.retained_boxes()
+    v.value.retained_boxes(),
+    false,
+    None,
+    false,
+    v.tpe.has_type_depth_expansion() || v.value.has_type_depth_expansion()
 );
 view!(
     AdditionalRegisters,
     v,
-    v.registers.parity_normalized(false),
+    after_write,
+    v.registers.parity_normalized(after_write),
     v.registers.header_values(),
-    v.registers.retained_boxes()
+    v.registers.retained_boxes(),
+    false,
+    None,
+    false,
+    v.registers.has_type_depth_expansion()
 );
 view!(
     ContextExtension,
     v,
+    after_write,
     {
         // IndexMap equality is key/value equality, independent of insertion order.
         let mut entries = v
             .values
             .iter()
-            .map(|(key, value)| (*key, value.parity_normalized(false)))
+            .map(|(key, value)| (*key, value.parity_normalized(after_write)))
             .collect::<Vec<_>>();
         entries.sort_by_key(|(key, _)| *key);
         entries
@@ -493,32 +642,53 @@ view!(
     v.values
         .values()
         .flat_map(ParityNormalize::retained_boxes)
-        .collect()
+        .collect(),
+    false,
+    None,
+    false,
+    v.values
+        .values()
+        .any(ParityNormalize::has_type_depth_expansion)
 );
 view!(
     SpendingProof,
     v,
+    after_write,
     (
         v.proof.clone(),
-        v.extension().parity_normalized(false),
+        v.extension().parity_normalized(after_write),
         v.extension_bytes().to_vec()
     ),
     v.extension().header_values(),
-    v.extension().retained_boxes()
+    v.extension().retained_boxes(),
+    false,
+    None,
+    false,
+    v.extension().has_type_depth_expansion()
 );
 view!(
     Input,
     v,
-    (v.box_id, v.spending_proof.parity_normalized(false)),
+    after_write,
+    (v.box_id, v.spending_proof.parity_normalized(after_write)),
     v.spending_proof.header_values(),
-    v.spending_proof.retained_boxes()
+    v.spending_proof.retained_boxes(),
+    false,
+    None,
+    false,
+    v.spending_proof.has_type_depth_expansion()
 );
 view!(
     UnsignedInput,
     v,
-    (v.box_id, v.extension.parity_normalized(false)),
+    after_write,
+    (v.box_id, v.extension.parity_normalized(after_write)),
     v.extension.header_values(),
-    v.extension.retained_boxes()
+    v.extension.retained_boxes(),
+    false,
+    None,
+    false,
+    v.extension.has_type_depth_expansion()
 );
 view!(
     ErgoBoxCandidate,
@@ -537,7 +707,7 @@ view!(
         .to_vec(),
         v.creation_height,
         v.tokens.clone(),
-        v.additional_registers().parity_normalized(false),
+        v.additional_registers().parity_normalized(after_write),
         v.register_bytes().to_vec()
     ),
     {
@@ -552,7 +722,8 @@ view!(
     },
     v.ergo_tree().has_pending_upcast_strip(),
     Some(4096),
-    v.ergo_tree().has_depth_expanding_boolean()
+    v.ergo_tree().has_depth_expanding_boolean(),
+    v.ergo_tree().has_type_depth_expansion() || v.additional_registers().has_type_depth_expansion()
 );
 view!(
     ErgoBox,
@@ -567,14 +738,15 @@ view!(
     v.candidate.retained_boxes(),
     v.candidate.has_pending_upcast_strip(),
     None,
-    v.candidate.has_depth_expanding_boolean()
+    v.candidate.has_depth_expanding_boolean(),
+    v.candidate.has_type_depth_expansion()
 );
 view!(
     Transaction,
     v,
     after_write,
     (
-        v.inputs.parity_normalized(false),
+        v.inputs.parity_normalized(after_write),
         v.data_inputs.clone(),
         v.output_candidates.parity_normalized(after_write)
     ),
@@ -590,14 +762,15 @@ view!(
     },
     v.output_candidates.has_pending_upcast_strip(),
     None,
-    v.output_candidates.has_depth_expanding_boolean()
+    v.output_candidates.has_depth_expanding_boolean(),
+    v.inputs.has_type_depth_expansion() || v.output_candidates.has_type_depth_expansion()
 );
 view!(
     UnsignedTransaction,
     v,
     after_write,
     (
-        v.inputs.parity_normalized(false),
+        v.inputs.parity_normalized(after_write),
         v.data_inputs.clone(),
         v.output_candidates.parity_normalized(after_write)
     ),
@@ -613,7 +786,8 @@ view!(
     },
     v.output_candidates.has_pending_upcast_strip(),
     None,
-    v.output_candidates.has_depth_expanding_boolean()
+    v.output_candidates.has_depth_expanding_boolean(),
+    v.inputs.has_type_depth_expansion() || v.output_candidates.has_type_depth_expansion()
 );
 view!(
     BlockTransactions,
@@ -624,13 +798,14 @@ view!(
     v.transactions.retained_boxes(),
     v.transactions.has_pending_upcast_strip(),
     None,
-    v.transactions.has_depth_expanding_boolean()
+    v.transactions.has_depth_expanding_boolean(),
+    v.transactions.has_type_depth_expansion()
 );
 
 pub(super) fn normalized_tree(tree: &ErgoTree, after_write: bool) -> ErgoTree {
     let mut tree = tree.clone();
     for (_, value) in &mut tree.constants {
-        normalize_value(value);
+        normalize_value(value, tree.version, after_write);
     }
     normalize_expr(&mut tree.body, tree.version, after_write);
     tree

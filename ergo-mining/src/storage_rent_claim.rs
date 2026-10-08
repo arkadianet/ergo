@@ -34,7 +34,8 @@
 //! tokens, which is consensus-unclaimable outright (see
 //! [`build_rent_claim`]; oracle-pinned by
 //! `tests/storage_rent_reemission_oracle.rs`). Excess seized tokens past
-//! what fits one P2PK output are burned. If the total proceeds cannot
+//! what fits one P2PK output are deferred by default. Overflow burning
+//! requires an explicit operator policy. If the total proceeds cannot
 //! clear the dust floor, no claim is produced.
 
 use ergo_primitives::reader::VlqReader;
@@ -56,6 +57,7 @@ use ergo_validation::{
 };
 
 use crate::error::MiningError;
+use crate::policy::RentTokenPolicy;
 
 /// `Constants.StorageIndexVarId` — the context-extension key carrying the
 /// recreated-output index on a storage-rent input. Mirrors the private
@@ -111,10 +113,37 @@ pub fn build_rent_claim(
     miner_pubkey: &[u8; 33],
     reemission_rules: Option<&ReemissionRuleInputs>,
 ) -> Result<Option<RentClaim>, MiningError> {
+    build_rent_claim_with_policy(
+        eligible,
+        current_height,
+        params,
+        max_claims,
+        miner_pubkey,
+        reemission_rules,
+        RentTokenPolicy::Preserve,
+        &mut 0,
+    )
+}
+
+/// Build a rent claim with an explicit token-overflow policy. Preservation
+/// defers full-consume inputs rather than burn assets when a payout cannot fit.
+#[allow(clippy::too_many_arguments)]
+pub fn build_rent_claim_with_policy(
+    eligible: &[ErgoBox],
+    current_height: u32,
+    params: &ProtocolParams,
+    max_claims: usize,
+    miner_pubkey: &[u8; 33],
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    token_policy: RentTokenPolicy,
+    skipped_preservation_out: &mut usize,
+) -> Result<Option<RentClaim>, MiningError> {
+    *skipped_preservation_out = 0;
     // Reserve one output for the miner even when every input is recreated;
     // both the total output count and each index must fit Scala's Short cap.
     let max_claims = max_claims.min(i16::MAX as usize - 1);
     let max_box_size = params.max_box_size as usize;
+    let p2pk_tree = parse_p2pk_tree(miner_pubkey)?;
 
     // Destination of each claimed box's value, decided in one pass so the
     // aggregate P2PK output index (which full-consume inputs name in var
@@ -220,17 +249,58 @@ pub fn build_rent_claim(
             p2pk_value = p2pk_value.saturating_add(fee);
             claimed.push((b, Dest::Recreate(output_idx)));
         } else {
-            // Full-consume branch: `value <= fee`. The whole box — value
-            // and tokens — is seized into the aggregate P2PK output. Tokens
-            // beyond the wire cap are dropped here; the aggregate is
-            // further trimmed to `max_box_size` below.
-            p2pk_value = p2pk_value.saturating_add(b.candidate.value);
-            for t in &b.candidate.tokens {
-                if p2pk_tokens.len() >= MAX_TOKENS_PER_BOX {
-                    break;
+            // Recovered assets must fit the payout before the input is
+            // selected. Merge identical token IDs; summing amounts beyond
+            // Ergo's signed-Long bound defers the input under either policy.
+            let mut prospective = p2pk_tokens.clone();
+            let mut amount_overflow = false;
+            for token in &b.candidate.tokens {
+                if let Some(existing) = prospective
+                    .iter_mut()
+                    .find(|t| t.token_id == token.token_id)
+                {
+                    match existing
+                        .amount
+                        .checked_add(token.amount)
+                        .filter(|v| *v <= i64::MAX as u64)
+                    {
+                        Some(amount) => existing.amount = amount,
+                        None => {
+                            amount_overflow = true;
+                            break;
+                        }
+                    }
+                } else {
+                    prospective.push(token.clone());
                 }
-                p2pk_tokens.push(t.clone());
             }
+            if amount_overflow {
+                *skipped_preservation_out += 1;
+                continue;
+            }
+            if token_policy == RentTokenPolicy::Preserve {
+                if prospective.len() > MAX_TOKENS_PER_BOX {
+                    *skipped_preservation_out += 1;
+                    continue;
+                }
+                // Worst-case value and index encodings keep future recreation
+                // outputs/value growth from forcing a late token truncation.
+                let probe = build_p2pk_box(
+                    i64::MAX as u64,
+                    &p2pk_tree,
+                    current_height,
+                    prospective.clone(),
+                )?;
+                let (_, size) =
+                    box_min_value_and_size(&probe, max_claims, params.min_value_per_byte)?;
+                if size > max_box_size {
+                    *skipped_preservation_out += 1;
+                    continue;
+                }
+            }
+            prospective.truncate(MAX_TOKENS_PER_BOX);
+            p2pk_tokens = prospective;
+            p2pk_value = p2pk_value.saturating_add(b.candidate.value);
             claimed.push((b, Dest::FullConsume));
         }
     }
@@ -255,8 +325,6 @@ pub fn build_rent_claim(
     } else {
         1
     };
-    let p2pk_tree = parse_p2pk_tree(miner_pubkey)?;
-
     // Trim seized tokens until the P2PK output fits max_box_size; excess
     // tokens are burned (consensus-legal: outputs may carry fewer tokens
     // than inputs).
@@ -266,6 +334,11 @@ pub fn build_rent_claim(
             box_min_value_and_size(&p2pk_box, p2pk_index, params.min_value_per_byte)?;
         if box_size <= max_box_size || p2pk_tokens.is_empty() {
             break;
+        }
+        if token_policy == RentTokenPolicy::Preserve {
+            // Defensive fallback: preserve all assets if parameters change or
+            // future payout encoding grows beyond the conservative probe.
+            return Ok(None);
         }
         p2pk_tokens.pop();
         p2pk_box = build_p2pk_box(p2pk_value, &p2pk_tree, current_height, p2pk_tokens.clone())?;
@@ -374,6 +447,63 @@ pub fn build_budget_bounded_rent_claim(
     size_ceiling: u64,
     reemission_rules: Option<&ReemissionRuleInputs>,
 ) -> Result<Option<(CheckedTransaction, u64, u64)>, MiningError> {
+    build_budget_bounded_rent_claim_with_policy(
+        eligible,
+        current_height,
+        params,
+        max_claims,
+        miner_pubkey,
+        ctx,
+        last_headers,
+        cost_ceiling,
+        size_ceiling,
+        reemission_rules,
+        RentTokenPolicy::Preserve,
+        &mut 0,
+    )
+}
+
+/// Budget-bounded rent claim with explicit preservation or overflow burning.
+/// The skip count describes the final bounded build, not discarded attempts.
+#[allow(clippy::too_many_arguments)]
+pub fn build_budget_bounded_rent_claim_with_policy(
+    eligible: &[ErgoBox],
+    current_height: u32,
+    params: &ProtocolParams,
+    max_claims: usize,
+    miner_pubkey: &[u8; 33],
+    ctx: &TransactionContext,
+    last_headers: &[Header],
+    cost_ceiling: u64,
+    size_ceiling: u64,
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    token_policy: RentTokenPolicy,
+    skipped_preservation_out: &mut usize,
+) -> Result<Option<(CheckedTransaction, u64, u64)>, MiningError> {
+    // Historical boxes can carry scripts that a new block cannot parse. A
+    // full consume emits only the miner script; a recreation emits the old one.
+    let eligible: Vec<_> = eligible
+        .iter()
+        .filter(|box_| {
+            let Ok(bytes) = serialize_ergo_box(box_) else {
+                return false;
+            };
+            let fee = compute_storage_fee(bytes.len() as i32, params.storage_fee_factor);
+            if fee > 0 && box_.candidate.value <= fee as u64 {
+                return true;
+            }
+            let tx = Transaction {
+                inputs: vec![],
+                data_inputs: vec![],
+                output_candidates: vec![box_.candidate.clone()],
+            };
+            crate::candidate::validate_block_transactions_roundtrip(&[tx], ctx.pre_header_version)
+                .is_ok()
+        })
+        .cloned()
+        .collect();
+    let eligible = eligible.as_slice();
+    *skipped_preservation_out = 0;
     // Cap on the number of CLAIMABLE boxes. `build_rent_claim` caps on
     // claims (skipping unclaimable boxes), so shrinking this directly drops
     // claims — keeping the proportional step below accurate even when the
@@ -383,13 +513,15 @@ pub fn build_budget_bounded_rent_claim(
         if cap == 0 {
             return Ok(None);
         }
-        let claim = match build_rent_claim(
+        let claim = match build_rent_claim_with_policy(
             eligible,
             current_height,
             params,
             cap,
             miner_pubkey,
             reemission_rules,
+            token_policy,
+            skipped_preservation_out,
         )? {
             Some(c) => c,
             None => return Ok(None),
@@ -1155,9 +1287,18 @@ mod tests {
             box_with_tokens(1_000_000, 0, 0xA4, tokens_from(135, 45)),
         ];
 
-        let claim = build_rent_claim(&boxes, height, &params, CLAIMS, &MINER_PK, None)
-            .unwrap()
-            .expect("claimable");
+        let claim = build_rent_claim_with_policy(
+            &boxes,
+            height,
+            &params,
+            CLAIMS,
+            &MINER_PK,
+            None,
+            RentTokenPolicy::BurnOverflow,
+            &mut 0,
+        )
+        .unwrap()
+        .expect("claimable");
 
         let p2pk = claim.tx.output_candidates.last().unwrap();
         assert!(
@@ -1171,6 +1312,71 @@ mod tests {
             "the P2PK output must fit max_box_size",
         );
         validate_rent(&claim, height, &params).expect("trimmed claim must validate");
+    }
+
+    #[test]
+    fn preserve_policy_defers_overflow_boxes_without_burning_tokens() {
+        let params = rent_params(10, 1_250_000);
+        for height in [100, DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT] {
+            let boxes: Vec<_> = (0..4)
+                .map(|i| box_with_tokens(10_000_000, 0, 0xA1 + i, tokens_from(i * 45, 45)))
+                .collect();
+            let mut skipped = 0;
+            let claim = build_rent_claim_with_policy(
+                &boxes,
+                height,
+                &params,
+                CLAIMS,
+                &MINER_PK,
+                None,
+                RentTokenPolicy::Preserve,
+                &mut skipped,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(skipped > 0);
+            assert!(claim.resolved_inputs.len() < boxes.len());
+            let input_tokens: usize = claim
+                .resolved_inputs
+                .iter()
+                .map(|b| b.candidate.tokens.len())
+                .sum();
+            let output_tokens: usize = claim
+                .tx
+                .output_candidates
+                .iter()
+                .map(|b| b.tokens.len())
+                .sum();
+            assert_eq!(input_tokens, output_tokens);
+            validate_rent(&claim, height, &params).unwrap();
+            validate_rent_raw(&claim, height, &params).unwrap();
+        }
+    }
+
+    #[test]
+    fn preserve_policy_merges_identical_recovered_tokens() {
+        let params = rent_params(10, 1_250_000);
+        let boxes = [
+            box_with_tokens(1_000_000, 0, 0xB1, tokens_from(0, 2)),
+            box_with_tokens(1_000_000, 0, 0xB2, tokens_from(0, 2)),
+        ];
+        let claim = build_rent_claim(&boxes, 100, &params, CLAIMS, &MINER_PK, None)
+            .unwrap()
+            .unwrap();
+        let tokens = &claim.tx.output_candidates.last().unwrap().tokens;
+        assert_eq!(tokens.len(), 2);
+        for token in tokens {
+            assert_eq!(
+                token.amount,
+                boxes
+                    .iter()
+                    .flat_map(|b| &b.candidate.tokens)
+                    .filter(|t| t.token_id == token.token_id)
+                    .map(|t| t.amount)
+                    .sum::<u64>()
+            );
+        }
+        validate_rent(&claim, 100, &params).unwrap();
     }
 
     #[test]
@@ -1323,6 +1529,8 @@ mod tests {
             .emission_script_trees()
             .expect("mainnet has emission trees");
         ReemissionRuleInputs {
+            check_rules: true,
+            emission: None,
             activation_height,
             reemission_token_id: *reem.reemission_token_id.as_bytes(),
             pay_to_reemission_tree: trees.pay_to_reemission,

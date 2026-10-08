@@ -31,6 +31,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
     let unreachable_peer: SocketAddr = "127.0.0.1:1".parse().unwrap();
     let chain_spec = Arc::new(ChainSpec::mainnet());
     NodeConfig {
+        check_reemission_rules: false,
         network: Network::Mainnet,
         shadow_config: Default::default(),
         chain_spec: chain_spec.clone(),
@@ -54,6 +55,8 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         sync_interval: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL,
         sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
         cache_bytes: None,
+        auto_upgrade_legacy: true,
+        auto_upgrade_keep_stale_indexer: false,
         redb_cache_budgets: Default::default(),
         script_validation_checkpoint: chain_spec.bootstrap.checkpoint,
         // No header-level anchor in tests: Scala's default is
@@ -74,9 +77,13 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         api_key_hash: Some(
             "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf".into(),
         ),
+        allow_unauthenticated_legacy_mining: false,
         api_allowed_hosts: Vec::new(),
         api_local_reverse_proxy: false,
         api_script: Default::default(),
+        api_scoped_keys: Vec::new(),
+        api_limits: Default::default(),
+        api_readiness: Default::default(),
         allow_direct_block_submit: false,
         devnet_max_block_cost: None,
         mempool_config: MempoolConfig::default(),

@@ -1,0 +1,651 @@
+{
+  "ergo_core" : "6.0.7",
+  "sigma_state" : "6.0.7",
+  "rent_entries" : [
+    {
+      "omitted" : 0,
+      "height" : 1843200,
+      "tx" : "0456d19ba9258fbeeea376fc134a810baf16cb4494dc817ce8ab5b5d612bf25d0600017f0300270ce04401d3a07068185101dcc6f7afc67dc6611c4c8fd5571827230eef717000017f03006ca21c507712bd5f71b1d65f88407d37edb4f0f76e2f0d284f9fb579de7db6a600017f0300dc774a9ef68e32433cb601cc572d5a4f97b00c46fc210ee169fe6e521043b35c00017f030000000180d0acf30e0008cd023d0faf2ff3580ce38cf6f5a003416f0e9039e388dc2ea8300395603757e6a846e8070000",
+      "accept" : false,
+      "cost" : null,
+      "error" : "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. 2d88f7870818469e9864d00bb752eb5d66ab665f9e28fcd5e031ae4e89646ea1: #0 => Success((false,50))"
+    },
+    {
+      "omitted" : 1,
+      "height" : 1843200,
+      "tx" : "0456d19ba9258fbeeea376fc134a810baf16cb4494dc817ce8ab5b5d612bf25d0600017f0300270ce04401d3a07068185101dcc6f7afc67dc6611c4c8fd5571827230eef717000017f03006ca21c507712bd5f71b1d65f88407d37edb4f0f76e2f0d284f9fb579de7db6a600017f0300dc774a9ef68e32433cb601cc572d5a4f97b00c46fc210ee169fe6e521043b35c00017f030000000180d0acf30e0008cd023d0faf2ff3580ce38cf6f5a003416f0e9039e388dc2ea8300395603757e6a846e8070000",
+      "accept" : true,
+      "cost" : 18124,
+      "error" : null
+    }
+  ],
+  "tx" : "0456d19ba9258fbeeea376fc134a810baf16cb4494dc817ce8ab5b5d612bf25d060000270ce04401d3a07068185101dcc6f7afc67dc6611c4c8fd5571827230eef717000006ca21c507712bd5f71b1d65f88407d37edb4f0f76e2f0d284f9fb579de7db6a60000dc774a9ef68e32433cb601cc572d5a4f97b00c46fc210ee169fe6e521043b35c000000000180d0acf30e0008cd023d0faf2ff3580ce38cf6f5a003416f0e9039e388dc2ea8300395603757e6a846e8070000",
+  "boxes" : [
+    "8094ebdc0300d1dad90101017201010101e80700000b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b00",
+    "8094ebdc0300d1dad90101017201010101e80700000c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c01",
+    "8094ebdc0300d1dad90101017201010101e80700000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d02",
+    "8094ebdc0300d1dad90101017201010101e80700000e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e03"
+  ],
+  "entries" : [
+    {
+      "omitted" : 0,
+      "fields" : [
+        {
+          "key" : "0005",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0001",
+          "value" : "001312d0"
+        },
+        {
+          "key" : "0006",
+          "value" : "000007d0"
+        },
+        {
+          "key" : "0009",
+          "value" : "0000001e"
+        },
+        {
+          "key" : "0002",
+          "value" : "00000168"
+        },
+        {
+          "key" : "0007",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0003",
+          "value" : "00080000"
+        },
+        {
+          "key" : "007b",
+          "value" : "00000004"
+        },
+        {
+          "key" : "0008",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0004",
+          "value" : "000f4240"
+        },
+        {
+          "key" : "007c",
+          "value" : "0000"
+        },
+        {
+          "key" : "0200",
+          "value" : "02d701990300"
+        }
+      ],
+      "parse_accept" : true,
+      "first_accept" : true,
+      "next_accept" : true,
+      "first_cost" : 18124,
+      "next_cost" : 18124,
+      "first_error" : null,
+      "next_error" : null
+    },
+    {
+      "omitted" : 1,
+      "fields" : [
+        {
+          "key" : "0005",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0006",
+          "value" : "000007d0"
+        },
+        {
+          "key" : "0009",
+          "value" : "0000001e"
+        },
+        {
+          "key" : "0002",
+          "value" : "00000168"
+        },
+        {
+          "key" : "0007",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0003",
+          "value" : "00080000"
+        },
+        {
+          "key" : "007b",
+          "value" : "00000004"
+        },
+        {
+          "key" : "0008",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0004",
+          "value" : "000f4240"
+        },
+        {
+          "key" : "007c",
+          "value" : "0000"
+        },
+        {
+          "key" : "0200",
+          "value" : "02d701990300"
+        }
+      ],
+      "parse_accept" : true,
+      "first_accept" : true,
+      "next_accept" : true,
+      "first_cost" : 18124,
+      "next_cost" : 18124,
+      "first_error" : null,
+      "next_error" : null
+    },
+    {
+      "omitted" : 2,
+      "fields" : [
+        {
+          "key" : "0005",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0001",
+          "value" : "001312d0"
+        },
+        {
+          "key" : "0006",
+          "value" : "000007d0"
+        },
+        {
+          "key" : "0009",
+          "value" : "0000001e"
+        },
+        {
+          "key" : "0007",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0003",
+          "value" : "00080000"
+        },
+        {
+          "key" : "007b",
+          "value" : "00000004"
+        },
+        {
+          "key" : "0008",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0004",
+          "value" : "000f4240"
+        },
+        {
+          "key" : "007c",
+          "value" : "0000"
+        },
+        {
+          "key" : "0200",
+          "value" : "02d701990300"
+        }
+      ],
+      "parse_accept" : true,
+      "first_accept" : false,
+      "next_accept" : false,
+      "first_cost" : null,
+      "next_cost" : null,
+      "first_error" : "java.util.NoSuchElementException: key not found: 2",
+      "next_error" : "java.util.NoSuchElementException: key not found: 2"
+    },
+    {
+      "omitted" : 3,
+      "fields" : [
+        {
+          "key" : "0005",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0001",
+          "value" : "001312d0"
+        },
+        {
+          "key" : "0006",
+          "value" : "000007d0"
+        },
+        {
+          "key" : "0009",
+          "value" : "0000001e"
+        },
+        {
+          "key" : "0002",
+          "value" : "00000168"
+        },
+        {
+          "key" : "0007",
+          "value" : "00000064"
+        },
+        {
+          "key" : "007b",
+          "value" : "00000004"
+        },
+        {
+          "key" : "0008",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0004",
+          "value" : "000f4240"
+        },
+        {
+          "key" : "007c",
+          "value" : "0000"
+        },
+        {
+          "key" : "0200",
+          "value" : "02d701990300"
+        }
+      ],
+      "parse_accept" : true,
+      "first_accept" : true,
+      "next_accept" : false,
+      "first_cost" : 18124,
+      "next_cost" : null,
+      "first_error" : null,
+      "next_error" : "java.util.NoSuchElementException: key not found: 3"
+    },
+    {
+      "omitted" : 4,
+      "fields" : [
+        {
+          "key" : "0005",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0001",
+          "value" : "001312d0"
+        },
+        {
+          "key" : "0006",
+          "value" : "000007d0"
+        },
+        {
+          "key" : "0009",
+          "value" : "0000001e"
+        },
+        {
+          "key" : "0002",
+          "value" : "00000168"
+        },
+        {
+          "key" : "0007",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0003",
+          "value" : "00080000"
+        },
+        {
+          "key" : "007b",
+          "value" : "00000004"
+        },
+        {
+          "key" : "0008",
+          "value" : "00000064"
+        },
+        {
+          "key" : "007c",
+          "value" : "0000"
+        },
+        {
+          "key" : "0200",
+          "value" : "02d701990300"
+        }
+      ],
+      "parse_accept" : true,
+      "first_accept" : false,
+      "next_accept" : false,
+      "first_cost" : null,
+      "next_cost" : null,
+      "first_error" : "java.util.NoSuchElementException: key not found: 4",
+      "next_error" : "java.util.NoSuchElementException: key not found: 4"
+    },
+    {
+      "omitted" : 5,
+      "fields" : [
+        {
+          "key" : "0001",
+          "value" : "001312d0"
+        },
+        {
+          "key" : "0006",
+          "value" : "000007d0"
+        },
+        {
+          "key" : "0009",
+          "value" : "0000001e"
+        },
+        {
+          "key" : "0002",
+          "value" : "00000168"
+        },
+        {
+          "key" : "0007",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0003",
+          "value" : "00080000"
+        },
+        {
+          "key" : "007b",
+          "value" : "00000004"
+        },
+        {
+          "key" : "0008",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0004",
+          "value" : "000f4240"
+        },
+        {
+          "key" : "007c",
+          "value" : "0000"
+        },
+        {
+          "key" : "0200",
+          "value" : "02d701990300"
+        }
+      ],
+      "parse_accept" : true,
+      "first_accept" : false,
+      "next_accept" : false,
+      "first_cost" : null,
+      "next_cost" : null,
+      "first_error" : "org.ergoplatform.validation.MalformedModifierError: Incorrect assets: key not found: 5",
+      "next_error" : "org.ergoplatform.validation.MalformedModifierError: Incorrect assets: key not found: 5"
+    },
+    {
+      "omitted" : 6,
+      "fields" : [
+        {
+          "key" : "0005",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0001",
+          "value" : "001312d0"
+        },
+        {
+          "key" : "0009",
+          "value" : "0000001e"
+        },
+        {
+          "key" : "0002",
+          "value" : "00000168"
+        },
+        {
+          "key" : "0007",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0003",
+          "value" : "00080000"
+        },
+        {
+          "key" : "007b",
+          "value" : "00000004"
+        },
+        {
+          "key" : "0008",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0004",
+          "value" : "000f4240"
+        },
+        {
+          "key" : "007c",
+          "value" : "0000"
+        },
+        {
+          "key" : "0200",
+          "value" : "02d701990300"
+        }
+      ],
+      "parse_accept" : true,
+      "first_accept" : false,
+      "next_accept" : false,
+      "first_cost" : null,
+      "next_cost" : null,
+      "first_error" : "java.util.NoSuchElementException: key not found: 6",
+      "next_error" : "java.util.NoSuchElementException: key not found: 6"
+    },
+    {
+      "omitted" : 7,
+      "fields" : [
+        {
+          "key" : "0005",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0001",
+          "value" : "001312d0"
+        },
+        {
+          "key" : "0006",
+          "value" : "000007d0"
+        },
+        {
+          "key" : "0009",
+          "value" : "0000001e"
+        },
+        {
+          "key" : "0002",
+          "value" : "00000168"
+        },
+        {
+          "key" : "0003",
+          "value" : "00080000"
+        },
+        {
+          "key" : "007b",
+          "value" : "00000004"
+        },
+        {
+          "key" : "0008",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0004",
+          "value" : "000f4240"
+        },
+        {
+          "key" : "007c",
+          "value" : "0000"
+        },
+        {
+          "key" : "0200",
+          "value" : "02d701990300"
+        }
+      ],
+      "parse_accept" : true,
+      "first_accept" : false,
+      "next_accept" : false,
+      "first_cost" : null,
+      "next_cost" : null,
+      "first_error" : "java.util.NoSuchElementException: key not found: 7",
+      "next_error" : "java.util.NoSuchElementException: key not found: 7"
+    },
+    {
+      "omitted" : 8,
+      "fields" : [
+        {
+          "key" : "0005",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0001",
+          "value" : "001312d0"
+        },
+        {
+          "key" : "0006",
+          "value" : "000007d0"
+        },
+        {
+          "key" : "0009",
+          "value" : "0000001e"
+        },
+        {
+          "key" : "0002",
+          "value" : "00000168"
+        },
+        {
+          "key" : "0007",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0003",
+          "value" : "00080000"
+        },
+        {
+          "key" : "007b",
+          "value" : "00000004"
+        },
+        {
+          "key" : "0004",
+          "value" : "000f4240"
+        },
+        {
+          "key" : "007c",
+          "value" : "0000"
+        },
+        {
+          "key" : "0200",
+          "value" : "02d701990300"
+        }
+      ],
+      "parse_accept" : true,
+      "first_accept" : false,
+      "next_accept" : false,
+      "first_cost" : null,
+      "next_cost" : null,
+      "first_error" : "java.util.NoSuchElementException: key not found: 8",
+      "next_error" : "java.util.NoSuchElementException: key not found: 8"
+    },
+    {
+      "omitted" : 9,
+      "fields" : [
+        {
+          "key" : "0005",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0001",
+          "value" : "001312d0"
+        },
+        {
+          "key" : "0006",
+          "value" : "000007d0"
+        },
+        {
+          "key" : "0002",
+          "value" : "00000168"
+        },
+        {
+          "key" : "0007",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0003",
+          "value" : "00080000"
+        },
+        {
+          "key" : "007b",
+          "value" : "00000004"
+        },
+        {
+          "key" : "0008",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0004",
+          "value" : "000f4240"
+        },
+        {
+          "key" : "007c",
+          "value" : "0000"
+        },
+        {
+          "key" : "0200",
+          "value" : "02d701990300"
+        }
+      ],
+      "parse_accept" : true,
+      "first_accept" : true,
+      "next_accept" : true,
+      "first_cost" : 18124,
+      "next_cost" : 18124,
+      "first_error" : null,
+      "next_error" : null
+    },
+    {
+      "omitted" : 123,
+      "fields" : [
+        {
+          "key" : "0005",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0001",
+          "value" : "001312d0"
+        },
+        {
+          "key" : "0006",
+          "value" : "000007d0"
+        },
+        {
+          "key" : "0009",
+          "value" : "0000001e"
+        },
+        {
+          "key" : "0002",
+          "value" : "00000168"
+        },
+        {
+          "key" : "0007",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0003",
+          "value" : "00080000"
+        },
+        {
+          "key" : "0008",
+          "value" : "00000064"
+        },
+        {
+          "key" : "0004",
+          "value" : "000f4240"
+        },
+        {
+          "key" : "007c",
+          "value" : "0000"
+        },
+        {
+          "key" : "0200",
+          "value" : "02d701990300"
+        }
+      ],
+      "parse_accept" : true,
+      "first_accept" : false,
+      "next_accept" : false,
+      "first_cost" : null,
+      "next_cost" : null,
+      "first_error" : "java.util.NoSuchElementException: key not found: 123",
+      "next_error" : "java.util.NoSuchElementException: key not found: 123"
+    }
+  ]
+}

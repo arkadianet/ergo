@@ -110,6 +110,7 @@ fn expired_ban_purged_on_load_permanent_survives() {
             until: SystemTime::now() - Duration::from_secs(60),
             count: 1,
             permanent: false,
+            operator: true,
         })
         .unwrap();
         book.record_ban(&BanRecord {
@@ -117,6 +118,7 @@ fn expired_ban_purged_on_load_permanent_survives() {
             until: SystemTime::now() - Duration::from_secs(60),
             count: 99,
             permanent: true,
+            operator: true,
         })
         .unwrap();
     }
@@ -171,6 +173,7 @@ fn unban_removes_entry() {
             until: SystemTime::now() + Duration::from_secs(3600),
             count: 1,
             permanent: false,
+            operator: true,
         })
         .unwrap();
         book.unban(ip).unwrap();
@@ -289,6 +292,7 @@ fn peer_manager_restores_known_peers_and_bans_from_persisted_address_book() {
             until: now_wall + Duration::from_secs(3600),
             count: 2,
             permanent: false,
+            operator: true,
         })
         .unwrap();
     }

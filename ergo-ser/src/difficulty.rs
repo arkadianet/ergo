@@ -13,21 +13,35 @@ pub fn read_nbits(r: &mut VlqReader) -> Result<u32, ReadError> {
     Ok(u32::from_be_bytes(r.get_array::<4>()?))
 }
 
-/// Decode the compact-bits representation into the full 256-bit target.
+/// Decode compact difficulty with the reference node's MPI sign semantics.
 ///
-/// The high byte of `nbits` is the byte length of the encoded target.
-/// The low 23 bits hold the mantissa (the sign bit at `0x00800000` is
-/// reserved and must be zero for valid Ergo targets). The target is
-/// reconstructed as `mantissa * 256^(size - 3)`.
-pub fn decode_compact_bits(nbits: u32) -> num_bigint::BigUint {
-    use num_bigint::BigUint;
+/// The exponent selects the first zero to three mantissa bytes, followed by
+/// zero padding. The first byte's high bit is the sign; zero has no sign.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/util/NBitsUtils.scala#L20-L27>
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/util/NBitsUtils.scala#L64-L80>
+pub fn decode_compact_bits_signed(nbits: u32) -> num_bigint::BigInt {
+    use num_bigint::{BigInt, BigUint, Sign};
     let size = (nbits >> 24) as usize;
-    let mantissa = nbits & 0x007FFFFF;
-    if size <= 3 {
+    let mantissa = nbits & 0x007f_ffff;
+    let magnitude = if size <= 3 {
         BigUint::from(mantissa >> (8 * (3 - size)))
     } else {
         BigUint::from(mantissa) << (8 * (size - 3))
-    }
+    };
+    let sign = if nbits & 0x0080_0000 != 0 {
+        Sign::Minus
+    } else {
+        Sign::Plus
+    };
+    BigInt::from_biguint(sign, magnitude)
+}
+
+/// Decode the magnitude of a compact difficulty for unsigned chain arithmetic.
+/// Canonical positive encodings have the same value as
+/// [`decode_compact_bits_signed`]. Signed consensus comparisons must use that
+/// function instead. Kept for mining, difficulty adjustment and chain metadata.
+pub fn decode_compact_bits(nbits: u32) -> num_bigint::BigUint {
+    decode_compact_bits_signed(nbits).into_parts().1
 }
 
 /// Encode a difficulty value back into compact `nBits` form. Inverse of

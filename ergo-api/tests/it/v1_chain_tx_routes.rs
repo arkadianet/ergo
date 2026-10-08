@@ -1,5 +1,5 @@
 //! Route-level integration tests for the first v1 group: `chain/*` +
-//! `transactions/*` reads (`dev-docs/v1-api-design.md` §3.5–§3.6).
+//! `transactions/*` reads.
 //!
 //! These are the convention-lock tests: they assert the exact snake_case field
 //! names from the design's example responses, the `{items, page}` collection
@@ -272,8 +272,8 @@ impl NodeChainQuery for StubChain {
         (10_000 / u64::from(wait_time_minutes.max(1))) * u64::from(tx_size_bytes)
     }
     // Fixed 2-block wait for the `status` eta tests (240s at a 120s interval).
-    fn pool_expected_wait_time_ms(&self, _fee: u64, _tx_size_bytes: u32) -> u64 {
-        240_000
+    fn pool_wait_estimate_ms(&self, _fee: u64, _tx_size_bytes: u32) -> Option<u64> {
+        Some(240_000)
     }
 }
 
@@ -1473,6 +1473,23 @@ async fn status_pending_reports_rank_and_eta() {
     assert_eq!(pool["eta_blocks"], 2);
     assert!(body["first_seen_unix_ms"].is_u64());
     assert!(body["first_seen_iso"].is_string());
+}
+
+#[tokio::test]
+async fn status_pending_omits_unknown_eta_with_a_chain_reader() {
+    let ours = tx_id();
+    let deps = Deps {
+        read: Arc::new(PoolRead {
+            rows: vec![pool_row(&ours, 100, 900, 200)],
+        }),
+        chain: Some(Arc::new(PrunedChain)),
+        ..Deps::default()
+    };
+    let (status, body) = get(deps, &format!("/api/v1/transactions/{ours}/status")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["state"], "pending");
+    assert!(body["pool"].get("eta_ms").is_none());
+    assert!(body["pool"].get("eta_blocks").is_none());
 }
 
 #[tokio::test]

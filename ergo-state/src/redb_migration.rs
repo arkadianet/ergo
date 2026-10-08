@@ -37,6 +37,8 @@ pub struct MigrationReport {
 /// Migration failures preserve the source and never overwrite the destination.
 #[derive(Debug, thiserror::Error)]
 pub enum MigrationError {
+    #[error("database upgrade interrupted; original preserved")]
+    Interrupted,
     #[error("source must be a regular file, not a symlink: {0}")]
     InvalidSource(PathBuf),
     #[error("database already opens under redb 4; no legacy migration is needed")]
@@ -68,6 +70,33 @@ pub enum MigrationError {
     #[error("database integrity or content verification failed: {0}")]
     Verification(&'static str),
 }
+
+/// Streaming progress and cancellation points for directory upgrades.
+#[derive(Debug, Clone)]
+pub enum MigrationProgress {
+    Copy {
+        bytes: u64,
+        total: u64,
+    },
+    Copied,
+    Verify {
+        reader: &'static str,
+        table: String,
+        rows: u64,
+    },
+    SourceCheck {
+        bytes: u64,
+        total: u64,
+    },
+    Verified {
+        tables: usize,
+        rows: u64,
+    },
+    /// The verified destination is durable; the source lock is still held.
+    Published(MigrationReport),
+}
+
+type Observer<'a> = dyn FnMut(MigrationProgress) -> Result<(), MigrationError> + 'a;
 
 fn io_error(operation: &'static str, source: io::Error) -> MigrationError {
     MigrationError::Io { operation, source }
@@ -131,7 +160,10 @@ macro_rules! supported_schemas {
 // Iteration and Value::as_bytes are supplied by each real dependency version.
 macro_rules! inventory_reader {
     ($name:ident, $version:ident, $error:ident) => {
-        fn $name(db: &$version::Database) -> Result<Inventory, MigrationError> {
+        fn $name(
+            db: &$version::Database,
+            observer: &mut Observer<'_>,
+        ) -> Result<Inventory, MigrationError> {
             use $version::{ReadableTable, TableHandle};
             let read = db
                 .begin_read()
@@ -174,6 +206,13 @@ macro_rules! inventory_reader {
                                             hash.update(bytes);
                                         }
                                         rows += 1;
+                                        if rows.is_multiple_of(4096) {
+                                            observer(MigrationProgress::Verify {
+                                                reader: stringify!($version),
+                                                table: name.to_owned(),
+                                                rows,
+                                            })?;
+                                        }
                                     }
                                     fingerprint = Some(TableFingerprint {
                                         schema: concat!(
@@ -194,6 +233,11 @@ macro_rules! inventory_reader {
                 supported_schemas!(check);
                 let fingerprint = fingerprint
                     .ok_or_else(|| MigrationError::UnsupportedSchema(name.to_owned()))?;
+                observer(MigrationProgress::Verify {
+                    reader: stringify!($version),
+                    table: name.to_owned(),
+                    rows: fingerprint.rows,
+                })?;
                 result.insert(name.to_owned(), fingerprint);
             }
             Ok(result)
@@ -204,7 +248,10 @@ macro_rules! inventory_reader {
 inventory_reader!(legacy_inventory, redb_legacy, legacy_error);
 inventory_reader!(current_inventory, redb, current_error);
 
-fn source_hash(source: &impl StorageBackend) -> Result<[u8; 32], MigrationError> {
+fn source_hash(
+    source: &impl StorageBackend,
+    observer: &mut Observer<'_>,
+) -> Result<[u8; 32], MigrationError> {
     let len = source
         .len()
         .map_err(|e| io_error("read source length", e))?;
@@ -216,6 +263,10 @@ fn source_hash(source: &impl StorageBackend) -> Result<[u8; 32], MigrationError>
             .map_err(|e| io_error("read source", e))?;
         offset += bytes.len() as u64;
         hash.update(bytes);
+        observer(MigrationProgress::SourceCheck {
+            bytes: offset,
+            total: len,
+        })?;
     }
     Ok(hash.finalize().into())
 }
@@ -243,12 +294,34 @@ pub fn migrate_database(
     source: &Path,
     destination: &Path,
 ) -> Result<MigrationReport, MigrationError> {
-    migrate_with_hook(source, destination, |_| Ok(()))
+    migrate_database_observed(source, destination, &mut |_| Ok(()))
 }
 
+/// Run the same verified migration with streaming progress and cancellation.
+/// Returning an error before publication removes the private temporary copy.
+/// `Published` runs under the source lock, allowing a directory upgrader to
+/// journal and swap the verified copy without a writer racing the renames.
+pub fn migrate_database_observed(
+    source: &Path,
+    destination: &Path,
+    observer: &mut Observer<'_>,
+) -> Result<MigrationReport, MigrationError> {
+    migrate_impl(source, destination, observer, |_| Ok(()))
+}
+
+#[cfg(test)]
 fn migrate_with_hook(
     source: &Path,
     destination: &Path,
+    before_publish: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<MigrationReport, MigrationError> {
+    migrate_impl(source, destination, &mut |_| Ok(()), before_publish)
+}
+
+fn migrate_impl(
+    source: &Path,
+    destination: &Path,
+    observer: &mut Observer<'_>,
     before_publish: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<MigrationReport, MigrationError> {
     let metadata = fs::symlink_metadata(source).map_err(|e| io_error("inspect source", e))?;
@@ -285,6 +358,10 @@ fn migrate_with_hook(
     let mut hash = Blake2b::<U32>::new();
     let mut offset = 0;
     while offset < len {
+        observer(MigrationProgress::Copy {
+            bytes: offset,
+            total: len,
+        })?;
         let bytes = source
             .read(offset, (len - offset).min(1024 * 1024) as usize)
             .map_err(|e| io_error("copy source", e))?;
@@ -296,6 +373,7 @@ fn migrate_with_hook(
     copy.as_file()
         .sync_all()
         .map_err(|e| io_error("sync copy", e))?;
+    observer(MigrationProgress::Copied)?;
     let original_hash: [u8; 32] = hash.finalize().into();
     // Classify with the current reader first: legacy redb cannot decode new
     // composite type tags in an already-current v3 file. Only actual v2 inputs
@@ -322,7 +400,7 @@ fn migrate_with_hook(
                     "legacy integrity check required repair",
                 ));
             }
-            let expected = legacy_inventory(&db)?;
+            let expected = legacy_inventory(&db, observer)?;
             let upgraded = db.upgrade().map_err(|e| legacy_error("upgrade copy", e))?;
             (expected, upgraded)
         };
@@ -339,7 +417,7 @@ fn migrate_with_hook(
                     "upgraded integrity check required repair",
                 ));
             }
-            if current_inventory(&db)? != expected {
+            if current_inventory(&db, observer)? != expected {
                 return Err(MigrationError::Verification(
                     "table schemas, counts or contents changed",
                 ));
@@ -348,7 +426,7 @@ fn migrate_with_hook(
         Ok((expected, upgraded))
     }))
     .map_err(|_| MigrationError::MalformedMetadata)??;
-    if source_hash(&source)? != original_hash {
+    if source_hash(&source, observer)? != original_hash {
         return Err(MigrationError::Verification("source changed while locked"));
     }
     fs::set_permissions(copy.path(), metadata.permissions().clone())
@@ -356,6 +434,10 @@ fn migrate_with_hook(
     copy.as_file()
         .sync_all()
         .map_err(|e| io_error("sync verified copy", e))?;
+    observer(MigrationProgress::Verified {
+        tables: expected.len(),
+        rows: expected.values().map(|table| table.rows).sum(),
+    })?;
     before_publish(copy.path()).map_err(|e| io_error("prepare publication", e))?;
     let _published = copy
         .persist_noclobber(destination)
@@ -373,11 +455,13 @@ fn migrate_with_hook(
     File::open(parent)
         .and_then(|dir| dir.sync_all())
         .map_err(|e| io_error("sync destination directory (verified copy is retained)", e))?;
-    Ok(MigrationReport {
+    let report = MigrationReport {
         tables: expected.len(),
         rows: expected.values().map(|table| table.rows).sum(),
         upgraded,
-    })
+    };
+    observer(MigrationProgress::Published(report.clone()))?;
+    Ok(report)
 }
 
 #[cfg(test)]

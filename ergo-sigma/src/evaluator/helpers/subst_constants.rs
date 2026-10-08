@@ -35,7 +35,13 @@ pub(crate) fn subst_constants(
     new_values: &[Value],
     is_v3_ergo_tree: bool,
 ) -> Result<(Vec<u8>, usize), EvalError> {
-    subst_constants_versioned(script_bytes, positions, new_values, is_v3_ergo_tree, true)
+    subst_constants_versioned(
+        script_bytes,
+        positions,
+        new_values,
+        is_v3_ergo_tree,
+        if is_v3_ergo_tree { 3 } else { 2 },
+    )
 }
 
 pub(crate) fn subst_constants_versioned(
@@ -43,11 +49,12 @@ pub(crate) fn subst_constants_versioned(
     positions: &[i32],
     new_values: &[Value],
     is_v3_ergo_tree: bool,
-    is_jit_activated: bool,
+    activated_script_version: u8,
 ) -> Result<(Vec<u8>, usize), EvalError> {
     use ergo_primitives::reader::VlqReader;
     use ergo_primitives::writer::VlqWriter;
     use ergo_ser::sigma_value::{read_constant, write_constant};
+    let is_jit_activated = (activated_script_version as i8) >= 2;
 
     // Scala `require(positions.length == newVals.length)`.
     if positions.len() != new_values.len() {
@@ -63,6 +70,12 @@ pub(crate) fn subst_constants_versioned(
     // deserializeHeaderWithTreeBytes: header [+ size] + segregated constants,
     // leaving the body as opaque raw bytes.
     let mut r = VlqReader::new(script_bytes);
+    // substituteConstants reads only the template header/size, so the
+    // template version is not checked. deserializeConstants still parses
+    // every nested SBox under the executing activated version, even when no
+    // position is substituted. Its tree-version failure is a hard error.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L245-L291
+    r.set_activated_script_version(Some(activated_script_version));
     let header = r.get_u8().map_err(parse_err)?;
     let has_size = header & 0x08 != 0;
     let constant_segregation = header & 0x10 != 0;
@@ -107,6 +120,11 @@ pub(crate) fn subst_constants_versioned(
             constants.push((tpe, val));
         }
     }
+    // substituteConstants parses every constant with the JVM serializers, which
+    // decode each GroupElement (also inside SigmaProp, Box and Header values):
+    // an off-curve point throws even when no constant is substituted.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L320-L411
+    crate::evaluator::dispatch::validate_recorded_group_elements(r.group_elements())?;
     let tree_bytes = script_bytes[r.position()..].to_vec();
     let n_constants = constants.len();
 

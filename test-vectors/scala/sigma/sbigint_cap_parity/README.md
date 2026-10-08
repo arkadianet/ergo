@@ -1,6 +1,6 @@
 # SBigInt 32-byte length cap parity
 
-**Audit reference:** `docs/audit-2.md` M12 / line 283 (SBigInt length cap parity).
+**Scope:** SBigInt length cap parity.
 
 ## Oracle source
 

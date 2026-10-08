@@ -100,6 +100,9 @@ fn avl_tree_json(t: &AvlTreeData) -> Value {
 fn sigma_value_json(v: &SigmaValue) -> Value {
     match v {
         SigmaValue::Unit => Value::Null,
+        // Stored expression children have no evaluated data value. The outer
+        // decoded register still exposes its serialized bytes and type.
+        SigmaValue::Unevaluated(_) => Value::Null,
         SigmaValue::Boolean(b) => Value::Bool(*b),
         // Small ints fit a JSON number safely (< 2^53).
         SigmaValue::Byte(n) => json!(*n),
@@ -118,7 +121,9 @@ fn sigma_value_json(v: &SigmaValue) -> Value {
         }
         SigmaValue::SigmaProp(sb) => sigma_boolean_json(sb),
         SigmaValue::AvlTree(t) => avl_tree_json(t),
-        SigmaValue::OpaqueBoxBytes(bytes) => Value::String(hex::encode(bytes)),
+        SigmaValue::OpaqueBoxBytes(bytes) | SigmaValue::CanonicalBoxBytes { bytes, .. } => {
+            Value::String(hex::encode(bytes))
+        }
         // Canonical serialized header bytes — Debug output is not a stable
         // wire shape. (Defensive: consensus rejects Header-typed register /
         // context constants at every version, so real boxes never reach this.)

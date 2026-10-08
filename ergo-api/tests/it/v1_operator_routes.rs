@@ -421,7 +421,7 @@ impl NodeAdmin for SpyAdmin {
     }
 }
 
-struct StubMining;
+struct StubMining(ergo_api::mining::RentSelfClaimState);
 
 fn fixed_work() -> WorkMessageJson {
     serde_json::from_value(serde_json::json!({
@@ -437,11 +437,46 @@ fn fixed_work() -> WorkMessageJson {
 
 #[async_trait]
 impl NodeMining for StubMining {
+    async fn rent_self_claim_state(&self) -> ergo_api::mining::RentSelfClaimState {
+        self.0
+    }
+    async fn mining_freshness(
+        &self,
+    ) -> Result<ergo_rest_json::mining_inspection::MiningFreshnessJson, MiningApiError> {
+        Ok(ergo_rest_json::mining_inspection::MiningFreshnessJson {
+            mining_started: true,
+            last_template_msg: Some("ab".repeat(32)),
+            last_template_height: Some(100),
+            last_template_age_ms: Some(25),
+            template_seq: Some(7),
+        })
+    }
     async fn candidate(
         &self,
         _longpoll: Option<String>,
     ) -> Result<Option<WorkMessageJson>, MiningApiError> {
         Ok(Some(fixed_work()))
+    }
+    async fn candidate_with_txs(
+        &self,
+        _txs: Vec<ergo_rest_json::types::ScalaTransactionInput>,
+        miner_pk: Option<String>,
+    ) -> Result<Option<WorkMessageJson>, MiningApiError> {
+        let mut work = fixed_work();
+        if let Some(pk) = miner_pk {
+            work.pk = pk;
+        }
+        Ok(Some(work))
+    }
+
+    async fn candidate_details(
+        &self,
+        _msg: Option<String>,
+        _template_seq: Option<u64>,
+    ) -> Result<Option<ergo_rest_json::mining_inspection::CandidateDetailsJson>, MiningApiError>
+    {
+        // Nothing is retained.
+        Ok(None)
     }
     async fn submit_solution(&self, _: AutolykosSolutionJson) -> Result<(), MiningApiError> {
         Ok(())
@@ -460,12 +495,19 @@ fn security() -> Arc<ApiSecurity> {
 
 /// Full-featured app: chain + admin + mining all wired.
 fn app_full(auth: Arc<V1AuthConfig>) -> Router {
+    app_with_rent_state(auth, Default::default())
+}
+
+fn app_with_rent_state(
+    auth: Arc<V1AuthConfig>,
+    rent_state: ergo_api::mining::RentSelfClaimState,
+) -> Router {
     let state = OperatorState {
         blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
         read: Arc::new(StubRead),
         chain: Some(Arc::new(StubChain)),
         admin: Some(Arc::new(SpyAdmin::default())),
-        mining: Some(Arc::new(StubMining)),
+        mining: Some(Arc::new(StubMining(rent_state))),
         network: NetworkPrefix::Mainnet,
     };
     let gov = Governor::new(Default::default()).expect("valid governor config");
@@ -479,7 +521,7 @@ fn app_with_admin(admin: Arc<SpyAdmin>, auth: Arc<V1AuthConfig>) -> Router {
         read: Arc::new(StubRead),
         chain: Some(Arc::new(StubChain)),
         admin: Some(admin),
-        mining: Some(Arc::new(StubMining)),
+        mining: Some(Arc::new(StubMining(Default::default()))),
         network: NetworkPrefix::Mainnet,
     };
     let gov = Governor::new(Default::default()).expect("valid governor config");
@@ -664,7 +706,40 @@ async fn mining_status_t0_composed_always_200() {
     assert_eq!(v["mining_enabled"], true);
     assert_eq!(v["synced"], true);
     assert_eq!(v["longpoll_supported"], true);
-    assert!(v["last_template_msg"].is_null());
+    assert_eq!(v["last_template_msg"], "ab".repeat(32));
+    assert_eq!(v["last_template_height"], 100);
+    assert_eq!(v["last_template_age_ms"], 25);
+    assert_eq!(v["template_seq"], 7);
+}
+
+#[tokio::test]
+async fn mining_status_exposes_rent_self_claim_states() {
+    use ergo_api::mining::RentSelfClaimState;
+    for (state, expected) in [
+        (
+            RentSelfClaimState::Disabled,
+            serde_json::json!({"state": "disabled"}),
+        ),
+        (
+            RentSelfClaimState::Active,
+            serde_json::json!({"state": "active"}),
+        ),
+        (
+            RentSelfClaimState::PausedIndexerBehind {
+                indexed_height: 90,
+                chain_height: 100,
+            },
+            serde_json::json!({"state": "paused_indexer_behind", "indexed_height": 90, "chain_height": 100}),
+        ),
+    ] {
+        let (status, value) = send(
+            app_with_rent_state(default_auth(), state),
+            req(Method::GET, "/api/v1/mining/status", None, None, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["rent_self_claim"], expected);
+    }
 }
 
 #[tokio::test]
@@ -794,6 +869,47 @@ async fn mining_candidate_t1_accepts_valid_key() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["msg"], "ab".repeat(32));
     assert_eq!(v["template_seq"], 7);
+}
+
+#[tokio::test]
+async fn mining_candidate_details_unretained_selector_is_v1_template_not_found() {
+    let uri = format!(
+        "/api/v1/mining/candidate-details?msg={}&template_seq=3",
+        "ab".repeat(32)
+    );
+    let (status, v) = send(
+        app_full(default_auth()),
+        req(
+            Method::GET,
+            &uri,
+            Some("operator-secret"),
+            Some(REMOTE),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(v["error"]["reason"], "template_not_found");
+    assert!(v["error"]["message"].is_string() && v["error"]["detail"].is_string());
+    assert!(
+        v.get("reason").is_none(),
+        "the v1 envelope nests the reason"
+    );
+
+    // Without selectors there is simply no current work.
+    let (status, v) = send(
+        app_full(default_auth()),
+        req(
+            Method::GET,
+            "/api/v1/mining/candidate-details",
+            Some("operator-secret"),
+            Some(REMOTE),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(v["error"]["reason"], "candidate_unavailable");
 }
 
 #[tokio::test]
@@ -943,7 +1059,7 @@ async fn config_patch_t2_hard_deny_allows_loopback_then_seam_deferred() {
             "/api/v1/node/config",
             Some("operator-secret"),
             Some(LOCAL),
-            None,
+            Some(Body::from("{}")),
         ),
     )
     .await;
@@ -987,7 +1103,30 @@ async fn mining_candidate_mining_off_is_mining_disabled_not_404() {
 }
 
 #[tokio::test]
-async fn mining_candidate_with_txs_seam_deferred_route_unavailable() {
+async fn mining_candidate_with_txs_array_and_explicit_key_reach_seam() {
+    const PK: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    for body in ["[]".to_owned(), format!(r#"{{"txs":[],"pk":"{PK}"}}"#)] {
+        let (status, v) = send(
+            app_full(default_auth()),
+            req(
+                Method::POST,
+                "/api/v1/mining/candidate-with-txs",
+                Some("operator-secret"),
+                Some(REMOTE),
+                Some(Body::from(body.clone())),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["msg"], "ab".repeat(32));
+        if body.starts_with('{') {
+            assert_eq!(v["pk"], PK);
+        }
+    }
+}
+
+#[tokio::test]
+async fn mining_candidate_with_txs_invalid_body_is_v1_bad_request() {
     let (status, v) = send(
         app_full(default_auth()),
         req(
@@ -995,12 +1134,12 @@ async fn mining_candidate_with_txs_seam_deferred_route_unavailable() {
             "/api/v1/mining/candidate-with-txs",
             Some("operator-secret"),
             Some(REMOTE),
-            None,
+            Some(Body::from("{}")),
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(v["error"]["reason"], "route_unavailable");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v["error"]["reason"], "bad_request");
 }
 
 #[tokio::test]
@@ -1047,4 +1186,95 @@ async fn voting_candidate_t0_seam_deferred_route_unavailable() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(v["error"]["reason"], "route_unavailable");
+}
+
+#[tokio::test]
+async fn probes_survive_exhausted_public_ip_budget() {
+    let app = app_full(default_auth());
+    for _ in 0..45 {
+        send(
+            app.clone(),
+            req(Method::GET, "/api/v1/node/info", None, Some(REMOTE), None),
+        )
+        .await;
+    }
+    assert_eq!(
+        send(
+            app.clone(),
+            req(Method::GET, "/api/v1/node/info", None, Some(REMOTE), None)
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    for name in ["startup", "liveness", "readiness"] {
+        let (status, _) = send(
+            app.clone(),
+            req(
+                Method::GET,
+                &format!("/api/v1/node/{name}"),
+                None,
+                Some(REMOTE),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stub probe should report unavailable, not exhaust the public budget"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sensitive_control_responses_are_not_cacheable() {
+    struct ConfigAdmin;
+    impl NodeAdmin for ConfigAdmin {
+        fn request_shutdown(&self) {}
+        fn effective_config(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({"revision":"boot:0"}))
+        }
+        fn apply_config_patch(
+            &self,
+            _: ergo_api::operator_control::RuntimeConfigPatch,
+        ) -> Result<serde_json::Value, ergo_api::operator_control::OperatorControlError> {
+            Ok(self.effective_config().unwrap())
+        }
+        fn credentials(&self) -> Option<Vec<ergo_api::auth::CredentialInfo>> {
+            Some(vec![])
+        }
+    }
+    let app = operator_router(
+        OperatorState {
+            blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
+            read: Arc::new(StubRead),
+            chain: None,
+            admin: Some(Arc::new(ConfigAdmin)),
+            mining: None,
+            network: NetworkPrefix::Mainnet,
+        },
+        Governor::new(Default::default()).unwrap(),
+        default_auth(),
+    );
+    use tower::ServiceExt;
+    for (method, path) in [
+        (Method::GET, "/api/v1/node/config"),
+        (Method::PATCH, "/api/v1/node/config"),
+        (Method::GET, "/api/v1/node/credentials"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(req(
+                method,
+                path,
+                Some("operator-secret"),
+                Some(LOCAL),
+                Some(Body::from("{}")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
 }

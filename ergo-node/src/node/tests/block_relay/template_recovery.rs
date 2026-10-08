@@ -189,6 +189,7 @@ async fn locally_mined_block_failed_apply_rebuild_serves_fresh_template_that_app
     let wiring = MiningWiring {
         handle: handle.clone(),
         intent_tx,
+        request_tx: std::sync::mpsc::channel().0,
         refresh_debounce: Duration::from_secs(1),
         block_interval_ms: 120_000,
         offline_generation: false,

@@ -1,0 +1,12 @@
+canon-control	true	12101
+canon-nonminimal-input-count	true	12101
+canon-nonminimal-out-height	true	12101
+stateful-bool_reg_02_tx	true	12101
+stateful-height_nonminimal_vlq_tx	true	12101
+stateful-inputs_count_nonminimal_tx	true	12101
+stateful-bigint_nonminimal_tx	true	12101
+stateful-coll_bool_padding_tx	true	12101
+stateful-ge_identity_garbage_tx	true	12101
+stateful-ctx_5_reverse_order_tx	true	12101
+stateful-ctx_dup_keys_2_tx	true	12101
+stateful-avl_flags_ff_tx	true	12101

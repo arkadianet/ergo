@@ -181,13 +181,15 @@ class PackagedDocumentation(unittest.TestCase):
                 self.assertIn("## State modes and how to choose", content)
                 readme = self.format("README.md", extension=extension)
                 self.assertIn(f"./ergo-node{extension} --config", readme)
+                self.assertIn(f"./ergo-node{extension} init --data-dir ../ergo-data", readme)
+                self.assertIn(f"./ergo-node{extension} api-key generate", readme)
                 self.assertIn(f"./ergo-wallet{extension} --help", readme)
 
     def test_bundled_links_stay_local_and_source_links_use_exact_revision(self):
         content = self.format("docs/operating.md")
         self.assertIn("](configuration.md#apiscript)", content)
         self.assertIn("](../config/ergo-node.toml.example)", content)
-        for path in ("docs/events.md", "docs/operating-mode-evidence.md", "docs/overview.md#running"):
+        for path in ("docs/events.md", "docs/overview.md#running"):
             self.assertIn(f"](https://github.com/arkadianet/ergo/blob/{self.sha}/{path})", content)
         self.assertIn(f"](https://github.com/arkadianet/ergo/tree/{self.sha}/ergo-node/src/config/)", content)
         self.assertNotIn("github.com/arkadianet/ergo/tree/main/", content)
@@ -213,7 +215,7 @@ class PackagedDocumentation(unittest.TestCase):
 
     def test_missing_source_reference_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "missing source link target"):
-            release.packaged_document("[missing](no-such-evidence.md)", "docs/operating-mode-evidence.md",
+            release.packaged_document("[missing](no-such-evidence.md)", "docs/compatibility.md",
                                       self.stage, self.sha)
 
 

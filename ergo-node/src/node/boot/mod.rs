@@ -220,27 +220,9 @@ fn expected_sentinel(config: &NodeConfig) -> &'static str {
 /// burning condition (Scala `verifyReemissionSpending`).
 fn build_reemission_rules(
     spec: &ergo_chain_spec::ChainSpec,
+    check_rules: bool,
 ) -> Option<ergo_validation::ReemissionRuleInputs> {
-    // `None` means EIP-27 is not enabled on this network (e.g. testnet), so the
-    // block validator correctly runs without the re-emission check.
-    let reemission = spec.reemission.as_ref()?;
-    // EIP-27 IS configured: the verified pay-to-reemission contract tree MUST be
-    // available, else we would build rules without a contract to match outputs
-    // against. Fail closed — refuse to boot rather than silently disable a
-    // consensus check. Unreachable for `ChainSpec::for_network` (mainnet has the
-    // trees; testnet returns above), so a failure here means a non-canonical /
-    // inconsistent spec, surfaced loudly like the sibling `.expect("const hex")`
-    // invariants in `emission_script_trees`.
-    let trees = spec.emission_script_trees().expect(
-        "chain spec configures EIP-27 re-emission but exposes no verified \
-         pay-to-reemission contract tree; refusing to boot with re-emission \
-         validation silently disabled",
-    );
-    Some(ergo_validation::ReemissionRuleInputs {
-        activation_height: reemission.activation_height,
-        reemission_token_id: *reemission.reemission_token_id.as_bytes(),
-        pay_to_reemission_tree: trees.pay_to_reemission,
-    })
+    ergo_validation::ReemissionRuleInputs::from_chain_spec(spec, check_rules)
 }
 
 /// Build the node, spawn the action loop on a background task, and
@@ -268,7 +250,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
             .into());
     }
     let db_path = config.data_dir.join("state.redb");
-    std::fs::create_dir_all(&config.data_dir)?;
+    let data_directory_lock = crate::data_upgrade::prepare_startup(&config).await?;
     crate::incidents::set_incident_dir(config.data_dir.join("incidents"));
 
     // 1. Open store
@@ -401,6 +383,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
             db_path,
             ergo_state::StateBackendKind::Digest(store),
             boot_sentinel,
+            data_directory_lock,
         )
         .await;
     }
@@ -528,9 +511,10 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         info!(boxes = boxes.len(), "genesis initialized");
     }
 
-    // 2b. Back-fill MODIFIER_TYPE_INDEX for any pre-existing data.
-    // No-op on fresh DBs; one-shot pass on first run after upgrade.
-    // Idempotent — safe to run every boot. Progress + completion logs
+    // 2b. Back-fill MODIFIER_TYPE_INDEX. Header sync does not tag it,
+    // so this one-shot pass runs on the first restart after a fresh
+    // sync, or the first run after an upgrade; a sentinel skips it
+    // afterwards. Idempotent. Info-level progress and completion logs
     // come from inside `back_fill_modifier_type_index` (store layer).
     if let Err(e) = store.back_fill_modifier_type_index() {
         warn!(error = %e, "modifier-type-index back-fill failed");
@@ -704,6 +688,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         db_path,
         ergo_state::StateBackendKind::Utxo(store),
         boot_sentinel,
+        data_directory_lock,
     )
     .await
 }
@@ -724,6 +709,7 @@ async fn run_inner_with_backend(
     db_path: std::path::PathBuf,
     mut store: ergo_state::StateBackendKind,
     boot_sentinel: u32,
+    data_directory_lock: std::sync::Arc<crate::data_upgrade::DataDirectoryLock>,
 ) -> Result<RunHandle, NodeError> {
     // Phase 1: peer manager + address book + known-peer seeding.
     let (session_id, peer_manager) = peers::setup(&config)?;
@@ -817,6 +803,8 @@ async fn run_inner_with_backend(
     // Operator /peers/connect -> action-loop dial requests. Small bound:
     // these are manual, rare, and fire-and-forget.
     let (peer_connect_tx, peer_connect_rx) = mpsc::channel::<std::net::SocketAddr>(16);
+    let (peer_control_tx, peer_control_rx) =
+        mpsc::channel::<crate::runtime_control::PeerControlRequest>(16);
     // Operator POST /api/v1/votes -> action-loop "rebuild the mining candidate
     // now" signal. Rare, fire-and-forget, coalescing (each rebuild reads the
     // latest targets), so a tiny bound is plenty.
@@ -895,6 +883,11 @@ async fn run_inner_with_backend(
         &mining_submit_tx,
         wallet_store.clone(),
     )?;
+    // Keep queued private transactions out of every public admission path
+    // from the first loop iteration, whether or not mining is enabled.
+    if let Some(queue) = mining_subsystem.private_queue.as_deref() {
+        super::private_mining::register_queued(&mut mempool, queue);
+    }
 
     // Graceful shutdown channel for the API task. Plumbed through
     // `ergo_api::serve_on` so axum's `with_graceful_shutdown` can
@@ -923,9 +916,12 @@ async fn run_inner_with_backend(
         &mut mempool,
         wallet_store,
         mining_subsystem.bridge.clone(),
+        mining_subsystem.private_queue.clone(),
         scaffold.voting_targets_slot.clone(),
         &shutdown_notify,
         &peer_connect_tx,
+        &peer_control_tx,
+        scaffold.runtime_control.clone(),
         &votes_changed_tx,
     )
     .await?;
@@ -1018,6 +1014,8 @@ async fn run_inner_with_backend(
             .checked_sub(ergo_p2p::peer_manager::GOSSIP_INTERVAL)
             .unwrap_or_else(Instant::now),
         last_starve_warn_at: None,
+        last_recovery_dial_at: None,
+        recovery_dial_rotation: 0,
         indexer_handle: sync.indexer_handle.clone(),
         anchor_map: anchor_map::AnchorMap::new(),
         rest_peer_urls: std::sync::Arc::new(std::sync::RwLock::new(RestPeers::new())),
@@ -1066,6 +1064,7 @@ async fn run_inner_with_backend(
         // to enter the `if config.mining_config.enabled` arm.
         mining_enabled: mining_subsystem.handle.is_some(),
         mined_apply_failed_parent: None,
+        private_mining: Default::default(),
         // Non-loopback bind or a declared loopback reverse proxy means API
         // submissions are not trusted-local and must use the public budget.
         api_publicly_bound: api_publicly_bound(config.api_bind, config.api_local_reverse_proxy),
@@ -1141,18 +1140,25 @@ async fn run_inner_with_backend(
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let mempool_tick_ms = config.mempool_config.notifier_poll_ms;
 
-    let loop_handle = tokio::spawn(action_loop(
-        state,
-        event_rx,
-        submit_rx,
-        mining_submit_rx,
-        peer_connect_rx,
-        votes_changed_rx,
-        mining_engine.wiring,
-        shutdown_rx,
-        mempool_tick_ms,
-        wallet_session_id,
-    ));
+    let loop_lock = data_directory_lock.clone();
+    let loop_handle = tokio::spawn(async move {
+        let _directory_lock = loop_lock;
+        action_loop(
+            state,
+            event_rx,
+            submit_rx,
+            mining_submit_rx,
+            peer_connect_rx,
+            peer_control_rx,
+            scaffold.runtime_control.clone(),
+            votes_changed_rx,
+            mining_engine.wiring,
+            shutdown_rx,
+            mempool_tick_ms,
+            wallet_session_id,
+        )
+        .await
+    });
 
     // Always expose the submit bridge — Scala-parity always-on
     // submission posture. The Option<_> wrapper stays so future
@@ -1161,6 +1167,7 @@ async fn run_inner_with_backend(
     let submit = Some(scaffold.submit_bridge);
 
     Ok(RunHandle {
+        data_directory_lock: Some(data_directory_lock),
         api_addr,
         submit,
         read: scaffold.read_state,

@@ -12,6 +12,7 @@
 //! the dispatch table is the consensus contract; the read and write
 //! sides each consume it independently.
 
+mod constructor;
 mod parse;
 mod types;
 mod walk;
@@ -20,7 +21,10 @@ mod write;
 #[cfg(test)]
 mod tests;
 
-pub use parse::{parse_body, parse_expr};
+pub use constructor::{
+    check_rebuilt_constructor, ConstructorError, ConstructorType, ConstructorTypes,
+};
+pub use parse::{parse_body, parse_body_for_substitution, parse_expr};
 pub use types::{
     find_unresolved_v5_method, find_v3_only_method, is_known_method, is_v3_only_method,
     is_v5_method, is_v6_method, method_explicit_type_args_count, opcode_name, Body, Expr, IrNode,

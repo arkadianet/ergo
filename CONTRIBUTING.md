@@ -16,7 +16,7 @@ need to build, test, and submit changes; it is self-contained.
 - For consensus-boundary changes, tests must be oracle-backed (Scala-produced
   fixtures or mainnet bytes), never self-oracles.
 
-See [`docs/architecture.md`](./docs/architecture.md) for the crate layering and
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the crate layering and
 data flow, and [`docs/compatibility.md`](./docs/compatibility.md) for what
 "consensus-compatible" means here and where the known gaps are.
 
@@ -282,6 +282,13 @@ regressions with the Node.js release pinned in `.github/ci-tools.toml`:
 node --experimental-default-type=module --test ergo-api/web/tests/*.test.mjs
 node scripts/test-voting-ui.cjs
 ```
+
+## Documentation policy
+
+`docs/` describes the current product and codebase. Behavior changes update
+those docs in the same PR. Session artifacts — audits, plans, benchmark runs
+and evidence logs — belong in PR descriptions or issues, not the repository.
+Crate-specific deep documentation lives with its crate.
 
 ## Pull requests
 

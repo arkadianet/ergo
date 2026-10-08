@@ -939,7 +939,7 @@ fn parse_class_failures_do_not_blacklist() {
         unresolved: &mut unr,
         weight_fn: &w,
     };
-    let (out, _) = process(
+    let (out, actions) = process(
         b"bytes",
         TxSource::Peer(peer()),
         Instant::now(),
@@ -953,6 +953,9 @@ fn parse_class_failures_do_not_blacklist() {
         }
     ));
     assert!(inv.is_empty(), "parse-class failure must not blacklist");
+    assert!(!actions
+        .iter()
+        .any(|a| matches!(a, MempoolAction::Penalize { .. })));
 
     // Deserialize from validate (the validator-disagreement arm —
     // peek parsed the bytes but validate could not): same rule.

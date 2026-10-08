@@ -436,6 +436,67 @@ fn cascade_grandparent_parent_child() {
     mp.pool().check_invariants();
 }
 
+#[test]
+fn staged_orphan_registered_private_is_never_promoted() {
+    // C was staged from a public submit before the operator queued it
+    // privately. Its parent's arrival must not promote or advertise C.
+    let mut mp = mempool();
+    let utxo = FakeUtxo::with(&[0x50]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(1, 5_000_000, &[0x50], &[0xAA]) // P
+        .plan(2, 5_000_000, &[0xAA], &[0xBB]); // C
+    let now = Instant::now();
+    mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(mp.is_staged(&d(2)), "child held as orphan");
+    mp.register_private_transaction(d(2));
+
+    let (po, pa) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(po, AdmissionOutcome::Admitted { .. }));
+    assert!(mp.contains(&d(1)));
+    assert!(!mp.contains(&d(2)), "private child stays out of the pool");
+    assert!(
+        !broadcasts(&pa).contains(&d(2)),
+        "private child never advertised"
+    );
+    mp.pool().check_invariants();
+}
+
+#[test]
+fn held_parent_registered_private_is_never_committed_by_a_package() {
+    // P was held after losing the pool-full gate, then queued privately. A
+    // booster child completing the package must not seat or advertise P.
+    let cfg = MempoolConfig {
+        max_pool_size: 2,
+        ..base_cfg()
+    };
+    let mut mp = Mempool::new(cfg, Box::new(ByCost));
+    let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(10, 1_000_000, &[0x90], &[0x9A])
+        .plan(11, 3_000_000, &[0x91], &[0x9B])
+        .plan(1, 1_000_000, &[0x70], &[0x71]) // P — held
+        .plan(2, 10_000_000, &[0x71], &[0x72]); // C — spends P's output
+    let now = Instant::now();
+    mp.process(&tx_bytes(10), TxSource::Api, now, &tip.view(&utxo), &v);
+    mp.process(&tx_bytes(11), TxSource::Api, now, &tip.view(&utxo), &v);
+    mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(mp.is_staged(&d(1)), "parent held");
+    mp.register_private_transaction(d(1));
+
+    let (co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(co, AdmissionOutcome::Rejected { .. }));
+    assert!(!mp.contains(&d(1)) && !mp.contains(&d(2)));
+    assert!(
+        mp.contains(&d(10)) && mp.contains(&d(11)),
+        "incumbents kept"
+    );
+    let named = broadcasts(&ca);
+    assert!(!named.contains(&d(1)) && !named.contains(&d(2)));
+    mp.pool().check_invariants();
+}
+
 // ----- invariants -----
 
 #[test]

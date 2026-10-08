@@ -983,6 +983,18 @@ struct GenerationWalletWrite {
     still_owns: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 impl crate::wallet::WalletWrite for GenerationWalletWrite {
+    fn mining_job_next_id(&self) -> Result<u64, WalletStoreError> {
+        self.inner.mining_job_next_id()
+    }
+    fn set_mining_job_next_id(&mut self, id: u64) -> Result<(), WalletStoreError> {
+        self.inner.set_mining_job_next_id(id)
+    }
+    fn put_mining_job_record(&mut self, id: u64, record: &[u8]) -> Result<(), WalletStoreError> {
+        self.inner.put_mining_job_record(id, record)
+    }
+    fn remove_mining_job_record(&mut self, id: u64) -> Result<(), WalletStoreError> {
+        self.inner.remove_mining_job_record(id)
+    }
     fn set_scan_invalidated(&mut self, invalidated: bool) -> Result<(), WalletStoreError> {
         self.inner.set_scan_invalidated(invalidated)
     }

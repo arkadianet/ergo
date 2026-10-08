@@ -566,6 +566,16 @@ impl WalletEngine {
                 .read()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
             if read
+                .discovery_coverage()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .is_some()
+            {
+                return Err(WalletAdminError::BadRequest(
+                    "UTXO-discovered wallets require a full historical rebuild (fromHeight=0)"
+                        .into(),
+                ));
+            }
+            if read
                 .scan_invalidated()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?
             {

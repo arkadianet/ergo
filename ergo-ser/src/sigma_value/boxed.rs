@@ -7,6 +7,10 @@ use ergo_primitives::reader::{ReadError, VlqReader};
 
 use super::{read_constant, SigmaValue};
 use crate::ergo_box::MAX_BOX_SIZE;
+use crate::error::WriteError;
+
+// A successful parse may still carry a failure when SBox is written later.
+type CanonicalTreeBytes = Result<Option<Vec<u8>>, WriteError>;
 
 /// Skip past an ErgoTree in the reader without fully parsing the body.
 ///
@@ -24,7 +28,7 @@ fn parse_sizeless_inner_box_script(
     r: &mut VlqReader,
     version: u8,
     cseg: bool,
-) -> Result<(), ReadError> {
+) -> Result<CanonicalTreeBytes, ReadError> {
     // A nested box-constant script is its OWN deserialization scope, parsed on the
     // SAME reader as the enclosing tree, so two pieces of version-scoped reader state
     // are saved/set/restored around the ENTIRE inner parse — segregated constants AND
@@ -56,7 +60,7 @@ fn parse_sizeless_inner_box_script_scoped(
     r: &mut VlqReader,
     version: u8,
     cseg: bool,
-) -> Result<(), ReadError> {
+) -> Result<CanonicalTreeBytes, ReadError> {
     let mut constants = Vec::new();
     if cseg {
         // Nested-tree `deserializeConstants` reads the count via `getUInt().toInt`
@@ -95,7 +99,20 @@ fn parse_sizeless_inner_box_script_scoped(
             )));
         }
     }
-    Ok(())
+    let tree = crate::ergo_tree::ErgoTree {
+        version,
+        has_size: false,
+        constant_segregation: cseg,
+        reserved_header_bits: 0,
+        constants,
+        body,
+    };
+    let mut writer = ergo_primitives::writer::VlqWriter::new();
+    // Cache the write result rather than dropping its error. Scala can retain a
+    // parsed box's received bytes, but CoreDataSerializer's SBox write must
+    // propagate a nested tree's serialization failure.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/ErgoBoxCandidate.scala#L138-L142
+    Ok(crate::ergo_tree::write_ergo_tree(&mut writer, &tree).map(|()| Some(writer.result())))
 }
 
 /// Harden a sizeless inner box-script parse failure to [`ReadError::HardReject`]
@@ -110,7 +127,7 @@ fn harden_sizeless_inner_error(e: ReadError) -> ReadError {
 }
 
 /// Read the proposition with the enclosing box's nesting base still active.
-fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
+fn skip_ergo_tree(r: &mut VlqReader) -> Result<CanonicalTreeBytes, ReadError> {
     let tree_start = r.position();
     let header = r.get_u8()?;
     let version = header & 0x07;
@@ -118,6 +135,17 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
     let cseg = header & 0x10 != 0;
 
     if has_size {
+        let activated = crate::ergo_tree::reader_activated_script_version(r);
+        if !r.is_trusted() && (activated as i8) >= 2 && (version as i8) > (activated as i8) {
+            // Scala reads header/size, then constructs VersionContext BEFORE
+            // parsing the nested box's constants or body. Reject here so a
+            // body ClassCastException cannot mask this hard version failure
+            // during deserialize substitution. Top-level wire trees continue
+            // to use the existing lenient reader and their box-layer gates.
+            // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L145-L196
+            r.get_uint_to_i32()?;
+            crate::ergo_tree::check_tree_version_value_supported(version, activated)?;
+        }
         // Size-delimited: Scala deserializes the nested box's proposition INLINE via
         // `ErgoTreeSerializer.deserializeErgoTree`, which is structure-delimited —
         // the declared size does NOT bound the parse or advance the reader on
@@ -148,6 +176,21 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
                 crate::ergo_tree::reader_activated_script_version(r),
             )?;
         }
+        // Opaque trees are written verbatim; do not reparse them here.
+        // Recursive self-delimitation checks would re-enter nested box parsing.
+        if matches!(sub_tree.body, crate::opcode::Expr::Unparsed(_)) {
+            return Ok(Ok(None));
+        }
+        let input = r.data_slice(tree_start, r.position());
+        // Only Unparsed bodies above keep received bytes on a write failure.
+        // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/TypeSerializer.scala#L94-L95
+        let mut writer = ergo_primitives::writer::VlqWriter::new();
+        Ok(
+            crate::ergo_tree::write_ergo_tree(&mut writer, &sub_tree).map(|()| {
+                let canonical = writer.result();
+                (canonical != input).then_some(canonical)
+            }),
+        )
     } else {
         // SIZELESS nested box script (an `SBox` constant's inner ErgoTree). This
         // mirrors Scala `deserializeErgoTree` for `sizeOpt = None`, where the
@@ -184,9 +227,17 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
                 ),
             });
         }
-        parse_sizeless_inner_box_script(r, version, cseg).map_err(harden_sizeless_inner_error)?;
+        let canonical = parse_sizeless_inner_box_script(r, version, cseg)
+            .map_err(harden_sizeless_inner_error)?;
+        Ok(canonical.map(|bytes| {
+            bytes
+                .map(|mut bytes| {
+                    bytes[0] = header;
+                    bytes
+                })
+                .filter(|bytes| bytes != r.data_slice(tree_start, r.position()))
+        }))
     }
-    Ok(())
 }
 
 /// Read an inline SBox constant by structurally advancing through the box
@@ -223,32 +274,78 @@ fn read_opaque_box_inner(r: &mut VlqReader) -> Result<SigmaValue, ReadError> {
     r.set_position_limit(Some(start + MAX_BOX_SIZE));
     let body = (|| {
         // value (nanoErgs) - VLQ u64
-        let _ = r.get_u64()?;
+        let value = r.get_u64()?;
         // ergo tree - skip past without full body parse (for size-delimited trees)
-        skip_ergo_tree(r)?;
+        let tree_start = r.position();
+        let canonical = skip_ergo_tree(r)?;
+        let tree_end = r.position();
         // creation height - VLQ u32
-        let _ = r.get_u32_exact()?;
+        let creation_height = r.get_u32_exact()?;
         // token count + tokens (full 32-byte token IDs for inline constants)
         let tc = r.get_u8()? as usize;
+        let mut tokens = Vec::with_capacity(tc);
         for _ in 0..tc {
-            let _ = r.get_bytes(32)?; // token id
-            let _ = r.get_u64()?; // amount
+            tokens.push((r.get_array::<32>()?, r.get_u64()?));
         }
         // additional registers
-        let _ = crate::register::read_registers(r)?;
-        Ok::<(), ReadError>(())
+        let registers = crate::register::read_registers(r)?;
+        Ok::<_, ReadError>((
+            tree_start,
+            tree_end,
+            canonical,
+            value,
+            creation_height,
+            tokens,
+            registers,
+        ))
     })();
     // Restore on both the success and error paths (Scala previousPositionLimit).
     r.set_position_limit(previous_limit);
-    body?;
+    let (tree_start, tree_end, canonical, value, creation_height, tokens, registers) = body?;
 
     // transaction id (32 bytes) + output index (VLQ u16) — outside the window.
-    let _ = r.get_bytes(32)?;
-    let _ = r.get_u16()?;
+    let transaction_id = r.get_array::<32>()?;
+    let index = r.get_u16()?;
 
     let end = r.position();
     let raw = r.data_slice(start, end).to_vec();
-    Ok(SigmaValue::OpaqueBoxBytes(raw))
+    // Deliberately distinguish ErgoBox's cached received identity from
+    // CoreDataSerializer's structured box write. Cache the changed script once.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/ErgoBoxCandidate.scala#L142
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/org/ergoplatform/ErgoBox.scala#L214-L227
+    let tree_bytes = canonical.as_ref().map(|bytes| {
+        bytes
+            .as_deref()
+            .unwrap_or_else(|| r.data_slice(tree_start, tree_end))
+    });
+    let encode = |version| {
+        let tree_bytes = tree_bytes.as_ref().map_err(|error| (*error).clone())?;
+        let mut writer = ergo_primitives::writer::VlqWriter::new();
+        writer.put_u64(value);
+        writer.put_bytes(tree_bytes);
+        writer.put_u32(creation_height);
+        writer.put_u8(tokens.len() as u8);
+        for (id, amount) in &tokens {
+            writer.put_bytes(id);
+            writer.put_u64(*amount);
+        }
+        crate::register::write_registers_versioned(&mut writer, &registers, version)?;
+        writer.put_bytes(&transaction_id);
+        writer.put_u16(index);
+        Ok::<_, crate::error::WriteError>(writer.result())
+    };
+    let canonical_bytes = encode(3);
+    let legacy = encode(1);
+    let legacy_bytes = (legacy != canonical_bytes).then_some(legacy);
+    if canonical_bytes.as_ref().is_ok_and(|bytes| bytes == &raw) && legacy_bytes.is_none() {
+        Ok(SigmaValue::OpaqueBoxBytes(raw))
+    } else {
+        Ok(SigmaValue::CanonicalBoxBytes {
+            bytes: raw,
+            canonical_bytes,
+            legacy_bytes,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -492,6 +589,31 @@ mod tests {
         assert_eq!(val, SigmaValue::OpaqueBoxBytes(box_bytes));
     }
 
+    #[test]
+    fn nested_box_version_failure_precedes_body_parsing_and_size_region_reads() {
+        // VersionContext is constructed after header/size, before any body read.
+        // In particular, an oversized declared region must not hide the hard
+        // version failure, nor may a malformed supported-version body do so.
+        for (tree, activated) in [("0cffffffff0f", 3), ("0b00", 2)] {
+            let bytes = sbox_constant_bytes(&hex::decode(tree).unwrap());
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(activated);
+            let error = read_value(&mut r, &SigmaType::SBox).unwrap_err();
+            assert!(
+                matches!(error, ReadError::HardReject(ref message)
+                if message.contains("activated script version")),
+                "{error:?}"
+            );
+        }
+        // Legacy and negative signed activation keep VersionContext's require
+        // inactive. This is parse behavior, separate from spend-time checking.
+        let bytes = sbox_constant_bytes(&[0x0c, 2, 0x08, 0xd3]);
+        for activated in [1, 0, 255, 128] {
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(activated);
+            assert!(read_value(&mut r, &SigmaType::SBox).is_ok());
+            assert!(r.is_empty());
+        }
+    }
+
     /// A nested `SBox`-constant whose inner script is a sizeless Boolean-root tree
     /// (`00 01 73` = Const(SBoolean, true)) must REJECT, matching Scala's
     /// `CheckDeserializedScriptIsSigmaProp` (rule 1001) on the inner root — the
@@ -542,7 +664,7 @@ mod tests {
         // header 08 | size 05 | body 08d3 (2 bytes) | trailing aabbcc (3 bytes)
         let bytes = hex::decode("080508d3aabbcc").unwrap();
         let mut r = VlqReader::new(&bytes);
-        super::skip_ergo_tree(&mut r).expect("nested size-delimited tree must skip");
+        let _ = super::skip_ergo_tree(&mut r).expect("nested size-delimited tree must skip");
         assert_eq!(
             r.remaining(),
             3,

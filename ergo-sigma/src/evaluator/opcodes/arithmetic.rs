@@ -53,7 +53,7 @@ use super::cast::apply_pre_v3_auto_upcast;
 /// uses the same bound. We check the value range directly rather than a bit
 /// count because `num_bigint::BigInt::bits()` returns the magnitude width
 /// and would wrongly reject `-2^255`.
-fn fits_in_256_bits(x: &num_bigint::BigInt) -> bool {
+pub(super) fn fits_in_256_bits(x: &num_bigint::BigInt) -> bool {
     let two_pow_255 = num_bigint::BigInt::from(1) << 255u32;
     let min = -&two_pow_255;
     x >= &min && x < &two_pow_255
@@ -463,7 +463,7 @@ pub(in crate::evaluator) fn eval_xor_of(
             add_cost_per_item(cx.cost, 0xFF, bs.len() as u32)?;
             // CSigmaDslBuilder.scala:117: VersionContext.current.isJitActivated
             // (activation >= 2); the historical rule is distinct.length == 2.
-            let result = if cx.ctx.activated_script_version >= 2 {
+            let result = if (cx.ctx.activated_script_version as i8) >= 2 {
                 bs.iter().fold(false, |acc, b| acc ^ b)
             } else {
                 bs.contains(&true) && bs.contains(&false)

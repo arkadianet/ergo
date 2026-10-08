@@ -73,6 +73,12 @@ fn rust_generated_file_exports_for_scala_verification() {
     let mut reopened = SecretStorage::open(dir.path().to_path_buf());
     reopened.unlock("test-rust-to-scala-pw").unwrap();
     assert!(reopened.check_seed(phrase, ""));
+    // Scala decrypts with its configured settings, not the file's; the JVM
+    // leg assumes the stock node default.
+    assert_eq!(
+        reopened.cached_file().unwrap().cipher_params.prf,
+        "HmacSHA256"
+    );
     // The JVM CI leg supplies a persistent path, then independently unlocks
     // this exact Rust-produced file with Scala JsonSecretStorage.
     if let Some(output) = std::env::var_os("ERGO_WALLET_INTEROP_FILE") {

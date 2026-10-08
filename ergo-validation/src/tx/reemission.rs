@@ -1,28 +1,7 @@
 //! EIP-27 re-emission spending validation.
 //!
-//! Port of the non-emission-box branch of the Scala reference's
-//! `ErgoTransaction.verifyReemissionSpending`
-//! (`ergo-core/.../mempool/ErgoTransaction.scala:225-331`), which runs
-//! inside `validateStateful` — i.e. on both mempool admission and block
-//! transaction validation.
-//!
-//! EIP-27 (re-emission) unlocks one re-emission token per block into the
-//! mining-reward boxes after the activation height. When those reward
-//! boxes are later spent, consensus requires the re-emission tokens to be
-//! **burned** (carried on no output) and `1` nanoErg per burned token to
-//! be paid to the pay-to-reemission contract. A node that does not enforce
-//! this accepts transactions the Scala reference rejects — an
-//! accept-invalid divergence (fork risk).
-//!
-//! Scope: this module enforces the **reemission-spending** branch (the
-//! `else if` arm in the Scala source: an ordinary reward box, value
-//! `<= 100_000` ERG, carrying re-emission tokens). The emission-box branch
-//! (spending the emission box itself, value `> 100_000` ERG with the
-//! emission NFT) is guarded by the emission contract during script
-//! evaluation and needs the emission-curve math; it is intentionally not
-//! reimplemented here. The value floor below means this check never
-//! *triggers* on an emission-box spend, so omitting that branch cannot
-//! cause a reject-valid divergence.
+//! Emission allocation and reward-box burning checks, when enabled by node settings.
+//! <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala#L225-L331>
 
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
@@ -53,6 +32,10 @@ const EMISSION_BOX_VALUE_FLOOR: u64 = 100_000 * COINS_IN_ONE_ERGO;
 /// Scala's `checkReemissionRules` being effectively off there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReemissionRuleInputs {
+    /// Whether the node applies rule 123. Off by default; enabled for mining.
+    pub check_rules: bool,
+    /// Emission-box constants. Reward-only callers can omit these.
+    pub emission: Option<EmissionRuleInputs>,
     /// EIP-27 activation height. Scala `reemission.activationHeight`. The
     /// re-emission **spending** branch triggers strictly *above* this height
     /// (`height > activation_height`) — see [`reemission_obligation_core`] and
@@ -69,9 +52,38 @@ pub struct ReemissionRuleInputs {
     pub pay_to_reemission_tree: Vec<u8>,
 }
 
+/// Network constants for the emission-box branch of rule 123.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmissionRuleInputs {
+    pub monetary: ergo_chain_spec::MonetaryParams,
+    pub emission_nft_id: [u8; 32],
+    pub emission_tree: Vec<u8>,
+}
+
+impl ReemissionRuleInputs {
+    /// Construct the complete rule inputs from network constants.
+    pub fn from_chain_spec(spec: &ergo_chain_spec::ChainSpec, check_rules: bool) -> Option<Self> {
+        let reemission = spec.reemission.as_ref()?;
+        let trees = spec
+            .emission_script_trees()
+            .expect("configured re-emission requires emission trees");
+        Some(Self {
+            check_rules,
+            activation_height: reemission.activation_height,
+            reemission_token_id: *reemission.reemission_token_id.as_bytes(),
+            pay_to_reemission_tree: trees.pay_to_reemission,
+            emission: Some(EmissionRuleInputs {
+                monetary: spec.monetary,
+                emission_nft_id: *reemission.emission_nft_id.as_bytes(),
+                emission_tree: trees.emission,
+            }),
+        })
+    }
+}
+
 /// Enforce the EIP-27 re-emission burning condition on `tx`.
 ///
-/// Mirrors the non-emission-box branch of Scala
+/// Mirrors both branches of Scala
 /// `verifyReemissionSpending`. Returns `Ok(())` when the rule does not
 /// apply (below activation, or no re-emission tokens spent from reward
 /// boxes) and when the burning condition is satisfied.
@@ -103,6 +115,12 @@ pub fn verify_reemission_spending(
     height: u32,
     rules: &ReemissionRuleInputs,
 ) -> Result<(), ValidationError> {
+    if !rules.check_rules || height < rules.activation_height {
+        return Ok(());
+    }
+    if let Some(emission) = &rules.emission {
+        verify_emission_allocation(tx, resolved_inputs, height, rules, emission)?;
+    }
     let token_id = &rules.reemission_token_id;
 
     // Trigger + burn obligation via the shared [`reemission_obligation_core`], so
@@ -178,6 +196,99 @@ pub fn verify_reemission_spending(
         )));
     }
 
+    Ok(())
+}
+
+// https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala#L252-L304
+fn verify_emission_allocation(
+    tx: &Transaction,
+    inputs: &[ErgoBox],
+    height: u32,
+    rules: &ReemissionRuleInputs,
+    emission: &EmissionRuleInputs,
+) -> Result<(), ValidationError> {
+    let fail =
+        || ValidationError::ReemissionRulesViolated("emission token allocation is invalid".into());
+    let has_nft = |b: &ErgoBox| {
+        b.candidate
+            .tokens
+            .iter()
+            .any(|t| t.token_id.as_bytes() == &emission.emission_nft_id)
+    };
+    let mut expected_emission_tree = None;
+    for input in inputs
+        .iter()
+        .filter(|b| b.candidate.value > EMISSION_BOX_VALUE_FLOOR)
+    {
+        let activation_input = height == rules.activation_height;
+        // Match Scala's short-circuit order: input(1) is read only if this
+        // input lacks the NFT and the block is at activation.
+        let carries_nft =
+            has_nft(input) || (activation_input && has_nft(inputs.get(1).ok_or_else(fail)?));
+        if carries_nft {
+            let source = if activation_input {
+                inputs.get(1).ok_or_else(fail)?
+            } else {
+                input
+            };
+            let amount_in = candidate_token_amount(&source.candidate, &rules.reemission_token_id);
+            let emission_out = tx.output_candidates.first().ok_or_else(fail)?;
+            let rewards_out = tx.output_candidates.get(1).ok_or_else(fail)?;
+            if amount_in == 0
+                || emission_out
+                    .tokens
+                    .first()
+                    .is_none_or(|t| t.token_id.as_bytes() != &emission.emission_nft_id)
+                || emission_out
+                    .tokens
+                    .get(1)
+                    .is_none_or(|t| t.token_id.as_bytes() != &rules.reemission_token_id)
+            {
+                return Err(fail());
+            }
+            let emission_amount = candidate_token_amount(emission_out, &rules.reemission_token_id);
+            let rewards_amount = candidate_token_amount(rewards_out, &rules.reemission_token_id);
+            // Scala Long addition wraps; preserve that behavior deliberately
+            // for consensus, including token totals beyond Long.MaxValue.
+            if amount_in != emission_amount.wrapping_add(rewards_amount)
+                || rewards_amount
+                    != ergo_chain_spec::reemission_for_height(
+                        height,
+                        &emission.monetary,
+                        rules.activation_height,
+                    )
+            {
+                return Err(fail());
+            }
+        } else {
+            // Legacy emission inputs must put both token identities on output 0.
+            // Parse the configured tree only for large inputs that can enter
+            // this fallback branch, matching ErgoTree structural equality.
+            if input.candidate.ergo_tree_bytes().first() != emission.emission_tree.first() {
+                continue;
+            }
+            if expected_emission_tree.is_none() {
+                expected_emission_tree = Some(
+                    read_ergo_tree(&mut VlqReader::new(&emission.emission_tree))
+                        .map_err(|_| fail())?,
+                );
+            }
+            if Some(input.candidate.ergo_tree()) == expected_emission_tree.as_ref() {
+                let out = tx.output_candidates.first().ok_or_else(fail)?;
+                if !out
+                    .tokens
+                    .iter()
+                    .any(|t| t.token_id.as_bytes() == &emission.emission_nft_id)
+                    || !out
+                        .tokens
+                        .iter()
+                        .any(|t| t.token_id.as_bytes() == &rules.reemission_token_id)
+                {
+                    return Err(fail());
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -347,6 +458,8 @@ mod tests {
 
     fn rules() -> ReemissionRuleInputs {
         ReemissionRuleInputs {
+            check_rules: true,
+            emission: None,
             activation_height: ACTIVATION,
             reemission_token_id: REEMISSION_TOKEN,
             pay_to_reemission_tree: pay2r_bytes(),
@@ -491,6 +604,8 @@ mod tests {
         // invokes this function; sanity-check that a high activation height
         // (Scala testnet uses 100_000_001) makes any real height a no-op.
         let disabled = ReemissionRuleInputs {
+            check_rules: true,
+            emission: None,
             activation_height: 100_000_001,
             reemission_token_id: REEMISSION_TOKEN,
             pay_to_reemission_tree: pay2r_bytes(),

@@ -1,0 +1,312 @@
+{
+  "entries": [
+    {
+      "name": "tuple1_type_constant",
+      "mode": "constant",
+      "bytes_hex": "6001040a",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "tuple1_registers",
+      "mode": "registers",
+      "bytes_hex": "016001040a",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "tuple1_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d30100016001040a",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "tuple1_in_output_tree_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d1b07016001040a08d3010000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "tuple1_in_output_tree_tree",
+      "mode": "tree",
+      "bytes_hex": "1b07016001040a08d3",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "box_bool02_whole",
+      "mode": "box",
+      "bytes_hex": "c0843d080208d30100010102000000000000000000000000000000000000000000000000000000000000000000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "sbox_const_tuple1_tree_registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d1b07016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "sbox_const_tuple1_tree_tx",
+      "mode": "transaction",
+      "bytes_hex": "01a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000000001c0843d080208d301000163c0843d1b07016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "tuple-one-sized-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d1b07016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-one-sized-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d1b07016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-one-sized-expression",
+      "mode": "expression",
+      "bytes_hex": "63c0843d1b07016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-one-sized-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d1b07016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-one-sized-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d1b07016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-one-sized-tree",
+      "mode": "tree",
+      "bytes_hex": "1b340163c0843d1b07016001040a08d301000000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-one-sizeless-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d10016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-one-sizeless-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d10016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-one-sizeless-expression",
+      "mode": "expression",
+      "bytes_hex": "63c0843d10016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-one-sizeless-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d10016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-one-sizeless-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d10016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-one-sizeless-tree",
+      "mode": "tree",
+      "bytes_hex": "1b330163c0843d10016001040a08d301000000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-zero-sized-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d1b0501600008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-zero-sized-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d1b0501600008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-zero-sized-expression",
+      "mode": "expression",
+      "bytes_hex": "63c0843d1b0501600008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-zero-sized-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d1b0501600008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-zero-sized-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d1b0501600008d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-zero-sized-tree",
+      "mode": "tree",
+      "bytes_hex": "1b320163c0843d1b0501600008d301000000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-two-control-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d1b09013c040402040208d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-two-control-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d1b09013c040402040208d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-two-control-expression",
+      "mode": "expression",
+      "bytes_hex": "63c0843d1b09013c040402040208d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-two-control-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d1b09013c040402040208d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-two-control-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d1b09013c040402040208d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-two-control-tree",
+      "mode": "tree",
+      "bytes_hex": "1b360163c0843d1b09013c040402040208d301000000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "unparsed-control-constant",
+      "mode": "constant",
+      "bytes_hex": "63c0843d1b06016001040a81010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "unparsed-control-constant-read",
+      "mode": "constant-read",
+      "bytes_hex": "63c0843d1b06016001040a81010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "unparsed-control-expression",
+      "mode": "expression",
+      "bytes_hex": "63c0843d1b06016001040a81010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "unparsed-control-registers",
+      "mode": "registers",
+      "bytes_hex": "0163c0843d1b06016001040a81010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "unparsed-control-context_extension",
+      "mode": "context_extension",
+      "bytes_hex": "010063c0843d1b06016001040a81010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "unparsed-control-tree",
+      "mode": "tree",
+      "bytes_hex": "1b330163c0843d1b06016001040a8101000000000000000000000000000000000000000000000000000000000000000000000008d3",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "sbox_const_tuple1_tree_registers-box-read",
+      "mode": "box-read",
+      "bytes_hex": "c0843d1b07016001040a08d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "sbox_const_tuple1_tree_registers-box-candidate-read",
+      "mode": "box-candidate-read",
+      "bytes_hex": "c0843d1b07016001040a08d3010000",
+      "version": 3,
+      "activated": 3
+    },
+    {
+      "name": "tuple-two-control-constant-box-read",
+      "mode": "box-read",
+      "bytes_hex": "c0843d1b09013c040402040208d3010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "tuple-two-control-constant-box-candidate-read",
+      "mode": "box-candidate-read",
+      "bytes_hex": "c0843d1b09013c040402040208d3010000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "unparsed-control-constant-box-read",
+      "mode": "box-read",
+      "bytes_hex": "c0843d1b06016001040a81010000000000000000000000000000000000000000000000000000000000000000000000",
+      "activated": 3,
+      "version": 3
+    },
+    {
+      "name": "unparsed-control-constant-box-candidate-read",
+      "mode": "box-candidate-read",
+      "bytes_hex": "c0843d1b06016001040a81010000",
+      "activated": 3,
+      "version": 3
+    }
+  ]
+}

@@ -50,10 +50,11 @@ use crate::traits::{
 };
 use crate::web::{
     JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHAIN_ACTIVITY, JS_CHART, JS_EXPLORER, JS_FEE_STATS,
-    JS_FORMAT, JS_MEMPOOL, JS_MINERS, JS_MINING, JS_MINING_REWARD, JS_MINING_WORK,
-    JS_NODE_GUIDANCE, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_STORAGE_RENT,
-    JS_SYNC_RINGS, JS_TABLE, JS_TOKEN_META, JS_VOTING, JS_WALLET, JS_WALLET_BUILDER,
-    JS_WALLET_TRANSACTION, JS_WORKSPACE_SEARCH, JS_WS_CLIENT,
+    JS_FORMAT, JS_MEMPOOL, JS_MINERS, JS_MINING, JS_MINING_INSPECTOR, JS_MINING_POLICY,
+    JS_MINING_REWARD, JS_MINING_WORK, JS_NODE_GUIDANCE, JS_OVERVIEW, JS_PEERS, JS_ROUTER,
+    JS_SETTINGS, JS_SPARKLINE, JS_STORAGE_RENT, JS_SYNC_RINGS, JS_TABLE, JS_TOKEN_META, JS_VOTING,
+    JS_WALLET, JS_WALLET_BUILDER, JS_WALLET_MAINTENANCE, JS_WALLET_PRIVATE, JS_WALLET_TRANSACTION,
+    JS_WORKSPACE_SEARCH, JS_WS_CLIENT,
 };
 use ergo_indexer_types::IndexerQuery;
 use ergo_ser::address::NetworkPrefix;
@@ -68,13 +69,13 @@ mod services;
 mod shared;
 pub use services::ApiServices;
 
-pub(crate) use openapi::NativeOpenApi;
 pub use openapi::{
     established_openapi_operations, legacy_rust_openapi, merge_openapi_checked,
     native_openapi_yaml, openapi_operations, rust_openapi, rust_openapi_json, rust_openapi_yaml,
     scala_openapi_operations, scala_openapi_yaml, v1_openapi_fragment, OpenApiMergeError,
     RouteOperation,
 };
+pub(crate) use openapi::{serialize_openapi_yaml, NativeOpenApi};
 pub use route_registry::ApiRouteInventory;
 pub(crate) use shared::{map_submit_error, submit_via_node};
 
@@ -781,10 +782,14 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
     // `voting/*`). Cloned up front because `admin` / `mining` are moved into
     // the Scala-compat mounts further down; the group mounts unconditionally
     // and gates inside each handler on the honest `*_unavailable` reason.
+    let operator_governor = admin.as_ref().and_then(|control| control.api_governor());
     let v1_op_read = read.clone();
     let v1_op_chain = compat.clone();
     let v1_op_admin = admin.clone();
     let v1_op_mining = mining.clone();
+    let allow_legacy_mining = security
+        .as_ref()
+        .is_some_and(|s| s.allow_unauthenticated_legacy_mining());
     let operator: Router = Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
@@ -804,6 +809,10 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
         )
         .route("/js/api-client.js", get(|| async { js(JS_API_CLIENT) }))
         .route("/js/auth.js", get(|| async { js(JS_AUTH) }))
+        .route(
+            "/js/capabilities.js",
+            get(|| async { js(crate::web::JS_CAPABILITIES) }),
+        )
         .route("/js/format.js", get(|| async { js(JS_FORMAT) }))
         .route("/js/fee-stats.js", get(|| async { js(JS_FEE_STATS) }))
         .route("/js/router.js", get(|| async { js(JS_ROUTER) }))
@@ -828,10 +837,22 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
         )
         .route("/js/explorer.js", get(|| async { js(JS_EXPLORER) }))
         .route("/js/token-meta.js", get(|| async { js(JS_TOKEN_META) }))
+        .route(
+            "/js/transaction-source.js",
+            get(|| async { js(crate::web::JS_TRANSACTION_SOURCE) }),
+        )
         .route("/js/peers.js", get(|| async { js(JS_PEERS) }))
         .route("/js/mempool.js", get(|| async { js(JS_MEMPOOL) }))
         .route("/js/voting.js", get(|| async { js(JS_VOTING) }))
         .route("/js/wallet.js", get(|| async { js(JS_WALLET) }))
+        .route(
+            "/js/wallet-private.js",
+            get(|| async { js(JS_WALLET_PRIVATE) }),
+        )
+        .route(
+            "/js/wallet-maintenance.js",
+            get(|| async { js(JS_WALLET_MAINTENANCE) }),
+        )
         .route(
             "/js/wallet-builder.js",
             get(|| async { js(JS_WALLET_BUILDER) }),
@@ -844,6 +865,14 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
         .route("/js/mining.js", get(|| async { js(JS_MINING) }))
         .route("/js/mining-work.js", get(|| async { js(JS_MINING_WORK) }))
         .route(
+            "/js/mining-inspector.js",
+            get(|| async { js(JS_MINING_INSPECTOR) }),
+        )
+        .route(
+            "/js/mining-policy.js",
+            get(|| async { js(JS_MINING_POLICY) }),
+        )
+        .route(
             "/js/mining-reward.js",
             get(|| async { js(JS_MINING_REWARD) }),
         )
@@ -851,8 +880,14 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
         .route("/swagger", get(swagger))
         .route("/swagger/native", get(swagger_native))
         .route("/swagger/v1", get(swagger_v1))
-        .route("/api-docs/openapi.yaml", get(openapi_yaml))
-        .route("/api-docs/openapi-scala.yaml", get(openapi_scala_yaml))
+        .route(
+            "/api-docs/openapi.yaml",
+            get(move || openapi_yaml(allow_legacy_mining)),
+        )
+        .route(
+            "/api-docs/openapi-scala.yaml",
+            get(move || openapi_scala_yaml(allow_legacy_mining)),
+        )
         .route("/api-docs/openapi-rust.yaml", get(openapi_rust_yaml))
         .route("/api-docs/openapi-rust.json", get(openapi_rust_json))
         .route("/api-docs/openapi-native.yaml", get(openapi_native_yaml))
@@ -969,7 +1004,11 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
     // governor is one per node, so later route groups reuse the same per-IP
     // budget.
     let v1_mempool_depth = services.mempool_depth.clone();
-    let v1_realtime = services.realtime.clone();
+    let v1_realtime = services
+        .realtime
+        .bus
+        .is_enabled()
+        .then(|| services.realtime.clone());
     let v1_webhooks_state = crate::v1::WebhooksState {
         handle: services.webhooks.clone(),
         network,
@@ -988,14 +1027,16 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
         mempool: v1_mempool,
         mempool_depth: v1_mempool_depth,
         emission: v1_emission,
-        realtime: Some(v1_realtime),
+        realtime: v1_realtime,
         network,
     };
-    let v1_governor = crate::v1::governor::Governor::new(crate::v1::governor::GovernorConfig {
-        local_reverse_proxy,
-        ..Default::default()
-    })
-    .expect("GovernorConfig is valid");
+    let v1_governor = operator_governor.unwrap_or_else(|| {
+        crate::v1::governor::Governor::new(crate::v1::governor::GovernorConfig {
+            local_reverse_proxy,
+            ..Default::default()
+        })
+        .expect("GovernorConfig is valid")
+    });
     // The `script/*` playground shares the one per-node governor (bounded
     // at the `Compute` class — the load-bearing anti-DoS control) and the
     // one v1 auth config (so `[api.script] require_api_key` can flip the group

@@ -18,6 +18,7 @@
 //! bookkeeping.
 
 mod build;
+pub(crate) use build::AT_TIP_GAP;
 mod publisher;
 
 pub use publisher::SnapshotPublisher;

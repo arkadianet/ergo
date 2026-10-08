@@ -47,6 +47,19 @@ impl NodeConfig {
             Err(e) => return Err(format!("failed to read {}: {e}", config_path.display())),
         };
 
+        Self::resolve(cli, toml_cfg)
+    }
+
+    /// Validate and resolve TOML in memory using the same checks as file loading.
+    /// This does not create directories, open databases, or start networking.
+    pub fn from_toml(contents: &str) -> Result<Self, String> {
+        use clap::Parser;
+        let toml_cfg = toml::from_str::<TomlConfig>(contents)
+            .map_err(|e| format!("failed to parse generated config: {e}"))?;
+        Self::resolve(Cli::parse_from(["ergo-node"]), toml_cfg)
+    }
+
+    fn resolve(cli: Cli, toml_cfg: TomlConfig) -> Result<Self, String> {
         // 3. Merge: CLI overrides TOML overrides defaults
         let network_str = cli
             .network
@@ -307,10 +320,7 @@ impl NodeConfig {
         // config-load by the `nipopow_bootstrap && genesis_id.is_none()`
         // check after genesis_id resolution below, plus a runtime pin
         // through `NipopowVerifier::new(genesis_id_opt, ...)` in the
-        // bootstrap orchestrator. R4 (mainnet mining ⇒
-        // `checkReemissionRules = true`) has no analogue here — we
-        // don't expose a `check_reemission_rules` opt-out at the
-        // config layer, so the rule is vacuous in our config space.
+        // bootstrap orchestrator.
         if nipopow_bootstrap && !(utxo_bootstrap || blocks_to_keep >= 0) {
             return Err(format!(
                 "[node.nipopow] nipopow_bootstrap = true requires either \
@@ -723,6 +733,37 @@ impl NodeConfig {
         } else {
             None
         };
+
+        let allow_unauthenticated_legacy_mining = toml_cfg
+            .api
+            .security
+            .as_ref()
+            .is_some_and(|security| security.allow_unauthenticated_legacy_mining);
+        if allow_unauthenticated_legacy_mining && api_bind.is_some() && api_key_hash.is_none() {
+            return Err("[api.security] allow_unauthenticated_legacy_mining requires api_key_hash for authenticated candidate requests".into());
+        }
+        let api_scoped_keys = toml_cfg
+            .api
+            .security
+            .as_ref()
+            .map(|s| s.keys.clone())
+            .unwrap_or_default();
+        ergo_api::auth::validate_credentials(
+            &api_scoped_keys,
+            toml_cfg
+                .api
+                .security
+                .as_ref()
+                .and_then(|security| security.api_key_hash.as_deref()),
+        )?;
+        let api_limits = toml_cfg.api.limits.clone();
+        api_limits
+            .validate()
+            .map_err(|e| format!("[api.limits] {e}"))?;
+        let api_readiness = toml_cfg.api.readiness.clone();
+        api_readiness
+            .validate()
+            .map_err(|e| format!("[api.readiness] {e}"))?;
 
         // [api] allowed_hosts — extra `Host` header values the DNS-
         // rebinding guard accepts; see `ResolvedConfig::api_allowed_hosts`
@@ -1152,6 +1193,11 @@ impl NodeConfig {
         };
 
         Ok(Self {
+            // Scala's non-mining default is false; miners apply rule 123.
+            // https://github.com/ergoplatform/ergo/blob/v6.0.7/src/main/resources/mainnet.conf#L44
+            // https://github.com/ergoplatform/ergo/blob/v6.0.7/src/main/scala/org/ergoplatform/settings/ErgoSettingsReader.scala#L180-L183
+            check_reemission_rules: mining_config.enabled
+                || toml_cfg.node.check_reemission_rules.unwrap_or(false),
             network,
             chain_spec,
             data_dir,
@@ -1175,12 +1221,21 @@ impl NodeConfig {
             sync_interval_stable,
             cache_bytes,
             redb_cache_budgets,
+            auto_upgrade_legacy: toml_cfg.store.auto_upgrade_legacy.unwrap_or(true),
+            auto_upgrade_keep_stale_indexer: toml_cfg
+                .store
+                .auto_upgrade_keep_stale_indexer
+                .unwrap_or(false),
             script_validation_checkpoint,
             header_checkpoint,
             genesis_id,
             api_bind,
             peer_details: toml_cfg.api.peer_details,
             api_key_hash,
+            allow_unauthenticated_legacy_mining,
+            api_scoped_keys,
+            api_limits,
+            api_readiness,
             api_allowed_hosts,
             api_local_reverse_proxy,
             api_script,

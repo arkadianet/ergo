@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use ergo_primitives::writer::VlqWriter;
-use ergo_ser::ergo_box::{write_ergo_box_candidate, ErgoBoxCandidate};
+use ergo_ser::ergo_box::ErgoBoxCandidate;
 use ergo_ser::transaction::Transaction;
 
 use crate::context::ProtocolParams;
@@ -37,7 +37,8 @@ pub fn validate_structural(
     check_has_outputs(tx)?;
     check_collection_caps(tx)?;
     check_no_duplicate_inputs(tx)?;
-    // Note: duplicate data inputs are allowed (read-only references, matches Scala)
+    // Repeated data inputs are a stateful, height-gated rule (110); see
+    // `tx::data_inputs`.
     for (i, out) in tx.output_candidates.iter().enumerate() {
         check_output_box(i, out, params)?;
     }
@@ -105,9 +106,15 @@ fn check_output_box(
     out: &ErgoBoxCandidate,
     params: &ProtocolParams,
 ) -> Result<(), ValidationError> {
-    let box_size = serialized_box_size(out, index as u16)?;
+    // ValidationState evaluates the rule predicate only when the rule is active.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/validation/ModifierValidator.scala#L94
+    let box_size = if params.is_rule_active(120) || params.is_rule_active(111) {
+        serialized_box_size(out, index as u16)?
+    } else {
+        0
+    };
 
-    if box_size > params.max_box_size as usize {
+    if params.is_rule_active(120) && box_size > params.max_box_size as usize {
         return Err(ValidationError::BoxTooLarge {
             index,
             size: box_size,
@@ -127,7 +134,7 @@ fn check_output_box(
     // and parsed-from-wire (where the verbatim bytes were captured by
     // `read_box_tail`).
     let prop_size = out.ergo_tree_bytes().len();
-    if prop_size > MAX_PROPOSITION_BYTES {
+    if params.is_rule_active(121) && prop_size > MAX_PROPOSITION_BYTES {
         return Err(ValidationError::PropositionTooLarge {
             index,
             size: prop_size,
@@ -137,7 +144,7 @@ fn check_output_box(
 
     // Min value: value >= serialized_box_size * min_value_per_byte
     let min_value = (box_size as u64).saturating_mul(params.min_value_per_byte);
-    if out.value < min_value {
+    if params.is_rule_active(111) && out.value < min_value {
         return Err(ValidationError::OutputValueTooLow {
             index,
             value: out.value,
@@ -163,7 +170,7 @@ fn check_output_box(
 /// 32 + vlq_size(index) to match.
 fn serialized_box_size(out: &ErgoBoxCandidate, index: u16) -> Result<usize, ValidationError> {
     let mut w = VlqWriter::new();
-    write_ergo_box_candidate(&mut w, out)
+    ergo_ser::ergo_box::write_ergo_box_candidate_versioned(&mut w, out, 1)
         .map_err(|e| ValidationError::Deserialization(e.to_string()))?;
     let mut idx_w = VlqWriter::new();
     idx_w.put_u16(index);
