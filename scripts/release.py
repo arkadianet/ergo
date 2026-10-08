@@ -205,7 +205,8 @@ def smoke_walletd(binary, config_template, work):
         except urllib.error.HTTPError as error:
             response = error
         with response:
-            return response.status, response.headers, json.loads(response.read())
+            payload = response.read()
+            return response.status, response.headers, json.loads(payload) if payload else None
 
     command = [str(binary), "--config", str(path)]
     for boot in ("fresh", "reopen"):
