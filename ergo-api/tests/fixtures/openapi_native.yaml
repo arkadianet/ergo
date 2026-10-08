@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ergo Rust Node — RUST API
-  description: 'Compatibility fragment for the original RUST API operator routes. The canonical complete RUST API document is served at `/api-docs/openapi-rust.yaml`. This fragment describes the production-superset route set: the conditional routes (`/api/v1/node/shutdown`, `/api/v1/difficulty/history`, `/api/v1/mining/minerStats`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching admin / chain-reader handles, so a given process may serve fewer routes than appear here. Query `GET /api/v1/health` to confirm a running node''s state.'
+  description: 'Compatibility fragment for the original RUST API operator routes. The canonical complete RUST API document is served at `/api-docs/openapi-rust.yaml`. This fragment describes the production-superset route set: the conditional routes (`/api/v1/node/shutdown`, `/api/v1/difficulty/history`, `/api/v1/mining/minerStats`, `/api/v1/votes/history`, `/api/v1/evidence/committed`) are mounted only when the node is wired with the matching admin / chain-reader handles, so a given process may serve fewer routes than appear here. The committed evidence reader additionally requires configured API-key security. Query `GET /api/v1/health` to confirm a running node''s state.'
   license:
     name: MIT OR Apache-2.0
     identifier: MIT OR Apache-2.0
@@ -75,6 +75,57 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiNodeEvents'
+  /api/v1/evidence/committed:
+    get:
+      tags:
+      - Applied evidence
+      operationId: committed_evidence
+      parameters:
+      - name: limit
+        in: query
+        description: Canonical decimal event count 1..16; default 1
+        required: false
+        schema:
+          type: string
+      - name: afterArchiveId
+        in: query
+        description: Complete cursor archive ID; supply all three cursor fields
+        required: false
+        schema:
+          type: string
+      - name: afterSequence
+        in: query
+        description: Canonical decimal sequence 0..2^53-1
+        required: false
+        schema:
+          type: string
+      - name: afterEventHash
+        in: query
+        description: Complete cursor lowercase BLAKE2b-256 event hash
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: One committed redb snapshot, exact journal event JSON and source anchor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommittedEvidencePage'
+        '400':
+          description: Invalid/oversized query or partial cursor
+        '403':
+          description: Missing or invalid api_key
+        '404':
+          description: Reader or API security not configured; route is absent
+        '409':
+          description: Cursor, journal, canonical tip or configured anchor requires reconstruction
+        '413':
+          description: GET body or complete page exceeds the bound
+        '503':
+          description: Reader unavailable or both bounded reader workers busy
+      security:
+      - ApiKeyAuth: []
   /api/v1/health:
     get:
       tags:
@@ -3186,6 +3237,27 @@ components:
         nanoErg:
           type: string
           description: Change nanoErg (decimal string).
+    CommittedEvidencePage:
+      type: object
+      required:
+      - schema
+      - source
+      - meta
+      - events
+      - nextCursor
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvidenceRecord'
+        meta:
+          $ref: '#/components/schemas/EvidenceMeta'
+        nextCursor:
+          $ref: '#/components/schemas/EvidenceCursor'
+        schema:
+          type: string
+        source:
+          $ref: '#/components/schemas/EvidenceSource'
     DataInputSource:
       oneOf:
       - type: object
@@ -3287,6 +3359,75 @@ components:
           format: int32
           description: Address index — the last path component.
           minimum: 0
+    EvidenceCursor:
+      type: object
+      required:
+      - archiveId
+      - sequence
+      - eventHash
+      properties:
+        archiveId:
+          type: string
+        eventHash:
+          type: string
+        sequence:
+          type: integer
+          format: int64
+          minimum: 0
+      additionalProperties: false
+    EvidenceMeta:
+      type: object
+      required:
+      - archiveId
+      - anchorId
+      - cursor
+      - branchGeneration
+      - tipId
+      - tipHeight
+      - reconstructionRequired
+      properties:
+        anchorId:
+          type: string
+        archiveId:
+          type: string
+        branchGeneration:
+          type: integer
+          format: int64
+          minimum: 0
+        cursor:
+          $ref: '#/components/schemas/EvidenceCursor'
+        reconstructionRequired:
+          type: boolean
+        tipHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        tipId:
+          type: string
+    EvidenceRecord:
+      type: object
+      required:
+      - eventJson
+      - eventHash
+      properties:
+        eventHash:
+          type: string
+        eventJson:
+          type: string
+          description: |-
+            Exact normative JournalEvent JSON UTF-8 string, including captured bytes
+            and provenance. Hash this string using the documented journal framing;
+            the outer HTTP JSON representation is not the journal hash preimage.
+    EvidenceSource:
+      type: object
+      required:
+      - kind
+      - configuredGenesisAnchor
+      properties:
+        configuredGenesisAnchor:
+          type: string
+        kind:
+          type: string
     ExternalSecret:
       oneOf:
       - type: object

@@ -38,6 +38,7 @@ pub(super) struct Scaffold {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_scaffold(
     config: &NodeConfig,
+    store: &ergo_state::StateBackendKind,
     db_path: &std::path::Path,
     boot_sentinel: u32,
     bootstrap_kind: crate::node::identity::BootstrapKind,
@@ -97,15 +98,21 @@ pub(super) fn build_scaffold(
         executor.apply_phase_metrics(),
         std::time::Duration::from_secs(5),
     );
-    let read_state: Arc<dyn ergo_api::NodeReadState> = SnapshotReadState::new(
+    let mut read_state = SnapshotReadState::new(
         snapshot_publisher.handle(),
         identity_slot.clone(),
         host_paths,
         voting_targets_slot.clone(),
         executor.apply_phase_metrics(),
         live_telemetry,
-    )
-    .into_dyn();
+    );
+    if config.applied_evidence_outbox {
+        let anchor = config.genesis_id.ok_or_else(|| {
+            std::io::Error::other("committed evidence API requires configured genesis anchor")
+        })?;
+        read_state = read_state.with_committed_evidence(store.db_arc(), anchor);
+    }
+    let read_state: Arc<dyn ergo_api::NodeReadState> = read_state.into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =
         SubmitBridge::new(submit_tx.clone(), event_tx.clone())
             .with_direct_block_submit(config.network, config.allow_direct_block_submit)

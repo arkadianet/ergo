@@ -832,6 +832,7 @@ async fn run_inner_with_backend(
     // bridges) — built before mining so mining can share voting_targets_slot.
     let scaffold = api_wiring::build_scaffold(
         &config,
+        &store,
         &db_path,
         boot_sentinel,
         sync.bootstrap_kind,

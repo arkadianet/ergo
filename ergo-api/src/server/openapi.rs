@@ -35,12 +35,13 @@ use crate::types::{
 The canonical complete RUST API document is served at `/api-docs/openapi-rust.yaml`. \
 This fragment describes the production-superset route set: the conditional routes \
 (`/api/v1/node/shutdown`, \
-`/api/v1/difficulty/history`, `/api/v1/mining/minerStats`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching \
+`/api/v1/difficulty/history`, `/api/v1/mining/minerStats`, `/api/v1/votes/history`, `/api/v1/evidence/committed`) are mounted only when the node is wired with the matching \
 admin / chain-reader handles, so a given process may serve fewer routes than \
-appear here. Query `GET /api/v1/health` to confirm a running node's state."
+appear here. The committed evidence reader additionally requires configured API-key security. Query `GET /api/v1/health` to confirm a running node's state."
     ),
     paths(
         super::handlers::info_handler,
+        super::evidence::committed_evidence,
         super::handlers::difficulty_history_handler,
         super::handlers::miner_stats_handler,
         super::handlers::votes_history_handler,
@@ -80,6 +81,11 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         crate::wallet::native::retrieve_rewards,
     ),
     components(schemas(
+        crate::evidence::CommittedEvidencePage,
+        crate::evidence::EvidenceSource,
+        crate::evidence::EvidenceMeta,
+        crate::evidence::EvidenceRecord,
+        crate::evidence::EvidenceCursor,
         ApiInfo,
         ApiIdentity,
         ApiHost,

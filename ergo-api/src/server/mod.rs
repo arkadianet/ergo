@@ -57,6 +57,7 @@ use ergo_indexer_types::IndexerQuery;
 use ergo_ser::address::NetworkPrefix;
 
 mod assets;
+mod evidence;
 mod handlers;
 mod openapi;
 mod route_registry;
@@ -758,6 +759,11 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         operator,
         &mut inventory,
         rust_api::legacy_router(read.clone()),
+    );
+    let operator = route_registry::merge_family_router(
+        operator,
+        &mut inventory,
+        evidence::router(read.clone(), security.clone()),
     );
 
     let operator = route_registry::merge_family_router(

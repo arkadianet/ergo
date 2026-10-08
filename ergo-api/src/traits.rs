@@ -30,6 +30,11 @@ use crate::types::{
 /// in `ergo-node` overrides all of them. When adding a method here, make it
 /// required unless test fixtures genuinely never exercise the route.
 pub trait NodeReadState: Send + Sync {
+    /// Optional actual committed-journal reader. None means the authenticated
+    /// evidence route is absent, never an empty successful evidence page.
+    fn committed_evidence_reader(&self) -> Option<crate::evidence::EvidenceReaderHandle> {
+        None
+    }
     fn info(&self) -> ApiInfo;
     fn status(&self) -> ApiStatus;
     fn tip(&self) -> ApiTip;
