@@ -110,6 +110,8 @@ pub struct NodeConfig {
     /// rejects 0). Wired into BOTH the state store and the indexer store
     /// at boot so the indexer can follow any reorg the state performs.
     pub keep_versions: u32,
+    /// Local non-consensus applied-evidence observer (default false).
+    pub applied_evidence_outbox: bool,
     /// State backend kind. Default `Utxo`. `Digest` selects the
     /// AD-proof-driven backend (Modes 5/6 of the roadmap).
     pub state_type: StateType,

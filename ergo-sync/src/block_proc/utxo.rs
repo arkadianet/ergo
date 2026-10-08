@@ -179,7 +179,25 @@ pub(super) fn process_block_utxo(
     // 3. Genesis block (height 1): no parent exists.
     let parent_id = *header.parent_id.as_bytes();
     if height == 1 && parent_id == [0u8; 32] {
-        store.apply_genesis(&header_id_computed, &state_root, &block_txs.transactions)?;
+        if let Some(anchor) = store.applied_evidence_anchor() {
+            let parent_root = store.root_digest();
+            let capture = ergo_state::evidence::CapturedBlock::trusted_genesis(
+                &header_bytes,
+                &parent_root,
+                &block_txs.transactions,
+                anchor,
+                store.active_params(),
+                store.validation_settings(),
+            )?;
+            store.apply_observed_genesis(
+                &header_id_computed,
+                &state_root,
+                &block_txs.transactions,
+                capture,
+            )?;
+        } else {
+            store.apply_genesis(&header_id_computed, &state_root, &block_txs.transactions)?;
+        }
         return Ok(ProcessedBlock {
             header_id: header_id_computed,
             height,
@@ -512,7 +530,19 @@ pub(super) fn process_block_utxo(
     //     does not yet exist.
     // Caller threads `wallet_hook` from NodeState; `None` is
     // acceptable for tests and non-wallet deployments.
-    store.apply_block(&checked_block, voted_params_row, wallet_hook)?;
+    if store.applied_evidence_anchor().is_some() {
+        let capture = ergo_state::evidence::CapturedBlock::checked(
+            &checked_block,
+            &header_bytes,
+            &parent_checked.header().state_root,
+            voted_params_row.as_ref().unwrap_or(store.active_params()),
+            store.validation_settings(),
+            script_validation_checkpoint,
+        )?;
+        store.apply_observed_block(&checked_block, voted_params_row, wallet_hook, capture)?;
+    } else {
+        store.apply_block(&checked_block, voted_params_row, wallet_hook)?;
+    }
     if mode2_trust_consumed {
         // apply_block committed the synthetic `voted_params` row (with
         // `activated_update = trusted cumulative`) and folded it into

@@ -8,6 +8,32 @@ use super::toml_sections::TomlConfig;
 use super::*;
 use ergo_mempool::MempoolConfig;
 
+#[test]
+fn applied_evidence_outbox_defaults_off_and_can_be_explicitly_enabled() {
+    let file = default_toml();
+    assert!(
+        !NodeConfig::load(minimal_cli(Some(&file)))
+            .unwrap()
+            .applied_evidence_outbox
+    );
+    let file = write_toml("[node]\napplied_evidence_outbox = true\n");
+    let config = NodeConfig::load(minimal_cli(Some(&file))).unwrap();
+    assert!(config.applied_evidence_outbox);
+    assert!(config.genesis_id.is_some());
+}
+
+#[test]
+fn applied_evidence_outbox_requires_validating_utxo_and_genesis_anchor() {
+    for body in [
+        "[node]\napplied_evidence_outbox = true\nstate_type = \"digest\"\n",
+        "[node]\napplied_evidence_outbox = true\n[chain]\ngenesis_id = \"\"\n",
+    ] {
+        let file = write_toml(body);
+        let error = NodeConfig::load(minimal_cli(Some(&file))).unwrap_err();
+        assert!(error.contains("applied_evidence_outbox"), "{error}");
+    }
+}
+
 fn parse(toml_str: &str) -> TomlConfig {
     toml::from_str::<TomlConfig>(toml_str).expect("parse TOML")
 }

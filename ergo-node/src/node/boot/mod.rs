@@ -399,6 +399,11 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // Undo-retention window (`[node] keep_versions`, Scala keepVersions
     // parity). Same pre-pipeline ordering requirement as blocks_to_keep.
     store.set_rollback_window(config.keep_versions);
+    if config.applied_evidence_outbox {
+        store.enable_applied_evidence(config.genesis_id.ok_or_else(|| {
+            std::io::Error::other("applied-evidence outbox requires a trusted genesis anchor")
+        })?)?;
+    }
     // NiPoPoW prover reads the network's difficulty schedule (epoch
     // lengths + use_last_epochs) — override the mainnet open-default
     // so a testnet store proves with testnet epochs.

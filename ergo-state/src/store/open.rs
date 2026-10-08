@@ -274,6 +274,7 @@ impl StateStore {
             }
         };
 
+        let evidence_recording = crate::evidence::recording_exists(&db)?;
         let mut store = Self {
             difficulty_params: ergo_chain_spec::DifficultyParams::mainnet(),
             headers: crate::header_store::HeaderSectionTables::new(db.clone()),
@@ -294,6 +295,9 @@ impl StateStore {
             // UTXO backends alongside coordinator `requires_proofs`.
             ad_proofs_apply_policy: super::AdProofsApplyPolicy::Regenerate,
             persist_pipeline: None,
+            evidence_recording,
+            evidence_anchor: None,
+            pending_evidence: None,
             mode2_trust_first_epoch,
             init_launch_params: launch_params,
             voting_settings,

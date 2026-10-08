@@ -528,6 +528,12 @@ impl StateStore {
             }
         }
 
+        crate::evidence::persist_rollback(
+            &write_txn,
+            self.evidence_recording,
+            target_height,
+            &new_tip_id,
+        )?;
         write_txn.commit()?;
         // Mutation after successful commit.
         self.chain_state.best_full_block_height = target_height;

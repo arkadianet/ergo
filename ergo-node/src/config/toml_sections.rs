@@ -326,6 +326,8 @@ pub(super) struct TomlNode {
     /// Prospective only — undo entries already pruned by a previous run's
     /// smaller window stay gone.
     pub(super) keep_versions: Option<u32>,
+    /// Opt-in local committed applied-evidence journal; not a consensus setting.
+    pub(super) applied_evidence_outbox: Option<bool>,
     /// `[node] state_type` — node state backend (Modes 5/6 of the
     /// roadmap). Mirrors Scala `ergo.node.stateType`. Default
     /// `"utxo"`. `"digest"` selects the AD-proof-driven backend
