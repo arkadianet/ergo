@@ -118,9 +118,11 @@ pub fn migrate(args: &MigrateArgs) -> Result<CutoverReport, ConfigError> {
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let raw = protected_open(&args.source_data_dir.join("state.redb"), true)?;
-    // Unix redb 2 used flock; current redb 4 also uses byte-range locks.
-    // Taking both prevents migration alongside either writer implementation.
-    #[cfg(unix)]
+    // Linux uses separate flock and OFD byte-range lock namespaces, so both
+    // locks are needed to exclude legacy and current redb owners. Elsewhere,
+    // the backend's whole-storage range lock also excludes legacy file locks;
+    // taking a file lock first can conflict with our own range lock on macOS.
+    #[cfg(target_os = "linux")]
     raw.try_lock()
         .map_err(|error| invalid(format!("stop the source node before migration: {error}")))?;
     let backend =
@@ -458,6 +460,29 @@ mod tests {
         assert_eq!(
             fs::read_to_string(destination.join("keep")).unwrap(),
             "preserved"
+        );
+    }
+
+    #[test]
+    fn cutover_refuses_legacy_whole_file_owner_without_mutating_source() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        fs::create_dir(&source).unwrap();
+        drop(embedded_source(&source));
+        let source_path = source.join("state.redb");
+        let original = fs::read(&source_path).unwrap();
+        let owner = protected_open(&source_path, true).unwrap();
+        owner.try_lock().unwrap();
+        let destination = root.path().join("standalone");
+        assert!(migrate(&args(&source, &destination))
+            .unwrap_err()
+            .to_string()
+            .contains("stop the source node"));
+        assert!(!destination.exists());
+        drop(owner);
+        assert!(
+            fs::read(&source_path).unwrap() == original,
+            "refused migration modified the source database"
         );
     }
 
