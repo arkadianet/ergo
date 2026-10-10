@@ -117,7 +117,51 @@ const STORAGE_PERIOD_BLOCKS: u32 = 1_051_200;
 /// a build that under-collects under heavy index lag still produces a valid
 /// candidate (the missed boxes stay eligible for the next build once the
 /// index catches up). Correctness never depends on collecting every box.
-const MAX_RENT_PAGES: u32 = 4;
+/// Rows the indexed size and value already show to be unclaimable are skipped
+/// without using a claim slot, and the scan resumes past a run of them on the
+/// next build (see [`RentScanCursor`]).
+const MAX_RENT_PAGES: u32 = 16;
+
+/// Indexer key `(creation_height, global_box_index)` of an eligible row.
+type RentRowKey = (u32, i64);
+
+/// Where the worker's next rent scan starts. Boxes the claim builder can never
+/// take (rent fee wrapped negative, recreation below the dust floor) never
+/// move, so a scan that always started at the oldest row could spend its
+/// whole page budget on them and starve every claim. After a scan that found
+/// claimable boxes, the next one starts just before the first of them (the
+/// claim set stays stable across same-parent rebuilds). After a scan that hit
+/// the page bound without finding any, the next one continues where it
+/// stopped. Reaching the end of the index wraps to the oldest row once.
+#[derive(Debug, Default)]
+pub(super) struct RentScanCursor {
+    resume_after: std::cell::Cell<Option<RentRowKey>>,
+}
+
+/// Quick claimability check from the indexed value and serialized length,
+/// before the box is materialized. `None` factor (parameter 1 absent) means
+/// no box is claimable. A recreated box is about as long as the original, so
+/// the dust floor is checked with an 8-byte margin to never drop a claimable
+/// box; the claim builder makes the exact decision.
+fn rent_row_claimable(
+    row: &StorageRentEligibleDto,
+    storage_fee_factor: Option<i32>,
+    min_value_per_byte: u64,
+) -> bool {
+    let Some(factor) = storage_fee_factor else {
+        return false;
+    };
+    let fee = ergo_validation::storage_rent::compute_storage_fee(row.box_bytes_len, factor);
+    if fee <= 0 {
+        return false;
+    }
+    let fee = fee as u64;
+    if row.box_value <= fee {
+        return true;
+    }
+    let size_floor = u64::try_from(row.box_bytes_len.saturating_sub(8)).unwrap_or(0);
+    row.box_value - fee >= min_value_per_byte.saturating_mul(size_floor)
+}
 
 fn update_rent_self_claim_state(
     handle: &MiningHandle,
@@ -165,6 +209,7 @@ fn resolve_eligible_rent_boxes(
     snapshot: &CommittedSnapshot,
     candidate_height: u32,
     handle: &MiningHandle,
+    scan_cursor: &RentScanCursor,
     should_cancel: &dyn Fn() -> bool,
 ) -> Vec<ErgoBox> {
     if should_cancel() {
@@ -191,17 +236,33 @@ fn resolve_eligible_rent_boxes(
             let Some(height_cutoff) = candidate_height.checked_sub(STORAGE_PERIOD_BLOCKS) else {
                 return Vec::new();
             };
+            // The tip parameters price the pre-filter; at an epoch boundary the
+            // target parameters may differ, which only shifts which boxes this
+            // one build considers.
+            let (storage_fee_factor, min_value_per_byte) = match snapshot.active_params() {
+                Ok(params) => (
+                    params.parameter(1),
+                    u64::try_from(params.min_value_per_byte).unwrap_or(0),
+                ),
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "mining: tip parameters unavailable; building without rent self-claim"
+                    );
+                    return Vec::new();
+                }
+            };
+            let reemission = handle.reemission_rules_ref();
             page_rent_boxes_cancellable(
-                |off, lim| {
-                    store_idx.read_storage_rent_eligible_paged(
-                        height_cutoff,
-                        off,
-                        lim,
-                        ergo_indexer::SortDir::Asc,
-                    )
+                |after, lim| store_idx.read_storage_rent_eligible_after(height_cutoff, after, lim),
+                |row| rent_row_claimable(row, storage_fee_factor, min_value_per_byte),
+                |id| {
+                    snapshot
+                        .get_box(id)
+                        .filter(|b| !carries_reemission_obligation(b, candidate_height, reemission))
                 },
-                |id| snapshot.get_box(id),
                 handle.max_storage_rent_claims(),
+                scan_cursor,
                 should_cancel,
             )
         },
@@ -222,47 +283,72 @@ fn resolve_rent_boxes_at_height(
     scan()
 }
 
-/// Page through eligible-box rows, materializing each against the build
-/// snapshot, until `max_claims` boxes resolve or the index runs dry.
+/// Whether `b` still carries a re-emission obligation, which makes it
+/// unclaimable through storage rent. Same predicate as the claim builder.
+fn carries_reemission_obligation(
+    b: &ErgoBox,
+    height: u32,
+    rules: Option<&ergo_validation::ReemissionRuleInputs>,
+) -> bool {
+    let Some(rules) = rules else {
+        return false;
+    };
+    let amount = b
+        .candidate
+        .tokens
+        .iter()
+        .filter(|t| t.token_id.as_bytes() == &rules.reemission_token_id)
+        .fold(0u64, |acc, t| acc.saturating_add(t.amount));
+    amount > 0
+        && ergo_validation::reemission_obligation_core(
+            [(b.candidate.value, amount)],
+            height,
+            rules.activation_height,
+        )
+        .triggered
+}
+
+/// Page through eligible-box rows oldest-first by indexer key, materializing
+/// each against the build snapshot, until `max_claims` boxes resolve, the page
+/// bound is hit, or the index runs dry.
 ///
-/// Rows the snapshot cannot materialize (spent since the index scan, or a
-/// reorg) are skipped and their cap slots backfilled from later pages, so
-/// indexer staleness costs retries, not claim slots. A fetch error degrades
-/// the whole resolution to empty (build without a rent claim) — a partial
-/// set is economically fine, but inconsistent-on-error is harder to reason
-/// about, so the contract is all-or-nothing. Generic over the page fetcher
-/// so the backfill/degrade logic is unit-testable without an indexer store.
+/// Rows `claimable_row` rejects from the indexed value and size (rent fee
+/// wrapped negative, recreation under the dust floor) and rows the snapshot
+/// cannot materialize (spent since the index scan, a reorg, or filtered by
+/// `resolve_box`) are skipped without using a claim slot. `cursor` carries the
+/// start position across builds (see [`RentScanCursor`]). A fetch error
+/// degrades the whole resolution to empty (build without a rent claim) — a
+/// partial set is economically fine, but inconsistent-on-error is harder to
+/// reason about, so the contract is all-or-nothing. Generic over the page
+/// fetcher so the logic is unit-testable without an indexer store.
 ///
-/// Each page is a separate indexer read transaction
-/// (`read_storage_rent_eligible_paged` opens its own) and `offset` is a
-/// skip-by-row-count cursor, so a rollback/apply landing between two reads can
-/// shift the ordered row set under the offset. Two consequences, both bounded
-/// to under-collection (never a wrong or blind claim, never a build abort):
-///
-/// - A `box_id` already taken can re-surface on a later page. The rent-claim
-///   builder does not dedup its inputs, so an undeduped repeat would produce a
-///   within-tx double-spend that fails the build — the `seen` set drops the
-///   repeat so the race costs a skipped row, not the candidate.
-/// - Front rows deleted between reads shift later rows left, under the
-///   advanced `offset`, so a live box can be stepped over and missed this
-///   build. It stays eligible and is collected on a later build once the index
-///   settles. Backfill therefore covers stale rows *within* a page, not rows
-///   that move across the page boundary mid-scan; the worst case is collecting
-///   fewer boxes than `max_claims`, which is fine — rent is opt-in policy and
-///   correctness never depends on collecting every eligible box.
+/// Each page is a separate indexer read transaction continuing strictly after
+/// the last key read, so rows added or removed between reads never shift live
+/// rows past the cursor. The `seen` set still drops a repeated `box_id` (the
+/// claim builder does not dedup its inputs, and a repeat would be a within-tx
+/// double-spend), which can occur after the scan wraps around.
 #[cfg(test)]
 fn page_rent_boxes<E: std::fmt::Debug>(
-    fetch_page: impl FnMut(u32, u32) -> Result<Vec<StorageRentEligibleDto>, E>,
+    fetch_page: impl FnMut(Option<RentRowKey>, u32) -> Result<Vec<StorageRentEligibleDto>, E>,
     resolve_box: impl Fn(&ergo_primitives::digest::Digest32) -> Option<ErgoBox>,
     max_claims: u32,
 ) -> Vec<ErgoBox> {
-    page_rent_boxes_cancellable(fetch_page, resolve_box, max_claims, &|| false)
+    page_rent_boxes_cancellable(
+        fetch_page,
+        |_| true,
+        resolve_box,
+        max_claims,
+        &RentScanCursor::default(),
+        &|| false,
+    )
 }
 
 fn page_rent_boxes_cancellable<E: std::fmt::Debug>(
-    mut fetch_page: impl FnMut(u32, u32) -> Result<Vec<StorageRentEligibleDto>, E>,
+    mut fetch_page: impl FnMut(Option<RentRowKey>, u32) -> Result<Vec<StorageRentEligibleDto>, E>,
+    claimable_row: impl Fn(&StorageRentEligibleDto) -> bool,
     resolve_box: impl Fn(&ergo_primitives::digest::Digest32) -> Option<ErgoBox>,
     max_claims: u32,
+    cursor: &RentScanCursor,
     should_cancel: &dyn Fn() -> bool,
 ) -> Vec<ErgoBox> {
     // A zero claim cap collects nothing — short-circuit before issuing any
@@ -270,14 +356,18 @@ fn page_rent_boxes_cancellable<E: std::fmt::Debug>(
     if max_claims == 0 {
         return Vec::new();
     }
+    let start = cursor.resume_after.get();
+    let mut after = start;
+    let mut wrapped = start.is_none();
+    let mut first_claimable: Option<Option<RentRowKey>> = None;
     let mut boxes = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut offset = 0u32;
-    for _ in 0..MAX_RENT_PAGES {
+    let mut exhausted = false;
+    'pages: for _ in 0..MAX_RENT_PAGES {
         if should_cancel() {
             return Vec::new();
         }
-        let rows = match fetch_page(offset, max_claims) {
+        let rows = match fetch_page(after, max_claims) {
             Ok(rows) => rows,
             Err(e) => {
                 warn!(
@@ -292,24 +382,38 @@ fn page_rent_boxes_cancellable<E: std::fmt::Debug>(
             if should_cancel() {
                 return Vec::new();
             }
-            // Skip a `box_id` already claimed — a duplicate from the
-            // moving-index race (see fn doc), never a second claim of the
-            // same box.
+            let before = after;
+            after = Some((row.creation_height, row.global_box_index));
+            if !claimable_row(&row) {
+                continue;
+            }
+            // Skip a `box_id` already taken, never a second claim of a box.
             if !seen.insert(row.box_id) {
                 continue;
             }
             if let Some(b) = resolve_box(&row.box_id) {
+                first_claimable.get_or_insert(before);
                 boxes.push(b);
                 if boxes.len() as u32 == max_claims {
-                    return boxes;
+                    break 'pages;
                 }
             }
         }
         if page_len < max_claims {
-            break; // index exhausted (short page)
+            // End of the index: wrap to the oldest row once.
+            if wrapped {
+                exhausted = true;
+                break;
+            }
+            wrapped = true;
+            after = None;
         }
-        offset += page_len;
     }
+    cursor.resume_after.set(match first_claimable {
+        Some(before_first) => before_first,
+        None if exhausted => None,
+        None => after,
+    });
     boxes
 }
 
@@ -452,6 +556,7 @@ pub(super) fn run_build_worker(
     // is disabled; then builds expand only authenticated operation paths.
     let mut base: Option<DryRunBase> = None;
     let mut proof_cache = CandidateProofCache::default();
+    let rent_scan_cursor = RentScanCursor::default();
     while let Ok(BuildRequest {
         intent,
         mode,
@@ -505,10 +610,17 @@ pub(super) fn run_build_worker(
                 BuildReply::Requested { reply, deadline, .. } if reply.is_closed() || Instant::now() >= *deadline)
             };
             let rent_resolver = |snapshot: &CommittedSnapshot, h: u32| {
-                resolve_eligible_rent_boxes(indexer.as_ref(), snapshot, h, &handle, &|| {
-                    let tip = handle.best_tip();
-                    !tip.synced || tip.parent_id != intent.expected_parent || caller_cancelled()
-                })
+                resolve_eligible_rent_boxes(
+                    indexer.as_ref(),
+                    snapshot,
+                    h,
+                    &handle,
+                    &rent_scan_cursor,
+                    &|| {
+                        let tip = handle.best_tip();
+                        !tip.synced || tip.parent_id != intent.expected_parent || caller_cancelled()
+                    },
+                )
             };
             let result = if is_requested {
                 build_requested_and_publish_cached(
@@ -963,6 +1075,7 @@ mod tests {
                         &snapshot,
                         candidate_height,
                         &handle,
+                        &RentScanCursor::default(),
                         &|| false
                     )
                     .is_empty());
@@ -1002,24 +1115,25 @@ mod tests {
         move |q: &Digest32| map.get(q).cloned()
     }
 
-    /// Pageable fetcher over a flat row list with an Asc row-index offset,
-    /// mirroring `read_storage_rent_eligible_paged`'s skip-`offset` semantics.
+    /// Pageable fetcher over a key-ordered row list, mirroring
+    /// `read_storage_rent_eligible_after`: rows strictly after the cursor key.
     /// `fetches` counts page reads so tests can assert the scan bound.
     fn pager<'a>(
         rows: &'a [StorageRentEligibleDto],
         fetches: &'a Cell<u32>,
-    ) -> impl FnMut(u32, u32) -> Result<Vec<StorageRentEligibleDto>, std::convert::Infallible> + 'a
-    {
-        move |offset: u32, limit: u32| {
+    ) -> impl FnMut(
+        Option<RentRowKey>,
+        u32,
+    ) -> Result<Vec<StorageRentEligibleDto>, std::convert::Infallible>
+           + 'a {
+        move |after: Option<RentRowKey>, limit: u32| {
             fetches.set(fetches.get() + 1);
-            let start = offset as usize;
-            let end = (start + limit as usize).min(rows.len());
-            let page = if start >= rows.len() {
-                Vec::new()
-            } else {
-                rows[start..end].to_vec()
-            };
-            Ok(page)
+            Ok(rows
+                .iter()
+                .filter(|r| after.is_none_or(|key| (r.creation_height, r.global_box_index) > key))
+                .take(limit as usize)
+                .cloned()
+                .collect())
         }
     }
 
@@ -1163,12 +1277,14 @@ mod tests {
         let rows = [row(1), row(2), row(3), row(4)];
         let boxes = page_rent_boxes_cancellable(
             pager(&rows, &fetches),
+            |_| true,
             |id| {
                 resolved.set(resolved.get() + 1);
                 cancelled.set(true);
                 resolver(&[1, 2, 3, 4])(id)
             },
             4,
+            &RentScanCursor::default(),
             &|| cancelled.get(),
         );
         assert!(boxes.is_empty());
@@ -1242,22 +1358,21 @@ mod tests {
 
     #[test]
     fn page_duplicate_box_id_across_pages_resolved_once() {
-        // Each page is a separate indexer read txn, so a rollback/apply
-        // between reads can shift the row set under the offset and re-surface
-        // a box already taken. The seen-set must drop the repeat — the
-        // rent-claim builder does not dedup, so a duplicate would otherwise
-        // become a within-tx double-spend and abort the build.
+        // A box already taken can come back on a later page (a wrapped scan,
+        // or a row re-added by a rollback between reads). The seen-set must
+        // drop the repeat — the rent-claim builder does not dedup, so a
+        // duplicate would otherwise become a within-tx double-spend and abort
+        // the build.
         let fetches = Cell::new(0);
-        let fetch = |offset: u32,
+        let fetch = |after: Option<RentRowKey>,
                      _limit: u32|
          -> Result<Vec<StorageRentEligibleDto>, std::convert::Infallible> {
             fetches.set(fetches.get() + 1);
-            // Page 1 (offset 0): full page of 4 (== cap), but seed 2 is stale,
-            // so it resolves only [1,3,4] — cap not reached, so page 2 is
-            // fetched. Page 2 re-surfaces seed 1 (shifted under the offset by
-            // a between-read apply) then a fresh seed 5. Dedup must skip the
-            // repeated seed 1 and fill the last slot with seed 5.
-            if offset == 0 {
+            // Page 1: full page of 4 (== cap), but seed 2 is stale, so it
+            // resolves only [1,3,4] — cap not reached, so page 2 is fetched.
+            // Page 2 re-surfaces seed 1 then a fresh seed 5. Dedup must skip
+            // the repeated seed 1 and fill the last slot with seed 5.
+            if after.is_none() {
                 Ok(vec![row(1), row(2), row(3), row(4)])
             } else {
                 Ok(vec![row(1), row(5)])
@@ -1281,39 +1396,119 @@ mod tests {
     }
 
     #[test]
-    fn page_front_deletion_between_reads_under_collects_not_aborts() {
-        // Pins the known limitation of skip-by-row-count paging over a
-        // mutating table: if front rows are deleted between page reads, later
-        // live rows shift under the advanced offset and are stepped over. The
-        // contract is under-collection (the missed box stays eligible for the
-        // next build), never a wrong/blind claim or a build abort.
-        //
-        // Page 1 (offset 0): a full page [1,2,3,4] (== cap), all stale, so it
-        // resolves nothing; offset advances to 4. Between reads the four stale
-        // front rows are deleted, so the live boxes 5..8 — which were at index
-        // 4..8 — are now at index 0..4, i.e. entirely under the advanced
-        // offset. Page 2 (offset 4) sees only what remains past index 4:
-        // empty. The scan under-collects (0 boxes) rather than erroring.
+    fn page_front_deletion_between_reads_keeps_later_rows() {
+        // Page 1: a full page [1,2,3,4] (== cap), all stale. Between reads the
+        // four front rows are deleted. Page 2 continues after key 4, so the
+        // live boxes 5..8 are still read and claimed: the keyset cursor does
+        // not step over rows when earlier ones disappear.
+        let table_after_deletion = [row(5), row(6), row(7), row(8)];
         let fetches = Cell::new(0);
-        let fetch = |offset: u32,
-                     _limit: u32|
+        let fetch = |after: Option<RentRowKey>,
+                     limit: u32|
          -> Result<Vec<StorageRentEligibleDto>, std::convert::Infallible> {
             fetches.set(fetches.get() + 1);
-            if offset == 0 {
+            if after.is_none() {
                 Ok(vec![row(1), row(2), row(3), row(4)]) // all stale
             } else {
-                // Post-deletion table is [5,6,7,8] (len 4); offset 4 skips
-                // all of it.
-                Ok(Vec::new())
+                Ok(table_after_deletion
+                    .iter()
+                    .filter(|r| after.is_none_or(|k| (r.creation_height, r.global_box_index) > k))
+                    .take(limit as usize)
+                    .cloned()
+                    .collect())
             }
         };
-        // Boxes 5..8 are live, but the offset stepped over them.
         let out = page_rent_boxes(fetch, resolver(&[5, 6, 7, 8]), 4);
-        assert!(
-            out.is_empty(),
-            "front-deletion gap under-collects; missed boxes stay eligible for the next build"
-        );
+        assert_eq!(out.len(), 4);
         assert_eq!(fetches.get(), 2);
+    }
+
+    /// One row with an explicit indexed value and length.
+    fn sized_row(seed: u8, box_value: u64, box_bytes_len: i32) -> StorageRentEligibleDto {
+        StorageRentEligibleDto {
+            box_value,
+            box_bytes_len,
+            ..row(seed)
+        }
+    }
+
+    #[test]
+    fn rent_row_prefilter_drops_unclaimable_boxes() {
+        let factor = Some(1_250_000);
+        // Fee wraps negative at ~1718-3435 bytes.
+        assert!(!rent_row_claimable(
+            &sized_row(1, 10_000_000_000, 2_000),
+            factor,
+            360
+        ));
+        // Recreated value below the dust floor.
+        assert!(!rent_row_claimable(
+            &sized_row(2, 125_000_100, 100),
+            factor,
+            360_000
+        ));
+        // Recreate and full consume are kept.
+        assert!(rent_row_claimable(
+            &sized_row(3, 10_000_000_000, 100),
+            factor,
+            360
+        ));
+        assert!(rent_row_claimable(&sized_row(4, 1_000, 100), factor, 360));
+        // Without a voted factor nothing is claimable.
+        assert!(!rent_row_claimable(
+            &sized_row(5, 10_000_000_000, 100),
+            None,
+            360
+        ));
+    }
+
+    #[test]
+    fn unclaimable_rows_ahead_of_claimable_ones_do_not_starve_the_scan() {
+        // 5000 rows whose fee wraps negative sit ahead of 10 claimable ones,
+        // more than the page bound reads in one build. Unclaimable rows use
+        // no claim slot, and the cursor carries the scan past them, so the
+        // claimable boxes are reached within a few builds and then found
+        // first on every later build.
+        let mut rows: Vec<StorageRentEligibleDto> = (0..5_000u32)
+            .map(|i| StorageRentEligibleDto {
+                creation_height: 1,
+                global_box_index: i64::from(i),
+                box_id: Digest32::from_bytes([0xEE; 32]),
+                box_value: 10_000_000_000,
+                box_bytes_len: 2_000,
+            })
+            .collect();
+        for seed in 1..=10u8 {
+            rows.push(StorageRentEligibleDto {
+                creation_height: 2,
+                ..sized_row(seed, 10_000_000_000, 100)
+            });
+        }
+        let live: Vec<u8> = (1..=10).collect();
+        let cursor = RentScanCursor::default();
+        let scan = || {
+            let fetches = Cell::new(0);
+            page_rent_boxes_cancellable(
+                pager(&rows, &fetches),
+                |row| rent_row_claimable(row, Some(1_250_000), 360),
+                resolver(&live),
+                64,
+                &cursor,
+                &|| false,
+            )
+        };
+        let mut builds = 1;
+        let mut out = scan();
+        while out.is_empty() {
+            builds += 1;
+            assert!(builds <= 5, "the scan never reached the claimable rows");
+            out = scan();
+        }
+        assert_eq!(out.len(), 10);
+        // Later builds start at the claimable rows and find the same set.
+        let again = scan();
+        assert_eq!(again.len(), 10);
+        assert_eq!(cursor.resume_after.get(), Some((1, 4_999)));
     }
 
     // ----- full_refresh_adds_nothing predicate -----
@@ -1547,7 +1742,9 @@ mod tests {
     #[test]
     fn page_fetch_error_first_page_degrades_to_empty() {
         let fetches = Cell::new(0);
-        let fetch = |_off: u32, _lim: u32| -> Result<Vec<StorageRentEligibleDto>, &'static str> {
+        let fetch = |_after: Option<RentRowKey>,
+                     _lim: u32|
+         -> Result<Vec<StorageRentEligibleDto>, &'static str> {
             fetches.set(fetches.get() + 1);
             Err("indexer read failed")
         };
@@ -1567,16 +1764,17 @@ mod tests {
             .iter()
             .map(|&s| (id(s), box_with_seed(s)))
             .collect();
-        let fetch =
-            |offset: u32, limit: u32| -> Result<Vec<StorageRentEligibleDto>, &'static str> {
-                fetches.set(fetches.get() + 1);
-                if offset == 0 {
-                    let end = (limit as usize).min(rows.len());
-                    Ok(rows[..end].to_vec())
-                } else {
-                    Err("indexer read failed on page 2")
-                }
-            };
+        let fetch = |after: Option<RentRowKey>,
+                     limit: u32|
+         -> Result<Vec<StorageRentEligibleDto>, &'static str> {
+            fetches.set(fetches.get() + 1);
+            if after.is_none() {
+                let end = (limit as usize).min(rows.len());
+                Ok(rows[..end].to_vec())
+            } else {
+                Err("indexer read failed on page 2")
+            }
+        };
         // Only 3 of the 4 page-1 rows are live, so page 1 does not fill the
         // cap → a second fetch is attempted and errors.
         let out = page_rent_boxes(fetch, move |q: &Digest32| map.get(q).cloned(), 4);

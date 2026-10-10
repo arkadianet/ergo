@@ -179,12 +179,15 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
   selection stops `DEFAULT_COST_SAFETY_GAP` below the cost ceiling, and the
   assembly trims the lowest-priority tail tx until the `BlockTransactions`
   section fits (`candidate.rs`, `tx_selection.rs`).
-- **Storage-rent self-claim.** Pinned ahead of mempool selection so any
-  conflicting fee-bearing claim on the same box is excluded; zero fee; mirrors
+- **Storage-rent self-claim.** Built ahead of mempool selection; boxes a
+  pooled transaction spends are left to it; zero fee; mirrors
   `ErgoInterpreter.checkExpiredBox` (empty proof, var-127 output index,
-  `box_age >= storage_period`, recreate-vs-seize on `value` vs `storageFee`).
-  Boxes whose fee wraps negative are consensus-uncollectable and skipped; the
-  builder only returns transactions the validator accepts (`storage_rent_claim.rs`).
+  `box_age >= storage_period`, recreate-vs-seize on `value` vs `storageFee`,
+  with the fee charged on the box's stored bytes, `ErgoBox::bytes`).
+  Boxes whose fee wraps negative are consensus-uncollectable and skipped; no
+  claim is built without a voted `storageFeeFactor`; the builder only returns
+  transactions the validator accepts, and a build error leaves the claim out
+  of the candidate (`storage_rent_claim.rs`, `candidate.rs`).
 - **Emission / reemission parity.** Per-height emission and reward math, the
   reward-output ErgoTree (pk at byte offset 7..40, 54-byte total), and the
   EIP-27 emission-tx shapes are byte-parity-verified against captured mainnet

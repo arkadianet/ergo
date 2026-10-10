@@ -857,35 +857,53 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
             operator_work_waiting,
             protection.required_size,
         );
+        // A box a pooled transaction spends is left to that transaction: its
+        // owner pays a fee to move it, and claiming it first would drop that
+        // transaction and its fee.
+        let pooled_inputs: HashSet<Digest32> = mempool
+            .iter()
+            .chain(private_transactions.iter())
+            .flat_map(|entry| entry.inputs.iter().copied())
+            .collect();
         let rent_boxes: Vec<_> = eligible_rent_boxes
             .iter()
             .filter(|box_| {
-                box_.box_id()
-                    .is_ok_and(|id| !protection.inputs.contains(&id) && !overlay.is_spent(&id))
+                box_.box_id().is_ok_and(|id| {
+                    !protection.inputs.contains(&id)
+                        && !overlay.is_spent(&id)
+                        && !pooled_inputs.contains(&id)
+                })
             })
             .cloned()
             .collect();
-        let (checked_rent, rent_cost, rent_size) =
-            match build_budget_bounded_rent_claim_with_policy(
-                &rent_boxes,
-                candidate_height,
-                &params,
-                rent_boxes.len(),
-                miner_pk,
-                &ctx,
-                last_headers.as_slice(),
-                rent_cost_ceiling,
-                rent_size_ceiling,
-                reemission_rules,
-                policy.rent_token_policy,
-                &mut observation.rent_skipped_preservation,
-            )? {
-                Some((checked, cost, size)) => {
-                    overlay.apply_checked(&checked);
-                    (Some(checked), cost, size)
-                }
-                None => (None, 0, 0),
-            };
+        // A rent claim is optional: a build error leaves it out, never the
+        // whole candidate.
+        let (checked_rent, rent_cost, rent_size) = match build_budget_bounded_rent_claim_with_policy(
+            &rent_boxes,
+            candidate_height,
+            &params,
+            rent_boxes.len(),
+            miner_pk,
+            &ctx,
+            last_headers.as_slice(),
+            rent_cost_ceiling,
+            rent_size_ceiling,
+            reemission_rules,
+            policy.rent_token_policy,
+            &mut observation.rent_skipped_preservation,
+        ) {
+            Ok(Some((checked, cost, size))) => {
+                overlay.apply_checked(&checked);
+                (Some(checked), cost, size)
+            }
+            Ok(None) => (None, 0, 0),
+            Err(MiningError::BuildCancelled) => return Err(MiningError::BuildCancelled),
+            Err(error) => {
+                warn_rent_claim_omitted(candidate_height, &error);
+                observation.rent_skipped_preservation = 0;
+                (None, 0, 0)
+            }
+        };
         final_rent_cost = rent_cost;
         timings.rent = phase_start.elapsed();
         check_build_cancelled(should_cancel)?;
@@ -1387,6 +1405,21 @@ fn warn_emission_omitted(height: u32, stage: &'static str, error: &dyn std::fmt:
             stage,
             error = ?error,
             "mining: emission transaction left out of the candidate",
+        );
+    }
+}
+
+/// Height of the last candidate whose rent claim failed to build.
+static LAST_RENT_OMITTED_HEIGHT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(u32::MAX);
+
+fn warn_rent_claim_omitted(height: u32, error: &MiningError) {
+    let previous = LAST_RENT_OMITTED_HEIGHT.swap(height, std::sync::atomic::Ordering::Relaxed);
+    if previous != height {
+        tracing::warn!(
+            height,
+            error = %error,
+            "mining: storage-rent claim left out of the candidate",
         );
     }
 }
@@ -2079,6 +2112,8 @@ mod tests {
         stub: ExhaustedView,
         /// Tracked emission box (must be in `utxo`); `None` = exhausted.
         emission_id: Option<Digest32>,
+        /// Absent-parameter bits reported by the tip parameters.
+        missing_core_parameters: u16,
         utxo: std::collections::HashMap<Digest32, ErgoBox>,
     }
 
@@ -2121,6 +2156,7 @@ mod tests {
         > {
             let (mut params, settings) = self.stub.tip_snapshot_params()?;
             params.block_version = self.stub.header.version;
+            params.missing_core_parameters = self.missing_core_parameters;
             Ok((params, settings))
         }
         fn candidate_dry_run(
@@ -2220,6 +2256,7 @@ mod tests {
         let view = RentView {
             stub: ExhaustedView { header },
             emission_id: None,
+            missing_core_parameters: 0,
             utxo: std::collections::HashMap::from([(
                 spendable.box_id().unwrap(),
                 spendable.clone(),
@@ -2372,6 +2409,7 @@ mod tests {
         let view = RentView {
             stub: ExhaustedView { header },
             emission_id: Some(emission.box_id().unwrap()),
+            missing_core_parameters: 0,
             utxo,
         };
         let pooled = Transaction {
@@ -2542,6 +2580,49 @@ mod tests {
         assert_eq!(full.transactions, vec![pooled]);
     }
 
+    /// The exhausted-emission rent view with one rent-eligible box that a
+    /// pooled transaction spends.
+    fn pooled_rent_case(
+        missing_core_parameters: u16,
+    ) -> (RentView, MempoolReadSnapshot, Transaction) {
+        let (mut view, mempool, pooled) = emission_case(
+            1_100_005,
+            constant_script_box(1, true, vec![], 0x71),
+            vec![],
+        );
+        view.emission_id = None;
+        view.missing_core_parameters = missing_core_parameters;
+        (view, mempool, pooled)
+    }
+
+    #[test]
+    fn candidate_without_storage_fee_factor_builds_without_rent() {
+        let (view, mempool, pooled) = pooled_rent_case(1); // parameter 1 absent
+        let rent_boxes: Vec<_> = (0..10).map(genesis_era_box).collect();
+        let candidate = generate_with_rent(&view, &mempool, &rent_boxes, &BlockPolicy::default());
+        assert_eq!(categories(&candidate), ["public"]);
+        assert_eq!(candidate.transactions, vec![pooled]);
+    }
+
+    #[test]
+    fn rent_claim_leaves_boxes_spent_by_pooled_transactions() {
+        let (view, mempool, pooled) = pooled_rent_case(0);
+        let spent_by_pool = pooled.inputs[0].box_id;
+        let mut rent_boxes: Vec<_> = (0..10).map(genesis_era_box).collect();
+        // The pooled transaction's input is itself rent-eligible.
+        rent_boxes.insert(0, view.utxo[&spent_by_pool].clone());
+        let candidate = generate_with_rent(&view, &mempool, &rent_boxes, &BlockPolicy::default());
+        assert_eq!(categories(&candidate), ["rent", "public"]);
+        assert!(candidate.transactions.contains(&pooled));
+        let rent_inputs: Vec<_> = candidate.transactions[0]
+            .inputs
+            .iter()
+            .map(|i| i.box_id)
+            .collect();
+        assert_eq!(rent_inputs.len(), 10);
+        assert!(!rent_inputs.contains(&spent_by_pool));
+    }
+
     fn reemission_for_height_at(height: u32, reemission: &ReemissionSettings) -> u64 {
         crate::reemission::reemission_for_height(height, &MonetarySettings::mainnet(), reemission)
     }
@@ -2557,6 +2638,7 @@ mod tests {
         let view = RentView {
             stub: ExhaustedView { header },
             emission_id: None,
+            missing_core_parameters: 0,
             utxo: std::collections::HashMap::from([
                 (spendable.box_id().unwrap(), spendable.clone()),
                 (private_box.box_id().unwrap(), private_box.clone()),
@@ -2762,6 +2844,7 @@ mod tests {
         let view = RentView {
             stub: ExhaustedView { header },
             emission_id: None,
+            missing_core_parameters: 0,
             utxo: std::collections::HashMap::from([(
                 historical.box_id().unwrap(),
                 historical.clone(),

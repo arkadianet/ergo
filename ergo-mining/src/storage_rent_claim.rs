@@ -41,7 +41,7 @@
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::address::build_p2pk_tree_bytes;
-use ergo_ser::ergo_box::{serialize_ergo_box, write_ergo_box_candidate, ErgoBox, ErgoBoxCandidate};
+use ergo_ser::ergo_box::{write_ergo_box_candidate, ErgoBox, ErgoBoxCandidate};
 use ergo_ser::ergo_tree::{read_ergo_tree, ErgoTree};
 use ergo_ser::header::Header;
 use ergo_ser::input::{ContextExtension, Input, SpendingProof};
@@ -139,6 +139,12 @@ pub fn build_rent_claim_with_policy(
     skipped_preservation_out: &mut usize,
 ) -> Result<Option<RentClaim>, MiningError> {
     *skipped_preservation_out = 0;
+    // Without a voted storageFeeFactor (parameter 1) the validator does not
+    // take the rent path at all and runs each box's script instead, which an
+    // empty proof cannot satisfy: nothing is claimable.
+    if !params.has_parameter(1) {
+        return Ok(None);
+    }
     // Reserve one output for the miner even when every input is recreated;
     // both the total output count and each index must fit Scala's Short cap.
     let max_claims = max_claims.min(i16::MAX as usize - 1);
@@ -208,13 +214,7 @@ pub fn build_rent_claim_with_policy(
         // i32 overflow (box_bytes_len beyond the wrap point), which is
         // consensus-uncollectable — Scala would reject a claim on it, so
         // skip it to keep the block fork-free.
-        let box_bytes_len = serialize_ergo_box(b)
-            .map_err(|e| MiningError::IdComputation {
-                op: "rent_box_serialize",
-                reason: format!("{e:?}"),
-            })?
-            .len() as i32;
-        let storage_fee = compute_storage_fee(box_bytes_len, params.storage_fee_factor);
+        let storage_fee = compute_storage_fee(rent_box_len(b)?, params.storage_fee_factor);
         if storage_fee <= 0 {
             continue;
         }
@@ -485,10 +485,10 @@ pub fn build_budget_bounded_rent_claim_with_policy(
     let eligible: Vec<_> = eligible
         .iter()
         .filter(|box_| {
-            let Ok(bytes) = serialize_ergo_box(box_) else {
+            let Ok(len) = rent_box_len(box_) else {
                 return false;
             };
-            let fee = compute_storage_fee(bytes.len() as i32, params.storage_fee_factor);
+            let fee = compute_storage_fee(len, params.storage_fee_factor);
             if fee > 0 && box_.candidate.value <= fee as u64 {
                 return true;
             }
@@ -588,6 +588,17 @@ pub fn build_budget_bounded_rent_claim_with_policy(
         let drop = drop_cost.max(drop_size).max(1) as usize;
         cap = claimed.saturating_sub(drop).max(1);
     }
+}
+
+/// Length the storage fee is charged on: Scala `box.bytes.length`, the bytes
+/// the box was read from (see `ErgoBox::bytes`), as the validator uses.
+pub fn rent_box_len(b: &ErgoBox) -> Result<i32, MiningError> {
+    b.bytes()
+        .map(|bytes| bytes.len() as i32)
+        .map_err(|e| MiningError::IdComputation {
+            op: "rent_box_bytes",
+            reason: format!("{e:?}"),
+        })
 }
 
 /// Build a storage-rent input for `b`: its real `box_id`, an empty
@@ -853,7 +864,7 @@ mod tests {
         let height = 100;
         let big = box_with_tokens(10_000_000_000, 0, 0xC0, tokens_from(0, 70));
 
-        let bytes_len = serialize_ergo_box(&big).unwrap().len() as i32;
+        let bytes_len = ergo_ser::ergo_box::serialize_ergo_box(&big).unwrap().len() as i32;
         assert!(
             bytes_len >= 1718,
             "test box must exceed the i32 wrap point, got {bytes_len} bytes"
@@ -880,7 +891,7 @@ mod tests {
         let height = 100;
         let big = box_with_tokens(10_000_000_000, 0, 0xC2, tokens_from(0, 104));
 
-        let bytes_len = serialize_ergo_box(&big).unwrap().len() as i32;
+        let bytes_len = ergo_ser::ergo_box::serialize_ergo_box(&big).unwrap().len() as i32;
         assert!(
             (bytes_len as i64) * (params.storage_fee_factor as i64) > i32::MAX as i64,
             "test box must overflow i32 at least once"
@@ -898,6 +909,67 @@ mod tests {
     }
 
     // ----- skip conditions -----
+
+    #[test]
+    fn rent_claim_without_storage_fee_factor_parameter_is_none() {
+        let mut params = rent_params(10, 1_250_000);
+        params.missing_core_parameters = 1; // parameter id 1 absent
+        assert!(!params.has_parameter(1));
+        let height = 100;
+        let boxes = [
+            aged_box(10_000_000_000, 0, 0xA1),
+            aged_box(1_000_000, 0, 0xA2),
+        ];
+        assert!(
+            build_rent_claim(&boxes, height, &params, CLAIMS, &MINER_PK, None)
+                .unwrap()
+                .is_none()
+        );
+        let ctx = rent_context(height);
+        assert!(build_budget_bounded_rent_claim(
+            &boxes,
+            height,
+            &params,
+            CLAIMS,
+            &MINER_PK,
+            &ctx,
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    /// The fee is charged on the bytes the box was read from, like the
+    /// validator (oracle: ergo 6.0.7 `box.bytes.length` = 42 for this box,
+    /// re-serialization 43; see `storage_rent_check.rs`): the recreated
+    /// output keeps `value - 42 * factor`, which the validator accepts.
+    #[test]
+    fn rent_fee_uses_received_box_bytes() {
+        let tail = "0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400";
+        let bytes = hex::decode(format!("c0843d00d17f{tail}")).unwrap();
+        let received = ergo_ser::ergo_box::read_ergo_box(
+            &mut VlqReader::new(&bytes).with_activated_script_version(3),
+        )
+        .unwrap();
+        assert_eq!(rent_box_len(&received).unwrap(), 42);
+        let params = rent_params(10, 1_000);
+        let height = 100;
+        let claim = build_rent_claim(
+            std::slice::from_ref(&received),
+            height,
+            &params,
+            CLAIMS,
+            &MINER_PK,
+            None,
+        )
+        .unwrap()
+        .expect("covered fee recreates the box");
+        assert_eq!(claim.tx.output_candidates[0].value, 1_000_000 - 42 * 1_000);
+        validate_rent(&claim, height, &params).expect("validator agrees on the fee");
+    }
 
     #[test]
     fn too_young_box_is_skipped() {
