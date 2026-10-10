@@ -151,6 +151,7 @@ fn reference_receiver_types() {
         "readers-relations",
         "readers-encodings",
         "readers-headers",
+        "readers-apply-roots",
     ] {
         let path = root.join(format!("{file}.json"));
         let fixture: Fixture =
