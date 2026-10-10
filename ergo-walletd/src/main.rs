@@ -10,6 +10,25 @@ fn main() {
         std::process::exit(1);
     }
     let cli = Cli::parse();
+    if let Some(CliCommand::Adopt(args)) = &cli.command {
+        match ergo_walletd::adopt::adopt(args) {
+            Ok(report) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).expect("adoption report is serializable")
+                );
+                println!(
+                    "adopted: start ergo-walletd in seed mode with data_dir = {}; the first unlock encrypts it",
+                    args.data_dir.display()
+                );
+                return;
+            }
+            Err(error) => {
+                eprintln!("ergo-walletd: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Some(CliCommand::Migrate(args)) = &cli.command {
         match ergo_walletd::migration::migrate(args) {
             Ok(report) => {

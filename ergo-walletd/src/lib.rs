@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err)]
 
+pub mod adopt;
 pub mod api;
 pub mod chain_http;
 pub mod config;
