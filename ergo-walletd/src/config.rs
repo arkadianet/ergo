@@ -294,12 +294,21 @@ pub struct Cli {
     pub unix_socket: Option<PathBuf>,
     #[arg(long)]
     pub tcp_fallback: Option<SocketAddr>,
+    /// Overrides `[security] unseal_key_file`, e.g.
+    /// `${CREDENTIALS_DIRECTORY}/unseal-key`.
+    #[arg(long)]
+    pub unseal_key_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum CliCommand {
     /// Copy a stopped embedded wallet into a fresh standalone seed directory.
     Migrate(crate::migration::MigrateArgs),
+    /// Print the wallet database key as hex, for an `unseal_key_file`
+    /// credential. Reads the wallet password (seed) or passphrase
+    /// (watch-only) from the first line of standard input. Pipe the output
+    /// straight into `systemd-creds encrypt`; never store it in the clear.
+    ExportUnsealKey,
 }
 
 #[derive(Clone)]
@@ -431,6 +440,9 @@ impl Config {
         }
         if let Some(value) = cli.tcp_fallback {
             file.tcp_fallback = Some(value);
+        }
+        if let Some(value) = cli.unseal_key_file {
+            file.security.unseal_key_file = Some(value);
         }
         let config = Self::from_file(file)?;
         let api_key = read_api_key(&config.api_key_file)?;
@@ -1110,6 +1122,7 @@ mod tests {
             blocks_page: None,
             unix_socket: None,
             tcp_fallback: None,
+            unseal_key_file: None,
         })
         .unwrap();
         assert_eq!(loaded.config.network, Network::Testnet);

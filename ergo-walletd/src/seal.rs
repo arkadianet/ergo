@@ -218,6 +218,32 @@ fn is_cleartext(path: &Path) -> Result<bool, DaemonError> {
     Ok(read == 4 && &prefix == b"redb")
 }
 
+/// Recover the database key with the wallet password (seed) or passphrase
+/// (watch-only), for `ergo-walletd export-unseal-key`. Never creates a key.
+pub fn export_unseal_key(config: &Config, secret: &str) -> Result<DataKey, DaemonError> {
+    match config.mode {
+        WalletMode::Seed => match SecretStorage::open_data_key(&secret_dir(config), secret) {
+            Ok(Some(key)) => Ok(DataKey::from_bytes(*key)),
+            Ok(None) => Err(DaemonError::Server(
+                "the wallet has no database key yet; unlock it once in the daemon first".into(),
+            )),
+            Err(WalletError::Decryption) => Err(DaemonError::Server("wrong password".into())),
+            Err(error) => Err(crate::host::HostError::from(error).into()),
+        },
+        WalletMode::WatchOnly => {
+            if !config.data_dir.join(WATCH_KEY_FILE).exists() {
+                return Err(DaemonError::Server(
+                    "the wallet has no database key yet; unseal it once in the daemon first".into(),
+                ));
+            }
+            watch_data_key(&config.data_dir, secret).map_err(|error| match error {
+                WalletAdminError::WrongPassword => DaemonError::Server("wrong passphrase".into()),
+                other => DaemonError::Server(other.to_string()),
+            })
+        }
+    }
+}
+
 /// Read a raw 32-byte database key, hex-encoded, from an owner-only file.
 pub fn read_unseal_key_file(path: &Path) -> Result<DataKey, DaemonError> {
     let text = crate::config::read_api_key(path)?;

@@ -85,6 +85,7 @@ fn load(path: &Path) -> LoadedConfig {
         blocks_page: None,
         unix_socket: None,
         tcp_fallback: None,
+        unseal_key_file: None,
     })
     .unwrap()
 }
@@ -526,4 +527,75 @@ fn watch_boot_refuses_a_secret_directory_even_without_a_seed_marker() {
         prepare(load(&config)).is_err(),
         "watch startup must refuse a directory containing a seed"
     );
+}
+
+#[test]
+fn unseal_key_file_opens_the_database_at_start_without_unlocking() {
+    let node_dir = tempfile::tempdir().unwrap();
+    let (store, _ids) = seeded_node(node_dir.path());
+    let node = serve_node_api(&store);
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let address = free_address();
+    let config = write_config(dir.path(), &data, "seed", &node.url(), address);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let daemon = RunningDaemon::start(prepare(load(&config)).unwrap(), address, &client);
+    assert_eq!(
+        local_response(
+            &client,
+            &daemon,
+            Method::POST,
+            "/api/v1/wallet/init",
+            Some(json!({"pass": PASSWORD, "strength": 12})),
+        )
+        .status(),
+        StatusCode::OK
+    );
+    daemon.stop();
+
+    // The exported key opens the database; a wrong password exports nothing.
+    let loaded = load(&config);
+    assert!(ergo_walletd::seal::export_unseal_key(&loaded.config, "wrong").is_err());
+    let key = ergo_walletd::seal::export_unseal_key(&loaded.config, PASSWORD).unwrap();
+    let key_file = dir.path().join("unseal-key");
+    write_key(&key_file, hex::encode(key.expose()).as_bytes());
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        format!(
+            "{text}\n[security]\nunseal_key_file = {}\n",
+            quote_path(&key_file)
+        ),
+    )
+    .unwrap();
+    let prepared = prepare(load(&config)).unwrap();
+    assert!(!prepared.is_sealed());
+    let restarted = RunningDaemon::start(prepared, address, &client);
+    assert_eq!(
+        json_body(local_response(
+            &client,
+            &restarted,
+            Method::GET,
+            LIFECYCLE_STATUS,
+            None
+        )),
+        json!({"initialized": true, "locked": true})
+    );
+    // Wallet data is served while spending stays locked.
+    let addresses = local_response(
+        &client,
+        &restarted,
+        Method::GET,
+        "/api/v1/wallet/addresses",
+        None,
+    );
+    assert_eq!(addresses.status(), StatusCode::OK);
+    restarted.stop();
+
+    // A key file for another database is refused at start.
+    write_key(&key_file, hex::encode([1u8; 32]).as_bytes());
+    assert!(prepare(load(&config)).is_err());
 }

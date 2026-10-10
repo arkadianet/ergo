@@ -91,6 +91,7 @@ fn load(config_path: &Path) -> LoadedConfig {
         blocks_page: None,
         unix_socket: None,
         tcp_fallback: None,
+        unseal_key_file: None,
     })
     .unwrap()
 }
@@ -362,6 +363,7 @@ fn daemon_refuses_a_group_readable_api_key_file_and_redacts_its_value() {
         blocks_page: None,
         unix_socket: None,
         tcp_fallback: None,
+        unseal_key_file: None,
     })
     .expect_err("a group-readable key file is a load error");
     assert!(
