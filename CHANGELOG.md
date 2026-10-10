@@ -23,6 +23,7 @@ infrastructure.
 - Reject `||` and `&&` whose evaluated right operand is not a Boolean; these were previously accepted. Accept `allOf`, `anyOf` and `xorOf` over an empty collection of any element type, as the reference does; these were previously rejected.
 - Reject `substConstants` calls whose new values include a tuple, an Option or Unit, or a Header in a script before version 3, whatever the positions; these were previously accepted. Accept a collection of boxes as new values when no box is substituted; this was previously rejected.
 - Reject `substConstants` calls whose template has a non-zero ErgoTree version without the size bit (rule 1012). These were previously accepted.
+- Reject AVL tree `contains`, `get`, `insert`, `update`, `remove` and `insertOrUpdate` calls on a tree whose key length is 2,147,483,646 or more; the reference cannot allocate the key and fails the script. `contains` previously returned false and the others None.
 
 ## [0.12.3] - 2026-10-07
 

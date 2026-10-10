@@ -252,3 +252,8 @@ fn subst_constants_new_values_lift_like_reference() {
 fn subst_constants_template_requires_the_size_bit() {
     check_vectors("subst-header-size-bit");
 }
+
+#[test]
+fn avl_key_length_past_the_jvm_array_limit_fails_the_script() {
+    check_vectors("avl-key-length");
+}

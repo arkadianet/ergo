@@ -684,7 +684,17 @@ pub(crate) enum AvlConstructFailure {
     /// Any other failure (invalid metadata, malformed proof, digest
     /// mismatch): the method's own failed-verifier result applies.
     Rejected,
+    /// The key length is one the JVM cannot allocate an array for: the
+    /// method call must fail.
+    KeyTooLong,
 }
+
+/// Largest byte-array length HotSpot allocates. scrypto's verifier builds an
+/// infinity key of `keyLength` bytes before it reads the proof; a longer array
+/// fails with "Requested array size exceeds VM limit", whatever the heap size,
+/// and the script fails instead of yielding the failed-verifier result.
+/// <https://github.com/input-output-hk/scrypto/blob/v3.0.0/shared/src/main/scala/scorex/crypto/authds/avltree/batch/AuthenticatedTreeOps.scala#L33>
+pub(crate) const JVM_MAX_KEY_LENGTH: i32 = i32::MAX - 2;
 
 /// Construct an AVL proof verifier from AvlTreeData and proof bytes.
 pub(crate) fn make_avl_verifier(
@@ -697,6 +707,9 @@ pub(crate) fn make_avl_verifier(
     // Scala AND avoids passing a wrapped-negative length to the third-party
     // crate as a huge `usize`. `try_make_avl_verifier` maps this Err to None,
     // so the method arms degrade gracefully (contains→false, etc.).
+    if avl.key_length > JVM_MAX_KEY_LENGTH {
+        return Err(AvlConstructFailure::KeyTooLong);
+    }
     if avl.key_length <= 0 || avl.value_length_opt.is_some_and(|v| v < 0) {
         return Err(AvlConstructFailure::Rejected);
     }
@@ -732,8 +745,9 @@ pub(crate) fn make_avl_verifier(
 /// per-method outcome (contains → false, get/getMany → error, insert
 /// pre-v3 → error / v3+ → None, update/remove/insertOrUpdate → None)
 /// instead of aborting the whole evaluation.
-/// The JVM's fatal Int.MaxValue-key allocation has no verification verdict;
-/// Rust rejects that metadata before constructing the upstream verifier.
+/// A key length the JVM cannot allocate ([`JVM_MAX_KEY_LENGTH`]) is NOT
+/// degraded either: the reference's infinity-key allocation throws before any
+/// proof is read, so every method that builds a verifier fails the script.
 ///
 /// COST NOTE: a failed construction yields `digest = None`, but its
 /// `treeHeight` is STILL the digest's height byte — scrypto sets
@@ -760,6 +774,9 @@ pub(crate) fn try_make_avl_verifier(
         Ok(Ok(bv)) => Ok(Some(bv)),
         Ok(Err(AvlConstructFailure::TooTall)) => Err(EvalError::RuntimeException(
             "AVL proof tree is taller than the script-level bound",
+        )),
+        Ok(Err(AvlConstructFailure::KeyTooLong)) => Err(EvalError::RuntimeException(
+            "AVL key length exceeds the JVM array size limit",
         )),
         Ok(Err(AvlConstructFailure::Rejected)) | Err(_) => Ok(None),
     }

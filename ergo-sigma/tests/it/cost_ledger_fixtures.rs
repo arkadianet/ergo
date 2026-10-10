@@ -564,6 +564,11 @@ fn jvm_failure(
             expected: "serializable value for SubstConstants",
             got,
         }) if got == "PreHeader" => Ok(("RejectScript", "sigma.serialization.SerializerException")),
+        // scrypto allocates a keyLength-byte infinity key before reading the
+        // proof; past the JVM array limit that is a fatal error.
+        VerifySpendingError::Eval(EvalError::RuntimeException(
+            "AVL key length exceeds the JVM array size limit",
+        )) => Ok(("RejectScript", "java.lang.OutOfMemoryError")),
         _ => anyhow::bail!("no oracle-backed JVM failure mapping for {error:?}"),
     }
 }
