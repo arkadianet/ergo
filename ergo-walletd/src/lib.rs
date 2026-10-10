@@ -4,6 +4,7 @@ pub mod api;
 pub mod chain_http;
 pub mod config;
 pub mod descriptor;
+pub mod encrypted_db;
 pub mod engine_chain;
 pub mod full_api;
 pub mod hardening;
@@ -11,7 +12,9 @@ pub mod host;
 mod host_guard;
 pub mod lifecycle_api;
 pub mod migration;
+pub mod nonce_vault;
 mod ownership;
+pub mod seal;
 #[cfg(unix)]
 pub mod socket;
 pub mod spending;
@@ -22,7 +25,6 @@ pub mod tip;
 
 use std::sync::Arc;
 
-use ergo_wallet_service::{RedbWalletStore, WalletService};
 #[cfg(unix)]
 use hyper_util::rt::{TokioExecutor, TokioIo};
 #[cfg(unix)]
@@ -37,9 +39,8 @@ use tower::ServiceExt;
 use crate::api::ApiContext;
 use crate::chain_http::HttpChainClient;
 use crate::config::{ApiKey, Config, ConfigError, LoadedConfig, WalletMode};
-use crate::host::{SpendingCapabilities, WalletHost};
-use crate::spending::RemoteSpendingAccess;
-use crate::sync::{StandaloneSyncer, SyncConfig, SyncError};
+use crate::host::WalletHost;
+use crate::sync::{StandaloneSyncer, SyncError};
 use crate::tip::CachedNodeTip;
 
 #[derive(Debug, Error)]
@@ -77,12 +78,46 @@ pub enum DaemonError {
 /// sync loop drives it from `spawn_blocking`, and the read API only touches the
 /// cached tip.
 pub struct Daemon {
-    config: Config,
-    service: Arc<WalletService>,
-    syncer: Arc<StandaloneSyncer>,
-    tip: Arc<CachedNodeTip>,
-    host: Option<WalletHost>,
+    context: seal::OpenContext,
+    opened: Option<seal::Opened>,
     local_api_key: ApiKey,
+}
+
+impl Daemon {
+    /// True when the daemon starts sealed and waits for a password.
+    pub fn is_sealed(&self) -> bool {
+        self.opened.is_none()
+    }
+}
+
+/// A daemon assembled already open, with its parts exposed (tests).
+#[cfg(test)]
+pub(crate) struct TestDaemon {
+    pub(crate) config: Config,
+    pub(crate) service: Arc<ergo_wallet_service::WalletService>,
+    pub(crate) syncer: Arc<StandaloneSyncer>,
+    pub(crate) tip: Arc<CachedNodeTip>,
+    pub(crate) host: Option<WalletHost>,
+    pub(crate) local_api_key: ApiKey,
+}
+
+#[cfg(test)]
+impl From<TestDaemon> for Daemon {
+    fn from(parts: TestDaemon) -> Self {
+        Self {
+            context: seal::OpenContext {
+                config: parts.config,
+                chain: None,
+                tip: parts.tip,
+            },
+            opened: Some(seal::Opened {
+                service: parts.service,
+                syncer: parts.syncer,
+                host: parts.host,
+            }),
+            local_api_key: parts.local_api_key,
+        }
+    }
 }
 
 /// Blocking startup half. **Call this from outside any Tokio runtime** — see
@@ -103,18 +138,6 @@ pub fn prepare(config: LoadedConfig) -> Result<Daemon, DaemonError> {
     }
     ownership::claim(&config.config.data_dir, config.config.mode)?;
     ownership::claim_network(&config.config.data_dir, config.config.network)?;
-    let mut store = RedbWalletStore::open_standalone(config.config.data_dir.join("wallet.redb"))?;
-    if config.config.mode == WalletMode::Seed {
-        store = store.rebuild_history_on_key_additions();
-    }
-    let store = Arc::new(store);
-    if config.config.mode == WalletMode::WatchOnly {
-        let path = config.config.descriptor_file.as_deref().ok_or_else(|| {
-            ConfigError::Invalid("watch_only mode requires descriptor_file".into())
-        })?;
-        let descriptors = descriptor::parse_file(path, config.config.network)?;
-        descriptor::import(store.as_ref(), &descriptors)?;
-    }
     let chain = Arc::new(match &config.config.node_ca_file {
         Some(path) => HttpChainClient::with_trusted_roots(
             config.config.node_url.clone(),
@@ -124,43 +147,21 @@ pub fn prepare(config: LoadedConfig) -> Result<Daemon, DaemonError> {
         None => HttpChainClient::new(config.config.node_url.clone(), config.api_key.clone())?,
     });
     let tip = Arc::new(CachedNodeTip::new(chain.clone()));
-    let service = Arc::new(WalletService::new(store.clone(), chain.clone()));
-    let host = if config.config.mode == WalletMode::Seed {
-        let spending = Arc::new(RemoteSpendingAccess::new(
-            store.clone(),
-            chain,
-            config.config.network,
-        ));
-        Some(WalletHost::with_spending(
-            store.clone(),
-            service.clone(),
-            SpendingCapabilities {
-                chain: spending.clone(),
-                preparation: spending.clone(),
-                submitter: spending.clone(),
-                mempool: spending,
-            },
-            &config.config.data_dir,
-            config.config.network,
-        )?)
-    } else {
-        None
-    };
-    let syncer = Arc::new(StandaloneSyncer::new(
-        service.clone(),
-        SyncConfig {
-            batch: config.config.sync_batch,
-            page: config.config.blocks_page,
-            ..SyncConfig::default()
-        },
-        tip.clone(),
-    ));
-    Ok(Daemon {
+    let context = seal::OpenContext {
         config: config.config,
-        service,
-        syncer,
+        chain: Some(chain),
         tip,
-        host,
+    };
+    let opened = match seal::start(&context)? {
+        seal::Start::Open(opened) => Some(opened),
+        seal::Start::Sealed => {
+            tracing::info!("wallet database sealed; unlock (seed) or unseal (watch-only) to start");
+            None
+        }
+    };
+    Ok(Daemon {
+        context,
+        opened,
         local_api_key: config.local_api_key,
     })
 }
@@ -178,50 +179,87 @@ pub async fn run(daemon: Daemon) -> Result<(), DaemonError> {
 /// harness down with the daemon. `shutdown` takes over the `run_listeners`
 /// select arm, so the rest of the supervision path — the blocking sync worker,
 /// the listener join set, and the socket guard cleanup — is identical to
-/// production.
+/// production. `POST /api/v1/wallet/seal` also ends the run.
 pub async fn run_until<F>(daemon: Daemon, shutdown: F) -> Result<(), DaemonError>
 where
     F: std::future::Future<Output = Result<(), DaemonError>>,
 {
-    let Daemon {
-        config,
-        service,
-        syncer,
-        tip,
-        host,
-        local_api_key,
-    } = daemon;
-    run_listeners(
-        syncer,
-        &config,
-        ApiContext {
-            service,
-            network: config.network,
-            tip,
-            tip_max_age: ApiContext::default_tip_max_age(config.sync_interval),
-        },
-        host,
-        local_api_key,
-        shutdown,
-    )
-    .await
+    run_listeners(daemon, shutdown).await
 }
 
-async fn run_listeners<F>(
-    syncer: Arc<StandaloneSyncer>,
+type CurrentRouter = Arc<parking_lot::RwLock<axum::Router>>;
+
+/// Forward to the router of the current state: sealed, then unsealed.
+async fn dispatch(
+    axum::extract::State(current): axum::extract::State<CurrentRouter>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let router = current.read().clone();
+    match tower::ServiceExt::oneshot(router, request).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    }
+    .into_response()
+}
+
+fn unsealed_router(
     config: &Config,
-    context: ApiContext,
-    host: Option<WalletHost>,
-    local_api_key: ApiKey,
-    shutdown: F,
-) -> Result<(), DaemonError>
+    tip: &Arc<CachedNodeTip>,
+    opened: &seal::Opened,
+    gate: &Arc<seal::Gate>,
+    key: &ApiKey,
+) -> axum::Router {
+    let context = ApiContext {
+        service: opened.service.clone(),
+        network: config.network,
+        tip: tip.clone(),
+        tip_max_age: ApiContext::default_tip_max_age(config.sync_interval),
+    };
+    let router = match &opened.host {
+        Some(host) => api::seed_router(context, host.clone(), key.clone()),
+        None => api::watch_router(context, key.clone()),
+    };
+    router.merge(seal::seal_router(gate.clone(), key.clone()))
+}
+
+async fn run_listeners<F>(daemon: Daemon, shutdown: F) -> Result<(), DaemonError>
 where
     F: std::future::Future<Output = Result<(), DaemonError>>,
 {
-    let router = match &host {
-        Some(host) => api::seed_router(context, host.clone(), local_api_key),
-        None => api::watch_router(context, local_api_key),
-    };
+    let Daemon {
+        context,
+        opened,
+        local_api_key,
+    } = daemon;
+    let config = context.config.clone();
+    let tip = context.tip.clone();
+    let (unsealed_tx, mut unsealed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (seal_tx, mut seal_rx) = tokio::sync::watch::channel(false);
+    let gate = seal::Gate::new(context, opened.clone(), unsealed_tx, seal_tx);
+    let current: CurrentRouter = Arc::new(parking_lot::RwLock::new(match &opened {
+        Some(opened) => unsealed_router(&config, &tip, opened, &gate, &local_api_key),
+        None => seal::sealed_router(gate.clone(), local_api_key.clone()),
+    }));
+    {
+        // Weak references: the router owns the gate, so strong ones would
+        // form a cycle that keeps the database open after shutdown.
+        let (current, config, tip, key) = (
+            Arc::downgrade(&current),
+            config.clone(),
+            tip.clone(),
+            local_api_key.clone(),
+        );
+        let weak = Arc::downgrade(&gate);
+        gate.set_installer(Box::new(move |opened| {
+            if let (Some(gate), Some(current)) = (weak.upgrade(), current.upgrade()) {
+                *current.write() = unsealed_router(&config, &tip, opened, &gate, &key);
+            }
+        }));
+    }
+    let router = axum::Router::new()
+        .fallback(dispatch)
+        .with_state(current.clone());
     let (api_shutdown_tx, api_shutdown_rx) = tokio::sync::watch::channel(());
     let mut listeners = tokio::task::JoinSet::new();
     let tcp_listener = if let Some(address) = config.tcp_fallback {
@@ -265,15 +303,55 @@ where
             "no local API listener configured".to_string(),
         ));
     }
-    let result = supervise_sync(
-        syncer,
-        config,
-        host,
-        Some(api_shutdown_tx),
-        listeners,
-        shutdown,
-    )
-    .await;
+    tokio::pin!(shutdown);
+    let opened = match opened {
+        Some(opened) => Ok(Some(opened)),
+        None => tokio::select! {
+            result = &mut shutdown => result.map(|()| None),
+            _ = seal_rx.changed() => Ok(None),
+            Some(opened) = unsealed_rx.recv() => Ok(Some(opened)),
+            Some(result) = listeners.join_next() => {
+                Err(match result {
+                    Ok(Ok(())) => DaemonError::Server("local API listener stopped".to_string()),
+                    Ok(Err(error)) => error,
+                    Err(error) => DaemonError::Server(error.to_string()),
+                })
+            }
+        },
+    };
+    let result = match opened {
+        Err(error) => Err(error),
+        Ok(None) => {
+            let _ = api_shutdown_tx.send(());
+            let deadline = tokio::time::Instant::now() + config.shutdown_timeout;
+            if tokio::time::timeout_at(deadline, async {
+                while listeners.join_next().await.is_some() {}
+            })
+            .await
+            .is_err()
+            {
+                listeners.shutdown().await;
+            }
+            Ok(())
+        }
+        Ok(Some(opened)) => {
+            let sealed = async move {
+                tokio::select! {
+                    result = shutdown => result,
+                    _ = seal_rx.changed() => Ok(()),
+                }
+            };
+            supervise_sync(
+                opened.syncer,
+                &config,
+                opened.host,
+                Some(api_shutdown_tx),
+                listeners,
+                sealed,
+            )
+            .await
+        }
+    };
     #[cfg(unix)]
     if let Some(mut guard) = unix_guard {
         guard.cleanup();
@@ -519,10 +597,12 @@ pub fn init_logging() {
 mod review_tests {
     use super::*;
     use crate::engine_chain::LifecycleChainAccess;
+    use crate::sync::SyncConfig;
     use ergo_wallet_service::{
         BlocksSinceRequest, BlocksSinceResponse, ChainBlock, ChainClient, ChainClientError,
         ChainSnapshot, CommittedTip, ForwardBlocksSince, SubmitRequest, SubmitResponse, UtxoLookup,
     };
+    use ergo_wallet_service::{RedbWalletStore, WalletService};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Condvar, Mutex};
     use std::time::Duration;
@@ -599,7 +679,7 @@ mod review_tests {
         }
     }
 
-    fn daemon(dir: &tempfile::TempDir, chain: Arc<TestChain>) -> Daemon {
+    fn daemon(dir: &tempfile::TempDir, chain: Arc<TestChain>) -> TestDaemon {
         let store =
             Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
         let tip = Arc::new(CachedNodeTip::new(chain.clone()));
@@ -613,7 +693,7 @@ mod review_tests {
             },
             tip.clone(),
         ));
-        Daemon {
+        TestDaemon {
             config: Config {
                 mode: WalletMode::WatchOnly,
                 network: config::Network::Mainnet,
@@ -632,6 +712,8 @@ mod review_tests {
                 allowed_hosts: Vec::new(),
                 lock_policy: config::LockPolicy::default(),
                 lock_memory: false,
+                unseal_key_file: None,
+                multisig_nonces: crate::config::NonceHolder::Daemon,
             },
             service,
             syncer,
@@ -641,7 +723,7 @@ mod review_tests {
         }
     }
 
-    async fn run_without_binding<F>(daemon: Daemon, shutdown: F) -> Result<(), DaemonError>
+    async fn run_without_binding<F>(daemon: TestDaemon, shutdown: F) -> Result<(), DaemonError>
     where
         F: std::future::Future<Output = Result<(), DaemonError>>,
     {
@@ -665,7 +747,7 @@ mod review_tests {
         let daemon = daemon(&dir, chain.clone());
         let service = daemon.service.clone();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(run_until(daemon, async {
+        let task = tokio::spawn(run_until(daemon.into(), async {
             shutdown_rx.await.unwrap();
             Ok(())
         }));

@@ -160,6 +160,35 @@ impl AttemptLimiter {
     }
 }
 
+/// The unlock failed-attempt budget for a host that checks a wallet password
+/// before its engine exists (a sealed daemon). It shares the engine's policy
+/// and, through the same [`AttemptJournal`], its persisted state.
+pub struct UnlockThrottle(AttemptLimiter);
+
+impl UnlockThrottle {
+    /// Load the budget from `journal`.
+    pub fn new(journal: std::sync::Arc<dyn AttemptJournal>) -> Self {
+        Self(AttemptLimiter::with_journal(journal, unix_now()))
+    }
+
+    /// Refuse while locked out ([`WalletAdminError::RateLimited`]).
+    pub fn check(&mut self) -> Result<(), WalletAdminError> {
+        self.0
+            .gate_at(unix_now())
+            .map_err(|()| WalletAdminError::RateLimited)
+    }
+
+    /// Record a wrong password.
+    pub fn record_failure(&mut self) {
+        self.0.record_failure_at(unix_now());
+    }
+
+    /// Record a correct password.
+    pub fn record_success(&mut self) {
+        self.0.record_success();
+    }
+}
+
 impl WalletEngine {
     pub fn status(&self) -> Result<WalletStatus, WalletAdminError> {
         let storage = self.storage.read();

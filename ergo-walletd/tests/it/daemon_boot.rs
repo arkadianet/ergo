@@ -91,6 +91,7 @@ fn load(config_path: &Path) -> LoadedConfig {
         blocks_page: None,
         unix_socket: None,
         tcp_fallback: None,
+        unseal_key_file: None,
     })
     .unwrap()
 }
@@ -98,6 +99,23 @@ fn load(config_path: &Path) -> LoadedConfig {
 /// One blocking authenticated HTTP/1.1 GET over the daemon's Unix socket.
 fn socket_get(socket: &Path, path: &str) -> String {
     socket_get_with(socket, path, Some(LOCAL_KEY))
+}
+
+/// One authenticated HTTP/1.1 POST with a JSON body over the Unix socket.
+fn socket_post(socket: &Path, path: &str, body: &str) -> String {
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST {path} HTTP/1.1\r\nHost: local\r\napi_key: {LOCAL_KEY}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
 }
 
 fn socket_get_with(socket: &Path, path: &str, key: Option<&str>) -> String {
@@ -142,9 +160,10 @@ fn daemon_prepares_outside_the_runtime_and_serves_its_read_api() {
         dir.path().join("data").is_dir(),
         "prepare created the data dir"
     );
+    assert!(daemon.is_sealed(), "a watch wallet starts sealed");
     assert!(
-        dir.path().join("data").join("wallet.redb").is_file(),
-        "prepare opened the wallet database"
+        !dir.path().join("data").join("wallet.redb").exists(),
+        "a sealed daemon does not open its database"
     );
     assert!(!socket.exists(), "the socket is bound by the async half");
 
@@ -180,7 +199,21 @@ fn daemon_prepares_outside_the_runtime_and_serves_its_read_api() {
     let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "the read API must not be world-accessible");
 
-    // --- step 4: the read API answers, and the blocking sync loop reaches the
+    // --- step 4: sealed until the operator passphrase is given ---
+    let sealed = socket_get(&socket, "/api/v1/wallet/status");
+    assert!(sealed.starts_with("HTTP/1.1 503"), "{sealed}");
+    assert!(sealed.contains("wallet_sealed"), "{sealed}");
+    let short = socket_post(&socket, "/api/v1/wallet/unseal", r#"{"pass":"short"}"#);
+    assert!(short.starts_with("HTTP/1.1 400"), "{short}");
+    let unsealed = socket_post(
+        &socket,
+        "/api/v1/wallet/unseal",
+        r#"{"pass":"watch-only passphrase"}"#,
+    );
+    assert!(unsealed.starts_with("HTTP/1.1 200"), "{unsealed}");
+    assert!(dir.path().join("data").join("data-key.json").is_file());
+
+    // --- step 5: the read API answers, and the blocking sync loop reaches the
     // real node's tip ---
     loop {
         let status = body(&socket_get(&socket, "/api/v1/wallet/status"));
@@ -261,7 +294,18 @@ fn daemon_prepares_outside_the_runtime_and_serves_its_read_api() {
         assert!(refused.starts_with("HTTP/1.1 404"), "{path}: {refused}");
     }
 
-    // --- step 5: programmatic shutdown, then the socket guard cleanup ---
+    // The database on disk is ciphertext: neither redb's magic nor the
+    // tracked public key appears in it.
+    let raw = std::fs::read(dir.path().join("data").join("wallet.redb")).unwrap();
+    assert!(!raw.starts_with(b"redb"));
+    let pubkey =
+        hex::decode("0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2").unwrap();
+    assert!(raw.windows(pubkey.len()).all(|window| window != pubkey));
+    assert!(raw
+        .windows(address.len())
+        .all(|window| window != address.as_bytes()));
+
+    // --- step 6: programmatic shutdown, then the socket guard cleanup ---
     stop_tx.send(()).unwrap();
     worker
         .join()
@@ -319,6 +363,7 @@ fn daemon_refuses_a_group_readable_api_key_file_and_redacts_its_value() {
         blocks_page: None,
         unix_socket: None,
         tcp_fallback: None,
+        unseal_key_file: None,
     })
     .expect_err("a group-readable key file is a load error");
     assert!(

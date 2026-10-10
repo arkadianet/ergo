@@ -36,15 +36,15 @@ pub const MAX_SYNC_BLOCKS: u32 = 1024;
 /// Blocks requested per `blocks-since` HTTP call, by default.
 ///
 /// This is deliberately **not** the apply budget. The adapter refuses any
-/// response body over `MAX_RESPONSE_BODY_BYTES` (8 MiB), and the chain
-/// protocol carries every output box as a hex string, so a page's JSON body
-/// costs roughly twice the bytes of the blocks it carries. Consensus bounds one
-/// block's `BlockTransactions` section by the voted `maxBlockSize` parameter,
-/// and this node documents a `maxBlockSize = 2097152` (2 MiB) vote, so one
-/// maxed-out block is already 4 MiB of hex: two of them are 8 MiB *before* any
-/// JSON envelope, so a page of `2` is **not provably** under the cap while a
-/// page of `1` is — 4 MiB plus an envelope of a few hundred kilobytes, less
-/// than half the cap. That is the whole reason this is `1` and not `2`: the
+/// response body over `MAX_RESPONSE_BODY_BYTES` (16 MiB), and the chain
+/// protocol carries every transaction and every output box as hex strings, so
+/// a page's JSON body costs roughly four times the bytes of the blocks it
+/// carries. Consensus bounds one block's `BlockTransactions` section by the
+/// voted `maxBlockSize` parameter, and this node documents a
+/// `maxBlockSize = 2097152` (2 MiB) vote, so one maxed-out block is already
+/// 8 MiB of hex: two of them are 16 MiB *before* any JSON envelope, so a page
+/// of `2` is **not provably** under the cap while a page of `1` is — 8 MiB plus
+/// an envelope of a few hundred kilobytes, about half the cap. That is the whole reason this is `1` and not `2`: the
 /// safe default is the largest page whose *worst legal* body still fits, and a
 /// real mainnet page is far smaller. A page sized from `sync_batch` (the old
 /// behaviour: `min(batch, remaining)`) could ask for up to 1024 blocks and

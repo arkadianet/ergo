@@ -191,6 +191,7 @@ pub(crate) fn transaction_generate_unsigned_impl(
 
 /// `TransactionSign` path: decode an unsigned tx hex, sign it, self-verify.
 /// Works with external secrets even when the wallet is locked.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn transaction_sign_impl(
     unsigned_tx_hex: &str,
     external_secret_dtos: Option<&[ergo_wallet_protocol::scala::sending::ExternalSecretDto]>,
@@ -199,7 +200,16 @@ pub(crate) fn transaction_sign_impl(
     state: &RwLock<crate::state::WalletState>,
     store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
+    custody: Option<&dyn super::NonceCustody>,
 ) -> Result<Vec<u8>, WalletAdminError> {
+    let hints = hints
+        .map(|dto| {
+            tx_hints_bag_from_dto(dto, custody).map_err(|e| match e {
+                WalletAdminError::BadRequest(_) => e,
+                other => WalletAdminError::Internal(format!("decode hints: {other:?}")),
+            })
+        })
+        .transpose()?;
     let snapshot = chain.signing_view().map_err(map_chain_error)?;
     transaction_sign_impl_with_snapshot(
         unsigned_tx_hex,
@@ -215,7 +225,7 @@ pub(crate) fn transaction_sign_impl(
 pub(crate) fn transaction_sign_impl_with_snapshot(
     unsigned_tx_hex: &str,
     external_secret_dtos: Option<&[ergo_wallet_protocol::scala::sending::ExternalSecretDto]>,
-    hints: Option<&ergo_wallet_protocol::scala::sending::TxHintsBagDto>,
+    hints: Option<ergo_wallet::proving::hints::TransactionHintsBag>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     _state: &RwLock<crate::state::WalletState>,
     store: &dyn crate::wallet::WalletStore,
@@ -235,13 +245,7 @@ pub(crate) fn transaction_sign_impl_with_snapshot(
         .map(decode_external_secret)
         .collect::<Result<_, _>>()?;
 
-    let hints_bag: ergo_wallet::proving::hints::TransactionHintsBag = match hints {
-        Some(dto) => tx_hints_bag_from_dto(dto).map_err(|e| match e {
-            WalletAdminError::BadRequest(_) => e,
-            other => WalletAdminError::Internal(format!("decode hints: {other:?}")),
-        })?,
-        None => ergo_wallet::proving::hints::TransactionHintsBag::empty(),
-    };
+    let hints_bag = hints.unwrap_or_else(ergo_wallet::proving::hints::TransactionHintsBag::empty);
 
     let storage = storage.read();
     let signed_tx = sign_unsigned_tx(
@@ -538,6 +542,7 @@ impl WalletEngine {
             &self.state,
             self.store.as_ref(),
             self.chain.as_ref(),
+            self.nonce_custody.as_deref(),
         );
         result.map(|signed_tx_bytes| {
             use ergo_wallet_protocol::scala::sending::{SignedTxDto, TransactionSignResponse};

@@ -364,10 +364,14 @@ impl InProcessChainClient {
                         })
                     })
                     .collect::<Result<Vec<_>, ChainClientError>>()?;
+                let mut writer = ergo_primitives::writer::VlqWriter::new();
+                ergo_ser::transaction::write_transaction(&mut writer, &transaction)
+                    .map_err(|error| Self::state_error("transaction encode", error))?;
                 Ok(ChainTransaction {
                     tx_id,
                     inputs,
                     outputs,
+                    bytes: Some(writer.result().to_vec()),
                 })
             })
             .collect::<Result<Vec<_>, ChainClientError>>()?;
@@ -415,6 +419,9 @@ impl InProcessChainClient {
                             bytes: output.box_bytes,
                         })
                         .collect(),
+                    // State rows hold wallet-relevant parts only; a remote
+                    // consumer cannot bind such a block to its header.
+                    bytes: None,
                 })
             })
             .collect::<Result<Vec<_>, ChainClientError>>()?;
@@ -804,6 +811,7 @@ fn wire_blocks_since(
                                             bytes: hex::encode(output.bytes),
                                         })
                                         .collect(),
+                                    bytes: transaction.bytes.map(hex::encode),
                                 })
                                 .collect(),
                         })

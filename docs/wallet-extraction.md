@@ -43,7 +43,8 @@ branch to main and choosing a release/cutover are subsequent delivery work.
   and defaults to an authenticated watch-only local read API. Opt-in seed mode hosts
   `WalletEngine` for lifecycle, selection, construction, signing, sending,
   scans, rescans and finite private mining jobs through an authenticated API. Both modes authenticate header identity and box
-  IDs, while trusting the node for chain validity and transaction membership.
+  IDs, check every header's proof of work and bind every block's transactions
+  to its header, while trusting the node for chain selection and difficulty.
   Watch reads and short diagnostic projections remain confirmed-only. Seed
   routes use the shared engine and coherently captured node/pool state.
 
@@ -84,7 +85,9 @@ node requests; `local_api_key_file` authenticates local wallet operations.
 An outbound scoped node credential needs `wallet` and, for private mining jobs,
 `operator`. An `admin` credential or the legacy master key also authorizes these
 requests.
-Seed wallets restart locked. Persisted public keys continue syncing while locked.
+Seed wallets restart sealed: `wallet.redb` is encrypted at rest and its key is
+released only by the wallet password. Once unsealed, persisted public keys
+continue syncing while spending is locked.
 The durable `wallet-mode` and `wallet-network` markers prevent incompatible
 ownership and network changes.
 
@@ -171,8 +174,9 @@ and copies supported wallet tables into a fresh `wallet.redb`. It preserves
 keys, derivation head, change address, balances/history, scans, discovery
 coverage and applied-header anchors; chain databases are not copied. It copies
 the original encrypted secret bytes without decrypting them; the daemon's first
-successful unlock rewrites that copy in the version-2 Argon2id keystore format
-and leaves the node's file untouched. Typed row
+successful unlock rewrites that copy in the version-2 Argon2id keystore format,
+seals a new database key into it and encrypts the copied `wallet.redb`, leaving
+the node's files untouched. Typed row
 comparison and source/secret byte checks run before publication. Unknown wallet
 tables, unfinished discovery work, invalid anchors, scheduler-owned jobs without
 explicit quarantine, and existing paths fail closed. `migration.json` records
