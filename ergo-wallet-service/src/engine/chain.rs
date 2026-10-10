@@ -307,6 +307,77 @@ pub trait WalletChainAccess: Send + Sync {
     }
 }
 
+/// A wallet-less chain accessor (such as the node's) with the wallet scan
+/// height read from a wallet store's cursor. Every other read goes to the
+/// chain accessor.
+pub struct StoreCursorChain {
+    chain: std::sync::Arc<dyn WalletChainAccess>,
+    store: std::sync::Arc<dyn crate::wallet::WalletStore>,
+}
+
+impl StoreCursorChain {
+    pub fn new(
+        chain: std::sync::Arc<dyn WalletChainAccess>,
+        store: std::sync::Arc<dyn crate::wallet::WalletStore>,
+    ) -> Self {
+        Self { chain, store }
+    }
+}
+
+impl WalletChainAccess for StoreCursorChain {
+    fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
+        self.store
+            .read()
+            .and_then(|read| read.scan_cursor())
+            .map(|cursor| cursor.map_or(0, |cursor| cursor.height))
+            .map_err(|error| ChainAccessError::State(error.to_string()))
+    }
+    fn tip_height(&self) -> Result<u32, ChainAccessError> {
+        self.chain.tip_height()
+    }
+    fn is_pruned(&self) -> bool {
+        self.chain.is_pruned()
+    }
+    fn reserved_wallet_inputs(
+        &self,
+    ) -> Result<std::collections::BTreeSet<[u8; 32]>, WalletAdminError> {
+        self.chain.reserved_wallet_inputs()
+    }
+    fn reemission_rules(&self) -> Option<&ReemissionRuleInputs> {
+        self.chain.reemission_rules()
+    }
+    fn reemission_rules_owned(&self) -> Option<ReemissionRuleInputs> {
+        self.chain.reemission_rules_owned()
+    }
+    fn read_block_at(&self, height: u32) -> Result<Option<RescanBlock>, RescanReadError> {
+        self.chain.read_block_at(height)
+    }
+    fn read_block_at_supported(&self) -> Result<bool, RescanReadError> {
+        self.chain.read_block_at_supported()
+    }
+    fn signing_view(&self) -> Result<Box<dyn SigningView>, ChainAccessError> {
+        self.chain.signing_view()
+    }
+    fn committed_tip(&self) -> Result<Option<CommittedTip>, ChainAccessError> {
+        self.chain.committed_tip()
+    }
+    fn ensure_view_current(&self, view: &dyn SigningView) -> Result<(), ChainAccessError> {
+        self.chain.ensure_view_current(view)
+    }
+    fn build_signing_context(&self) -> Result<BlockchainStateContext, ChainAccessError> {
+        self.chain.build_signing_context()
+    }
+    fn build_signing_params(&self) -> Result<BlockchainParameters, ChainAccessError> {
+        self.chain.build_signing_params()
+    }
+    fn build_protocol_params(&self) -> Result<ProtocolParams, ChainAccessError> {
+        self.chain.build_protocol_params()
+    }
+    fn lookup_utxo(&self, box_id: &[u8; 32]) -> Result<Option<ErgoBox>, ChainAccessError> {
+        self.chain.lookup_utxo(box_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

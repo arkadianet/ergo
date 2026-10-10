@@ -29,7 +29,6 @@ mod toml_sections;
 pub use cli::{ApiKeyCommand, Cli, Command};
 pub use resolved::{
     LoggingConfig, LoggingFileConfig, LoggingFormat, NodeConfig, RedbCacheBudgets, StateType,
-    WalletMode,
 };
 
 #[cfg(test)]

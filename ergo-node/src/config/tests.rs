@@ -395,28 +395,15 @@ fn api_non_loopback_bind_rejected_without_public_bind() {
 }
 
 #[test]
-fn wallet_expose_private_keys_defaults_false() {
-    let path = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n");
-    let cli = minimal_cli(Some(&path));
-    let cfg = NodeConfig::load(cli).expect("default config must load");
-    assert!(
-        !cfg.wallet_expose_private_keys,
-        "absent [wallet] expose_private_keys must default to false"
-    );
-}
-
-#[test]
-fn wallet_expose_private_keys_explicit_true_threaded() {
+fn retired_embedded_wallet_keys_still_load() {
+    // Configs written for the embedded wallet keep loading after an
+    // upgrade; both keys are ignored with a warning.
     let path = write_toml(
         "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
-         [wallet]\nexpose_private_keys = true\n",
+         [wallet]\nmode = \"embedded\"\nexpose_private_keys = true\n",
     );
-    let cli = minimal_cli(Some(&path));
-    let cfg = NodeConfig::load(cli).expect("explicit true must load");
-    assert!(
-        cfg.wallet_expose_private_keys,
-        "explicit [wallet] expose_private_keys = true must thread to NodeConfig"
-    );
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("retired keys load");
+    assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:9090");
 }
 
 #[test]
@@ -2625,10 +2612,9 @@ fn reemission_check_defaults_and_mining_override() {
 }
 
 #[test]
-fn wallet_mode_defaults_to_embedded() {
+fn wallet_daemon_address_has_a_default() {
     let path = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n");
-    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("default wallet mode loads");
-    assert_eq!(cfg.wallet_mode, WalletMode::Embedded);
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("default config loads");
     assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:9090");
 }
 
@@ -2639,7 +2625,6 @@ fn wallet_mode_external_accepts_daemon_address() {
          [wallet]\nmode = \"external\"\ndaemon_address = \"http://127.0.0.1:19090\"\n",
     );
     let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("external wallet mode loads");
-    assert_eq!(cfg.wallet_mode, WalletMode::External);
     assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:19090");
 }
 

@@ -156,10 +156,8 @@ fn process_header_modifier_batch(
         })
         .collect();
 
-    let wallet_wiring = state
-        .wallet_hook
-        .as_deref()
-        .map(crate::node::wallet_bridge::WalletStateHook::wiring);
+    // The node hosts no wallet: no wallet rows join the chain commit.
+    let wallet_wiring = None;
     let mut all_actions = state.executor.execute_all(
         batch_actions,
         &mut state.store,
@@ -799,10 +797,8 @@ fn inject_local_full_block(
     // calls `process_block`. If the local block isn't at tip+1 yet,
     // no-op — `try_apply_next_blocks` will pick it up on the next
     // chain advance.
-    let wallet_wiring = state
-        .wallet_hook
-        .as_deref()
-        .map(crate::node::wallet_bridge::WalletStateHook::wiring);
+    // The node hosts no wallet: no wallet rows join the chain commit.
+    let wallet_wiring = None;
     let follow_ups = state.executor.execute(
         Action::AssembleBlock {
             header_id: header_id_bytes,

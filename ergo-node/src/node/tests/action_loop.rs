@@ -159,7 +159,6 @@ async fn action_loop_services_queued_api_before_ready_peer_flood() {
         None,
         shutdown_rx,
         1000,
-        0,
     ));
     tokio::time::timeout(Duration::from_secs(2), sent.notified())
         .await

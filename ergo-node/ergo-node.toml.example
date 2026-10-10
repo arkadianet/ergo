@@ -228,17 +228,19 @@ peer_details.reverse_dns = false
 # enabled = false
 
 [wallet]
-# mode = "embedded"
+# The wallet runs in ergo-walletd (docs/wallet-setup.md); the node answers
+# its former wallet routes with `wallet_moved` and this address.
 # daemon_address = "http://127.0.0.1:9090"
 
 [mining]
 # External-miner API (GET /mining/candidate + POST /mining/solution).
 # enabled = false
 
-# Compressed secp256k1 reward key (66 hex chars). Omit to resolve the
-# wallet's EIP-3 first-address key lazily, mirroring Scala's two-tier
-# resolution — candidate serving then waits until the wallet is
-# initialized and unlocked once. Required when [wallet] mode = "external".
+# Reward key, as a P2PK address from any wallet (`ergo-walletd reward-key`
+# prints one) or as a compressed secp256k1 key (66 hex chars). One of the
+# two is required, unless the data directory still holds a wallet from a
+# release that hosted it: its first address is then used and logged.
+# miner_reward_address = "9..."
 # miner_public_key_hex = "02..."
 
 # Minimum interval (ms) between same-parent mempool-refresh signals.

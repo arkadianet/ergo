@@ -1197,6 +1197,7 @@ dependencies = [
 name = "ergo-wallet-service"
 version = "0.12.3"
 dependencies = [
+ "aes-gcm",
  "async-trait",
  "bincode",
  "ergo-chain-spec",
@@ -1208,13 +1209,16 @@ dependencies = [
  "ergo-wallet",
  "ergo-wallet-protocol",
  "hex",
+ "hmac",
  "k256",
  "parking_lot",
+ "rand 0.8.6",
  "redb 2.6.3",
  "redb 4.3.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "subtle",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -1225,7 +1229,6 @@ dependencies = [
 name = "ergo-walletd"
 version = "0.12.3"
 dependencies = [
- "aes-gcm",
  "async-trait",
  "axum",
  "base64",
@@ -1247,7 +1250,6 @@ dependencies = [
  "ergo-wallet-protocol",
  "ergo-wallet-service",
  "hex",
- "hmac",
  "hyper",
  "hyper-util",
  "parking_lot",
