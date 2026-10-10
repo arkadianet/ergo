@@ -47,7 +47,9 @@ the installed UTXO root** against an independently trusted node. Genesis sync
 sets both bootstrap flags false and takes hours to days. Explorer and full
 mining also need historical index catch-up.
 
-Mining requires `--reward wallet` or `--reward public-key`. Wallet rewards omit
+Mining requires `--reward address`, `--reward wallet` or `--reward public-key`.
+Address rewards take `--miner-reward-address`, a P2PK address from any wallet,
+checked against the selected network. Wallet rewards omit
 `miner_public_key_hex`; initialize and **unlock** the node wallet in the
 dashboard before work is served. Public-key rewards require
 `--miner-public-key HEX`, a valid 33-byte compressed secp256k1 point beginning
@@ -649,7 +651,8 @@ either way.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Enables the external-miner subsystem and mounts `/mining/*`. Rejected when `state_type = "digest"` (candidate generation needs UTXO state). CLI flag `--mining-enabled` forces it on. |
-| `miner_public_key_hex` | string (hex) | none | 33-byte compressed secp256k1 public key (66 hex chars) for the reward output. **Optional in embedded mode**: when set, it is the pinned reward pubkey; when omitted, the wallet's EIP-3 first-address key is resolved at candidate time. It is **required when `[wallet] mode = "external"` and mining is enabled**, because external mode has no wallet tables to resolve. A value that is present must be well-formed (66 hex chars → 33 bytes) or load fails. CLI flag: `--mining-public-key`. |
+| `miner_public_key_hex` | string (hex) | none | 33-byte compressed secp256k1 public key (66 hex chars) for the reward output. **Optional in embedded mode**: when set, it is the pinned reward pubkey; when omitted, the wallet's EIP-3 first-address key is resolved at candidate time. When `[wallet] mode = "external"` and mining is enabled without a key, boot takes the first-address key of a legacy embedded wallet still in `state.redb` and logs how to pin it; with no such wallet, boot fails. A value that is present must be well-formed (66 hex chars → 33 bytes) or load fails. CLI flag: `--mining-public-key`. |
+| `miner_reward_address` | string | none | P2PK reward address, as wallets display it. Decoded into the reward key and checked against the node's `network`; setting it together with a different `miner_public_key_hex` is a load error. See [Wallet setup](wallet-setup.md). |
 | `block_candidate_generation_interval_ms` | u64 | `250` | Minimum interval (ms) between same-parent mempool-refresh signals; must be at least 50. The first pool change after a quiet interval signals immediately. Changes within the interval share a deadline and refresh the latest pool snapshot when it expires, independently of the mempool polling tick. Applied-parent changes bypass this interval; header-only changes do not rebuild work once mining has started. Lower values refresh transaction contents sooner but increase build load and churn of the 16 retained templates. |
 | `use_external_miner` | bool | `true` | Must be `true` — an internal CPU miner is not supported, so `false` is rejected at load. |
 | `candidate_base_cache` | bool | `false` | With the default `false`, candidate proofs load only authenticated AVL operation paths from the committed snapshot and retain no full-tree graph between builds. Legacy v1 nodes without child labels may require subtree reads. Setting `true` enables the alternative cache of the hydrated AVL working set between candidate builds, keyed on the committed tip. Same-tip rebuilds reuse the tree and loaded paths; transaction validation and proof generation for changed transaction sets still run. Independently of this setting, the worker can reuse a prior state root and proof for an identical applied parent and ordered transaction bytes after fresh transaction validation. When the committed tip moves, the engine walks back at most six headers to the cached tip or to one of up to three retained ancestor trees, and replays the stored blocks from there. It checks each block's state root against its header and the final root against the committed state. This covers growth by a few blocks and reorgs up to three deep. Full rehydration remains the fallback beyond that window, and on missing data, decode or prover errors, or digest mismatches. Holds the full UTXO AVL node graph resident — multi-GB on a mainnet archival node, scaling with the UTXO-set size — so enable it only on a mining node with RAM headroom. |
@@ -773,9 +776,9 @@ checks and are enforced at load:
   (the eligible-box scan reads the extra-index).
 - `[voting.targets]` set with `[mining] enabled = false` is rejected — the
   votes are only ever cast by blocks this node mines.
-- `[wallet] mode = "external"` with `[mining] enabled = true` requires
-  `[mining].miner_public_key_hex`; wallet-backed reward-key resolution is
-  available only in embedded mode.
+- `[wallet] mode = "external"` with `[mining] enabled = true` and no reward
+  key boots only when a legacy embedded wallet in `state.redb` supplies one;
+  pin it with `miner_reward_address`.
 
 ## Minimal example
 
@@ -1136,6 +1139,9 @@ the running host.
 | `--tcp-fallback <addr>` | socket addr | — | Overrides `tcp_fallback`. |
 | `--unseal-key-file <path>` | path | — | Overrides `[security] unseal_key_file`. |
 | `export-unseal-key` | subcommand | — | Print the wallet database key as hex, reading the password or passphrase from standard input. |
+| `init` | subcommand | — | `--config <path> --data-dir <path> [--node-url] [--network] [--tcp] [--mining-jobs]`: write a seed-mode config and two owner-only credentials, and print the node's `[[api.security.keys]]` entry. |
+| `adopt` | subcommand | — | `--handoff <node data_dir>/wallet-handoff --data-dir <new>`: take over a node's wallet handoff. See [Wallet setup](wallet-setup.md). |
+| `reward-key` | subcommand | — | Print the wallet's first-address reward address, public key and `miner_reward_address` line; reads the password from standard input. |
 
 Logging uses `tracing` with the `RUST_LOG` filter (default `info`): reorgs and
 retries log at `warn`, protocol violations and other terminal sync failures log

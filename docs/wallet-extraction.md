@@ -136,6 +136,11 @@ unlocked secrets after admitted commands drain.
 
 ### Migration and rollback
 
+[Wallet setup](wallet-setup.md) describes the routine upgrade: a node that
+does not host its wallet publishes `wallet-handoff/` while running, and
+`ergo-walletd adopt` takes it over. The offline `migrate` command below remains
+for a stopped node.
+
 Stop the embedded node and retain a complete backup. If its database uses an
 old redb format, first run the existing `ergo-node migrate-redb` copy migration.
 Upgrade the embedded wallet application schema with the current node before
