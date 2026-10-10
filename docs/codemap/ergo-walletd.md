@@ -112,8 +112,10 @@ In default watch mode every read route is a `GET`; each is mounted twice, at a s
 `/api/v1/wallet/*`. `READ_ROUTE_INVENTORY` is the pinned list and is asserted by
 `tests/it/routes.rs`, which also asserts that the default watch router leaves
 wallet lifecycle, signing, and private-key routes unmounted. Seed mode retains
-short diagnostic reads and projects native wallet routes through the full engine;
-every seed-mode API read and write is authenticated.
+short diagnostic reads and projects native wallet routes through the full engine.
+`api::watch_router` and the seed router both authenticate every read and write
+with the local credential, and the TCP listener additionally checks `Host`
+(`host_guard`).
 
 | Route | Response |
 |---|---|
@@ -489,8 +491,9 @@ reached the limiter and needs no change.
   store keeps 33-byte pubkeys and renders base58 addresses at read time, so the
   network prefix is never baked into persistent state. Watch mode loads the
   node API credential but never constructs secret storage. Seed mode owns its
-  encrypted secret directory and requires a separate local API credential;
-  credentials are permission-checked, redacted and zeroized on drop.
+  encrypted secret directory. Both modes require a separate local API
+  credential; credentials are permission-checked, redacted, compared as
+  SHA-256 digests in constant time and zeroized on drop.
 - **Mode ownership.** A durable `wallet-mode` marker prevents reuse between
   watch and seed modes. An unmarked database can only resume as watch-only;
   seed migration is not inferred from persisted public keys.
@@ -502,8 +505,14 @@ reached the limiter and needs no change.
 - **Loopback by construction.** `tcp_fallback` must be a loopback address; the
   Unix socket is created under a `0o077` umask and `chmod 0600`, with a
   `<socket>.owner` marker (`ergo-walletd-socket:<pid>:<nanos>`) so a stale
-  socket is reclaimed but a live one is never stolen. Seed-mode authentication
-  protects both Unix and TCP listeners.
+  socket is reclaimed but a live one is never stolen. Local authentication
+  protects both Unix and TCP listeners in both modes; the TCP listener accepts
+  only its loopback `Host` names plus `[api] allowed_hosts`.
+- **Locked by default, and again.** Seed wallets restart locked; `host` locks
+  them after `[security] idle_lock` without a non-`GET` operation and after
+  `max_unlock`. The unlock attempt budget persists in
+  `unlock-attempts.json`. `hardening` disables core dumps and ptrace before any
+  credential is read.
 - **Network identity is configuration.** `network` (`mainnet` | `testnet`,
   default `mainnet`, any other value rejected) is threaded into descriptor
   validation and into every address this API renders. The daemon cannot infer
@@ -512,8 +521,8 @@ reached the limiter and needs no change.
 - **Fail-closed sync.** A page that breaks height, parent, or duplicate
   invariants, an ancestor that does not rewind, and a second reorg deeper than
   retained history after a full rebuild are terminal: the durable rescan state
-  becomes `failed`; syncing pauses and the read API stays available (authenticated
-  in seed mode). The seed worker compares committed tracked-key rows under
+  becomes `failed`; syncing pauses and the authenticated read API stays
+  available. The seed worker compares committed tracked-key rows under
   the writer gate while parked; an actual key change permits replay without
   restarting, even if recording the failure metadata had failed.
   The watch worker stops on terminal failure. A sync-worker panic stops the daemon. A reorg that *does* rewind is a warn and

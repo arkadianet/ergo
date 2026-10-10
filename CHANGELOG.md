@@ -16,6 +16,12 @@ infrastructure.
 
 ## [Unreleased]
 
+### Security
+
+- **Wallet keystore version 2.** New wallets use Argon2id (256 MiB, 3 passes) with AES-256-GCM that authenticates every parameter. A version-1 (Scala/Appkit PBKDF2) keystore is rewritten as version 2 in place by its first successful unlock; `ergo-wallet export-keystore` still writes version 1 for JVM tools. Version-2 files cannot be read by earlier releases. Keystore cost parameters are bounded on read.
+- **`ergo-walletd`:** watch-only mode now requires `local_api_key_file`, like seed mode. The loopback TCP listener refuses unknown `Host` headers. A plain-`http` `node_url` must be loopback, and `node_ca_file` pins the CAs for an `https` node. Unlocked seed wallets lock after 15 minutes without a wallet operation and after 12 hours (`[security]`). The unlock attempt budget survives restarts and escalates up to 24-hour lockouts. The daemon disables core dumps and ptrace at startup and can lock its memory into RAM (`[security] lock_memory`). The systemd unit adds swap, syscall, capability and network restrictions.
+- Passwords, mnemonics and derived secret bytes are wiped after use, and secret key types are no longer `Clone`.
+
 ## [0.12.3] - 2026-10-07
 
 A consensus release for mainnet. Upgrade every 0.12.2 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.

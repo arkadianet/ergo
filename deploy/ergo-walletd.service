@@ -35,6 +35,31 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=yes
+# Keep the unlocked key out of swap and core files (the daemon also disables
+# core dumps and ptrace itself). For [security] lock_memory = true, add
+# LimitMEMLOCK=infinity.
+MemorySwapMax=0
+LimitCORE=0
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallArchitectures=native
+ProtectProc=invisible
+ProcSubset=pid
+PrivateUsers=yes
+PrivateIPC=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+KeyringMode=private
+# Network: loopback only. For a remote https node, add its address, e.g.
+# IPAddressAllow=192.0.2.10
+IPAddressDeny=any
+IPAddressAllow=localhost
 
 [Install]
 WantedBy=multi-user.target
