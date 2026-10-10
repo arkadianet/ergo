@@ -4,6 +4,11 @@ use ergo_walletd::{init_logging, prepare, run};
 
 fn main() {
     init_logging();
+    // Before any credential or secret file is read.
+    if let Err(error) = ergo_walletd::hardening::disable_core_dumps() {
+        eprintln!("ergo-walletd: {error}");
+        std::process::exit(1);
+    }
     let cli = Cli::parse();
     if let Some(CliCommand::Migrate(args)) = &cli.command {
         match ergo_walletd::migration::migrate(args) {
@@ -28,6 +33,12 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if config.config.lock_memory {
+        if let Err(error) = ergo_walletd::hardening::lock_all_memory() {
+            eprintln!("ergo-walletd: {error}");
+            std::process::exit(2);
+        }
+    }
     // The blocking HTTP client is built HERE, before any Tokio runtime exists on
     // this thread. `reqwest::blocking` creates and drops a private runtime
     // inside `ClientBuilder::build`, and Tokio panics when a runtime is dropped

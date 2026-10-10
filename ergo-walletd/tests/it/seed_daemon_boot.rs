@@ -47,13 +47,12 @@ fn write_config(
     let local_key = root.join("local-key");
     write_key(&node_key, NODE_API_KEY);
     write_key(&local_key, LOCAL_KEY.as_bytes());
-    let mode_fields = if mode == "seed" {
-        format!("local_api_key_file = {}\n", quote_path(&local_key))
-    } else {
+    let mut mode_fields = format!("local_api_key_file = {}\n", quote_path(&local_key));
+    if mode != "seed" {
         let descriptors = root.join("descriptors.toml");
         std::fs::write(&descriptors, DESCRIPTORS).unwrap();
-        format!("descriptor_file = {}\n", quote_path(&descriptors))
-    };
+        mode_fields.push_str(&format!("descriptor_file = {}\n", quote_path(&descriptors)));
+    }
     let path = root.join(format!("{mode}.toml"));
     std::fs::write(
         &path,
@@ -249,6 +248,23 @@ fn seed_daemon_loads_separate_credentials_syncs_and_restarts_locked() {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.headers()["cache-control"], "no-store");
     }
+    // DNS rebinding: a correctly authenticated request that names a foreign
+    // host is refused before routing; the listener's own names are accepted.
+    let rebound = client
+        .get(format!("{}{LIFECYCLE_STATUS}", daemon.url))
+        .header("host", format!("evil.example:{}", address.port()))
+        .header("api_key", LOCAL_KEY)
+        .send()
+        .unwrap();
+    assert_eq!(rebound.status(), StatusCode::FORBIDDEN);
+    assert_eq!(rebound.headers()["cache-control"], "no-store");
+    let named = client
+        .get(format!("{}{LIFECYCLE_STATUS}", daemon.url))
+        .header("host", format!("localhost:{}", address.port()))
+        .header("api_key", LOCAL_KEY)
+        .send()
+        .unwrap();
+    assert_eq!(named.status(), StatusCode::OK);
     // The local credential is not an operator credential accepted by the node.
     assert_eq!(
         request(
