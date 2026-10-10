@@ -277,7 +277,7 @@ fn purge_legacy_wallet(data_dir: &Path, remove_keystore: bool) -> Result<LegacyP
     }
     // Database::open takes the exclusive lock, so a running node is refused.
     let mut database = redb::Database::open(data_dir.join("state.redb"))?;
-    let write = database.begin_write()?;
+    let write = ergo_state::begin_write_qr(&database)?;
     let tables: Vec<_> = write
         .list_tables()?
         .filter(|table| table.name().starts_with("wallet_"))
