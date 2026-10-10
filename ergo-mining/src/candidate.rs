@@ -43,7 +43,7 @@ use ergo_validation::popow::algos::{is_genesis, unpack_interlinks};
 use ergo_validation::voting::validation_settings::validation_settings_update_to_extension_fields;
 use ergo_validation::{
     compute_epoch_votes, compute_next_params, validate_transaction_parsed,
-    voting::{derive_activated_script_version, select_candidate_votes},
+    voting::{derive_activated_script_version, select_candidate_votes_seeded},
     ActiveProtocolParameters, ChainHeaderReader, ChainHeaderReaderError, CheckedTransaction,
     CostAccumulator, ErgoValidationSettings, ErgoValidationSettingsUpdate, HeaderView, JitCost,
     ProtocolParams, ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules,
@@ -543,12 +543,26 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
     //     triple the header-votes validator accepts; at an epoch start the
     //     suppression of decreases / id 9 follows the live rule-215 status
     //     (disabled by mainnet 6.0). Empty targets ⇒ `[0,0,0]`.
+    //     Mid-epoch, only the votes the epoch-start header seeded are cast:
+    //     the tally counts nothing else. If that header cannot be read the
+    //     selection is unrestricted (still a valid header).
     let rule_215_disabled = validation_settings.is_rule_disabled(RULE_HDR_VOTES_UNKNOWN);
-    let candidate_votes = select_candidate_votes(
+    let epoch_start_height =
+        candidate_height - candidate_height % voting_settings.voting_length.max(1);
+    let epoch_seed = (!is_epoch_start && epoch_start_height > 0 && !voting_targets.is_empty())
+        .then(|| {
+            ViewChainHeaderReader { view }
+                .header_at(epoch_start_height)
+                .ok()
+        })
+        .flatten()
+        .map(|header| header.votes);
+    let candidate_votes = select_candidate_votes_seeded(
         vote_selection_params(&active_params, epoch_payload.as_ref()),
         voting_targets,
         is_epoch_start,
         rule_215_disabled,
+        epoch_seed.as_ref(),
     );
 
     check_build_cancelled(should_cancel)?;
@@ -2593,6 +2607,42 @@ mod tests {
         view.emission_id = None;
         view.missing_core_parameters = missing_core_parameters;
         (view, mempool, pooled)
+    }
+
+    #[test]
+    fn mid_epoch_candidate_votes_only_for_seeded_parameters() {
+        // The stub serves its one header at every height, so the epoch-start
+        // header seeds `+3`. Targets move 1, 2 and 3; mid-epoch only 3 counts.
+        let (mut view, mempool, _) = pooled_rent_case(0);
+        view.stub.header.votes = [3, 0, 0];
+        let targets: BTreeMap<u8, i64> = [(1u8, 2_000_000i64), (2, 9_000), (3, 600_000)]
+            .into_iter()
+            .collect();
+        let candidate = generate_candidate_with_policy_cancellable(
+            &view,
+            ergo_chain_spec::Network::Mainnet,
+            BuildMode::Full,
+            &mempool,
+            &RENT_MINER_PK,
+            &MonetarySettings::mainnet(),
+            None,
+            None,
+            &DifficultyParams::mainnet(),
+            &[],
+            &targets,
+            &VotingSettings::mainnet(),
+            &[],
+            &mut vec![],
+            &[],
+            &BlockPolicy::default(),
+            0,
+            0,
+            &|| false,
+        )
+        .unwrap()
+        .unwrap()
+        .0;
+        assert_eq!(candidate.header.votes, [3, 0, 0]);
     }
 
     #[test]

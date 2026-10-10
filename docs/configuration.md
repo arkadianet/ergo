@@ -684,8 +684,10 @@ configured parameters one step per block toward your target value. The node
 only ever casts votes that the consensus header-vote rules accept (at most two
 parameter votes, no duplicates or contradictions, and only known increases at
 an epoch-start block); a parameter already at its target — or already at its
-`min`/`max` bound — casts no vote. Soft-fork voting and `blockVersion` (123)
-are **not** operator-settable here.
+`min`/`max` bound — casts no vote. A vote only counts when the voting epoch's
+first block cast it, so blocks inside an epoch vote only for parameters that
+block seeded. Soft-fork voting and `blockVersion` (123) are **not**
+operator-settable here.
 
 `GET /api/v1/votes` shows the live votable set with each parameter's current
 value, step, and bounds, plus the votes this node is configured to cast.
