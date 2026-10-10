@@ -16,6 +16,10 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject ErgoTrees without a size field whose root is a nested function application that does not return SigmaProp, as the reference node does. These trees were previously accepted.
+
 ## [0.12.3] - 2026-10-07
 
 A consensus release for mainnet. Upgrade every 0.12.2 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.
