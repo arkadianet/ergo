@@ -70,7 +70,7 @@ md5      = "0.7"
 pbkdf2   = "0.12"
 sha2     = "0.10"
 gf2_192  = "0.28"
-bip39    = { version = "2", features = ["zeroize"] }
+bip39    = { version = "3", features = ["zeroize"] }
 hmac     = "0.12"
 
 # Numerics
