@@ -630,11 +630,13 @@ fn build_and_publish_inner(
     handle.check_requested_private_work(requested, intent.operator_owned)?;
     let publish_start = std::time::Instant::now();
 
-    // A same-parent rebuild with unchanged block content (same transactions,
+    // A pool-refresh rebuild with unchanged block content (same transactions,
     // extension and votes; only the timestamp moved) keeps the served
     // template: republishing it would only push equivalent jobs out of the
-    // retained history that late solutions are checked against.
-    if intent.reason != BuildReason::Requested {
+    // retained history that late solutions are checked against. Pool churn
+    // is the frequent rebuild; tip, startup, key and vote builds still
+    // publish.
+    if intent.reason == BuildReason::MempoolRefresh {
         if let Some(identity) =
             handle.unchanged_template(&candidate, &work, &intent.expected_parent)
         {
