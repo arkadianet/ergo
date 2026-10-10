@@ -247,6 +247,50 @@ pub fn export_unseal_key(config: &Config, secret: &str) -> Result<DataKey, Daemo
     }
 }
 
+/// The wallet's first EIP-3 public key, for `[mining] miner_reward_address`:
+/// read from the database when the wallet has derived it, otherwise derived
+/// from the seed. Needs the password (or watch-only passphrase).
+pub fn reward_key(config: &Config, secret: &str) -> Result<[u8; 33], DaemonError> {
+    use ergo_wallet_service::WalletStore;
+    let from_database = |key: &DataKey| -> Result<Option<[u8; 33]>, DaemonError> {
+        let path = config.data_dir.join(WALLET_DB);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let db = encrypted_db::open_database(&path, key).map_err(store_error)?;
+        let store = RedbWalletStore::from_standalone_db(Arc::new(db))?;
+        match store.read()?.resolve_reward_key()? {
+            ergo_wallet_service::RewardKeyResolution::Ready(key) => Ok(Some(key)),
+            ergo_wallet_service::RewardKeyResolution::Pending => Ok(None),
+            ergo_wallet_service::RewardKeyResolution::Corrupt => Err(DaemonError::Server(
+                "the wallet's tracked keys are inconsistent".into(),
+            )),
+        }
+    };
+    if let Ok(key) = export_unseal_key(config, secret) {
+        if let Some(found) = from_database(&key)? {
+            return Ok(found);
+        }
+    }
+    if config.mode == WalletMode::WatchOnly {
+        return Err(DaemonError::Server(
+            "no first-address key among the watched descriptors".into(),
+        ));
+    }
+    let mut storage = SecretStorage::open(secret_dir(config));
+    storage.unlock(secret).map_err(|error| match error {
+        WalletError::Decryption => DaemonError::Server("wrong password".into()),
+        other => crate::host::HostError::from(other).into(),
+    })?;
+    let unlocked = storage
+        .unlocked()
+        .ok_or_else(|| DaemonError::Server("the wallet did not unlock".into()))?;
+    unlocked
+        .master
+        .derive_pubkey_at_path(&ergo_wallet::DerivationPath::eip3_first_address())
+        .map_err(|error| DaemonError::Server(error.to_string()))
+}
+
 /// Read a raw 32-byte database key, hex-encoded, from an owner-only file.
 pub fn read_unseal_key_file(path: &Path) -> Result<DataKey, DaemonError> {
     let text = crate::config::read_api_key(path)?;

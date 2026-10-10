@@ -219,7 +219,6 @@ mod tests {
     #[test]
     fn a_published_handoff_is_adopted_and_encrypted_by_the_first_unseal() {
         use ergo_wallet_service::wallet::handoff::{publish_seed_directory, PublishOptions};
-        use ergo_wallet_service::WalletStore;
         ergo_wallet::storage::use_fast_keystore_kdf_for_tests();
         let node = tempfile::tempdir().unwrap();
         let db = crate::migration::tests::embedded_source(node.path());

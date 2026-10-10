@@ -74,6 +74,8 @@ pub enum Network {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Reward {
+    /// A P2PK address from any wallet, given with --miner-reward-address.
+    Address,
     /// The node wallet; initialize and unlock it before work is served.
     Wallet,
     /// The key given with --miner-public-key.
@@ -115,6 +117,9 @@ pub struct InitArgs {
     /// Compressed secp256k1 public key for --reward public-key (66 hex characters).
     #[arg(long)]
     pub miner_public_key: Option<String>,
+    /// P2PK reward address for --reward address, as any Ergo wallet shows it.
+    #[arg(long)]
+    pub miner_reward_address: Option<String>,
     /// Continue when free disk space is below the recommended amount.
     #[arg(long)]
     pub allow_low_disk: bool,
@@ -234,13 +239,16 @@ fn run_with_space(
             args.sync = Some(choice(input, diagnostics, "Sync", allowed)?);
         }
         if args.preset.is_some_and(Preset::mining) && args.reward.is_none() {
-            writeln!(diagnostics, "wallet: rewards use the node wallet; initialize and unlock it before work can be served. public-key: rewards go to your compressed public key; keep its private key in your own wallet.")?;
+            writeln!(diagnostics, "address: rewards go to a P2PK address from any wallet (Nautilus, Satergo, a hardware wallet or ergo-walletd reward-key). wallet: rewards use the node wallet; initialize and unlock it before work can be served. public-key: rewards go to your compressed public key; keep its private key in your own wallet.")?;
             args.reward = Some(choice(
                 input,
                 diagnostics,
                 "Mining reward",
-                &["wallet", "public-key"],
+                &["address", "wallet", "public-key"],
             )?);
+        }
+        if args.reward == Some(Reward::Address) && args.miner_reward_address.is_none() {
+            args.miner_reward_address = Some(prompt(input, diagnostics, "Reward address")?);
         }
         if args.reward == Some(Reward::PublicKey) && args.miner_public_key.is_none() {
             args.miner_public_key = Some(prompt(
@@ -266,6 +274,9 @@ fn run_with_space(
     if args.reward == Some(Reward::PublicKey) && args.miner_public_key.is_none() {
         missing.push("--miner-public-key");
     }
+    if args.reward == Some(Reward::Address) && args.miner_reward_address.is_none() {
+        missing.push("--miner-reward-address");
+    }
     if !missing.is_empty() {
         return Err(invalid(format!(
             "missing required choices: {}",
@@ -285,6 +296,20 @@ fn run_with_space(
     }
     if args.reward == Some(Reward::Wallet) && args.miner_public_key.is_some() {
         return Err(invalid("--miner-public-key requires --reward public-key"));
+    }
+    if args.miner_reward_address.is_some() && args.reward != Some(Reward::Address) {
+        return Err(invalid("--miner-reward-address requires --reward address"));
+    }
+    if args.reward == Some(Reward::Address) {
+        // The address names the key; the rest of the plan works with the key.
+        let address = args.miner_reward_address.as_deref().expect("checked");
+        let prefix = match network {
+            Network::Mainnet => ergo_ser::address::NetworkPrefix::Mainnet,
+            Network::Testnet => ergo_ser::address::NetworkPrefix::Testnet,
+        };
+        let key = ergo_ser::address::decode_p2pk_address(address.trim(), prefix)
+            .map_err(|e| invalid(format!("--miner-reward-address: {e}")))?;
+        args.miner_public_key = Some(hex::encode(key));
     }
     let cwd = std::env::current_dir()?;
     let data_dir = absolute(
@@ -844,6 +869,45 @@ mod tests {
             .to_string()
             .contains("--accept-unanchored-bootstrap"));
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reward_address_is_decoded_into_the_pinned_key() {
+        let key = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let bytes: [u8; 33] = hex::decode(key).unwrap().try_into().unwrap();
+        let address = ergo_ser::address::encode_p2pk_from_pubkey(
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            &bytes,
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut args = args(root.path(), "mining-fast", "genesis");
+        args.reward = Some(Reward::Address);
+        args.miner_reward_address = Some(address.clone());
+        let (result, output, _) = execute(&args, false, "", Some(300 * GIB));
+        result.unwrap();
+        assert!(output.contains(&address), "{output}");
+        // A testnet address does not belong on mainnet.
+        let testnet = ergo_ser::address::encode_p2pk_from_pubkey(
+            ergo_ser::address::NetworkPrefix::Testnet,
+            &bytes,
+        )
+        .unwrap();
+        args.miner_reward_address = Some(testnet);
+        let (result, _, _) = execute(&args, false, "", Some(300 * GIB));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("--miner-reward-address"));
+        // An address without --reward address is refused.
+        args.reward = Some(Reward::PublicKey);
+        args.miner_public_key = Some(key.into());
+        args.miner_reward_address = Some(address);
+        let (result, _, _) = execute(&args, false, "", Some(300 * GIB));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires --reward address"));
     }
 
     #[test]
