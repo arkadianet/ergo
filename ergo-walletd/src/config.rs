@@ -138,6 +138,11 @@ pub struct SecuritySection {
     /// limit would make later allocations fail.
     #[serde(default)]
     pub lock_memory: bool,
+    /// Owner-only file holding the wallet database key as 64 hex characters,
+    /// read at start to unseal without a password. Intended for a systemd
+    /// `LoadCredentialEncrypted=` credential sealed to the host TPM; the copy
+    /// is only as strong as where it is stored.
+    pub unseal_key_file: Option<PathBuf>,
 }
 
 impl Default for SecuritySection {
@@ -146,6 +151,7 @@ impl Default for SecuritySection {
             idle_lock: default_idle_lock(),
             max_unlock: default_max_unlock(),
             lock_memory: false,
+            unseal_key_file: None,
         }
     }
 }
@@ -373,6 +379,7 @@ pub struct Config {
     pub allowed_hosts: Vec<String>,
     pub lock_policy: LockPolicy,
     pub lock_memory: bool,
+    pub unseal_key_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -584,6 +591,7 @@ impl Config {
             allowed_hosts,
             lock_policy: LockPolicy::from_section(&file.security),
             lock_memory: file.security.lock_memory,
+            unseal_key_file: file.security.unseal_key_file.clone(),
         })
     }
 }

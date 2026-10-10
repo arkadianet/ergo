@@ -347,7 +347,12 @@ fn seed_daemon_loads_separate_credentials_syncs_and_restarts_locked() {
     assert_eq!(addresses_before["items"].as_array().unwrap().len(), 2);
     // Shut down while unlocked; prepare must never resurrect the master key.
     daemon.stop();
-    let restarted = RunningDaemon::start(prepare(load(&config)).unwrap(), address, &client);
+    let prepared = prepare(load(&config)).unwrap();
+    assert!(
+        prepared.is_sealed(),
+        "a restarted seed wallet starts sealed"
+    );
+    let restarted = RunningDaemon::start(prepared, address, &client);
     assert_eq!(
         json_body(local_response(
             &client,
@@ -356,7 +361,64 @@ fn seed_daemon_loads_separate_credentials_syncs_and_restarts_locked() {
             LIFECYCLE_STATUS,
             None
         )),
-        json!({"initialized": true, "locked": true})
+        json!({"initialized": true, "locked": true, "sealed": true})
+    );
+    // Sealed: no wallet data is served, and the database on disk is ciphertext.
+    let sealed = local_response(
+        &client,
+        &restarted,
+        Method::GET,
+        "/api/v1/wallet/addresses",
+        None,
+    );
+    assert_eq!(sealed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let raw = std::fs::read(data.join("wallet.redb")).unwrap();
+    assert!(!raw.starts_with(b"redb"), "wallet.redb must be encrypted");
+    for item in addresses_before["items"].as_array().unwrap() {
+        let address = item["address"].as_str().unwrap().as_bytes();
+        assert!(raw.windows(address.len()).all(|window| window != address));
+    }
+    // A wrong password neither unseals nor unlocks.
+    let wrong = local_response(
+        &client,
+        &restarted,
+        Method::POST,
+        "/api/v1/wallet/unlock",
+        Some(json!({"pass": "wrong password"})),
+    );
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        local_response(
+            &client,
+            &restarted,
+            Method::GET,
+            "/api/v1/wallet/addresses",
+            None
+        )
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    // Unlocking unseals the database and unlocks the engine.
+    assert_eq!(
+        local_response(
+            &client,
+            &restarted,
+            Method::POST,
+            "/api/v1/wallet/unlock",
+            Some(json!({"pass": PASSWORD})),
+        )
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_body(local_response(
+            &client,
+            &restarted,
+            Method::GET,
+            LIFECYCLE_STATUS,
+            None
+        )),
+        json!({"initialized": true, "locked": false})
     );
     assert_eq!(
         json_body(local_response(
@@ -395,6 +457,8 @@ fn daemon_data_directories_refuse_mode_changes_and_keep_legacy_watch_usable() {
         address,
     );
     drop(prepare(load(&watch)).unwrap());
+    // A Phase 2 watch directory holds a cleartext database.
+    drop(redb::Database::create(watch_data.join("wallet.redb")).unwrap());
     let seed = write_config(
         dir.path(),
         &watch_data,

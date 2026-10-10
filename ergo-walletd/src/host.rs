@@ -74,7 +74,7 @@ pub const UNLOCK_ATTEMPTS_FILE: &str = "unlock-attempts.json";
 
 /// Owner-only, atomically replaced JSON record of unlock failures, so that
 /// restarting the daemon neither resets the guess budget nor ends a lockout.
-struct FileAttemptJournal(std::path::PathBuf);
+pub(crate) struct FileAttemptJournal(pub(crate) std::path::PathBuf);
 
 impl ergo_wallet_service::engine::AttemptJournal for FileAttemptJournal {
     fn load(&self) -> Result<Option<ergo_wallet_service::engine::AttemptRecord>, String> {
@@ -541,6 +541,15 @@ impl WalletHost {
         self.call_inner(|engine| engine.lock(), true).await?;
         *self.inner.session.lock() = None;
         Ok(())
+    }
+
+    /// Seal the wallet database key into the keystore a later `init` or
+    /// `restore` creates.
+    pub fn set_new_wallet_data_key(&self, key: &crate::encrypted_db::DataKey) {
+        self.inner
+            .engine
+            .lock()
+            .set_new_wallet_data_key(*key.expose());
     }
 
     /// Record a wallet operation for the idle lock. Reads do not count, so a

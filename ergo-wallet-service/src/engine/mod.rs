@@ -78,7 +78,7 @@ mod sign;
 pub mod submit;
 mod sweep;
 
-pub use admin::{AttemptJournal, AttemptRecord};
+pub use admin::{AttemptJournal, AttemptRecord, UnlockThrottle};
 pub use chain::{map_chain_error, ChainAccessError, SigningView, WalletChainAccess};
 pub use config::WalletEngineConfig;
 pub use hook::WalletStateHook;
@@ -186,6 +186,12 @@ impl WalletEngine {
             unlock_limiter: admin::AttemptLimiter::new(),
             check_limiter: admin::AttemptLimiter::new(),
         }
+    }
+
+    /// Seal `key` into the keystore that the next `init` or `restore`
+    /// creates, so the host can encrypt its database before a wallet exists.
+    pub fn set_new_wallet_data_key(&mut self, key: [u8; 32]) {
+        self.storage.write().set_new_wallet_data_key(key);
     }
 
     /// Persist the unlock failed-attempt budget through `journal`, so a

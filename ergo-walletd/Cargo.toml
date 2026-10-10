@@ -57,6 +57,8 @@ base64              = { workspace = true }
 rustix = { workspace = true, features = ["fs", "process", "mm"] }
 
 [dev-dependencies]
+# Fast keystore key derivation in tests only (absent from release builds).
+ergo-wallet = { workspace = true, features = ["keystore", "test-utils"] }
 # TEST-TARGET ONLY. The daemon's normal dependency boundary deliberately
 # excludes the node crates (it talks to a node over HTTP). The integration
 # test in `tests/it/node_api.rs` stands up the *real* `ergo-api` chain
