@@ -2654,16 +2654,48 @@ fn wallet_mode_rejects_unknown_value() {
 }
 
 #[test]
-fn external_wallet_mining_requires_pinned_key() {
+fn external_wallet_mining_key_is_resolved_at_boot_and_addresses_decode() {
+    // Load no longer rejects an unpinned external miner: boot may take the
+    // reward key from a legacy embedded wallet (or refuse there).
     let path = write_toml(
         "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
          [wallet]\nmode = \"external\"\n\
          [mining]\nenabled = true\n",
     );
-    let err = NodeConfig::load(minimal_cli(Some(&path)))
-        .expect_err("external mining without a pinned key rejects");
-    assert!(
-        err.contains("miner_public_key_hex"),
-        "error must name the missing key: {err}"
+    let config = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert!(config.mining_config.miner_public_key_hex.is_none());
+
+    // A reward address is decoded into the pinned key.
+    let key = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    let bytes: [u8; 33] = hex::decode(key).unwrap().try_into().unwrap();
+    let address = ergo_ser::address::encode_p2pk_from_pubkey(
+        ergo_ser::address::NetworkPrefix::Mainnet,
+        &bytes,
+    )
+    .unwrap();
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n[mining]\nenabled = true\nminer_reward_address = \"{address}\"\n"
+    ));
+    let config = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert_eq!(
+        config.mining_config.miner_public_key_hex.as_deref(),
+        Some(key)
     );
+
+    // A testnet address on mainnet, or a second different key, is refused.
+    let testnet = ergo_ser::address::encode_p2pk_from_pubkey(
+        ergo_ser::address::NetworkPrefix::Testnet,
+        &bytes,
+    )
+    .unwrap();
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n[mining]\nenabled = true\nminer_reward_address = \"{testnet}\"\n"
+    ));
+    assert!(NodeConfig::load(minimal_cli(Some(&path))).is_err());
+    let other = "03".to_string() + &"11".repeat(32);
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n[mining]\nenabled = true\nminer_reward_address = \"{address}\"\nminer_public_key_hex = \"{other}\"\n"
+    ));
+    let error = NodeConfig::load(minimal_cli(Some(&path))).unwrap_err();
+    assert!(error.contains("different keys"), "{error}");
 }

@@ -68,6 +68,15 @@ pub enum Command {
         #[arg(long)]
         restart: bool,
     },
+    /// Remove a legacy embedded wallet's rows from a stopped node once the
+    /// wallet daemon has adopted it (`ergo-walletd adopt`).
+    WalletLegacyPurge {
+        data_dir: PathBuf,
+        /// Also delete the legacy encrypted keystore in `data_dir/wallet/`.
+        /// The daemon holds its own copy; keep a backup of the mnemonic.
+        #[arg(long)]
+        remove_keystore: bool,
+    },
 }
 
 /// Secrets are supplied through files or stdin, never through CLI arguments.
