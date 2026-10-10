@@ -374,6 +374,7 @@ pub(super) fn xor(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalErro
     };
     let n = a.len().min(b.len());
     add_cost_per_item(cx.cost, 0x9B, n as u32)?;
+    crate::evaluator::opcodes::sigma::check_pre_jit_xor_lengths(a.len(), b.len(), cx)?;
     let out: Vec<u8> = a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect();
     Ok(Value::CollBytes(out))
 }

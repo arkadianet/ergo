@@ -282,3 +282,8 @@ fn non_sigma_prop_roots_are_never_spendable() {
 fn collections_are_limited_to_100000_items() {
     check_vectors("collection-length-limit");
 }
+
+#[test]
+fn pre_jit_xor_reads_the_right_operand_by_left_length() {
+    check_vectors("pre-jit-xor");
+}
