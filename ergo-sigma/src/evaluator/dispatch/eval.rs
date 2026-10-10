@@ -92,6 +92,9 @@ fn eval_expr_inner(expr: &Expr, cx: EvalCtx<'_>, script_root: bool) -> Result<Va
     // Root-gated at depth 0 at every evaluator entry. Substitution uses empty
     // constants and preserves evaluation depth; inserted deserialize nodes are
     // not revisited by the bottom-up pass.
+    // The static node types used by the reference's runtime type checks live
+    // for this evaluation (see `static_types`).
+    let _types_scope = (*depth == 0).then(crate::evaluator::static_types::Scope::enter);
     if *depth == 0 {
         // Whole-tree checks Scala performs at context/deserialize time, BEFORE
         // any bytecode runs — so they fire even when the live path never reaches
@@ -135,6 +138,9 @@ fn eval_expr_inner(expr: &Expr, cx: EvalCtx<'_>, script_root: bool) -> Result<Va
         Some(expr) => (expr, &[][..]),
         None => (expr, constants),
     };
+    if _types_scope.is_some() {
+        crate::evaluator::static_types::annotate(expr, constants);
+    }
     *depth += 1;
     if *depth > MAX_EVAL_DEPTH {
         return Err(EvalError::DepthLimitExceeded(*depth));
@@ -188,7 +194,12 @@ fn eval_op(
         }
 
         // ValUse — reference a bound variable
-        (0x72, Payload::ValUse { id }) => opcodes::binding::eval_val_use(*id, cx.env, cx.cost),
+        // Value.checkType(this, res) against ValUse.tpe (values.scala:991).
+        (0x72, Payload::ValUse { id }) => opcodes::binding::eval_val_use(*id, cx.env, cx.cost)
+            .and_then(|v| {
+                crate::evaluator::static_types::check_op(node, &v, ctx.is_v3_ergo_tree())?;
+                Ok(v)
+            }),
 
         // BlockValue — evaluate ValDefs then return result
         (0xD8, Payload::BlockValue { items, result }) => {
@@ -448,7 +459,7 @@ fn eval_op(
                 SigmaType::SBoolean => {
                     let mut bools = Vec::with_capacity(items.len());
                     for item in items {
-                        match eval_expr(item, ctx, constants, env, depth, cost, trace)? {
+                        match eval_collection_item(item, ctx, constants, env, depth, cost, trace)? {
                             Value::Bool(b) => bools.push(b),
                             other => {
                                 return Err(EvalError::TypeError {
@@ -463,7 +474,7 @@ fn eval_op(
                 SigmaType::SSigmaProp => {
                     let mut props = Vec::with_capacity(items.len());
                     for item in items {
-                        match eval_expr(item, ctx, constants, env, depth, cost, trace)? {
+                        match eval_collection_item(item, ctx, constants, env, depth, cost, trace)? {
                             Value::SigmaProp(sp) => props.push(sp),
                             other => {
                                 return Err(EvalError::TypeError {
@@ -478,7 +489,7 @@ fn eval_op(
                 SigmaType::SByte => {
                     let mut bytes = Vec::with_capacity(items.len());
                     for item in items {
-                        match eval_expr(item, ctx, constants, env, depth, cost, trace)? {
+                        match eval_collection_item(item, ctx, constants, env, depth, cost, trace)? {
                             Value::Byte(v) => bytes.push(v as u8),
                             other => {
                                 return Err(EvalError::TypeError {
@@ -493,7 +504,7 @@ fn eval_op(
                 SigmaType::SShort => {
                     let mut shorts = Vec::with_capacity(items.len());
                     for item in items {
-                        match eval_expr(item, ctx, constants, env, depth, cost, trace)? {
+                        match eval_collection_item(item, ctx, constants, env, depth, cost, trace)? {
                             Value::Short(v) => shorts.push(v),
                             other => {
                                 return Err(EvalError::TypeError {
@@ -508,7 +519,7 @@ fn eval_op(
                 SigmaType::SInt => {
                     let mut ints = Vec::with_capacity(items.len());
                     for item in items {
-                        match eval_expr(item, ctx, constants, env, depth, cost, trace)? {
+                        match eval_collection_item(item, ctx, constants, env, depth, cost, trace)? {
                             Value::Int(v) => ints.push(v),
                             other => {
                                 return Err(EvalError::TypeError {
@@ -523,7 +534,7 @@ fn eval_op(
                 SigmaType::SLong => {
                     let mut longs = Vec::with_capacity(items.len());
                     for item in items {
-                        match eval_expr(item, ctx, constants, env, depth, cost, trace)? {
+                        match eval_collection_item(item, ctx, constants, env, depth, cost, trace)? {
                             Value::Long(v) => longs.push(v),
                             other => {
                                 return Err(EvalError::TypeError {
@@ -538,7 +549,8 @@ fn eval_op(
                 SigmaType::SBox => {
                     let mut boxes = Vec::with_capacity(items.len());
                     for item in items {
-                        let v = eval_expr(item, ctx, constants, env, depth, cost, trace)?;
+                        let v =
+                            eval_collection_item(item, ctx, constants, env, depth, cost, trace)?;
                         boxes.push(v);
                     }
                     Ok(Value::CollBox(boxes))
@@ -548,7 +560,7 @@ fn eval_op(
                     let mut vals = Vec::with_capacity(items.len());
                     for item in items {
                         vals.push(
-                            eval_expr(item, ctx, constants, env, depth, cost, trace)
+                            eval_collection_item(item, ctx, constants, env, depth, cost, trace)
                                 .and_then(crate::evaluator::helpers::reject_sstring)?,
                         );
                     }
@@ -565,8 +577,9 @@ fn eval_op(
                     // serialize-back preserve the right `Coll[T]` T.
                     let mut vals = Vec::with_capacity(items.len());
                     for item in items {
-                        let value = eval_expr(item, ctx, constants, env, depth, cost, trace)
-                            .and_then(crate::evaluator::helpers::reject_sstring)?;
+                        let value =
+                            eval_collection_item(item, ctx, constants, env, depth, cost, trace)
+                                .and_then(crate::evaluator::helpers::reject_sstring)?;
                         opcodes::binding::check_runtime_tuple_type(elem_type, &value)?;
                         vals.push(value);
                     }
@@ -747,4 +760,20 @@ fn eval_op(
 
         _ => Err(EvalError::UnsupportedOpcode(node.opcode)),
     }
+}
+
+/// A ConcreteCollection item, checked against its own static type:
+/// `Value.checkType(item, itemV)` (values.scala:894).
+fn eval_collection_item(
+    item: &Expr,
+    ctx: &ReductionContext<'_>,
+    constants: &[(SigmaType, SigmaValue)],
+    env: &mut Env,
+    depth: &mut usize,
+    cost: &mut CostAccumulator,
+    trace: &mut Option<Vec<TraceEntry>>,
+) -> Result<Value, EvalError> {
+    let v = eval_expr(item, ctx, constants, env, depth, cost, trace)?;
+    crate::evaluator::static_types::check_node(item, &v, ctx.is_v3_ergo_tree())?;
+    Ok(v)
 }

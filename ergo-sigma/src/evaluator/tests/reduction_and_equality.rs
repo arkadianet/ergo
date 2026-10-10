@@ -743,7 +743,7 @@ fn empty_map_with_captured_closure_value() {
         captured_env: std::rc::Rc::new(captured_env),
         params: vec![10],
         param_types: vec![(10, Some(SigmaType::SBox))],
-        body: Box::new(mapper_body),
+        body: std::rc::Rc::new(mapper_body),
     };
 
     // Empty input collection (filter removed everything)
@@ -881,7 +881,7 @@ fn every_value_variant_equals_itself() {
         captured_env: Rc::new(Env::new()),
         params: vec![],
         param_types: vec![],
-        body: Box::new(Expr::Op(IrNode {
+        body: std::rc::Rc::new(Expr::Op(IrNode {
             opcode: 0x7F,
             payload: Payload::Zero,
         })),

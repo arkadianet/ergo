@@ -344,6 +344,8 @@ fn substitute_node(
                 Err(ConstructorError::ClassCast) => return Ok((changed, original_type)),
                 Ok(actual) if actual.as_ref() == Some(tpe) => {
                     *expr = script;
+                    // Scala typed the payload on its own reader.
+                    crate::evaluator::static_types::mark_fresh_root(expr);
                     return Ok((true, Ok(actual)));
                 }
                 _ => {
@@ -366,7 +368,13 @@ fn substitute_node(
     // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/org/ergoplatform/ErgoLikeInterpreter.scala#L17-L39
     if source.is_none() {
         if let Some(default) = default {
-            *expr = default.clone();
+            let copy = default.clone();
+            crate::evaluator::static_types::copy_fresh_roots(default, &copy);
+            let fresh = crate::evaluator::static_types::take_fresh_root(default);
+            *expr = copy;
+            if fresh {
+                crate::evaluator::static_types::mark_fresh_root(expr);
+            }
             return Ok((true, child_types.pop().unwrap_or(Ok(None))));
         }
     }

@@ -586,7 +586,7 @@ pub enum Value {
         params: Vec<u32>,
         /// Parameter types from FuncValue IR (used for type inference on empty maps).
         param_types: Vec<(u32, Option<SigmaType>)>,
-        body: Box<Expr>,
+        body: std::rc::Rc<Expr>,
     },
 }
 

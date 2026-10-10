@@ -267,3 +267,8 @@ fn runtime_deserialized_code_gets_the_tree_parse_checks() {
 fn method_receivers_and_arguments_match_reference() {
     check_vectors("method-receivers-and-arguments");
 }
+
+#[test]
+fn evaluated_values_are_checked_against_static_types() {
+    check_vectors("value-check-type");
+}

@@ -564,6 +564,16 @@ fn jvm_failure(
             expected: "serializable value for SubstConstants",
             got,
         }) if got == "PreHeader" => Ok(("RejectScript", "sigma.serialization.SerializerException")),
+        // Value.checkType (values.scala:251-260): a value whose class does not
+        // match its node's static type throws InterpreterException; a type
+        // without a runtime class reaches SType.isValueOfType's sys.error.
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "value of the static type (Value.checkType)",
+            ..
+        }) => Ok(("RejectScript", "sigma.exceptions.InterpreterException")),
+        VerifySpendingError::Eval(EvalError::RuntimeException(
+            "Value.checkType: type without a runtime class",
+        )) => Ok(("RejectOther", "java.lang.RuntimeException")),
         // A method invoked on a receiver of another class: reflection throws
         // IllegalArgumentException ("object is not an instance of declaring
         // class"); the numeric methods' `obj.asInstanceOf[T]` throws

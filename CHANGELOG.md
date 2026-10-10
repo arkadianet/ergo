@@ -26,6 +26,7 @@ infrastructure.
 - Reject AVL tree `contains`, `get`, `insert`, `update`, `remove` and `insertOrUpdate` calls on a tree whose key length is 2,147,483,646 or more; the reference cannot allocate the key and fails the script. `contains` previously returned false and the others None.
 - Reject `DeserializeContext` and `DeserializeRegister` code, and boxes parsed by `Global.deserializeTo`, that use a value binding with no definition or a constant placeholder; these were previously accepted.
 - Reject method calls whose receiver is not of the method's type, for example `HEIGHT` read from an Int or `Global.xor` called on a box; these were previously accepted. Accept surplus arguments to the numeric `toBytes`, `toBits`, `bitwiseInverse`, `bitwise*` and `shift*` methods, and Byte or Short values for Int (and Short) method parameters, as the reference does; these were previously rejected.
+- Reject scripts in which an evaluated value does not have its expression's static type at the points the reference checks it: lambda arguments and results, fold zero values, `getOrElse` and indexed-access defaults, `if` branches, `==`/`!=` operands, block values and bindings, tuple and collection items. These were previously accepted.
 
 ## [0.12.3] - 2026-10-07
 

@@ -53,7 +53,7 @@ use crate::evaluator::helpers::{
     coll_elem_type, collection_to_values, infer_expr_type, not_a_collection, sigma_type_compatible,
     sigma_type_to_coll_kind, value_to_sigma_type, values_equal, values_to_collection, CollKind,
 };
-use crate::evaluator::opcodes::binding::check_closure_param_types;
+use crate::evaluator::opcodes::binding::{check_closure_arg, check_closure_result};
 use crate::evaluator::types::{EvalError, Value};
 
 // Reflection-based methods evaluate arguments before their method charge.
@@ -106,6 +106,10 @@ pub(super) fn get_or_else(
     let default = cx.eval_expr(&args[1])?;
     super::super::super::cost::add_cost(cx.cost, 0xB2)?;
     let default = reject_sstring(default).map_err(reflect_sstring_error)?;
+    // getOrElse_eval runs Value.checkType(mc.args.last.tpe, default)
+    // (methods.scala:842) inside the reflective call.
+    crate::evaluator::static_types::check_node(&args[1], &default, cx.ctx.is_v3_ergo_tree())
+        .map_err(|_| EvalError::InvocationTargetException("Coll.getOrElse default type"))?;
     let Some(index) = super::widen_to_int(&index) else {
         return Err(EvalError::TypeError {
             expected: "Int index",
@@ -380,7 +384,7 @@ pub(super) fn flat_map(
             for item in items {
                 // Scala closure invocation: Value.checkType runs
                 // before the AddToEnvironment charge.
-                check_closure_param_types(&param_types).map_err(reflect_sstring_error)?;
+                check_closure_arg(&param_types, &item, cx.ctx).map_err(reflect_sstring_error)?;
                 let mut call_env = (*captured_env).clone();
                 if let Some(param_id) = params.first() {
                     // Scala FuncValue closure binds its argument on each
@@ -398,6 +402,7 @@ pub(super) fn flat_map(
                     cx.trace,
                 )
                 .and_then(reject_sstring)
+                .and_then(|r| check_closure_result(&body, r, cx.ctx))
                 .map_err(reflect_sstring_error)?;
                 inner_colls.push(inner);
             }

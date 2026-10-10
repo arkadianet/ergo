@@ -15,6 +15,75 @@ pub fn substitution_type_of(body: &crate::opcode::Expr) -> Option<crate::sigma_t
     infer_type(body, &mut store, &[]).filter(type_is_precise)
 }
 
+/// Record the static type of every node of `body` whose type this typer
+/// determines, keyed by the node's address. The walk is the parse-order
+/// replica of Scala's `valDefTypeStore` started empty, as Scala's reader does
+/// for a tree body, so a `ValUse` gets the type of the latest binding of its id
+/// before it in wire order (Scala's `ValUse.tpe`), not of its lexical binding.
+///
+/// `fresh_roots` holds the addresses of substituted runtime-deserialized
+/// expressions inside `body`. Scala parsed each of those on its own reader
+/// (empty binding and constant stores), so each is typed with a fresh store and
+/// its bindings do not reach the enclosing tree.
+///
+/// The evaluator uses these types for the reference's runtime
+/// `Value.checkType` calls; the addresses are only meaningful while `body` is
+/// alive and unmoved.
+/// The table key [`record_node_types`] uses for a node: the address of an
+/// operation node's [`crate::opcode::IrNode`], so an evaluator holding only the
+/// `IrNode` can look it up, and the `Expr`'s own address otherwise.
+pub fn node_key(e: &crate::opcode::Expr) -> usize {
+    match e {
+        crate::opcode::Expr::Op(node) => node as *const crate::opcode::IrNode as usize,
+        _ => e as *const crate::opcode::Expr as usize,
+    }
+}
+
+pub fn record_node_types(
+    body: &crate::opcode::Expr,
+    constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
+    fresh_roots: &std::collections::HashSet<usize>,
+    out: &mut std::collections::HashMap<usize, crate::sigma_type::SigmaType>,
+) {
+    type Consts = [(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)];
+    struct Walk<'a> {
+        fresh_roots: &'a std::collections::HashSet<usize>,
+        out: &'a mut std::collections::HashMap<usize, crate::sigma_type::SigmaType>,
+    }
+    fn walk(
+        e: &crate::opcode::Expr,
+        store: &mut ValDefTypeStore,
+        constants: &Consts,
+        w: &mut Walk<'_>,
+    ) -> Option<crate::sigma_type::SigmaType> {
+        let addr = e as *const crate::opcode::Expr as usize;
+        let key = node_key(e);
+        let t = if w.fresh_roots.contains(&addr) {
+            let mut fresh = ValDefTypeStore::default();
+            infer_with(e, &mut fresh, &[], w)
+        } else {
+            infer_with(e, store, constants, w)
+        };
+        if let Some(t) = &t {
+            w.out.insert(key, t.clone());
+        }
+        t
+    }
+    fn infer_with(
+        e: &crate::opcode::Expr,
+        store: &mut ValDefTypeStore,
+        constants: &Consts,
+        w: &mut Walk<'_>,
+    ) -> Option<crate::sigma_type::SigmaType> {
+        super::root_type::infer_node_type(e, store, constants, true, false, &mut |c, s, k| {
+            walk(c, s, k, w)
+        })
+    }
+    let mut store = ValDefTypeStore::default();
+    let mut w = Walk { fresh_roots, out };
+    walk(body, &mut store, constants, &mut w);
+}
+
 /// Infer each node once, visiting all children in wire order before computing
 /// its result. Unknown bindings and box-induced store pollution return `None`;
 /// substitution rejects these types. A box constant's nested script can mutate

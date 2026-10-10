@@ -1189,8 +1189,11 @@ fn flatmap_element_binding_does_not_leak_into_caller_env() {
     assert_eq!(run_eval(&block), Value::Int(999));
 }
 
-/// Fold (0xB0) — accumulator+element tuple binding (id=1) does not
-/// leak into the caller's env.
+/// Fold (0xB0) — the accumulator+element tuple binding (id=1) does not
+/// leak into the caller's env, but its DECLARED type does: Scala's flat,
+/// parse-order `valDefTypeStore` types the later `ValUse(1)` as `(Int, Int)`,
+/// so `Value.checkType` rejects the outer `Int` it reads (JVM-confirmed with
+/// the analogous `forall` and nested-block shapes).
 #[test]
 fn fold_acc_binding_does_not_leak_into_caller_env() {
     // Fold sums the collection: zero=0, op = (acc, x) -> acc + x.
@@ -1256,5 +1259,14 @@ fn fold_acc_binding_does_not_leak_into_caller_env() {
             )),
         },
     );
-    assert_eq!(run_eval(&block), Value::Int(999));
+    assert!(
+        matches!(
+            run_eval_err(&block),
+            EvalError::TypeError {
+                expected: "value of the static type (Value.checkType)",
+                ..
+            }
+        ),
+        "the ValUse after the lambda has the lambda argument's static type"
+    );
 }

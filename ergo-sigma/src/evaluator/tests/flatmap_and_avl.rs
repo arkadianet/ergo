@@ -357,9 +357,12 @@ fn flatmap_result_type_errors_still_precede_the_output_cost() {
     };
     let (built, total) = eval_flat_map(&flat_map(const_coll_int(vec![1])), &ctx, None);
     assert_eq!(built.unwrap(), Value::CollInt(vec![1, 1]));
+    // A non-collection result already fails the lambda's
+    // `Value.checkType(body, res)`: the If's static type is the Coll[Int] of
+    // its first branch.
     for (other, error) in [
         (const_bytes(vec![1]), "Int in collection"),
-        (const_int(5), "collection for lambda operation"),
+        (const_int(5), "value of the static type (Value.checkType)"),
     ] {
         // The flatMap charge is the well-typed twin's last one, so only that
         // charge exceeds this limit. The type error is still reported.

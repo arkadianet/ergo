@@ -2,6 +2,7 @@
 //! `SType.isValueOfType` and the receiver casts of reflective method calls.
 //! <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/ast/SType.scala#L187-L212>
 
+use ergo_ser::sigma_type::SigmaType;
 
 use crate::evaluator::types::{EvalError, Value};
 
@@ -30,6 +31,51 @@ fn is_box_value(v: &Value) -> bool {
         v,
         Value::SelfBox | Value::BoxRef { .. } | Value::InlineBox(_)
     )
+}
+
+/// Scala `Value.checkType(tpe, value)`: a shallow class test of `value`
+/// against `tpe`. Types without a case there (`SAny`, type variables,
+/// `SString`, non-pair tuples, multi-argument functions, `SUnsignedBigInt`
+/// in a pre-v3 tree) throw whatever the value.
+pub(crate) fn check_value_type(tpe: &SigmaType, v: &Value, v3_tree: bool) -> Result<(), EvalError> {
+    let ok = match tpe {
+        SigmaType::SBoolean => matches!(v, Value::Bool(_)),
+        SigmaType::SByte => matches!(v, Value::Byte(_)),
+        SigmaType::SShort => matches!(v, Value::Short(_)),
+        SigmaType::SInt => matches!(v, Value::Int(_)),
+        SigmaType::SLong => matches!(v, Value::Long(_)),
+        SigmaType::SBigInt => matches!(v, Value::BigInt(_)),
+        SigmaType::SUnsignedBigInt if v3_tree => matches!(v, Value::UnsignedBigInt(_)),
+        SigmaType::SGroupElement => matches!(v, Value::GroupElement(_)),
+        SigmaType::SSigmaProp => matches!(v, Value::SigmaProp(_)),
+        SigmaType::SBox => is_box_value(v),
+        SigmaType::SColl(_) => is_coll_value(v),
+        SigmaType::SOption(_) => matches!(v, Value::Opt(_)),
+        SigmaType::STuple(items) if items.len() == 2 => {
+            matches!(v, Value::Tuple(items) if items.len() == 2)
+        }
+        SigmaType::SFunc { t_dom, .. } if t_dom.len() == 1 => matches!(v, Value::Func { .. }),
+        SigmaType::SContext => matches!(v, Value::Context),
+        SigmaType::SAvlTree => matches!(v, Value::AvlTree(_)),
+        SigmaType::SGlobal => matches!(v, Value::Global),
+        SigmaType::SHeader => matches!(v, Value::Header(_)),
+        SigmaType::SPreHeader => matches!(v, Value::PreHeader),
+        SigmaType::SUnit => matches!(v, Value::Unit),
+        SigmaType::SString => return Err(EvalError::RuntimeException("Unknown type SString")),
+        _ => {
+            return Err(EvalError::RuntimeException(
+                "Value.checkType: type without a runtime class",
+            ))
+        }
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(EvalError::TypeError {
+            expected: "value of the static type (Value.checkType)",
+            got: format!("{tpe:?} vs {}", value_class(v)),
+        })
+    }
 }
 
 fn value_class(v: &Value) -> &'static str {
