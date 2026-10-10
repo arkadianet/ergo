@@ -78,6 +78,7 @@ mod sign;
 pub mod submit;
 mod sweep;
 
+pub use admin::{AttemptJournal, AttemptRecord};
 pub use chain::{map_chain_error, ChainAccessError, SigningView, WalletChainAccess};
 pub use config::WalletEngineConfig;
 pub use hook::WalletStateHook;
@@ -185,6 +186,12 @@ impl WalletEngine {
             unlock_limiter: admin::AttemptLimiter::new(),
             check_limiter: admin::AttemptLimiter::new(),
         }
+    }
+
+    /// Persist the unlock failed-attempt budget through `journal`, so a
+    /// host restart neither resets it nor ends a pending lockout.
+    pub fn set_unlock_attempt_journal(&mut self, journal: Arc<dyn admin::AttemptJournal>) {
+        self.unlock_limiter = admin::AttemptLimiter::with_journal(journal, admin::unix_now());
     }
 
     /// The wallet's rescan coordinator (fence flags + transition lock).

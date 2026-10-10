@@ -299,6 +299,7 @@ where
     let (jobs_shutdown, mut jobs_stopped) = tokio::sync::watch::channel(());
     let mut jobs = tokio::task::JoinSet::new();
     if let Some(host) = host.clone() {
+        let lock_policy = config.lock_policy;
         jobs.spawn(async move {
             let mut ticks = tokio::time::interval(std::time::Duration::from_secs(2));
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -306,6 +307,11 @@ where
                 tokio::select! {
                     _ = jobs_stopped.changed() => return,
                     _ = ticks.tick() => {
+                        match host.enforce_lock_policy(lock_policy).await {
+                            Ok(_) => {}
+                            Err(ergo_wallet_protocol::WalletAdminError::ShuttingDown) => return,
+                            Err(error) => tracing::warn!(%error, "automatic wallet lock deferred"),
+                        }
                         match host.tick_mining_jobs().await {
                             Ok(()) => {}
                             Err(ergo_wallet_protocol::WalletAdminError::ShuttingDown) => return,

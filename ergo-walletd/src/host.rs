@@ -69,6 +69,49 @@ pub enum HostError {
     PublicStateWithoutSecret,
 }
 
+/// File in the data directory holding the unlock failed-attempt record.
+pub const UNLOCK_ATTEMPTS_FILE: &str = "unlock-attempts.json";
+
+/// Owner-only, atomically replaced JSON record of unlock failures, so that
+/// restarting the daemon neither resets the guess budget nor ends a lockout.
+struct FileAttemptJournal(std::path::PathBuf);
+
+impl ergo_wallet_service::engine::AttemptJournal for FileAttemptJournal {
+    fn load(&self) -> Result<Option<ergo_wallet_service::engine::AttemptRecord>, String> {
+        match std::fs::read(&self.0) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|error| error.to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn save(&self, record: &ergo_wallet_service::engine::AttemptRecord) -> Result<(), String> {
+        use std::io::Write;
+        let dir = self
+            .0
+            .parent()
+            .ok_or_else(|| "attempt record has no directory".to_string())?;
+        let bytes = serde_json::to_vec(record).map_err(|error| error.to_string())?;
+        let mut pending = tempfile::Builder::new()
+            .prefix(".unlock-attempts-")
+            .tempfile_in(dir)
+            .map_err(|error| error.to_string())?;
+        pending
+            .write_all(&bytes)
+            .map_err(|error| error.to_string())?;
+        pending
+            .as_file()
+            .sync_all()
+            .map_err(|error| error.to_string())?;
+        pending
+            .persist(&self.0)
+            .map_err(|error| error.error.to_string())?;
+        Ok(())
+    }
+}
+
 struct Inner {
     engine: Mutex<WalletEngine>,
     store: Arc<dyn WalletStore>,
@@ -79,6 +122,44 @@ struct Inner {
     rescan: Arc<RescanCoordinator>,
     rescan_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     recovery_generation: AtomicU64,
+    /// When the current unlock began and when the last wallet operation ran.
+    session: Mutex<Option<UnlockSession>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UnlockSession {
+    unlocked_at: std::time::Instant,
+    last_activity: std::time::Instant,
+}
+
+/// Why [`WalletHost::enforce_lock_policy`] locked the wallet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoLock {
+    Idle,
+    MaxUnlocked,
+}
+
+impl UnlockSession {
+    fn expired(
+        &self,
+        policy: crate::config::LockPolicy,
+        now: std::time::Instant,
+    ) -> Option<AutoLock> {
+        let elapsed = |since: std::time::Instant| now.saturating_duration_since(since);
+        if policy
+            .max_unlocked
+            .is_some_and(|limit| elapsed(self.unlocked_at) >= limit)
+        {
+            return Some(AutoLock::MaxUnlocked);
+        }
+        if policy
+            .idle
+            .is_some_and(|limit| elapsed(self.last_activity) >= limit)
+        {
+            return Some(AutoLock::Idle);
+        }
+        None
+    }
 }
 
 /// The tracked rows used by a failed pass. Compare the committed key set,
@@ -211,6 +292,9 @@ impl WalletHost {
             service: Some(service),
             rescan: rescan.clone(),
         });
+        engine.set_unlock_attempt_journal(Arc::new(FileAttemptJournal(
+            data_dir.join(UNLOCK_ATTEMPTS_FILE),
+        )));
         engine
             .recover_mining_jobs()
             .map_err(|error| HostError::Hydration(error.to_string()))?;
@@ -225,6 +309,7 @@ impl WalletHost {
                 rescan,
                 rescan_task: Mutex::new(None),
                 recovery_generation: AtomicU64::new(0),
+                session: Mutex::new(None),
             }),
         })
     }
@@ -437,11 +522,55 @@ impl WalletHost {
     }
 
     pub async fn unlock(&self, pass: String) -> Result<(), WalletAdminError> {
-        self.call(move |engine| engine.unlock(pass)).await
+        self.call(move |engine| engine.unlock(pass)).await?;
+        let now = std::time::Instant::now();
+        *self.inner.session.lock() = Some(UnlockSession {
+            unlocked_at: now,
+            last_activity: now,
+        });
+        Ok(())
     }
 
     pub async fn lock(&self) -> Result<(), WalletAdminError> {
-        self.call_inner(|engine| engine.lock(), true).await
+        self.call_inner(|engine| engine.lock(), true).await?;
+        *self.inner.session.lock() = None;
+        Ok(())
+    }
+
+    /// Record a wallet operation for the idle lock. Reads do not count, so a
+    /// polling client cannot keep the wallet unlocked.
+    pub fn note_activity(&self) {
+        if let Some(session) = self.inner.session.lock().as_mut() {
+            session.last_activity = std::time::Instant::now();
+        }
+    }
+
+    /// Lock the wallet when its unlock has outlived `policy`. Returns why it
+    /// locked, if it did.
+    pub async fn enforce_lock_policy(
+        &self,
+        policy: crate::config::LockPolicy,
+    ) -> Result<Option<AutoLock>, WalletAdminError> {
+        self.enforce_lock_policy_at(policy, std::time::Instant::now())
+            .await
+    }
+
+    async fn enforce_lock_policy_at(
+        &self,
+        policy: crate::config::LockPolicy,
+        now: std::time::Instant,
+    ) -> Result<Option<AutoLock>, WalletAdminError> {
+        let expired = self
+            .inner
+            .session
+            .lock()
+            .and_then(|session| session.expired(policy, now));
+        let Some(reason) = expired else {
+            return Ok(None);
+        };
+        self.lock().await?;
+        tracing::info!(?reason, "wallet locked automatically");
+        Ok(Some(reason))
     }
 
     pub async fn check(
@@ -704,6 +833,125 @@ mod tests {
             .await
             .unwrap();
         host.unlock("test".to_string()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unlock_failures_survive_a_restart() {
+        let fixture = Fixture::new();
+        let host = fixture.host().unwrap();
+        host.restore(PHRASE.to_string(), String::new(), "test".to_string(), false)
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            assert_eq!(
+                host.unlock("wrong".to_string()).await.unwrap_err(),
+                WalletAdminError::WrongPassword
+            );
+        }
+        host.shutdown().await.unwrap();
+        drop(host);
+        let path = fixture.dir.path().join(UNLOCK_ATTEMPTS_FILE);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        }
+        // The fifth failure after a restart still exhausts the budget.
+        let reopened = fixture.host().unwrap();
+        assert_eq!(
+            reopened.unlock("wrong".to_string()).await.unwrap_err(),
+            WalletAdminError::WrongPassword
+        );
+        assert_eq!(
+            reopened.unlock("test".to_string()).await.unwrap_err(),
+            WalletAdminError::RateLimited
+        );
+        reopened.shutdown().await.unwrap();
+        drop(reopened);
+        let again = fixture.host().unwrap();
+        assert_eq!(
+            again.unlock("test".to_string()).await.unwrap_err(),
+            WalletAdminError::RateLimited,
+            "a restart does not end the lockout"
+        );
+        again.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lock_policy_locks_after_idle_or_maximum_and_reads_do_not_extend() {
+        use crate::config::LockPolicy;
+        let fixture = Fixture::new();
+        let host = fixture.host().unwrap();
+        let policy = LockPolicy {
+            idle: Some(Duration::from_secs(60)),
+            max_unlocked: Some(Duration::from_secs(600)),
+        };
+        // Locked wallets have no session to expire.
+        assert_eq!(host.enforce_lock_policy(policy).await.unwrap(), None);
+        restore_and_unlock(&host).await;
+        let start = std::time::Instant::now();
+        assert_eq!(
+            host.enforce_lock_policy_at(policy, start).await.unwrap(),
+            None
+        );
+        // Reads do not count as activity.
+        host.status().await.unwrap();
+        assert_eq!(
+            host.enforce_lock_policy_at(policy, start + Duration::from_secs(61))
+                .await
+                .unwrap(),
+            Some(AutoLock::Idle)
+        );
+        assert!(!host.status().await.unwrap().is_unlocked);
+
+        host.unlock("test".to_string()).await.unwrap();
+        let start = std::time::Instant::now();
+        for minute in 1..=9 {
+            // Operations keep the idle timer fresh...
+            host.inner.session.lock().as_mut().unwrap().last_activity =
+                start + Duration::from_secs(minute * 60);
+            assert_eq!(
+                host.enforce_lock_policy_at(policy, start + Duration::from_secs(minute * 60 + 30))
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
+        host.note_activity();
+        // ...but never past the maximum unlock duration.
+        host.inner.session.lock().as_mut().unwrap().last_activity =
+            start + Duration::from_secs(599);
+        assert_eq!(
+            host.enforce_lock_policy_at(policy, start + Duration::from_secs(600))
+                .await
+                .unwrap(),
+            Some(AutoLock::MaxUnlocked)
+        );
+        assert!(!host.status().await.unwrap().is_unlocked);
+
+        // An explicit lock ends the session; disabled limits never lock.
+        host.unlock("test".to_string()).await.unwrap();
+        host.lock().await.unwrap();
+        assert!(host.inner.session.lock().is_none());
+        host.unlock("test".to_string()).await.unwrap();
+        let unlimited = LockPolicy {
+            idle: None,
+            max_unlocked: None,
+        };
+        assert_eq!(
+            host.enforce_lock_policy_at(
+                unlimited,
+                std::time::Instant::now() + Duration::from_secs(86_400 * 30)
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        assert!(host.status().await.unwrap().is_unlocked);
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test]
