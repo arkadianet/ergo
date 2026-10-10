@@ -34,6 +34,25 @@ thread_local! {
 
 /// The error [`collection_to_values`] reports for a value that is not a
 /// collection.
+/// The reference's `MaxArrayLength`: every array-backed collection
+/// (`CollOverArray`) requires at most this many items, and v5+ array
+/// concatenation checks it before allocating.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/util/package.scala#L6-L28>
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/data/CollsOverArrays.scala#L13-L14>
+pub(crate) const MAX_ARRAY_LENGTH: usize = 100_000;
+
+/// Fail like the reference when a collection result would hold more than
+/// [`MAX_ARRAY_LENGTH`] items.
+pub(crate) fn check_array_length(len: usize) -> Result<(), EvalError> {
+    if len > MAX_ARRAY_LENGTH {
+        Err(EvalError::RuntimeException(
+            "collection exceeds the 100000-item array limit",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn not_a_collection(value: &Value) -> EvalError {
     EvalError::TypeError {
         expected: "collection for lambda operation",

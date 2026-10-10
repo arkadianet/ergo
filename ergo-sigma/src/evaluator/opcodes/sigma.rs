@@ -618,6 +618,8 @@ pub(in crate::evaluator) fn eval_subst_constants(
     // number of constants in the template ErgoTree. The evaluator
     // charges PerItem cost based on this count.
     add_cost_per_item(cx.cost, 0x74, n_template_constants as u32)?;
+    // `Colls.fromArray(newBytes)` (MaxArrayLength).
+    super::super::helpers::check_array_length(result.len())?;
     Ok(Value::CollBytes(result))
 }
 

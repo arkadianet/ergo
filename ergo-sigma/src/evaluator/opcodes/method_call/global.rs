@@ -400,7 +400,10 @@ pub(super) fn serialize(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, Ev
     add_method_cost(cx.cost, 10)?;
     let mut w = ergo_primitives::writer::VlqWriter::new();
     serialize_runtime_value(&v, &mut w, cx)?;
-    Ok(Value::CollBytes(w.result()))
+    let bytes = w.result();
+    // `Colls.fromArray(bytes)` (MaxArrayLength).
+    crate::evaluator::helpers::check_array_length(bytes.len())?;
+    Ok(Value::CollBytes(bytes))
 }
 
 /// Walk runtime containers in write order. Converting a whole tuple first would

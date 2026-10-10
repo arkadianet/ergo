@@ -524,6 +524,9 @@ fn flatten_flat_map_results(
         }
         out_len = out_len.saturating_add(collection_len(result, ctx));
     }
+    // `builder.fromArray(toArray.flatMap(..))`: the result is one
+    // array-backed collection, built before flatMap_eval's charge.
+    crate::evaluator::helpers::check_array_length(out_len)?;
     // Box and boxed-element (`Tuple`) outputs hold one `Value` per element and
     // accept any element. Every other kind has its own carrier: convert each
     // result that uses another carrier now, one result at a time, so an
@@ -718,6 +721,9 @@ pub(super) fn patch(
     // overflow usize on supported targets: both args are clamped to
     // [0, i32::MAX], so the worst-case sum 2 * i32::MAX fits in u32.
     let end = (from + replaced).min(items.len());
+    // The patched array becomes a CollOverArray (MaxArrayLength).
+    let start = from.min(items.len());
+    crate::evaluator::helpers::check_array_length(items.len() - (end - start) + patch_items.len())?;
     items.splice(from.min(items.len())..end, patch_items);
     values_to_collection(kind, items, elem_type)
 }

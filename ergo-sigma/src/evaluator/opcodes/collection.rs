@@ -663,6 +663,12 @@ fn append_values(left: Value, right: Value, cx: &EvalCtx<'_>) -> Result<Value, E
             return super::super::helpers::legacy_pair(a, b, cx.ctx);
         }
     }
+    // CollOverArray.append returns the argument for an empty receiver;
+    // otherwise the concatenation is limited to MaxArrayLength items.
+    let left_len = collection_len(&left, cx.ctx);
+    if left_len > 0 {
+        super::super::helpers::check_array_length(left_len + collection_len(&right, cx.ctx))?;
+    }
     let (kind, mut items) = collection_to_values(left, cx.ctx)?;
     let (_, tail) = collection_to_values(right, cx.ctx)?;
     items.extend(tail);

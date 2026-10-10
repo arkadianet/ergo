@@ -28,6 +28,7 @@ infrastructure.
 - Reject method calls whose receiver is not of the method's type, for example `HEIGHT` read from an Int or `Global.xor` called on a box; these were previously accepted. Accept surplus arguments to the numeric `toBytes`, `toBits`, `bitwiseInverse`, `bitwise*` and `shift*` methods, and Byte or Short values for Int (and Short) method parameters, as the reference does; these were previously rejected.
 - Reject scripts in which an evaluated value does not have its expression's static type at the points the reference checks it: lambda arguments and results, fold zero values, `getOrElse` and indexed-access defaults, `if` branches, `==`/`!=` operands, block values and bindings, tuple and collection items. These were previously accepted.
 - Reject spending a box whose script root is not a SigmaProp when the root type is only visible through a collection projection or function application (for example `Coll(1).map(_ => true)(0)`), and reject a Boolean script result. These were previously accepted.
+- Reject collection results with more than 100,000 items (append, flatMap, patch, `Global.serialize`, `substConstants`), as the reference does. These were previously accepted.
 
 ## [0.12.3] - 2026-10-07
 

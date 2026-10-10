@@ -277,3 +277,8 @@ fn evaluated_values_are_checked_against_static_types() {
 fn non_sigma_prop_roots_are_never_spendable() {
     check_vectors("root-type");
 }
+
+#[test]
+fn collections_are_limited_to_100000_items() {
+    check_vectors("collection-length-limit");
+}
