@@ -2120,7 +2120,7 @@ mod tests {
         );
         // The helper's templates are version 3 at height 1.
         let n = calc_n(3, 1);
-        let solves = |msg: &[u8; 32], nonce: &[u8; 8]| hit_for_v2(msg, nonce, 1, n) <= target;
+        let solves = |msg: &[u8; 32], nonce: &[u8; 8]| hit_for_v2(msg, nonce, 1, n) < target;
         let nonce = (0u64..)
             .map(u64::to_be_bytes)
             .find(|nonce| solves(&offered_msg, nonce) && !solves(&rebuilt_msg, nonce))
@@ -2196,7 +2196,7 @@ mod tests {
                 without_msg
             );
             let n = calc_n(3, 1);
-            let solves = |msg: &[u8; 32], nonce: &[u8; 8]| hit_for_v2(msg, nonce, 1, n) <= target;
+            let solves = |msg: &[u8; 32], nonce: &[u8; 8]| hit_for_v2(msg, nonce, 1, n) < target;
             let only = |msg: [u8; 32], other: [u8; 32]| {
                 (0u64..)
                     .map(u64::to_be_bytes)
@@ -2874,7 +2874,7 @@ mod tests {
             .is_some());
         // The helper's templates are version 3 at height 1.
         let n = calc_n(3, 1);
-        let solves = |msg: &[u8; 32], nonce: &[u8; 8]| hit_for_v2(msg, nonce, 1, n) <= target;
+        let solves = |msg: &[u8; 32], nonce: &[u8; 8]| hit_for_v2(msg, nonce, 1, n) < target;
         let nonce_where = |pred: &dyn Fn(&[u8; 8]) -> bool| {
             (0u64..)
                 .map(u64::to_be_bytes)

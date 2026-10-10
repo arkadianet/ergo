@@ -143,7 +143,7 @@ pub struct Candidate {
     /// `blake2b256(serialize_header_without_pow(header))` — the
     /// external miner hashes this with their nonce.
     pub msg: [u8; 32],
-    /// Mining target. The miner's hit must be `<= target` to count
+    /// Mining target. The miner's hit must be `< target` to count
     /// as a valid solution.
     pub target: BigUint,
     /// Frozen `chain_state().best_full_block_id` at generation time.

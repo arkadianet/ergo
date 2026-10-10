@@ -34,7 +34,7 @@ pub struct WorkMessage {
     /// Blake2b256 of `serialize_header_without_pow(header)` — the message the
     /// miner hashes with their nonce to compute the Autolykos v2 hit.
     pub msg: [u8; 32],
-    /// Mining target; a solution's hit must be `<= target`.
+    /// Mining target; a solution's hit must be `< target`.
     pub target: BigUint,
     /// Candidate block height.
     pub height: u32,
