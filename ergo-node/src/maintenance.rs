@@ -48,7 +48,8 @@ fn requires_interruption_cleanup(command: &crate::config::Command) -> bool {
         | Command::VerifyBackup { .. }
         | Command::Doctor { .. }
         | Command::UtxoStats { .. }
-        | Command::WalletScanUtxo { .. } => false,
+        | Command::WalletScanUtxo { .. }
+        | Command::WalletLegacyPurge { .. } => false,
     }
 }
 
@@ -248,8 +249,64 @@ pub fn run(command: &crate::config::Command) -> Result<String> {
                 )?)?
             }
         }
+        Command::WalletLegacyPurge {
+            data_dir,
+            remove_keystore,
+        } => serde_json::to_value(purge_legacy_wallet(data_dir, *remove_keystore)?)?,
     };
     Ok(serde_json::to_string_pretty(&value)?)
+}
+
+#[derive(Debug, Serialize)]
+struct LegacyPurgeReport {
+    tables_removed: Vec<String>,
+    keystore_removed: bool,
+}
+
+/// Drop every `wallet_*` table of a stopped node after the daemon adopted
+/// the wallet, and compact the file. Freed pages are not securely erased.
+fn purge_legacy_wallet(data_dir: &Path, remove_keystore: bool) -> Result<LegacyPurgeReport> {
+    use redb::{MultimapTableHandle, TableHandle};
+    if !data_dir
+        .join(crate::node::legacy_wallet::ADOPTED_MARKER)
+        .is_file()
+    {
+        return Err(fail(
+            "the wallet daemon has not adopted this node's wallet; run `ergo-walletd adopt` first",
+        ));
+    }
+    // Database::open takes the exclusive lock, so a running node is refused.
+    let mut database = redb::Database::open(data_dir.join("state.redb"))?;
+    let write = database.begin_write()?;
+    let tables: Vec<_> = write
+        .list_tables()?
+        .filter(|table| table.name().starts_with("wallet_"))
+        .collect();
+    let multimaps: Vec<_> = write
+        .list_multimap_tables()?
+        .filter(|table| table.name().starts_with("wallet_"))
+        .collect();
+    let mut names = Vec::new();
+    for table in tables {
+        names.push(table.name().to_string());
+        write.delete_table(table)?;
+    }
+    for table in multimaps {
+        names.push(table.name().to_string());
+        write.delete_multimap_table(table)?;
+    }
+    write.commit()?;
+    database.compact()?;
+    drop(database);
+    let keystore = data_dir.join("wallet");
+    let keystore_removed = remove_keystore && keystore.exists();
+    if keystore_removed {
+        fs::remove_dir_all(&keystore)?;
+    }
+    Ok(LegacyPurgeReport {
+        tables_removed: names,
+        keystore_removed,
+    })
 }
 
 fn read_wallet_marker(directory: &Path, name: &str) -> Result<String> {

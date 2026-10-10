@@ -187,4 +187,82 @@ mod tests {
             "never unlocked: no reward key yet"
         );
     }
+
+    #[test]
+    fn purge_requires_adoption_and_drops_only_wallet_tables() {
+        use redb::{ReadableDatabase, TableHandle};
+        ergo_wallet::storage::use_fast_keystore_kdf_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let db =
+                std::sync::Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+            ergo_state::wallet::migrate_schema(&db).unwrap();
+            let write = db.begin_write().unwrap();
+            write
+                .open_table(redb::TableDefinition::<u64, &[u8]>::new("chain_index"))
+                .unwrap()
+                .insert(1, [1u8; 32].as_slice())
+                .unwrap();
+            write.commit().unwrap();
+        }
+        let mut secrets = SecretStorage::open(dir.path().join("wallet"));
+        secrets.restore(PHRASE, "", "pw", false).unwrap();
+        let purge = |remove_keystore| {
+            crate::maintenance::run(&crate::config::Command::WalletLegacyPurge {
+                data_dir: dir.path().to_path_buf(),
+                remove_keystore,
+            })
+        };
+        assert!(purge(false).unwrap_err().to_string().contains("adopt"));
+        std::fs::write(dir.path().join(ADOPTED_MARKER), b"adopted\n").unwrap();
+        let report: serde_json::Value = serde_json::from_str(&purge(false).unwrap()).unwrap();
+        assert!(!report["tables_removed"].as_array().unwrap().is_empty());
+        assert_eq!(report["keystore_removed"], false);
+        let db = redb::Database::open(dir.path().join("state.redb")).unwrap();
+        let read = db.begin_read().unwrap();
+        let names: Vec<String> = read
+            .list_tables()
+            .unwrap()
+            .map(|table| table.name().to_string())
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.starts_with("wallet_")),
+            "{names:?}"
+        );
+        assert!(names.contains(&"chain_index".to_string()));
+        drop(read);
+        drop(db);
+        assert!(dir.path().join("wallet").exists());
+        let report: serde_json::Value = serde_json::from_str(&purge(true).unwrap()).unwrap();
+        assert_eq!(report["keystore_removed"], true);
+        assert!(!dir.path().join("wallet").exists());
+    }
+
+    #[test]
+    fn reward_key_is_the_legacy_first_eip3_key() {
+        use ergo_state::wallet::{WalletStore, WalletWrite};
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            std::sync::Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        ergo_state::wallet::migrate_schema(&db).unwrap();
+        assert_eq!(reward_key(&db).unwrap(), None);
+        let key = [2u8; 33];
+        let store = ergo_state::wallet::RedbWalletStore::new(db.clone());
+        let mut write = store.begin_write().unwrap();
+        write
+            .insert_tracked_pubkey(
+                1,
+                key,
+                &ergo_state::wallet::TrackedPubkeyMeta {
+                    derivation_path: ergo_wallet::DerivationPath::eip3_first_address()
+                        .components()
+                        .to_vec(),
+                    derivation_path_label: String::new(),
+                    added_at_height: 0,
+                },
+            )
+            .unwrap();
+        write.commit().unwrap();
+        assert_eq!(reward_key(&db).unwrap(), Some(key));
+    }
 }
