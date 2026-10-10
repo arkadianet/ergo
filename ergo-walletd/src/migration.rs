@@ -180,7 +180,7 @@ pub fn migrate(args: &MigrateArgs) -> Result<CutoverReport, ConfigError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ergo_wallet::storage::SecretStorage;
     use ergo_wallet_service::wallet::{
@@ -191,7 +191,7 @@ mod tests {
 
     const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-    fn embedded_source(dir: &Path) -> Arc<redb::Database> {
+    pub(crate) fn embedded_source(dir: &Path) -> Arc<redb::Database> {
         let mut secrets = SecretStorage::open(dir.join("wallet"));
         secrets
             .restore(PHRASE, "", "migration-test-password", false)

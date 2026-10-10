@@ -319,6 +319,8 @@ pub struct Cli {
 pub enum CliCommand {
     /// Copy a stopped embedded wallet into a fresh standalone seed directory.
     Migrate(crate::migration::MigrateArgs),
+    /// Move a node's wallet handoff into a new seed data directory.
+    Adopt(crate::adopt::AdoptArgs),
     /// Print the wallet database key as hex, for an `unseal_key_file`
     /// credential. Reads the wallet password (seed) or passphrase
     /// (watch-only) from the first line of standard input. Pipe the output

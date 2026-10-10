@@ -426,7 +426,7 @@ impl Gate {
 
     /// Release the database key with `secret` and open the database, unless
     /// already open. Returns the opened services.
-    async fn unseal(
+    pub(crate) async fn unseal(
         self: &Arc<Self>,
         secret: Zeroizing<String>,
     ) -> Result<Opened, WalletAdminError> {
