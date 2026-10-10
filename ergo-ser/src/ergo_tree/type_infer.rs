@@ -15,6 +15,14 @@ pub fn substitution_type_of(body: &crate::opcode::Expr) -> Option<crate::sigma_t
     infer_type(body, &mut store, &[]).filter(type_is_precise)
 }
 
+/// Exact static type of a tree body (fresh binding store), or `None`.
+pub(super) fn exact_type_of(
+    body: &crate::opcode::Expr,
+    constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
+) -> Option<crate::sigma_type::SigmaType> {
+    infer_type(body, &mut ValDefTypeStore::default(), constants)
+}
+
 /// Record the static type of every node of `body` whose type this typer
 /// determines, keyed by the node's address. The walk is the parse-order
 /// replica of Scala's `valDefTypeStore` started empty, as Scala's reader does

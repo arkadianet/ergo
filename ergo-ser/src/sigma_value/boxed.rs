@@ -98,7 +98,7 @@ fn parse_sizeless_inner_box_script_scoped(
     // resolving to one) is a sizeless `ValidationException` Scala re-raises as a
     // `SerializerException` — hardened by the caller. Mirrors the box-reader
     // `check_sigma_prop_root` gate for the top-level tree.
-    if let Some(tpe) = crate::ergo_tree::determinable_root_type_of(&body, &constants) {
+    if let Some(tpe) = crate::ergo_tree::root_type::rule_1001_root_type_of(&body, &constants) {
         if tpe != crate::sigma_type::SigmaType::SSigmaProp {
             return Err(ReadError::InvalidData(format!(
                 "nested box script: sizeless root has type {tpe:?}, expected SigmaProp (CheckDeserializedScriptIsSigmaProp, rule 1001)"

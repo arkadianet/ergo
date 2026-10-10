@@ -272,3 +272,8 @@ fn method_receivers_and_arguments_match_reference() {
 fn evaluated_values_are_checked_against_static_types() {
     check_vectors("value-check-type");
 }
+
+#[test]
+fn non_sigma_prop_roots_are_never_spendable() {
+    check_vectors("root-type");
+}
