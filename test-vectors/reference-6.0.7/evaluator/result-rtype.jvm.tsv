@@ -23,3 +23,15 @@ p6-v3-mcflatmap-two-int	true	12118
 p6-v3-mapop-notype-two-int	false	null
 p6-v3-mapop-plain-two-int	true	12108
 fuzz-A-39-0300	false	null
+p7-v0-mapop-typevar-empty	false	null
+p7-v0-forall-typevar-empty	true	12102
+p7-v0-filter-typevar-empty	true	12106
+p7-v0-mapop-typevar-two	false	null
+p7-v0-forall-typevar-two	false	null
+p7-v0-filter-typevar-two	false	null
+p7-v3-mapop-typevar-empty	false	null
+p7-v3-forall-typevar-empty	true	12102
+p7-v3-filter-typevar-empty	true	12106
+p7-v3-mapop-typevar-two	false	null
+p7-v3-forall-typevar-two	false	null
+p7-v3-filter-typevar-two	false	null

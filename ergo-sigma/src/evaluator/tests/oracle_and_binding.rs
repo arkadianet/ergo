@@ -805,8 +805,11 @@ fn polymorphic_lambda_through_map_rejects() {
 }
 
 #[test]
-fn polymorphic_lambda_over_empty_coll_accepts() {
-    // Zero elements → zero closure invocations → no checkType → Ok.
+fn polymorphic_lambda_over_empty_coll_still_rejects_map() {
+    // Zero elements → zero closure invocations → no argument checkType, but
+    // MapCollection converts the mapper's range `T` to an RType first
+    // (transformers.scala:43) and fails. forall/filter over an empty
+    // collection accept the same lambda (JVM-confirmed).
     let expr = op(
         0xAD,
         Payload::Two(
@@ -814,11 +817,13 @@ fn polymorphic_lambda_over_empty_coll_accepts() {
             Box::new(poly_identity_lambda()),
         ),
     );
-    match run_eval(&expr) {
-        Value::CollInt(v) => assert!(v.is_empty()),
-        Value::CollGeneric(v, _) => assert!(v.is_empty()),
-        other => panic!("expected empty collection, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            run_eval_err(&expr),
+            EvalError::RuntimeException("Don't know how to convert SType to RType")
+        ),
+        "the mapper range has no runtime type"
+    );
 }
 
 /// MapCollection (0xAD) — element binding does not bleed into the
