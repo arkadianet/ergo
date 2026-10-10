@@ -1224,6 +1224,7 @@ dependencies = [
 name = "ergo-walletd"
 version = "0.12.3"
 dependencies = [
+ "aes-gcm",
  "async-trait",
  "axum",
  "base64",
@@ -1244,9 +1245,11 @@ dependencies = [
  "ergo-wallet-protocol",
  "ergo-wallet-service",
  "hex",
+ "hmac",
  "hyper",
  "hyper-util",
  "parking_lot",
+ "rand 0.8.6",
  "redb 4.3.0",
  "reqwest",
  "rustix",

@@ -131,6 +131,27 @@ pub struct EncryptedSecretV2 {
     /// Pre-1627 derivation switch. Required in version 2.
     #[serde(rename = "usePre1627KeyDerivation")]
     pub use_pre_1627_key_derivation: bool,
+    /// Wallet database key, sealed under the same password-derived key.
+    /// Absent until a host that encrypts its database installs one.
+    #[serde(rename = "dataKey", default, skip_serializing_if = "Option::is_none")]
+    pub data_key: Option<SealedKeyV2>,
+}
+
+/// A 256-bit key sealed inside a version-2 keystore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealedKeyV2 {
+    /// Nonce. Hex-encoded, 12 bytes.
+    pub iv: String,
+    /// Ciphertext followed by the 16-byte GCM tag. Hex-encoded.
+    #[serde(rename = "cipherText")]
+    pub cipher_text: String,
+}
+
+/// Seed and database key recovered from a keystore.
+pub(crate) struct OpenedSecret {
+    pub(crate) seed: zeroize::Zeroizing<[u8; 64]>,
+    pub(crate) data_key: Option<zeroize::Zeroizing<[u8; 32]>>,
 }
 
 impl EncryptedSecretV2 {
@@ -167,23 +188,45 @@ impl EncryptedSecretV2 {
         aad
     }
 
+    /// Associated data for the sealed database key: the seed's associated
+    /// data, a separator and the key's own nonce.
+    fn data_key_aad(seed_aad: &[u8], key_iv: &[u8; 12]) -> Vec<u8> {
+        let mut aad = seed_aad.to_vec();
+        aad.extend_from_slice(b"\0data-key\0");
+        aad.extend_from_slice(key_iv);
+        aad
+    }
+
     fn encrypt(
         seed: &[u8; 64],
         password: &str,
         use_pre_1627: bool,
         params: crate::encryption::Argon2idParams,
+        data_key: Option<&[u8; 32]>,
     ) -> Result<Self, WalletError> {
         let mut salt = [0u8; 32];
         let mut iv = [0u8; 12];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut iv);
         let key = crate::encryption::derive_key_argon2id(password.as_bytes(), &salt, params)?;
-        let sealed = crate::encryption::seal(
-            &key,
-            &iv,
-            seed,
-            &Self::aad(params, &salt, &iv, use_pre_1627),
-        )?;
+        let seed_aad = Self::aad(params, &salt, &iv, use_pre_1627);
+        let sealed = crate::encryption::seal(&key, &iv, seed, &seed_aad)?;
+        let data_key = data_key
+            .map(|data_key| {
+                let mut key_iv = [0u8; 12];
+                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key_iv);
+                crate::encryption::seal(
+                    &key,
+                    &key_iv,
+                    data_key,
+                    &Self::data_key_aad(&seed_aad, &key_iv),
+                )
+                .map(|sealed| SealedKeyV2 {
+                    iv: hex::encode(key_iv),
+                    cipher_text: hex::encode(sealed),
+                })
+            })
+            .transpose()?;
         Ok(Self {
             version: 2,
             kdf: KdfV2 {
@@ -199,10 +242,11 @@ impl EncryptedSecretV2 {
             },
             cipher_text: hex::encode(sealed),
             use_pre_1627_key_derivation: use_pre_1627,
+            data_key,
         })
     }
 
-    fn decrypt(&self, password: &str) -> Result<zeroize::Zeroizing<Vec<u8>>, WalletError> {
+    fn decrypt(&self, password: &str) -> Result<OpenedSecret, WalletError> {
         let invalid = |message: String| WalletError::SecretFile(message);
         if self.version != 2 {
             return Err(invalid(format!(
@@ -232,12 +276,41 @@ impl EncryptedSecretV2 {
         let sealed =
             hex::decode(&self.cipher_text).map_err(|e| invalid(format!("cipherText hex: {e}")))?;
         let key = crate::encryption::derive_key_argon2id(password.as_bytes(), &salt, params)?;
-        crate::encryption::open(
-            &key,
-            &iv,
-            &sealed,
-            &Self::aad(params, &salt, &iv, self.use_pre_1627_key_derivation),
-        )
+        let seed_aad = Self::aad(params, &salt, &iv, self.use_pre_1627_key_derivation);
+        let bytes = crate::encryption::open(&key, &iv, &sealed, &seed_aad)?;
+        let seed: [u8; 64] = bytes.as_slice().try_into().map_err(|_| {
+            invalid(format!(
+                "decrypted seed must be 64 bytes, got {}",
+                bytes.len()
+            ))
+        })?;
+        let data_key = self
+            .data_key
+            .as_ref()
+            .map(|sealed_key| {
+                let key_iv: [u8; 12] = hex::decode(&sealed_key.iv)
+                    .map_err(|e| invalid(format!("dataKey iv hex: {e}")))?
+                    .try_into()
+                    .map_err(|_| invalid("dataKey iv must be 12 bytes".to_string()))?;
+                let sealed = hex::decode(&sealed_key.cipher_text)
+                    .map_err(|e| invalid(format!("dataKey cipherText hex: {e}")))?;
+                let bytes = crate::encryption::open(
+                    &key,
+                    &key_iv,
+                    &sealed,
+                    &Self::data_key_aad(&seed_aad, &key_iv),
+                )?;
+                let data_key: [u8; 32] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| invalid("dataKey must be 32 bytes".to_string()))?;
+                Ok::<_, WalletError>(zeroize::Zeroizing::new(data_key))
+            })
+            .transpose()?;
+        Ok(OpenedSecret {
+            seed: zeroize::Zeroizing::new(seed),
+            data_key,
+        })
     }
 }
 
@@ -299,17 +372,22 @@ impl KeystoreFile {
     }
 
     fn decrypt_seed(&self, password: &str) -> Result<zeroize::Zeroizing<[u8; 64]>, WalletError> {
-        let bytes = match self {
-            Self::V1(secret) => return SecretStorage::decrypt_seed(secret, password),
-            Self::V2(secret) => secret.decrypt(password)?,
-        };
-        let seed: [u8; 64] = bytes.as_slice().try_into().map_err(|_| {
-            WalletError::SecretFile(format!(
-                "decrypted seed must be 64 bytes, got {}",
-                bytes.len()
-            ))
-        })?;
-        Ok(zeroize::Zeroizing::new(seed))
+        Ok(self.open_secret(password)?.seed)
+    }
+
+    pub(crate) fn open_secret(&self, password: &str) -> Result<OpenedSecret, WalletError> {
+        match self {
+            Self::V1(secret) => Ok(OpenedSecret {
+                seed: SecretStorage::decrypt_seed(secret, password)?,
+                data_key: None,
+            }),
+            Self::V2(secret) => secret.decrypt(password),
+        }
+    }
+
+    /// True when the file holds a sealed wallet database key.
+    pub fn has_data_key(&self) -> bool {
+        matches!(self, Self::V2(secret) if secret.data_key.is_some())
     }
 
     /// True when unlock should rewrite this file with the current parameters.
@@ -461,6 +539,8 @@ pub struct SecretStorage {
     cached_secret_path: Option<PathBuf>,
     /// Outcome of the last automatic format upgrade, until taken.
     upgrade: Option<KeystoreUpgrade>,
+    /// Database key sealed into a wallet created by `init` or `restore`.
+    new_wallet_data_key: Option<zeroize::Zeroizing<[u8; 32]>>,
 }
 
 pub use crate::master::{UnlockedMaster, UnlockedSecret};
@@ -488,7 +568,54 @@ impl SecretStorage {
             cached_secret_file: None,
             cached_secret_path: None,
             upgrade: None,
+            new_wallet_data_key: None,
         }
+    }
+
+    /// Seal `key` into the keystore that a later `init` or `restore` creates.
+    pub fn set_new_wallet_data_key(&mut self, key: [u8; 32]) {
+        self.new_wallet_data_key = Some(zeroize::Zeroizing::new(key));
+    }
+
+    /// Recover the wallet database key with `password` without unlocking.
+    /// `Ok(None)` means the keystore holds no database key yet; a wrong
+    /// password is [`WalletError::Decryption`] in every case.
+    pub fn open_data_key(
+        secret_dir: &Path,
+        password: &str,
+    ) -> Result<Option<zeroize::Zeroizing<[u8; 32]>>, WalletError> {
+        let path = Self::find_secret_file(secret_dir)?;
+        Ok(Self::read_secret_file(&path)?
+            .open_secret(password)?
+            .data_key)
+    }
+
+    /// Seal a new wallet database key into an existing keystore, rewriting it
+    /// atomically in the current version-2 format. Refused when the keystore
+    /// already holds one: replacing it would make the database unreadable.
+    pub fn install_data_key(
+        secret_dir: &Path,
+        password: &str,
+        key: &[u8; 32],
+    ) -> Result<(), WalletError> {
+        let path = Self::find_secret_file(secret_dir)?;
+        let file = Self::read_secret_file(&path)?;
+        let opened = file.open_secret(password)?;
+        if opened.data_key.is_some() {
+            return Err(WalletError::SecretFile(
+                "keystore already holds a wallet database key".to_string(),
+            ));
+        }
+        let secret = EncryptedSecretV2::encrypt(
+            &opened.seed,
+            password,
+            file.use_pre_1627(),
+            new_keystore_kdf(),
+            Some(key),
+        )?;
+        let json = serde_json::to_vec_pretty(&secret)
+            .map_err(|e| WalletError::SecretFile(format!("serialize: {e}")))?;
+        replace_secret_file(&path, &json)
     }
 
     fn read_secret_file(path: &Path) -> Result<KeystoreFile, WalletError> {
@@ -760,7 +887,7 @@ impl SecretStorage {
         }
         let secret = self.cached_secret_file.as_ref().unwrap();
 
-        let seed = secret.decrypt_seed(password)?;
+        let OpenedSecret { seed, data_key } = secret.open_secret(password)?;
 
         // Derive the master key directly from the seed bytes — no
         // mnemonic involvement at unlock time. Branch on use_pre_1627
@@ -780,10 +907,12 @@ impl SecretStorage {
             use_pre_1627,
         });
         if let Some(from_version) = upgrade_from {
-            self.upgrade = Some(match self.rewrite_current(&seed, password, use_pre_1627) {
-                Ok(()) => KeystoreUpgrade::Upgraded { from_version },
-                Err(error) => KeystoreUpgrade::Failed(error.to_string()),
-            });
+            self.upgrade = Some(
+                match self.rewrite_current(&seed, password, use_pre_1627, data_key.as_deref()) {
+                    Ok(()) => KeystoreUpgrade::Upgraded { from_version },
+                    Err(error) => KeystoreUpgrade::Failed(error.to_string()),
+                },
+            );
         }
         Ok(())
     }
@@ -793,19 +922,21 @@ impl SecretStorage {
         self.upgrade.take()
     }
 
-    /// Re-encrypt the unlocked seed in the current format and atomically
-    /// replace the cached file at its path.
+    /// Re-encrypt the unlocked seed, and its database key if any, in the
+    /// current format and atomically replace the cached file at its path.
     fn rewrite_current(
         &mut self,
         seed: &[u8; 64],
         password: &str,
         use_pre_1627: bool,
+        data_key: Option<&[u8; 32]>,
     ) -> Result<(), WalletError> {
         let path = self
             .cached_secret_path
             .clone()
             .ok_or_else(|| WalletError::SecretFile("secret file path unknown".to_string()))?;
-        let secret = EncryptedSecretV2::encrypt(seed, password, use_pre_1627, new_keystore_kdf())?;
+        let secret =
+            EncryptedSecretV2::encrypt(seed, password, use_pre_1627, new_keystore_kdf(), data_key)?;
         let json = serde_json::to_vec_pretty(&secret)
             .map_err(|e| WalletError::SecretFile(format!("serialize: {e}")))?;
         replace_secret_file(&path, &json)?;
@@ -903,7 +1034,13 @@ impl SecretStorage {
         self.require_uninitialized()?;
         create_secret_directory(&self.secret_dir)
             .map_err(|e| WalletError::SecretFile(format!("create secret directory: {e}")))?;
-        let secret = EncryptedSecretV2::encrypt(seed, password, use_pre_1627, new_keystore_kdf())?;
+        let secret = EncryptedSecretV2::encrypt(
+            seed,
+            password,
+            use_pre_1627,
+            new_keystore_kdf(),
+            self.new_wallet_data_key.as_deref(),
+        )?;
         let json = serde_json::to_string_pretty(&secret)
             .map_err(|e| WalletError::SecretFile(format!("serialize: {e}")))?;
         let secret = KeystoreFile::V2(secret);
@@ -1088,6 +1225,37 @@ mod tests {
             0o700
         );
         SecretStorage::open(path).unlock("test-password").unwrap();
+    }
+
+    #[test]
+    fn upgrading_a_weak_version_2_file_keeps_its_database_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = [3u8; 64];
+        let weak = crate::encryption::Argon2idParams {
+            memory_kib: 8,
+            iterations: 1,
+            parallelism: 1,
+        };
+        let secret =
+            EncryptedSecretV2::encrypt(&seed, "pw", false, weak, Some(&[9u8; 32])).unwrap();
+        let path = dir.path().join("w.json");
+        std::fs::write(&path, serde_json::to_vec(&secret).unwrap()).unwrap();
+        let mut storage = SecretStorage::open(dir.path().to_path_buf());
+        storage.unlock("pw").unwrap();
+        assert_eq!(
+            storage.take_keystore_upgrade(),
+            Some(KeystoreUpgrade::Upgraded { from_version: 2 })
+        );
+        let KeystoreFile::V2(upgraded) = SecretStorage::read_secret_file(&path).unwrap() else {
+            panic!("upgrades write version 2");
+        };
+        assert!(!upgraded.params().weaker_than(&new_keystore_kdf()));
+        assert_eq!(
+            *SecretStorage::open_data_key(dir.path(), "pw")
+                .unwrap()
+                .unwrap(),
+            [9u8; 32]
+        );
     }
 
     // ----- helpers -----

@@ -47,6 +47,9 @@ zeroize             = { workspace = true }
 redb                = { workspace = true }
 tempfile            = { workspace = true }
 sha2                = { workspace = true }
+aes-gcm             = { workspace = true }
+hmac                = { workspace = true }
+rand                = { workspace = true }
 base64              = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
