@@ -135,6 +135,7 @@ fn transaction(tx: u8, inputs: Vec<ChainInput>, outputs: Vec<ChainOutput>) -> Ch
         tx_id: tx_id(tx),
         inputs,
         outputs,
+        bytes: None,
     }
 }
 

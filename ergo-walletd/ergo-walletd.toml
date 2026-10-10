@@ -51,14 +51,14 @@ blocks_page = 1                  # Request budget: max blocks asked for in ONE
                                  # blocks-since call (1..=1024). This is what
                                  # bounds a single response body, and it is
                                  # independent of sync_batch: the wire form
-                                 # hex-encodes every output box, so a page of N
-                                 # blocks costs roughly twice their bytes and
-                                 # must fit the daemon's 8 MiB response cap.
-                                 # 1 is the largest page whose *worst legal*
-                                 # body provably fits: one block at the
-                                 # documented 2 MiB maxBlockSize is 4 MiB of
-                                 # hex, so two would be 8 MiB before any JSON
-                                 # envelope. A block too large for even a
+                                 # hex-encodes every transaction and output
+                                 # box, so a page of N blocks costs roughly
+                                 # four times their bytes and must fit the
+                                 # daemon's 16 MiB response cap. 1 is the
+                                 # largest page whose *worst legal* body
+                                 # provably fits: one block at the documented
+                                 # 2 MiB maxBlockSize is 8 MiB of hex, so two
+                                 # would be 16 MiB before any JSON envelope. A block too large for even a
                                  # one-block page is a terminal, named error —
                                  # the daemon never retries with a smaller
                                  # page.

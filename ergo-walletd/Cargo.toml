@@ -25,6 +25,7 @@ ergo-ser             = { workspace = true }
 ergo-chain-spec      = { workspace = true }
 ergo-rest-json       = { workspace = true }
 ergo-validation      = { workspace = true }
+ergo-crypto          = { workspace = true }
 ergo-sigma           = { workspace = true }
 axum                = { workspace = true }
 hyper               = { workspace = true }

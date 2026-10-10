@@ -183,3 +183,36 @@ impl ChainClient for NoChain {
         Err(ChainClientError::Unsupported)
     }
 }
+
+/// The transactions root a version-2 header commits to for `transactions`:
+/// the Merkle root of their ids followed by their witness ids.
+pub fn transactions_root(
+    transactions: &[ergo_ser::transaction::Transaction],
+) -> ergo_primitives::digest::Digest32 {
+    let ids: Vec<Vec<u8>> = transactions
+        .iter()
+        .map(|tx| {
+            ergo_ser::transaction::transaction_id(tx)
+                .unwrap()
+                .as_bytes()
+                .to_vec()
+        })
+        .collect();
+    let witnesses: Vec<Vec<u8>> = transactions
+        .iter()
+        .map(|tx| {
+            let proofs: Vec<u8> = tx
+                .inputs
+                .iter()
+                .flat_map(|input| input.spending_proof.proof.iter().copied())
+                .collect();
+            ergo_crypto::autolykos::common::blake2b256(&proofs)[1..].to_vec()
+        })
+        .collect();
+    let id_refs: Vec<&[u8]> = ids.iter().map(Vec::as_slice).collect();
+    let witness_refs: Vec<&[u8]> = witnesses.iter().map(Vec::as_slice).collect();
+    ergo_primitives::digest::Digest32::from_bytes(ergo_crypto::merkle::transactions_root(
+        &id_refs,
+        Some(&witness_refs),
+    ))
+}

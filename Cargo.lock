@@ -1232,6 +1232,7 @@ dependencies = [
  "clap",
  "ergo-api",
  "ergo-chain-spec",
+ "ergo-crypto",
  "ergo-mempool",
  "ergo-mining",
  "ergo-node",

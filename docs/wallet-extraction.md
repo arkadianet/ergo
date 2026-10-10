@@ -43,7 +43,8 @@ branch to main and choosing a release/cutover are subsequent delivery work.
   and defaults to an authenticated watch-only local read API. Opt-in seed mode hosts
   `WalletEngine` for lifecycle, selection, construction, signing, sending,
   scans, rescans and finite private mining jobs through an authenticated API. Both modes authenticate header identity and box
-  IDs, while trusting the node for chain validity and transaction membership.
+  IDs, check every header's proof of work and bind every block's transactions
+  to its header, while trusting the node for chain selection and difficulty.
   Watch reads and short diagnostic projections remain confirmed-only. Seed
   routes use the shared engine and coherently captured node/pool state.
 

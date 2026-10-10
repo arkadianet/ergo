@@ -130,6 +130,17 @@ where
     Ok(value)
 }
 
+fn deserialize_optional_hex_bytes<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    if let Some(value) = &value {
+        validate_hex_bytes(value, "bytes").map_err(serde::de::Error::custom)?;
+    }
+    Ok(value)
+}
+
 fn deserialize_optional_id32_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -402,10 +413,10 @@ pub struct ChainOutput {
 }
 
 /// Transaction identity plus the structured inputs and canonical output boxes
-/// needed by a wallet rescan. The current chain protocol does not carry raw
-/// transaction bytes, so a consumer can verify the transaction id against the
-/// ids embedded in its output boxes but cannot recompute it from a serialized
-/// transaction here.
+/// needed by a wallet rescan, and the complete serialized transaction. From
+/// `bytes` a consumer recomputes the transaction id and witness id, checks the
+/// structured parts against them and binds every transaction of a block to
+/// its header's transactions root.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChainTransaction {
@@ -413,6 +424,14 @@ pub struct ChainTransaction {
     pub tx_id: String,
     pub inputs: Vec<ChainInput>,
     pub outputs: Vec<ChainOutput>,
+    /// The serialized transaction, proofs included, as lowercase hex. Absent
+    /// only from nodes that cannot prove the block.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_hex_bytes"
+    )]
+    pub bytes: Option<String>,
 }
 
 /// Block identity, height, parent, the raw header those three are derived

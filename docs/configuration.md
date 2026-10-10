@@ -847,7 +847,7 @@ confirmed-only.
 | `sync_interval` | u64 or string | `15` | Delay after completed sync passes or retryable errors; incomplete passes continue immediately. Accepts plain seconds (`15`) or a duration string (`"500ms"`, `"30s"`, `"2m"`, `"1h"`). `0` is rejected. CLI: `--sync-interval`. |
 | `shutdown_timeout_secs` | u64 | `5` | Maximum seconds to wait for a cancelled sync worker during shutdown. Must be greater than zero. Cancellation prevents subsequent requests and block application; an in-flight blocking HTTP request can finish after the deadline. |
 | `sync_batch` | u32 | `256` | **Apply budget**: the maximum number of blocks *applied* (committed to the wallet database) by one sync pass. Must be `1..=1024`. It is not a request size — a pass may reach the node tip through many HTTP calls, and it is not what bounds a single response. Larger values trade memory and pass latency for fewer passes. CLI: `--sync-batch`. |
-| `blocks_page` | u32 | `1` | **Request budget**: the maximum number of blocks asked for in a single `blocks-since` call, independent of `sync_batch`. Must be `1..=1024`. The wire form hex-encodes every output box, so a page of `N` blocks costs roughly twice their serialized bytes and must fit the daemon's hard 8 MiB response cap. The default `1` is the largest page whose *worst legal* body provably fits that cap (see [The two sync budgets](#the-two-sync-budgets)); raising it is an operator decision made against their own node's `maxBlockSize`. A block too large even for a one-block page is a terminal error naming the cap and the page — the daemon never retries with a smaller page. CLI: `--blocks-page`. |
+| `blocks_page` | u32 | `1` | **Request budget**: the maximum number of blocks asked for in a single `blocks-since` call, independent of `sync_batch`. Must be `1..=1024`. The wire form hex-encodes every transaction and output box, so a page of `N` blocks costs roughly four times their serialized bytes and must fit the daemon's hard 16 MiB response cap. The default `1` is the largest page whose *worst legal* body provably fits that cap (see [The two sync budgets](#the-two-sync-budgets)); raising it is an operator decision made against their own node's `maxBlockSize`. A block too large even for a one-block page is a terminal error naming the cap and the page — the daemon never retries with a smaller page. CLI: `--blocks-page`. |
 | `unix_socket` | string (path) | none | Path of the owner-only Unix socket serving the local API. Both modes require the local credential on every request. See [Socket permissions](#socket-permissions). CLI: `--unix-socket`. |
 | `tcp_fallback` | string (socket addr) | none | Optional loopback TCP listener for the local API. A non-loopback bind is rejected at load. Both modes require the same local credential used on the Unix socket. Alias: `tcp_addr`. CLI: `--tcp-fallback`. |
 
@@ -866,14 +866,15 @@ the same knob:
 
 A pass with `sync_batch = 256` and `blocks_page = 1` therefore issues up to 256
 requests to apply 256 blocks. The default `1` is chosen against the adapter's
-hard 8 MiB response cap: the chain protocol carries each output box as a hex
-string, so a page costs roughly twice the serialized bytes of the blocks in it,
+hard 16 MiB response cap: the chain protocol carries each transaction and output
+box as a hex string, so a page costs roughly four times the serialized bytes of
+the blocks in it,
 and consensus bounds one block's `BlockTransactions` section by the voted
 `maxBlockSize` parameter. Sizing it against the largest value this document
 shows an operator voting for (`maxBlockSize = 2097152`, 2 MiB) makes the default
 provably safe for any node the daemon may be pointed at: one maxed-out block is
-4 MiB of hex, so a page of `1` fits with more than half the cap spare, while a
-page of `2` would be 8 MiB *before* the JSON envelope (ids, indices, braces) is
+8 MiB of hex, so a page of `1` fits with about half the cap spare, while a
+page of `2` would be 16 MiB *before* the JSON envelope (ids, indices, braces) is
 added. Today's mainnet parameter is smaller than that, so the default is
 deliberately conservative rather than minimal. Sizing the request from the apply
 budget instead (the earlier behaviour, `min(sync_batch, remaining)`) would ask
@@ -910,7 +911,7 @@ file cannot leave the daemon listening somewhere unintended.
 |---|---|---|---|
 | `idle_lock` | u64 or string | `"15m"` | Lock an unlocked seed wallet after this long without a wallet operation: an authenticated non-`GET` request (unlock, sign, send, key or scan changes). Reads do not extend it, so a polling client cannot keep the wallet unlocked. `0` disables it. |
 | `max_unlock` | u64 or string | `"12h"` | Lock an unlocked seed wallet this long after unlocking, whatever its activity. `0` disables it. |
-| `lock_memory` | bool | `false` | Lock all current and future daemon memory into RAM (Linux). Startup fails unless the memory-lock limit is unlimited (systemd `LimitMEMLOCK=infinity`, which the shipped unit sets), because a bounded limit would make later allocations fail. |
+| `lock_memory` | bool | `false` | Lock all current and future daemon memory into RAM (Linux). Startup fails unless the memory-lock limit is unlimited (systemd `LimitMEMLOCK=infinity`), because a bounded limit would make later allocations fail. |
 
 Durations accept plain seconds or `"500ms"`, `"30s"`, `"15m"`, `"12h"`. Private
 mining jobs whose signed bytes are already journaled keep retrying while
