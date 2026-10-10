@@ -11,7 +11,8 @@ use ergo_wallet_protocol::WalletAdminError;
 use super::keys::WalletBootService;
 use super::WalletEngine;
 
-/// Durable state of an [`AttemptLimiter`], in seconds since the Unix epoch.
+/// Durable state of the engine's unlock failed-attempt budget, in seconds
+/// since the Unix epoch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptRecord {
@@ -25,7 +26,7 @@ pub struct AttemptRecord {
     pub strikes: u32,
 }
 
-/// Where an [`AttemptLimiter`] persists its [`AttemptRecord`], so that
+/// Where the unlock failed-attempt budget persists its [`AttemptRecord`], so that
 /// restarting the host does not reset the guess budget.
 pub trait AttemptJournal: Send + Sync {
     /// The stored record, or `None` when nothing has been stored.
