@@ -65,7 +65,7 @@ pub(super) fn apply(
     check_arity(args, 1)?;
     let index = cx.eval_expr(&args[0])?;
     super::super::super::cost::add_cost(cx.cost, 0xB2)?;
-    let Value::Int(index) = index else {
+    let Some(index) = super::widen_to_int(&index) else {
         return Err(EvalError::TypeError {
             expected: "Int index",
             got: format!("{index:?}"),
@@ -106,7 +106,7 @@ pub(super) fn get_or_else(
     let default = cx.eval_expr(&args[1])?;
     super::super::super::cost::add_cost(cx.cost, 0xB2)?;
     let default = reject_sstring(default).map_err(reflect_sstring_error)?;
-    let Value::Int(index) = index else {
+    let Some(index) = super::widen_to_int(&index) else {
         return Err(EvalError::TypeError {
             expected: "Int index",
             got: format!("{index:?}"),
@@ -139,13 +139,15 @@ pub(super) fn index_of(
         });
     }
     let elem = cx.eval_expr(&args[0])?;
-    let from = match cx.eval_expr(&args[1])? {
-        Value::Int(v) => v.max(0) as usize,
-        other => {
+    let from_val = cx.eval_expr(&args[1])?;
+    let from = match super::widen_to_int(&from_val) {
+        Some(v) => v.max(0) as usize,
+        None => {
+            let other = from_val;
             return Err(EvalError::TypeError {
                 expected: "Int for indexOf from",
                 got: format!("{other:?}"),
-            })
+            });
         }
     };
     let (_kind, items) = collection_to_values(obj_val, cx.ctx)?;
@@ -256,13 +258,14 @@ pub(super) fn starts_ends_with(
 pub(super) fn get(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalError> {
     check_arity(args, 1)?;
     let idx_val = cx.eval_expr(&args[0])?;
-    let idx = match idx_val {
-        Value::Int(n) => n,
-        other => {
+    let idx = match super::widen_to_int(&idx_val) {
+        Some(n) => n,
+        None => {
+            let other = idx_val;
             return Err(EvalError::TypeError {
                 expected: "Int for SColl.get index",
                 got: format!("{other:?}"),
-            })
+            });
         }
     };
     add_method_cost(cx.cost, COST_GET)?;
@@ -641,18 +644,18 @@ pub(super) fn patch(
     let replaced_val = cx.eval_expr(&args[2])?;
     // n.max(0) mirrors Scala's `if (from > 0) ... else 0` /
     // `if (replaced < 0) 0 else replaced` clamp.
-    let from = match from_val {
-        Value::Int(n) => n.max(0) as usize,
-        _ => {
+    let from = match super::widen_to_int(&from_val) {
+        Some(n) => n.max(0) as usize,
+        None => {
             return Err(EvalError::TypeError {
                 expected: "Int for patch from",
                 got: format!("{from_val:?}"),
             })
         }
     };
-    let replaced = match replaced_val {
-        Value::Int(n) => n.max(0) as usize,
-        _ => {
+    let replaced = match super::widen_to_int(&replaced_val) {
+        Some(n) => n.max(0) as usize,
+        None => {
             return Err(EvalError::TypeError {
                 expected: "Int for patch replaced",
                 got: format!("{replaced_val:?}"),
@@ -749,9 +752,9 @@ pub(super) fn updated(
     }
     let idx_val = cx.eval_expr(&args[0])?;
     let elem_val = cx.eval_expr(&args[1])?;
-    let idx_i32 = match idx_val {
-        Value::Int(n) => n,
-        _ => {
+    let idx_i32 = match super::widen_to_int(&idx_val) {
+        Some(n) => n,
+        None => {
             return Err(EvalError::TypeError {
                 expected: "Int for updated index",
                 got: format!("{idx_val:?}"),

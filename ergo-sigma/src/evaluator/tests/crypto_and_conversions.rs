@@ -611,7 +611,7 @@ fn context_getvar_inline_works_methodcall_form_unsupported() {
             payload: Payload::MethodCall {
                 type_id: 101,
                 method_id: 11,
-                obj: Box::new(op(0xDD, Payload::Zero)),
+                obj: Box::new(op(0xFE, Payload::Zero)),
                 args: vec![Expr::Const {
                     tpe: SigmaType::SByte,
                     val: SigmaValue::Byte(7),
@@ -657,7 +657,7 @@ fn methodcall_context_getvarfrominput_v6_reads_other_inputs() {
             payload: Payload::MethodCall {
                 type_id: 101,
                 method_id: 12,
-                obj: Box::new(op(0xDD, Payload::Zero)),
+                obj: Box::new(op(0xFE, Payload::Zero)),
                 args: vec![
                     Expr::Const {
                         tpe: SigmaType::SShort,
@@ -762,26 +762,20 @@ fn zero_arg_v6_methods_resolve_via_property_call() {
         Value::CollInt(vec![3, 2, 1])
     );
 
-    // Arity is still enforced for the moved no-arg methods: a malformed 0xDC
-    // MethodCall carrying extra args must error (not silently ignore them),
-    // matching the `check_arity(args, 0)` the explicit arms used to do.
-    let bad = Expr::Op(IrNode {
+    // The numeric v6 methods' user-defined invoke ignores surplus arguments
+    // (it reads at most `other.head`); the reference accepts the extra
+    // argument after evaluating it.
+    let extra = Expr::Op(IrNode {
         opcode: 0xDC,
         payload: Payload::MethodCall {
             type_id: 4,
             method_id: 8, // bitwiseInverse — no-arg
             obj: Box::new(const_int(1)),
-            args: vec![const_int(99)], // bogus extra arg
+            args: vec![const_int(99)], // surplus arg, evaluated and ignored
             type_args: vec![],
         },
     });
-    assert!(
-        matches!(
-            run_eval_err(&bad),
-            EvalError::ArityMismatch { expected: 0, .. }
-        ),
-        "no-arg method invoked with args must error on arity"
-    );
+    assert_eq!(run_eval(&extra), Value::Int(-2));
 }
 
 /// EIP-50 v6 `SGlobal.deserializeTo[T]` (MethodCall 106, 4) — Scala

@@ -564,6 +564,23 @@ fn jvm_failure(
             expected: "serializable value for SubstConstants",
             got,
         }) if got == "PreHeader" => Ok(("RejectScript", "sigma.serialization.SerializerException")),
+        // A method invoked on a receiver of another class: reflection throws
+        // IllegalArgumentException ("object is not an instance of declaring
+        // class"); the numeric methods' `obj.asInstanceOf[T]` throws
+        // ClassCastException.
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "method receiver of the declaring type",
+            got,
+        }) => {
+            let numeric = ["(2,", "(3,", "(4,", "(5,", "(6,", "(9,"]
+                .iter()
+                .any(|p| got.starts_with(p));
+            if numeric {
+                Ok(("RejectScript", "java.lang.ClassCastException"))
+            } else {
+                Ok(("RejectScript", "java.lang.IllegalArgumentException"))
+            }
+        }
         // scrypto allocates a keyLength-byte infinity key before reading the
         // proof; past the JVM array limit that is a fatal error.
         VerifySpendingError::Eval(EvalError::RuntimeException(

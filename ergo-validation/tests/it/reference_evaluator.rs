@@ -262,3 +262,8 @@ fn avl_key_length_past_the_jvm_array_limit_fails_the_script() {
 fn runtime_deserialized_code_gets_the_tree_parse_checks() {
     check_vectors("runtime-deserialized-parse-checks");
 }
+
+#[test]
+fn method_receivers_and_arguments_match_reference() {
+    check_vectors("method-receivers-and-arguments");
+}

@@ -53,8 +53,13 @@ pub(super) fn encode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value,
 pub(super) fn decode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalError> {
     check_arity(args, 1)?;
     let v_val = cx.eval_expr(&args[0])?;
+    // Reflection unboxes the argument with Java's widening conversions, so a
+    // Byte, Short or Int argument is accepted for the `Long` parameter.
     let compact = match v_val {
         Value::Long(n) => n,
+        Value::Int(n) => i64::from(n),
+        Value::Short(n) => i64::from(n),
+        Value::Byte(n) => i64::from(n),
         other => {
             return Err(EvalError::TypeError {
                 expected: "Long for SGlobal.decodeNbits",
@@ -108,13 +113,15 @@ pub(super) fn some(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalErr
 // block validator's PoW check uses via the `hit_for_v2` wrapper.
 pub(super) fn pow_hit(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalError> {
     check_arity(args, 5)?;
-    let k = match cx.eval_expr(&args[0])? {
-        Value::Int(v) => v,
-        other => {
+    let k_val = cx.eval_expr(&args[0])?;
+    let k = match super::widen_to_int(&k_val) {
+        Some(v) => v,
+        None => {
+            let other = k_val;
             return Err(EvalError::TypeError {
                 expected: "Int k for SGlobal.powHit",
                 got: format!("{other:?}"),
-            })
+            });
         }
     };
     let msg = match cx.eval_expr(&args[1])? {
@@ -144,13 +151,15 @@ pub(super) fn pow_hit(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, Eval
             })
         }
     };
-    let n_param = match cx.eval_expr(&args[4])? {
-        Value::Int(v) => v,
-        other => {
+    let n_val = cx.eval_expr(&args[4])?;
+    let n_param = match super::widen_to_int(&n_val) {
+        Some(v) => v,
+        None => {
+            let other = n_val;
             return Err(EvalError::TypeError {
                 expected: "Int N for SGlobal.powHit",
                 got: format!("{other:?}"),
-            })
+            });
         }
     };
     // PowHitCostKind, charged before the (heavy) hit computation.

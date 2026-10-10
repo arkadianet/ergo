@@ -35,6 +35,20 @@ fn property_call_and_method_call_parity_for_no_arg_methods() {
     ctx.last_headers = &headers;
 
     let context_expr = || op(0xFE, Payload::Zero);
+    let global_expr = || op(0xDD, Payload::Zero);
+    // Every receiver must be of the method's declaring type.
+    let pre_header_expr = || {
+        op(
+            0xDB,
+            Payload::MethodCall {
+                type_id: 101,
+                method_id: 3,
+                obj: Box::new(op(0xFE, Payload::Zero)),
+                args: vec![],
+                type_args: vec![],
+            },
+        )
+    };
     let self_expr = || op(0xA7, Payload::Zero);
     let groupgen_via_pc = move || {
         op(
@@ -42,7 +56,7 @@ fn property_call_and_method_call_parity_for_no_arg_methods() {
             Payload::MethodCall {
                 type_id: 106,
                 method_id: 1,
-                obj: Box::new(context_expr()),
+                obj: Box::new(global_expr()),
                 args: vec![],
                 type_args: vec![],
             },
@@ -59,11 +73,11 @@ fn property_call_and_method_call_parity_for_no_arg_methods() {
         // SContext.minerPubKey
         (101, 10, Box::new(context_expr)),
         // SPreHeader.version
-        (105, 1, Box::new(context_expr)),
+        (105, 1, Box::new(pre_header_expr)),
         // SPreHeader.height
-        (105, 5, Box::new(context_expr)),
-        // SGlobal.groupGenerator (obj is anything; SGlobal ignores it)
-        (106, 1, Box::new(context_expr)),
+        (105, 5, Box::new(pre_header_expr)),
+        // SGlobal.groupGenerator
+        (106, 1, Box::new(global_expr)),
         // SBox.tokens — PropertyCall-only inline previously; now both
         (99, 8, Box::new(self_expr)),
         // SGroupElement.getEncoded on the secp256k1 generator
