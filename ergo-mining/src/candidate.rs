@@ -743,9 +743,8 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
     //        minimal template is the strict [emission] prefix of a full
     //        block — same shape, same consensus pipeline below.
     let mut prioritized_count = 0;
-    let (checked_rent, user_checked, checked_fee) = if mode == BuildMode::Minimal
-        && prioritized.is_empty()
-    {
+    let emission_only = mode == BuildMode::Minimal && prioritized.is_empty();
+    let (checked_rent, user_checked, checked_fee) = if emission_only {
         (None, Vec::new(), None)
     } else {
         // 9b. Seed an in-block overlay (over the committed state tip — the same
@@ -932,19 +931,28 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         //     a block could pass the dry-run yet be rejected at submit on
         //     `max_block_cost`. The fee tx is validated against a FRESH overlay
         //     rebuilt from the kept set, so a trimmed tx never leaves a stale
-        //     spend behind.
+        //     spend behind. A fee tx that fails validation trims the same way
+        //     (reason `fee_collection_invalid`) instead of failing the build.
         observation.excluded.extend(selected.excluded);
         let required_ids = selected.required;
         let mut user_checked = priority.checked;
         user_checked.extend(selected.checked);
         let cost_ceiling = max_block_cost.saturating_sub(safety_gap);
+        // Set once the fee tx fails validation with nothing left to trim: the
+        // block is then built without fee collection (the fee boxes stay
+        // unspent) rather than not at all.
+        let mut skip_fee_tx = false;
         let checked_fee = loop {
             check_build_cancelled(should_cancel)?;
             let user_raw: Vec<Transaction> = user_checked
                 .iter()
                 .map(|(c, _)| c.transaction().clone())
                 .collect();
-            let fee_tx_opt = build_fee_tx(&user_raw, miner_pk, candidate_height)?;
+            let fee_tx_opt = if skip_fee_tx {
+                None
+            } else {
+                build_fee_tx(&user_raw, miner_pk, candidate_height, &params)?
+            };
             check_build_cancelled(should_cancel)?;
 
             // Fresh overlay over [emission, rent, kept user txs] so the fee tx's
@@ -979,7 +987,7 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
                         })?;
                     let mut fee_cost_acc = CostAccumulator::new(block_cap);
                     check_build_cancelled(should_cancel)?;
-                    let cf = {
+                    let validated = {
                         let mut fee_ctx = TxValidationCtx {
                             ctx: &ctx,
                             params: &params,
@@ -997,12 +1005,27 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
                             false,
                             &mut fee_ctx,
                         )
-                        .map_err(|e| MiningError::IdComputation {
-                            op: "validate_fee_tx",
-                            reason: format!("{e:?}"),
-                        })?
                     };
-                    (Some(cf), fee_cost_acc.total_block_cost())
+                    match validated {
+                        Ok(cf) => (Some(cf), fee_cost_acc.total_block_cost()),
+                        // A fee tx the validator rejects must not cost the
+                        // template: drop the lowest-priority user tx (its fee
+                        // outputs may be the cause) and retry; with nothing
+                        // left to trim, build without fee collection.
+                        Err(_) => {
+                            if user_checked.len() <= prioritized_count {
+                                skip_fee_tx = true;
+                            } else if let Some((transaction, _)) = user_checked.pop() {
+                                let id = Digest32::from_bytes(*transaction.tx_id());
+                                observation.excluded.push(ExcludedTransaction::new(
+                                    id,
+                                    "fee_collection_invalid",
+                                    required_ids.contains(&id),
+                                ));
+                            }
+                            continue;
+                        }
+                    }
                 }
                 None => (None, 0),
             };
