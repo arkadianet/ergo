@@ -30,6 +30,7 @@ infrastructure.
 - Reject spending a box whose script root is not a SigmaProp when the root type is only visible through a collection projection or function application (for example `Coll(1).map(_ => true)(0)`), and reject a Boolean script result. These were previously accepted.
 - Reject collection results with more than 100,000 items (append, flatMap, patch, `Global.serialize`, `substConstants`), as the reference does. These were previously accepted.
 - Reject `xor` of a longer left operand before JIT activation (block version 2 and earlier), as the reference does.
+- Reject `map` and `flatMap` calls whose result element type is not a concrete type (a failed method specialization, or a mapper whose body has no type), even on an empty collection; these were previously accepted.
 
 ## [0.12.3] - 2026-10-07
 

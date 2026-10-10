@@ -284,6 +284,11 @@ fn collections_are_limited_to_100000_items() {
 }
 
 #[test]
+fn map_results_need_a_convertible_element_type() {
+    check_vectors("result-rtype");
+}
+
+#[test]
 fn pre_jit_xor_reads_the_right_operand_by_left_length() {
     check_vectors("pre-jit-xor");
 }

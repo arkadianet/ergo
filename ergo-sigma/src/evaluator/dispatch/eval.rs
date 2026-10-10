@@ -356,9 +356,17 @@ fn eval_op(
                 args,
                 type_args,
             },
-        ) => opcodes::method_call::eval_method_call(
-            *type_id, *method_id, obj, args, type_args, &mut cx,
-        ),
+        ) => {
+            let v = opcodes::method_call::eval_method_call(
+                *type_id, *method_id, obj, args, type_args, &mut cx,
+            )?;
+            // map_eval / flatMap_eval convert `mc.tpe`'s element type to an
+            // RType (methods.scala:863, 1005).
+            if matches!((*type_id, *method_id), (12, 3) | (12, 15)) {
+                check_coll_result_rtype(crate::evaluator::static_types::op_type(node))?;
+            }
+            Ok(v)
+        }
 
         // PropertyCall — no-arg method invocation. Shared dispatch table
         // with MethodCall lives in opcodes::property_call::eval_no_arg_method.
@@ -678,7 +686,15 @@ fn eval_op(
 
         // MapCollection(collection, mapper) — output type inferred from mapper.
         (0xAD, Payload::Two(coll_expr, mapper_expr)) => {
-            opcodes::collection::eval_map_collection(coll_expr, mapper_expr, &mut cx)
+            let v = opcodes::collection::eval_map_collection(coll_expr, mapper_expr, &mut cx)?;
+            // MapCollection.eval converts `mapper.tpe.tRange` to an RType
+            // (transformers.scala:43).
+            if let Some(SigmaType::SFunc { t_range, .. }) =
+                crate::evaluator::static_types::node_type(mapper_expr)
+            {
+                check_rtype(&t_range)?;
+            }
+            Ok(v)
         }
 
         // Exists(collection, predicate)

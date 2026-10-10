@@ -78,6 +78,51 @@ pub(crate) fn check_value_type(tpe: &SigmaType, v: &Value, v3_tree: bool) -> Res
     }
 }
 
+/// Scala `Evaluation.stypeToRType`: map and flatMap build their result's
+/// runtime type from the node's static result type and throw ("Don't know
+/// how to convert SType") for a type variable left by a failed
+/// specialization, `NoType`, or a function of more than one argument.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/Evaluation.scala#L18-L56>
+pub(crate) fn check_rtype(tpe: &SigmaType) -> Result<(), EvalError> {
+    let ok = match tpe {
+        SigmaType::STuple(items) => return items.iter().try_for_each(check_rtype),
+        SigmaType::SColl(e) | SigmaType::SOption(e) => return check_rtype(e),
+        SigmaType::SFunc {
+            t_dom,
+            t_range,
+            tpe_params,
+        } if t_dom.len() == 1 && tpe_params.is_empty() => {
+            check_rtype(&t_dom[0])?;
+            return check_rtype(t_range);
+        }
+        SigmaType::STypeVar(_)
+        | SigmaType::NoType
+        | SigmaType::SReserved10
+        | SigmaType::SReserved11
+        | SigmaType::SFunc { .. } => false,
+        _ => true,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(EvalError::RuntimeException(
+            "Don't know how to convert SType to RType",
+        ))
+    }
+}
+
+/// [`check_rtype`] on a collection-typed node's element type; any other
+/// known type fails the reference's `asInstanceOf[SCollection]`.
+pub(crate) fn check_coll_result_rtype(tpe: Option<SigmaType>) -> Result<(), EvalError> {
+    match tpe {
+        None | Some(SigmaType::SAny) => Ok(()),
+        Some(SigmaType::SColl(e)) => check_rtype(&e),
+        Some(_) => Err(EvalError::RuntimeException(
+            "method result type is not a collection (ClassCastException)",
+        )),
+    }
+}
+
 fn value_class(v: &Value) -> &'static str {
     match v {
         Value::Unit => "Unit",
