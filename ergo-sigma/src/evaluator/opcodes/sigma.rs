@@ -596,8 +596,16 @@ pub(in crate::evaluator) fn eval_subst_constants(
             })
         }
     };
-    // Unpack the collection of new values into individual elements
-    let value_items = unpack_collection(new_values)?;
+    // Unpack the collection of new values into individual elements. Box
+    // collections need the context to enumerate their boxes; Scala lifts a box
+    // once JIT is active. Substituting one is still unsupported here (no
+    // context reaches the constant writer).
+    let value_items = match new_values {
+        boxes @ (Value::CollBox(_) | Value::BoxCollection(_)) => {
+            super::super::helpers::collection_to_values(boxes, cx.ctx)?.1
+        }
+        other => unpack_collection(other)?,
+    };
 
     let (result, n_template_constants) = super::super::helpers::subst_constants_versioned(
         &script_bytes,

@@ -242,3 +242,8 @@ fn runtime_deserialized_group_elements_are_curve_checked() {
 fn boolean_ops_require_boolean_operands() {
     check_vectors("boolean-operands");
 }
+
+#[test]
+fn subst_constants_new_values_lift_like_reference() {
+    check_vectors("subst-constants-values");
+}

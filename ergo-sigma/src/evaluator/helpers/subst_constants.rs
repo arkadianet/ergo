@@ -1,6 +1,5 @@
 //! `subst_constants` — the `SubstConstants` (0x74) template-constant
-//! substitution, depending on `serialize`'s `value_to_typed_sigma` and
-//! `type_infer`'s `sigma_type_compatible`.
+//! substitution, depending on `serialize`'s `value_to_typed_sigma`.
 
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::SigmaValue;
@@ -55,6 +54,13 @@ pub(crate) fn subst_constants_versioned(
     use ergo_primitives::writer::VlqWriter;
     use ergo_ser::sigma_value::{read_constant, write_constant};
     let is_jit_activated = (activated_script_version as i8) >= 2;
+
+    // Scala lifts every new value to a Constant before it reads the template
+    // or the positions, so an unliftable value fails the call even when no
+    // position substitutes it.
+    for value in new_values {
+        check_liftable(value, is_v3_ergo_tree, is_jit_activated)?;
+    }
 
     // Scala `require(positions.length == newVals.length)`.
     if positions.len() != new_values.len() {
@@ -154,10 +160,10 @@ pub(crate) fn subst_constants_versioned(
             // residual; SGlobal.serialize handles the box case with `Some`).
             let (new_type, sv) = value_to_typed_sigma(new_value, None)?;
             // Scala `require(c.tpe == newConst.tpe)`: a substitution cannot
-            // change the constant's type. `sigma_type_compatible` bridges the
-            // SAny wildcard our type recovery surfaces for `Opt(None)` / empty
-            // collections back to the template's concrete type.
-            if !sigma_type_compatible(template_type, &new_type) {
+            // change the constant's type. Liftable values carry their exact
+            // type (an Option, whose None would surface as `SOption(SAny)`,
+            // never gets here), so the comparison is exact.
+            if *template_type != new_type {
                 return Err(EvalError::RuntimeException(
                     "substConstants: new value type does not match the constant type",
                 ));
@@ -200,4 +206,56 @@ pub(crate) fn subst_constants_versioned(
     w.put_bytes(&tree_bytes);
 
     Ok((w.result(), n_constants))
+}
+
+/// `Platform.liftToConstant` on the JVM: the runtime values `substConstants`
+/// can turn into constants. Tuples, Options, Unit and the context objects have
+/// no case and make `toArrayOfConstants` throw. Header, PreHeader and
+/// UnsignedBigInt lift only in v3 trees, String only before v3, and a Box only
+/// once JIT is active. A collection lifts whatever its element type.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/jvm/src/main/scala/sigma/Platform.scala#L16-L64>
+fn check_liftable(
+    value: &Value,
+    is_v3_ergo_tree: bool,
+    is_jit_activated: bool,
+) -> Result<(), EvalError> {
+    let liftable = match value {
+        Value::Byte(_)
+        | Value::Short(_)
+        | Value::Int(_)
+        | Value::Long(_)
+        | Value::BigInt(_)
+        | Value::Bool(_)
+        | Value::GroupElement(_)
+        | Value::SigmaProp(_)
+        | Value::AvlTree(_)
+        | Value::CollGeneric(..)
+        | Value::CollLegacyPair(..)
+        | Value::CollBool(_)
+        | Value::CollBytes(_)
+        | Value::Tokens(_)
+        | Value::CollInt(_)
+        | Value::CollLong(_)
+        | Value::CollShort(_)
+        | Value::CollSigmaProp(_)
+        | Value::CollBox(_)
+        | Value::BoxCollection(_)
+        | Value::CollHeader(_) => true,
+        Value::Header(_) | Value::PreHeader | Value::UnsignedBigInt(_) => is_v3_ergo_tree,
+        Value::Str(_) => !is_v3_ergo_tree,
+        Value::SelfBox | Value::BoxRef { .. } | Value::InlineBox(_) => is_jit_activated,
+        Value::Unit
+        | Value::Tuple(_)
+        | Value::Opt(_)
+        | Value::Global
+        | Value::Context
+        | Value::Func { .. } => false,
+    };
+    if liftable {
+        Ok(())
+    } else {
+        Err(EvalError::RuntimeException(
+            "substConstants: new value cannot be lifted to a constant",
+        ))
+    }
 }
