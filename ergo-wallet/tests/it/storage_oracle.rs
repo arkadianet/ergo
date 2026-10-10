@@ -73,15 +73,26 @@ fn rust_generated_file_exports_for_scala_verification() {
     let mut reopened = SecretStorage::open(dir.path().to_path_buf());
     reopened.unlock("test-rust-to-scala-pw").unwrap();
     assert!(reopened.check_seed(phrase, ""));
-    // Scala decrypts with its configured settings, not the file's; the JVM
-    // leg assumes the stock node default.
-    assert_eq!(
-        reopened.cached_file().unwrap().cipher_params.prf,
-        "HmacSHA256"
-    );
+    // New Rust wallets are version 2, which Scala cannot read; the JVM leg
+    // verifies the version-1 copy written by the Appkit export.
+    assert_eq!(reopened.cached_file().unwrap().version(), 2);
+    let export_dir = tempfile::tempdir().unwrap();
+    let exported =
+        SecretStorage::export_for_appkit(&path, export_dir.path(), "test-rust-to-scala-pw")
+            .unwrap();
+    let mut exported_storage = SecretStorage::open(export_dir.path().to_path_buf());
+    exported_storage.load_metadata().unwrap();
+    match exported_storage.cached_file().unwrap() {
+        ergo_wallet::storage::KeystoreFile::V1(secret) => {
+            // Scala decrypts with its configured settings, not the file's;
+            // the JVM leg assumes the stock node default.
+            assert_eq!(secret.cipher_params.prf, "HmacSHA256");
+        }
+        other => panic!("Appkit export must be version 1, got {}", other.version()),
+    }
     // The JVM CI leg supplies a persistent path, then independently unlocks
     // this exact Rust-produced file with Scala JsonSecretStorage.
     if let Some(output) = std::env::var_os("ERGO_WALLET_INTEROP_FILE") {
-        std::fs::copy(path, output).unwrap();
+        std::fs::copy(exported, output).unwrap();
     }
 }

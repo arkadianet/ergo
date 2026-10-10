@@ -1,6 +1,12 @@
 //! Encrypted secret-file storage (Scala-compatible).
 //!
-//! On-disk format at `<data_dir>/wallet/<uuid>.json` exactly matches
+//! New files use version 2: Argon2id key derivation and AES-256-GCM whose
+//! associated data authenticates every parameter ([`EncryptedSecretV2`]).
+//! Version-1 files ([`EncryptedSecret`]) remain readable and are rewritten as
+//! version 2 by the first successful unlock. [`SecretStorage::export_for_appkit`]
+//! writes a version-1 copy for JVM tools.
+//!
+//! The version-1 format at `<data_dir>/wallet/<uuid>.json` exactly matches
 //! Scala `JsonSecretStorage`:
 //! - filename: `UUID.nameUUIDFromBytes(cipherText).toString + ".json"`
 //!   (deterministic; two wallets with the same ciphertext produce the
@@ -77,6 +83,283 @@ pub struct EncryptedSecret {
         deserialize_with = "deserialize_use_pre_1627"
     )]
     pub use_pre_1627_key_derivation: bool,
+}
+
+/// Version-2 key-derivation block: Argon2id with an explicit salt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KdfV2 {
+    /// Always `"argon2id"`.
+    pub algorithm: String,
+    /// Memory cost in KiB.
+    #[serde(rename = "memoryKiB")]
+    pub memory_kib: u32,
+    /// Number of passes.
+    pub iterations: u32,
+    /// Degree of parallelism.
+    pub parallelism: u32,
+    /// Salt. Hex-encoded, 32 bytes.
+    pub salt: String,
+}
+
+/// Version-2 cipher block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CipherV2 {
+    /// Always `"AES-256-GCM"`.
+    pub algorithm: String,
+    /// Nonce. Hex-encoded, 12 bytes.
+    pub iv: String,
+}
+
+/// Version-2 encrypted secret file: Argon2id key derivation and AES-256-GCM
+/// whose associated data authenticates every parameter and the derivation
+/// mode. Not readable by Scala, Appkit or earlier Rust releases; use
+/// [`SecretStorage::export_for_appkit`] for a version-1 copy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptedSecretV2 {
+    /// Always 2.
+    pub version: u32,
+    /// Key derivation.
+    pub kdf: KdfV2,
+    /// Cipher.
+    pub cipher: CipherV2,
+    /// Ciphertext followed by the 16-byte GCM tag. Hex-encoded.
+    #[serde(rename = "cipherText")]
+    pub cipher_text: String,
+    /// Pre-1627 derivation switch. Required in version 2.
+    #[serde(rename = "usePre1627KeyDerivation")]
+    pub use_pre_1627_key_derivation: bool,
+}
+
+impl EncryptedSecretV2 {
+    const ALGORITHM: &'static str = "argon2id";
+    const CIPHER: &'static str = "AES-256-GCM";
+    const AAD_DOMAIN: &'static [u8] = b"ergo-wallet keystore v2\0";
+
+    fn params(&self) -> crate::encryption::Argon2idParams {
+        crate::encryption::Argon2idParams {
+            memory_kib: self.kdf.memory_kib,
+            iterations: self.kdf.iterations,
+            parallelism: self.kdf.parallelism,
+        }
+    }
+
+    /// Associated data binding the version, every KDF and cipher parameter,
+    /// and the derivation mode to the ciphertext.
+    fn aad(
+        params: crate::encryption::Argon2idParams,
+        salt: &[u8],
+        iv: &[u8; 12],
+        pre: bool,
+    ) -> Vec<u8> {
+        let mut aad = Vec::with_capacity(Self::AAD_DOMAIN.len() + 64);
+        aad.extend_from_slice(Self::AAD_DOMAIN);
+        aad.extend_from_slice(&2u32.to_be_bytes());
+        aad.extend_from_slice(&params.memory_kib.to_be_bytes());
+        aad.extend_from_slice(&params.iterations.to_be_bytes());
+        aad.extend_from_slice(&params.parallelism.to_be_bytes());
+        aad.extend_from_slice(&(salt.len() as u32).to_be_bytes());
+        aad.extend_from_slice(salt);
+        aad.extend_from_slice(iv);
+        aad.push(u8::from(pre));
+        aad
+    }
+
+    fn encrypt(
+        seed: &[u8; 64],
+        password: &str,
+        use_pre_1627: bool,
+        params: crate::encryption::Argon2idParams,
+    ) -> Result<Self, WalletError> {
+        let mut salt = [0u8; 32];
+        let mut iv = [0u8; 12];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut iv);
+        let key = crate::encryption::derive_key_argon2id(password.as_bytes(), &salt, params)?;
+        let sealed = crate::encryption::seal(
+            &key,
+            &iv,
+            seed,
+            &Self::aad(params, &salt, &iv, use_pre_1627),
+        )?;
+        Ok(Self {
+            version: 2,
+            kdf: KdfV2 {
+                algorithm: Self::ALGORITHM.to_string(),
+                memory_kib: params.memory_kib,
+                iterations: params.iterations,
+                parallelism: params.parallelism,
+                salt: hex::encode(salt),
+            },
+            cipher: CipherV2 {
+                algorithm: Self::CIPHER.to_string(),
+                iv: hex::encode(iv),
+            },
+            cipher_text: hex::encode(sealed),
+            use_pre_1627_key_derivation: use_pre_1627,
+        })
+    }
+
+    fn decrypt(&self, password: &str) -> Result<zeroize::Zeroizing<Vec<u8>>, WalletError> {
+        let invalid = |message: String| WalletError::SecretFile(message);
+        if self.version != 2 {
+            return Err(invalid(format!(
+                "unsupported keystore version {}",
+                self.version
+            )));
+        }
+        if self.kdf.algorithm != Self::ALGORITHM {
+            return Err(invalid(format!("unsupported KDF {:?}", self.kdf.algorithm)));
+        }
+        if self.cipher.algorithm != Self::CIPHER {
+            return Err(invalid(format!(
+                "unsupported cipher {:?}",
+                self.cipher.algorithm
+            )));
+        }
+        let params = self.params();
+        params.validate()?;
+        let salt = hex::decode(&self.kdf.salt).map_err(|e| invalid(format!("salt hex: {e}")))?;
+        if !(16..=64).contains(&salt.len()) {
+            return Err(invalid("salt must be 16 to 64 bytes".to_string()));
+        }
+        let iv: [u8; 12] = hex::decode(&self.cipher.iv)
+            .map_err(|e| invalid(format!("iv hex: {e}")))?
+            .try_into()
+            .map_err(|_| invalid("iv must be 12 bytes".to_string()))?;
+        let sealed =
+            hex::decode(&self.cipher_text).map_err(|e| invalid(format!("cipherText hex: {e}")))?;
+        let key = crate::encryption::derive_key_argon2id(password.as_bytes(), &salt, params)?;
+        crate::encryption::open(
+            &key,
+            &iv,
+            &sealed,
+            &Self::aad(params, &salt, &iv, self.use_pre_1627_key_derivation),
+        )
+    }
+}
+
+/// A parsed secret file of either supported version. Serializes to the
+/// file's own JSON shape.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum KeystoreFile {
+    /// Scala/Appkit-compatible PBKDF2 file.
+    V1(EncryptedSecret),
+    /// Argon2id file with authenticated parameters.
+    V2(EncryptedSecretV2),
+}
+
+impl KeystoreFile {
+    /// Parse a secret file. A `version` field selects version 2; files
+    /// without one are the Scala-compatible version 1.
+    pub fn parse(bytes: &[u8]) -> Result<Self, WalletError> {
+        let parse_error = |e: serde_json::Error| WalletError::SecretFile(format!("parse: {e}"));
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(parse_error)?;
+        match value.get("version") {
+            None => serde_json::from_value(value)
+                .map(Self::V1)
+                .map_err(parse_error),
+            Some(serde_json::Value::Number(number)) if number.as_u64() == Some(2) => {
+                serde_json::from_value(value)
+                    .map(Self::V2)
+                    .map_err(parse_error)
+            }
+            Some(other) => Err(WalletError::SecretFile(format!(
+                "unsupported keystore version {other}"
+            ))),
+        }
+    }
+
+    /// The file's derivation-mode flag. Readable without the password.
+    pub fn use_pre_1627(&self) -> bool {
+        match self {
+            Self::V1(secret) => secret.use_pre_1627_key_derivation,
+            Self::V2(secret) => secret.use_pre_1627_key_derivation,
+        }
+    }
+
+    /// Format version: 1 or 2.
+    pub fn version(&self) -> u32 {
+        match self {
+            Self::V1(_) => 1,
+            Self::V2(_) => 2,
+        }
+    }
+
+    /// Ciphertext bytes, for the Scala filename convention.
+    fn cipher_text_bytes(&self) -> Result<Vec<u8>, WalletError> {
+        let text = match self {
+            Self::V1(secret) => &secret.cipher_text,
+            Self::V2(secret) => &secret.cipher_text,
+        };
+        hex::decode(text).map_err(|e| WalletError::SecretFile(format!("cipherText hex: {e}")))
+    }
+
+    fn decrypt_seed(&self, password: &str) -> Result<zeroize::Zeroizing<[u8; 64]>, WalletError> {
+        let bytes = match self {
+            Self::V1(secret) => return SecretStorage::decrypt_seed(secret, password),
+            Self::V2(secret) => secret.decrypt(password)?,
+        };
+        let seed: [u8; 64] = bytes.as_slice().try_into().map_err(|_| {
+            WalletError::SecretFile(format!(
+                "decrypted seed must be 64 bytes, got {}",
+                bytes.len()
+            ))
+        })?;
+        Ok(zeroize::Zeroizing::new(seed))
+    }
+
+    /// True when unlock should rewrite this file with the current parameters.
+    fn needs_upgrade(&self) -> bool {
+        match self {
+            Self::V1(_) => true,
+            Self::V2(secret) => secret.params().weaker_than(&new_keystore_kdf()),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+static TEST_KDF: std::sync::OnceLock<crate::encryption::Argon2idParams> =
+    std::sync::OnceLock::new();
+
+/// Argon2id parameters for newly written keystore files.
+pub fn new_keystore_kdf() -> crate::encryption::Argon2idParams {
+    #[cfg(any(test, feature = "test-utils"))]
+    if let Some(params) = TEST_KDF.get() {
+        return *params;
+    }
+    // This crate's own unit tests create many wallets; they use the fast
+    // cost unless a test asks otherwise.
+    #[cfg(test)]
+    return FAST_TEST_KDF;
+    #[cfg(not(test))]
+    crate::encryption::Argon2idParams::keystore_default()
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+const FAST_TEST_KDF: crate::encryption::Argon2idParams = crate::encryption::Argon2idParams {
+    memory_kib: 64,
+    iterations: 1,
+    parallelism: 1,
+};
+
+/// Test builds only: write new keystores with minimal Argon2id cost so
+/// suites that create many wallets stay fast. Absent from production builds.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn use_fast_keystore_kdf_for_tests() {
+    let _ = TEST_KDF.set(FAST_TEST_KDF);
+}
+
+/// Result of the automatic keystore upgrade attempted by a successful unlock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeystoreUpgrade {
+    /// The file was rewritten in the current version-2 format.
+    Upgraded { from_version: u32 },
+    /// The rewrite failed; the original file is unchanged and still unlocks.
+    Failed(String),
 }
 
 /// Default for missing `usePre1627KeyDerivation` field. Tier-1
@@ -173,7 +456,11 @@ pub struct SecretStorage {
     unlocked: Option<UnlockedSecret>,
     /// The most-recently-seen secret file. Cached at boot to short-
     /// circuit repeated directory scans.
-    cached_secret_file: Option<EncryptedSecret>,
+    cached_secret_file: Option<KeystoreFile>,
+    /// Path the cached file was read from; an upgrade replaces it in place.
+    cached_secret_path: Option<PathBuf>,
+    /// Outcome of the last automatic format upgrade, until taken.
+    upgrade: Option<KeystoreUpgrade>,
 }
 
 pub use crate::master::{UnlockedMaster, UnlockedSecret};
@@ -199,7 +486,15 @@ impl SecretStorage {
             secret_dir,
             unlocked: None,
             cached_secret_file: None,
+            cached_secret_path: None,
+            upgrade: None,
         }
+    }
+
+    fn read_secret_file(path: &Path) -> Result<KeystoreFile, WalletError> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| WalletError::SecretFile(format!("read {path:?}: {e}")))?;
+        KeystoreFile::parse(&bytes)
     }
 
     /// Load the encrypted secret file's metadata (WITHOUT decrypting
@@ -212,12 +507,10 @@ impl SecretStorage {
     /// Returns `WalletUninitialized` if no secret file exists.
     pub fn load_metadata(&mut self) -> Result<bool, WalletError> {
         let path = Self::find_secret_file(&self.secret_dir)?;
-        let json = std::fs::read_to_string(&path)
-            .map_err(|e| WalletError::SecretFile(format!("read {path:?}: {e}")))?;
-        let secret: EncryptedSecret = serde_json::from_str(&json)
-            .map_err(|e| WalletError::SecretFile(format!("parse: {e}")))?;
-        let use_pre_1627 = secret.use_pre_1627_key_derivation;
+        let secret = Self::read_secret_file(&path)?;
+        let use_pre_1627 = secret.use_pre_1627();
         self.cached_secret_file = Some(secret);
+        self.cached_secret_path = Some(path);
         Ok(use_pre_1627)
     }
 
@@ -341,18 +634,17 @@ impl SecretStorage {
 
     /// Write a separate Appkit-compatible copy of an existing encrypted wallet.
     /// Authenticates the original password and preserves its seed, password,
-    /// and key-derivation mode. The source is never modified; the destination
-    /// directory must be empty. No mnemonic or private key is returned.
+    /// and key-derivation mode. The source, version 1 or 2, is never modified;
+    /// the copy is the Scala/Appkit version-1 PBKDF2 format, which is weaker
+    /// against password guessing than version 2. The destination directory
+    /// must be empty. No mnemonic or private key is returned.
     pub fn export_for_appkit(
         source_file: &Path,
         output_dir: &Path,
         password: &str,
     ) -> Result<PathBuf, WalletError> {
-        let bytes = std::fs::read(source_file)
-            .map_err(|e| WalletError::SecretFile(format!("read {source_file:?}: {e}")))?;
-        let secret: EncryptedSecret = serde_json::from_slice(&bytes)
-            .map_err(|e| WalletError::SecretFile(format!("parse: {e}")))?;
-        let seed = Self::decrypt_seed(&secret, password)?;
+        let secret = Self::read_secret_file(source_file)?;
+        let seed = secret.decrypt_seed(password)?;
         if output_dir.exists() {
             let mut entries = std::fs::read_dir(output_dir)
                 .map_err(|e| WalletError::SecretFile(format!("read output directory: {e}")))?;
@@ -363,7 +655,7 @@ impl SecretStorage {
             }
         }
         let mut output = Self::open(output_dir.to_path_buf());
-        output.persist_seed(&seed, password, secret.use_pre_1627_key_derivation)?;
+        output.persist_seed_v1(&seed, password, secret.use_pre_1627())?;
         Self::find_secret_file(output_dir)
     }
 
@@ -421,6 +713,12 @@ impl SecretStorage {
                 "PBKDF2 iteration count must be positive".to_string(),
             ));
         }
+        if iterations > crate::encryption::MAX_PBKDF2_ITERATIONS {
+            return Err(WalletError::SecretFile(format!(
+                "PBKDF2 iteration count {iterations} exceeds {}",
+                crate::encryption::MAX_PBKDF2_ITERATIONS
+            )));
+        }
         let key = crate::encryption::derive_key_pbkdf2_with_prf(
             password.as_bytes(),
             &salt,
@@ -447,24 +745,28 @@ impl SecretStorage {
     /// master key, stores it in memory for later use. No
     /// `mnemonic_pass` argument — the passphrase was mixed into the
     /// seed at `init`/`restore` time and is "baked in".
+    ///
+    /// A successful unlock of a version-1 file, or of a version-2 file
+    /// weaker than [`new_keystore_kdf`], rewrites it in place in the current
+    /// version-2 format. The rewrite is atomic: the directory always holds
+    /// exactly one complete secret file. A failed rewrite does not fail the
+    /// unlock; [`Self::take_keystore_upgrade`] reports either outcome.
     pub fn unlock(&mut self, password: &str) -> Result<(), WalletError> {
         // Load the secret file if not cached.
         if self.cached_secret_file.is_none() {
             let path = Self::find_secret_file(&self.secret_dir)?;
-            let json = std::fs::read_to_string(&path)
-                .map_err(|e| WalletError::SecretFile(format!("read {path:?}: {e}")))?;
-            let secret: EncryptedSecret = serde_json::from_str(&json)
-                .map_err(|e| WalletError::SecretFile(format!("parse: {e}")))?;
-            self.cached_secret_file = Some(secret);
+            self.cached_secret_file = Some(Self::read_secret_file(&path)?);
+            self.cached_secret_path = Some(path);
         }
         let secret = self.cached_secret_file.as_ref().unwrap();
 
-        let seed = Self::decrypt_seed(secret, password)?;
+        let seed = secret.decrypt_seed(password)?;
 
         // Derive the master key directly from the seed bytes — no
         // mnemonic involvement at unlock time. Branch on use_pre_1627
         // to construct the correct master-key variant.
-        let use_pre_1627 = secret.use_pre_1627_key_derivation;
+        let use_pre_1627 = secret.use_pre_1627();
+        let upgrade_from = secret.needs_upgrade().then(|| secret.version());
         let master = if use_pre_1627 {
             UnlockedMaster::Legacy(
                 crate::extended_key::ExtendedSecretKeyLegacy::derive_master_key(seed.as_slice())?,
@@ -477,6 +779,37 @@ impl SecretStorage {
             master,
             use_pre_1627,
         });
+        if let Some(from_version) = upgrade_from {
+            self.upgrade = Some(match self.rewrite_current(&seed, password, use_pre_1627) {
+                Ok(()) => KeystoreUpgrade::Upgraded { from_version },
+                Err(error) => KeystoreUpgrade::Failed(error.to_string()),
+            });
+        }
+        Ok(())
+    }
+
+    /// Take the outcome of the automatic upgrade attempted by the last unlock.
+    pub fn take_keystore_upgrade(&mut self) -> Option<KeystoreUpgrade> {
+        self.upgrade.take()
+    }
+
+    /// Re-encrypt the unlocked seed in the current format and atomically
+    /// replace the cached file at its path.
+    fn rewrite_current(
+        &mut self,
+        seed: &[u8; 64],
+        password: &str,
+        use_pre_1627: bool,
+    ) -> Result<(), WalletError> {
+        let path = self
+            .cached_secret_path
+            .clone()
+            .ok_or_else(|| WalletError::SecretFile("secret file path unknown".to_string()))?;
+        let secret = EncryptedSecretV2::encrypt(seed, password, use_pre_1627, new_keystore_kdf())?;
+        let json = serde_json::to_vec_pretty(&secret)
+            .map_err(|e| WalletError::SecretFile(format!("serialize: {e}")))?;
+        replace_secret_file(&path, &json)?;
+        self.cached_secret_file = Some(KeystoreFile::V2(secret));
         Ok(())
     }
 
@@ -554,14 +887,38 @@ impl SecretStorage {
     /// Access the cached secret file metadata (the JSON struct read
     /// from disk; doesn't expose the decrypted master). Useful for
     /// reading the `use_pre_1627` flag without unlocking.
-    pub fn cached_file(&self) -> Option<&EncryptedSecret> {
+    pub fn cached_file(&self) -> Option<&KeystoreFile> {
         self.cached_secret_file.as_ref()
     }
 
-    /// Internal: encrypt the BIP39 seed bytes (64 bytes) and write to
-    /// disk. Matches Scala `JsonSecretStorage` which stores the
-    /// encrypted seed — NOT the mnemonic phrase.
+    /// Internal: encrypt the BIP39 seed bytes (64 bytes) in the current
+    /// version-2 format and write to disk. Like Scala `JsonSecretStorage`,
+    /// the file holds the encrypted seed — NOT the mnemonic phrase.
     fn persist_seed(
+        &mut self,
+        seed: &[u8; 64],
+        password: &str,
+        use_pre_1627: bool,
+    ) -> Result<(), WalletError> {
+        self.require_uninitialized()?;
+        create_secret_directory(&self.secret_dir)
+            .map_err(|e| WalletError::SecretFile(format!("create secret directory: {e}")))?;
+        let secret = EncryptedSecretV2::encrypt(seed, password, use_pre_1627, new_keystore_kdf())?;
+        let json = serde_json::to_string_pretty(&secret)
+            .map_err(|e| WalletError::SecretFile(format!("serialize: {e}")))?;
+        let secret = KeystoreFile::V2(secret);
+        let path = self
+            .secret_dir
+            .join(filename_for_ciphertext(&secret.cipher_text_bytes()?));
+        publish_secret_file(&path, json.as_bytes())?;
+        self.cached_secret_file = Some(secret);
+        self.cached_secret_path = Some(path);
+        Ok(())
+    }
+
+    /// Internal: write the seed in the Scala/Appkit version-1 format
+    /// (PBKDF2-HMAC-SHA256, 128,000 iterations). Used only for exports.
+    fn persist_seed_v1(
         &mut self,
         seed: &[u8; 64],
         password: &str,
@@ -606,7 +963,8 @@ impl SecretStorage {
         publish_secret_file(&path, json.as_bytes())?;
 
         // Cache so subsequent unlock() doesn't re-read the file.
-        self.cached_secret_file = Some(secret);
+        self.cached_secret_file = Some(KeystoreFile::V1(secret));
+        self.cached_secret_path = Some(path);
         Ok(())
     }
 }
@@ -647,6 +1005,29 @@ fn create_secret_directory(dir: &Path) -> std::io::Result<()> {
 /// not expose a portable directory durability barrier there.
 fn publish_secret_file(path: &Path, bytes: &[u8]) -> Result<(), WalletError> {
     publish_secret_file_with(path, bytes, |_| Ok(()))
+}
+
+/// Atomically replace an existing secret file with complete new contents.
+/// The replacement is written and synced beside the original and renamed
+/// over it, so a crash leaves either the old or the new complete file.
+fn replace_secret_file(path: &Path, bytes: &[u8]) -> Result<(), WalletError> {
+    use std::io::Write;
+    let replace = || -> std::io::Result<()> {
+        let dir = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("missing secret directory"))?;
+        let mut pending = tempfile::Builder::new()
+            .prefix(".ergo-wallet-pending-")
+            .tempfile_in(dir)?;
+        pending.write_all(bytes)?;
+        pending.as_file().sync_all()?;
+        let replaced = pending.persist(path).map_err(|error| error.error)?;
+        replaced.sync_all()?;
+        #[cfg(unix)]
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    };
+    replace().map_err(|error| WalletError::SecretFile(format!("replace {path:?}: {error}")))
 }
 
 fn publish_secret_file_with(
