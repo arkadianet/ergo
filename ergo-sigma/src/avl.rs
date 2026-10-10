@@ -53,6 +53,88 @@ impl Drop for AvlGuard {
     }
 }
 
+/// Length of an AVL+ digest: a 32-byte root label plus one height byte.
+pub const AVL_DIGEST_LENGTH: usize = 33;
+
+// Packed-proof node markers (scrypto `BatchProofConstants`; the same values
+// are crate-private in `ergo_avltree_rust::batch_node`). Any other byte is an
+// internal node whose value is its balance.
+const PROOF_LEAF: u8 = 2;
+const PROOF_LABEL: u8 = 3;
+const PROOF_END_OF_TREE: u8 = 4;
+const PROOF_LABEL_LENGTH: usize = 32;
+
+/// Height of the tree a packed AVL+ batch proof reconstructs, computed
+/// without building it: one pass over the bytes with a heap stack of subtree
+/// heights. Leaves and label-only nodes have height 0; an internal node has
+/// height `max(left, right) + 1`.
+///
+/// Mirrors the reconstruction in `ergo_avltree_rust`'s `BatchAVLVerifier`
+/// (and scrypto's) exactly: a leaf carries its key only when the previous
+/// node was not a leaf (a label node resets this, an internal node does
+/// not), then the next-leaf key, then a 4-byte big-endian length when values
+/// are not fixed-length, then the value. Returns `None` exactly when that
+/// reconstruction fails on the proof's structure: a read past the end
+/// (including a missing end-of-tree marker), an internal node with fewer
+/// than two subtrees below it, or anything but one tree at the end. Failures
+/// that need the tree itself (node-count bound, root label versus digest)
+/// are left to the crate.
+pub fn proof_tree_height(
+    proof: &[u8],
+    key_length: usize,
+    value_length_opt: Option<usize>,
+) -> Option<usize> {
+    fn advance(proof: &[u8], i: usize, n: usize) -> Option<usize> {
+        let end = i.checked_add(n)?;
+        (end <= proof.len()).then_some(end)
+    }
+
+    let mut heights: Vec<u32> = Vec::new();
+    let mut previous_was_leaf = false;
+    let mut i = 0usize;
+    loop {
+        let marker = *proof.get(i)?;
+        if marker == PROOF_END_OF_TREE {
+            break;
+        }
+        i += 1;
+        match marker {
+            PROOF_LABEL => {
+                i = advance(proof, i, PROOF_LABEL_LENGTH)?;
+                heights.push(0);
+                previous_was_leaf = false;
+            }
+            PROOF_LEAF => {
+                if !previous_was_leaf {
+                    i = advance(proof, i, key_length)?;
+                }
+                i = advance(proof, i, key_length)?;
+                let value_length = match value_length_opt {
+                    Some(len) => len,
+                    None => {
+                        let end = advance(proof, i, 4)?;
+                        let len_bytes: [u8; 4] = proof[i..end].try_into().ok()?;
+                        i = end;
+                        u32::from_be_bytes(len_bytes) as usize
+                    }
+                };
+                i = advance(proof, i, value_length)?;
+                heights.push(0);
+                previous_was_leaf = true;
+            }
+            _ => {
+                let right = heights.pop()?;
+                let left = heights.pop()?;
+                heights.push(left.max(right).checked_add(1)?);
+            }
+        }
+    }
+    match heights.as_slice() {
+        [root] => Some(*root as usize),
+        _ => None,
+    }
+}
+
 /// Opaque handle to a BatchAVLVerifier from `ergo_avltree_rust`.
 ///
 /// Operation methods return `Result<_, ()>` because the underlying crate's
@@ -108,6 +190,11 @@ impl AvlVerifier {
     ///   `CAvlTreeVerifier.apply` (no bounds);
     /// - SANTA authds adverse vectors rely on the bound to reject
     ///   self-consistent proofs padded with extra nodes.
+    ///
+    /// The proof bytes are pre-scanned (see [`proof_tree_height`]) before
+    /// the crate sees them: a proof the crate's reconstruction would reject
+    /// for its structure is rejected here without building any tree.
+    /// No height bound is applied; see [`Self::new_with_height_bound`].
     pub fn new(
         digest: &[u8],
         proof: &[u8],
@@ -116,12 +203,85 @@ impl AvlVerifier {
         max_num_operations: Option<usize>,
         max_deletes: Option<usize>,
     ) -> Result<Self, String> {
+        Self::construct(
+            digest,
+            proof,
+            key_length,
+            value_length_opt,
+            max_num_operations,
+            max_deletes,
+            None,
+        )
+    }
+
+    /// As [`Self::new`], and additionally rejects a proof whose
+    /// reconstructed tree is taller than `max_tree_height` before any tree
+    /// is built.
+    ///
+    /// The upstream crate walks the reconstructed tree recursively (node
+    /// labels, tree operations, and the drop of the tree itself), one stack
+    /// frame per level, so the tree height must be bounded before
+    /// construction for the walk to fit on a validation thread's stack.
+    pub fn new_with_height_bound(
+        digest: &[u8],
+        proof: &[u8],
+        key_length: usize,
+        value_length_opt: Option<usize>,
+        max_num_operations: Option<usize>,
+        max_deletes: Option<usize>,
+        max_tree_height: usize,
+    ) -> Result<Self, String> {
+        Self::construct(
+            digest,
+            proof,
+            key_length,
+            value_length_opt,
+            max_num_operations,
+            max_deletes,
+            Some(max_tree_height),
+        )
+    }
+
+    fn construct(
+        digest: &[u8],
+        proof: &[u8],
+        key_length: usize,
+        value_length_opt: Option<usize>,
+        max_num_operations: Option<usize>,
+        max_deletes: Option<usize>,
+        max_tree_height: Option<usize>,
+    ) -> Result<Self, String> {
         // scrypto 3.0.0 AuthenticatedTreeOps.scala:33 fatally allocates an
         // Int.MaxValue-sized infinity key. Reject this wire-reachable class
         // before constructing the upstream tree; allocation failure cannot
         // be contained by catch_unwind.
         if key_length >= i32::MAX as usize {
             return Err("AVL key length exceeds the JVM array limit".to_string());
+        }
+        // The crate checks these two before reading the proof; checking them
+        // first keeps the failure order of the reconstruction.
+        if key_length == 0 {
+            return Err("AVL key length must be positive".to_string());
+        }
+        if digest.len() != AVL_DIGEST_LENGTH {
+            return Err(format!(
+                "AVL digest must be {AVL_DIGEST_LENGTH} bytes, got {}",
+                digest.len()
+            ));
+        }
+        // Structural pre-scan. A proof that fails here also fails the
+        // crate's reconstruction (same grammar, same failure points), so the
+        // verdict is unchanged; the crate is simply never handed a proof it
+        // would reject mid-parse, which would otherwise drop a partially
+        // built (and possibly very deep) tree.
+        let height = proof_tree_height(proof, key_length, value_length_opt)
+            .ok_or_else(|| "malformed AVL proof: tree reconstruction fails".to_string())?;
+        if let Some(bound) = max_tree_height {
+            if height > bound {
+                return Err(format!(
+                    "AVL proof tree height {height} exceeds the bound {bound}"
+                ));
+            }
         }
         let digest = bytes::Bytes::from(digest.to_vec());
         let proof = bytes::Bytes::from(proof.to_vec());
@@ -742,6 +902,263 @@ mod tests {
         assert!(
             !post_consumption_panicked,
             "ops after partial proof-stream consumption must return Ok/Err, never panic",
+        );
+    }
+}
+
+#[cfg(test)]
+mod deep_proof_tests {
+    use super::*;
+    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
+    use ergo_avltree_rust::batch_node::{AVLTree as ProverTree, Node, NodeHeader};
+    use ergo_avltree_rust::operation::{KeyValue as ProverKv, Operation as ProverOp};
+
+    // ----- helpers -----
+
+    /// Stack size of the node's validation threads.
+    const VALIDATION_STACK: usize = 8 * 1024 * 1024;
+
+    /// A depth whose tree the upstream crate can neither label nor drop on
+    /// an 8 MB stack (labelling overflows near 14,000 levels, dropping a
+    /// one between 50,000 and 200,000).
+    const FAR_TOO_DEEP: usize = 200_000;
+
+    /// Set in the child process that runs a deep-proof test body.
+    const CHILD_ENV: &str = "ERGO_SIGMA_DEEP_AVL_CHILD";
+
+    /// Run `body` on a thread with the validation stack size, inside a child
+    /// process that re-runs only test `test_path` of this test binary. A stack
+    /// overflow aborts the process it happens in; running the body in a child
+    /// turns such a regression into an ordinary failure of this one test.
+    fn run_isolated(test_path: &str, body: fn()) {
+        if std::env::var_os(CHILD_ENV).is_some() {
+            std::thread::Builder::new()
+                .stack_size(VALIDATION_STACK)
+                .spawn(body)
+                .expect("spawn validation-stack thread")
+                .join()
+                .expect("deep-proof test body");
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary path");
+        let output = std::process::Command::new(exe)
+            .args([test_path, "--exact", "--test-threads=1", "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("run child test process");
+        assert!(
+            output.status.success(),
+            "child run of {test_path} failed ({}):\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child run of {test_path} did not run the test",
+        );
+    }
+
+    /// Packed proof of a left spine with `depth` internal nodes (key length
+    /// 1, values fixed at 0 bytes), followed by direction bits that always
+    /// go left. Returns the proof and the matching 33-byte digest.
+    fn spine_proof(depth: usize) -> (Vec<u8>, Vec<u8>) {
+        let leaf_label = |key: u8, next: u8| crate::blake2b256(&[0u8, key, next]);
+        let mut proof = vec![PROOF_LEAF, 0x10, 0x30];
+        let mut label = leaf_label(0x10, 0x30);
+        for level in 0..depth {
+            // A leaf after a leaf or an internal node reuses the previous
+            // next-leaf key as its key, so only the next-leaf key is written.
+            let right = if level == 0 {
+                leaf_label(0x30, 0x20)
+            } else {
+                leaf_label(0x20, 0x20)
+            };
+            proof.extend_from_slice(&[PROOF_LEAF, 0x20, 0x00]);
+            let mut internal = vec![1u8, 0x00];
+            internal.extend_from_slice(&label);
+            internal.extend_from_slice(&right);
+            label = crate::blake2b256(&internal);
+        }
+        proof.push(PROOF_END_OF_TREE);
+        proof.extend(std::iter::repeat_n(0xFFu8, spine_directions_len(depth)));
+        let mut digest = label.to_vec();
+        digest.push(depth.min(200) as u8);
+        (proof, digest)
+    }
+
+    fn spine_directions_len(depth: usize) -> usize {
+        depth / 8 + 8
+    }
+
+    fn prover_key(i: u32) -> [u8; 32] {
+        // Byte 4 keeps every key above the all-zero negative-infinity key.
+        let mut key = [0u8; 32];
+        key[..4].copy_from_slice(&i.wrapping_mul(2_654_435_761).to_be_bytes());
+        key[4] = 1;
+        key
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn proof_tree_height_of_spine_equals_its_depth() {
+        for depth in [0usize, 1, 2, 7, 300] {
+            let (proof, _) = spine_proof(depth);
+            assert_eq!(proof_tree_height(&proof, 1, Some(0)), Some(depth));
+        }
+    }
+
+    #[test]
+    fn proof_tree_height_of_prover_proof_is_within_digest_height() {
+        let tree = ProverTree::new(
+            |d| Node::LabelOnly(NodeHeader::new(Some(*d), None)),
+            32,
+            None,
+        );
+        let mut prover = BatchAVLProver::new(tree, true);
+        for i in 0u32..2_000 {
+            prover
+                .perform_one_operation(&ProverOp::Insert(ProverKv {
+                    key: bytes::Bytes::copy_from_slice(&prover_key(i)),
+                    value: bytes::Bytes::from(vec![0xAB; 5]),
+                }))
+                .expect("insert");
+        }
+        let _ = prover.generate_proof();
+        let parent = prover.digest().expect("digest").to_vec();
+        for i in (0u32..2_000).step_by(97) {
+            prover
+                .perform_one_operation(&ProverOp::Lookup(bytes::Bytes::copy_from_slice(
+                    &prover_key(i),
+                )))
+                .expect("lookup");
+        }
+        let proof = prover.generate_proof().to_vec();
+        let height = proof_tree_height(&proof, 32, None).expect("well-formed proof");
+        assert!(
+            height <= usize::from(parent[32]),
+            "proof height {height} above digest height {}",
+            parent[32]
+        );
+        assert!(
+            AvlVerifier::new_with_height_bound(&parent, &proof, 32, None, None, None, height)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn moderate_depth_avl_proof_verifies_as_before() {
+        run_isolated(
+            "avl::deep_proof_tests::moderate_depth_avl_proof_verifies_as_before",
+            || {
+                let (proof, digest) = spine_proof(1_000);
+                let mut verifier = AvlVerifier::new(&digest, &proof, 1, Some(0), None, None)
+                    .expect("well-formed spine with matching digest");
+                assert_eq!(verifier.lookup(&[0x10]), Ok(Some(Vec::new())));
+                let mut wrong = digest.clone();
+                wrong[0] ^= 1;
+                assert!(
+                    AvlVerifier::new(&wrong, &proof, 1, Some(0), None, None).is_err(),
+                    "a digest mismatch still fails construction"
+                );
+            },
+        );
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn proof_tree_height_rejects_what_reconstruction_rejects() {
+        let (spine, _) = spine_proof(3);
+        let tree_len = spine.len() - spine_directions_len(3);
+        // No end-of-tree marker.
+        assert_eq!(proof_tree_height(&spine[..tree_len - 1], 1, Some(0)), None);
+        // Empty proof.
+        assert_eq!(proof_tree_height(&[], 1, Some(0)), None);
+        // Internal node with nothing below it.
+        assert_eq!(
+            proof_tree_height(&[0x00, PROOF_END_OF_TREE], 1, Some(0)),
+            None
+        );
+        // Two trees left at the end.
+        assert_eq!(
+            proof_tree_height(
+                &[PROOF_LEAF, 1, 2, PROOF_LEAF, 3, PROOF_END_OF_TREE],
+                1,
+                Some(0)
+            ),
+            None
+        );
+        // Truncated label.
+        assert_eq!(
+            proof_tree_height(&[PROOF_LABEL, 0, 0, PROOF_END_OF_TREE], 1, Some(0)),
+            None
+        );
+        // Variable-length value whose length runs past the end.
+        assert_eq!(
+            proof_tree_height(
+                &[PROOF_LEAF, 1, 2, 0xFF, 0xFF, 0xFF, 0xFF, PROOF_END_OF_TREE],
+                1,
+                None
+            ),
+            None
+        );
+        // A single label-only root is a complete tree of height 0.
+        let mut label_root = vec![PROOF_LABEL];
+        label_root.extend_from_slice(&[0u8; PROOF_LABEL_LENGTH]);
+        label_root.push(PROOF_END_OF_TREE);
+        assert_eq!(proof_tree_height(&label_root, 1, Some(0)), Some(0));
+    }
+
+    #[test]
+    fn avl_proof_at_height_bound_is_accepted_and_one_above_is_rejected() {
+        let (proof, digest) = spine_proof(300);
+        assert!(
+            AvlVerifier::new_with_height_bound(&digest, &proof, 1, Some(0), None, None, 300)
+                .is_ok(),
+            "a proof exactly at the bound constructs"
+        );
+        assert!(
+            AvlVerifier::new_with_height_bound(&digest, &proof, 1, Some(0), None, None, 299)
+                .is_err(),
+            "a proof one level above the bound is rejected"
+        );
+    }
+
+    #[test]
+    fn deep_avl_proof_over_height_bound_fails_closed() {
+        run_isolated(
+            "avl::deep_proof_tests::deep_avl_proof_over_height_bound_fails_closed",
+            || {
+                let (proof, digest) = spine_proof(FAR_TOO_DEEP);
+                assert!(AvlVerifier::new_with_height_bound(
+                    &digest,
+                    &proof,
+                    1,
+                    Some(0),
+                    None,
+                    None,
+                    255
+                )
+                .is_err());
+            },
+        );
+    }
+
+    #[test]
+    fn deep_malformed_avl_proof_fails_closed() {
+        // A deep spine that never reaches its end-of-tree marker. The crate
+        // would build the whole spine before failing on the missing marker,
+        // then drop it recursively; the pre-scan rejects the proof first.
+        run_isolated(
+            "avl::deep_proof_tests::deep_malformed_avl_proof_fails_closed",
+            || {
+                let (mut proof, digest) = spine_proof(FAR_TOO_DEEP);
+                proof.truncate(proof.len() - spine_directions_len(FAR_TOO_DEEP) - 1);
+                assert!(AvlVerifier::new(&digest, &proof, 1, Some(0), None, None).is_err());
+            },
         );
     }
 }
