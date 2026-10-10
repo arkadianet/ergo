@@ -11,7 +11,6 @@ use axum::{Json, Router};
 use ergo_wallet_protocol::native::dto::LifecycleStatusDto;
 use ergo_wallet_protocol::native::error::NativeWalletError;
 use ergo_wallet_protocol::{WalletAdminError, WalletErrorSurface};
-use subtle::ConstantTimeEq;
 
 pub const MAX_LIFECYCLE_BODY_BYTES: usize = 16 * 1024;
 pub const LIFECYCLE_ROUTE_INVENTORY: &[(&str, &str)] = &[
@@ -41,7 +40,7 @@ pub(crate) async fn authenticate(
 ) -> Response {
     let mut values = request.headers().get_all("api_key").iter();
     let authorized = values.next().is_some_and(|value| {
-        values.next().is_none() && bool::from(value.as_bytes().ct_eq(key.expose()))
+        values.next().is_none() && bool::from(key.ct_eq_bytes(value.as_bytes()))
     });
     let mut response = if authorized {
         next.run(request).await

@@ -827,8 +827,8 @@ unknown fields and combinations that mix descriptor and seed ownership.
 `mode = "watch_only"` imports public descriptors and exposes the existing
 read API without opening secret storage. `mode = "seed"` hosts the shared
 wallet engine for encrypted seed lifecycle, transaction construction, signing,
-submission, scans/rescans and durable private mining jobs. An independent
-credential protects all local reads and writes. Seed-mode native balance reads
+submission, scans/rescans and durable private mining jobs. In both modes an
+independent credential protects all local reads and writes. Seed-mode native balance reads
 can include an explicitly requested mempool delta; watch-only reads remain
 confirmed-only.
 
@@ -836,19 +836,20 @@ confirmed-only.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `mode` | string | `"watch_only"` | `"watch_only"` requires a public `descriptor_file`. `"seed"` requires `local_api_key_file` and rejects `descriptor_file`. CLI: `--mode <watch-only\|seed>`. |
+| `mode` | string | `"watch_only"` | `"watch_only"` requires a public `descriptor_file`. `"seed"` rejects `descriptor_file`. Both require `local_api_key_file`. CLI: `--mode <watch-only\|seed>`. |
 | `network` | string | `"mainnet"` | Required network identity: `"mainnet"` or `"testnet"`. Any other value (including `devnet`) is a load error. It selects the base58 address prefix used for descriptor validation and for every address the local API returns, so it **must** match the network the configured `node_url` serves — the daemon cannot infer that from the node. CLI: `--network`. |
 | `data_dir` | string (path) | none (required) | Directory holding `wallet.redb`. Seed mode also stores encrypted secret files under `wallet/`. Use a fresh, separate directory when creating a seed wallet; there is no automatic migration from an embedded or descriptor wallet. Created on first start. |
-| `node_url` | string (URL) | none (required) | Base URL of the node API. Watch-only mode reads `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}`. Seed mode also uses coherent spending context, tip-bound block replay, transaction admission/submission and `/api/v1/mining/private-transactions` queue operations. Must be `http`/`https` with a host and no credentials, query, or fragment. CLI: `--node-url`. |
+| `node_url` | string (URL) | none (required) | Base URL of the node API. Watch-only mode reads `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}`. Seed mode also uses coherent spending context, tip-bound block replay, transaction admission/submission and `/api/v1/mining/private-transactions` queue operations. Must be `http`/`https` with a host and no credentials, query, or fragment. Plain `http` is accepted only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), because the node credential travels in a header; a remote node needs `https`. CLI: `--node-url`. |
+| `node_ca_file` | string (path) | none | PEM bundle of the certificate authorities trusted for an `https` `node_url`. When set, the system roots are not trusted, so only a node certificate chaining to these CAs is accepted. Requires an `https` `node_url`; validated at load. |
 | `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Scoped credentials need `wallet`; seed private mining jobs additionally need `operator`. An `admin` credential or the legacy master key also authorizes these requests. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
 | `descriptor_file` | string (path) | none | Required in `watch_only` mode and rejected in `seed` mode. Public descriptor file (see [Descriptor file](#descriptor-file)); size-capped at 16 MiB and validated at load. CLI: `--descriptor-file`. |
-| `local_api_key_file` | string (path) | none | Required in `seed` mode and rejected in `watch_only` mode. Independent local `api_key` credential protecting all seed-mode reads and writes on both Unix and TCP listeners. Uses the same file-permission, size and header-value checks as `api_key_file`; the two files must contain different credentials. Never forwarded to the node. CLI: `--local-api-key-file`. |
+| `local_api_key_file` | string (path) | none (required) | Independent local `api_key` credential protecting every local API request in both modes, on both Unix and TCP listeners. Watch-only balances, addresses and history are as private as a seed wallet's. Uses the same file-permission, size and header-value checks as `api_key_file`; the two files must contain different credentials. Never forwarded to the node. CLI: `--local-api-key-file`. |
 | `sync_interval` | u64 or string | `15` | Delay after completed sync passes or retryable errors; incomplete passes continue immediately. Accepts plain seconds (`15`) or a duration string (`"500ms"`, `"30s"`, `"2m"`, `"1h"`). `0` is rejected. CLI: `--sync-interval`. |
 | `shutdown_timeout_secs` | u64 | `5` | Maximum seconds to wait for a cancelled sync worker during shutdown. Must be greater than zero. Cancellation prevents subsequent requests and block application; an in-flight blocking HTTP request can finish after the deadline. |
 | `sync_batch` | u32 | `256` | **Apply budget**: the maximum number of blocks *applied* (committed to the wallet database) by one sync pass. Must be `1..=1024`. It is not a request size — a pass may reach the node tip through many HTTP calls, and it is not what bounds a single response. Larger values trade memory and pass latency for fewer passes. CLI: `--sync-batch`. |
 | `blocks_page` | u32 | `1` | **Request budget**: the maximum number of blocks asked for in a single `blocks-since` call, independent of `sync_batch`. Must be `1..=1024`. The wire form hex-encodes every output box, so a page of `N` blocks costs roughly twice their serialized bytes and must fit the daemon's hard 8 MiB response cap. The default `1` is the largest page whose *worst legal* body provably fits that cap (see [The two sync budgets](#the-two-sync-budgets)); raising it is an operator decision made against their own node's `maxBlockSize`. A block too large even for a one-block page is a terminal error naming the cap and the page — the daemon never retries with a smaller page. CLI: `--blocks-page`. |
-| `unix_socket` | string (path) | none | Path of the owner-only Unix socket serving the local API. Seed mode still requires the local credential on every request. See [Socket permissions](#socket-permissions). CLI: `--unix-socket`. |
-| `tcp_fallback` | string (socket addr) | none | Optional loopback TCP listener for the local API. A non-loopback bind is rejected at load. Seed mode requires the same local credential used on the Unix socket. Alias: `tcp_addr`. CLI: `--tcp-fallback`. |
+| `unix_socket` | string (path) | none | Path of the owner-only Unix socket serving the local API. Both modes require the local credential on every request. See [Socket permissions](#socket-permissions). CLI: `--unix-socket`. |
+| `tcp_fallback` | string (socket addr) | none | Optional loopback TCP listener for the local API. A non-loopback bind is rejected at load. Both modes require the same local credential used on the Unix socket. Alias: `tcp_addr`. CLI: `--tcp-fallback`. |
 
 At least one of `unix_socket` / `tcp_fallback` is required.
 
@@ -897,10 +898,23 @@ against the documented 2 MiB `maxBlockSize`.
 |---|---|---|---|
 | `unix_socket` | string (path) | none | Same as the top-level key. |
 | `tcp_fallback` | string (socket addr) | none | Same as the top-level key (alias `tcp_addr`). |
+| `allowed_hosts` | array of strings | `[]` | Extra `Host` header values (`host:port`) accepted on `tcp_fallback`, besides the listener's own loopback names (`localhost:<port>` and its IP). Any other `Host` is refused with `403 host_not_allowed` before routing, which stops DNS-rebinding requests from a browser. |
 
-`[api]` is an *alternative spelling* of the two top-level listener keys, not an
-extra section: specifying a listener in both places is a load error, so a
-half-edited file cannot leave the daemon listening somewhere unintended.
+For the listener keys, `[api]` is an *alternative spelling* of the top-level
+keys: specifying a listener in both places is a load error, so a half-edited
+file cannot leave the daemon listening somewhere unintended.
+
+## `ergo-walletd.toml` `[security]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `idle_lock` | u64 or string | `"15m"` | Lock an unlocked seed wallet after this long without a wallet operation: an authenticated non-`GET` request (unlock, sign, send, key or scan changes). Reads do not extend it, so a polling client cannot keep the wallet unlocked. `0` disables it. |
+| `max_unlock` | u64 or string | `"12h"` | Lock an unlocked seed wallet this long after unlocking, whatever its activity. `0` disables it. |
+| `lock_memory` | bool | `false` | Lock all current and future daemon memory into RAM (Linux). Startup fails unless the memory-lock limit is unlimited (systemd `LimitMEMLOCK=infinity`, which the shipped unit sets), because a bounded limit would make later allocations fail. |
+
+Durations accept plain seconds or `"500ms"`, `"30s"`, `"15m"`, `"12h"`. Private
+mining jobs whose signed bytes are already journaled keep retrying while
+locked; unsigned jobs wait for the next unlock without spending retries.
 
 ## Descriptor file
 
@@ -962,14 +976,32 @@ reconciles the seed's public keys, and later syncing continues while locked.
 Seed restarts require the daemon's persisted `wallet-mode` marker; an unmarked
 directory containing `wallet.redb`, `wallet/` or `state.redb` is rejected.
 
-Every seed-mode API request must contain exactly one `api_key` header matching the
-local credential, on both Unix and TCP listeners. The node credential is
-insufficient. Missing, duplicate or incorrect credentials return `401` before
-body parsing. All seed-mode responses include `Cache-Control: no-store`.
+Every API request, in either mode, must contain exactly one `api_key` header
+matching the local credential, on both Unix and TCP listeners. The node
+credential is insufficient. Missing, duplicate or incorrect credentials return
+`401` before body parsing; credentials are compared as SHA-256 digests in
+constant time. All authenticated responses include `Cache-Control: no-store`.
 Lifecycle bodies are capped at 16 KiB, use strict protocol DTOs, and return
-generic parse errors without echoing secret fields. The engine's failed-attempt
-budget protects password and mnemonic checks; internal error details are
+generic parse errors without echoing secret fields. Internal error details are
 withheld from the local API.
+
+The engine's failed-attempt budget protects password and mnemonic checks: five
+failures within a minute lock unlock for five minutes, and each further lockout
+before a successful unlock doubles, up to 24 hours. The unlock budget is kept in
+the owner-only `data_dir/unlock-attempts.json`, so restarting the daemon neither
+resets it nor ends a lockout.
+
+New wallets are written in the version-2 keystore format: Argon2id
+(256 MiB, 3 passes) and AES-256-GCM whose associated data authenticates every
+parameter and the derivation mode. A version-1 file (the Scala/Appkit PBKDF2
+format, including a migrated embedded wallet) is rewritten in place as version 2
+by its first successful unlock; the rewrite is an atomic replace, and if it
+fails the original file is kept and the unlock still succeeds. Version-2 files
+cannot be read by Scala, Appkit or earlier releases; `ergo-wallet
+export-keystore` writes a version-1 copy for those tools. Both formats reject
+cost parameters large enough to stall unlock. The old file's blocks may remain
+on disk until overwritten: replacement is not secure erasure on SSDs or
+copy-on-write file systems.
 
 | Method | Route | Request / response |
 |---|---|---|
@@ -1015,10 +1047,25 @@ Both daemon modes restrict their listener addresses and socket permissions:
 - The marker and the socket are removed on clean shutdown.
 - Unix connection tasks are tracked and cancelled during listener shutdown;
   TCP listeners drain gracefully within the configured shutdown deadline.
-- `tcp_fallback`, when used, must bind a loopback address (rejected otherwise).
-- Watch-only mode uses socket permissions or loopback for access control.
-  Seed mode also requires the independent local `api_key` credential for every
-  read and write. The daemon does not provide TLS or bind non-loopback TCP.
+- `tcp_fallback`, when used, must bind a loopback address (rejected otherwise),
+  and accepts only its own loopback `Host` names plus `[api] allowed_hosts`.
+- Both modes require the independent local `api_key` credential for every read
+  and write, in addition to socket permissions or loopback binding. The daemon
+  does not provide TLS or bind non-loopback TCP.
+- The data directory is owner-only (`0700`) in both modes, as is a socket
+  directory the daemon creates.
+
+## Process hardening
+
+Before it reads any credential, the daemon sets its core-file limit to zero and,
+on Linux, marks itself non-dumpable, which also blocks same-user debuggers and
+`/proc/<pid>/mem` reads. `[security] lock_memory` additionally locks its memory
+into RAM. The shipped [systemd unit](../deploy/ergo-walletd.service) adds
+`MemorySwapMax=0` and `LimitCORE=0`, an `@system-service` syscall filter,
+`MemoryDenyWriteExecute`, no capabilities, private `/proc`, IPC and users, and
+loopback-only networking (`IPAddressAllow=localhost`; add a remote `https`
+node's address explicitly). Memory protection does not defend against root on
+the running host.
 
 ## `ergo-walletd` CLI flags
 
@@ -1031,7 +1078,7 @@ Both daemon modes restrict their listener addresses and socket permissions:
 | `--node-url <url>` | string | — | Overrides `node_url`. |
 | `--api-key-file <path>` | path | — | Overrides `api_key_file`. |
 | `--descriptor-file <path>` | path | — | Overrides `descriptor_file`. |
-| `--local-api-key-file <path>` | path | — | Overrides `local_api_key_file` for seed mode. |
+| `--local-api-key-file <path>` | path | — | Overrides `local_api_key_file`. |
 | `--sync-interval <secs>` | u64 | — | Overrides `sync_interval`. |
 | `--sync-batch <n>` | u32 | — | Overrides `sync_batch` (the per-pass apply budget). |
 | `--blocks-page <n>` | u32 | — | Overrides `blocks_page` (the per-request page size). |

@@ -143,24 +143,56 @@ impl HttpChainClient {
     /// invariant is documented, structurally enforced by `main`, and exercised
     /// end-to-end by `tests/it/daemon_boot.rs`.
     pub fn with_timeouts(
+        base_url: Url,
+        api_key: ApiKey,
+        connect_timeout: Duration,
+        total_timeout: Duration,
+    ) -> Result<Self, ChainClientError> {
+        Self::build(base_url, api_key, connect_timeout, total_timeout, None)
+    }
+
+    /// Blocking constructor for an `https` node whose certificate must chain
+    /// to `roots`; the system roots are not trusted. Same threading contract
+    /// as [`Self::with_timeouts`].
+    pub fn with_trusted_roots(
+        base_url: Url,
+        api_key: ApiKey,
+        roots: Vec<reqwest::Certificate>,
+    ) -> Result<Self, ChainClientError> {
+        Self::build(
+            base_url,
+            api_key,
+            CONNECT_TIMEOUT,
+            TOTAL_TIMEOUT,
+            Some(roots),
+        )
+    }
+
+    fn build(
         mut base_url: Url,
         api_key: ApiKey,
         connect_timeout: Duration,
         total_timeout: Duration,
+        roots: Option<Vec<reqwest::Certificate>>,
     ) -> Result<Self, ChainClientError> {
         if !base_url.path().ends_with('/') {
             let path = format!("{}/", base_url.path());
             base_url.set_path(&path);
         }
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .connect_timeout(connect_timeout)
             .timeout(total_timeout)
             .redirect(reqwest::redirect::Policy::none())
-            .pool_max_idle_per_host(2)
-            .build()
-            .map_err(|_| {
-                ChainClientError::Transport("HTTP client initialization failed".to_string())
-            })?;
+            .pool_max_idle_per_host(2);
+        if let Some(roots) = roots {
+            builder = builder.tls_built_in_root_certs(false).https_only(true);
+            for root in roots {
+                builder = builder.add_root_certificate(root);
+            }
+        }
+        let client = builder.build().map_err(|_| {
+            ChainClientError::Transport("HTTP client initialization failed".to_string())
+        })?;
         Ok(Self {
             client,
             cancelled: AtomicBool::new(false),

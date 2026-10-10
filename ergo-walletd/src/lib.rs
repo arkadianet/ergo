@@ -6,7 +6,9 @@ pub mod config;
 pub mod descriptor;
 pub mod engine_chain;
 pub mod full_api;
+pub mod hardening;
 pub mod host;
+mod host_guard;
 pub mod lifecycle_api;
 pub mod migration;
 mod ownership;
@@ -80,32 +82,24 @@ pub struct Daemon {
     syncer: Arc<StandaloneSyncer>,
     tip: Arc<CachedNodeTip>,
     host: Option<WalletHost>,
-    local_api_key: Option<ApiKey>,
+    local_api_key: ApiKey,
 }
 
 /// Blocking startup half. **Call this from outside any Tokio runtime** — see
 /// [`Daemon`] for why.
 pub fn prepare(config: LoadedConfig) -> Result<Daemon, DaemonError> {
-    match config.config.mode {
-        WalletMode::Seed => {
-            if config.config.descriptor_file.is_some()
-                || config.local_api_key.as_ref().is_none_or(|key| {
-                    key.expose().is_empty() || key.expose() == config.api_key.expose()
-                })
-            {
-                return Err(ConfigError::Invalid(
-                    "seed mode requires a separate local API credential and no descriptor_file"
-                        .into(),
-                )
-                .into());
-            }
-        }
-        WalletMode::WatchOnly if config.local_api_key.is_some() => {
-            return Err(
-                ConfigError::Invalid("local API credential requires seed mode".into()).into(),
-            );
-        }
-        WalletMode::WatchOnly => {}
+    if config.local_api_key.expose().is_empty()
+        || bool::from(config.local_api_key.ct_eq(&config.api_key))
+    {
+        return Err(ConfigError::Invalid(
+            "the local API requires its own credential, different from the node credential".into(),
+        )
+        .into());
+    }
+    if config.config.mode == WalletMode::Seed && config.config.descriptor_file.is_some() {
+        return Err(
+            ConfigError::Invalid("seed mode does not accept descriptor_file".into()).into(),
+        );
     }
     ownership::claim(&config.config.data_dir, config.config.mode)?;
     ownership::claim_network(&config.config.data_dir, config.config.network)?;
@@ -121,10 +115,14 @@ pub fn prepare(config: LoadedConfig) -> Result<Daemon, DaemonError> {
         let descriptors = descriptor::parse_file(path, config.config.network)?;
         descriptor::import(store.as_ref(), &descriptors)?;
     }
-    let chain = Arc::new(HttpChainClient::new(
-        config.config.node_url.clone(),
-        config.api_key.clone(),
-    )?);
+    let chain = Arc::new(match &config.config.node_ca_file {
+        Some(path) => HttpChainClient::with_trusted_roots(
+            config.config.node_url.clone(),
+            config.api_key.clone(),
+            config::read_ca_file(path)?,
+        )?,
+        None => HttpChainClient::new(config.config.node_url.clone(), config.api_key.clone())?,
+    });
     let tip = Arc::new(CachedNodeTip::new(chain.clone()));
     let service = Arc::new(WalletService::new(store.clone(), chain.clone()));
     let host = if config.config.mode == WalletMode::Seed {
@@ -214,16 +212,15 @@ async fn run_listeners<F>(
     config: &Config,
     context: ApiContext,
     host: Option<WalletHost>,
-    local_api_key: Option<ApiKey>,
+    local_api_key: ApiKey,
     shutdown: F,
 ) -> Result<(), DaemonError>
 where
     F: std::future::Future<Output = Result<(), DaemonError>>,
 {
-    let router = match (&host, local_api_key) {
-        (Some(host), Some(key)) => api::seed_router(context, host.clone(), key),
-        (None, None) => api::router(context),
-        _ => return Err(DaemonError::Server("inconsistent wallet API mode".into())),
+    let router = match &host {
+        Some(host) => api::seed_router(context, host.clone(), local_api_key),
+        None => api::watch_router(context, local_api_key),
     };
     let (api_shutdown_tx, api_shutdown_rx) = tokio::sync::watch::channel(());
     let mut listeners = tokio::task::JoinSet::new();
@@ -245,7 +242,12 @@ where
         None
     };
     if let Some(listener) = tcp_listener {
-        let tcp_router = router.clone();
+        let allowed =
+            host_guard::AllowedHosts::for_listener(listener.local_addr()?, &config.allowed_hosts);
+        let tcp_router = router.clone().layer(axum::middleware::from_fn_with_state(
+            Arc::new(allowed),
+            host_guard::require_allowed_host,
+        ));
         let shutdown = api_shutdown_rx.clone();
         listeners.spawn(async move {
             axum::serve(listener, tcp_router)
@@ -297,6 +299,7 @@ where
     let (jobs_shutdown, mut jobs_stopped) = tokio::sync::watch::channel(());
     let mut jobs = tokio::task::JoinSet::new();
     if let Some(host) = host.clone() {
+        let lock_policy = config.lock_policy;
         jobs.spawn(async move {
             let mut ticks = tokio::time::interval(std::time::Duration::from_secs(2));
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -304,6 +307,11 @@ where
                 tokio::select! {
                     _ = jobs_stopped.changed() => return,
                     _ = ticks.tick() => {
+                        match host.enforce_lock_policy(lock_policy).await {
+                            Ok(_) => {}
+                            Err(ergo_wallet_protocol::WalletAdminError::ShuttingDown) => return,
+                            Err(error) => tracing::warn!(%error, "automatic wallet lock deferred"),
+                        }
                         match host.tick_mining_jobs().await {
                             Ok(()) => {}
                             Err(ergo_wallet_protocol::WalletAdminError::ShuttingDown) => return,
@@ -613,19 +621,23 @@ mod review_tests {
                 node_url: "http://127.0.0.1:9053/".parse().unwrap(),
                 api_key_file: dir.path().join("key"),
                 descriptor_file: Some(dir.path().join("descriptor")),
-                local_api_key_file: None,
+                local_api_key_file: dir.path().join("local-key"),
+                node_ca_file: None,
                 sync_interval: Duration::from_secs(60),
                 shutdown_timeout: Duration::from_millis(500),
                 sync_batch: 1,
                 blocks_page: 1,
                 unix_socket: Some(dir.path().join("wallet.sock")),
                 tcp_fallback: None,
+                allowed_hosts: Vec::new(),
+                lock_policy: config::LockPolicy::default(),
+                lock_memory: false,
             },
             service,
             syncer,
             tip,
             host: None,
-            local_api_key: None,
+            local_api_key: ApiKey::from_test(b"local".to_vec()),
         }
     }
 

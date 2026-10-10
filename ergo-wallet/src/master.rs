@@ -45,7 +45,7 @@ impl UnlockedMaster {
         path: &crate::derivation::DerivationPath,
     ) -> Result<k256::Scalar, WalletError> {
         use k256::elliptic_curve::ops::Reduce;
-        let bytes: [u8; 32] = match self {
+        let bytes: zeroize::Zeroizing<[u8; 32]> = match self {
             UnlockedMaster::Modern(esk) => {
                 let leaf = esk.derive_at_path(path)?;
                 leaf.secret_bytes()
@@ -53,14 +53,14 @@ impl UnlockedMaster {
             UnlockedMaster::Legacy(esk) => {
                 let leaf = esk.derive_at_path(path)?;
                 // Variable-length secret: left-pad to 32 bytes.
-                let mut padded = [0u8; 32];
+                let mut padded = zeroize::Zeroizing::new([0u8; 32]);
                 let sb = leaf.secret_bytes();
                 let offset = 32 - sb.len().min(32);
                 padded[offset..].copy_from_slice(&sb[sb.len().saturating_sub(32)..]);
                 padded
             }
         };
-        let wide = k256::U256::from_be_slice(&bytes);
+        let wide = k256::U256::from_be_slice(bytes.as_slice());
         Ok(<k256::Scalar as Reduce<k256::U256>>::reduce(wide))
     }
 

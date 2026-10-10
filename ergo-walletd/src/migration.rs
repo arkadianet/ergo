@@ -137,10 +137,15 @@ pub fn migrate(args: &MigrateArgs) -> Result<CutoverReport, ConfigError> {
         .prefix(".ergo-wallet-cutover-")
         .tempdir_in(parent)?;
     let source_copy_path = temporary.path().join("source.redb");
-    let mut source_copy = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&source_copy_path)?;
+    let mut source_options = OpenOptions::new();
+    source_options.write(true).create_new(true);
+    // The private copy holds the whole node database, wallet rows included.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        source_options.mode(0o600);
+    }
+    let mut source_copy = source_options.open(&source_copy_path)?;
     let length = backend.len()?;
     let mut original_hash = Sha256::new();
     let mut buffer = vec![0u8; 1024 * 1024];

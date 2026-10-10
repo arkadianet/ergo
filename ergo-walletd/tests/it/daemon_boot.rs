@@ -44,12 +44,17 @@ const DESCRIPTORS: &str = concat!(
 /// exactly the key `crate::node_api`'s router is gated on. If the two ever drift,
 /// the daemon's sync loop answers 401 and the wallet never reaches the tip, so
 /// this is the fixture's own guard against silently not exercising auth.
+const LOCAL_KEY: &str = "watch-daemon-local-credential";
+
 fn write_config(dir: &Path, node_url: &str, socket: &Path) -> PathBuf {
     let key_file = dir.join("node-api-key");
     let mut key = NODE_API_KEY.to_vec();
     key.push(b'\n');
     std::fs::write(&key_file, &key).unwrap();
     std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let local_key_file = dir.join("local-api-key");
+    std::fs::write(&local_key_file, LOCAL_KEY).unwrap();
+    std::fs::set_permissions(&local_key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
     let descriptors = dir.join("descriptors.toml");
     std::fs::write(&descriptors, DESCRIPTORS).unwrap();
     let config_path = dir.join("ergo-walletd.toml");
@@ -57,10 +62,11 @@ fn write_config(dir: &Path, node_url: &str, socket: &Path) -> PathBuf {
         &config_path,
         format!(
             "network = \"mainnet\"\ndata_dir = \"{}\"\nnode_url = \"{node_url}\"\n\
-             api_key_file = \"{}\"\ndescriptor_file = \"{}\"\n\
+             api_key_file = \"{}\"\nlocal_api_key_file = \"{}\"\ndescriptor_file = \"{}\"\n\
              sync_interval = \"1s\"\nsync_batch = 8\nunix_socket = \"{}\"\n",
             dir.join("data").display(),
             key_file.display(),
+            local_key_file.display(),
             descriptors.display(),
             socket.display(),
         ),
@@ -89,12 +95,20 @@ fn load(config_path: &Path) -> LoadedConfig {
     .unwrap()
 }
 
-/// One blocking HTTP/1.1 GET over the daemon's Unix socket.
+/// One blocking authenticated HTTP/1.1 GET over the daemon's Unix socket.
 fn socket_get(socket: &Path, path: &str) -> String {
+    socket_get_with(socket, path, Some(LOCAL_KEY))
+}
+
+fn socket_get_with(socket: &Path, path: &str, key: Option<&str>) -> String {
     let mut stream = UnixStream::connect(socket).unwrap();
+    let key = key
+        .map(|key| format!("api_key: {key}\r\n"))
+        .unwrap_or_default();
     stream
         .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n").as_bytes(),
+            format!("GET {path} HTTP/1.1\r\nHost: local\r\n{key}Connection: close\r\n\r\n")
+                .as_bytes(),
         )
         .unwrap();
     let mut response = String::new();
@@ -190,6 +204,27 @@ fn daemon_prepares_outside_the_runtime_and_serves_its_read_api() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    // Watch-only data is private: every read requires the local credential,
+    // and the node credential is not accepted in its place.
+    for key in [
+        None,
+        Some("wrong"),
+        Some(std::str::from_utf8(NODE_API_KEY).unwrap()),
+    ] {
+        for path in [
+            "/api/v1/wallet/status",
+            "/api/v1/wallet/addresses",
+            "/balance",
+        ] {
+            let refused = socket_get_with(&socket, path, key);
+            assert!(
+                refused.starts_with("HTTP/1.1 401"),
+                "{path} {key:?}: {refused}"
+            );
+            assert!(!refused.contains("address\""), "{path}: {refused}");
+        }
+    }
+
     // The sync loop publishes every tip it observes, so `/status` never has to
     // probe the node itself.
     let status = body(&socket_get(&socket, "/api/v1/wallet/status"));
@@ -250,6 +285,9 @@ fn daemon_refuses_a_group_readable_api_key_file_and_redacts_its_value() {
     let key_file = dir.path().join("node-api-key");
     std::fs::write(&key_file, b"walletd-boot-key\n").unwrap();
     std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let local_key_file = dir.path().join("local-api-key");
+    std::fs::write(&local_key_file, LOCAL_KEY).unwrap();
+    std::fs::set_permissions(&local_key_file, std::fs::Permissions::from_mode(0o600)).unwrap();
     let descriptors = dir.path().join("descriptors.toml");
     std::fs::write(&descriptors, DESCRIPTORS).unwrap();
     let config_path = dir.path().join("ergo-walletd.toml");
@@ -257,9 +295,10 @@ fn daemon_refuses_a_group_readable_api_key_file_and_redacts_its_value() {
         &config_path,
         format!(
             "data_dir = \"{}\"\nnode_url = \"http://127.0.0.1:9099\"\napi_key_file = \"{}\"\n\
-             descriptor_file = \"{}\"\nunix_socket = \"{}\"\n",
+             local_api_key_file = \"{}\"\ndescriptor_file = \"{}\"\nunix_socket = \"{}\"\n",
             dir.path().join("data").display(),
             key_file.display(),
+            local_key_file.display(),
             descriptors.display(),
             socket.display(),
         ),
