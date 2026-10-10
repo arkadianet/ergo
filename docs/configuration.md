@@ -912,10 +912,57 @@ file cannot leave the daemon listening somewhere unintended.
 | `idle_lock` | u64 or string | `"15m"` | Lock an unlocked seed wallet after this long without a wallet operation: an authenticated non-`GET` request (unlock, sign, send, key or scan changes). Reads do not extend it, so a polling client cannot keep the wallet unlocked. `0` disables it. |
 | `max_unlock` | u64 or string | `"12h"` | Lock an unlocked seed wallet this long after unlocking, whatever its activity. `0` disables it. |
 | `lock_memory` | bool | `false` | Lock all current and future daemon memory into RAM (Linux). Startup fails unless the memory-lock limit is unlimited (systemd `LimitMEMLOCK=infinity`), because a bounded limit would make later allocations fail. |
+| `unseal_key_file` | string (path) | none | Owner-only file holding the wallet database key as 64 hex characters, read at start so the daemon unseals without a password (see [Sealed start](#sealed-start-and-database-encryption)). Intended for a systemd `LoadCredentialEncrypted=` credential bound to the host's TPM. CLI: `--unseal-key-file`. |
+| `multisig_nonces` | string | `"daemon"` | Who holds multisig signing nonces between `generateCommitments` and signing. `"daemon"` returns single-use `custody:` handles in place of each own commitment's secret nonce and resolves them when signing; they expire after an hour and are wiped on lock. `"caller"` returns the secret nonce as hex, as the Scala node does: anyone who sees it with the final signature can recover the signing key. |
 
 Durations accept plain seconds or `"500ms"`, `"30s"`, `"15m"`, `"12h"`. Private
 mining jobs whose signed bytes are already journaled keep retrying while
 locked; unsigned jobs wait for the next unlock without spending retries.
+
+## Sealed start and database encryption
+
+`wallet.redb` is encrypted at rest in both modes: every 4 KiB sector is sealed
+with AES-256-GCM under a random wallet database key, with the sector's index
+and the file's identifier authenticated, so a copied or recovered database
+reveals no addresses, balances or history, and a modified sector fails to
+read. The database key is never stored in the clear:
+
+- **Seed wallets** seal it in the keystore under the wallet password.
+- **Watch-only wallets** seal it in `data_dir/data-key.json` under an operator
+  passphrase of at least 12 characters, set by the first unseal.
+
+A daemon that restarts is **sealed**: it holds no key, does not open the
+database and does not sync. Lifecycle status reports
+`{initialized, locked, sealed: true}`; other wallet routes answer
+`503 wallet_sealed`. To resume:
+
+- `POST /api/v1/wallet/unlock` (or Scala `/wallet/unlock`) with the wallet
+  password unseals the database, starts sync and unlocks spending.
+- `POST /api/v1/wallet/unseal` with `{pass}` unseals without unlocking:
+  sync resumes, spending stays locked. Watch-only wallets use this route with
+  their passphrase.
+
+Unseal attempts share the persisted unlock budget. Auto-lock (`idle_lock`,
+`max_unlock`) wipes only the spending key, so an unsealed wallet keeps syncing
+while locked. `POST /api/v1/wallet/seal` stops the daemon; it starts sealed
+again. A fresh seed directory starts unsealed with a new key, which `init` or
+`restore` seals into the new keystore.
+
+An existing cleartext `wallet.redb` (a migrated or earlier wallet) is encrypted
+on its first unseal through a verified copy and an atomic rename; a wallet
+whose keystore has no database key gets one sealed first. Encryption is not
+secure erasure: the former cleartext blocks can remain on disk until
+overwritten, so use full-disk encryption as well.
+
+For an unattended host, `ergo-walletd export-unseal-key --config <path>`
+reads the password (or passphrase) from the first line of standard input and
+prints the database key as hex. Pipe it straight into
+`systemd-creds encrypt --with-key=tpm2 --name=unseal-key - /etc/ergo-walletd/unseal-key.cred`,
+add `LoadCredentialEncrypted=unseal-key:/etc/ergo-walletd/unseal-key.cred` to the
+unit and start with `--unseal-key-file ${CREDENTIALS_DIRECTORY}/unseal-key`.
+The daemon then unseals at boot without a password; spending still needs the
+password. That copy of the key is only as strong as the host that holds it: it
+protects a database copied elsewhere, not one read by root on the same host.
 
 ## Descriptor file
 
@@ -1006,7 +1053,9 @@ copy-on-write file systems.
 
 | Method | Route | Request / response |
 |---|---|---|
-| GET | `/api/v1/wallet/lifecycle/status` | `{initialized, locked}` from local state; works while the node is unavailable |
+| GET | `/api/v1/wallet/lifecycle/status` | `{initialized, locked}` from local state; `sealed: true` is added while sealed; works while the node is unavailable |
+| POST | `/api/v1/wallet/unseal` | `{pass}`; release the database key without unlocking spending (watch-only: the passphrase) |
+| POST | `/api/v1/wallet/seal` | Stop the daemon; it starts sealed. `202` |
 | POST | `/api/v1/wallet/init` | `{pass, mnemonicPass?, strength?}`; strength is 12, 15, 18, 21 or 24 words, default 24; response `{mnemonic}` |
 | POST | `/api/v1/wallet/restore` | `{mnemonic, mnemonicPass?, pass, derivation}`; derivation is `{type:"eip3"}` or `{type:"legacyPre1627"}` |
 | POST | `/api/v1/wallet/unlock` | `{pass}`; unlock and reconcile public keys |
@@ -1085,6 +1134,8 @@ the running host.
 | `--blocks-page <n>` | u32 | — | Overrides `blocks_page` (the per-request page size). |
 | `--unix-socket <path>` | path | — | Overrides `unix_socket`. |
 | `--tcp-fallback <addr>` | socket addr | — | Overrides `tcp_fallback`. |
+| `--unseal-key-file <path>` | path | — | Overrides `[security] unseal_key_file`. |
+| `export-unseal-key` | subcommand | — | Print the wallet database key as hex, reading the password or passphrase from standard input. |
 
 Logging uses `tracing` with the `RUST_LOG` filter (default `info`): reorgs and
 retries log at `warn`, protocol violations and other terminal sync failures log

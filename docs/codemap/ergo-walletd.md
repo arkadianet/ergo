@@ -513,7 +513,12 @@ reached the limiter and needs no change.
   socket is reclaimed but a live one is never stolen. Local authentication
   protects both Unix and TCP listeners in both modes; the TCP listener accepts
   only its loopback `Host` names plus `[api] allowed_hosts`.
-- **Locked by default, and again.** Seed wallets restart locked; `host` locks
+- **Sealed at rest.** `encrypted_db` stores `wallet.redb` as AES-256-GCM
+  sectors; `seal` starts the daemon without its database key and opens the
+  database only when a password, passphrase or `unseal_key_file` releases it,
+  encrypting a cleartext database on the way. `nonce_vault` keeps multisig
+  nonces under single-use handles.
+- **Locked by default, and again.** Seed wallets restart sealed and locked; `host` locks
   them after `[security] idle_lock` without a non-`GET` operation and after
   `max_unlock`. The unlock attempt budget persists in
   `unlock-attempts.json`. `hardening` disables core dumps and ptrace before any
