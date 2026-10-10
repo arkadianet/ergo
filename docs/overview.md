@@ -230,7 +230,7 @@ serves a **read-only** local API. It holds no signing key — there is no send,
 sign, or unlock route, and every balance, box, and transaction it reports comes
 from confirmed blocks it has applied. For a signing (seed) wallet, mining
 reward addresses and upgrading from a node-hosted wallet, see
-[`docs/wallet-setup.md`](docs/wallet-setup.md).
+[`wallet-setup.md`](wallet-setup.md).
 
 ```bash
 # Start it against a local node with the bundled reference config.
