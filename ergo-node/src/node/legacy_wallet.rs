@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn reward_key_is_the_legacy_first_eip3_key() {
-        use ergo_state::wallet::{WalletStore, WalletWrite};
+        use ergo_state::wallet::WalletStore;
         let dir = tempfile::tempdir().unwrap();
         let db =
             std::sync::Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());

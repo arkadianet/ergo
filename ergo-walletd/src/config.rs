@@ -321,6 +321,11 @@ pub enum CliCommand {
     Migrate(crate::migration::MigrateArgs),
     /// Move a node's wallet handoff into a new seed data directory.
     Adopt(crate::adopt::AdoptArgs),
+    /// Create a seed-mode config and its two credential files.
+    Init(crate::onboard::InitArgs),
+    /// Print the wallet's mining reward address and public key. Reads the
+    /// wallet password (seed) or passphrase (watch-only) from standard input.
+    RewardKey,
     /// Print the wallet database key as hex, for an `unseal_key_file`
     /// credential. Reads the wallet password (seed) or passphrase
     /// (watch-only) from the first line of standard input. Pipe the output
@@ -631,7 +636,7 @@ impl Config {
 /// spellings are aliases, not a merge: specifying both is a load error so a
 /// typo cannot silently leave the daemon without the listener the operator
 /// intended. `allowed_hosts` exists only in `[api]` and stays there.
-fn merge_api_section(mut file: FileConfig) -> Result<FileConfig, ConfigError> {
+pub(crate) fn merge_api_section(mut file: FileConfig) -> Result<FileConfig, ConfigError> {
     if let Some(api) = file.api.as_mut() {
         if (api.unix_socket.is_some() || api.tcp_fallback.is_some())
             && (file.unix_socket.is_some() || file.tcp_fallback.is_some())
