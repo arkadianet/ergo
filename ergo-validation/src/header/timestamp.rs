@@ -2,11 +2,20 @@ use ergo_ser::header::Header;
 
 use super::HeaderValidationError;
 
-/// Scala `Constants.FutureTimestampThreshold` — 20 minutes in
-/// milliseconds. A header more than this far ahead of the validator's
-/// clock is rejected as recoverable (peer can retry once the local
-/// clock catches up).
-pub const FUTURE_TIMESTAMP_DRIFT_MS: u64 = 20 * 60 * 1000;
+/// Mainnet future-timestamp cap — 20 minutes in milliseconds (10 × the
+/// 2-minute block interval). A header more than this far ahead of the
+/// validator's clock is rejected as recoverable (peer can retry once the
+/// local clock catches up). Other chains derive their cap with
+/// [`future_timestamp_drift_ms`].
+pub const FUTURE_TIMESTAMP_DRIFT_MS: u64 = future_timestamp_drift_ms(120_000);
+
+/// Future-timestamp cap for a chain whose target block interval is
+/// `desired_interval_ms`: Scala `HeadersProcessor.MaxTimeDrift =
+/// 10 * chainSettings.blockInterval`. Mainnet (120 s) gives
+/// [`FUTURE_TIMESTAMP_DRIFT_MS`]; testnet (45 s) gives 7.5 minutes.
+pub const fn future_timestamp_drift_ms(desired_interval_ms: u64) -> u64 {
+    desired_interval_ms.saturating_mul(10)
+}
 
 /// Check that header.parent_id matches the computed ID of the parent.
 pub fn check_parent_id(header: &Header, parent_id: &[u8; 32]) -> Result<(), HeaderValidationError> {
@@ -30,9 +39,10 @@ pub fn check_timestamp(header: &Header, parent: &Header) -> Result<(), HeaderVal
     Ok(())
 }
 
-/// Scala `hdrFutureTimestamp` (rule 211) — reject headers whose
-/// timestamp is more than [`FUTURE_TIMESTAMP_DRIFT_MS`] ahead of
-/// `now_ms`.
+/// Scala `hdrFutureTimestamp` (rule 211) with the mainnet cap — reject
+/// headers whose timestamp is more than [`FUTURE_TIMESTAMP_DRIFT_MS`]
+/// ahead of `now_ms`. Chains with another block interval use
+/// [`check_future_timestamp_with_cap`].
 ///
 /// Standalone (not invoked by [`validate_header_after_pow`](super::validate_header_after_pow))
 /// because the validator clock is a runtime input that varies by caller:
@@ -43,7 +53,16 @@ pub fn check_timestamp(header: &Header, parent: &Header) -> Result<(), HeaderVal
 /// keeps the rejection surface symmetric with the other rule
 /// helpers.
 pub fn check_future_timestamp(header: &Header, now_ms: u64) -> Result<(), HeaderValidationError> {
-    let cap_ms = FUTURE_TIMESTAMP_DRIFT_MS;
+    check_future_timestamp_with_cap(header, now_ms, FUTURE_TIMESTAMP_DRIFT_MS)
+}
+
+/// Rule 211 with an explicit cap, normally [`future_timestamp_drift_ms`]
+/// of the chain's block interval.
+pub fn check_future_timestamp_with_cap(
+    header: &Header,
+    now_ms: u64,
+    cap_ms: u64,
+) -> Result<(), HeaderValidationError> {
     if header.timestamp > now_ms.saturating_add(cap_ms) {
         return Err(HeaderValidationError::FutureTimestamp {
             header_ts: header.timestamp,
@@ -125,6 +144,28 @@ mod tests {
         // accepted.
         let now = u64::MAX - 1_000_000;
         let header = test_header([0; 3], u64::MAX - 500_000);
+        assert!(check_future_timestamp(&header, now).is_ok());
+    }
+
+    #[test]
+    fn future_timestamp_cap_is_ten_block_intervals() {
+        assert_eq!(
+            future_timestamp_drift_ms(120_000),
+            FUTURE_TIMESTAMP_DRIFT_MS
+        );
+        assert_eq!(future_timestamp_drift_ms(45_000), 450_000);
+        assert_eq!(future_timestamp_drift_ms(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn future_timestamp_testnet_header_ten_minutes_ahead_rejected() {
+        let now = 1_700_000_000_000u64;
+        let header = test_header([0; 3], now + 10 * 60 * 1000);
+        let cap = future_timestamp_drift_ms(45_000);
+        assert!(matches!(
+            check_future_timestamp_with_cap(&header, now, cap),
+            Err(HeaderValidationError::FutureTimestamp { cap_ms, .. }) if cap_ms == cap
+        ));
         assert!(check_future_timestamp(&header, now).is_ok());
     }
 }
