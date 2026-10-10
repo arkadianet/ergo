@@ -36,8 +36,9 @@ RestrictSUIDSGID=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=yes
 # Keep the unlocked key out of swap and core files (the daemon also disables
-# core dumps and ptrace itself). For [security] lock_memory = true, add
-# LimitMEMLOCK=infinity.
+# core dumps and ptrace itself). The unlimited memory-lock limit lets
+# [security] lock_memory = true start; it has no effect otherwise.
+LimitMEMLOCK=infinity
 MemorySwapMax=0
 LimitCORE=0
 MemoryDenyWriteExecute=yes

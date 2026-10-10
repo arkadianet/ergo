@@ -555,7 +555,12 @@ impl Config {
             .map(|api| api.allowed_hosts.clone())
             .unwrap_or_default();
         for host in &allowed_hosts {
-            if host.is_empty() || !host.is_ascii() || host.contains(['/', ' ', '@']) {
+            // `Host` carries the port for any non-default port, and entries
+            // are compared exactly, so one without a port could never match.
+            let has_port = host
+                .rsplit_once(':')
+                .is_some_and(|(name, port)| !name.is_empty() && port.parse::<u16>().is_ok());
+            if !has_port || !host.is_ascii() || host.contains(['/', ' ', '@']) {
                 return Err(ConfigError::Invalid(format!(
                     "allowed_hosts entry {host:?} must be host:port"
                 )));
@@ -840,9 +845,20 @@ mod tests {
         let config = Config::from_file(file).unwrap();
         assert_eq!(config.allowed_hosts, vec!["wallet.lan:3033".to_string()]);
         assert!(config.tcp_fallback.is_some());
-        let bad = text.replace("wallet.lan:3033", "http://x/");
-        let file = merge_api_section(toml::from_str(&bad).unwrap()).unwrap();
-        assert!(Config::from_file(file).is_err());
+        for bad in [
+            "http://x/",
+            "wallet.lan",
+            ":3033",
+            "wallet.lan:port",
+            "wallet.lan:70000",
+        ] {
+            let text = text.replace("wallet.lan:3033", bad);
+            let file = merge_api_section(toml::from_str(&text).unwrap()).unwrap();
+            assert!(Config::from_file(file).is_err(), "{bad} must be refused");
+        }
+        let text = text.replace("wallet.lan:3033", "[::1]:3033");
+        let file = merge_api_section(toml::from_str(&text).unwrap()).unwrap();
+        assert!(Config::from_file(file).is_ok());
     }
 
     #[test]

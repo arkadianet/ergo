@@ -108,6 +108,12 @@ impl ergo_wallet_service::engine::AttemptJournal for FileAttemptJournal {
         pending
             .persist(&self.0)
             .map_err(|error| error.error.to_string())?;
+        // Make the rename durable too, or a power loss could restore the
+        // previous record and with it a spent guess budget.
+        #[cfg(unix)]
+        std::fs::File::open(dir)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 }
