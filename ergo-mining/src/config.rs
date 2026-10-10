@@ -59,6 +59,12 @@ pub struct MiningConfig {
     #[serde(default)]
     pub miner_public_key_hex: Option<String>,
 
+    /// Miner's reward address: a P2PK address on the node's network, the
+    /// form wallets display. The node config loader decodes it into
+    /// `miner_public_key_hex`; setting both to different keys is an error.
+    #[serde(default)]
+    pub miner_reward_address: Option<String>,
+
     /// Debounce window for same-parent mempool-refresh rebuilds, in
     /// milliseconds. When the mempool changes but the tip has not, the action
     /// loop coalesces the burst and re-signals the engine at most once per
@@ -198,6 +204,7 @@ impl Default for MiningConfig {
         Self {
             enabled: false,
             miner_public_key_hex: None,
+            miner_reward_address: None,
             block_candidate_generation_interval_ms: default_candidate_interval_ms(),
             use_external_miner: default_use_external_miner(),
             claim_storage_rent: false,

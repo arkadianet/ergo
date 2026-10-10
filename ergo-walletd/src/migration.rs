@@ -1,12 +1,14 @@
 //! Explicit, offline embedded-to-daemon cutover. Original files are retained.
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use ergo_wallet::storage::SecretStorage;
-use ergo_wallet_service::wallet::migration::{export_embedded_wallet, MigrationReport};
+pub use ergo_wallet_service::wallet::handoff::CutoverReport;
+use ergo_wallet_service::wallet::handoff::{
+    publish_seed_directory, read_single_secret, PublishOptions,
+};
 use redb::StorageBackend;
 use sha2::{Digest, Sha256};
 
@@ -30,16 +32,6 @@ pub struct MigrateArgs {
     /// Withdraw queued private transactions on the node before stopping it.
     #[arg(long)]
     pub quarantine_mining_jobs: bool,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct CutoverReport {
-    pub version: u32,
-    pub network: String,
-    pub source_database_sha256: String,
-    pub encrypted_secret_sha256: String,
-    pub wallet_jobs_quarantined: u64,
-    pub wallet: MigrationReport,
 }
 
 fn invalid(message: impl Into<String>) -> ConfigError {
@@ -67,41 +59,6 @@ fn protected_open(path: &Path, writable_lock: bool) -> Result<File, ConfigError>
         return Err(invalid("opened migration source is not a regular file"));
     }
     Ok(file)
-}
-
-fn sync_directory(path: &Path) -> Result<(), ConfigError> {
-    #[cfg(unix)]
-    File::open(path)?.sync_all()?;
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
-}
-
-fn create_private_directory(path: &Path) -> Result<(), ConfigError> {
-    let builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    let mut builder = builder;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(path)?;
-    Ok(())
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
 }
 
 /// Locks raw source bytes without opening/recovering the original database.
@@ -164,60 +121,9 @@ pub fn migrate(args: &MigrateArgs) -> Result<CutoverReport, ConfigError> {
         .source_secret_dir
         .clone()
         .unwrap_or_else(|| args.source_data_dir.join("wallet"));
-    if fs::symlink_metadata(&secret_dir)?.file_type().is_symlink() {
-        return Err(invalid("migration secret directory must not be a symlink"));
-    }
-    let secret_path =
-        SecretStorage::find_secret_file(&secret_dir).map_err(|error| invalid(error.to_string()))?;
-    let eligible_files = fs::read_dir(&secret_dir)?
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry.path().is_file()
-                && !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".ergo-wallet-pending-")
-        })
-        .count();
-    if eligible_files != 1 {
-        return Err(invalid(
-            "migration requires one unambiguous encrypted secret file",
-        ));
-    }
-    let mut secret = protected_open(&secret_path, false)?;
-    let mut encrypted = Vec::new();
-    Read::by_ref(&mut secret)
-        .take(4 * 1024 * 1024 + 1)
-        .read_to_end(&mut encrypted)?;
-    if encrypted.len() > 4 * 1024 * 1024 {
-        return Err(invalid("encrypted secret exceeds migration size limit"));
-    }
-    let candidate = temporary.path().join("candidate");
-    create_private_directory(&candidate)?;
-    create_private_directory(&candidate.join("wallet"))?;
-    let secret_name = secret_path
-        .file_name()
-        .ok_or_else(|| invalid("secret has no filename"))?;
-    write_private(&candidate.join("wallet").join(secret_name), &encrypted)?;
-    // Parse only public encryption metadata. Never request or decrypt a seed.
-    SecretStorage::open(candidate.join("wallet"))
-        .load_metadata()
-        .map_err(|error| invalid(error.to_string()))?;
+    let (secret_name, encrypted) =
+        read_single_secret(&secret_dir).map_err(|error| invalid(error.to_string()))?;
     let source = redb::Database::open(&source_copy_path).map_err(|error| invalid(format!("open private source copy (legacy formats require ergo-node migrate-redb first): {error}")))?;
-    let source_read =
-        redb::ReadableDatabase::begin_read(&source).map_err(|error| invalid(error.to_string()))?;
-    let source_network = ergo_wallet_service::wallet::migration::source_network(&source_read)
-        .map_err(|error| invalid(error.to_string()))?;
-    let expected_network = match args.network {
-        Network::Mainnet => ergo_chain_spec::Network::Mainnet,
-        Network::Testnet => ergo_chain_spec::Network::Testnet,
-    };
-    if source_network != expected_network {
-        return Err(invalid(
-            "migration network differs from committed source chain identity",
-        ));
-    }
-    drop(source_read);
     // This database is solely the recoverable private copy. The locked source
     // bytes and the node's private queue remain untouched, even on failure.
     let wallet_jobs_quarantined = if args.quarantine_mining_jobs {
@@ -226,66 +132,49 @@ pub fn migrate(args: &MigrateArgs) -> Result<CutoverReport, ConfigError> {
     } else {
         0
     };
-    let wallet = export_embedded_wallet(&source, &candidate.join("wallet.redb"))
-        .map_err(|error| invalid(error.to_string()))?;
-    drop(source);
-    let mut current_hash = Sha256::new();
-    offset = 0;
-    while offset < length {
-        let count = (length - offset).min(buffer.len() as u64) as usize;
-        backend.read(offset, &mut buffer[..count])?;
-        current_hash.update(&buffer[..count]);
-        offset += count as u64;
-    }
-    if backend.len()? != length || current_hash.finalize() != original_hash {
-        return Err(invalid("source database changed during migration"));
-    }
-    secret.rewind()?;
-    let mut secret_check = Vec::new();
-    Read::by_ref(&mut secret)
-        .take(4 * 1024 * 1024 + 1)
-        .read_to_end(&mut secret_check)?;
-    if secret_check != encrypted {
-        return Err(invalid("source encrypted secret changed during migration"));
-    }
-    let report = CutoverReport {
-        version: 1,
-        network: args.network.as_str().into(),
-        source_database_sha256: hex::encode(original_hash),
-        encrypted_secret_sha256: hex::encode(Sha256::digest(&encrypted)),
-        wallet_jobs_quarantined,
-        wallet,
+    let network = match args.network {
+        Network::Mainnet => ergo_chain_spec::Network::Mainnet,
+        Network::Testnet => ergo_chain_spec::Network::Testnet,
     };
-    write_private(
-        &candidate.join("migration.json"),
-        &serde_json::to_vec_pretty(&report).map_err(|error| invalid(error.to_string()))?,
-    )?;
-    write_private(
-        &candidate.join("wallet-network"),
-        format!("{}\n", args.network.as_str()).as_bytes(),
-    )?;
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(candidate.join("wallet.redb"))?
-        .sync_all()?;
-    // Reserve the destination without replacing any file or symlink. Publishing
-    // the ownership marker last makes an interrupted cutover fail closed.
-    create_private_directory(&args.destination)?;
-    sync_directory(parent)?;
-    create_private_directory(&args.destination.join("wallet"))?;
-    for name in ["wallet.redb", "migration.json", "wallet-network"] {
-        fs::hard_link(candidate.join(name), args.destination.join(name))?;
-    }
-    fs::hard_link(
-        candidate.join("wallet").join(secret_name),
-        args.destination.join("wallet").join(secret_name),
-    )?;
-    sync_directory(&args.destination.join("wallet"))?;
-    sync_directory(&args.destination)?;
-    write_private(&args.destination.join("wallet-mode"), b"seed\n")?;
-    sync_directory(&args.destination)?;
-    sync_directory(parent)?;
+    let report = publish_seed_directory(
+        &source,
+        (&secret_name, &encrypted),
+        &args.destination,
+        PublishOptions {
+            network,
+            source_database_sha256: Some(hex::encode(original_hash)),
+            wallet_jobs_quarantined,
+            carry_scheduler_jobs: false,
+        },
+        || {
+            // The raw source and its secret must be unchanged by the time the
+            // copy is published.
+            let mut current_hash = Sha256::new();
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let mut offset = 0;
+            let changed = |message: &str| ergo_wallet_service::WalletStoreError::decode(message);
+            while offset < length {
+                let count = (length - offset).min(buffer.len() as u64) as usize;
+                backend
+                    .read(offset, &mut buffer[..count])
+                    .map_err(|error| changed(&error.to_string()))?;
+                current_hash.update(&buffer[..count]);
+                offset += count as u64;
+            }
+            if backend.len().map_err(|error| changed(&error.to_string()))? != length
+                || current_hash.finalize() != original_hash
+            {
+                return Err(changed("source database changed during migration"));
+            }
+            let (_, secret_check) = read_single_secret(&secret_dir)?;
+            if secret_check != encrypted {
+                return Err(changed("source encrypted secret changed during migration"));
+            }
+            Ok(())
+        },
+    )
+    .map_err(|error| invalid(error.to_string()))?;
+    drop(source);
     backend.close()?;
     Ok(report)
 }
@@ -293,6 +182,7 @@ pub fn migrate(args: &MigrateArgs) -> Result<CutoverReport, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_wallet::storage::SecretStorage;
     use ergo_wallet_service::wallet::{
         tables::*, BoxProvenance, BoxStatus, TrackedPubkeyMeta, WalletBox,
     };
