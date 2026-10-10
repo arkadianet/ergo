@@ -1090,6 +1090,109 @@ fn methodcall_avltree_bad_proof_contains_false_get_errors() {
     );
 }
 
+/// A well-formed AVL proof taller than the script-level bound fails every
+/// AvlTree method as a script error, before any tree is built: never `false`,
+/// `None` or an unchanged tree. A proof of the same depth that is malformed
+/// (no end-of-tree marker) keeps the malformed-proof results.
+#[test]
+fn methodcall_avltree_deep_proofs_fail_closed() {
+    // In a child process on the validation stack, so a regression that builds
+    // the tree fails this test instead of aborting the test binary.
+    crate::avl::deep_proof_tests::run_isolated(
+        "evaluator::tests::methodcall_avltree_deep_proofs_fail_closed",
+        deep_proofs_fail_closed_body,
+    );
+}
+
+fn deep_proofs_fail_closed_body() {
+    use crate::avl::MAX_SCRIPT_AVL_PROOF_HEIGHT;
+    use ergo_ser::sigma_value::CollValue;
+
+    let depth = MAX_SCRIPT_AVL_PROOF_HEIGHT + 1;
+    let mut proof = vec![2u8, 0, 1];
+    for _ in 0..depth {
+        proof.extend_from_slice(&[2, 1, 0]);
+    }
+    let malformed = proof.clone();
+    proof.extend_from_slice(&[4, 0]);
+
+    let avl_const = Expr::Const {
+        tpe: SigmaType::SAvlTree,
+        val: SigmaValue::AvlTree(ergo_ser::sigma_value::AvlTreeData {
+            digest: [0x07; 33].to_vec(),
+            insert_allowed: true,
+            update_allowed: true,
+            remove_allowed: true,
+            key_length: 1,
+            value_length_opt: Some(0),
+        }),
+    };
+    let bytes_coll = |b: &[u8]| SigmaValue::Coll(CollValue::Bytes(b.to_vec()));
+    let key = const_bytes(vec![0x01]);
+    let keys = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(SigmaType::SByte)))),
+        val: SigmaValue::Coll(CollValue::Values(vec![bytes_coll(&[0x01])])),
+    };
+    let entries = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::STuple(vec![
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+        ]))),
+        val: SigmaValue::Coll(CollValue::Values(vec![SigmaValue::Tuple(vec![
+            bytes_coll(&[0x01]),
+            bytes_coll(&[]),
+        ])])),
+    };
+    let call = |method_id: u8, arg: &Expr, proof: &[u8]| {
+        Expr::Op(IrNode {
+            opcode: 0xDC,
+            payload: Payload::MethodCall {
+                type_id: 100,
+                method_id,
+                obj: Box::new(avl_const.clone()),
+                args: vec![arg.clone(), const_bytes(proof.to_vec())],
+                type_args: vec![],
+            },
+        })
+    };
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+
+    for (name, method_id, arg) in [
+        ("contains", 9u8, &key),
+        ("get", 10, &key),
+        ("getMany", 11, &keys),
+        ("insert", 12, &entries),
+        ("update", 13, &entries),
+        ("remove", 14, &keys),
+        ("insertOrUpdate", 16, &entries),
+    ] {
+        assert!(
+            matches!(
+                eval_to_value(&call(method_id, arg, &proof), &ctx, &[]),
+                Err(EvalError::RuntimeException(_))
+            ),
+            "{name}: a proof above the height bound must be a script error",
+        );
+    }
+    // !contains is a script error too, not true.
+    let not_contains = op(0xEF, Payload::One(Box::new(call(9, &key, &proof))));
+    assert!(matches!(
+        eval_to_value(&not_contains, &ctx, &[]),
+        Err(EvalError::RuntimeException(_))
+    ));
+
+    // Malformed at the same depth: contains is false, get is an error.
+    assert_eq!(
+        eval_to_value(&call(9, &key, &malformed), &ctx, &[]).expect("contains"),
+        Value::Bool(false),
+    );
+    assert!(matches!(
+        eval_to_value(&call(10, &key, &malformed), &ctx, &[]),
+        Err(EvalError::TypeError { .. })
+    ));
+}
+
 /// The height byte of an AvlTree digest is not covered by the proof, so an
 /// honest insert proof replayed against a digest whose height byte is 255
 /// grows the root height to 256, and an honest remove proof against a height
@@ -1186,7 +1289,12 @@ fn methodcall_avltree_root_height_out_of_range_is_script_error() {
 
     // insert (12) and insertOrUpdate (16) at the true height byte succeed.
     for method_id in [12u8, 16] {
-        let honest = call(tree(&empty_digest, 0), method_id, entries.clone(), &insert_proof);
+        let honest = call(
+            tree(&empty_digest, 0),
+            method_id,
+            entries.clone(),
+            &insert_proof,
+        );
         let got = eval_to_value(&honest, &ctx, &[]).expect("insert at true height");
         assert_eq!(updated_digest(got), one_entry_digest);
     }
@@ -1197,7 +1305,12 @@ fn methodcall_avltree_root_height_out_of_range_is_script_error() {
 
     // Height byte 255 + a height-growing insert: script error.
     for method_id in [12u8, 16] {
-        let high = call(tree(&empty_digest, 255), method_id, entries.clone(), &insert_proof);
+        let high = call(
+            tree(&empty_digest, 255),
+            method_id,
+            entries.clone(),
+            &insert_proof,
+        );
         assert!(
             matches!(
                 eval_to_value(&high, &ctx, &[]),

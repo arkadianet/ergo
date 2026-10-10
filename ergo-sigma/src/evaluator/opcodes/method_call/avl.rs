@@ -75,7 +75,7 @@ pub(super) fn contains(
     };
     // Construct before charging lookup. Invalid metadata or proof reconstruction
     // is retained as a failed verifier; contains maps its lookup failure to false.
-    let verifier = try_make_avl_verifier(avl, &proof);
+    let verifier = try_make_avl_verifier(avl, &proof)?;
     cx.cost.add(lookup_cost.compute(avl_cost_height(avl))?)?;
     match verifier {
         Some(mut bv) => match bv.lookup(&key) {
@@ -136,7 +136,7 @@ pub(super) fn get(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     };
     // A reconstructed verifier with a bad proof still pays for lookup; get
     // reports that lookup failure as InterpreterException, including at v3.
-    let verifier = try_make_avl_verifier(avl, &proof);
+    let verifier = try_make_avl_verifier(avl, &proof)?;
     cx.cost.add(lookup_cost.compute(avl_cost_height(avl))?)?;
     match verifier {
         Some(mut bv) => match bv.lookup(&key) {
@@ -228,7 +228,7 @@ pub(super) fn get_many(
     // Failure (construction OR lookup) errors when a key is processed
     // (NOT version-gated). A witnessed-absent key yields a None
     // element.
-    let mut bv_opt = try_make_avl_verifier(avl, &proof);
+    let mut bv_opt = try_make_avl_verifier(avl, &proof)?;
     let tree_height = avl_cost_height(avl);
     let mut results = Vec::with_capacity(keys.len());
     for key in keys {
@@ -435,7 +435,7 @@ pub(super) fn remove(
         per_chunk: JitCost::from_jit(15),
         chunk_size: 1,
     };
-    let mut bv_opt = try_make_avl_verifier(&avl, &proof);
+    let mut bv_opt = try_make_avl_verifier(&avl, &proof)?;
     // treeHeight == digest height byte even on a failed construction.
     let nitems = avl_cost_height(&avl).max(1);
     // Scala remove_eval uses cfor (NOT forall): every key is charged
@@ -684,7 +684,7 @@ fn eval_avl_mutate(
             chunk_size: 1,
         },
     };
-    let mut bv_opt = try_make_avl_verifier(avl, proof);
+    let mut bv_opt = try_make_avl_verifier(avl, proof)?;
     // nItems = max(treeHeight,1); treeHeight == the digest's height byte even
     // on a failed construction (rootNodeHeight is set before the proof parse).
     let nitems = avl_cost_height(avl).max(1);

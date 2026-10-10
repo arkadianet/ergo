@@ -282,8 +282,9 @@ impl DigestProofVerifier {
                     .unwrap_or_else(|| "verifier construction panicked".to_string());
                 DigestApplyError::VerifierConstructionPanic { reason }
             })?;
-        let inner = inner_result
-            .map_err(|e| DigestApplyError::VerifierConstructionRejected { reason: e })?;
+        let inner = inner_result.map_err(|e| DigestApplyError::VerifierConstructionRejected {
+            reason: e.to_string(),
+        })?;
         Ok(Self {
             inner,
             parent_state_root: *parent_state_root,
@@ -727,7 +728,7 @@ mod tests {
     #[test]
     fn deep_adproofs_fail_closed() {
         // A stack overflow aborts the process it happens in, so the body
-        // runs in a child process on the 8 MB validation stack; a regression
+        // runs in a child process on the validation stack; a regression
         // fails this test instead of aborting the test binary.
         const CHILD_ENV: &str = "ERGO_STATE_DEEP_ADPROOF_CHILD";
         const TEST_PATH: &str = "digest_apply::tests::deep_adproofs_fail_closed";
@@ -747,17 +748,17 @@ mod tests {
             return;
         }
         let verdict = std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
+            .stack_size(ergo_ser::decode_stack::DECODE_THREAD_STACK_BYTES)
             .spawn(|| {
-                // 16,000 levels stay inside the node-count bound for 200
+                // 100,000 levels stay inside the node-count bound for 2,000
                 // operations at parent height 30, so only the height bound
                 // keeps the crate from walking the spine.
-                let proof = deep_spine_adproof(16_000);
+                let proof = deep_spine_adproof(100_000);
                 let header = synth_header(*blake2b256(&proof).as_bytes());
                 let modifier_id = correct_modifier_id_for(&header);
                 let mut parent = [0x5Au8; 33];
                 parent[32] = 30;
-                DigestProofVerifier::new(modifier_id, &proof, &header, &parent, Some(200))
+                DigestProofVerifier::new(modifier_id, &proof, &header, &parent, Some(2_000))
                     .map(|_| ())
             })
             .expect("spawn validation-stack thread")

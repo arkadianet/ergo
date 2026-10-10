@@ -53,6 +53,16 @@ impl Drop for AvlGuard {
     }
 }
 
+/// Tallest AVL proof tree a script may hand to an AvlTree method.
+///
+/// The verifier walks the reconstructed tree recursively, one stack frame per
+/// level, so a taller well-formed proof fails the method call (a script
+/// error) before any tree is built. Malformed proofs are unaffected and keep
+/// their per-method results. Validation threads are sized
+/// (`ergo_ser::decode_stack::DECODE_THREAD_STACK_BYTES`) to walk at least
+/// twice this height.
+pub const MAX_SCRIPT_AVL_PROOF_HEIGHT: usize = 12_000;
+
 /// Length of an AVL+ digest: a 32-byte root label plus one height byte.
 pub const AVL_DIGEST_LENGTH: usize = 33;
 
@@ -173,6 +183,35 @@ pub struct AvlVerifier {
     root_height: i64,
 }
 
+/// Why [`AvlVerifier::new_with_height_bound`] refused a proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AvlVerifierError {
+    /// The proof parses into a complete tree that is taller than the bound.
+    TooTall {
+        /// Height of the tree the proof reconstructs.
+        height: usize,
+        /// The bound it exceeds.
+        bound: usize,
+    },
+    /// Any other construction failure: invalid metadata, a malformed proof,
+    /// the node-count bound, or a root label that does not match the digest.
+    Rejected(String),
+}
+
+impl std::fmt::Display for AvlVerifierError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooTall { height, bound } => {
+                write!(
+                    f,
+                    "AVL proof tree height {height} exceeds the bound {bound}"
+                )
+            }
+            Self::Rejected(reason) => f.write_str(reason),
+        }
+    }
+}
+
 /// The root height reached a value a digest's height byte cannot hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AvlHeightOutOfRange {
@@ -234,6 +273,7 @@ impl AvlVerifier {
             max_deletes,
             None,
         )
+        .map_err(|e| e.to_string())
     }
 
     /// As [`Self::new`], and additionally rejects a proof whose
@@ -252,7 +292,7 @@ impl AvlVerifier {
         max_num_operations: Option<usize>,
         max_deletes: Option<usize>,
         max_tree_height: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, AvlVerifierError> {
         Self::construct(
             digest,
             proof,
@@ -272,21 +312,22 @@ impl AvlVerifier {
         max_num_operations: Option<usize>,
         max_deletes: Option<usize>,
         max_tree_height: Option<usize>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, AvlVerifierError> {
+        let rejected = |reason: String| Err(AvlVerifierError::Rejected(reason));
         // scrypto 3.0.0 AuthenticatedTreeOps.scala:33 fatally allocates an
         // Int.MaxValue-sized infinity key. Reject this wire-reachable class
         // before constructing the upstream tree; allocation failure cannot
         // be contained by catch_unwind.
         if key_length >= i32::MAX as usize {
-            return Err("AVL key length exceeds the JVM array limit".to_string());
+            return rejected("AVL key length exceeds the JVM array limit".to_string());
         }
         // The crate checks these two before reading the proof; checking them
         // first keeps the failure order of the reconstruction.
         if key_length == 0 {
-            return Err("AVL key length must be positive".to_string());
+            return rejected("AVL key length must be positive".to_string());
         }
         if digest.len() != AVL_DIGEST_LENGTH {
-            return Err(format!(
+            return rejected(format!(
                 "AVL digest must be {AVL_DIGEST_LENGTH} bytes, got {}",
                 digest.len()
             ));
@@ -296,13 +337,12 @@ impl AvlVerifier {
         // verdict is unchanged; the crate is simply never handed a proof it
         // would reject mid-parse, which would otherwise drop a partially
         // built (and possibly very deep) tree.
-        let height = proof_tree_height(proof, key_length, value_length_opt)
-            .ok_or_else(|| "malformed AVL proof: tree reconstruction fails".to_string())?;
+        let Some(height) = proof_tree_height(proof, key_length, value_length_opt) else {
+            return rejected("malformed AVL proof: tree reconstruction fails".to_string());
+        };
         if let Some(bound) = max_tree_height {
             if height > bound {
-                return Err(format!(
-                    "AVL proof tree height {height} exceeds the bound {bound}"
-                ));
+                return Err(AvlVerifierError::TooTall { height, bound });
             }
         }
         let digest = bytes::Bytes::from(digest.to_vec());
@@ -338,8 +378,10 @@ impl AvlVerifier {
                 root_height: i64::from(digest[AVL_DIGEST_LENGTH - 1]),
                 inner: Some(v),
             }),
-            Ok(Err(e)) => Err(format!("{e}")),
-            Err(_) => Err("AVL verifier construction panicked on a malformed proof".to_string()),
+            Ok(Err(e)) => rejected(format!("{e}")),
+            Err(_) => {
+                rejected("AVL verifier construction panicked on a malformed proof".to_string())
+            }
         }
     }
 
@@ -959,7 +1001,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod deep_proof_tests {
+pub(crate) mod deep_proof_tests {
     use super::*;
     use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
     use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
@@ -969,12 +1011,12 @@ mod deep_proof_tests {
     // ----- helpers -----
 
     /// Stack size of the node's validation threads.
-    const VALIDATION_STACK: usize = 8 * 1024 * 1024;
+    const VALIDATION_STACK: usize = ergo_ser::decode_stack::DECODE_THREAD_STACK_BYTES;
 
     /// A depth whose tree the upstream crate can neither label nor drop on
-    /// an 8 MB stack (labelling overflows near 14,000 levels, dropping a
-    /// one between 50,000 and 200,000).
-    const FAR_TOO_DEEP: usize = 200_000;
+    /// the validation stack (on 32 MB, release builds overflow labelling a
+    /// tree near 52,000 levels; dropping takes several times that).
+    const FAR_TOO_DEEP: usize = 1_000_000;
 
     /// Set in the child process that runs a deep-proof test body.
     const CHILD_ENV: &str = "ERGO_SIGMA_DEEP_AVL_CHILD";
@@ -983,7 +1025,7 @@ mod deep_proof_tests {
     /// process that re-runs only test `test_path` of this test binary. A stack
     /// overflow aborts the process it happens in; running the body in a child
     /// turns such a regression into an ordinary failure of this one test.
-    fn run_isolated(test_path: &str, body: fn()) {
+    pub(crate) fn run_isolated(test_path: &str, body: fn()) {
         if std::env::var_os(CHILD_ENV).is_some() {
             std::thread::Builder::new()
                 .stack_size(VALIDATION_STACK)

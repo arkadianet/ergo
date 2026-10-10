@@ -2,6 +2,7 @@ use ergo_primitives::cost::{CostAccumulator, CostKind, JitCost};
 use ergo_ser::sigma_value::SigmaBoolean;
 
 use super::types::{BoxSource, EvalError, ReductionContext, Value};
+use crate::avl::MAX_SCRIPT_AVL_PROOF_HEIGHT;
 use crate::cost_table;
 
 /// Faithful port of Scala `DataValueComparer.equalSigmaBoolean` (cost AND
@@ -675,11 +676,21 @@ pub(crate) fn avl_cost_height(avl: &ergo_ser::sigma_value::AvlTreeData) -> u32 {
     }
 }
 
+/// Why a script-level AVL verifier could not be built.
+pub(crate) enum AvlConstructFailure {
+    /// The proof's tree is taller than [`MAX_SCRIPT_AVL_PROOF_HEIGHT`]: the
+    /// method call must fail.
+    TooTall,
+    /// Any other failure (invalid metadata, malformed proof, digest
+    /// mismatch): the method's own failed-verifier result applies.
+    Rejected,
+}
+
 /// Construct an AVL proof verifier from AvlTreeData and proof bytes.
 pub(crate) fn make_avl_verifier(
     avl: &ergo_ser::sigma_value::AvlTreeData,
     proof: &[u8],
-) -> Result<crate::avl::AvlVerifier, EvalError> {
+) -> Result<crate::avl::AvlVerifier, AvlConstructFailure> {
     // Reject invalid metadata up front (scrypto `require(keyLength > 0)` /
     // `require(valueLengthOpt.forall(_ >= 0))` — these fail BEFORE the tree is
     // reconstructed, yielding reconstructedTree=None). Doing this here mirrors
@@ -687,15 +698,9 @@ pub(crate) fn make_avl_verifier(
     // crate as a huge `usize`. `try_make_avl_verifier` maps this Err to None,
     // so the method arms degrade gracefully (contains→false, etc.).
     if avl.key_length <= 0 || avl.value_length_opt.is_some_and(|v| v < 0) {
-        return Err(EvalError::TypeError {
-            expected: "valid AVL metadata (keyLength > 0, valueLengthOpt >= 0)",
-            got: format!(
-                "keyLength={}, valueLengthOpt={:?}",
-                avl.key_length, avl.value_length_opt
-            ),
-        });
+        return Err(AvlConstructFailure::Rejected);
     }
-    crate::avl::AvlVerifier::new(
+    crate::avl::AvlVerifier::new_with_height_bound(
         &avl.digest,
         proof,
         avl.key_length as usize,
@@ -709,10 +714,11 @@ pub(crate) fn make_avl_verifier(
         // one here would reject proofs the reference accepts.
         None,
         None,
+        MAX_SCRIPT_AVL_PROOF_HEIGHT,
     )
-    .map_err(|e| EvalError::TypeError {
-        expected: "valid AVL proof",
-        got: format!("verifier construction failed: {e}"),
+    .map_err(|e| match e {
+        crate::avl::AvlVerifierError::TooTall { .. } => AvlConstructFailure::TooTall,
+        crate::avl::AvlVerifierError::Rejected(_) => AvlConstructFailure::Rejected,
     })
 }
 
@@ -738,17 +744,25 @@ pub(crate) fn make_avl_verifier(
 /// against the JVM-blessed contains-on-bad-proof vector cost.)
 ///
 /// [`crate::avl::AvlVerifier::new`] now self-guards construction panics (returns
-/// `Err`), so this `catch_unwind` is belt-and-suspenders — it also collapses an
-/// `Err` to `None` via `.and_then(|r| r.ok())`, the fail-closed cost path.
+/// `Err`), so this `catch_unwind` is belt-and-suspenders; a rejected
+/// construction becomes `Ok(None)`, the fail-closed cost path.
+///
+/// A proof taller than [`MAX_SCRIPT_AVL_PROOF_HEIGHT`] is the one failure that
+/// is NOT degraded: it returns `Err`, so the method call fails as a script
+/// error whatever the method (never `None`, so never `contains = false`).
 pub(crate) fn try_make_avl_verifier(
     avl: &ergo_ser::sigma_value::AvlTreeData,
     proof: &[u8],
-) -> Option<crate::avl::AvlVerifier> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+) -> Result<Option<crate::avl::AvlVerifier>, EvalError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         make_avl_verifier(avl, proof)
-    }))
-    .ok()
-    .and_then(|r| r.ok())
+    })) {
+        Ok(Ok(bv)) => Ok(Some(bv)),
+        Ok(Err(AvlConstructFailure::TooTall)) => Err(EvalError::RuntimeException(
+            "AVL proof tree is taller than the script-level bound",
+        )),
+        Ok(Err(AvlConstructFailure::Rejected)) | Err(_) => Ok(None),
+    }
 }
 
 /// Get the length of a collection value (for per-item costing).
