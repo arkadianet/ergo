@@ -582,7 +582,8 @@ fn subst_constants_coll_of_none_preserves_template_option_type() {
     // isV3OrLaterErgoTreeVersion (Scala CoreDataSerializer).
     let template = ErgoTree {
         version: 3,
-        has_size: false,
+        // Rule 1012: a non-zero version requires the size bit.
+        has_size: true,
         constant_segregation: true,
         reserved_header_bits: 0,
         constants: vec![(

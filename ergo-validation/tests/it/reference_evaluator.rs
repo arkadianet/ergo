@@ -247,3 +247,8 @@ fn boolean_ops_require_boolean_operands() {
 fn subst_constants_new_values_lift_like_reference() {
     check_vectors("subst-constants-values");
 }
+
+#[test]
+fn subst_constants_template_requires_the_size_bit() {
+    check_vectors("subst-header-size-bit");
+}

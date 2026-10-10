@@ -84,6 +84,16 @@ pub(crate) fn subst_constants_versioned(
     r.set_activated_script_version(Some(activated_script_version));
     let header = r.get_u8().map_err(parse_err)?;
     let has_size = header & 0x08 != 0;
+    // `deserializeHeaderAndSize` runs `CheckHeaderSizeBit` (rule 1012) on the
+    // template header: a non-zero version without the size bit throws a
+    // ValidationException, which nothing catches during evaluation.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/ErgoTreeSerializer.scala#L216-L219
+    if header & 0x07 != 0 && !has_size {
+        return Err(EvalError::EvaluationValidation {
+            rule_id: 1012,
+            args: vec![header],
+        });
+    }
     let constant_segregation = header & 0x10 != 0;
     if has_size {
         // Original declared size, read like Scala's `deserializeHeaderAndSize`
