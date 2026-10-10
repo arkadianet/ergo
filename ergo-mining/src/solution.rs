@@ -46,6 +46,11 @@ pub enum SolutionOutcome {
     Accepted(SubmittedBlock),
     /// PoW hit >= target. Returns 400.
     InvalidPow,
+    /// The solution is valid proof of work for a template the node built
+    /// but no longer holds (it aged out of the retained history). Only
+    /// [`crate::handle::MiningHandle::verify_solution`] returns it. Returns
+    /// 400 `expired_candidate`; the miner should fetch a new candidate.
+    TemplateExpired,
     /// The solved template is no longer current. From [`verify_solution`]:
     /// its parent no longer equals the live best-full block id. From
     /// [`crate::handle::MiningHandle::verify_solution`] also: the template was

@@ -186,6 +186,10 @@ pub enum MiningApiError {
     /// block mined on its parent failed to apply. 400 `stale_candidate`.
     #[error("stale candidate (best-full flipped or candidate withdrawn)")]
     StaleParent,
+    /// The nonce solves a template the node built but no longer holds (it
+    /// aged out of the retained history). 400 `expired_candidate`.
+    #[error("expired candidate (the solved template is no longer retained)")]
+    TemplateExpired,
     /// Mining subsystem disabled or node not synced. 503.
     #[error("mining not available: {0}")]
     Unavailable(String),
@@ -217,6 +221,7 @@ impl IntoResponse for MiningApiError {
         let (status, reason): (StatusCode, &'static str) = match &self {
             MiningApiError::InvalidPow => (StatusCode::BAD_REQUEST, "invalid_pow"),
             MiningApiError::StaleParent => (StatusCode::BAD_REQUEST, "stale_candidate"),
+            MiningApiError::TemplateExpired => (StatusCode::BAD_REQUEST, "expired_candidate"),
             MiningApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             MiningApiError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             MiningApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),

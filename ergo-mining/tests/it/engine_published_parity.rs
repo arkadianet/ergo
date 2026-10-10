@@ -2851,3 +2851,46 @@ fn requested_worker_reuse_matches_frozen_ownership() {
     assert_eq!(sequences[0], sequences[2]);
     assert_eq!(sequences[1], sequences[3]);
 }
+
+#[test]
+fn same_parent_rebuild_with_unchanged_content_keeps_the_served_template() {
+    use ergo_mining::{engine::build_and_publish_cached, state_view::CandidateProofCache};
+
+    let regime = Regime::pre_eip27();
+    let (_directory, store, tip) = synced_store(&regime);
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+    let mut intent = build_intent(tip, regime.parent_height);
+    let mut sequences = Vec::new();
+    for (reason, built_at) in [
+        (BuildReason::Tip, BUILT_AT_MS),
+        (BuildReason::MempoolRefresh, BUILT_AT_MS + 5_000),
+        (BuildReason::MempoolRefresh, BUILT_AT_MS + 10_000),
+    ] {
+        intent.reason = reason;
+        let outcome = build_and_publish_cached(
+            &store.reader_handle(),
+            &handle,
+            &intent,
+            BuildMode::Full,
+            None,
+            &mut CandidateProofCache::default(),
+            move || built_at,
+            |_, _| Vec::new(),
+            &mut None,
+        )
+        .unwrap();
+        let BuildOutcome::Published { template_seq, .. } = outcome else {
+            panic!("{outcome:?}")
+        };
+        sequences.push(template_seq);
+    }
+    // Only the timestamp moved: the first template keeps being served and
+    // the history holds one job.
+    assert_eq!(sequences, [sequences[0]; 3]);
+    assert_eq!(handle.inspect_history().len(), 1);
+}

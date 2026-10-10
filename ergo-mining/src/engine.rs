@@ -630,6 +630,25 @@ fn build_and_publish_inner(
     handle.check_requested_private_work(requested, intent.operator_owned)?;
     let publish_start = std::time::Instant::now();
 
+    // A same-parent rebuild with unchanged block content (same transactions,
+    // extension and votes; only the timestamp moved) keeps the served
+    // template: republishing it would only push equivalent jobs out of the
+    // retained history that late solutions are checked against.
+    if intent.reason != BuildReason::Requested {
+        if let Some(identity) =
+            handle.unchanged_template(&candidate, &work, &intent.expected_parent)
+        {
+            if mode == BuildMode::Full {
+                handle.record_suspects(suspects);
+            }
+            timings.publish = publish_start.elapsed();
+            return Ok(BuildOutcome::Published {
+                timings,
+                template_seq: identity.template_seq,
+            });
+        }
+    }
+
     // CAS-publish: serve only if the live tip still matches the parent we
     // built against. The published template's era is stamped from the live
     // tip under the publish lock, not `intent.chain_seq` — see

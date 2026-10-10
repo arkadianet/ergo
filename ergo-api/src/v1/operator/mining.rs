@@ -39,6 +39,11 @@ pub(super) fn map_mining_error(e: MiningApiError, unavailable: Reason) -> Respon
              the candidate was withdrawn after a block mined from it failed to apply)",
             "re-fetch GET /api/v1/mining/candidate and resubmit",
         ),
+        MiningApiError::TemplateExpired => v1_error(
+            Reason::StaleCandidate,
+            "the solved candidate has aged out of the node's retained templates",
+            "re-fetch GET /api/v1/mining/candidate more often",
+        ),
         MiningApiError::Unavailable(detail) => v1_error(
             unavailable,
             "the mining subsystem cannot answer right now",

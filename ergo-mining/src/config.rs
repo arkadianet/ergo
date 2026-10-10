@@ -63,11 +63,18 @@ pub struct MiningConfig {
     /// milliseconds. When the mempool changes but the tip has not, the action
     /// loop coalesces the burst and re-signals the engine at most once per
     /// window with a fresh mempool snapshot. Lower = fresher candidates but
-    /// faster churn of the bounded template ring (16 retained); higher = staler
-    /// candidates but longer same-parent history for in-flight solves.
-    /// Default: 250.
+    /// more rebuilds; a rebuild whose block content is unchanged keeps the
+    /// served template. Default: 250.
     #[serde(default = "default_candidate_interval_ms")]
     pub block_candidate_generation_interval_ms: u64,
+
+    /// How long a superseded template stays solvable, in milliseconds. The
+    /// newest 16 templates are always kept; older ones are kept while younger
+    /// than this, within a fixed memory bound. A solution for a template no
+    /// longer held is answered `expired_candidate`. Default: 120000 (two of
+    /// the reference node's 60 s candidate refresh periods).
+    #[serde(default = "default_template_retention_ms")]
+    pub template_retention_ms: u64,
 
     /// v1 must be `true`. The internal CPU-miner thread is deferred
     /// to a follow-up plan; this config exists so a future feature
@@ -176,6 +183,10 @@ fn default_candidate_interval_ms() -> u64 {
     250
 }
 
+fn default_template_retention_ms() -> u64 {
+    crate::handle::DEFAULT_TEMPLATE_RETENTION_MS
+}
+
 fn default_use_external_miner() -> bool {
     true
 }
@@ -199,6 +210,7 @@ impl Default for MiningConfig {
             enabled: false,
             miner_public_key_hex: None,
             block_candidate_generation_interval_ms: default_candidate_interval_ms(),
+            template_retention_ms: default_template_retention_ms(),
             use_external_miner: default_use_external_miner(),
             claim_storage_rent: false,
             max_storage_rent_claims: default_max_storage_rent_claims(),

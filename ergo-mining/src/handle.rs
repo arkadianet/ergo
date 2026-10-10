@@ -1,7 +1,8 @@
 //! `MiningHandle`: the API-task-facing entry point.
 //!
-//! Holds the bounded-ring candidate cache (the last `MAX_RETAINED_TEMPLATES`
-//! published templates, newest at the back, plus the authoritative tip) and
+//! Holds the bounded candidate history (the newest `MAX_RETAINED_TEMPLATES`
+//! published templates plus older ones inside the retention window, newest at
+//! the back, plus the authoritative tip) and
 //! exposes thread-safe methods for two callers — the off-loop candidate engine
 //! and the REST handlers:
 //!
@@ -107,8 +108,21 @@ use crate::reemission::ReemissionSettings;
 use crate::solution::{verify_solution, SolutionOutcome, SubmittedBlock};
 use crate::work_message::{MinerSolution, WorkMessage};
 
-/// Ordinary template history, independent of requested work.
+/// Ordinary templates always kept by count, independent of requested work.
+/// Older ones are also kept while younger than the retention window.
 pub const MAX_RETAINED_TEMPLATES: usize = 16;
+/// Default age for which an ordinary template stays solvable after a newer one
+/// replaced it: two of the reference node's 60 s candidate refresh periods,
+/// so a miner still hashing on an older job does not lose a found block.
+pub const DEFAULT_TEMPLATE_RETENTION_MS: u64 = 120_000;
+/// Memory bound on ordinary templates kept for their retention window
+/// (estimated retained size); past it the oldest go first, whatever their age.
+pub const MAX_ORDINARY_TEMPLATE_BYTES: usize = 256 * 1024 * 1024;
+/// Count bound on ordinary templates kept for their retention window.
+pub const MAX_ORDINARY_TEMPLATES: usize = 1024;
+/// Evicted templates remembered so a late solution to one is answered as
+/// expired rather than as invalid proof of work.
+pub const MAX_EXPIRED_TEMPLATE_RECORDS: usize = 256;
 /// Requested work shares a bounded budget, with stale/withdrawn jobs evicted first.
 /// Charge at least 64 KiB per job to bound scans even for tiny candidates.
 pub const MAX_REQUESTED_TEMPLATE_BYTES: usize = 64 * 1024 * 1024;
@@ -139,9 +153,11 @@ pub enum RewardKeySource {
 /// ordinary templates plus per-key requested histories, newest at the back. Serving
 /// returns the newest offered template whose parent matches the tip; solution
 /// verification scans the whole ring (newest-first) so a solution against any
-/// recently superseded template still resolves. Eviction is by age — once the
-/// ordinary ring is full, its oldest member is evicted; requested work has a
-/// separate per-key limit and byte budget. A
+/// recently superseded template still resolves. Ordinary templates are kept
+/// by count (the newest [`MAX_RETAINED_TEMPLATES`]) and by age (the retention
+/// window), within [`MAX_ORDINARY_TEMPLATES`] / [`MAX_ORDINARY_TEMPLATE_BYTES`];
+/// requested work has a separate per-key limit and byte budget. Evicted
+/// templates leave a small record so a late solution is answered as expired. A
 /// mined block's failed apply withdraws every template on its parent
 /// ([`MiningHandle::withdraw_templates_for_parent`]): a withdrawn template is
 /// no longer offered, and ages out of the ring like any other.
@@ -160,6 +176,70 @@ struct MiningCache {
     /// against the tip and access the cached templates atomically — no TOCTOU
     /// window between reading the tip and reading/writing the cache.
     best_tip: BestTip,
+    /// Age an ordinary template is kept beyond the newest
+    /// [`MAX_RETAINED_TEMPLATES`]; `None` = [`DEFAULT_TEMPLATE_RETENTION_MS`].
+    retention_ms: Option<u64>,
+    /// Proof-of-work inputs of recently evicted templates, newest at the back.
+    expired: std::collections::VecDeque<ExpiredTemplate>,
+}
+
+/// What a solution check needs from an evicted template: enough to tell a
+/// late solution for it from invalid proof of work, without its body.
+#[derive(Debug, Clone)]
+struct ExpiredTemplate {
+    msg: [u8; 32],
+    version: u8,
+    height: u32,
+    n_bits: u32,
+    miner_pubkey: [u8; 33],
+    operator_owned: bool,
+}
+
+impl ExpiredTemplate {
+    fn of(template: &Template) -> Self {
+        let candidate = &template.candidate;
+        Self {
+            msg: candidate.msg,
+            version: candidate.header.version,
+            height: candidate.header.height,
+            n_bits: candidate.header.n_bits,
+            miner_pubkey: candidate.validation_ctx.pre_header.miner_pubkey,
+            operator_owned: template.identity.reason != BuildReason::Requested
+                || candidate.observation.operator_owned,
+        }
+    }
+
+    /// Whether `solution` is valid proof of work for this template.
+    fn solved_by(&self, solution: &MinerSolution) -> bool {
+        if solution
+            .pk
+            .map_or(!self.operator_owned, |pk| pk != self.miner_pubkey)
+        {
+            return false;
+        }
+        let n = ergo_crypto::autolykos::common::calc_n(self.version, self.height);
+        let hit =
+            ergo_crypto::autolykos::v2::hit_for_v2(&self.msg, &solution.nonce, self.height, n);
+        hit < ergo_crypto::difficulty::get_target(self.n_bits)
+    }
+}
+
+/// Whether a rebuilt candidate carries the same block content as `previous`
+/// (everything but the timestamp), so publishing it adds nothing for miners.
+fn same_block_content(previous: &Template, candidate: &Candidate, work: &WorkMessage) -> bool {
+    let (a, b) = (&previous.candidate, candidate);
+    a.parent_id == b.parent_id
+        && a.header.version == b.header.version
+        && a.header.height == b.header.height
+        && a.header.n_bits == b.header.n_bits
+        && a.header.votes == b.header.votes
+        && a.transactions == b.transactions
+        && a.extension_fields == b.extension_fields
+        && a.validation_ctx.pre_header.miner_pubkey == b.validation_ctx.pre_header.miner_pubkey
+        && previous.work.pk == work.pk
+        && a.observation.policy_revision == b.observation.policy_revision
+        && a.observation.operator_generation == b.observation.operator_generation
+        && a.observation.operator_owned == b.observation.operator_owned
 }
 
 /// A published template in the [`MiningCache`] ring.
@@ -173,6 +253,9 @@ struct RetainedTemplate {
     /// accepted.
     withdrawn: bool,
     requested_weight: usize,
+    /// Estimated retained size of an ordinary template (0 for requested work,
+    /// which is charged through `requested_weight`).
+    ordinary_weight: usize,
     last_served_ms: u64,
 }
 
@@ -257,6 +340,51 @@ impl MiningCache {
             }
         }
         (bytes <= MAX_REQUESTED_TEMPLATE_BYTES - weight).then_some(removed)
+    }
+
+    /// Remove the template at `index`, remembering what a late solution check
+    /// needs.
+    fn evict(&mut self, index: usize) {
+        if let Some(retained) = self.templates.remove(index) {
+            if self.expired.len() >= MAX_EXPIRED_TEMPLATE_RECORDS {
+                self.expired.pop_front();
+            }
+            self.expired
+                .push_back(ExpiredTemplate::of(&retained.template));
+        }
+    }
+
+    /// Evict ordinary templates past their retention: the newest
+    /// [`MAX_RETAINED_TEMPLATES`] always stay, older ones stay while younger
+    /// than the retention window, and the memory bounds evict the oldest
+    /// first whatever their age. The newest template is never evicted.
+    fn evict_ordinary(&mut self, now_ms: u64) {
+        let retention_ms = self.retention_ms.unwrap_or(DEFAULT_TEMPLATE_RETENTION_MS);
+        loop {
+            let mut count = 0usize;
+            let mut bytes = 0usize;
+            let mut oldest = None;
+            for (index, t) in self.templates.iter().enumerate() {
+                if t.requested_weight == 0 {
+                    count += 1;
+                    bytes = bytes.saturating_add(t.ordinary_weight);
+                    oldest.get_or_insert((index, t.template.identity.built_at_ms));
+                }
+            }
+            let Some((index, built_at_ms)) = oldest else {
+                return;
+            };
+            if count <= 1 {
+                return;
+            }
+            let over_bounds = count > MAX_ORDINARY_TEMPLATES || bytes > MAX_ORDINARY_TEMPLATE_BYTES;
+            let expired = count > MAX_RETAINED_TEMPLATES
+                && now_ms.saturating_sub(built_at_ms) >= retention_ms;
+            if !(over_bounds || expired) {
+                return;
+            }
+            self.evict(index);
+        }
     }
 
     /// The newest offered template built on `parent`.
@@ -800,6 +928,34 @@ impl MiningHandle {
         self
     }
 
+    /// Set how long an ordinary template stays solvable after newer ones
+    /// replaced it (beyond the newest [`MAX_RETAINED_TEMPLATES`], within the
+    /// memory bounds). Default [`DEFAULT_TEMPLATE_RETENTION_MS`].
+    pub fn with_template_retention_ms(self, retention_ms: u64) -> Self {
+        self.cache.write().expect("cache poisoned").retention_ms = Some(retention_ms);
+        self
+    }
+
+    /// The newest offered ordinary template on `parent` when `candidate`
+    /// carries the same block content (all but the timestamp). Publishing
+    /// such a rebuild would only push an equivalent job out of the history,
+    /// so the engine keeps serving the existing one instead.
+    pub fn unchanged_template(
+        &self,
+        candidate: &Candidate,
+        work: &WorkMessage,
+        parent: &[u8; 32],
+    ) -> Option<TemplateIdentity> {
+        let cache = self.cache.read().expect("cache poisoned");
+        if !crate::engine::should_publish(&cache.best_tip, parent) {
+            return None;
+        }
+        cache
+            .newest_offered_on(parent)
+            .filter(|t| same_block_content(t, candidate, work))
+            .map(|t| t.identity.clone())
+    }
+
     /// Last scan availability observed by the serial build worker.
     pub fn rent_self_claim_state(&self) -> crate::rent_state::RentSelfClaimState {
         *self
@@ -1008,7 +1164,7 @@ impl MiningHandle {
             return None;
         }
         let built_at_ms = now_ms();
-        let requested_weight = if reason == BuildReason::Requested {
+        let weight = {
             let inputs_size: usize = candidate
                 .observation
                 .transactions
@@ -1060,15 +1216,18 @@ impl MiningHandle {
                 .saturating_add(parsed_size)
                 .saturating_add(excluded_size)
                 .max(64 * 1024)
+        };
+        let (requested_weight, ordinary_weight) = if reason == BuildReason::Requested {
+            (weight, 0)
         } else {
-            0
+            (0, weight)
         };
         if reason == BuildReason::Requested {
             let mut evictions =
                 cache.requested_evictions(requested_weight, work.pk, built_at_ms)?;
             evictions.sort_unstable_by(|a, b| b.cmp(a));
             for index in evictions {
-                cache.templates.remove(index);
+                cache.evict(index);
             }
         }
         let chain_seq = cache.best_tip.chain_seq;
@@ -1097,23 +1256,11 @@ impl MiningHandle {
             }),
             withdrawn: false,
             requested_weight,
+            ordinary_weight,
             last_served_ms: built_at_ms,
         });
         if reason != BuildReason::Requested {
-            while cache
-                .templates
-                .iter()
-                .filter(|t| t.requested_weight == 0)
-                .count()
-                > MAX_RETAINED_TEMPLATES
-            {
-                let index = cache
-                    .templates
-                    .iter()
-                    .position(|t| t.requested_weight == 0)
-                    .expect("ordinary retention exceeded");
-                cache.templates.remove(index);
-            }
+            cache.evict_ordinary(built_at_ms);
         }
         drop(cache);
         // Wake longpoll waiters: a monotonic bump so a waiter that already
@@ -1410,7 +1557,10 @@ impl MiningHandle {
     ///    that submits valid PoW against a chain-flipped or withdrawn
     ///    candidate gets the actionable answer, not the misleading "invalid
     ///    pow".
-    /// 3. `InvalidPow` — the residual fall-through.
+    /// 3. `TemplateExpired` — valid PoW for a template that has aged out of
+    ///    the retained history (the last [`MAX_EXPIRED_TEMPLATE_RECORDS`]
+    ///    evicted templates are remembered for this check).
+    /// 4. `InvalidPow` — the residual fall-through.
     pub fn verify_solution(
         &self,
         solution: &MinerSolution,
@@ -1463,7 +1613,8 @@ impl MiningHandle {
                 }
             });
             match verify_solution(candidate, solution, state)? {
-                SolutionOutcome::InvalidPow => continue,
+                // `crate::solution::verify_solution` never answers expired.
+                SolutionOutcome::InvalidPow | SolutionOutcome::TemplateExpired => continue,
                 SolutionOutcome::Accepted(b) if !retained.withdrawn => {
                     if prefer(&b)? {
                         return Ok(SolutionOutcome::Accepted(b));
@@ -1487,7 +1638,15 @@ impl MiningHandle {
                 }
             }
         }
-        Ok(newest.or(saw_stale).unwrap_or(SolutionOutcome::InvalidPow))
+        Ok(newest.or(saw_stale).unwrap_or_else(|| {
+            // Valid work for a template no longer held is a late solution,
+            // not invalid proof of work.
+            if cache.expired.iter().rev().any(|e| e.solved_by(solution)) {
+                SolutionOutcome::TemplateExpired
+            } else {
+                SolutionOutcome::InvalidPow
+            }
+        }))
     }
 
     /// Select the network whose genesis mining rules apply.
@@ -2441,8 +2600,10 @@ mod tests {
             let msg = [i as u8; 32];
             last_msg = msg;
             let (c, w) = candidate_pair_msg(parent, msg);
+            // One retention window apart: only the count bound keeps them.
+            let at = BUILT_AT_MS + i as u64 * DEFAULT_TEMPLATE_RETENTION_MS;
             assert!(h
-                .publish_if_current(c, w, &parent, || BUILT_AT_MS, BuildReason::MempoolRefresh)
+                .publish_if_current(c, w, &parent, || at, BuildReason::MempoolRefresh)
                 .is_some());
         }
 
@@ -2635,6 +2796,147 @@ mod tests {
         // Tip advances to a new parent before the engine republishes.
         h.set_best_tip(synced_tip([0xFFu8; 32]));
         assert_eq!(h.cached_work_if_synced(), None);
+    }
+
+    /// Publish a PoW-passing template (any hit) on `parent` at `at`.
+    fn publish_passing(h: &MiningHandle, parent: [u8; 32], msg: [u8; 32], at: u64) {
+        let (c, w) = candidate_pair_msg_nbits(parent, msg, 0x03000001);
+        assert!(h
+            .publish_if_current(c, w, &parent, || at, BuildReason::MempoolRefresh)
+            .is_some());
+    }
+
+    /// Publish `count` PoW-failing (target 0) refreshes on `parent`, the i-th
+    /// at `start + i * step`.
+    fn publish_failing(h: &MiningHandle, parent: [u8; 32], count: usize, start: u64, step: u64) {
+        for i in 0..count {
+            let mut msg = [0xC0u8; 32];
+            msg[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let (c, w) = candidate_pair_msg_nbits(parent, msg, 0x00000000);
+            let at = start + i as u64 * step;
+            assert!(h
+                .publish_if_current(c, w, &parent, || at, BuildReason::MempoolRefresh)
+                .is_some());
+        }
+    }
+
+    fn any_nonce() -> MinerSolution {
+        MinerSolution {
+            nonce: [0u8; 8],
+            pk: None,
+        }
+    }
+
+    #[test]
+    fn solutions_for_retained_templates_are_accepted_after_mempool_churn() {
+        // 40 same-parent refreshes within one minute push the solved template
+        // far past the newest 16, but it is younger than the retention window.
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0u8; 32]; // the fresh store's best full block
+        h.set_best_tip(synced_tip(parent));
+        publish_passing(&h, parent, [0xA0; 32], BUILT_AT_MS);
+        publish_failing(&h, parent, 40, BUILT_AT_MS + 1_000, 1_000);
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+        let outcome = h.verify_solution(&any_nonce(), &state).unwrap();
+        let SolutionOutcome::Accepted(block) = outcome else {
+            panic!("retained template accepts its solution, got {outcome:?}")
+        };
+        assert_eq!(block.header.n_bits, 0x03000001);
+    }
+
+    #[test]
+    fn solution_for_an_evicted_template_is_reported_expired() {
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0u8; 32];
+        h.set_best_tip(synced_tip(parent));
+        publish_passing(&h, parent, [0xA0; 32], BUILT_AT_MS);
+        // Past the retention window and the newest 16: the first is evicted.
+        publish_failing(
+            &h,
+            parent,
+            MAX_RETAINED_TEMPLATES + 1,
+            BUILT_AT_MS + DEFAULT_TEMPLATE_RETENTION_MS,
+            1,
+        );
+        assert!(h.cache.read().unwrap().templates.iter().all(|t| t
+            .template
+            .candidate
+            .header
+            .n_bits
+            == 0));
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+        assert!(matches!(
+            h.verify_solution(&any_nonce(), &state).unwrap(),
+            SolutionOutcome::TemplateExpired
+        ));
+        // Work that solves none of them, held or evicted, is still invalid.
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        h.set_best_tip(synced_tip(parent));
+        publish_failing(&h, parent, 40, BUILT_AT_MS, DEFAULT_TEMPLATE_RETENTION_MS);
+        assert!(matches!(
+            h.verify_solution(&any_nonce(), &state).unwrap(),
+            SolutionOutcome::InvalidPow
+        ));
+    }
+
+    #[test]
+    fn template_retention_is_configurable_and_memory_bounded() {
+        let parent = [0x45u8; 32];
+        // A zero window keeps only the newest 16.
+        let h = MiningHandle::mainnet([0x02u8; 33]).with_template_retention_ms(0);
+        h.set_best_tip(synced_tip(parent));
+        publish_failing(&h, parent, 40, BUILT_AT_MS, 1);
+        assert_eq!(
+            h.cache.read().unwrap().templates.len(),
+            MAX_RETAINED_TEMPLATES
+        );
+        // Within the window, the count bound still caps the history.
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        h.set_best_tip(synced_tip(parent));
+        publish_failing(&h, parent, MAX_ORDINARY_TEMPLATES + 10, BUILT_AT_MS, 0);
+        let cache = h.cache.read().unwrap();
+        assert_eq!(cache.templates.len(), MAX_ORDINARY_TEMPLATES);
+        assert!(
+            cache
+                .templates
+                .iter()
+                .map(|t| t.ordinary_weight)
+                .sum::<usize>()
+                <= MAX_ORDINARY_TEMPLATE_BYTES
+        );
+        assert_eq!(cache.expired.len(), 10);
+    }
+
+    #[test]
+    fn unchanged_rebuild_reuses_the_served_template() {
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0x46u8; 32];
+        h.set_best_tip(synced_tip(parent));
+        let (c, w) = candidate_pair_msg(parent, [1; 32]);
+        let first = h
+            .publish_if_current(c, w, &parent, || BUILT_AT_MS, BuildReason::Tip)
+            .unwrap();
+        // Same content, a later timestamp (hence another msg).
+        let (mut c, w) = candidate_pair_msg(parent, [2; 32]);
+        c.header.timestamp += 1_000;
+        assert_eq!(h.unchanged_template(&c, &w, &parent), Some(first.clone()));
+        // Different votes or transactions are new content.
+        let mut voted = c.clone();
+        voted.header.votes = [1, 0, 0];
+        assert_eq!(h.unchanged_template(&voted, &w, &parent), None);
+        let mut with_tx = c.clone();
+        with_tx
+            .transactions
+            .push(ergo_ser::transaction::Transaction {
+                inputs: vec![],
+                data_inputs: vec![],
+                output_candidates: vec![],
+            });
+        assert_eq!(h.unchanged_template(&with_tx, &w, &parent), None);
+        // Another parent never matches.
+        assert_eq!(h.unchanged_template(&c, &w, &[0x47; 32]), None);
     }
 
     #[test]
@@ -3223,12 +3525,14 @@ mod tests {
                 operator_pk,
                 100 + refresh as u64,
             );
+            // Each refresh one retention window after the previous, so only
+            // the count bound keeps ordinary templates.
             let identity = handle
                 .publish_if_current(
                     candidate,
                     work,
                     &parent,
-                    || BUILT_AT_MS,
+                    || BUILT_AT_MS + refresh as u64 * DEFAULT_TEMPLATE_RETENTION_MS,
                     BuildReason::MempoolRefresh,
                 )
                 .unwrap();
