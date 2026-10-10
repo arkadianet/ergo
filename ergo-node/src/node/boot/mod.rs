@@ -240,15 +240,6 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // advertises a pruned mode the implementation doesn't yet honor.
     // Lift in the eviction follow-up commit.
     validate_runtime_mode_support(&config)?;
-    if config.wallet_mode == crate::config::WalletMode::External
-        && config.mining_config.enabled
-        && config.mining_config.miner_public_key_hex.is_none()
-    {
-        return Err("[wallet] mode = \"external\" with mining enabled requires \
-                    [mining].miner_public_key_hex; the node cannot resolve a wallet-backed \
-                    reward key without an embedded wallet"
-            .into());
-    }
     let db_path = config.data_dir.join("state.redb");
     let data_directory_lock = crate::data_upgrade::prepare_startup(&config).await?;
     crate::incidents::set_incident_dir(config.data_dir.join("incidents"));
@@ -876,12 +867,55 @@ async fn run_inner_with_backend(
             None
         };
 
+    // A node that does not host the wallet hands a legacy embedded wallet to
+    // the daemon once, in the background, from a read snapshot.
+    if wallet_store.is_none() {
+        let db = store.db_arc();
+        let data_dir = config.data_dir.clone();
+        let network = config.network;
+        std::thread::Builder::new()
+            .name("wallet-handoff".into())
+            .spawn(move || {
+                use crate::node::legacy_wallet::{write_handoff, Handoff};
+                match write_handoff(&db, &data_dir, network) {
+                    Ok(Handoff::Written(path) | Handoff::Waiting(path)) => tracing::warn!(
+                        handoff = %path.display(),
+                        "a legacy embedded wallet is ready for the wallet daemon: run \
+                         `ergo-walletd adopt --handoff {} --data-dir <new wallet directory>`",
+                        path.display()
+                    ),
+                    Ok(Handoff::Adopted) => tracing::info!(
+                        "the legacy embedded wallet was adopted by the wallet daemon; \
+                         `ergo-node wallet-legacy purge` removes its rows from this node"
+                    ),
+                    Ok(Handoff::NoLegacyWallet) => {}
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "the legacy embedded wallet could not be handed off; it is unchanged"
+                    ),
+                }
+            })
+            .map_err(|error| format!("start the wallet handoff: {error}"))?;
+    }
+
+    // An external-mode miner with no pinned key keeps mining with the reward
+    // key of a legacy embedded wallet still held in state.redb, read once.
+    let legacy_reward_key = if wallet_store.is_none()
+        && config.mining_config.enabled
+        && config.mining_config.miner_public_key_hex.is_none()
+    {
+        crate::node::legacy_wallet::reward_key(&store.db_arc())?
+    } else {
+        None
+    };
+
     // Phase 3b: mining subsystem (the MiningHandle + API bridge).
     let mining_subsystem = mining::build_subsystem(
         &config,
         &scaffold.voting_targets_slot,
         &mining_submit_tx,
         wallet_store.clone(),
+        legacy_reward_key,
     )?;
     // Keep queued private transactions out of every public admission path
     // from the first loop iteration, whether or not mining is enabled.

@@ -54,6 +54,7 @@ pub(super) fn build_subsystem(
     voting_targets_slot: &std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
     mining_submit_tx: &tokio::sync::mpsc::Sender<crate::mining_bridge::MiningRequest>,
     wallet_store: Option<std::sync::Arc<dyn ergo_state::wallet::WalletStore>>,
+    legacy_reward_key: Option<[u8; 33]>,
 ) -> Result<MiningSubsystem, NodeError> {
     let private_queue = open_private_queue(&config.data_dir, config.mining_config.enabled)?;
     if !config.mining_config.enabled {
@@ -91,6 +92,29 @@ pub(super) fn build_subsystem(
             (
                 std::sync::Arc::new(ergo_mining::PinnedRewardKeySource::new(miner_pk)),
                 Some(miner_pk),
+            )
+        }
+        None if wallet_store.is_none() => {
+            let key = legacy_reward_key.ok_or_else(|| -> NodeError {
+                "[mining] enabled requires miner_reward_address or miner_public_key_hex: \
+                 the node holds no wallet to take a reward key from"
+                    .into()
+            })?;
+            let prefix = match config.network {
+                crate::config::Network::Testnet => ergo_ser::address::NetworkPrefix::Testnet,
+                _ => ergo_ser::address::NetworkPrefix::Mainnet,
+            };
+            let address = ergo_ser::address::encode_p2pk_from_pubkey(prefix, &key).map_err(
+                |error| -> NodeError { format!("legacy reward address: {error}").into() },
+            )?;
+            warn!(
+                %address,
+                "mining rewards go to the legacy embedded wallet's first address; pin it with \
+                 [mining] miner_reward_address = \"{address}\""
+            );
+            (
+                std::sync::Arc::new(ergo_mining::PinnedRewardKeySource::new(key)),
+                Some(key),
             )
         }
         None => {
@@ -417,7 +441,7 @@ mod tests {
             ),
         ));
         let subsystem = tracing::subscriber::with_default(subscriber, || {
-            build_subsystem(config, &Default::default(), &tx, Some(wallet_store))
+            build_subsystem(config, &Default::default(), &tx, Some(wallet_store), None)
         })
         .unwrap_or_else(|e| panic!("mining boot refused: {e}"));
         let logged = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
@@ -530,14 +554,14 @@ mod tests {
             },
         ] {
             config.mining_config.miner_public_key_hex = Some(hex::encode(invalid));
-            let error = build_subsystem(&config, &targets, &submit, None)
+            let error = build_subsystem(&config, &targets, &submit, None, None)
                 .err()
                 .unwrap();
             assert!(error.to_string().contains("not a secp256k1 public key"));
         }
         config.mining_config.miner_public_key_hex =
             Some("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".into());
-        assert!(build_subsystem(&config, &targets, &submit, None)
+        assert!(build_subsystem(&config, &targets, &submit, None, None)
             .unwrap()
             .handle
             .is_some());

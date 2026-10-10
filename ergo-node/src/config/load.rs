@@ -1010,20 +1010,31 @@ impl NodeConfig {
         if let Some(pk_hex) = cli.mining_public_key.as_ref() {
             mining_config.miner_public_key_hex = Some(pk_hex.clone());
         }
+        if let Some(address) = mining_config.miner_reward_address.clone() {
+            let prefix = match network {
+                Network::Mainnet => ergo_ser::address::NetworkPrefix::Mainnet,
+                _ => ergo_ser::address::NetworkPrefix::Testnet,
+            };
+            let key = ergo_ser::address::decode_p2pk_address(address.trim(), prefix)
+                .map_err(|e| format!("[mining] miner_reward_address: {e}"))?;
+            k256::PublicKey::from_sec1_bytes(&key).map_err(|_| {
+                "[mining] miner_reward_address does not hold a valid public key".to_string()
+            })?;
+            let key_hex = hex::encode(key);
+            match &mining_config.miner_public_key_hex {
+                Some(existing) if !existing.eq_ignore_ascii_case(&key_hex) => {
+                    return Err("[mining] miner_reward_address and miner_public_key_hex \
+                                name different keys"
+                        .into());
+                }
+                _ => mining_config.miner_public_key_hex = Some(key_hex),
+            }
+        }
         if let Err(e) = mining_config.validate() {
             return Err(format!("[mining]: {e}"));
         }
-        if wallet_mode == WalletMode::External
-            && mining_config.enabled
-            && mining_config.miner_public_key_hex.is_none()
-        {
-            return Err(
-                "[wallet] mode = \"external\" with [mining] enabled = true requires \
-                 [mining].miner_public_key_hex (or --mining-public-key); wallet-backed \
-                 reward keys are unavailable in external mode"
-                    .into(),
-            );
-        }
+        // An external-mode miner without a pinned key is checked at boot,
+        // where a legacy embedded wallet's public key can still supply one.
 
         // [voting] — operator on-chain voting policy. Resolve each
         // `[voting.targets]` parameter NAME to its votable id; an unknown or
