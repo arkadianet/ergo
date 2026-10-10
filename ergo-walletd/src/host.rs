@@ -851,6 +851,7 @@ mod tests {
         host.shutdown().await.unwrap();
         drop(host);
         let path = fixture.dir.path().join(UNLOCK_ATTEMPTS_FILE);
+        assert!(path.is_file(), "the attempt record is persisted");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
