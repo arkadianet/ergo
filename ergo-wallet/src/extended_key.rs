@@ -16,7 +16,10 @@ use sha2::Sha512;
 type HmacSha512 = Hmac<Sha512>;
 
 /// 32-byte secp256k1 private scalar + 32-byte BIP32 chain code.
-#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+///
+/// Deliberately not `Clone`: each copy of secret material is one more place
+/// that must be wiped.
+#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct ExtendedSecretKey {
     /// Raw secp256k1 scalar. Treated as opaque secret material; never logged.
     /// k256::SecretKey already handles its own zeroize internally.
@@ -38,8 +41,8 @@ impl std::fmt::Debug for ExtendedSecretKey {
 impl ExtendedSecretKey {
     /// Borrow the raw secret bytes. Use sparingly — prefer
     /// [`Self::public_key`] for downstream consumers.
-    pub fn secret_bytes(&self) -> [u8; 32] {
-        self.secret.to_bytes().into()
+    pub fn secret_bytes(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        zeroize::Zeroizing::new(self.secret.to_bytes().into())
     }
 
     /// Derive the BIP32 master key from a BIP39 seed using standard
@@ -175,11 +178,19 @@ impl ExtendedSecretKey {
     /// Walk a [`DerivationPath`] from this key, returning the leaf.
     /// Each component is fed to [`Self::derive_child`] in order.
     pub fn derive_at_path(&self, path: &DerivationPath) -> Result<Self, WalletError> {
-        let mut current = self.clone();
+        let mut current = self.duplicate();
         for &component in path.components() {
             current = current.derive_child(component)?;
         }
         Ok(current)
+    }
+
+    /// Explicit copy for the empty-path walk; the copy is wiped on drop.
+    fn duplicate(&self) -> Self {
+        Self {
+            secret: self.secret.clone(),
+            chain_code: self.chain_code,
+        }
     }
 }
 
@@ -242,7 +253,7 @@ impl ExtendedSecretKey {
 ///
 /// `Zeroize` + `ZeroizeOnDrop` ensure the variable-length
 /// `secret_bytes` and the chain code are wiped on drop.
-#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct ExtendedSecretKeyLegacy {
     /// The master keeps its complete 32-byte HMAC output. Children use
     /// variable-length unsigned big-endian bytes (1..=32 bytes), and
@@ -417,7 +428,10 @@ impl ExtendedSecretKeyLegacy {
 
     /// Walk a [`DerivationPath`] using pre-1627 child derivation.
     pub fn derive_at_path(&self, path: &DerivationPath) -> Result<Self, WalletError> {
-        let mut current = self.clone();
+        let mut current = Self {
+            secret_bytes: self.secret_bytes.clone(),
+            chain_code: self.chain_code,
+        };
         for &component in path.components() {
             current = current.derive_child(component)?;
         }

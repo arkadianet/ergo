@@ -3,6 +3,7 @@
 //! the password and seed oracles.
 
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
 use ergo_wallet_protocol::scala::types::WalletStatus;
 use ergo_wallet_protocol::WalletAdminError;
@@ -207,6 +208,8 @@ impl WalletEngine {
         mnemonic_pass: String,
         strength: u8,
     ) -> Result<String, WalletAdminError> {
+        // Owned secrets are wiped when this command returns.
+        let (pass, mnemonic_pass) = (Zeroizing::new(pass), Zeroizing::new(mnemonic_pass));
         let mut storage = self.storage.write();
         // Refuse to overwrite an existing wallet: `init` on an initialized
         // wallet would persist a second secret file. Return a typed `WalletExists`
@@ -249,6 +252,11 @@ impl WalletEngine {
         pass: String,
         use_pre_1627: bool,
     ) -> Result<(), WalletAdminError> {
+        let (mnemonic, mnemonic_pass, pass) = (
+            Zeroizing::new(mnemonic),
+            Zeroizing::new(mnemonic_pass),
+            Zeroizing::new(pass),
+        );
         let mut storage = self.storage.write();
         // Refuse to overwrite an existing wallet (same safety guard as `init`).
         if !matches!(
@@ -278,6 +286,7 @@ impl WalletEngine {
     }
 
     pub fn unlock(&mut self, pass: String) -> Result<(), WalletAdminError> {
+        let pass = Zeroizing::new(pass);
         if self.unlock_limiter.gate_at(unix_now()).is_err() {
             tracing::warn!("wallet unlock rejected: failed-attempt budget exhausted");
             return Err(WalletAdminError::RateLimited);
@@ -331,6 +340,7 @@ impl WalletEngine {
         mnemonic: String,
         mnemonic_pass: String,
     ) -> Result<bool, WalletAdminError> {
+        let (mnemonic, mnemonic_pass) = (Zeroizing::new(mnemonic), Zeroizing::new(mnemonic_pass));
         // `check` is a yes/no oracle over the recovery phrase — the same
         // brute-force surface as unlock, so it shares the failed-attempt
         // budget (a mismatch counts as a failure; a match resets it).
