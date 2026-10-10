@@ -116,6 +116,11 @@ pub struct ChainTransaction {
     pub tx_id: TxId,
     pub inputs: Vec<ChainInput>,
     pub outputs: Vec<ChainOutput>,
+    /// The complete serialized transaction, proofs included, when the source
+    /// can supply it. A remote consumer recomputes the transaction and witness
+    /// ids from these bytes and binds the block's transactions to its header.
+    #[serde(default)]
+    pub bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

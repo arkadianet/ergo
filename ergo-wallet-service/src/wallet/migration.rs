@@ -13,7 +13,7 @@ use redb::{
 
 use super::{mining_jobs, tables::*, utxo_scan, RedbWalletStore, WalletStore, WalletStoreError};
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MigrationReport {
     pub tables: BTreeMap<String, u64>,
     pub applied_headers: u64,
@@ -28,6 +28,16 @@ pub struct MigrationReport {
 pub fn export_embedded_wallet(
     source: &Database,
     destination: &Path,
+) -> Result<MigrationReport, WalletStoreError> {
+    export_embedded_wallet_with(source, destination, false)
+}
+
+/// [`export_embedded_wallet`], optionally carrying job records the embedded
+/// scheduler still owns. Carry them only when that scheduler no longer runs.
+pub fn export_embedded_wallet_with(
+    source: &Database,
+    destination: &Path,
+    carry_scheduler_jobs: bool,
 ) -> Result<MigrationReport, WalletStoreError> {
     let original = ReadableDatabase::begin_read(source)?;
     let mut supported = BTreeMap::new();
@@ -118,7 +128,7 @@ pub fn export_embedded_wallet(
             "upgrade the embedded wallet schema with the current node before cutover",
         ));
     }
-    if !mining_jobs::pending_jobs(&original)?.is_empty() {
+    if !carry_scheduler_jobs && !mining_jobs::pending_jobs(&original)?.is_empty() {
         return Err(WalletStoreError::decode(
             "wallet jobs retain scheduler ownership, including mined/conflicted transactions; cancel queued work before stopping the node, then explicitly use --quarantine-mining-jobs to retain the journal in the private migration copy",
         ));

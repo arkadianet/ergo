@@ -14,6 +14,7 @@ publish    = false
 # P2PK address encoding goes through `encode_p2pk_from_pubkey`, not through
 # `ergo-sigma::build_prove_dlog_ergo_tree`.
 aes-gcm          = { workspace = true }
+argon2           = { workspace = true }
 ergo-primitives  = { workspace = true }
 indexmap         = { workspace = true }
 ergo-sigma       = { workspace = true }

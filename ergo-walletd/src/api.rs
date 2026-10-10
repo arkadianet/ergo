@@ -105,6 +105,16 @@ pub fn router(context: ApiContext) -> Router {
         .with_state(state)
 }
 
+/// The watch-only read API behind the local credential. Watch-only data —
+/// balances, addresses, boxes and history — is as private as a seed
+/// wallet's, so every route requires the `api_key` header.
+pub fn watch_router(context: ApiContext, local_api_key: crate::config::ApiKey) -> Router {
+    router(context).layer(axum::middleware::from_fn_with_state(
+        local_api_key,
+        crate::lifecycle_api::authenticate,
+    ))
+}
+
 /// Preserve the daemon's short diagnostic/read aliases in seed mode. Native
 /// wallet reads are supplied separately by the complete engine adapter.
 pub(crate) fn short_router(context: ApiContext) -> Router {

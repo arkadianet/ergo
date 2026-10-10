@@ -33,3 +33,16 @@ blocks_page = 1
 unix_socket = "./ergo-walletd-seed.sock" # Created owner-only, mode 0600.
 # TCP is optional and must bind loopback; it uses the same local credential.
 # tcp_fallback = "127.0.0.1:3033"
+
+# wallet.redb is encrypted at rest; a restarted daemon is sealed until the
+# wallet password unseals it. Unlocked wallets lock again after 15 minutes
+# without a wallet operation and 12 hours after unlocking (0 disables a
+# limit). lock_memory = true locks all daemon memory into RAM (Linux; needs
+# LimitMEMLOCK=infinity). unseal_key_file unseals at start from a TPM-bound
+# credential. multisig_nonces = "caller" returns secret nonces (Scala form).
+# [security]
+# idle_lock = "15m"
+# max_unlock = "12h"
+# lock_memory = false
+# unseal_key_file = "/run/credentials/ergo-walletd.service/unseal-key"
+# multisig_nonces = "daemon"

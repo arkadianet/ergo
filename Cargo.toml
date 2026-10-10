@@ -74,6 +74,8 @@ ergo-node          = { path = "ergo-node" }
 
 # Cryptography
 aes-gcm  = "0.11"
+# Memory-hard keystore key derivation (version-2 wallet files).
+argon2   = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
 blake2   = "0.10"
 k256     = "0.13"
 md5      = "0.7"

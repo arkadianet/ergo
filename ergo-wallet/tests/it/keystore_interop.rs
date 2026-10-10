@@ -2,7 +2,7 @@
 
 use ergo_wallet::encryption::{derive_key_pbkdf2_with_prf, encrypt, Pbkdf2Prf};
 use ergo_wallet::error::WalletError;
-use ergo_wallet::storage::{EncryptedSecret, SecretStorage};
+use ergo_wallet::storage::{EncryptedSecret, KeystoreFile, KeystoreUpgrade, SecretStorage};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -37,6 +37,29 @@ fn write_secret(secret: &EncryptedSecret) -> (tempfile::TempDir, std::path::Path
     let path = dir.path().join("oracle.json");
     std::fs::write(&path, serde_json::to_vec(secret).unwrap()).unwrap();
     (dir, path)
+}
+
+fn read_keystore(path: &std::path::Path) -> KeystoreFile {
+    KeystoreFile::parse(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// After an upgrading unlock the directory holds exactly one file, at the
+/// original path, in version 2, and it unlocks to the same master.
+fn assert_upgraded_in_place(
+    dir: &std::path::Path,
+    path: &std::path::Path,
+    password: &str,
+    master: &str,
+) {
+    assert_eq!(std::fs::read_dir(dir).unwrap().count(), 1);
+    assert_eq!(read_keystore(path).version(), 2);
+    let mut reopened = SecretStorage::open(dir.to_path_buf());
+    reopened.unlock(password).unwrap();
+    assert_eq!(reopened.take_keystore_upgrade(), None);
+    assert_eq!(
+        hex::encode(reopened.unlocked().unwrap().master.master_pubkey().unwrap()),
+        master
+    );
 }
 
 // ----- error paths -----
@@ -134,7 +157,7 @@ fn scala_keystore_field_layout_matches_reference_aes_output() {
 }
 
 #[test]
-fn scala_wallet_imports_both_prfs_without_modifying_the_file() {
+fn scala_wallet_imports_both_prfs_and_upgrades_in_place() {
     let oracle = oracle();
     for vector in &oracle.vectors {
         // Preserve the reference JSON, which has no algorithm/mode fields.
@@ -159,12 +182,22 @@ fn scala_wallet_imports_both_prfs_without_modifying_the_file() {
             hex::encode(storage.unlocked().unwrap().master.master_pubkey().unwrap()),
             vector.master_public_key
         );
-        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert_eq!(
+            storage.take_keystore_upgrade(),
+            Some(KeystoreUpgrade::Upgraded { from_version: 1 })
+        );
+        assert_ne!(std::fs::read(&path).unwrap(), bytes);
+        assert_upgraded_in_place(
+            dir.path(),
+            &path,
+            &oracle.password,
+            &vector.master_public_key,
+        );
     }
 }
 
 #[test]
-fn legacy_rust_sha512_wallet_remains_readable_without_rewriting() {
+fn legacy_rust_sha512_wallet_remains_readable_and_upgrades_in_place() {
     let oracle = oracle();
     let vector = oracle
         .vectors
@@ -179,7 +212,6 @@ fn legacy_rust_sha512_wallet_remains_readable_without_rewriting() {
     secret.cipher_text = hex::encode(&output[..output.len() - 16]);
     secret.auth_tag = hex::encode(&output[output.len() - 16..]);
     let (dir, path) = write_secret(&secret);
-    let before = std::fs::read(&path).unwrap();
     let mut storage = SecretStorage::open(dir.path().to_path_buf());
     storage.unlock(&oracle.password).unwrap();
     assert!(storage.check_seed(&oracle.mnemonic, ""));
@@ -187,11 +219,16 @@ fn legacy_rust_sha512_wallet_remains_readable_without_rewriting() {
         hex::encode(storage.unlocked().unwrap().master.master_pubkey().unwrap()),
         vector.master_public_key
     );
-    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert_upgraded_in_place(
+        dir.path(),
+        &path,
+        &oracle.password,
+        &vector.master_public_key,
+    );
 }
 
 #[test]
-fn new_wallet_uses_appkit_defaults_and_reference_seed() {
+fn new_wallet_is_version_2_and_its_appkit_export_uses_reference_defaults() {
     let oracle = oracle();
     let dir = tempfile::tempdir().unwrap();
     let mut storage = SecretStorage::open(dir.path().to_path_buf());
@@ -199,7 +236,17 @@ fn new_wallet_uses_appkit_defaults_and_reference_seed() {
         .restore(&oracle.mnemonic, "", &oracle.password, false)
         .unwrap();
     let path = SecretStorage::find_secret_file(dir.path()).unwrap();
-    let secret: EncryptedSecret = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let KeystoreFile::V2(written) = read_keystore(&path) else {
+        panic!("new wallets must be version 2");
+    };
+    assert_eq!(written.kdf.algorithm, "argon2id");
+    assert_eq!(written.cipher.algorithm, "AES-256-GCM");
+    assert_eq!(hex::decode(&written.kdf.salt).unwrap().len(), 32);
+    let export_dir = tempfile::tempdir().unwrap();
+    let exported =
+        SecretStorage::export_for_appkit(&path, export_dir.path(), &oracle.password).unwrap();
+    let secret: EncryptedSecret =
+        serde_json::from_slice(&std::fs::read(exported).unwrap()).unwrap();
     assert_eq!(secret.cipher_params.prf, "HmacSHA256");
     assert_eq!(secret.cipher_params.c, 128000);
     assert_eq!(secret.cipher_params.dk_len, 256);
@@ -237,9 +284,11 @@ fn legacy_export_preserves_seed_derivation_mode_and_source_bytes() {
         secret.auth_tag = hex::encode(&output[output.len() - 16..]);
         secret.use_pre_1627_key_derivation = pre_1627;
         let (source_dir, source) = write_secret(&secret);
-        let source_before = std::fs::read(&source).unwrap();
         let mut original = SecretStorage::open(source_dir.path().to_path_buf());
         original.unlock(&oracle.password).unwrap();
+        // The unlock upgraded the source to version 2; the export reads it
+        // without modifying it.
+        let source_before = std::fs::read(&source).unwrap();
         let path = ergo_wallet::DerivationPath::eip3_first_address();
         let expected_pk = original
             .unlocked()
@@ -334,4 +383,197 @@ fn cli_export_keystore_reads_password_from_stdin_and_retains_reference_key() {
         hex::encode(exported.unlocked().unwrap().master.master_pubkey().unwrap()),
         legacy.master_public_key
     );
+}
+
+#[test]
+fn version_2_authenticates_its_parameters_and_derivation_mode() {
+    let oracle = oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let mut storage = SecretStorage::open(dir.path().to_path_buf());
+    storage
+        .restore(&oracle.mnemonic, "", &oracle.password, false)
+        .unwrap();
+    let path = SecretStorage::find_secret_file(dir.path()).unwrap();
+    let KeystoreFile::V2(original) = read_keystore(&path) else {
+        panic!("new wallets must be version 2");
+    };
+    let tampered: [fn(&mut ergo_wallet::storage::EncryptedSecretV2); 4] = [
+        |s| s.use_pre_1627_key_derivation = !s.use_pre_1627_key_derivation,
+        |s| s.kdf.iterations += 1,
+        |s| {
+            let mut iv = hex::decode(&s.cipher.iv).unwrap();
+            iv[0] ^= 1;
+            s.cipher.iv = hex::encode(iv);
+        },
+        |s| {
+            let mut bytes = hex::decode(&s.cipher_text).unwrap();
+            bytes[0] ^= 1;
+            s.cipher_text = hex::encode(bytes);
+        },
+    ];
+    for tamper in tampered {
+        let mut secret = original.clone();
+        tamper(&mut secret);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        std::fs::write(&path, serde_json::to_vec(&secret).unwrap()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut storage = SecretStorage::open(dir.path().to_path_buf());
+        assert!(matches!(
+            storage.unlock(&oracle.password),
+            Err(WalletError::Decryption)
+        ));
+        assert!(storage.unlocked().is_none());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+}
+
+#[test]
+fn excessive_or_unknown_keystore_parameters_are_refused_before_derivation() {
+    let oracle = oracle();
+    let mut v1 = oracle.vectors[0].encrypted_secret.clone();
+    v1.cipher_params.c = ergo_wallet::encryption::MAX_PBKDF2_ITERATIONS + 1;
+    let (dir, _) = write_secret(&v1);
+    assert!(matches!(
+        SecretStorage::open(dir.path().to_path_buf()).unlock(&oracle.password),
+        Err(WalletError::SecretFile(_))
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut storage = SecretStorage::open(dir.path().to_path_buf());
+    storage
+        .restore(&oracle.mnemonic, "", &oracle.password, false)
+        .unwrap();
+    let path = SecretStorage::find_secret_file(dir.path()).unwrap();
+    let KeystoreFile::V2(original) = read_keystore(&path) else {
+        panic!("new wallets must be version 2");
+    };
+    let invalid: [fn(&mut ergo_wallet::storage::EncryptedSecretV2); 6] = [
+        |s| s.kdf.memory_kib = u32::MAX,
+        |s| s.kdf.iterations = 1_000,
+        |s| s.kdf.parallelism = 0,
+        |s| s.kdf.algorithm = "scrypt".into(),
+        |s| s.cipher.algorithm = "AES-128-GCM".into(),
+        |s| s.kdf.salt = "00".into(),
+    ];
+    for change in invalid {
+        let mut secret = original.clone();
+        change(&mut secret);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("w.json"),
+            serde_json::to_vec(&secret).unwrap(),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            SecretStorage::open(dir.path().to_path_buf()).unlock(&oracle.password),
+            Err(WalletError::SecretFile(_))
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+    let mut unknown = serde_json::to_value(&original).unwrap();
+    unknown["version"] = serde_json::json!(3);
+    assert!(KeystoreFile::parse(&serde_json::to_vec(&unknown).unwrap()).is_err());
+    unknown["version"] = serde_json::json!(2);
+    unknown["extra"] = serde_json::json!(true);
+    assert!(KeystoreFile::parse(&serde_json::to_vec(&unknown).unwrap()).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_upgrade_keeps_the_original_file_and_still_unlocks() {
+    use std::os::unix::fs::PermissionsExt;
+    let oracle = oracle();
+    let (dir, path) = write_secret(&oracle.vectors[0].encrypted_secret);
+    let before = std::fs::read(&path).unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    if tempfile::tempfile_in(dir.path()).is_ok() {
+        // Running with privileges that ignore directory permissions.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+    let mut storage = SecretStorage::open(dir.path().to_path_buf());
+    storage.unlock(&oracle.password).unwrap();
+    assert!(matches!(
+        storage.take_keystore_upgrade(),
+        Some(KeystoreUpgrade::Failed(_))
+    ));
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn wallet_database_key_is_sealed_in_the_keystore_and_survives_rewrites() {
+    let oracle = oracle();
+    let key = [7u8; 32];
+
+    // A new wallet created with a database key returns it for the password only.
+    let dir = tempfile::tempdir().unwrap();
+    let mut storage = SecretStorage::open(dir.path().to_path_buf());
+    storage.set_new_wallet_data_key(key);
+    storage
+        .restore(&oracle.mnemonic, "", &oracle.password, false)
+        .unwrap();
+    assert_eq!(
+        *SecretStorage::open_data_key(dir.path(), &oracle.password)
+            .unwrap()
+            .unwrap(),
+        key
+    );
+    assert!(matches!(
+        SecretStorage::open_data_key(dir.path(), "wrong"),
+        Err(WalletError::Decryption)
+    ));
+    let path = SecretStorage::find_secret_file(dir.path()).unwrap();
+    assert!(read_keystore(&path).has_data_key());
+    // Installing a second key would orphan the database.
+    assert!(matches!(
+        SecretStorage::install_data_key(dir.path(), &oracle.password, &[8u8; 32]),
+        Err(WalletError::SecretFile(_))
+    ));
+
+    // A Scala version-1 file gains a key; the rewrite is version 2, keeps the
+    // seed and still holds exactly one file.
+    let (v1_dir, v1_path) = write_secret(&oracle.vectors[0].encrypted_secret);
+    assert_eq!(
+        SecretStorage::open_data_key(v1_dir.path(), &oracle.password).unwrap(),
+        None
+    );
+    assert!(matches!(
+        SecretStorage::install_data_key(v1_dir.path(), "wrong", &key),
+        Err(WalletError::Decryption)
+    ));
+    SecretStorage::install_data_key(v1_dir.path(), &oracle.password, &key).unwrap();
+    assert_eq!(std::fs::read_dir(v1_dir.path()).unwrap().count(), 1);
+    assert!(read_keystore(&v1_path).has_data_key());
+    let mut unlocked = SecretStorage::open(v1_dir.path().to_path_buf());
+    unlocked.unlock(&oracle.password).unwrap();
+    assert!(unlocked.check_seed(&oracle.mnemonic, ""));
+    assert_eq!(
+        *SecretStorage::open_data_key(v1_dir.path(), &oracle.password)
+            .unwrap()
+            .unwrap(),
+        key
+    );
+
+    // A tampered sealed key fails authentication rather than yielding a key.
+    let KeystoreFile::V2(mut secret) = read_keystore(&v1_path) else {
+        panic!("installed keystores are version 2");
+    };
+    let sealed = secret.data_key.as_mut().unwrap();
+    let mut bytes = hex::decode(&sealed.cipher_text).unwrap();
+    bytes[0] ^= 1;
+    sealed.cipher_text = hex::encode(bytes);
+    let tampered = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tampered.path().join("w.json"),
+        serde_json::to_vec(&secret).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        SecretStorage::open_data_key(tampered.path(), &oracle.password),
+        Err(WalletError::Decryption)
+    ));
 }

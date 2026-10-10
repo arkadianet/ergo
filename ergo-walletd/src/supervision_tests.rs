@@ -15,6 +15,8 @@ use ergo_wallet_service::{
 
 use crate::config::{Network, WalletMode};
 use crate::engine_chain::LifecycleChainAccess;
+use crate::sync::SyncConfig;
+use ergo_wallet_service::{RedbWalletStore, WalletService};
 
 const LOCAL_KEY: &str = "supervision-local-key";
 
@@ -80,7 +82,7 @@ impl ChainClient for RecoverableChain {
     }
 }
 
-fn seed_daemon(dir: &Path, chain: Arc<RecoverableChain>) -> Daemon {
+fn seed_daemon(dir: &Path, chain: Arc<RecoverableChain>) -> TestDaemon {
     let store = Arc::new(
         RedbWalletStore::open_standalone(dir.join("wallet.redb"))
             .unwrap()
@@ -106,7 +108,7 @@ fn seed_daemon(dir: &Path, chain: Arc<RecoverableChain>) -> Daemon {
         },
         tip.clone(),
     ));
-    Daemon {
+    TestDaemon {
         config: Config {
             mode: WalletMode::Seed,
             network: Network::Testnet,
@@ -114,19 +116,25 @@ fn seed_daemon(dir: &Path, chain: Arc<RecoverableChain>) -> Daemon {
             node_url: "http://127.0.0.1:9/".parse().unwrap(),
             api_key_file: dir.join("node-key"),
             descriptor_file: None,
-            local_api_key_file: Some(dir.join("local-key")),
+            local_api_key_file: dir.join("local-key"),
+            node_ca_file: None,
             sync_interval: Duration::from_millis(10),
             shutdown_timeout: Duration::from_secs(2),
             sync_batch: 3,
             blocks_page: 3,
             unix_socket: None,
             tcp_fallback: Some("127.0.0.1:0".parse().unwrap()),
+            allowed_hosts: Vec::new(),
+            lock_policy: crate::config::LockPolicy::default(),
+            lock_memory: false,
+            unseal_key_file: None,
+            multisig_nonces: crate::config::NonceHolder::Daemon,
         },
         service,
         syncer,
         tip,
         host: Some(host),
-        local_api_key: Some(ApiKey::from_test(LOCAL_KEY.as_bytes().to_vec())),
+        local_api_key: ApiKey::from_test(LOCAL_KEY.as_bytes().to_vec()),
     }
 }
 
@@ -226,7 +234,7 @@ async fn shutdown_closes_idle_unix_connections_and_releases_the_wallet_database(
     daemon.config.unix_socket = Some(path.clone());
     daemon.config.tcp_fallback = None;
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let running = tokio::spawn(run_until(daemon, async move {
+    let running = tokio::spawn(run_until(daemon.into(), async move {
         let _ = stopped.await;
         Ok(())
     }));

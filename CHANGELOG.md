@@ -16,6 +16,16 @@ infrastructure.
 
 ## [Unreleased]
 
+### Security
+
+- **Wallet keystore version 2.** New wallets use Argon2id (256 MiB, 3 passes) with AES-256-GCM that authenticates every parameter. A version-1 (Scala/Appkit PBKDF2) keystore is rewritten as version 2 in place by its first successful unlock; `ergo-wallet export-keystore` still writes version 1 for JVM tools. Version-2 files cannot be read by earlier releases. Keystore cost parameters are bounded on read.
+- **`ergo-walletd`:** watch-only mode now requires `local_api_key_file`, like seed mode. The loopback TCP listener refuses unknown `Host` headers. A plain-`http` `node_url` must be loopback, and `node_ca_file` pins the CAs for an `https` node. Unlocked seed wallets lock after 15 minutes without a wallet operation and after 12 hours (`[security]`). The unlock attempt budget survives restarts and escalates up to 24-hour lockouts. The daemon disables core dumps and ptrace at startup and can lock its memory into RAM (`[security] lock_memory`). The systemd unit adds swap, syscall, capability and network restrictions.
+- Passwords, mnemonics and derived secret bytes are wiped after use, and secret key types are no longer `Clone`.
+- **`ergo-walletd` encrypts `wallet.redb` at rest** (AES-256-GCM per 4 KiB sector). The database key is sealed in the keystore under the wallet password (seed) or in `data-key.json` under an operator passphrase (watch-only). A restarted daemon starts sealed: no key, no open database, no sync, until `unlock` or `unseal`. Auto-lock wipes only the spending key, so sync continues while locked. An existing cleartext database is encrypted on its first unseal. `[security] unseal_key_file` and `export-unseal-key` support a TPM-bound systemd credential for unattended starts.
+- **`ergo-walletd` verifies the chain it is served:** each header's proof of work, and each block's transactions against its header's transactions root, recomputed from the serialized transactions the node now sends. The daemon's response cap is 16 MiB.
+- **Wallet handoff and setup:** a node that does not host its wallet publishes a verified copy of a legacy embedded wallet at `data_dir/wallet-handoff/`; `ergo-walletd adopt` takes it over and `ergo-node wallet-legacy-purge` removes the old rows afterwards. An external-mode miner without a reward key keeps the legacy wallet's key. `[mining] miner_reward_address` accepts a P2PK address; `ergo-node init --reward address`, `ergo-walletd init` and `ergo-walletd reward-key` cover new installations. See `docs/wallet-setup.md`.
+- **Multisig nonces stay in the daemon** by default: `generateCommitments` returns single-use handles instead of secret nonces (`[security] multisig_nonces = "caller"` restores the Scala form).
+
 ## [0.12.3] - 2026-10-07
 
 A consensus release for mainnet. Upgrade every 0.12.2 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.

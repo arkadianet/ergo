@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -47,8 +47,15 @@ pub struct UnixSocketGuard {
 
 impl UnixSocketGuard {
     pub fn claim(path: &Path) -> Result<Self, SocketError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            // A socket directory the daemon creates is owner-only.
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
         }
         clean_stale_socket(path)?;
         let owner_path = owner_path(path);

@@ -46,7 +46,7 @@ static AUTH: LazyLock<String> = LazyLock::new(|| {
         .replace("features (logs, voting, wallet)", "wallet operations")
 });
 
-pub(super) fn router() -> Router {
+pub(crate) fn router() -> Router {
     Router::new()
         .route("/", get(index))
         .route("/wallet", get(index))

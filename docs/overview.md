@@ -228,16 +228,22 @@ flows:
 `<data_dir>/wallet.redb`, syncs by reading the node's `/api/v1/chain/*` API, and
 serves a **read-only** local API. It holds no signing key — there is no send,
 sign, or unlock route, and every balance, box, and transaction it reports comes
-from confirmed blocks it has applied.
+from confirmed blocks it has applied. For a signing (seed) wallet, mining
+reward addresses and upgrading from a node-hosted wallet, see
+[`wallet-setup.md`](wallet-setup.md).
 
 ```bash
 # Start it against a local node with the bundled reference config.
 ./target/release/ergo-walletd --config ergo-walletd/ergo-walletd.toml
 
 # Read it back over the owner-only socket (mode 0600).
-curl --unix-socket ergo-walletd.sock http://local/api/v1/wallet/status
-curl --unix-socket ergo-walletd.sock http://local/api/v1/wallet/balances
-curl --unix-socket ergo-walletd.sock http://local/api/v1/wallet/addresses
+K=$(cat wallet-api-key)
+# The database is encrypted; the first start sets the watch-only passphrase.
+curl --unix-socket ergo-walletd.sock -H "api_key: $K" -d '{"pass":"<passphrase>"}' \
+  http://local/api/v1/wallet/unseal
+curl --unix-socket ergo-walletd.sock -H "api_key: $K" http://local/api/v1/wallet/status
+curl --unix-socket ergo-walletd.sock -H "api_key: $K" http://local/api/v1/wallet/balances
+curl --unix-socket ergo-walletd.sock -H "api_key: $K" http://local/api/v1/wallet/addresses
 ```
 
 Every field is documented by type in

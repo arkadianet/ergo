@@ -40,10 +40,11 @@ branch to main and choosing a release/cutover are subsequent delivery work.
   chain views and supervised wallet/rescan workers. Embedded wallet rows still
   co-commit with chain rows in the same `state.redb` transaction.
 - `ergo-walletd` owns a separate `wallet.redb`, resumes from a durable cursor,
-  and defaults to a watch-only local read API. Opt-in seed mode hosts
+  and defaults to an authenticated watch-only local read API. Opt-in seed mode hosts
   `WalletEngine` for lifecycle, selection, construction, signing, sending,
   scans, rescans and finite private mining jobs through an authenticated API. Both modes authenticate header identity and box
-  IDs, while trusting the node for chain validity and transaction membership.
+  IDs, check every header's proof of work and bind every block's transactions
+  to its header, while trusting the node for chain selection and difficulty.
   Watch reads and short diagnostic projections remain confirmed-only. Seed
   routes use the shared engine and coherently captured node/pool state.
 
@@ -84,7 +85,9 @@ node requests; `local_api_key_file` authenticates local wallet operations.
 An outbound scoped node credential needs `wallet` and, for private mining jobs,
 `operator`. An `admin` credential or the legacy master key also authorizes these
 requests.
-Seed wallets restart locked. Persisted public keys continue syncing while locked.
+Seed wallets restart sealed: `wallet.redb` is encrypted at rest and its key is
+released only by the wallet password. Once unsealed, persisted public keys
+continue syncing while spending is locked.
 The durable `wallet-mode` and `wallet-network` markers prevent incompatible
 ownership and network changes.
 
@@ -133,6 +136,11 @@ unlocked secrets after admitted commands drain.
 
 ### Migration and rollback
 
+[Wallet setup](wallet-setup.md) describes the routine upgrade: a node that
+does not host its wallet publishes `wallet-handoff/` while running, and
+`ergo-walletd adopt` takes it over. The offline `migrate` command below remains
+for a stopped node.
+
 Stop the embedded node and retain a complete backup. If its database uses an
 old redb format, first run the existing `ergo-node migrate-redb` copy migration.
 Upgrade the embedded wallet application schema with the current node before
@@ -170,7 +178,10 @@ locks the raw stopped source, opens and recovers only a private temporary copy,
 and copies supported wallet tables into a fresh `wallet.redb`. It preserves
 keys, derivation head, change address, balances/history, scans, discovery
 coverage and applied-header anchors; chain databases are not copied. It copies
-the original encrypted secret bytes without decrypting them. Typed row
+the original encrypted secret bytes without decrypting them; the daemon's first
+successful unlock rewrites that copy in the version-2 Argon2id keystore format,
+seals a new database key into it and encrypts the copied `wallet.redb`, leaving
+the node's files untouched. Typed row
 comparison and source/secret byte checks run before publication. Unknown wallet
 tables, unfinished discovery work, invalid anchors, scheduler-owned jobs without
 explicit quarantine, and existing paths fail closed. `migration.json` records
@@ -213,8 +224,17 @@ The unit uses `LoadCredential` to present private credential copies to its
 dynamic account, with state under `/var/lib/ergo-walletd` and the socket under
 `/run/ergo-walletd`. Its default Unix socket is suitable for local clients;
 configure loopback TCP for a browser. Adjust `shutdown_timeout_secs` for the
-node's bounded RPC deadline and set `TimeoutStopSec` above it. Installing these
-examples does not change the embedded-node or watch-only-daemon defaults.
+node's bounded RPC deadline and set `TimeoutStopSec` above it. The unit keeps
+daemon memory out of swap and core files, filters system calls, drops all
+capabilities and allows only loopback networking; add a remote `https` node's
+address with `IPAddressAllow`. Installing these examples does not change the
+embedded-node or watch-only-daemon defaults.
+
+The daemon's security controls — the version-2 Argon2id keystore and its
+automatic upgrade, idle and maximum-duration locks, the persisted unlock
+budget, local authentication in both modes, the `Host` allowlist, node
+transport rules and process hardening — are described in the
+[daemon configuration reference](configuration.md#ergo-walletdtoml-security).
 
 ## Parallel library work
 

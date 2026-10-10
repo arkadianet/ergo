@@ -62,6 +62,122 @@ pub fn derive_key_pbkdf2_with_prf(
     key
 }
 
+/// Argon2id cost parameters for version-2 keystore files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Argon2idParams {
+    /// Memory cost in KiB.
+    pub memory_kib: u32,
+    /// Number of passes.
+    pub iterations: u32,
+    /// Degree of parallelism (lanes).
+    pub parallelism: u32,
+}
+
+impl Argon2idParams {
+    /// Largest memory cost accepted from a file: 4 GiB.
+    pub const MAX_MEMORY_KIB: u32 = 4 * 1024 * 1024;
+    /// Largest pass count accepted from a file.
+    pub const MAX_ITERATIONS: u32 = 16;
+    /// Largest lane count accepted from a file.
+    pub const MAX_PARALLELISM: u32 = 16;
+
+    /// Parameters for newly written keystores: 256 MiB, 3 passes, 1 lane.
+    pub const fn keystore_default() -> Self {
+        Self {
+            memory_kib: 256 * 1024,
+            iterations: 3,
+            parallelism: 1,
+        }
+    }
+
+    /// Reject parameters that are malformed or whose cost would let a
+    /// tampered file stall unlock. A low cost is the writer's choice and is
+    /// not rejected: an attacker able to rewrite the file could replace it.
+    pub fn validate(&self) -> Result<(), crate::error::WalletError> {
+        let invalid = |message: &str| crate::error::WalletError::SecretFile(message.to_string());
+        if self.parallelism == 0 || self.parallelism > Self::MAX_PARALLELISM {
+            return Err(invalid("Argon2id parallelism is out of range"));
+        }
+        if self.iterations == 0 || self.iterations > Self::MAX_ITERATIONS {
+            return Err(invalid("Argon2id iteration count is out of range"));
+        }
+        if self.memory_kib < 8 * self.parallelism || self.memory_kib > Self::MAX_MEMORY_KIB {
+            return Err(invalid("Argon2id memory cost is out of range"));
+        }
+        Ok(())
+    }
+
+    /// True when this cost is below `other` in memory or passes.
+    pub fn weaker_than(&self, other: &Self) -> bool {
+        self.memory_kib < other.memory_kib || self.iterations < other.iterations
+    }
+}
+
+/// Largest PBKDF2 iteration count accepted from a version-1 file. Scala and
+/// Appkit write 128,000; the bound stops a tampered file from stalling unlock.
+pub const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
+
+/// Derive a 256-bit key with Argon2id (version 0x13).
+pub fn derive_key_argon2id(
+    password: &[u8],
+    salt: &[u8],
+    params: Argon2idParams,
+) -> Result<Zeroizing<[u8; 32]>, crate::error::WalletError> {
+    params.validate()?;
+    let argon_params = argon2::Params::new(
+        params.memory_kib,
+        params.iterations,
+        params.parallelism,
+        Some(32),
+    )
+    .map_err(|error| crate::error::WalletError::SecretFile(format!("Argon2id: {error}")))?;
+    let argon = argon2::Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        argon_params,
+    );
+    let mut key = Zeroizing::new([0u8; 32]);
+    argon
+        .hash_password_into(password, salt, key.as_mut())
+        .map_err(|error| crate::error::WalletError::SecretFile(format!("Argon2id: {error}")))?;
+    Ok(key)
+}
+
+/// AES-256-GCM with associated data. Returns the conventional
+/// ciphertext-then-tag stream. Callers must use a fresh random 96-bit IV.
+pub fn seal(
+    key: &Zeroizing<[u8; 32]>,
+    iv: &[u8; 12],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, crate::error::WalletError> {
+    let key_array: &Key<Aes256Gcm> = (&**key).into();
+    Aes256Gcm::new(key_array)
+        .encrypt(
+            iv.into(),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|e| crate::error::WalletError::Encryption(format!("{e:?}")))
+}
+
+/// Open a [`seal`] stream. Any failure, including a wrong key or changed
+/// associated data, is [`crate::error::WalletError::Decryption`].
+pub fn open(
+    key: &Zeroizing<[u8; 32]>,
+    iv: &[u8; 12],
+    sealed: &[u8],
+    aad: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, crate::error::WalletError> {
+    let key_array: &Key<Aes256Gcm> = (&**key).into();
+    Aes256Gcm::new(key_array)
+        .decrypt(iv.into(), Payload { msg: sealed, aad })
+        .map(Zeroizing::new)
+        .map_err(|_| crate::error::WalletError::Decryption)
+}
+
 /// Encrypt under AES-256-GCM. Returns `(ciphertext, auth_tag)` as
 /// separate byte vectors with Scala's historical JSON field split: `auth_tag`
 /// contains the first 16 bytes of the encrypted stream, and `ciphertext` the

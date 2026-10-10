@@ -10,11 +10,18 @@
 //! not carry. ErgoBox bytes are parsed canonically and every recomputable box
 //! field is checked.
 //!
-//! What is still taken from the authenticated node on trust: the protocol
-//! carries the wallet-relevant parts of each transaction, not full transaction
-//! bytes. Transaction ids are therefore cross-checked against the ids embedded
-//! in their output boxes but not recomputed, and a block's transactions are not
-//! bound to its header's transactions root.
+//! Every header's proof of work is checked against its own `nBits`. Every
+//! transaction arrives with its serialized bytes: the adapter recomputes each
+//! transaction id and witness id, checks the structured inputs and outputs
+//! against the parsed transaction, and recomputes the block's transactions
+//! root against its header. A node therefore cannot alter, add or drop a
+//! transaction inside a block it serves.
+//!
+//! What is still taken from the authenticated node on trust: that the
+//! difficulty a header states is the one required at its height (the adapter
+//! does not follow difficulty adjustment), that the served chain is the best
+//! chain, that no block is withheld, mempool contents, and transaction
+//! admission.
 //!
 //! # Bounded pages
 //!
@@ -48,7 +55,7 @@ const API_KEY_HEADER: &str = "api_key";
 /// pages are the reason it exists: the wire form hex-encodes every output box,
 /// so a page's body is roughly twice the blocks it carries, and an unbounded
 /// page would grow with `sync_batch` until it hit this.
-pub const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -143,24 +150,56 @@ impl HttpChainClient {
     /// invariant is documented, structurally enforced by `main`, and exercised
     /// end-to-end by `tests/it/daemon_boot.rs`.
     pub fn with_timeouts(
+        base_url: Url,
+        api_key: ApiKey,
+        connect_timeout: Duration,
+        total_timeout: Duration,
+    ) -> Result<Self, ChainClientError> {
+        Self::build(base_url, api_key, connect_timeout, total_timeout, None)
+    }
+
+    /// Blocking constructor for an `https` node whose certificate must chain
+    /// to `roots`; the system roots are not trusted. Same threading contract
+    /// as [`Self::with_timeouts`].
+    pub fn with_trusted_roots(
+        base_url: Url,
+        api_key: ApiKey,
+        roots: Vec<reqwest::Certificate>,
+    ) -> Result<Self, ChainClientError> {
+        Self::build(
+            base_url,
+            api_key,
+            CONNECT_TIMEOUT,
+            TOTAL_TIMEOUT,
+            Some(roots),
+        )
+    }
+
+    fn build(
         mut base_url: Url,
         api_key: ApiKey,
         connect_timeout: Duration,
         total_timeout: Duration,
+        roots: Option<Vec<reqwest::Certificate>>,
     ) -> Result<Self, ChainClientError> {
         if !base_url.path().ends_with('/') {
             let path = format!("{}/", base_url.path());
             base_url.set_path(&path);
         }
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .connect_timeout(connect_timeout)
             .timeout(total_timeout)
             .redirect(reqwest::redirect::Policy::none())
-            .pool_max_idle_per_host(2)
-            .build()
-            .map_err(|_| {
-                ChainClientError::Transport("HTTP client initialization failed".to_string())
-            })?;
+            .pool_max_idle_per_host(2);
+        if let Some(roots) = roots {
+            builder = builder.tls_built_in_root_certs(false).https_only(true);
+            for root in roots {
+                builder = builder.add_root_certificate(root);
+            }
+        }
+        let client = builder.build().map_err(|_| {
+            ChainClientError::Transport("HTTP client initialization failed".to_string())
+        })?;
         Ok(Self {
             client,
             cancelled: AtomicBool::new(false),
@@ -792,13 +831,14 @@ fn neutral_snapshot(snapshot: wire::ChainSnapshot) -> Result<ChainSnapshot, Chai
             timestamp_unix_ms: header.timestamp_unix_ms,
             header_bytes: decode_hex(&header.header_bytes, "header_bytes")?,
         };
-        value.authenticate().map_err(|error| {
+        let decoded = value.authenticate().map_err(|error| {
             ChainClientError::Protocol(format!(
                 "snapshot header {} at height {}: {error}",
                 hex::encode(header_id),
                 header.height
             ))
         })?;
+        verify_header_pow(&decoded, &header_id)?;
         previous = Some(value.clone());
         headers.push(value);
     }
@@ -907,6 +947,122 @@ fn neutral_box(box_info: wire::ChainBox) -> Result<ChainBox, ChainClientError> {
     })
 }
 
+/// Check the header's proof of work against its own `nBits`. This proves the
+/// work the header claims; whether that difficulty was the one required at
+/// its height is not checked here.
+fn verify_header_pow(
+    header: &ergo_ser::header::Header,
+    block_id: &[u8; 32],
+) -> Result<(), ChainClientError> {
+    ergo_crypto::pow::verify_pow_solution(header).map_err(|error| {
+        ChainClientError::Protocol(format!(
+            "block {} at height {}: proof of work: {error}",
+            hex::encode(block_id),
+            header.height
+        ))
+    })
+}
+
+/// Bind every transaction of a block to its header: recompute each
+/// transaction id and witness id from the serialized transaction, check the
+/// structured inputs and outputs against it, and recompute the transactions
+/// root. A node can then omit a whole block but cannot alter, add or drop a
+/// transaction within one.
+fn bind_transactions(
+    header: &ergo_ser::header::Header,
+    block_id: &[u8; 32],
+    transactions: &[wire::ChainTransaction],
+) -> Result<(), ChainClientError> {
+    let fail = |message: String| {
+        ChainClientError::Protocol(format!(
+            "block {} at height {}: {message}",
+            hex::encode(block_id),
+            header.height
+        ))
+    };
+    let mut tx_ids = Vec::with_capacity(transactions.len());
+    let mut witness_ids = Vec::with_capacity(transactions.len());
+    for transaction in transactions {
+        let bytes = transaction
+            .bytes
+            .as_deref()
+            .ok_or_else(|| fail("the node did not supply transaction bytes".to_string()))?;
+        let bytes = decode_hex(bytes, "transaction bytes")?;
+        let mut reader = VlqReader::new(&bytes);
+        let parsed = ergo_ser::transaction::read_transaction(&mut reader)
+            .map_err(|error| fail(format!("transaction bytes do not decode: {error}")))?;
+        if !reader.is_empty() {
+            return Err(fail("transaction bytes carry trailing data".to_string()));
+        }
+        let tx_id = *ergo_ser::transaction::transaction_id(&parsed)
+            .map_err(|error| fail(format!("transaction id: {error}")))?
+            .as_bytes();
+        if hex::encode(tx_id) != transaction.tx_id {
+            return Err(fail(format!(
+                "transaction {} hashes to {}",
+                transaction.tx_id,
+                hex::encode(tx_id)
+            )));
+        }
+        let inputs_match = parsed.inputs.len() == transaction.inputs.len()
+            && parsed
+                .inputs
+                .iter()
+                .zip(&transaction.inputs)
+                .all(|(input, claimed)| hex::encode(input.box_id.as_bytes()) == claimed.box_id);
+        if !inputs_match {
+            return Err(fail(format!(
+                "transaction {} inputs differ",
+                transaction.tx_id
+            )));
+        }
+        if parsed.output_candidates.len() != transaction.outputs.len() {
+            return Err(fail(format!(
+                "transaction {} outputs differ",
+                transaction.tx_id
+            )));
+        }
+        for (index, (candidate, claimed)) in parsed
+            .output_candidates
+            .iter()
+            .zip(&transaction.outputs)
+            .enumerate()
+        {
+            let output = ergo_ser::ergo_box::ErgoBox {
+                candidate: candidate.clone(),
+                transaction_id: ergo_primitives::digest::ModifierId::from_bytes(tx_id),
+                index: index as u16,
+            };
+            let encoded = serialize_ergo_box(&output)
+                .map_err(|error| fail(format!("output encode: {error}")))?;
+            if hex::encode(encoded) != claimed.bytes {
+                return Err(fail(format!(
+                    "transaction {} output {index} differs",
+                    transaction.tx_id
+                )));
+            }
+        }
+        let mut proofs = Vec::new();
+        for input in &parsed.inputs {
+            proofs.extend_from_slice(&input.spending_proof.proof);
+        }
+        witness_ids.push(ergo_crypto::autolykos::common::blake2b256(&proofs)[1..].to_vec());
+        tx_ids.push(tx_id.to_vec());
+    }
+    let id_refs: Vec<&[u8]> = tx_ids.iter().map(Vec::as_slice).collect();
+    let witness_refs: Vec<&[u8]> = witness_ids.iter().map(Vec::as_slice).collect();
+    let root = ergo_crypto::merkle::transactions_root(
+        &id_refs,
+        (header.version >= 2).then_some(witness_refs.as_slice()),
+    );
+    if root != *header.transactions_root.as_bytes() {
+        return Err(fail(
+            "transactions do not match the header's transactions root".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn neutral_block(block: wire::ChainBlock) -> Result<ChainBlock, ChainClientError> {
     let block_id = decode_id(&block.block_id, "block_id")?;
     if block.height > 0 && block_id == [0; 32] {
@@ -916,14 +1072,21 @@ fn neutral_block(block: wire::ChainBlock) -> Result<ChainBlock, ChainClientError
     }
     let parent_id = decode_id(&block.parent_id, "parent_id")?;
     let header_bytes = decode_hex(&block.header_bytes, "header_bytes")?;
-    ergo_wallet_service::authenticate_header(&header_bytes, &block_id, block.height, &parent_id)
-        .map_err(|error| {
-            ChainClientError::Protocol(format!(
-                "block {} at height {}: {error}",
-                hex::encode(block_id),
-                block.height
-            ))
-        })?;
+    let header = ergo_wallet_service::authenticate_header(
+        &header_bytes,
+        &block_id,
+        block.height,
+        &parent_id,
+    )
+    .map_err(|error| {
+        ChainClientError::Protocol(format!(
+            "block {} at height {}: {error}",
+            hex::encode(block_id),
+            block.height
+        ))
+    })?;
+    verify_header_pow(&header, &block_id)?;
+    bind_transactions(&header, &block_id, &block.transactions)?;
     let mut tx_ids = std::collections::BTreeSet::new();
     let mut block_box_ids = std::collections::BTreeSet::new();
     let mut transactions = Vec::with_capacity(block.transactions.len());
@@ -984,6 +1147,8 @@ fn neutral_block(block: wire::ChainBlock) -> Result<ChainBlock, ChainClientError
             tx_id,
             inputs,
             outputs,
+            // Verified above; the wallet service does not need the bytes.
+            bytes: None,
         });
     }
     Ok(ChainBlock {
@@ -1144,7 +1309,11 @@ mod tests {
             version: 2,
             parent_id: ModifierId::from_bytes(parent),
             ad_proofs_root: Digest32::from_bytes([1; 32]),
-            transactions_root: Digest32::from_bytes([2; 32]),
+            // The root of an empty transaction list, matching the bodies below.
+            transactions_root: Digest32::from_bytes(ergo_crypto::merkle::transactions_root(
+                &[],
+                Some(&[]),
+            )),
             state_root: ADDigest::from_bytes([3; 33]),
             timestamp,
             extension_root: Digest32::from_bytes([4; 32]),
@@ -1310,6 +1479,140 @@ mod tests {
             assert!(!error.contains("secret-value"));
             handle.join().unwrap();
         }
+    }
+
+    /// A structurally valid one-input, one-output transaction and its wire
+    /// form, plus a version-2 header committing to it.
+    fn bound_block() -> (ergo_ser::header::Header, wire::ChainTransaction) {
+        use ergo_primitives::digest::{ADDigest, Digest32};
+        use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
+        use ergo_ser::ergo_tree::ErgoTree;
+        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+        use ergo_ser::opcode::Expr;
+        use ergo_ser::register::AdditionalRegisters;
+        use ergo_ser::sigma_type::SigmaType;
+        use ergo_ser::sigma_value::SigmaValue;
+        let tree = ErgoTree {
+            version: 0,
+            reserved_header_bits: 0,
+            has_size: true,
+            constant_segregation: true,
+            constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
+            body: Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(true),
+            },
+        };
+        let tx = ergo_ser::transaction::Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes([5; 32]),
+                spending_proof: SpendingProof::new(vec![1, 2, 3], ContextExtension::empty())
+                    .unwrap(),
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: vec![ErgoBoxCandidate::new(
+                1_000_000,
+                tree,
+                1,
+                Vec::new(),
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        let tx_id = ergo_ser::transaction::transaction_id(&tx).unwrap();
+        let mut writer = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::transaction::write_transaction(&mut writer, &tx).unwrap();
+        let output = ErgoBox {
+            candidate: tx.output_candidates[0].clone(),
+            transaction_id: tx_id,
+            index: 0,
+        };
+        let witness = &ergo_crypto::autolykos::common::blake2b256(&[1, 2, 3])[1..];
+        let root = ergo_crypto::merkle::transactions_root(&[tx_id.as_bytes()], Some(&[witness]));
+        let header = ergo_ser::header::Header {
+            version: 2,
+            parent_id: ModifierId::from_bytes([0; 32]),
+            ad_proofs_root: Digest32::from_bytes([1; 32]),
+            transactions_root: Digest32::from_bytes(root),
+            state_root: ADDigest::from_bytes([3; 33]),
+            timestamp: 1_700_000_000_001,
+            extension_root: Digest32::from_bytes([4; 32]),
+            n_bits: 16842752,
+            height: 1,
+            votes: [0; 3],
+            unparsed_bytes: Vec::new(),
+            solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from([2; 33]),
+                nonce: [1; 8],
+            },
+        };
+        let wire_tx = wire::ChainTransaction {
+            tx_id: hex::encode(tx_id.as_bytes()),
+            inputs: vec![wire::ChainInput {
+                box_id: hex::encode([5; 32]),
+                index: 0,
+            }],
+            outputs: vec![wire::ChainOutput {
+                box_id: hex::encode(output.box_id().unwrap().as_bytes()),
+                index: 0,
+                bytes: hex::encode(serialize_ergo_box(&output).unwrap()),
+            }],
+            bytes: Some(hex::encode(writer.result())),
+        };
+        (header, wire_tx)
+    }
+
+    #[test]
+    fn block_transactions_are_bound_to_the_header() {
+        let (header, transaction) = bound_block();
+        bind_transactions(&header, &[9; 32], std::slice::from_ref(&transaction)).unwrap();
+        let refused =
+            |transactions: &[wire::ChainTransaction], expected: &str| match bind_transactions(
+                &header,
+                &[9; 32],
+                transactions,
+            ) {
+                Err(ChainClientError::Protocol(message)) => {
+                    assert!(message.contains(expected), "{expected}: {message}")
+                }
+                other => panic!("{expected}: expected a protocol error, got {other:?}"),
+            };
+        let mut missing = transaction.clone();
+        missing.bytes = None;
+        refused(&[missing], "did not supply transaction bytes");
+        let mut wrong_id = transaction.clone();
+        wrong_id.tx_id = hex::encode([7; 32]);
+        refused(&[wrong_id], "hashes to");
+        let mut wrong_input = transaction.clone();
+        wrong_input.inputs[0].box_id = hex::encode([6; 32]);
+        refused(&[wrong_input], "inputs differ");
+        let mut wrong_output = transaction.clone();
+        let mut bytes = hex::decode(&wrong_output.outputs[0].bytes).unwrap();
+        bytes[0] ^= 1;
+        wrong_output.outputs[0].bytes = hex::encode(bytes);
+        refused(&[wrong_output], "output 0 differs");
+        // Dropping the transaction leaves a root that no longer matches.
+        refused(&[], "transactions root");
+        // A changed proof keeps the id but changes the witness id.
+        let mut other_proof = transaction.clone();
+        let mut tx_bytes = hex::decode(other_proof.bytes.as_ref().unwrap()).unwrap();
+        let position = tx_bytes
+            .windows(3)
+            .position(|window| window == [1, 2, 3])
+            .unwrap();
+        tx_bytes[position] = 9;
+        other_proof.bytes = Some(hex::encode(tx_bytes));
+        refused(&[other_proof], "transactions root");
+    }
+
+    #[test]
+    fn headers_need_their_proof_of_work() {
+        let (header, _) = bound_block();
+        verify_header_pow(&header, &[9; 32]).unwrap();
+        let mut harder = header.clone();
+        // Difficulty 2^24: this header's one nonce misses the target.
+        harder.n_bits = 0x0401_0000;
+        assert!(verify_header_pow(&harder, &[9; 32]).is_err());
     }
 
     #[test]
@@ -1576,7 +1879,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buffer = [0u8; 1024];
             let _ = stream.read(&mut buffer).unwrap();
-            let body = "x".repeat(9 * 1024 * 1024);
+            let body = "x".repeat(MAX_RESPONSE_BODY_BYTES + 1024 * 1024);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -1611,7 +1914,7 @@ mod tests {
             let _ = stream.read(&mut buffer).unwrap();
             // No `Content-Length`: the cap has to hold from the stream alone,
             // which is the case a chunked node response would take.
-            let body = "x".repeat(9 * 1024 * 1024);
+            let body = "x".repeat(MAX_RESPONSE_BODY_BYTES + 1024 * 1024);
             let response = format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{body}");
             let _ = stream.write_all(response.as_bytes());
         });

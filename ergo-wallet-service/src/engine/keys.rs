@@ -451,7 +451,7 @@ impl WalletBootService {
                 if storage.cached_file().is_none() {
                     storage.load_metadata()?
                 } else {
-                    storage.cached_file().unwrap().use_pre_1627_key_derivation
+                    storage.cached_file().unwrap().use_pre_1627()
                 }
             }
         };
@@ -461,6 +461,21 @@ impl WalletBootService {
 
         // Step 3: Unlock (decrypts master key into memory).
         storage.unlock(password)?;
+        match storage.take_keystore_upgrade() {
+            Some(ergo_wallet::storage::KeystoreUpgrade::Upgraded { from_version }) => {
+                tracing::info!(
+                    from_version,
+                    "wallet keystore rewritten in the version-2 Argon2id format"
+                );
+            }
+            Some(ergo_wallet::storage::KeystoreUpgrade::Failed(error)) => {
+                tracing::warn!(
+                    %error,
+                    "wallet keystore upgrade failed; the existing file is unchanged and will be retried at the next unlock"
+                );
+            }
+            None => {}
+        }
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (|| -> Result<(), WalletError> {

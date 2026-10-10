@@ -277,11 +277,12 @@ fn apply_empty_block(store: &mut StateStore, height: u32, parent: [u8; 32]) -> [
             .unwrap()
             .try_into()
             .unwrap();
+    let transactions = vec![transaction()];
     let header = Header {
         version: 2,
         parent_id: ModifierId::from_bytes(parent),
         ad_proofs_root: Digest32::from_bytes([0; 32]),
-        transactions_root: Digest32::from_bytes([0; 32]),
+        transactions_root: crate::support::transactions_root(&transactions),
         state_root: store.root_digest(),
         timestamp: 1_000_000 + u64::from(height),
         extension_root: Digest32::from_bytes([0; 32]),
@@ -301,7 +302,7 @@ fn apply_empty_block(store: &mut StateStore, height: u32, parent: [u8; 32]) -> [
         &mut writer,
         &BlockTransactions {
             header_id: id,
-            transactions: vec![transaction()],
+            transactions,
         },
     )
     .unwrap();

@@ -54,7 +54,7 @@ as described above; confirmed-only comparison is the Phase 2 shadow boundary.
   state machine that drives the wallet cursor. `batch` is the per-pass **apply**
   budget and `page` is the per-request **page** budget; see "Two sync budgets".
 - `src/chain_http.rs:55` — `HttpChainClient`: the node HTTP adapter and its
-  response neutralisation/validation, the 8 MiB body cap, and the
+  response neutralisation/validation, the 16 MiB body cap, and the
   `new_in_runtime` / `with_timeouts_in_runtime` constructors for async callers.
 - `src/api.rs:32` — `ApiContext` and the read-only router.
 - `src/tip.rs:32` — `CachedNodeTip`: the last-observed node tip shared between
@@ -96,7 +96,7 @@ as described above; confirmed-only comparison is the Phase 2 shadow boundary.
 - `sync::StandaloneSyncer`, `sync::SyncConfig`, `sync::SyncReport`,
   `sync::SyncError` — sync engine. `sync::DEFAULT_BLOCKS_PER_PAGE` is the shipped
   per-request page size; `sync::MAX_SYNC_BLOCKS` bounds both knobs.
-- `chain_http::MAX_RESPONSE_BODY_BYTES` — the 8 MiB cap that bounds a page.
+- `chain_http::MAX_RESPONSE_BODY_BYTES` — the 16 MiB cap that bounds a page.
 - `chain_http::HttpChainClient` — the only place a node URL is used.
 - `api::ApiContext`, `api::router`, `api::READ_ROUTE_INVENTORY` — the read-only
   API and its test-pinned route list.
@@ -112,8 +112,10 @@ In default watch mode every read route is a `GET`; each is mounted twice, at a s
 `/api/v1/wallet/*`. `READ_ROUTE_INVENTORY` is the pinned list and is asserted by
 `tests/it/routes.rs`, which also asserts that the default watch router leaves
 wallet lifecycle, signing, and private-key routes unmounted. Seed mode retains
-short diagnostic reads and projects native wallet routes through the full engine;
-every seed-mode API read and write is authenticated.
+short diagnostic reads and projects native wallet routes through the full engine.
+`api::watch_router` and the seed router both authenticate every read and write
+with the local credential, and the TCP listener additionally checks `Host`
+(`host_guard`).
 
 | Route | Response |
 |---|---|
@@ -231,15 +233,15 @@ exercises the production one.
 Every request is `min(remaining, page, batch - processed)`. A pass with
 `batch = 256` and `page = 1` reaches the tip through up to 256 requests.
 
-The default of 1 is sized against `chain_http::MAX_RESPONSE_BODY_BYTES` (8 MiB),
-not picked for throughput. The chain protocol carries every output box as a hex
-string, so a page's JSON body costs roughly twice the serialized bytes of the
-blocks in it, and consensus bounds one block's `BlockTransactions` section by
-the voted `maxBlockSize` parameter. Measured against the largest `maxBlockSize`
-this repo documents an operator voting for (2 MiB in `docs/configuration.md`),
-one maxed-out block is already 4 MiB of hex, so a page of `1` provably fits with
-more than half the cap spare while a page of `2` reaches 8 MiB *before* any JSON
-envelope. Today's mainnet parameter is smaller, so the default is deliberately
+The default of 1 is sized against `chain_http::MAX_RESPONSE_BODY_BYTES` (16 MiB),
+not picked for throughput. The chain protocol carries every transaction and
+every output box as hex strings, so a page's JSON body costs roughly four times
+the serialized bytes of the blocks in it, and consensus bounds one block's
+`BlockTransactions` section by the voted `maxBlockSize` parameter. Measured
+against the largest `maxBlockSize` this repo documents an operator voting for
+(2 MiB in `docs/configuration.md`), one maxed-out block is already 8 MiB of hex,
+so a page of `1` provably fits with about half the cap spare while a page of `2`
+reaches 16 MiB *before* any JSON envelope. Today's mainnet parameter is smaller, so the default is deliberately
 conservative; `blocks_page` remains configurable and raising it is a per-node
 decision. The earlier behaviour — sizing the request from the apply budget,
 `min(batch, remaining)` — could ask for up to 1024 blocks and hit the cap on any
@@ -272,19 +274,24 @@ The node is authenticated by its API key, but its answers are still checked.
 - **Boxes.** Every `ErgoBox` is parsed canonically and re-serialized; `box_id`,
   embedded `transaction_id`, output index, value, assets, and creation height
   are recomputed (`chain_http::neutral_block` / `WalletService::convert_block`).
+- **Proof of work.** Every block and snapshot header's Autolykos solution is
+  checked against the header's own `nBits` (`chain_http::verify_header_pow`).
+- **Transactions inside a block.** Every transaction arrives with its
+  serialized bytes. `chain_http::bind_transactions` recomputes each
+  transaction id and witness id, checks the structured inputs and output boxes
+  against the parsed transaction, and recomputes the block's
+  `transactionsRoot` against its header. A node cannot alter, add or drop a
+  transaction inside a block it serves; a node that cannot supply the bytes
+  (one serving blocks from wallet state rows only) is refused.
 
 What remains trusted:
 
-- **Transactions inside a block.** The protocol carries the wallet-relevant
-  parts of each transaction (inputs and output boxes), not full transaction
-  bytes. Transaction ids are cross-checked against the ids embedded in their own
-  output boxes, but a block's transactions are not bound to its header's
-  `transactionsRoot`, so a node holding the API key could omit or invent
-  wallet-relevant transactions inside a genuine block.
-- **Chain validity.** Proof-of-work and difficulty are not checked. The daemon
-  follows the chain its node presents; what it rules out is a block served
-  under an id its header does not hash to, or at a height or parent its header
-  does not carry.
+- **Chain selection and difficulty.** The daemon does not follow difficulty
+  adjustment, so it cannot tell whether a header's stated `nBits` was the one
+  required at its height, or whether the presented chain is the best chain.
+- **Completeness.** A node can withhold whole blocks or stall; it cannot make a
+  served block say something its header does not commit to.
+- **Mempool, fees, relay parameters and admission** for spending.
 
 ## Known deviations
 
@@ -489,8 +496,9 @@ reached the limiter and needs no change.
   store keeps 33-byte pubkeys and renders base58 addresses at read time, so the
   network prefix is never baked into persistent state. Watch mode loads the
   node API credential but never constructs secret storage. Seed mode owns its
-  encrypted secret directory and requires a separate local API credential;
-  credentials are permission-checked, redacted and zeroized on drop.
+  encrypted secret directory. Both modes require a separate local API
+  credential; credentials are permission-checked, redacted, compared as
+  SHA-256 digests in constant time and zeroized on drop.
 - **Mode ownership.** A durable `wallet-mode` marker prevents reuse between
   watch and seed modes. An unmarked database can only resume as watch-only;
   seed migration is not inferred from persisted public keys.
@@ -502,8 +510,19 @@ reached the limiter and needs no change.
 - **Loopback by construction.** `tcp_fallback` must be a loopback address; the
   Unix socket is created under a `0o077` umask and `chmod 0600`, with a
   `<socket>.owner` marker (`ergo-walletd-socket:<pid>:<nanos>`) so a stale
-  socket is reclaimed but a live one is never stolen. Seed-mode authentication
-  protects both Unix and TCP listeners.
+  socket is reclaimed but a live one is never stolen. Local authentication
+  protects both Unix and TCP listeners in both modes; the TCP listener accepts
+  only its loopback `Host` names plus `[api] allowed_hosts`.
+- **Sealed at rest.** `encrypted_db` stores `wallet.redb` as AES-256-GCM
+  sectors; `seal` starts the daemon without its database key and opens the
+  database only when a password, passphrase or `unseal_key_file` releases it,
+  encrypting a cleartext database on the way. `nonce_vault` keeps multisig
+  nonces under single-use handles.
+- **Locked by default, and again.** Seed wallets restart sealed and locked; `host` locks
+  them after `[security] idle_lock` without a non-`GET` operation and after
+  `max_unlock`. The unlock attempt budget persists in
+  `unlock-attempts.json`. `hardening` disables core dumps and ptrace before any
+  credential is read.
 - **Network identity is configuration.** `network` (`mainnet` | `testnet`,
   default `mainnet`, any other value rejected) is threaded into descriptor
   validation and into every address this API renders. The daemon cannot infer
@@ -512,8 +531,8 @@ reached the limiter and needs no change.
 - **Fail-closed sync.** A page that breaks height, parent, or duplicate
   invariants, an ancestor that does not rewind, and a second reorg deeper than
   retained history after a full rebuild are terminal: the durable rescan state
-  becomes `failed`; syncing pauses and the read API stays available (authenticated
-  in seed mode). The seed worker compares committed tracked-key rows under
+  becomes `failed`; syncing pauses and the authenticated read API stays
+  available. The seed worker compares committed tracked-key rows under
   the writer gate while parked; an actual key change permits replay without
   restarting, even if recording the failure metadata had failed.
   The watch worker stops on terminal failure. A sync-worker panic stops the daemon. A reorg that *does* rewind is a warn and
@@ -523,7 +542,7 @@ reached the limiter and needs no change.
   serves the tip the sync loop last observed and only probes when that
   observation is older than two sync intervals, with a 2 s probe ceiling.
 - **Bounded requests.** One `blocks-since` page is at most `blocks_page` blocks
-  (default 1) and at most 8 MiB of body, whichever bites first. The apply budget
+  (default 1) and at most 16 MiB of body, whichever bites first. The apply budget
   (`sync_batch`) never sizes a request. A page over the byte cap is a single
   terminal error naming the cap and the page — never a smaller-page retry and
   never a loop. See "Two sync budgets".

@@ -23,12 +23,20 @@ data_dir = "./ergo-walletd-data" # Holds wallet.redb, the daemon's only
 node_url = "http://127.0.0.1:9099" # The node's operator API base URL. The daemon
                                  # reads /api/v1/chain/* from it and nothing
                                  # else. http(s) only, no credentials, query,
-                                 # or fragment.
+                                 # or fragment. Plain http only for a loopback
+                                 # host; a remote node needs https.
+# node_ca_file = "./node-ca.pem" # Trust only these CAs for an https node_url.
 api_key_file = "./node-api-key"  # File holding the node's `api_key` request
                                  # header value. Must be a regular file that is
                                  # NOT readable by group or other (chmod 600);
                                  # the daemon refuses to start otherwise and
                                  # never logs the value.
+local_api_key_file = "./wallet-api-key" # Independent credential for this
+                                 # daemon's own API: every request needs its
+                                 # value in the `api_key` header. Watch-only
+                                 # balances, addresses and history are private
+                                 # data. Same file rules as api_key_file, and
+                                 # it must differ from the node credential.
 descriptor_file = "./descriptors.toml" # Public descriptor file: compressed
                                  # secp256k1 public keys, derivation paths, and
                                  # labels. Any secret field is a hard error.
@@ -43,14 +51,14 @@ blocks_page = 1                  # Request budget: max blocks asked for in ONE
                                  # blocks-since call (1..=1024). This is what
                                  # bounds a single response body, and it is
                                  # independent of sync_batch: the wire form
-                                 # hex-encodes every output box, so a page of N
-                                 # blocks costs roughly twice their bytes and
-                                 # must fit the daemon's 8 MiB response cap.
-                                 # 1 is the largest page whose *worst legal*
-                                 # body provably fits: one block at the
-                                 # documented 2 MiB maxBlockSize is 4 MiB of
-                                 # hex, so two would be 8 MiB before any JSON
-                                 # envelope. A block too large for even a
+                                 # hex-encodes every transaction and output
+                                 # box, so a page of N blocks costs roughly
+                                 # four times their bytes and must fit the
+                                 # daemon's 16 MiB response cap. 1 is the
+                                 # largest page whose *worst legal* body
+                                 # provably fits: one block at the documented
+                                 # 2 MiB maxBlockSize is 8 MiB of hex, so two
+                                 # would be 16 MiB before any JSON envelope. A block too large for even a
                                  # one-block page is a terminal, named error —
                                  # the daemon never retries with a smaller
                                  # page.
@@ -67,3 +75,6 @@ unix_socket = "./ergo-walletd.sock"
 # Optional loopback-only TCP listener; a non-loopback address is rejected at
 # load, so the read API is never exposed to the network by configuration.
 # tcp_fallback = "127.0.0.1:3033"
+# Extra Host header values accepted on tcp_fallback besides its own loopback
+# names (DNS-rebinding protection), e.g. ["wallet.lan:3033"].
+# allowed_hosts = []

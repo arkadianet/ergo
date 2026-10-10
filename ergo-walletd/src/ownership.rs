@@ -53,7 +53,12 @@ pub(crate) fn claim(data_dir: &Path, mode: WalletMode) -> Result<(), ConfigError
                 // state.redb without any standalone wallet.redb. Its node
                 // and daemon would not share a database lock, so adopting
                 // the secrets here would silently create a second owner.
-                for existing in ["wallet", "wallet.redb", "state.redb"] {
+                for existing in [
+                    "wallet",
+                    "wallet.redb",
+                    "state.redb",
+                    crate::seal::WATCH_KEY_FILE,
+                ] {
                     match fs::symlink_metadata(data_dir.join(existing)) {
                         Ok(_) => {
                             return Err(ConfigError::Invalid(
@@ -104,12 +109,12 @@ fn create_data_directory(data_dir: &Path, mode: WalletMode) -> Result<(), Config
         .collect();
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
+    // Watch-only data is as private as a seed wallet's: both are owner-only.
     #[cfg(unix)]
-    if mode == WalletMode::Seed {
+    {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    #[cfg(not(unix))]
     let _ = mode;
     builder.create(data_dir)?;
     #[cfg(unix)]
@@ -126,13 +131,14 @@ fn create_data_directory(data_dir: &Path, mode: WalletMode) -> Result<(), Config
 
 fn protect_seed_directory(data_dir: &Path, mode: WalletMode) -> Result<(), ConfigError> {
     #[cfg(unix)]
-    if mode == WalletMode::Seed {
+    {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
         fs::File::open(data_dir)?.sync_all()?;
     }
+    let _ = mode;
     #[cfg(not(unix))]
-    let _ = (data_dir, mode);
+    let _ = data_dir;
     Ok(())
 }
 
