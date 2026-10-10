@@ -161,7 +161,29 @@ pub fn proof_tree_height(
 /// also panic while parsing a malformed proof — so `new` catches it and returns
 /// `Err` instead of panicking. `AvlVerifier` is thus a single fail-closed
 /// boundary at BOTH construction and operation time.
-pub struct AvlVerifier(Option<BatchAVLVerifier>);
+///
+/// The root height is tracked here rather than in the crate. It starts at the
+/// starting digest's height byte, which the proof does not authenticate, so
+/// operations can move it below 0 or above 255. The crate keeps it in a
+/// `usize` and asserts it is below 256 when producing a digest; keeping the
+/// authoritative value here lets [`AvlVerifier::digest_checked`] report an
+/// out-of-range height as an error instead of a panic or a wrapped value.
+pub struct AvlVerifier {
+    inner: Option<BatchAVLVerifier>,
+    root_height: i64,
+}
+
+/// The root height reached a value a digest's height byte cannot hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AvlHeightOutOfRange {
+    /// The root height after the operations.
+    pub height: i64,
+}
+
+/// Offset added to the crate's `usize` root height while an operation runs,
+/// so a decrement below the real height 0 cannot underflow. Each operation
+/// moves the height by at most one.
+const CRATE_HEIGHT_BIAS: i64 = 1 << 32;
 
 // `clippy::result_unit_err`: the underlying `ergo_avltree_rust` crate
 // returns opaque errors from `perform_one_operation`; collapsing to
@@ -312,7 +334,10 @@ impl AvlVerifier {
                 max_deletes,
             )
         })) {
-            Ok(Ok(v)) => Ok(AvlVerifier(Some(v))),
+            Ok(Ok(v)) => Ok(AvlVerifier {
+                root_height: i64::from(digest[AVL_DIGEST_LENGTH - 1]),
+                inner: Some(v),
+            }),
             Ok(Err(e)) => Err(format!("{e}")),
             Err(_) => Err("AVL verifier construction panicked on a malformed proof".to_string()),
         }
@@ -324,7 +349,7 @@ impl AvlVerifier {
     /// The crate `panic!`s on a structurally-valid-but-wrong proof at op time
     /// (see the type doc). This restores Scala's `Try`-boundary semantics: a
     /// caught panic POISONS the verifier (the inner value was moved into the
-    /// unwinding closure and dropped, so `self.0` stays `None`) and surfaces
+    /// unwinding closure and dropped, so `self.inner` stays `None`) and surfaces
     /// `Err(())`. A verifier already poisoned by an earlier caught panic stays
     /// failed. A clean (non-panicking) `Err` from the crate is returned
     /// unchanged and does NOT poison — existing, oracle-verified behaviour is
@@ -337,10 +362,11 @@ impl AvlVerifier {
         f: impl FnOnce(&mut BatchAVLVerifier) -> Result<R, ()>,
     ) -> Result<R, ()> {
         // Already poisoned by an earlier caught panic → stay failed.
-        let mut bv = match self.0.take() {
+        let mut bv = match self.inner.take() {
             Some(bv) => bv,
             None => return Err(()),
         };
+        bv.state().tree.height = (self.root_height + CRATE_HEIGHT_BIAS) as usize;
         // `AssertUnwindSafe` is justified: `bv` is owned (not shared, no locks),
         // and on panic it is dropped during unwinding — no broken invariant is
         // ever observed, because the verifier is never reused after a panic.
@@ -350,12 +376,20 @@ impl AvlVerifier {
             (bv, r)
         })) {
             // Op completed (Ok, or a clean crate Err) → keep the verifier.
-            Ok((bv, r)) => {
-                self.0 = Some(bv);
+            Ok((mut bv, r)) => {
+                // A failed operation clears the root (and the height with
+                // it); the digest is then absent whatever the height.
+                if bv.get_state().tree.root.is_some() {
+                    self.root_height = bv.get_state().tree.height as i64 - CRATE_HEIGHT_BIAS;
+                }
+                // Keep the crate's own copy in the range its digest accepts;
+                // `digest_checked` decides on `root_height`.
+                bv.state().tree.height = self.root_height.clamp(0, 255) as usize;
+                self.inner = Some(bv);
                 r
             }
             // Panicked: `bv` was moved into the closure and dropped while
-            // unwinding; `self.0` stays `None` (poisoned) and we fail closed.
+            // unwinding; `self.inner` stays `None` (poisoned) and we fail closed.
             Err(_) => Err(()),
         }
     }
@@ -513,12 +547,30 @@ impl AvlVerifier {
     /// Returns the 33-byte digest (32 hash bytes + 1 height byte).
     ///
     /// Returns `None` if the verifier was poisoned by a caught op-time panic
-    /// (Scala parity: a failed op yields `topNode = None`, so no digest leaks).
+    /// (Scala parity: a failed op yields `topNode = None`, so no digest leaks),
+    /// and also when the root height is out of range (see
+    /// [`Self::digest_checked`], which tells the two apart).
     pub fn digest(&self) -> Option<Vec<u8>> {
-        self.0
-            .as_ref()
-            .and_then(|bv| bv.digest())
-            .map(|d| d.to_vec())
+        self.digest_checked().ok().flatten()
+    }
+
+    /// As [`Self::digest`], but a tree whose root height left `0..=255`
+    /// (possible because the starting height byte is not authenticated by
+    /// the proof) is an `Err` rather than `None`. `Ok(None)` still means the
+    /// verifier failed (construction or an operation).
+    pub fn digest_checked(&self) -> Result<Option<Vec<u8>>, AvlHeightOutOfRange> {
+        let Some(bv) = self.inner.as_ref() else {
+            return Ok(None);
+        };
+        if bv.get_state().tree.root.is_none() {
+            return Ok(None);
+        }
+        if !(0..=255).contains(&self.root_height) {
+            return Err(AvlHeightOutOfRange {
+                height: self.root_height,
+            });
+        }
+        Ok(bv.digest().map(|d| d.to_vec()))
     }
 }
 

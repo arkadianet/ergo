@@ -1090,6 +1090,133 @@ fn methodcall_avltree_bad_proof_contains_false_get_errors() {
     );
 }
 
+/// The height byte of an AvlTree digest is not covered by the proof, so an
+/// honest insert proof replayed against a digest whose height byte is 255
+/// grows the root height to 256, and an honest remove proof against a height
+/// byte of 0 shrinks it to -1. Neither fits a digest's height byte: the
+/// method call fails as a script error. The same proofs with the true height
+/// byte still produce the updated tree.
+#[test]
+fn methodcall_avltree_root_height_out_of_range_is_script_error() {
+    use bytes::Bytes;
+    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
+    use ergo_avltree_rust::batch_node::{AVLTree as OracleTree, Node, NodeHeader};
+    use ergo_avltree_rust::operation::{KeyValue, Operation};
+    use ergo_ser::sigma_value::CollValue;
+
+    let key = vec![0x42u8; 32];
+    let value = vec![0xDE, 0xAD];
+    let mut prover = BatchAVLProver::new(
+        OracleTree::new(
+            |digest| Node::LabelOnly(NodeHeader::new(Some(*digest), None)),
+            32,
+            None,
+        ),
+        true,
+    );
+    let empty_digest = prover.digest().expect("empty digest").to_vec();
+    prover
+        .perform_one_operation(&Operation::Insert(KeyValue {
+            key: Bytes::from(key.clone()),
+            value: Bytes::from(value.clone()),
+        }))
+        .expect("insert");
+    let insert_proof = prover.generate_proof().to_vec();
+    let one_entry_digest = prover.digest().expect("digest after insert").to_vec();
+    prover
+        .perform_one_operation(&Operation::Remove(Bytes::from(key.clone())))
+        .expect("remove");
+    let remove_proof = prover.generate_proof().to_vec();
+    let after_remove_digest = prover.digest().expect("digest after remove").to_vec();
+    assert_eq!(empty_digest[32], 0);
+    assert_eq!(one_entry_digest[32], 1);
+
+    let tree = |digest: &[u8], height: u8| {
+        let mut digest = digest.to_vec();
+        digest[32] = height;
+        Expr::Const {
+            tpe: SigmaType::SAvlTree,
+            val: SigmaValue::AvlTree(ergo_ser::sigma_value::AvlTreeData {
+                digest,
+                insert_allowed: true,
+                update_allowed: true,
+                remove_allowed: true,
+                key_length: 32,
+                value_length_opt: None,
+            }),
+        }
+    };
+    let call = |obj: Expr, method_id: u8, arg: Expr, proof: &[u8]| {
+        Expr::Op(IrNode {
+            opcode: 0xDC,
+            payload: Payload::MethodCall {
+                type_id: 100,
+                method_id,
+                obj: Box::new(obj),
+                args: vec![arg, const_bytes(proof.to_vec())],
+                type_args: vec![],
+            },
+        })
+    };
+    let bytes_coll = |b: &[u8]| SigmaValue::Coll(CollValue::Bytes(b.to_vec()));
+    let entries = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::STuple(vec![
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+        ]))),
+        val: SigmaValue::Coll(CollValue::Values(vec![SigmaValue::Tuple(vec![
+            bytes_coll(&key),
+            bytes_coll(&value),
+        ])])),
+    };
+    let keys = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(SigmaType::SByte)))),
+        val: SigmaValue::Coll(CollValue::Values(vec![bytes_coll(&key)])),
+    };
+    let updated_digest = |v: Value| match v {
+        Value::Opt(Some(t)) => match *t {
+            Value::AvlTree(t) => t.digest,
+            other => panic!("expected AvlTree, got {other:?}"),
+        },
+        other => panic!("expected Some(AvlTree), got {other:?}"),
+    };
+    let b = make_test_box();
+    let ctx = ctx_with_self_box(&b);
+
+    // insert (12) and insertOrUpdate (16) at the true height byte succeed.
+    for method_id in [12u8, 16] {
+        let honest = call(tree(&empty_digest, 0), method_id, entries.clone(), &insert_proof);
+        let got = eval_to_value(&honest, &ctx, &[]).expect("insert at true height");
+        assert_eq!(updated_digest(got), one_entry_digest);
+    }
+    // remove (14) at the true height byte succeeds.
+    let honest = call(tree(&one_entry_digest, 1), 14, keys.clone(), &remove_proof);
+    let got = eval_to_value(&honest, &ctx, &[]).expect("remove at true height");
+    assert_eq!(updated_digest(got), after_remove_digest);
+
+    // Height byte 255 + a height-growing insert: script error.
+    for method_id in [12u8, 16] {
+        let high = call(tree(&empty_digest, 255), method_id, entries.clone(), &insert_proof);
+        assert!(
+            matches!(
+                eval_to_value(&high, &ctx, &[]),
+                Err(EvalError::RuntimeException(_))
+            ),
+            "method {method_id}: root height 256 must be a script error",
+        );
+    }
+    // Height byte 0 + a height-shrinking remove: script error.
+    let low = call(tree(&one_entry_digest, 0), 14, keys, &remove_proof);
+    assert!(
+        matches!(
+            eval_to_value(&low, &ctx, &[]),
+            Err(EvalError::RuntimeException(_))
+        ),
+        "root height -1 must be a script error",
+    );
+}
+
 /// `SAvlTree.isInsertAllowed(5)` / `isUpdateAllowed(6)` / `isRemoveAllowed(7)`
 /// each return the matching `enabledOperations` bit as a Boolean. These are
 /// zero-arg flag accessors, so they ride the `0xDB PropertyCall` wire form

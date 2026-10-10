@@ -450,7 +450,7 @@ pub(super) fn remove(
     // remove uniquely charges digest_Info(15) UNCONDITIONALLY after
     // the loop (insert/update/insertOrUpdate do not).
     cx.cost.add(JitCost::from_jit(15))?;
-    match bv_opt.as_ref().and_then(|bv| bv.digest()) {
+    match checked_avl_digest(bv_opt.as_ref())? {
         Some(d) if d.len() == 33 => {
             cx.cost.add(JitCost::from_jit(40))?; // updateDigest_Info
             let mut updated = avl.clone();
@@ -734,7 +734,7 @@ fn eval_avl_mutate(
         }
         return Ok(Value::Opt(None));
     }
-    match bv_opt.as_ref().and_then(|bv| bv.digest()) {
+    match checked_avl_digest(bv_opt.as_ref())? {
         Some(d) if d.len() == 33 => {
             cx.cost.add(JitCost::from_jit(40))?; // updateDigest_Info (success only)
             let mut updated = avl.clone();
@@ -742,5 +742,19 @@ fn eval_avl_mutate(
             Ok(Value::Opt(Some(Box::new(Value::AvlTree(updated)))))
         }
         _ => Ok(Value::Opt(None)),
+    }
+}
+
+/// The digest after a successful run of AVL mutations, or a script error when
+/// the root height left the range a digest's height byte can hold. The
+/// starting height byte is not authenticated by the proof, so an insert at
+/// height 255 or a remove at height 0 can push it out of range; the result is
+/// a failed method call, not an absent tree.
+fn checked_avl_digest(bv: Option<&crate::avl::AvlVerifier>) -> Result<Option<Vec<u8>>, EvalError> {
+    match bv {
+        None => Ok(None),
+        Some(bv) => bv.digest_checked().map_err(|_| {
+            EvalError::RuntimeException("AvlTree root height out of range after operations")
+        }),
     }
 }
