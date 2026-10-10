@@ -1,8 +1,8 @@
 //! Security-header regression for the dashboard SPA static surface.
 //!
-//! The SPA at `/` hosts the wallet section, which renders mnemonics
-//! (init/restore), so the SPA document and its static assets carry a strict
-//! CSP plus `Cache-Control: no-store` (a bfcache mitigation) and
+//! The SPA at `/` renders operator data and once hosted the wallet section
+//! (now `ergo-walletd`'s UI), so the SPA document and its static assets carry
+//! a strict CSP plus `Cache-Control: no-store` (a bfcache mitigation) and
 //! `Referrer-Policy: no-referrer`. These headers must cover `/` and the
 //! CSS/JS assets, and must NOT leak onto the CDN-backed `/swagger*` pages
 //! (whose `default-src 'self'` would block Swagger-UI). The self-hosted
@@ -149,13 +149,6 @@ async fn spa_js_carries_spa_security_headers() {
     assert_spa_security_headers("/js/app.js").await;
     assert_spa_security_headers("/js/activity.js").await;
     assert_spa_security_headers("/js/activity-model.js").await;
-}
-
-#[tokio::test]
-async fn wallet_js_module_carries_spa_security_headers() {
-    assert_spa_security_headers("/js/wallet.js").await;
-    assert_spa_security_headers("/js/wallet-builder.js").await;
-    assert_spa_security_headers("/js/wallet-transaction.js").await;
 }
 
 #[tokio::test]

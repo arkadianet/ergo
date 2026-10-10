@@ -53,7 +53,6 @@ use crate::web::{
     JS_FORMAT, JS_MEMPOOL, JS_MINERS, JS_MINING, JS_MINING_INSPECTOR, JS_MINING_POLICY,
     JS_MINING_REWARD, JS_MINING_WORK, JS_NODE_GUIDANCE, JS_OVERVIEW, JS_PEERS, JS_ROUTER,
     JS_SETTINGS, JS_SPARKLINE, JS_STORAGE_RENT, JS_SYNC_RINGS, JS_TABLE, JS_TOKEN_META, JS_VOTING,
-    JS_WALLET, JS_WALLET_BUILDER, JS_WALLET_MAINTENANCE, JS_WALLET_PRIVATE, JS_WALLET_TRANSACTION,
     JS_WORKSPACE_SEARCH, JS_WS_CLIENT,
 };
 use ergo_indexer_types::IndexerQuery;
@@ -850,23 +849,6 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
         .route("/js/peers.js", get(|| async { js(JS_PEERS) }))
         .route("/js/mempool.js", get(|| async { js(JS_MEMPOOL) }))
         .route("/js/voting.js", get(|| async { js(JS_VOTING) }))
-        .route("/js/wallet.js", get(|| async { js(JS_WALLET) }))
-        .route(
-            "/js/wallet-private.js",
-            get(|| async { js(JS_WALLET_PRIVATE) }),
-        )
-        .route(
-            "/js/wallet-maintenance.js",
-            get(|| async { js(JS_WALLET_MAINTENANCE) }),
-        )
-        .route(
-            "/js/wallet-builder.js",
-            get(|| async { js(JS_WALLET_BUILDER) }),
-        )
-        .route(
-            "/js/wallet-transaction.js",
-            get(|| async { js(JS_WALLET_TRANSACTION) }),
-        )
         .route("/js/miners.js", get(|| async { js(JS_MINERS) }))
         .route("/js/mining.js", get(|| async { js(JS_MINING) }))
         .route("/js/mining-work.js", get(|| async { js(JS_MINING_WORK) }))

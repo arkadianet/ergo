@@ -2,12 +2,14 @@
 //!
 //! # What this compares
 //!
-//! The node embeds the wallet: its `StateStore` redb holds the wallet tables
-//! and the chain-apply seam writes them inside the *same* redb write
-//! transaction as the UTXO mutation. Phase 2 extracted that wallet core into
-//! `ergo-wallet-service`, so the standalone daemon runs the *same* service
-//! code against its *own* redb, fed by blocks it pulls from the node's
-//! `/api/v1/chain/*` HTTP surface. Two code paths, one source of truth.
+//! Earlier releases embedded the wallet in the node: its `StateStore` redb
+//! held the wallet tables and the chain-apply seam wrote them inside the
+//! *same* redb write transaction as the UTXO mutation. The node no longer
+//! hosts a wallet, but that path survives here as the reference: the same
+//! `ergo-wallet-service` apply hook inside the chain store's own write. The
+//! standalone daemon runs the *same* service code against its *own* redb,
+//! fed by blocks it pulls from the node's `/api/v1/chain/*` HTTP surface.
+//! Two code paths, one source of truth.
 //!
 //! This module proves they agree. It builds the same chain twice over the
 //! same block bytes and then compares the **normalized `WalletRead` state** of
@@ -23,7 +25,7 @@
 //! **Embedded** — a real `ergo_state::store::StateStore` in a temp dir, seeded
 //! with the real mainnet genesis boxes, advanced by the **production**
 //! `StateStore::apply_block` with a real `CheckedBlock` and the real
-//! production `WalletApplyHook` (`ergo_node::node::wallet_bridge::WalletStateHook`,
+//! service `WalletApplyHook` (`ergo_wallet_service::engine::WalletStateHook`,
 //! hydrated from the store's own `WALLET_TRACKED_PUBKEYS`). The wallet apply
 //! lands inside `apply_block`'s own redb write transaction, so the wallet and
 //! chain state commit or fail together. Rollback uses the real
@@ -1114,14 +1116,14 @@ struct EmbeddedFiles {
     /// seeding tracked keys and the scan registry writes exactly the tables the
     /// node writes, and `WalletRead` reads the rows the node itself reads.
     wallet_store: Arc<RedbWalletStore>,
-    hook: ergo_node::node::wallet_bridge::WalletStateHook,
+    hook: ergo_wallet_service::engine::WalletStateHook,
 }
 
 /// The embedded wallet: a real `StateStore` whose redb *is* the wallet
 /// database, advanced by the production `StateStore::apply_block` with the
 /// production `WalletApplyHook`.
 ///
-/// The hook is ergo-node's own `WalletStateHook` — not a test double — so
+/// The hook is the service's own `WalletStateHook` — not a test double — so
 /// `tracked_p2pk_trees`, `cached_pubkeys`, `registered_scan_count` and
 /// `match_boxes` are the production implementations, including the per-block
 /// scan-count gate and the scan registry load from the store.
@@ -1564,7 +1566,7 @@ impl EmbeddedSide {
 /// the same boot-time hydration the node performs before handing the hook to
 /// the chain-apply seam. No wallet engine runs here, so it is the standalone
 /// hook, with a rescan coordinator of its own.
-fn build_hook(store: &Arc<RedbWalletStore>) -> ergo_node::node::wallet_bridge::WalletStateHook {
+fn build_hook(store: &Arc<RedbWalletStore>) -> ergo_wallet_service::engine::WalletStateHook {
     let read = store.read().expect("hook hydration read");
     let hydration = ergo_wallet_service::wallet::hydration::HydrationSnapshot::load(read.as_ref())
         .expect("hook hydration snapshot");
@@ -1572,7 +1574,7 @@ fn build_hook(store: &Arc<RedbWalletStore>) -> ergo_node::node::wallet_bridge::W
     state
         .hydrate_from_reader(&hydration, ergo_ser::address::NetworkPrefix::Mainnet)
         .expect("hook hydration from the tracked-pubkey table");
-    ergo_node::node::wallet_bridge::WalletStateHook::standalone(
+    ergo_wallet_service::engine::WalletStateHook::standalone(
         Arc::new(parking_lot::RwLock::new(state)),
         Arc::new(store.as_ref().clone()),
     )

@@ -75,12 +75,8 @@ pub(super) struct TomlVoting {
 pub(super) struct TomlWallet {
     pub(super) mode: Option<String>,
     pub(super) daemon_address: Option<String>,
-    /// `[wallet] expose_private_keys`: when `true`, the
-    /// `POST /wallet/getPrivateKey` route returns the derived secret
-    /// scalar for an address; when `false`/absent the route returns
-    /// `403 Forbidden`. Default `false`. Operators who set this
-    /// `true` accept that an authenticated `api_key` request can
-    /// extract per-address private material from the running node.
+    /// Retired with the embedded wallet: accepted so upgraded configs still
+    /// load, and ignored with a warning.
     pub(super) expose_private_keys: Option<bool>,
 }
 

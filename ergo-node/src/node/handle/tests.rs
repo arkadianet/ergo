@@ -122,8 +122,6 @@ async fn cancelling_shutdown_preserves_anchor_and_mining_task_cleanup() {
     for mining in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let mut handle = test_node(directory.path()).await;
-        // Finish wallet ownership before parking the next shutdown await.
-        handle.drain_wallet().await.unwrap();
         let loop_task = retain_loop_for_test(&mut handle);
         let (task, address, dropped, _cleanup) = parked_task().await;
         if mining {
@@ -178,7 +176,6 @@ impl ergo_api::v1::realtime::journal::RealtimeStore for ShutdownReplayStore {
 async fn shutdown_persists_final_publisher_event_before_closing_journal() {
     let directory = tempfile::tempdir().unwrap();
     let mut handle = test_node(directory.path()).await;
-    handle.drain_wallet().await.unwrap();
     let real_loop = retain_loop_for_test(&mut handle);
     let store = Arc::new(ShutdownReplayStore::default());
     let services =

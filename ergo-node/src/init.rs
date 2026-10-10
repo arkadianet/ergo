@@ -76,8 +76,6 @@ pub enum Network {
 pub enum Reward {
     /// A P2PK address from any wallet, given with --miner-reward-address.
     Address,
-    /// The node wallet; initialize and unlock it before work is served.
-    Wallet,
     /// The key given with --miner-public-key.
     PublicKey,
 }
@@ -239,12 +237,12 @@ fn run_with_space(
             args.sync = Some(choice(input, diagnostics, "Sync", allowed)?);
         }
         if args.preset.is_some_and(Preset::mining) && args.reward.is_none() {
-            writeln!(diagnostics, "address: rewards go to a P2PK address from any wallet (Nautilus, Satergo, a hardware wallet or ergo-walletd reward-key). wallet: rewards use the node wallet; initialize and unlock it before work can be served. public-key: rewards go to your compressed public key; keep its private key in your own wallet.")?;
+            writeln!(diagnostics, "address: rewards go to a P2PK address from any wallet (Nautilus, Satergo, a hardware wallet or ergo-walletd reward-key). public-key: rewards go to your compressed public key; keep its private key in your own wallet.")?;
             args.reward = Some(choice(
                 input,
                 diagnostics,
                 "Mining reward",
-                &["address", "wallet", "public-key"],
+                &["address", "public-key"],
             )?);
         }
         if args.reward == Some(Reward::Address) && args.miner_reward_address.is_none() {
@@ -294,7 +292,7 @@ fn run_with_space(
             "--reward and --miner-public-key require a mining preset",
         ));
     }
-    if args.reward == Some(Reward::Wallet) && args.miner_public_key.is_some() {
+    if args.miner_public_key.is_some() && args.reward != Some(Reward::PublicKey) {
         return Err(invalid("--miner-public-key requires --reward public-key"));
     }
     if args.miner_reward_address.is_some() && args.reward != Some(Reward::Address) {
@@ -435,12 +433,8 @@ fn run_with_space(
     let mut next_steps = vec![format!("Start: {start_command}"), format!("Dashboard: {dashboard_url}"), format!("API key file: {}. Send its contents in the api_key header or enter them in the dashboard; never send the hash.", key_file.display())];
     if preset == Preset::Wallet {
         next_steps.push(
-            "Initialize or restore the node wallet in the dashboard, then unlock it to use it."
-                .into(),
+            "Run the wallet in ergo-walletd beside this node; see docs/wallet-setup.md.".into(),
         );
-    }
-    if args.reward == Some(Reward::Wallet) {
-        next_steps.push("Initialize and unlock the node wallet in the dashboard; mining serves no work until the wallet is unlocked.".into());
     }
     if preset.mining() {
         next_steps.push("Connect an external miner through ergo-solo: https://github.com/arkadianet/ergo-stratum-rs or follow docs/lithos.md.".into());
@@ -744,7 +738,9 @@ mod tests {
             panic!("init parser");
         };
         if args.preset.is_some_and(Preset::mining) {
-            args.reward = Some(Reward::Wallet);
+            args.reward = Some(Reward::PublicKey);
+            args.miner_public_key =
+                Some("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".into());
         }
         if args.sync == Some(Sync::Fast) {
             args.accept_unanchored_bootstrap = true;
@@ -883,6 +879,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut args = args(root.path(), "mining-fast", "genesis");
         args.reward = Some(Reward::Address);
+        args.miner_public_key = None;
         args.miner_reward_address = Some(address.clone());
         let (result, output, _) = execute(&args, false, "", Some(300 * GIB));
         result.unwrap();

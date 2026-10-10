@@ -120,22 +120,6 @@ impl InProcessChainClient {
         Self::new(reader, submitter).with_state_accessor(state)
     }
 
-    pub fn from_state_store<S>(store: &ergo_state::store::StateStore, submitter: S) -> Self
-    where
-        S: IntoChainSubmitter,
-    {
-        let reader = store.reader_handle();
-        let wallet_store: Arc<dyn ergo_state::wallet::WalletStore> =
-            Arc::new(ergo_state::wallet::RedbWalletStore::new(store.db_arc()));
-        let state = Arc::new(super::ChainStateAccessorImpl::new(
-            reader.clone(),
-            wallet_store,
-            false,
-            None,
-        ));
-        Self::new(reader, submitter).with_state_accessor(state)
-    }
-
     pub fn with_state_accessor(mut self, state: Arc<dyn WalletChainAccess>) -> Self {
         self.state = Some(state);
         self
@@ -1342,7 +1326,6 @@ mod tests {
     use ergo_ser::header::serialize_header;
     use ergo_ser::modifier_id::compute_section_id;
     use ergo_state::store::StateStore;
-    use ergo_state::wallet::RedbWalletStore;
     use std::sync::Arc;
 
     use super::*;
@@ -1556,11 +1539,8 @@ mod tests {
             .test_force_put_header_chain_index(2, &[0xEE; 32])
             .unwrap();
         let reader = ChainStoreReader::new_from_db(store.db_arc());
-        let wallet_store: Arc<dyn ergo_state::wallet::WalletStore> =
-            Arc::new(RedbWalletStore::new(store.db_arc()));
-        let accessor = Arc::new(super::super::ChainStateAccessorImpl::new(
+        let accessor = Arc::new(super::super::ChainStateAccessorImpl::chain_only(
             reader.clone(),
-            wallet_store,
             false,
             None,
         ));
@@ -1629,8 +1609,12 @@ mod tests {
         let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
         store.initialize_genesis(&[]).unwrap();
         let ids = apply_empty_blocks(&mut store, 12);
-        let client =
-            InProcessChainClient::from_state_store(&store, None::<Arc<dyn ergo_api::NodeSubmit>>);
+        let client = InProcessChainClient::from_chain_reader(
+            store.reader_handle(),
+            None::<Arc<dyn ergo_api::NodeSubmit>>,
+            false,
+            None,
+        );
         let response = client
             .blocks_since(BlocksSinceRequest {
                 cursor: ChainCursor {

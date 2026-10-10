@@ -213,17 +213,9 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
         if next_height <= next_header_height || cs.best_header_id != cs.best_full_block_id {
             // Try to assemble and apply blocks sequentially. Successful applies
             // are relayed by flush_actions below, alongside missing-section requests.
-            //
-            // M5 wallet-hook plumbing: build a `WalletWiring` (hook +
-            // rescan guard) and thread it through the executor so chain +
-            // wallet writes commit in one redb transaction on both the
-            // synchronous and persist-pipeline paths. Rollback also rewinds
-            // wallet state atomically; missing required sections invalidate
-            // wallet scan state for a full rescan.
-            let wallet_wiring = state
-                .wallet_hook
-                .as_deref()
-                .map(crate::node::wallet_bridge::WalletStateHook::wiring);
+
+            // The node hosts no wallet: no wallet rows join the chain commit.
+            let wallet_wiring = None;
             state.executor.try_apply_next_blocks(
                 &mut state.store,
                 &mut state.coordinator,

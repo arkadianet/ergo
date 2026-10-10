@@ -26,7 +26,12 @@ fn command(root: &Path, preset: &str, sync: &str, network: &str) -> Command {
     ])
     .arg(root.join("data"));
     if preset.starts_with("mining-") {
-        cmd.args(["--reward", "wallet"]);
+        cmd.args([
+            "--reward",
+            "public-key",
+            "--miner-public-key",
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        ]);
     }
     cmd.stdin(Stdio::null());
     cmd
@@ -94,9 +99,11 @@ fn every_allowed_preset_sync_network_writes_loader_accepted_config() {
                     loaded.mining_config.claim_storage_rent,
                     preset == "mining-full"
                 );
-                assert!(loaded.mining_config.miner_public_key_hex.is_none());
+                assert_eq!(
+                    loaded.mining_config.miner_public_key_hex.is_some(),
+                    preset.starts_with("mining-")
+                );
                 assert!(loaded.mempool_config.enabled);
-                assert!(!loaded.wallet_expose_private_keys);
                 assert!(!loaded.allow_unauthenticated_legacy_mining);
                 assert!(loaded.bind_addr.is_none());
                 assert!(loaded.declared_addr.is_none());
@@ -117,7 +124,6 @@ fn every_allowed_preset_sync_network_writes_loader_accepted_config() {
                 assert!(combined(&out).contains("--data-dir"));
                 assert!(combined(&out).contains("Ctrl-C"));
                 if preset.starts_with("mining-") {
-                    assert!(combined(&out).contains("unlock"));
                     assert!(combined(&out).contains("ergo-stratum-rs"));
                 }
                 if ["mining-full", "explorer"].contains(&preset) {

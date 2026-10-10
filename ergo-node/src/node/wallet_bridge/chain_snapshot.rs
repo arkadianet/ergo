@@ -231,9 +231,7 @@ mod tests {
         store.initialize_genesis(&boxes).unwrap();
         apply_headers(&mut store, 5);
         let reader = ergo_state::reader::ChainStoreReader::new_from_db(store.db_arc());
-        let wallet_store: std::sync::Arc<dyn ergo_state::wallet::WalletStore> =
-            std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(store.db_arc()));
-        let accessor = super::super::ChainStateAccessorImpl::new(reader, wallet_store, false, None);
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(reader, false, None);
         let snapshot = accessor.chain_snapshot().unwrap();
         (dir, snapshot)
     }
@@ -278,9 +276,7 @@ mod tests {
         store.initialize_genesis(&[]).unwrap();
         apply_headers(&mut store, 5);
         let reader = ergo_state::reader::ChainStoreReader::new_from_db(store.db_arc());
-        let wallet_store: std::sync::Arc<dyn ergo_state::wallet::WalletStore> =
-            std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(store.db_arc()));
-        let accessor = super::super::ChainStateAccessorImpl::new(reader, wallet_store, false, None);
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(reader, false, None);
         let snapshot = accessor.chain_snapshot().unwrap();
         assert_eq!(snapshot.tip().height, 5);
         assert_eq!(snapshot.headers().len(), 5);
@@ -323,9 +319,7 @@ mod tests {
         store.initialize_genesis(&[]).unwrap();
         let (parent, _) = apply_headers(&mut store, 11);
         let reader = ergo_state::reader::ChainStoreReader::new_from_db(store.db_arc());
-        let wallet_store: std::sync::Arc<dyn ergo_state::wallet::WalletStore> =
-            std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(store.db_arc()));
-        let accessor = super::super::ChainStateAccessorImpl::new(reader, wallet_store, false, None);
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(reader, false, None);
         let snapshot = accessor.chain_snapshot().unwrap();
         assert_eq!(snapshot.tip().height, 11);
         assert_eq!(snapshot.headers()[0].height, 11);
@@ -416,13 +410,10 @@ mod tests {
             assert_eq!(live.tip.height, 2048);
             assert_eq!(live.params.validation_settings, expected);
 
-            let accessor = super::super::ChainStateAccessorImpl::new(
+            let accessor = super::super::ChainStateAccessorImpl::chain_only(
                 ergo_state::reader::ChainStoreReader::new_from_db(
                     node.store.as_utxo().unwrap().db_arc(),
                 ),
-                std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(
-                    node.store.as_utxo().unwrap().db_arc(),
-                )),
                 false,
                 None,
             );
@@ -443,13 +434,18 @@ mod tests {
         submitter: std::sync::Arc<dyn ergo_wallet_service::engine::TxSubmitter>,
     ) -> ergo_wallet_service::engine::WalletEngine {
         use ergo_wallet_service::engine::{
-            RescanCoordinator, WalletEngine, WalletEngineConfig, WalletEngineParts,
+            RescanCoordinator, StoreCursorChain, WalletEngine, WalletEngineConfig,
+            WalletEngineParts,
         };
+        let store: std::sync::Arc<dyn ergo_wallet_service::WalletStore> =
+            std::sync::Arc::new(ergo_wallet_service::RedbWalletStore::new(db));
         WalletEngine::new(WalletEngineParts {
             storage,
             state,
-            store: std::sync::Arc::new(ergo_wallet_service::RedbWalletStore::new(db)),
-            chain,
+            store: store.clone(),
+            // The node's accessor carries no wallet; the cursor comes from
+            // the wallet store, as in the daemon.
+            chain: std::sync::Arc::new(StoreCursorChain::new(chain, store)),
             mempool,
             submitter,
             service: None,
@@ -496,11 +492,8 @@ mod tests {
             .initialize_genesis(&[(*committed_id.as_bytes(), committed_bytes)])
             .unwrap();
         apply_headers(&mut store, 5);
-        let accessor = super::super::ChainStateAccessorImpl::new(
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(
             ergo_state::reader::ChainStoreReader::new_from_db(store.db_arc()),
-            std::sync::Arc::new(ergo_wallet_service::wallet::RedbWalletStore::new(
-                store.db_arc(),
-            )),
             false,
             None,
         );
@@ -716,11 +709,8 @@ mod tests {
             )])
             .unwrap();
         apply_headers(&mut store, 5);
-        let accessor = super::super::ChainStateAccessorImpl::new(
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(
             ergo_state::reader::ChainStoreReader::new_from_db(db.clone()),
-            std::sync::Arc::new(ergo_wallet_service::wallet::RedbWalletStore::new(
-                db.clone(),
-            )),
             false,
             None,
         );

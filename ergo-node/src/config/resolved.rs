@@ -65,36 +65,6 @@ impl std::str::FromStr for StateType {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum WalletMode {
-    #[default]
-    Embedded,
-    External,
-}
-
-impl WalletMode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Embedded => "embedded",
-            Self::External => "external",
-        }
-    }
-}
-
-impl std::str::FromStr for WalletMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "embedded" => Ok(WalletMode::Embedded),
-            "external" => Ok(WalletMode::External),
-            other => Err(format!(
-                "unknown wallet mode: {other:?}; expected \"embedded\" or \"external\""
-            )),
-        }
-    }
-}
-
 /// Independent redb page-cache budgets. These exclude the AVL arena, dirty
 /// nodes, queued jobs and the mining prover; they do not bound process RSS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,13 +260,8 @@ pub struct NodeConfig {
     /// builder casts at most `ParamVotesCount` (2) votes per block toward
     /// these targets. Non-empty only when `[mining] enabled = true`.
     pub voting_targets: std::collections::BTreeMap<u8, i64>,
-    /// `[wallet] expose_private_keys`: when `true`, the
-    /// `POST /wallet/getPrivateKey` route returns the derived secret
-    /// scalar for an address. Default `false` — the route otherwise
-    /// returns `403 Forbidden`. Threaded into the wallet engine's
-    /// `WalletEngineConfig` at boot.
-    pub wallet_expose_private_keys: bool,
-    pub wallet_mode: WalletMode,
+    /// `[wallet] daemon_address`: where the wallet daemon serves, returned by
+    /// the node's wallet routes (`410 wallet_moved`). The node hosts no wallet.
     pub wallet_daemon_address: String,
     /// Step C — when `true`, the per-peer SyncInfo dispatch swaps
     /// our recent-header-tail `lastHeaderIds` for a single anchor ID

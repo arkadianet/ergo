@@ -169,6 +169,47 @@ impl ergo_api::NodeSubmit for VerifyingSubmit {
     }
 }
 
+/// The reference engine only builds; it never submits.
+struct BuildOnly;
+
+#[async_trait::async_trait]
+impl ergo_wallet_service::engine::TxSubmitter for BuildOnly {
+    async fn submit_transaction(
+        &self,
+        _: Vec<u8>,
+    ) -> Result<String, ergo_wallet_service::engine::TxSubmitError> {
+        panic!("the reference engine must not submit")
+    }
+}
+
+/// The node's snapshot pool as the engine's mempool overlay.
+struct PoolOverlay(Arc<dyn ergo_api::MempoolView>);
+
+impl ergo_wallet_service::engine::MempoolOverlay for PoolOverlay {
+    fn is_spent_by_pool(&self, box_id: &Digest32) -> bool {
+        self.0.is_spent_by_pool(box_id)
+    }
+
+    fn pool_spending_tx(&self, box_id: &Digest32) -> Option<Digest32> {
+        self.0.pool_spending_tx(box_id)
+    }
+
+    fn pool_outputs(&self) -> Arc<std::collections::HashMap<Digest32, ErgoBox>> {
+        self.0.pool_outputs()
+    }
+
+    fn box_snapshot(
+        &self,
+        committed_ids: &[Digest32],
+    ) -> ergo_wallet_service::engine::mempool::MempoolBoxSnapshot {
+        let snapshot = self.0.box_snapshot(committed_ids);
+        ergo_wallet_service::engine::mempool::MempoolBoxSnapshot {
+            outputs: snapshot.outputs,
+            spent_box_ids: snapshot.spent_box_ids,
+        }
+    }
+}
+
 async fn daemon_request(
     app: &axum::Router,
     path: &str,
@@ -595,7 +636,7 @@ fn context_response_retains_its_admission_until_body_is_dropped() {
 }
 
 #[test]
-fn daemon_and_embedded_wallet_build_same_transaction_and_remote_send_verifies_proofs() {
+fn daemon_and_in_process_engine_build_same_transaction_and_remote_send_verifies_proofs() {
     use ergo_wallet_service::engine::{
         RescanCoordinator, WalletEngine, WalletEngineConfig, WalletEngineParts,
     };
@@ -603,7 +644,7 @@ fn daemon_and_embedded_wallet_build_same_transaction_and_remote_send_verifies_pr
     use ergo_walletd::host::{SpendingCapabilities, WalletHost};
     let node_dir = tempfile::tempdir().unwrap();
     let wallet_dir = tempfile::tempdir().unwrap();
-    let embedded_dir = tempfile::tempdir().unwrap();
+    let reference_dir = tempfile::tempdir().unwrap();
     let pk = phrase_key();
     let mut tree = vec![0x00, 0x08, 0xcd];
     tree.extend(pk);
@@ -714,9 +755,9 @@ fn daemon_and_embedded_wallet_build_same_transaction_and_remote_send_verifies_pr
         .unwrap();
     fund_wallet(wallet.as_ref(), &input, tip);
 
-    // The second engine owns separate encrypted secrets but the same persisted
-    // public state. Its chain/mempool adapters are the embedded production ones.
-    let mut secret = ergo_wallet::storage::SecretStorage::open(embedded_dir.path().join("wallet"));
+    // The reference engine owns separate encrypted secrets but the same
+    // persisted public state, and reads the node's chain and pool in process.
+    let mut secret = ergo_wallet::storage::SecretStorage::open(reference_dir.path().join("wallet"));
     secret
         .restore(PHRASE, "", "correct-password", false)
         .unwrap();
@@ -728,18 +769,22 @@ fn daemon_and_embedded_wallet_build_same_transaction_and_remote_send_verifies_pr
     state
         .hydrate_from_reader(&hydration, Network::Mainnet.prefix())
         .unwrap();
-    let chain = Arc::new(ergo_node::node::wallet_bridge::ChainStateAccessorImpl::new(
-        node_store.reader_handle(),
-        wallet.clone(),
-        false,
-        Some(rules.clone()),
-    ));
-    let embedded_pool = ergo_node::api_bridge::SnapshotMempoolView::new(pool.clone()).into_dyn();
-    let mut embedded = WalletEngine::new(WalletEngineParts {
+    let chain = Arc::new(
+        ergo_node::node::wallet_bridge::ChainStateAccessorImpl::chain_only(
+            node_store.reader_handle(),
+            false,
+            Some(rules.clone()),
+        ),
+    );
+    let reference_pool = ergo_node::api_bridge::SnapshotMempoolView::new(pool.clone()).into_dyn();
+    let mut reference = WalletEngine::new(WalletEngineParts {
         storage: Arc::new(parking_lot::RwLock::new(secret)),
         state: Arc::new(parking_lot::RwLock::new(state)),
         store: wallet.clone(),
-        chain,
+        chain: Arc::new(ergo_wallet_service::engine::StoreCursorChain::new(
+            chain,
+            wallet.clone(),
+        )),
         config: WalletEngineConfig {
             network: Network::Mainnet.prefix(),
             expose_private_keys: false,
@@ -747,21 +792,17 @@ fn daemon_and_embedded_wallet_build_same_transaction_and_remote_send_verifies_pr
             min_relay_fee_nano_erg: 1_000_000,
             max_tx_size_bytes: 90_000,
         },
-        submitter: Arc::new(ergo_node::node::wallet_bridge::NodeSubmitAdapter::new(
-            submitter.clone(),
-        )),
-        mempool: Arc::new(ergo_node::node::wallet_bridge::MempoolViewOverlay::new(
-            embedded_pool,
-        )),
+        submitter: Arc::new(BuildOnly),
+        mempool: Arc::new(PoolOverlay(reference_pool)),
         service: None,
         rescan: Arc::new(RescanCoordinator::new()),
     });
-    embedded.unlock("correct-password".into()).unwrap();
+    reference.unlock("correct-password".into()).unwrap();
     assert_eq!(wallet.read().unwrap().unspent_boxes().unwrap().len(), 1);
     let address =
         ergo_wallet::address::pubkey_to_p2pk_address(&pk, Network::Mainnet.prefix()).unwrap();
     let intent = serde_json::json!({"outputs":[{"type":"payment","address":address,"value":"10000000"}],"fee":"1000000"});
-    let embedded_build = embedded
+    let reference_build = reference
         .native_build_transaction(serde_json::from_value(intent.clone()).unwrap())
         .unwrap();
     let (status, build) = runtime.block_on(daemon_request(
@@ -772,7 +813,7 @@ fn daemon_and_embedded_wallet_build_same_transaction_and_remote_send_verifies_pr
     assert_eq!(status, axum::http::StatusCode::OK, "{build}");
     let daemon_build: ergo_wallet_protocol::native::dto::BuildTxResponse =
         serde_json::from_value(build).unwrap();
-    assert_eq!(daemon_build, embedded_build);
+    assert_eq!(daemon_build, reference_build);
     let (status, signed) = runtime.block_on(daemon_request(
         &app,
         "/api/v1/wallet/transactions/sign",
