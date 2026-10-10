@@ -223,6 +223,11 @@ pub enum BuildOutcome {
     /// The candidate orchestrator returned `None` (its own in-generation
     /// parent guard caught a flip). Retry on the next intent.
     Raced,
+    /// The tip still matches, but the block would hold no transactions: no
+    /// emission tx (emission ended, or it could not be built or validated)
+    /// and nothing else selected. A Minimal build is followed by a Full build,
+    /// which may still find requested, rent or mempool transactions.
+    NothingToMine,
     /// No committed state to build on (pre-genesis). Nothing to do.
     NoState,
 }
@@ -591,7 +596,15 @@ fn build_and_publish_inner(
         other => other?,
     };
     let Some((mut candidate, work, mut timings)) = built else {
-        return Ok(BuildOutcome::Raced);
+        // `None` is either the generator's parent guard (the tip moved) or a
+        // block with nothing in it (no coinbase and no transactions).
+        return Ok(
+            if should_publish(&handle.best_tip(), &intent.expected_parent) {
+                BuildOutcome::NothingToMine
+            } else {
+                BuildOutcome::Raced
+            },
+        );
     };
     candidate.observation.operator_owned = intent.operator_owned;
     for (tx, observation) in candidate

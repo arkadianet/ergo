@@ -168,7 +168,7 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
   wastes the work rather than serving a wrong-parent candidate
   (`handle.rs::publish_if_current` / `cached_work_if_synced`).
 - **Two-stage solution acceptance.** `verify_solution` runs the PoW pre-check
-  (`hit_for_v2 <= target`) and a fast-fail parent-id check off the loop;
+  (`hit_for_v2 < target`) and a fast-fail parent-id check off the loop;
   `prepare_mined_block` re-checks parent-id under the action-loop lock as the
   authoritative TOCTOU close; the node stores the header before
   `store_mined_sections` persists the sections durably, ahead of announce and
@@ -188,7 +188,14 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
 - **Emission / reemission parity.** Per-height emission and reward math, the
   reward-output ErgoTree (pk at byte offset 7..40, 54-byte total), and the
   EIP-27 emission-tx shapes are byte-parity-verified against captured mainnet
-  fixtures (`emission_rules.rs`, `reward_script.rs`, `reemission.rs`).
+  fixtures (`emission_rules.rs`, `reward_script.rs`, `reemission.rs`). At the
+  EIP-27 activation height the emission tx also spends the configured
+  injection box (`ReemissionParams::injection_box_id`).
+- **Emission never blocks a template.** No emission tx is built once the
+  per-block reward is zero; an emission tx that cannot be built or does not
+  validate is left out (one warning per height) and the candidate is built
+  from the remaining transactions. A Minimal build that ends up empty answers
+  `BuildOutcome::NothingToMine` and the node follows it with a Full build.
 - **Coverage gaps (by design).** An internal CPU miner is not implemented
   (`use_external_miner` must be `true`) (`config.rs`). Epoch/voting boundary
   candidates (`H % voting_length == 0`) ARE fully built: `generate_candidate`

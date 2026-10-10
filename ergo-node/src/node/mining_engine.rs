@@ -643,6 +643,9 @@ pub(super) async fn run_mining_engine(
     mut intent_rx: watch::Receiver<Option<BuildIntent>>,
     mut cancel_rx: watch::Receiver<bool>,
 ) {
+    // Parent whose Minimal build had nothing to mine (no emission tx): later
+    // builds for it go straight to Full, including on later intents.
+    let mut minimal_empty_parent: Option<[u8; 32]> = None;
     'outer: loop {
         // Wait for a new intent (or cancellation). `watch` retains the latest
         // value, so an intent published before this await is picked up below.
@@ -684,7 +687,9 @@ pub(super) async fn run_mining_engine(
             // full build's; once anything serves this parent, build enriched.
             // Probing the ring (not per-intent state) keeps the decision
             // correct across superseded intents and ABA reorgs for free.
-            let mode = if handle.has_template_for_parent(&intent.expected_parent) {
+            let mode = if handle.has_template_for_parent(&intent.expected_parent)
+                || minimal_empty_parent == Some(intent.expected_parent)
+            {
                 BuildMode::Full
             } else {
                 BuildMode::Minimal
@@ -830,6 +835,18 @@ pub(super) async fn run_mining_engine(
                         "mining engine: commit-visibility retries exhausted; awaiting next intent",
                     );
                     break;
+                }
+                Ok(BuildOutcome::NothingToMine) if mode == BuildMode::Minimal => {
+                    // No emission tx (emission ended, or it could not be built
+                    // or validated): an emission-only template is empty, but a
+                    // Full build may still find transactions to mine.
+                    debug!(
+                        build_ms,
+                        reason = ?intent.reason,
+                        "mining engine: minimal build has nothing to mine; building full",
+                    );
+                    minimal_empty_parent = Some(intent.expected_parent);
+                    continue;
                 }
                 Ok(outcome) => {
                     debug!(
@@ -1467,6 +1484,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(seen, Some(([3; 32], BuildMode::Minimal)));
+        cancel_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_minimal_build_is_followed_by_a_full_build() {
+        let handle = plain_handle();
+        let (req_tx, req_rx) = mpsc::channel::<BuildRequest>();
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker = std::thread::spawn(move || {
+            // Every build finds nothing to mine (no emission tx, empty pool).
+            while let Ok(request) = req_rx.recv() {
+                seen_tx.send(request.mode).unwrap();
+                let BuildReply::Background(reply) = request.reply else {
+                    panic!("background build expected")
+                };
+                reply
+                    .send((Ok(BuildOutcome::NothingToMine), "cold"))
+                    .unwrap();
+            }
+        });
+        let (intent_tx, intent_rx) = watch::channel(None);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(run_mining_engine(
+            handle.clone(),
+            req_tx,
+            intent_rx,
+            cancel_rx,
+        ));
+        let mut intent = minimal_intent(ergo_mempool::MempoolReadSnapshot::empty());
+        intent.expected_parent = [7; 32];
+        intent.reason = ergo_mining::engine::BuildReason::Tip;
+        intent_tx.send(Some(intent.clone())).unwrap();
+        macro_rules! next_mode {
+            () => {
+                tokio::time::timeout(Duration::from_secs(2), seen_rx.recv())
+                    .await
+                    .unwrap()
+            };
+        }
+        assert_eq!(next_mode!(), Some(BuildMode::Minimal));
+        assert_eq!(next_mode!(), Some(BuildMode::Full));
+        // A later intent for the same parent (pool change) builds Full directly.
+        intent.reason = ergo_mining::engine::BuildReason::MempoolRefresh;
+        intent_tx.send(Some(intent)).unwrap();
+        assert_eq!(next_mode!(), Some(BuildMode::Full));
         cancel_tx.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(2), task)
             .await

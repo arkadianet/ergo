@@ -536,6 +536,11 @@ mod tests {
             hex::decode(&target.emission_tx.inputs[1].box_id).unwrap()[..],
             "input[1] must equal injection box id"
         );
+        assert_eq!(
+            built.inputs[1].box_id,
+            ReemissionSettings::mainnet().injection_box_id,
+            "the configured mainnet injection box id is the one spent at activation"
+        );
 
         assert_eq!(
             built.output_candidates[0].value, target.emission_tx.outputs[0].value,
