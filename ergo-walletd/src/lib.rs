@@ -306,18 +306,16 @@ where
     tokio::pin!(shutdown);
     let opened = match opened {
         Some(opened) => Ok(Some(opened)),
-        None => loop {
-            tokio::select! {
-                result = &mut shutdown => break result.map(|()| None),
-                _ = seal_rx.changed() => break Ok(None),
-                Some(opened) = unsealed_rx.recv() => break Ok(Some(opened)),
-                Some(result) = listeners.join_next() => {
-                    break Err(match result {
-                        Ok(Ok(())) => DaemonError::Server("local API listener stopped".to_string()),
-                        Ok(Err(error)) => error,
-                        Err(error) => DaemonError::Server(error.to_string()),
-                    });
-                }
+        None => tokio::select! {
+            result = &mut shutdown => result.map(|()| None),
+            _ = seal_rx.changed() => Ok(None),
+            Some(opened) = unsealed_rx.recv() => Ok(Some(opened)),
+            Some(result) = listeners.join_next() => {
+                Err(match result {
+                    Ok(Ok(())) => DaemonError::Server("local API listener stopped".to_string()),
+                    Ok(Err(error)) => error,
+                    Err(error) => DaemonError::Server(error.to_string()),
+                })
             }
         },
     };

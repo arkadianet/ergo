@@ -17,9 +17,12 @@ pub const NONCE_TTL: Duration = Duration::from_secs(3600);
 /// Most nonces held at once.
 pub const MAX_NONCES: usize = 4096;
 
+/// A held nonce and when it was deposited.
+type Entry = (Zeroizing<[u8; 32]>, Instant);
+
 #[derive(Default)]
 pub struct NonceVault {
-    entries: Mutex<BTreeMap<String, (Zeroizing<[u8; 32]>, Instant)>>,
+    entries: Mutex<BTreeMap<String, Entry>>,
 }
 
 impl NonceVault {

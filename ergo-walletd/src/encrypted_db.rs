@@ -361,7 +361,7 @@ impl EncryptedBackend {
         if len > old_len {
             // Zero the tail of a partial last sector, then seal new sectors
             // as zeros: grown space must read back as zero.
-            if old_len % SECTOR as u64 != 0 {
+            if !old_len.is_multiple_of(SECTOR as u64) {
                 let index = old_len / SECTOR as u64;
                 let mut plain = self.read_sector(index)?;
                 plain[(old_len % SECTOR as u64) as usize..].fill(0);
@@ -377,7 +377,7 @@ impl EncryptedBackend {
         } else if len < old_len {
             self.publish_len(state, len)?;
             self.inner.sync_data()?;
-            if len % SECTOR as u64 != 0 {
+            if !len.is_multiple_of(SECTOR as u64) {
                 let index = len / SECTOR as u64;
                 let mut plain = self.read_sector(index)?;
                 plain[(len % SECTOR as u64) as usize..].fill(0);
