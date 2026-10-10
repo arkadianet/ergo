@@ -69,6 +69,7 @@ pub mod jobs;
 mod keys;
 pub mod mempool;
 mod multisig;
+mod nonce_custody;
 mod reads;
 pub mod rescan;
 mod scan;
@@ -84,6 +85,7 @@ pub use config::WalletEngineConfig;
 pub use hook::WalletStateHook;
 pub use keys::WalletBootService;
 pub use mempool::{MempoolOverlay, NoopMempoolOverlay};
+pub use nonce_custody::{NonceCustody, NONCE_HANDLE_PREFIX};
 pub use rescan::{
     recover_interrupted_rescan, BeginRescanError, RescanCoordinator, RescanJob, WalletRescanGuard,
 };
@@ -134,6 +136,8 @@ pub struct WalletEngine {
     unlock_limiter: admin::AttemptLimiter,
     /// Failed-attempt budget for the seed `check` oracle.
     check_limiter: admin::AttemptLimiter,
+    /// When set, multisig nonces stay with the host (see [`NonceCustody`]).
+    nonce_custody: Option<Arc<dyn NonceCustody>>,
 }
 
 impl WalletEngine {
@@ -185,7 +189,14 @@ impl WalletEngine {
             rescan,
             unlock_limiter: admin::AttemptLimiter::new(),
             check_limiter: admin::AttemptLimiter::new(),
+            nonce_custody: None,
         }
+    }
+
+    /// Keep multisig nonces in `custody`: `generateCommitments` returns
+    /// single-use handles instead of secret nonces, and signing resolves them.
+    pub fn set_nonce_custody(&mut self, custody: Arc<dyn NonceCustody>) {
+        self.nonce_custody = Some(custody);
     }
 
     /// Seal `key` into the keystore that the next `init` or `restore`

@@ -128,6 +128,7 @@ fn seed_daemon(dir: &Path, chain: Arc<RecoverableChain>) -> TestDaemon {
             lock_policy: crate::config::LockPolicy::default(),
             lock_memory: false,
             unseal_key_file: None,
+            multisig_nonces: crate::config::NonceHolder::Daemon,
         },
         service,
         syncer,

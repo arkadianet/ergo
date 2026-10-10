@@ -143,6 +143,20 @@ pub struct SecuritySection {
     /// `LoadCredentialEncrypted=` credential sealed to the host TPM; the copy
     /// is only as strong as where it is stored.
     pub unseal_key_file: Option<PathBuf>,
+    /// Who holds multisig signing nonces between `generateCommitments` and
+    /// signing: the daemon (default; single-use handles are returned) or the
+    /// caller (the Scala-compatible secret hex).
+    #[serde(default)]
+    pub multisig_nonces: NonceHolder,
+}
+
+/// Holder of multisig signing nonces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NonceHolder {
+    #[default]
+    Daemon,
+    Caller,
 }
 
 impl Default for SecuritySection {
@@ -152,6 +166,7 @@ impl Default for SecuritySection {
             max_unlock: default_max_unlock(),
             lock_memory: false,
             unseal_key_file: None,
+            multisig_nonces: NonceHolder::Daemon,
         }
     }
 }
@@ -389,6 +404,7 @@ pub struct Config {
     pub lock_policy: LockPolicy,
     pub lock_memory: bool,
     pub unseal_key_file: Option<PathBuf>,
+    pub multisig_nonces: NonceHolder,
 }
 
 #[derive(Debug, Clone)]
@@ -604,6 +620,7 @@ impl Config {
             lock_policy: LockPolicy::from_section(&file.security),
             lock_memory: file.security.lock_memory,
             unseal_key_file: file.security.unseal_key_file.clone(),
+            multisig_nonces: file.security.multisig_nonces,
         })
     }
 }

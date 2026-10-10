@@ -144,6 +144,9 @@ pub(crate) fn open(
         if new_wallet {
             host.set_new_wallet_data_key(key);
         }
+        if config.multisig_nonces == crate::config::NonceHolder::Daemon {
+            host.enable_nonce_custody();
+        }
         Some(host)
     } else {
         None

@@ -400,10 +400,12 @@ fn multisig_host_uses_same_context_selection_as_signing() {
         &storage,
         &store,
         &ControlledChain(view.clone()),
+        None,
     )
     .unwrap();
     assert!(!hints.hints.secret_hints["0"].is_empty());
-    let internal_hints = crate::engine::hints_codec::tx_hints_bag_from_dto(&hints.hints).unwrap();
+    let internal_hints =
+        crate::engine::hints_codec::tx_hints_bag_from_dto(&hints.hints, None).unwrap();
     let commitment = internal_hints.public_hints[&0]
         .hints
         .iter()
@@ -427,7 +429,7 @@ fn multisig_host_uses_same_context_selection_as_signing() {
     )
     .unwrap();
     assert!(!hints.hints.public_hints["0"].is_empty());
-    let extracted = crate::engine::hints_codec::tx_hints_bag_from_dto(&hints.hints).unwrap();
+    let extracted = crate::engine::hints_codec::tx_hints_bag_from_dto(&hints.hints, None).unwrap();
     assert!(extracted.public_hints[&0].hints.contains(&commitment));
     assert!(extracted.public_hints[&0]
         .hints
@@ -441,6 +443,7 @@ fn multisig_host_uses_same_context_selection_as_signing() {
             &storage,
             &store,
             &ControlledChain(synthetic.clone()),
+            None,
         ),
         Err(WalletAdminError::UnsupportedScript),
     ));

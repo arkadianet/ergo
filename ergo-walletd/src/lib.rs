@@ -12,6 +12,7 @@ pub mod host;
 mod host_guard;
 pub mod lifecycle_api;
 pub mod migration;
+pub mod nonce_vault;
 mod ownership;
 pub mod seal;
 #[cfg(unix)]
@@ -714,6 +715,7 @@ mod review_tests {
                 lock_policy: config::LockPolicy::default(),
                 lock_memory: false,
                 unseal_key_file: None,
+                multisig_nonces: crate::config::NonceHolder::Daemon,
             },
             service,
             syncer,
