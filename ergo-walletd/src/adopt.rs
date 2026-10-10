@@ -283,11 +283,6 @@ mod tests {
                 "migration-test-password".to_string(),
             )))
             .unwrap();
-        let raw = fs::read(data_dir.join("wallet.redb")).unwrap();
-        assert!(
-            !raw.starts_with(b"redb"),
-            "the first unseal encrypts the database"
-        );
         let read = opened.service.store().read().unwrap();
         assert_eq!(read.tracked_pubkeys_with_paths().unwrap().len(), 1);
         drop(read);
@@ -300,6 +295,12 @@ mod tests {
         drop(opened);
         drop(gate);
         runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+        // Read only once closed: Windows refuses reads of a locked range.
+        let raw = fs::read(data_dir.join("wallet.redb")).unwrap();
+        assert!(
+            !raw.starts_with(b"redb"),
+            "the first unseal encrypts the database"
+        );
     }
 
     #[test]
