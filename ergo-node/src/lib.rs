@@ -30,7 +30,6 @@ pub mod realtime_indexer_bridge;
 pub mod realtime_mempool_bridge;
 pub mod runtime_control;
 pub mod snapshot;
-pub mod wallet_boot;
 
 pub use node::{run, run_inner, RunHandle};
 

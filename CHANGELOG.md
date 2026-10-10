@@ -26,6 +26,14 @@ infrastructure.
 - **Wallet handoff and setup:** a node that does not host its wallet publishes a verified copy of a legacy embedded wallet at `data_dir/wallet-handoff/`; `ergo-walletd adopt` takes it over and `ergo-node wallet-legacy-purge` removes the old rows afterwards. An external-mode miner without a reward key keeps the legacy wallet's key. `[mining] miner_reward_address` accepts a P2PK address; `ergo-node init --reward address`, `ergo-walletd init` and `ergo-walletd reward-key` cover new installations. See `docs/wallet-setup.md`.
 - **Multisig nonces stay in the daemon** by default: `generateCommitments` returns single-use handles instead of secret nonces (`[security] multisig_nonces = "caller"` restores the Scala form).
 
+### Removed
+
+- **The node no longer hosts a wallet.** It never opens wallet secrets, runs no wallet writer, scheduler or chain-apply hook, and its wallet and scan routes answer `410 wallet_moved` with `[wallet] daemon_address`. The dashboard's wallet page moved to `ergo-walletd`. `[wallet] mode = "embedded"` and `expose_private_keys` still load, with a warning, and do nothing. `ergo-node init` no longer offers `--reward wallet`. The readiness option `require_wallet` is ignored.
+
+### Changed
+
+- `ergo-node wallet-scan-utxo` requires `--wallet-data-dir`. With `--wallet-key-stdin` it reads the key that `ergo-walletd export-unseal-key` prints and opens the daemon's encrypted database without the wallet password.
+
 ## [0.12.3] - 2026-10-07
 
 A consensus release for mainnet. Upgrade every 0.12.2 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.

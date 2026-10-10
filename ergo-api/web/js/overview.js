@@ -272,7 +272,7 @@ export function mount(el) {
   const prompt = root.querySelector('[data-auth-prompt]');
   if (prompt) {
     const txt = document.createElement('span');
-    txt.textContent = 'Read-only access · Authorize to manage voting and your wallet.';
+    txt.textContent = 'Read-only access · Authorize to manage voting.';
     const btn = document.createElement('button');
     btn.className = 'btn btn--ghost btn--sm';
     btn.type = 'button';

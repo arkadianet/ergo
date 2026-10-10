@@ -27,11 +27,10 @@ import * as peers from './peers.js';
 import * as mempool from './mempool.js';
 import * as mining from './mining.js';
 import * as voting from './voting.js';
-import * as wallet from './wallet.js';
 import * as activity from './activity.js';
 
-const SECTIONS = ['overview', 'explorer', 'peers', 'mempool', 'mining', 'voting', 'wallet', 'activity'];
-const renderers = { overview, explorer, peers, mempool, mining, voting, wallet, activity };
+const SECTIONS = ['overview', 'explorer', 'peers', 'mempool', 'mining', 'voting', 'activity'];
+const renderers = { overview, explorer, peers, mempool, mining, voting, activity };
 const mounted = new Set();
 let current = null;
 // Tip/mempool/peers come from WS; /info is rarely needed for the chrome.

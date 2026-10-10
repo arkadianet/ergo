@@ -62,6 +62,14 @@ impl DataKey {
         Self(Zeroizing::new(bytes))
     }
 
+    /// Parse 64 hex characters, as `ergo-walletd export-unseal-key` prints
+    /// them; surrounding whitespace is ignored.
+    pub fn from_hex(text: &str) -> Option<Self> {
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        hex::decode_to_slice(text.trim(), bytes.as_mut()).ok()?;
+        Some(Self(bytes))
+    }
+
     /// A fresh random key from the operating system.
     pub fn generate() -> Self {
         let mut bytes = Zeroizing::new([0u8; 32]);

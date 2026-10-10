@@ -2,9 +2,9 @@
 # shadow-compare.sh — run the embedded-vs-daemon wallet shadow harness.
 #
 # Phase-2 item 5. The harness lives in `ergo-walletd/tests/it/shadow.rs` and
-# proves that the node's *embedded* wallet (a real `ergo-state` `StateStore`
+# proves that the reference embedded wallet (a real `ergo-state` `StateStore`
 # whose redb also holds the wallet tables, advanced by the production
-# `StateStore::apply_block` + `ergo_node::WalletStateHook`) and the standalone
+# `StateStore::apply_block` + the service's `WalletStateHook`) and the standalone
 # watch-only daemon (a real `RedbWalletStore::open_standalone` advanced by the
 # real `StandaloneSyncer` over the real `HttpChainClient` against the real
 # `ergo-api` chain router) reach the *same* `WalletRead` state from the same

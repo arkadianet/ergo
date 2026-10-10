@@ -80,7 +80,9 @@ pub mod submit;
 mod sweep;
 
 pub use admin::{AttemptJournal, AttemptRecord, UnlockThrottle};
-pub use chain::{map_chain_error, ChainAccessError, SigningView, WalletChainAccess};
+pub use chain::{
+    map_chain_error, ChainAccessError, SigningView, StoreCursorChain, WalletChainAccess,
+};
 pub use config::WalletEngineConfig;
 pub use hook::WalletStateHook;
 pub use keys::WalletBootService;

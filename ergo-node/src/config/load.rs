@@ -16,7 +16,7 @@ use tracing_subscriber::EnvFilter;
 use super::toml_sections::*;
 use super::{
     validate_supported, Cli, LoggingConfig, LoggingFileConfig, LoggingFormat, Network, NodeConfig,
-    StateType, WalletMode, MAX_DOWNLOAD_WINDOW,
+    StateType, MAX_DOWNLOAD_WINDOW,
 };
 
 impl NodeConfig {
@@ -983,12 +983,32 @@ impl NodeConfig {
             }
         }
 
-        let wallet_mode = match toml_cfg.wallet.mode.as_deref() {
-            None => WalletMode::Embedded,
-            Some(value) => value
-                .parse::<WalletMode>()
-                .map_err(|e| format!("[wallet] {e}"))?,
-        };
+        // The node hosts no wallet. Configs written for the embedded wallet
+        // still load: `mode = "embedded"` and `expose_private_keys` are
+        // ignored with a warning, so an upgrade never fails here.
+        match toml_cfg
+            .wallet
+            .mode
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            None | Some("external") => {}
+            Some("embedded") => tracing::warn!(
+                "[wallet] mode = \"embedded\" is retired: the node no longer hosts a wallet; \
+                 its wallet is handed to ergo-walletd (see docs/wallet-setup.md)"
+            ),
+            Some(other) => {
+                return Err(format!(
+                    "[wallet] unknown wallet mode: {other:?}; the node hosts no wallet"
+                ))
+            }
+        }
+        if toml_cfg.wallet.expose_private_keys.is_some() {
+            tracing::warn!(
+                "[wallet] expose_private_keys is ignored: the node no longer hosts a wallet"
+            );
+        }
         let wallet_daemon_address = toml_cfg
             .wallet
             .daemon_address
@@ -1260,8 +1280,6 @@ impl NodeConfig {
             logging,
             mining_config,
             voting_targets,
-            wallet_expose_private_keys: toml_cfg.wallet.expose_private_keys.unwrap_or(false),
-            wallet_mode,
             wallet_daemon_address,
         })
     }

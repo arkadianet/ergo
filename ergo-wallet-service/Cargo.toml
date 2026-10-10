@@ -37,6 +37,12 @@ zeroize              = { workspace = true }
 # assembly directory beside the destination.
 sha2                 = { workspace = true }
 tempfile             = { workspace = true }
+# The daemon's encrypted `wallet.redb` backend (`encrypted_db`), shared so the
+# node's offline discovery can open it with an exported database key.
+aes-gcm              = { workspace = true }
+hmac                 = { workspace = true }
+subtle               = { workspace = true }
+rand                 = { workspace = true }
 
 [dev-dependencies]
 # Verify legacy standalone stores are refused without modifying their files.

@@ -126,7 +126,6 @@ pub(super) struct SyncSetup {
     pub shadow_state: Option<Arc<super::super::shadow_watch::ShadowState>>,
     pub shadow_future: Option<ShadowFuture>,
     pub chain_meta: ergo_state::chain::ChainStateMeta,
-    pub backend_is_utxo: bool,
     pub bootstrap_kind: crate::node::identity::BootstrapKind,
     pub popow_bootstrap: Option<ergo_sync::popow_bootstrap::PopowBootstrap>,
     pub last_seen_active_params: ergo_validation::ActiveProtocolParameters,
@@ -522,13 +521,6 @@ pub(super) fn setup(
     // `ChainStateRead` enum forward.
     let chain_meta = store.chain_state_meta();
 
-    // Only the UTXO backend produces box-level apply events the wallet
-    // can scan. The headers-only-digest (Mode 6) and digest-verifier
-    // (Mode 5) backends have no box arena, so the live wallet apply hook
-    // is left empty for both — matching the `NodeState.wallet_hook` doc
-    // invariant.
-    let backend_is_utxo = store.as_utxo().is_some();
-
     // Detect bootstrap source from chain_state for the identity label
     // projection. PoPowSparse header_availability is the signature of
     // `apply_popow_proof`; for the Dense + sentinel > 1 case we
@@ -619,7 +611,6 @@ pub(super) fn setup(
         shadow_state,
         shadow_future,
         chain_meta,
-        backend_is_utxo,
         bootstrap_kind,
         popow_bootstrap,
         last_seen_active_params,

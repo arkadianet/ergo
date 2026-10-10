@@ -244,9 +244,7 @@ function renderYourNode() {
       );
     }
     const foot = el('div', 'ov-foot');
-    const wl = el('a', 'ex-link', 'matured rewards → Wallet');
-    wl.href = '#wallet';
-    foot.append(wl);
+    foot.append(el('span', '', 'Matured rewards are spendable in your reward wallet.'));
     els.you.append(foot);
   }
 }

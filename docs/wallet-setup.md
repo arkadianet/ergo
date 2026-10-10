@@ -66,8 +66,8 @@ unattended operation with a TPM-bound credential.
 
 ## Upgrading a node that hosted its wallet
 
-A node that no longer hosts its embedded wallet leaves that wallet's rows and
-keystore untouched and hands a copy to the daemon:
+The node no longer hosts a wallet. It leaves the old wallet's rows and keystore
+untouched and hands a copy to the daemon:
 
 1. **Upgrade the node.** It keeps syncing and mining. A miner without a
    configured reward key keeps the old wallet's first-address key, and the log
@@ -95,8 +95,9 @@ keystore untouched and hands a copy to the daemon:
    format and encrypts the database.
 
 5. **Point wallet clients at the daemon.** The node answers its former wallet
-   routes with `wallet_moved` and the daemon's address; the daemon serves the
-   same Scala-compatible `/wallet/*` and `/scan/*` routes.
+   routes with `wallet_moved` and the daemon's address (`[wallet]
+   daemon_address`); the daemon serves the same `/wallet/*` and `/scan/*`
+   routes. The dashboard's wallet page is now the daemon's browser UI.
 
 6. **Purge the old rows** from the node once the daemon works:
 

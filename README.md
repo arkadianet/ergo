@@ -80,14 +80,16 @@ Snapshot trust verification is provisional. Cross-check the installed UTXO root
 against a known-good reference before trusting the state. Read the [fast bootstrap guide](docs/operating.md#fast-clean-db-boot-mode-2--nipopow)
 and [configuration reference](docs/configuration.md).
 
-Mining needs either `[mining] miner_public_key_hex` (a 33-byte compressed
-secp256k1 public key, 66 hex characters; `ergo-wallet pubkey` prints it from a
-mnemonic) or an initialized node wallet, whose first EIP-3 key is used.
+Mining needs a reward key: `[mining] miner_reward_address` (a P2PK address
+from any wallet; `ergo-walletd reward-key` prints one) or
+`miner_public_key_hex` (a 33-byte compressed secp256k1 public key, 66 hex
+characters; `ergo-wallet pubkey` prints it from a mnemonic). The wallet runs in
+`ergo-walletd` beside the node; see [wallet setup](docs/wallet-setup.md).
 The node supplies mining work through REST, so GPU rigs need a Stratum server
 or pool in between: for example [ergo-solo](https://github.com/arkadianet/ergo-stratum-rs)
 for solo mining, or [Lithos](docs/lithos.md). See [mining templates](docs/operator-mining.md).
 
-### Unlock wallet and mining
+### API key
 
 **Wallet routes, mining controls, and other privileged calls need an API key.**
 The dashboard and public reads work without one. `ergo-node init` already
@@ -107,7 +109,7 @@ api_key_hash = "<64 lowercase hex characters>"
 
 Add it to `ergo-node.toml` and restart the node. Clients send the **secret**
 from the file, not the hash, in the `api_key` header; enter it in the dashboard
-to authorize privileged calls. Then initialize or unlock your wallet.
+to authorize privileged calls.
 `ergo-node api-key hash --secret-file PATH` prints the hash for an existing
 secret. See [API authentication](docs/configuration.md#apisecurity).
 
