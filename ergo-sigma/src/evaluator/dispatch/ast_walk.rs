@@ -429,6 +429,13 @@ fn deserialize_measured(
     reader.set_strict_method_resolution();
     reader.set_embeddable_activated_version(Some(ctx.activated_script_version));
     let parsed = ergo_ser::opcode::parse_body_for_substitution(&mut reader, ctx.ergo_tree_version);
+    // ValueSerializer decodes every GroupElement as it reads it (constants,
+    // SigmaProp, Box and Header data alike), so an off-curve point throws
+    // before any later parse error, the swallowed ClassCastException below or
+    // the cost charge. The reader records exactly the points read before it
+    // stopped.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/serialization/GroupElementSerializer.scala#L34-L41
+    super::validate_recorded_group_elements(reader.group_elements())?;
     // Deliberately match Kiama.strategy's swallowed direct ClassCastException:
     // leave the live macro unresolved; do not charge a failed payload decode.
     // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/kiama/rewriting/Rewriter.scala#L180-L191
