@@ -20,6 +20,7 @@ infrastructure.
 
 - Reject ErgoTrees without a size field whose root is a nested function application that does not return SigmaProp, as the reference node does. These trees were previously accepted.
 - Reject inputs whose `DeserializeContext` or `DeserializeRegister` code contains an off-curve group element, including one in a branch that is never evaluated or before a parse error the evaluator ignores. These inputs were previously accepted.
+- Reject `||` and `&&` whose evaluated right operand is not a Boolean; these were previously accepted. Accept `allOf`, `anyOf` and `xorOf` over an empty collection of any element type, as the reference does; these were previously rejected.
 
 ## [0.12.3] - 2026-10-07
 

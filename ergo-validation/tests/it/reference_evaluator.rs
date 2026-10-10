@@ -237,3 +237,8 @@ fn runtime_parsed_group_elements_match_reference() {
 fn runtime_deserialized_group_elements_are_curve_checked() {
     check_vectors("runtime-deserialized-group-elements");
 }
+
+#[test]
+fn boolean_ops_require_boolean_operands() {
+    check_vectors("boolean-operands");
+}

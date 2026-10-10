@@ -776,6 +776,27 @@ pub(crate) fn collection_len(coll: &Value, ctx: &ReductionContext) -> usize {
     }
 }
 
+/// An empty collection of any element type. The Boolean reducers (AND, OR,
+/// xorOf) cast elements to Boolean only as they read them, so the reference
+/// accepts an empty collection whatever its element type.
+pub(crate) fn is_empty_collection(coll: &Value, ctx: &ReductionContext) -> bool {
+    matches!(
+        coll,
+        Value::CollBytes(_)
+            | Value::CollShort(_)
+            | Value::CollInt(_)
+            | Value::CollLong(_)
+            | Value::CollBool(_)
+            | Value::CollSigmaProp(_)
+            | Value::CollBox(_)
+            | Value::CollHeader(_)
+            | Value::Tokens(_)
+            | Value::CollGeneric(..)
+            | Value::CollLegacyPair(..)
+            | Value::BoxCollection(_)
+    ) && collection_len(coll, ctx) == 0
+}
+
 #[cfg(test)]
 mod prim_coll_eq_tests {
     use super::*;
