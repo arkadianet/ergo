@@ -68,7 +68,8 @@ pub(in crate::evaluator) fn eval_val_use(
 // caller's env is untouched once the block returns. Bindings must not
 // leak past the block, and a shadowed outer id must reappear
 // afterwards (an expression evaluated after the block sees the
-// PRE-block env). Mirrored with a block-local clone; closures created
+// PRE-block env). Mirrored by binding in place and restoring every
+// shadowed or new id when the block returns; closures created
 // inside the block capture the block env, exactly like Scala's
 // FuncValue capturing `curEnv`.
 /// Scala's shallow tuple check also rejects a register's CreateTuple carrier
@@ -124,7 +125,30 @@ pub(in crate::evaluator) fn eval_block_value(
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
     add_cost_per_item(cx.cost, 0xD8, items.len() as u32)?;
-    let mut block_env = cx.env.clone();
+    // The block binds into the caller's environment and restores every
+    // shadowed or new id afterwards (on success and on error), instead of
+    // copying the whole environment per block evaluation.
+    let mut saved: Vec<(u32, Option<Value>)> = Vec::with_capacity(items.len());
+    let result = eval_block_bindings(items, result, cx, &mut saved);
+    for (id, old) in saved.into_iter().rev() {
+        match old {
+            Some(v) => {
+                cx.env.insert(id, v);
+            }
+            None => {
+                cx.env.remove(&id);
+            }
+        }
+    }
+    result
+}
+
+fn eval_block_bindings(
+    items: &[Expr],
+    result: &Expr,
+    cx: &mut EvalCtx<'_>,
+    saved: &mut Vec<(u32, Option<Value>)>,
+) -> Result<Value, EvalError> {
     for item in items {
         match item {
             Expr::Op(node) => match &node.payload {
@@ -133,7 +157,7 @@ pub(in crate::evaluator) fn eval_block_value(
                         rhs,
                         cx.ctx,
                         cx.constants,
-                        &mut block_env,
+                        cx.env,
                         cx.depth,
                         cx.cost,
                         cx.trace,
@@ -157,7 +181,7 @@ pub(in crate::evaluator) fn eval_block_value(
                             value: trace_val(&val),
                         });
                     }
-                    block_env.insert(*id, val);
+                    saved.push((*id, cx.env.insert(*id, val)));
                 }
                 _ => {
                     return Err(EvalError::TypeError {
@@ -184,7 +208,7 @@ pub(in crate::evaluator) fn eval_block_value(
         result,
         cx.ctx,
         cx.constants,
-        &mut block_env,
+        cx.env,
         cx.depth,
         cx.cost,
         cx.trace,

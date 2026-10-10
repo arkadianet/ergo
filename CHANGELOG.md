@@ -31,6 +31,7 @@ infrastructure.
 - Reject collection results with more than 100,000 items (append, flatMap, patch, `Global.serialize`, `substConstants`), as the reference does. These were previously accepted.
 - Reject `xor` of a longer left operand before JIT activation (block version 2 and earlier), as the reference does.
 - Reject `map` and `flatMap` calls whose result element type is not a concrete type (a failed method specialization, or a mapper whose body has no type), even on an empty collection; these were previously accepted.
+- Collection element access (`getOrElse`, `apply`, `get`, `indexOf`, `slice`), `append` of primitive collections, lambda calls inside collection operations and blocks no longer copy whole collections or environments per call. A transaction indexing a 60 KB context variable 60,000 times took 20 s to validate and now takes 0.2 s; verdicts and costs are unchanged.
 
 ## [0.12.3] - 2026-10-07
 

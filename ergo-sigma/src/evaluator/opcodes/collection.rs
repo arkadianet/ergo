@@ -296,6 +296,10 @@ pub(in crate::evaluator) fn eval_forall(
             param_types,
             body,
         } => {
+            // One environment for every call: the body never mutates it and
+            // each call rebinds the parameter, so the captured values are
+            // not copied per element.
+            let mut call_env = (*captured_env).clone();
             for item in items {
                 // Scala closure invocation: Value.checkType runs before
                 // the AddToEnvironment charge (see check_closure_param_types).
@@ -303,7 +307,6 @@ pub(in crate::evaluator) fn eval_forall(
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
-                let mut call_env = (*captured_env).clone();
                 if let Some(param_id) = params.first() {
                     call_env.insert(*param_id, item);
                 }
@@ -361,6 +364,10 @@ pub(in crate::evaluator) fn eval_filter(
             body,
         } => {
             let mut result = Vec::new();
+            // One environment for every call: the body never mutates it and
+            // each call rebinds the parameter, so the captured values are
+            // not copied per element.
+            let mut call_env = (*captured_env).clone();
             for item in items {
                 // Scala closure invocation: Value.checkType runs before
                 // the AddToEnvironment charge (see check_closure_param_types).
@@ -368,7 +375,6 @@ pub(in crate::evaluator) fn eval_filter(
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
-                let mut call_env = (*captured_env).clone();
                 if let Some(param_id) = params.first() {
                     call_env.insert(*param_id, item.clone());
                 }
@@ -428,6 +434,10 @@ pub(in crate::evaluator) fn eval_fold(
             param_types,
             body,
         } => {
+            // One environment for every call: the body never mutates it and
+            // each call rebinds the parameter, so the captured values are
+            // not copied per element.
+            let mut call_env = (*captured_env).clone();
             for item in items {
                 // Scala closure invocation: Value.checkType runs before
                 // the AddToEnvironment charge (see check_closure_param_types).
@@ -437,7 +447,6 @@ pub(in crate::evaluator) fn eval_fold(
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
-                let mut call_env = (*captured_env).clone();
                 // Fold function takes (acc, item) as a tuple via params
                 if params.len() >= 2 {
                     let Value::Tuple(mut pair) = arg else {
@@ -506,6 +515,10 @@ pub(in crate::evaluator) fn map_values(
             body,
         } => {
             let mut result = Vec::new();
+            // One environment for every call: the body never mutates it and
+            // each call rebinds the parameter, so the captured values are
+            // not copied per element.
+            let mut call_env = (*captured_env).clone();
             for item in items {
                 // Scala closure invocation: Value.checkType runs before
                 // the AddToEnvironment charge (see check_closure_param_types).
@@ -513,7 +526,6 @@ pub(in crate::evaluator) fn map_values(
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
-                let mut call_env = (*captured_env).clone();
                 if let Some(param_id) = params.first() {
                     call_env.insert(*param_id, item);
                 }
@@ -582,6 +594,10 @@ pub(in crate::evaluator) fn eval_exists(
             param_types,
             body,
         } => {
+            // One environment for every call: the body never mutates it and
+            // each call rebinds the parameter, so the captured values are
+            // not copied per element.
+            let mut call_env = (*captured_env).clone();
             for item in items {
                 // Scala closure invocation: Value.checkType runs before
                 // the AddToEnvironment charge (see check_closure_param_types).
@@ -589,7 +605,6 @@ pub(in crate::evaluator) fn eval_exists(
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
-                let mut call_env = (*captured_env).clone();
                 if let Some(param_id) = params.first() {
                     call_env.insert(*param_id, item);
                 }
@@ -669,6 +684,31 @@ fn append_values(left: Value, right: Value, cx: &EvalCtx<'_>) -> Result<Value, E
     if left_len > 0 {
         super::super::helpers::check_array_length(left_len + collection_len(&right, cx.ctx))?;
     }
+    // Same-kind primitive carriers concatenate in place (no per-element
+    // conversion); everything else takes the unpacking path.
+    let (left, right) = match (left, right) {
+        (Value::CollBytes(mut a), Value::CollBytes(b)) => {
+            a.extend_from_slice(&b);
+            return Ok(Value::CollBytes(a));
+        }
+        (Value::CollShort(mut a), Value::CollShort(b)) => {
+            a.extend_from_slice(&b);
+            return Ok(Value::CollShort(a));
+        }
+        (Value::CollInt(mut a), Value::CollInt(b)) => {
+            a.extend_from_slice(&b);
+            return Ok(Value::CollInt(a));
+        }
+        (Value::CollLong(mut a), Value::CollLong(b)) => {
+            a.extend_from_slice(&b);
+            return Ok(Value::CollLong(a));
+        }
+        (Value::CollBool(mut a), Value::CollBool(b)) => {
+            a.extend_from_slice(&b);
+            return Ok(Value::CollBool(a));
+        }
+        pair => pair,
+    };
     let (kind, mut items) = collection_to_values(left, cx.ctx)?;
     let (_, tail) = collection_to_values(right, cx.ctx)?;
     items.extend(tail);
@@ -751,6 +791,14 @@ pub(in crate::evaluator) fn eval_slice(
             })
         }
     };
+    // Primitive carriers are sliced in place (the reference slices its array).
+    if let Some(sliced) =
+        super::super::helpers::fast_slice(&coll, from.max(0) as usize, until.max(0) as usize)
+    {
+        let cost_n = until.wrapping_sub(from).max(0) as u32;
+        add_cost_per_item(cx.cost, 0xB4, cost_n)?;
+        return Ok(sliced);
+    }
     let elem_type = coll_elem_type(&coll).unwrap_or(SigmaType::SAny);
     let (kind, items) = collection_to_values(coll, cx.ctx)?;
     let len = items.len();

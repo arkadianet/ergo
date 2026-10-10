@@ -60,6 +60,65 @@ pub(crate) fn not_a_collection(value: &Value) -> EvalError {
     }
 }
 
+/// Length of a collection whose elements [`fast_element`] reads in place;
+/// `None` for every other carrier (callers then take the unpacking path).
+/// Element access must not convert the whole collection: the reference
+/// indexes its arrays directly, so a per-call copy turns a cheaply charged
+/// loop into quadratic work.
+pub(crate) fn fast_len(coll: &Value) -> Option<usize> {
+    match coll {
+        Value::CollBytes(v) => Some(v.len()),
+        Value::CollShort(v) => Some(v.len()),
+        Value::CollInt(v) => Some(v.len()),
+        Value::CollLong(v) => Some(v.len()),
+        Value::CollBool(v) => Some(v.len()),
+        Value::CollSigmaProp(v) => Some(v.len()),
+        Value::CollBox(v) | Value::CollGeneric(v, _) | Value::CollLegacyPair(v, _, _) => {
+            Some(v.len())
+        }
+        _ => None,
+    }
+}
+
+/// Element `i` of a [`fast_len`] carrier, in the shape
+/// [`collection_to_values`] gives it.
+pub(crate) fn fast_element(coll: &Value, i: usize) -> Option<Value> {
+    match coll {
+        Value::CollBytes(v) => v.get(i).map(|b| Value::Byte(*b as i8)),
+        Value::CollShort(v) => v.get(i).copied().map(Value::Short),
+        Value::CollInt(v) => v.get(i).copied().map(Value::Int),
+        Value::CollLong(v) => v.get(i).copied().map(Value::Long),
+        Value::CollBool(v) => v.get(i).copied().map(Value::Bool),
+        Value::CollSigmaProp(v) => v.get(i).cloned().map(Value::SigmaProp),
+        Value::CollBox(v) | Value::CollGeneric(v, _) | Value::CollLegacyPair(v, _, _) => {
+            v.get(i).cloned()
+        }
+        _ => None,
+    }
+}
+
+/// `coll.slice(from, until)` (clamped, `from <= until`) for the primitive
+/// carriers, copying only the slice; `None` for any other carrier (the
+/// caller then takes the unpacking path).
+pub(crate) fn fast_slice(coll: &Value, from: usize, until: usize) -> Option<Value> {
+    macro_rules! cut {
+        ($v:expr) => {{
+            let from = from.min($v.len());
+            let until = until.min($v.len()).max(from);
+            $v[from..until].to_vec()
+        }};
+    }
+    match coll {
+        Value::CollBytes(v) => Some(Value::CollBytes(cut!(v))),
+        Value::CollShort(v) => Some(Value::CollShort(cut!(v))),
+        Value::CollInt(v) => Some(Value::CollInt(cut!(v))),
+        Value::CollLong(v) => Some(Value::CollLong(cut!(v))),
+        Value::CollBool(v) => Some(Value::CollBool(cut!(v))),
+        Value::CollSigmaProp(v) => Some(Value::CollSigmaProp(cut!(v))),
+        _ => None,
+    }
+}
+
 /// Decompose a collection Value into (element_kind, items).
 pub(crate) fn collection_to_values(
     coll: Value,

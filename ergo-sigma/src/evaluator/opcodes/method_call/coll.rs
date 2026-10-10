@@ -71,6 +71,15 @@ pub(super) fn apply(
             got: format!("{index:?}"),
         });
     };
+    if let Some(len) = crate::evaluator::helpers::fast_len(&obj_val) {
+        return usize::try_from(index)
+            .ok()
+            .and_then(|i| crate::evaluator::helpers::fast_element(&obj_val, i))
+            .ok_or(EvalError::TypeError {
+                expected: "valid collection index",
+                got: format!("index={index}, len={len}"),
+            });
+    }
     let (_, items) = collection_to_values(obj_val, cx.ctx)?;
     usize::try_from(index)
         .ok()
@@ -116,6 +125,12 @@ pub(super) fn get_or_else(
             got: format!("{index:?}"),
         });
     };
+    if crate::evaluator::helpers::fast_len(&obj_val).is_some() {
+        return Ok(usize::try_from(index)
+            .ok()
+            .and_then(|i| crate::evaluator::helpers::fast_element(&obj_val, i))
+            .unwrap_or(default));
+    }
     let (_, items) = collection_to_values(obj_val, cx.ctx)?;
     Ok(usize::try_from(index)
         .ok()
@@ -154,10 +169,23 @@ pub(super) fn index_of(
             });
         }
     };
-    let (_kind, items) = collection_to_values(obj_val, cx.ctx)?;
     let mut result: i32 = -1;
     let mut iters = 0u32;
-    for (i, item) in items.into_iter().enumerate().skip(from) {
+    // Read the elements in place where the carrier allows it.
+    let items: Box<dyn Iterator<Item = (usize, Value)>> =
+        match crate::evaluator::helpers::fast_len(&obj_val) {
+            Some(len) => Box::new((from.min(len)..len).filter_map(move |i| {
+                crate::evaluator::helpers::fast_element(&obj_val, i).map(|v| (i, v))
+            })),
+            None => Box::new(
+                collection_to_values(obj_val, cx.ctx)?
+                    .1
+                    .into_iter()
+                    .enumerate()
+                    .skip(from),
+            ),
+        };
+    for (i, item) in items {
         iters += 1;
         // Scala `indexOf_eval` calls `DataValueComparer.equalDataValues`
         // per iteration, charging its cost (e.g. EQ_Prim(3) for a
@@ -273,6 +301,12 @@ pub(super) fn get(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
         }
     };
     add_method_cost(cx.cost, COST_GET)?;
+    if crate::evaluator::helpers::fast_len(&obj_val).is_some() {
+        let item = usize::try_from(idx)
+            .ok()
+            .and_then(|i| crate::evaluator::helpers::fast_element(&obj_val, i));
+        return Ok(Value::Opt(item.map(Box::new)));
+    }
     let (_kind, items) = collection_to_values(obj_val, cx.ctx)?;
     if idx < 0 || (idx as usize) >= items.len() {
         Ok(Value::Opt(None))
@@ -381,11 +415,14 @@ pub(super) fn flat_map(
             // so we can reassemble the correct output type.
             let inner_colls_was_empty = items.is_empty();
             let mut inner_colls: Vec<Value> = Vec::new();
+            // One environment for every call: the body never mutates it and
+            // each call rebinds the parameter, so the captured values are
+            // not copied per element.
+            let mut call_env = (*captured_env).clone();
             for item in items {
                 // Scala closure invocation: Value.checkType runs
                 // before the AddToEnvironment charge.
                 check_closure_arg(&param_types, &item, cx.ctx).map_err(reflect_sstring_error)?;
-                let mut call_env = (*captured_env).clone();
                 if let Some(param_id) = params.first() {
                     // Scala FuncValue closure binds its argument on each
                     // application: addFixedCost(AddToEnvironment = 5).
