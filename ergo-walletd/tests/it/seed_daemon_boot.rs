@@ -117,7 +117,10 @@ impl RunningDaemon {
                     Ok(())
                 }))
                 .map_err(|error| error.to_string());
-            runtime.shutdown_background();
+            // Wait for blocking tasks (an in-flight sync request, a draining
+            // command): they hold the wallet database, which the next start
+            // in this process must be able to open.
+            runtime.shutdown_timeout(Duration::from_secs(30));
             result
         });
         let running = Self {
