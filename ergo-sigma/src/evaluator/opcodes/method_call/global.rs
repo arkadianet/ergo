@@ -242,6 +242,8 @@ pub(super) fn deserialize_to(
     let mut r = ergo_primitives::reader::VlqReader::new(&bytes)
         .with_activated_script_version(cx.ctx.activated_script_version);
     r.set_ergo_tree_version(Some(cx.ctx.ergo_tree_version));
+    // A fresh reader: a nested box script's unbound ValUse is decidable.
+    r.track_val_bindings();
     let parsed = ergo_ser::sigma_value::read_value(&mut r, target_type).map_err(|e| {
         // DataSerializer preserves ValidationException, including rule 1020.
         // It arises during evaluation and remains a hard spend failure.

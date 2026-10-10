@@ -428,6 +428,13 @@ fn deserialize_measured(
     reader.set_activated_script_version(Some(ctx.activated_script_version));
     reader.set_strict_method_resolution();
     reader.set_embeddable_activated_version(Some(ctx.activated_script_version));
+    // `SigmaSerializer.startReader` gives the payload a fresh reader: an empty
+    // `valDefTypeStore` (an unbound ValUse throws NoSuchElementException) and
+    // an empty `ConstantStore` (any ConstantPlaceholder index is out of
+    // bounds). Both are hard errors raised before the cost charge.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/SigmaSerializer.scala#L22-L33
+    reader.track_val_bindings();
+    reader.set_constant_pool_len(Some(0));
     let parsed = ergo_ser::opcode::parse_body_for_substitution(&mut reader, ctx.ergo_tree_version);
     // ValueSerializer decodes every GroupElement as it reads it (constants,
     // SigmaProp, Box and Header data alike), so an off-curve point throws

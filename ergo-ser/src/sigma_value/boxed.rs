@@ -77,7 +77,13 @@ fn parse_sizeless_inner_box_script_scoped(
             constants.push(read_constant(r)?);
         }
     }
-    let body = crate::opcode::parse_body_with_constants(r, version, &constants)?;
+    // The inner tree's placeholders index its own constants, whatever pool the
+    // enclosing parse has (`deserializeErgoTree` installs a fresh store).
+    let saved_pool_len = r.constant_pool_len();
+    r.set_constant_pool_len(Some(constants.len()));
+    let body = crate::opcode::parse_body_with_constants(r, version, &constants);
+    r.set_constant_pool_len(saved_pool_len);
+    let body = body?;
     // Sizeless inner tree => version 0 (the caller ran rule 1012 first), so methods
     // resolve against the v5 registry; a v6-only OR genuinely-unknown id makes Scala
     // throw a method-resolution `ValidationException`, hardened by the caller.

@@ -257,3 +257,8 @@ fn subst_constants_template_requires_the_size_bit() {
 fn avl_key_length_past_the_jvm_array_limit_fails_the_script() {
     check_vectors("avl-key-length");
 }
+
+#[test]
+fn runtime_deserialized_code_gets_the_tree_parse_checks() {
+    check_vectors("runtime-deserialized-parse-checks");
+}
