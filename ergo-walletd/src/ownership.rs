@@ -53,7 +53,12 @@ pub(crate) fn claim(data_dir: &Path, mode: WalletMode) -> Result<(), ConfigError
                 // state.redb without any standalone wallet.redb. Its node
                 // and daemon would not share a database lock, so adopting
                 // the secrets here would silently create a second owner.
-                for existing in ["wallet", "wallet.redb", "state.redb"] {
+                for existing in [
+                    "wallet",
+                    "wallet.redb",
+                    "state.redb",
+                    crate::seal::WATCH_KEY_FILE,
+                ] {
                     match fs::symlink_metadata(data_dir.join(existing)) {
                         Ok(_) => {
                             return Err(ConfigError::Invalid(

@@ -68,12 +68,12 @@ const GENESIS_CURSOR_ID: &str = "00000000000000000000000000000000000000000000000
 
 // ----- real node state store -----
 
-fn header(height: u32, parent: ModifierId, nonce: [u8; 8]) -> Header {
+fn header(height: u32, parent: ModifierId, nonce: [u8; 8], transactions: &[Transaction]) -> Header {
     Header {
         version: 2,
         parent_id: parent,
         ad_proofs_root: Digest32::from_bytes([0; 32]),
-        transactions_root: Digest32::from_bytes([0; 32]),
+        transactions_root: crate::support::transactions_root(transactions),
         state_root: ADDigest::from_bytes([0; 33]),
         timestamp: 1_000_000 + height as u64,
         extension_root: Digest32::from_bytes([0; 32]),
@@ -97,7 +97,8 @@ fn apply_block(
     parent: ModifierId,
     nonce: [u8; 8],
 ) -> [u8; 32] {
-    let value = header(height, parent, nonce);
+    let transactions = vec![small_transaction(height)];
+    let value = header(height, parent, nonce, &transactions);
     let (bytes, id) = serialize_header(&value).unwrap();
     let id_bytes = *id.as_bytes();
     store.store_header(&id_bytes, &bytes).unwrap();
@@ -106,7 +107,7 @@ fn apply_block(
         &mut writer,
         &BlockTransactions {
             header_id: id,
-            transactions: vec![small_transaction(height)],
+            transactions,
         },
     )
     .unwrap();
@@ -183,8 +184,9 @@ const FULL_BOX_REGISTER_BYTES: usize = 3_900;
 
 /// Output boxes per block. `FULL_BOX_REGISTER_BYTES * OUTPUTS_PER_BLOCK` is
 /// ~1.5 MiB of serialized `BlockTransactions` per block, which is the premise
-/// the paging test asserts: hex-encoded on the wire, a page of three of those
-/// cannot fit the daemon's 8 MiB response cap, while the default one-block page
+/// the paging test asserts: on the wire each block is about four times that
+/// (hex transaction bytes plus hex output boxes), so a page of three cannot fit
+/// the daemon's 16 MiB response cap, while the default one-block page
 /// comfortably can.
 const OUTPUTS_PER_BLOCK: usize = 400;
 
@@ -272,7 +274,8 @@ fn apply_block_with_transactions(
     parent: ModifierId,
     nonce: [u8; 8],
 ) -> ([u8; 32], usize) {
-    let value = header(height, parent, nonce);
+    let transactions = vec![fat_transaction(height, height as u8)];
+    let value = header(height, parent, nonce, &transactions);
     let (bytes, id) = serialize_header(&value).unwrap();
     let id_bytes = *id.as_bytes();
     store.store_header(&id_bytes, &bytes).unwrap();
@@ -281,7 +284,7 @@ fn apply_block_with_transactions(
         &mut writer,
         &BlockTransactions {
             header_id: id,
-            transactions: vec![fat_transaction(height, height as u8)],
+            transactions,
         },
     )
     .unwrap();
@@ -699,9 +702,9 @@ fn real_node_tip_blocks_since_and_sync_against_a_seeded_state_store() {
 ///
 /// The other tests in this module use tiny blocks, where any page size works
 /// because the response is a few hundred bytes. A real mainnet page is not like
-/// that: every output box crosses the wire hex-encoded, so a page of `N` blocks
-/// costs roughly twice their serialized bytes, and the daemon refuses any body
-/// over 8 MiB. This fixture therefore builds blocks of ~1.4 MiB each — many
+/// that: every transaction and output box crosses the wire hex-encoded, so a
+/// page of `N` blocks costs roughly four times their serialized bytes, and the
+/// daemon refuses any body over 16 MiB. This fixture therefore builds blocks of ~1.4 MiB each — many
 /// full-size boxes, the shape a real full block has — so the difference between
 /// "page bounded by `blocks_page`" and "page bounded by `sync_batch`" is the
 /// difference between a completed pass and a hard failure.
@@ -719,10 +722,11 @@ fn real_node_pages_non_empty_full_size_blocks_without_oversized_requests() {
     let (store, section_bytes) = seeded_fat_node(node_dir.path());
     let node = serve_node_api(&store);
 
-    // Premise. The wire form is hex, so the body for a page of `N` blocks is
-    // about `2 * N * section_bytes` plus a per-block JSON allowance.
+    // Premise. The wire form is hex transactions plus hex output boxes, so the
+    // body for a page of `N` blocks is about `4 * N * section_bytes` plus a
+    // per-block JSON allowance.
     let page_body = |blocks: u32| -> u64 {
-        2 * u64::from(blocks) * section_bytes as u64
+        4 * u64::from(blocks) * section_bytes as u64
             + u64::from(blocks) * JSON_ENVELOPE_ALLOWANCE_PER_BLOCK
     };
     assert!(

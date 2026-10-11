@@ -226,7 +226,11 @@ def smoke_walletd(binary, config_template, work):
                         if time.monotonic() >= deadline:
                             raise RuntimeError("walletd lifecycle API unavailable") from None
                         time.sleep(0.1)
-                if status != 200 or headers.get("Cache-Control") != "no-store" or state != {"initialized": boot == "reopen", "locked": True}:
+                # A reopened seed wallet starts sealed: its database key is
+                # released only by the password.
+                expected = ({"initialized": True, "locked": True, "sealed": True} if boot == "reopen"
+                            else {"initialized": False, "locked": True})
+                if status != 200 or headers.get("Cache-Control") != "no-store" or state != expected:
                     raise RuntimeError("walletd seed status or cache policy differs")
                 if request("/api/v1/wallet/lifecycle/status", authenticated=False)[0] != 401:
                     raise RuntimeError("walletd seed read accepted missing credential")
@@ -237,6 +241,13 @@ def smoke_walletd(binary, config_template, work):
                         raise RuntimeError("walletd seed unlock failed")
                     if request("/api/v1/wallet/lifecycle/status")[2] != {"initialized": True, "locked": False}:
                         raise RuntimeError("walletd initialized seed did not unlock")
+                else:
+                    if request("/api/v1/wallet/addresses")[0] != 503:
+                        raise RuntimeError("walletd sealed seed served wallet data")
+                    if request("/api/v1/wallet/unlock", body={"pass": password})[0] != 200:
+                        raise RuntimeError("walletd sealed seed did not unseal")
+                    if request("/api/v1/wallet/lifecycle/status")[2] != {"initialized": True, "locked": False}:
+                        raise RuntimeError("walletd unsealed seed did not unlock")
                 process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
                 if process.wait(timeout=30) != 0:
                     raise RuntimeError("walletd graceful shutdown failed")
@@ -247,6 +258,8 @@ def smoke_walletd(binary, config_template, work):
                 raise RuntimeError(f"{error}\n{log_path.read_text(encoding='utf-8', errors='replace')[-8000:]}") from error
     if not (work / "data/wallet.redb").is_file() or len(list((work / "data/wallet").glob("*.json"))) != 1:
         raise RuntimeError("walletd did not retain exactly one encrypted seed and standalone database")
+    if (work / "data/wallet.redb").read_bytes()[:4] == b"redb":
+        raise RuntimeError("walletd left its database unencrypted")
 
 
 def packaged_document(content, document, stage, source_sha, *, extension="", root=ROOT):

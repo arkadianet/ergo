@@ -1770,6 +1770,7 @@ mod tests {
                         index: 0,
                         bytes,
                     }],
+                    bytes: None,
                 }],
             }],
         });

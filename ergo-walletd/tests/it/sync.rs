@@ -179,13 +179,14 @@ fn page_size_bounds_every_request_while_the_batch_budget_still_applies() {
 #[test]
 fn the_default_page_is_the_bounded_constant_not_the_apply_budget() {
     const DOCUMENTED_MAX_BLOCK_SIZE: u64 = 2 * 1024 * 1024;
-    // Worst-case body for a page of N blocks: hex doubles every box byte, plus a
-    // deliberately loose allowance for the JSON envelope. The real envelope is a
-    // few hundred kilobytes, so this over-counts and cannot make the default look
-    // safer than it is.
+    // Worst-case body for a page of N blocks: every transaction crosses the
+    // wire as hex and so do its output boxes, so a block costs up to four times
+    // its bytes, plus a deliberately loose allowance for the JSON envelope. The
+    // real envelope is a few hundred kilobytes, so this over-counts and cannot
+    // make the default look safer than it is.
     const ENVELOPE_ALLOWANCE_PER_BLOCK: u64 = 1024 * 1024;
     let worst_case_body = |blocks: u64| -> u64 {
-        blocks * (2 * DOCUMENTED_MAX_BLOCK_SIZE + ENVELOPE_ALLOWANCE_PER_BLOCK)
+        blocks * (4 * DOCUMENTED_MAX_BLOCK_SIZE + ENVELOPE_ALLOWANCE_PER_BLOCK)
     };
     let cap = ergo_walletd::chain_http::MAX_RESPONSE_BODY_BYTES as u64;
 

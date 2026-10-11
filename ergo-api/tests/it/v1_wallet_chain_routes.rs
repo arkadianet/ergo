@@ -185,6 +185,7 @@ impl FakeChain {
                     index: 0,
                     bytes: "00ff".to_string(),
                 }],
+                bytes: Some("0102".to_string()),
             }],
         }
     }

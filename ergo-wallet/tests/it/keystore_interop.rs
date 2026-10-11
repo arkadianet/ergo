@@ -503,3 +503,77 @@ fn failed_upgrade_keeps_the_original_file_and_still_unlocks() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
+
+#[test]
+fn wallet_database_key_is_sealed_in_the_keystore_and_survives_rewrites() {
+    let oracle = oracle();
+    let key = [7u8; 32];
+
+    // A new wallet created with a database key returns it for the password only.
+    let dir = tempfile::tempdir().unwrap();
+    let mut storage = SecretStorage::open(dir.path().to_path_buf());
+    storage.set_new_wallet_data_key(key);
+    storage
+        .restore(&oracle.mnemonic, "", &oracle.password, false)
+        .unwrap();
+    assert_eq!(
+        *SecretStorage::open_data_key(dir.path(), &oracle.password)
+            .unwrap()
+            .unwrap(),
+        key
+    );
+    assert!(matches!(
+        SecretStorage::open_data_key(dir.path(), "wrong"),
+        Err(WalletError::Decryption)
+    ));
+    let path = SecretStorage::find_secret_file(dir.path()).unwrap();
+    assert!(read_keystore(&path).has_data_key());
+    // Installing a second key would orphan the database.
+    assert!(matches!(
+        SecretStorage::install_data_key(dir.path(), &oracle.password, &[8u8; 32]),
+        Err(WalletError::SecretFile(_))
+    ));
+
+    // A Scala version-1 file gains a key; the rewrite is version 2, keeps the
+    // seed and still holds exactly one file.
+    let (v1_dir, v1_path) = write_secret(&oracle.vectors[0].encrypted_secret);
+    assert_eq!(
+        SecretStorage::open_data_key(v1_dir.path(), &oracle.password).unwrap(),
+        None
+    );
+    assert!(matches!(
+        SecretStorage::install_data_key(v1_dir.path(), "wrong", &key),
+        Err(WalletError::Decryption)
+    ));
+    SecretStorage::install_data_key(v1_dir.path(), &oracle.password, &key).unwrap();
+    assert_eq!(std::fs::read_dir(v1_dir.path()).unwrap().count(), 1);
+    assert!(read_keystore(&v1_path).has_data_key());
+    let mut unlocked = SecretStorage::open(v1_dir.path().to_path_buf());
+    unlocked.unlock(&oracle.password).unwrap();
+    assert!(unlocked.check_seed(&oracle.mnemonic, ""));
+    assert_eq!(
+        *SecretStorage::open_data_key(v1_dir.path(), &oracle.password)
+            .unwrap()
+            .unwrap(),
+        key
+    );
+
+    // A tampered sealed key fails authentication rather than yielding a key.
+    let KeystoreFile::V2(mut secret) = read_keystore(&v1_path) else {
+        panic!("installed keystores are version 2");
+    };
+    let sealed = secret.data_key.as_mut().unwrap();
+    let mut bytes = hex::decode(&sealed.cipher_text).unwrap();
+    bytes[0] ^= 1;
+    sealed.cipher_text = hex::encode(bytes);
+    let tampered = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tampered.path().join("w.json"),
+        serde_json::to_vec(&secret).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        SecretStorage::open_data_key(tampered.path(), &oracle.password),
+        Err(WalletError::Decryption)
+    ));
+}

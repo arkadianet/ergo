@@ -280,6 +280,7 @@ pub(crate) fn generate_commitments_impl(
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
+    custody: Option<&dyn super::NonceCustody>,
 ) -> Result<ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsResponse, WalletAdminError> {
     use ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsResponse;
 
@@ -355,7 +356,7 @@ pub(crate) fn generate_commitments_impl(
     }
     .map_err(|e| WalletAdminError::Internal(format!("generateCommitments: {e}")))?;
 
-    let hints_dto = tx_hints_bag_to_dto(&tbag);
+    let hints_dto = tx_hints_bag_to_dto(&tbag, custody);
     Ok(GenerateCommitmentsResponse { hints: hints_dto })
 }
 
@@ -443,7 +444,8 @@ pub(crate) fn extract_hints_impl(
     }
     .map_err(|e| WalletAdminError::Internal(format!("extractHints: {e}")))?;
 
-    let hints_dto = tx_hints_bag_to_dto(&tbag);
+    // Extraction yields public hints only: no own secret nonce exists here.
+    let hints_dto = tx_hints_bag_to_dto(&tbag, None);
     Ok(HintExtractionResponse { hints: hints_dto })
 }
 
@@ -458,6 +460,7 @@ impl WalletEngine {
             &self.storage,
             self.store.as_ref(),
             self.chain.as_ref(),
+            self.nonce_custody.as_deref(),
         )
     }
 

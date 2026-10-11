@@ -74,7 +74,7 @@ pub const UNLOCK_ATTEMPTS_FILE: &str = "unlock-attempts.json";
 
 /// Owner-only, atomically replaced JSON record of unlock failures, so that
 /// restarting the daemon neither resets the guess budget nor ends a lockout.
-struct FileAttemptJournal(std::path::PathBuf);
+pub(crate) struct FileAttemptJournal(pub(crate) std::path::PathBuf);
 
 impl ergo_wallet_service::engine::AttemptJournal for FileAttemptJournal {
     fn load(&self) -> Result<Option<ergo_wallet_service::engine::AttemptRecord>, String> {
@@ -130,6 +130,8 @@ struct Inner {
     recovery_generation: AtomicU64,
     /// When the current unlock began and when the last wallet operation ran.
     session: Mutex<Option<UnlockSession>>,
+    /// Multisig nonces kept by the daemon, when enabled.
+    nonce_vault: Mutex<Option<Arc<crate::nonce_vault::NonceVault>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -316,6 +318,7 @@ impl WalletHost {
                 rescan_task: Mutex::new(None),
                 recovery_generation: AtomicU64::new(0),
                 session: Mutex::new(None),
+                nonce_vault: Mutex::new(None),
             }),
         })
     }
@@ -540,7 +543,27 @@ impl WalletHost {
     pub async fn lock(&self) -> Result<(), WalletAdminError> {
         self.call_inner(|engine| engine.lock(), true).await?;
         *self.inner.session.lock() = None;
+        if let Some(vault) = self.inner.nonce_vault.lock().as_ref() {
+            vault.clear();
+        }
         Ok(())
+    }
+
+    /// Keep multisig nonces in the daemon: `generateCommitments` returns
+    /// single-use handles, and locking wipes every held nonce.
+    pub fn enable_nonce_custody(&self) {
+        let vault = Arc::new(crate::nonce_vault::NonceVault::default());
+        self.inner.engine.lock().set_nonce_custody(vault.clone());
+        *self.inner.nonce_vault.lock() = Some(vault);
+    }
+
+    /// Seal the wallet database key into the keystore a later `init` or
+    /// `restore` creates.
+    pub fn set_new_wallet_data_key(&self, key: &crate::encrypted_db::DataKey) {
+        self.inner
+            .engine
+            .lock()
+            .set_new_wallet_data_key(*key.expose());
     }
 
     /// Record a wallet operation for the idle lock. Reads do not count, so a

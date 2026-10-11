@@ -138,6 +138,25 @@ pub struct SecuritySection {
     /// limit would make later allocations fail.
     #[serde(default)]
     pub lock_memory: bool,
+    /// Owner-only file holding the wallet database key as 64 hex characters,
+    /// read at start to unseal without a password. Intended for a systemd
+    /// `LoadCredentialEncrypted=` credential sealed to the host TPM; the copy
+    /// is only as strong as where it is stored.
+    pub unseal_key_file: Option<PathBuf>,
+    /// Who holds multisig signing nonces between `generateCommitments` and
+    /// signing: the daemon (default; single-use handles are returned) or the
+    /// caller (the Scala-compatible secret hex).
+    #[serde(default)]
+    pub multisig_nonces: NonceHolder,
+}
+
+/// Holder of multisig signing nonces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NonceHolder {
+    #[default]
+    Daemon,
+    Caller,
 }
 
 impl Default for SecuritySection {
@@ -146,6 +165,8 @@ impl Default for SecuritySection {
             idle_lock: default_idle_lock(),
             max_unlock: default_max_unlock(),
             lock_memory: false,
+            unseal_key_file: None,
+            multisig_nonces: NonceHolder::Daemon,
         }
     }
 }
@@ -288,12 +309,21 @@ pub struct Cli {
     pub unix_socket: Option<PathBuf>,
     #[arg(long)]
     pub tcp_fallback: Option<SocketAddr>,
+    /// Overrides `[security] unseal_key_file`, e.g.
+    /// `${CREDENTIALS_DIRECTORY}/unseal-key`.
+    #[arg(long)]
+    pub unseal_key_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum CliCommand {
     /// Copy a stopped embedded wallet into a fresh standalone seed directory.
     Migrate(crate::migration::MigrateArgs),
+    /// Print the wallet database key as hex, for an `unseal_key_file`
+    /// credential. Reads the wallet password (seed) or passphrase
+    /// (watch-only) from the first line of standard input. Pipe the output
+    /// straight into `systemd-creds encrypt`; never store it in the clear.
+    ExportUnsealKey,
 }
 
 #[derive(Clone)]
@@ -373,6 +403,8 @@ pub struct Config {
     pub allowed_hosts: Vec<String>,
     pub lock_policy: LockPolicy,
     pub lock_memory: bool,
+    pub unseal_key_file: Option<PathBuf>,
+    pub multisig_nonces: NonceHolder,
 }
 
 #[derive(Debug, Clone)]
@@ -424,6 +456,9 @@ impl Config {
         }
         if let Some(value) = cli.tcp_fallback {
             file.tcp_fallback = Some(value);
+        }
+        if let Some(value) = cli.unseal_key_file {
+            file.security.unseal_key_file = Some(value);
         }
         let config = Self::from_file(file)?;
         let api_key = read_api_key(&config.api_key_file)?;
@@ -584,6 +619,8 @@ impl Config {
             allowed_hosts,
             lock_policy: LockPolicy::from_section(&file.security),
             lock_memory: file.security.lock_memory,
+            unseal_key_file: file.security.unseal_key_file.clone(),
+            multisig_nonces: file.security.multisig_nonces,
         })
     }
 }
@@ -1102,6 +1139,7 @@ mod tests {
             blocks_page: None,
             unix_socket: None,
             tcp_fallback: None,
+            unseal_key_file: None,
         })
         .unwrap();
         assert_eq!(loaded.config.network, Network::Testnet);

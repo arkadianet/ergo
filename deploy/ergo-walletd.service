@@ -18,6 +18,11 @@ WorkingDirectory=/var/lib/ergo-walletd
 # systemd presents private copies to the dynamic service account.
 LoadCredential=node-api-key:/etc/ergo-walletd/node-api-key
 LoadCredential=wallet-api-key:/etc/ergo-walletd/wallet-api-key
+# Optional unattended unseal: a TPM-bound database key created with
+#   ergo-walletd export-unseal-key | systemd-creds encrypt --with-key=tpm2 \
+#     --name=unseal-key - /etc/ergo-walletd/unseal-key.cred
+# then add --unseal-key-file ${CREDENTIALS_DIRECTORY}/unseal-key to ExecStart.
+#LoadCredentialEncrypted=unseal-key:/etc/ergo-walletd/unseal-key.cred
 ExecStart=/usr/local/bin/ergo-walletd --config /etc/ergo-walletd/walletd.toml --data-dir /var/lib/ergo-walletd --api-key-file ${CREDENTIALS_DIRECTORY}/node-api-key --local-api-key-file ${CREDENTIALS_DIRECTORY}/wallet-api-key --unix-socket /run/ergo-walletd/wallet.sock
 Restart=on-failure
 RestartSec=10s

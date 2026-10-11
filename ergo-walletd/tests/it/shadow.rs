@@ -1490,7 +1490,9 @@ impl EmbeddedSide {
                 version: 2,
                 parent_id: ModifierId::from_bytes(parent),
                 ad_proofs_root: Digest32::from_bytes([0; 32]),
-                transactions_root: Digest32::from_bytes([0; 32]),
+                transactions_root: crate::support::transactions_root(
+                    &parsed.iter().map(|(tx, _)| tx.clone()).collect::<Vec<_>>(),
+                ),
                 state_root,
                 timestamp: 1_000_000 + height as u64,
                 extension_root: Digest32::from_bytes([0; 32]),

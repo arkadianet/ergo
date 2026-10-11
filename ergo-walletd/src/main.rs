@@ -26,6 +26,7 @@ fn main() {
             }
         }
     }
+    let export = matches!(cli.command, Some(CliCommand::ExportUnsealKey));
     let config = match ergo_walletd::config::Config::load(cli) {
         Ok(config) => config,
         Err(error) => {
@@ -33,6 +34,27 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if export {
+        let mut secret = zeroize::Zeroizing::new(String::new());
+        if std::io::stdin().read_line(&mut secret).is_err() {
+            eprintln!("ergo-walletd: could not read the password from standard input");
+            std::process::exit(2);
+        }
+        let secret = secret.trim_end_matches(['\n', '\r']);
+        match ergo_walletd::seal::export_unseal_key(&config.config, secret) {
+            Ok(key) => {
+                println!(
+                    "{}",
+                    zeroize::Zeroizing::new(hex::encode(key.expose())).as_str()
+                );
+                return;
+            }
+            Err(error) => {
+                eprintln!("ergo-walletd: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if config.config.lock_memory {
         if let Err(error) = ergo_walletd::hardening::lock_all_memory() {
             eprintln!("ergo-walletd: {error}");
