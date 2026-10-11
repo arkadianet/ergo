@@ -18,7 +18,7 @@
 //!
 //! Mounted with `Router::layer` (not `route_layer`) around the fully
 //! assembled router in
-//! [`crate::server::serve_on_with_mempool_and_wallet_and_security_and_hosts`],
+//! [`crate::server::serve_on_with_mempool_and_security_and_hosts`],
 //! so it also covers the 404 fallback — a rebound request should never
 //! learn anything about the route table, not even "that path doesn't
 //! exist."

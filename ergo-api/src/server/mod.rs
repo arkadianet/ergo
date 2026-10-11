@@ -6,12 +6,12 @@
 //! hash denies access with setup guidance. Public routes remain open.
 //!
 //! Entry points come in two tiers. The positional convenience builders
-//! (`serve_on`, `serve`, `router`, `router_with_wallet`) hardwire a
-//! `NoopMempoolView`/`NoopWalletAdmin` with privileged routes closed — they let tests
+//! (`serve_on`, `serve`, `router`) hardwire a
+//! `NoopMempoolView` with privileged routes closed — they let tests
 //! stand up a router without assembling a full `ServerCtx`. Production
 //! goes through the explicit builder
-//! (`serve_on_with_mempool_and_wallet_and_security` /
-//! `router_with_mempool_and_wallet_and_security`), which takes the
+//! (`serve_on_with_mempool_and_security` /
+//! `router_with_mempool_and_security`), which takes the
 //! `Option<ApiSecurity>` gate as a required argument, never defaulted, so
 //! enabling auth is a conscious decision at every call site rather than a
 //! fallthrough.
@@ -26,7 +26,7 @@ use axum::{
     extract::{MatchedPath, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{from_fn, Next},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -44,14 +44,15 @@ use crate::compat::handlers::{
     utxo_with_pool_boxes_by_ids_handler as scala_utxo_with_pool_boxes_by_ids_handler,
 };
 use crate::compat::traits::NodeChainQuery;
-use crate::traits::ChainParamsView;
-use crate::traits::{MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView};
+use crate::traits::{
+    ChainParamsView, MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView,
+    WalletChain,
+};
 use crate::web::{
     JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHAIN_ACTIVITY, JS_CHART, JS_EXPLORER, JS_FEE_STATS,
     JS_FORMAT, JS_MEMPOOL, JS_MINERS, JS_MINING, JS_MINING_INSPECTOR, JS_MINING_POLICY,
     JS_MINING_REWARD, JS_MINING_WORK, JS_NODE_GUIDANCE, JS_OVERVIEW, JS_PEERS, JS_ROUTER,
     JS_SETTINGS, JS_SPARKLINE, JS_STORAGE_RENT, JS_SYNC_RINGS, JS_TABLE, JS_TOKEN_META, JS_VOTING,
-    JS_WALLET, JS_WALLET_BUILDER, JS_WALLET_MAINTENANCE, JS_WALLET_PRIVATE, JS_WALLET_TRANSACTION,
     JS_WORKSPACE_SEARCH, JS_WS_CLIENT,
 };
 use ergo_indexer_types::IndexerQuery;
@@ -99,6 +100,7 @@ pub struct ServerCtx {
     pub read: Arc<dyn NodeReadState>,
     pub compat: Option<Arc<dyn NodeChainQuery>>,
     pub submit: Option<Arc<dyn NodeSubmit>>,
+    pub wallet_chain: Option<Arc<dyn WalletChain>>,
     pub indexer: Option<Arc<dyn IndexerQuery>>,
     pub mempool: Arc<dyn MempoolView>,
     pub network: NetworkPrefix,
@@ -111,6 +113,9 @@ pub struct ServerCtx {
     /// the API is unaffected. The integrator mounts a real handle when
     /// `[mining].enabled = true`.
     pub mining: Option<Arc<dyn crate::mining::NodeMining>>,
+    /// Optional durable private queue retained with mining disabled. Operator
+    /// list/cancel routes use it without enabling candidate or import routes.
+    pub private_queue: Option<Arc<dyn crate::mining::NodeMining>>,
     /// Scala-compat `/emission/at/{height}` schedule view. `None` ⇒ the
     /// route is not mounted (404). Production always wires it — the
     /// schedule is static per-network math, valid in every node mode.
@@ -185,11 +190,13 @@ pub fn serve_on(
         read,
         compat,
         submit,
+        wallet_chain: None,
         indexer,
         mempool: Arc::new(NoopMempoolView::new()),
         network,
         chain_params: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported,
@@ -208,52 +215,35 @@ pub fn serve_on(
 /// [`serve_on`] keeps the legacy positional signature for the test
 /// callers that don't need the overlay.
 ///
-/// Wallet routes are backed by a [`crate::wallet::NoopWalletAdmin`] and
-/// privileged routes are closed (`security = None`). For production, use
-/// [`serve_on_with_mempool_and_wallet_and_security`] directly.
+/// Privileged routes are closed (`security = None`). For production, use
+/// [`serve_on_with_mempool_and_security`] directly.
 pub fn serve_on_with_mempool(
     ctx: ServerCtx,
     listener: tokio::net::TcpListener,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     admin: Option<Arc<dyn NodeAdmin>>,
 ) -> JoinHandle<()> {
-    // Test entry point: no wallet, privileged routes closed. Production uses
-    // [`serve_on_with_mempool_and_wallet_and_security`] directly.
-    serve_on_with_mempool_and_wallet_and_security(
-        ctx,
-        listener,
-        shutdown_rx,
-        admin,
-        Arc::new(crate::wallet::NoopWalletAdmin),
-        None,
-    )
+    // Test entry point: privileged routes closed. Production uses
+    // [`serve_on_with_mempool_and_security`] directly.
+    serve_on_with_mempool_and_security(ctx, listener, shutdown_rx, admin, None)
 }
 
 /// Full-featured server entry point: mempool overlay + `NodeAdmin` +
-/// `WalletAdmin` + explicit `Option<Arc<ApiSecurity>>`.
+/// explicit `Option<Arc<ApiSecurity>>`.
 ///
 /// Production passes `Some(operator_security)` when a hash is configured,
 /// or `None` to keep privileged routes closed. Public routes stay available.
-pub fn serve_on_with_mempool_and_wallet_and_security(
+pub fn serve_on_with_mempool_and_security(
     ctx: ServerCtx,
     listener: tokio::net::TcpListener,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     admin: Option<Arc<dyn NodeAdmin>>,
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> JoinHandle<()> {
-    serve_on_with_mempool_and_wallet_and_security_and_hosts(
-        ctx,
-        listener,
-        shutdown_rx,
-        admin,
-        wallet_admin,
-        security,
-        &[],
-    )
+    serve_on_with_mempool_and_security_and_hosts(ctx, listener, shutdown_rx, admin, security, &[])
 }
 
-/// Variant of [`serve_on_with_mempool_and_wallet_and_security`] that
+/// Variant of [`serve_on_with_mempool_and_security`] that
 /// also takes the operator's `[api] allowed_hosts` list, threaded into
 /// the [`crate::host_guard`] middleware layered around the whole
 /// router (including the 404 fallback) — see that module's docs for
@@ -267,14 +257,34 @@ pub fn serve_on_with_mempool_and_wallet_and_security(
 /// resolved `[api] allowed_hosts`; every other `serve_on*` variant
 /// forwards an empty list here.
 #[allow(clippy::too_many_arguments)]
-pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
+pub fn serve_on_with_mempool_and_security_and_hosts(
     ctx: ServerCtx,
     listener: tokio::net::TcpListener,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     admin: Option<Arc<dyn NodeAdmin>>,
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
     allowed_hosts: &[String],
+) -> JoinHandle<()> {
+    serve_on_with_mempool_and_security_and_hosts_and_wallet_moved(
+        ctx,
+        listener,
+        shutdown_rx,
+        admin,
+        security,
+        allowed_hosts,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn serve_on_with_mempool_and_security_and_hosts_and_wallet_moved(
+    ctx: ServerCtx,
+    listener: tokio::net::TcpListener,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    allowed_hosts: &[String],
+    wallet_moved: Option<&str>,
 ) -> JoinHandle<()> {
     let bind_addr = listener.local_addr().ok();
     // v1 boot-warn: loudly flag a network-reachable T1/T2 surface under
@@ -285,7 +295,7 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     }
     let services = ctx.services.clone();
     let worker_read = ctx.read.clone();
-    let app = router_with_mempool_and_wallet_and_security(ctx, admin, wallet_admin, security);
+    let app = router_with_mempool_and_wallet_moved(ctx, admin, security, wallet_moved);
     // Host-header allowlist: the outermost layer, added after the router
     // is fully assembled (with its own `TraceLayer` / `spa_security_headers`
     // layers already attached), so it runs first on every request —
@@ -398,7 +408,7 @@ pub async fn serve(
 /// handlers whenever the node's state backend does not retain UTXO
 /// box bytes. Returns `503 Service Unavailable` with a JSON body
 /// describing the limitation. Mounted by
-/// [`router_with_mempool_and_wallet_and_security`] when
+/// [`router_with_mempool_and_security`] when
 /// `ServerCtx::utxo_reads_supported = false`.
 ///
 /// The body shape is `[derived]` — locally authored to be
@@ -517,14 +527,10 @@ fn scala_utxo_subtree(utxo_reads_supported: bool) -> Router<Arc<dyn NodeChainQue
 /// the router via [`router_with_mempool`]; this entry point installs
 /// [`NoopMempoolView`] for tests that don't care about the P5 overlay.
 ///
-/// Mounts the wallet routes backed by a [`crate::wallet::NoopWalletAdmin`]
-/// (returns zero-state for `/wallet/status`; 501 stubs for all others).
-/// Pass [`router_with_wallet`] if you need a real or test `WalletAdmin`.
-///
 /// `/utxo/*` routes mount in their Mode 1 (UTXO backend) shape; callers
 /// that need the Mode 5 digest-backend 503 shape construct a
 /// [`ServerCtx`] directly and call [`router_with_mempool`] or
-/// [`router_with_mempool_and_wallet_and_security`] with
+/// [`router_with_mempool_and_security`] with
 /// `utxo_reads_supported: false`. Production goes through those
 /// ServerCtx-direct paths via `ergo-node`'s boot dispatch, which
 /// derives the field from the resolved `state_type`.
@@ -535,50 +541,25 @@ pub fn router(
     indexer: Option<Arc<dyn IndexerQuery>>,
     network: NetworkPrefix,
 ) -> Router {
-    router_with_wallet(
-        read,
-        compat,
-        submit,
-        indexer,
-        network,
-        true,
-        Arc::new(crate::wallet::NoopWalletAdmin),
-    )
-}
-
-/// Variant of [`router`] that accepts a real (or test) [`crate::wallet::WalletAdmin`].
-/// Used by tests that need a real `WalletAdmin` and a configurable
-/// `utxo_reads_supported` without constructing a full
-/// [`ServerCtx`]. Production `ergo-node` goes directly through
-/// [`router_with_mempool_and_wallet_and_security`] with a fully-
-/// resolved [`ServerCtx`] whose `utxo_reads_supported` is derived
-/// from the resolved `state_type`.
-pub fn router_with_wallet(
-    read: Arc<dyn NodeReadState>,
-    compat: Option<Arc<dyn NodeChainQuery>>,
-    submit: Option<Arc<dyn NodeSubmit>>,
-    indexer: Option<Arc<dyn IndexerQuery>>,
-    network: NetworkPrefix,
-    utxo_reads_supported: bool,
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
-) -> Router {
     let ctx = ServerCtx {
         read,
         compat,
         submit,
+        wallet_chain: None,
         indexer,
         mempool: Arc::new(NoopMempoolView::new()),
         network,
         chain_params: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
-        utxo_reads_supported,
+        utxo_reads_supported: true,
         local_reverse_proxy: false,
         services: Arc::new(crate::ApiServices::new()),
         script_config: Default::default(),
     };
-    router_with_mempool_and_wallet_and_security(ctx, None, wallet_admin, None)
+    router_with_mempool_and_security(ctx, None, None)
 }
 
 /// Variant of [`router`] that installs a snapshot-backed
@@ -587,17 +568,11 @@ pub fn router_with_wallet(
 /// unconfirmed overlay (balance, unspent boxes) call this directly with
 /// a fixture view.
 ///
-/// Mounts wallet routes backed by a [`crate::wallet::NoopWalletAdmin`].
 /// Test-only entry point — calls the security-aware builder with
-/// `wallet_admin = NoopWalletAdmin` and `security = None`. Production
-/// uses [`router_with_mempool_and_wallet_and_security`] directly.
+/// `security = None`. Production uses [`router_with_mempool_and_security`]
+/// directly.
 pub fn router_with_mempool(ctx: ServerCtx, admin: Option<Arc<dyn NodeAdmin>>) -> Router {
-    router_with_mempool_and_wallet_and_security(
-        ctx,
-        admin,
-        Arc::new(crate::wallet::NoopWalletAdmin),
-        None,
-    )
+    router_with_mempool_and_security(ctx, admin, None)
 }
 
 fn make_http_span(request: &Request) -> tracing::Span {
@@ -650,40 +625,64 @@ fn log_http_response_failure(class: ServerErrorsFailureClass, latency: std::time
     }
 }
 
-/// Full-featured router builder: mempool overlay + explicit `WalletAdmin` +
-/// explicit `Option<Arc<ApiSecurity>>` gate. When `security` is `Some`,
-/// the `/wallet/*` subtree and both `/node/shutdown` aliases are wrapped
+/// Full-featured router builder: mempool overlay + explicit
+/// `Option<Arc<ApiSecurity>>` gate. When `security` is `Some`, the retired
+/// `/wallet/*` subtree and both `/node/shutdown` aliases are wrapped
 /// with [`crate::auth::require_api_key`] **before** they merge into the
 /// public router — public routes (`/info`, `/blocks/*`, `/peers/*`,
 /// `/transactions*`, `/utils/*`) stay unauthenticated. There is no
 /// convenience wrapper that hides the security parameter; callers
 /// must pass an explicit `Option` so the auth decision is local to
 /// every call site rather than a default fallthrough.
-pub fn router_with_mempool_and_wallet_and_security(
+pub fn router_with_mempool_and_security(
     ctx: ServerCtx,
     admin: Option<Arc<dyn NodeAdmin>>,
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> Router {
-    router_with_mempool_and_wallet_and_security_and_inventory(ctx, admin, wallet_admin, security).0
+    router_with_mempool_and_security_and_inventory(ctx, admin, security).0
 }
 
-pub fn router_with_mempool_and_wallet_and_security_and_inventory(
+pub fn router_with_mempool_and_wallet_moved(
     ctx: ServerCtx,
     admin: Option<Arc<dyn NodeAdmin>>,
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
+    wallet_moved: Option<&str>,
+) -> Router {
+    router_with_mempool_and_security_and_inventory_and_wallet_moved(
+        ctx,
+        admin,
+        security,
+        wallet_moved,
+    )
+    .0
+}
+
+pub fn router_with_mempool_and_security_and_inventory(
+    ctx: ServerCtx,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+) -> (Router, ApiRouteInventory) {
+    router_with_mempool_and_security_and_inventory_and_wallet_moved(ctx, admin, security, None)
+}
+
+fn router_with_mempool_and_security_and_inventory_and_wallet_moved(
+    ctx: ServerCtx,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    wallet_moved: Option<&str>,
 ) -> (Router, ApiRouteInventory) {
     let mut inventory = ApiRouteInventory::default();
     let ServerCtx {
         read,
         compat,
         submit,
+        wallet_chain,
         indexer,
         mempool,
         network,
         chain_params,
         mining,
+        private_queue,
         emission,
         emission_scripts,
         utxo_reads_supported,
@@ -702,6 +701,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     // Per-height emission schedule for the `stats/*` supply series.
     let v1_emission = emission.clone();
     let v1_submit = submit.clone();
+    let v1_wallet_chain = wallet_chain.clone();
     let v1_mempool = mempool.clone();
     // Same up-front-clone rationale for the `script/*` group: `compat` is
     // moved into the Scala-compat `match` further down, so the chain reader for
@@ -775,23 +775,6 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         .route("/js/peers.js", get(|| async { js(JS_PEERS) }))
         .route("/js/mempool.js", get(|| async { js(JS_MEMPOOL) }))
         .route("/js/voting.js", get(|| async { js(JS_VOTING) }))
-        .route("/js/wallet.js", get(|| async { js(JS_WALLET) }))
-        .route(
-            "/js/wallet-private.js",
-            get(|| async { js(JS_WALLET_PRIVATE) }),
-        )
-        .route(
-            "/js/wallet-maintenance.js",
-            get(|| async { js(JS_WALLET_MAINTENANCE) }),
-        )
-        .route(
-            "/js/wallet-builder.js",
-            get(|| async { js(JS_WALLET_BUILDER) }),
-        )
-        .route(
-            "/js/wallet-transaction.js",
-            get(|| async { js(JS_WALLET_TRANSACTION) }),
-        )
         .route("/js/miners.js", get(|| async { js(JS_MINERS) }))
         .route("/js/mining.js", get(|| async { js(JS_MINING) }))
         .route("/js/mining-work.js", get(|| async { js(JS_MINING_WORK) }))
@@ -878,7 +861,6 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         &mut inventory,
         scala_api::auxiliary_router(
             network,
-            wallet_admin.clone(),
             mining,
             emission,
             emission_scripts,
@@ -909,7 +891,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     let assembled = route_registry::merge_family_router(
         assembled,
         &mut inventory,
-        scala_api::wallet_router(wallet_admin.clone(), security.clone()),
+        scala_api::wallet_router(security.clone(), wallet_moved),
     );
     // The v1 T1 (operator) auth config — the same api-key gate the wallet
     // surface uses, reused for the `webhooks/*` management routes below.
@@ -917,14 +899,10 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     let v1_auth = crate::v1::auth::V1AuthConfig::new(security.clone())
         .with_local_reverse_proxy(local_reverse_proxy)
         .into_shared();
-    // Captured before the native mount consumes `wallet_admin`: the v1
-    // scan/accounts group (`/api/v1/scan/*` + `/api/v1/accounts/*`)
-    // reuses the SAME wallet-admin bridge for scan + key operations.
-    let v1_accounts_admin = wallet_admin.clone();
     let assembled = route_registry::merge_family_router(
         assembled,
         &mut inventory,
-        rust_api::wallet_router(wallet_admin, security),
+        rust_api::wallet_router(security, wallet_moved),
     );
 
     // Native `/api/v1/*` product API — the `chain/*` + `transactions/*` reads
@@ -950,6 +928,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         chain: v1_chain,
         indexer: v1_indexer,
         submit: v1_submit,
+        wallet_chain: v1_wallet_chain.clone(),
         // Keyless build stays honest-unavailable (route_unavailable) until the
         // extracted keyless TxBuilder core is wired in ergo-node.
         tx_builder: None,
@@ -992,14 +971,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         chain: v1_op_chain,
         admin: v1_op_admin,
         mining: v1_op_mining,
-        network,
-    };
-    // Scan registry + account-abstraction group (`/api/v1/scan/*`,
-    // `/api/v1/accounts/*`). T0 watch reads (governor), T1 scan +
-    // watch writes + account/PSBT seams (`require_tier(Operator)`), T2 private-key
-    // export (`require_tier(Admin)` — api-key + loopback-preferred).
-    let v1_accounts_state = crate::v1::AccountsState {
-        admin: v1_accounts_admin,
+        private_queue,
         network,
     };
     // `POST /api/v1/batch` — a bounded read-only multiplexer over
@@ -1014,11 +986,12 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         rust_api::product_router(rust_api::ProductRouterState {
             script: script_state,
             api: v1_state,
+            wallet_chain: v1_wallet_chain,
             operator: v1_operator_state,
-            accounts: v1_accounts_state,
             webhooks: v1_webhooks_state,
             governor: v1_governor,
             auth: v1_auth,
+            wallet_moved: wallet_moved.map(str::to_string),
         }),
     );
 
@@ -1047,19 +1020,20 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     (router, inventory)
 }
 
-/// Public redirect routes for the retired `/wallet/ui*` paths → the dashboard
-/// SPA's wallet section (`/#wallet`). Kept as their own router merged before the
-/// gated `/wallet/*` router so the static routes win over its `/wallet/*rest`
-/// catch-all (otherwise these would 403 instead of redirecting).
-fn wallet_ui_router() -> Router {
+/// Public `410 wallet_moved` routes for the retired `/wallet/ui*` paths: the
+/// wallet UI is served by `ergo-walletd`. Kept as their own router merged
+/// before the gated `/wallet/*` router so the static routes win over its
+/// `/wallet/*rest` catch-all (otherwise these would ask for an API key).
+fn wallet_ui_router(wallet_moved: Option<&str>) -> Router {
+    let address: Option<Arc<str>> = wallet_moved.map(Arc::from);
+    let moved = move || {
+        let address = address.clone();
+        async move { crate::wallet::wallet_moved_response(address.as_deref()) }
+    };
     Router::new()
-        .route("/wallet/ui", get(wallet_ui_redirect))
-        .route("/wallet/ui/index.html", get(wallet_ui_redirect))
-        .route("/wallet/ui/wallet.js", get(wallet_ui_redirect))
-}
-
-async fn wallet_ui_redirect() -> Redirect {
-    Redirect::permanent("/#wallet")
+        .route("/wallet/ui", get(moved.clone()))
+        .route("/wallet/ui/index.html", get(moved.clone()))
+        .route("/wallet/ui/wallet.js", get(moved))
 }
 
 /// Strict response headers for the mnemonic-bearing SPA surfaces (applied by

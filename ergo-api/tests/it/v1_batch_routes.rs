@@ -232,6 +232,7 @@ fn app() -> Router {
         chain,
         indexer: None,
         submit: None,
+        wallet_chain: None,
         tx_builder: None,
         mempool,
         mempool_depth: Arc::new(MempoolDepthRing::new()),

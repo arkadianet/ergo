@@ -14,8 +14,9 @@
 //!   matching Scala's `ApiError.ApiKeyNotValid`
 //!   (`http/api/ApiError.scala:37`).
 //!
-//! Mounted by [`crate::wallet::router_with_security`] and [`crate::server`] around the
-//! privileged routes (wallets, scans, admin controls, mining and block submission).
+//! Mounted by [`crate::server`] around the privileged routes (admin controls,
+//! mining and block submission); [`crate::wallet`]'s retired wallet and scan
+//! paths run the same check before answering `410 wallet_moved`.
 //! Without a configured [`ApiSecurity`], they fail closed. Public reads and
 //! transaction submissions do not receive the layer.
 //!
@@ -215,33 +216,37 @@ pub async fn require_api_key(
     next: Next,
 ) -> Response {
     let Some(sec) = sec else {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "error": 403,
-                "reason": "api-key-not-configured",
-                "detail": API_KEY_NOT_CONFIGURED,
-            })),
-        )
-            .into_response();
+        return reject_unconfigured();
     };
-    let Some(header_val) = req.headers().get(API_KEY_HEADER) else {
+    if !request_is_authorized(&sec, &req) {
         return reject_invalid();
-    };
-    // Single api-key scheme: delegate the Blake2b-256 + constant-time hex
-    // compare to `ApiSecurity::verify` (shared with the v1 tier gate).
-    if sec.authorize(
-        header_val.as_bytes(),
-        req.method().as_str(),
-        req.extensions()
-            .get::<axum::extract::MatchedPath>()
-            .map_or(req.uri().path(), |path| path.as_str()),
-        false,
-    ) {
-        next.run(req).await
-    } else {
-        reject_invalid()
     }
+    next.run(req).await
+}
+
+pub(crate) fn reject_unconfigured() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": 403,
+            "reason": "api-key-not-configured",
+            "detail": API_KEY_NOT_CONFIGURED,
+        })),
+    )
+        .into_response()
+}
+
+pub(crate) fn request_is_authorized(sec: &ApiSecurity, req: &Request<Body>) -> bool {
+    req.headers().get(API_KEY_HEADER).is_some_and(|header_val| {
+        sec.authorize(
+            header_val.as_bytes(),
+            req.method().as_str(),
+            req.extensions()
+                .get::<axum::extract::MatchedPath>()
+                .map_or(req.uri().path(), |path| path.as_str()),
+            false,
+        )
+    })
 }
 
 /// Post-auth catch-all for unknown subpaths under a gated prefix
@@ -260,7 +265,7 @@ pub(crate) async fn unknown_gated_subpath() -> StatusCode {
     StatusCode::NOT_FOUND
 }
 
-fn reject_invalid() -> Response {
+pub(crate) fn reject_invalid() -> Response {
     (
         StatusCode::FORBIDDEN,
         Json(json!({

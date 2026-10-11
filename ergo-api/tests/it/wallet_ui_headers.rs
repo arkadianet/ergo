@@ -1,8 +1,8 @@
 //! Security-header regression for the dashboard SPA static surface.
 //!
-//! The SPA at `/` hosts the wallet section, which renders mnemonics
-//! (init/restore), so the SPA document and its static assets carry a strict
-//! CSP plus `Cache-Control: no-store` (a bfcache mitigation) and
+//! The SPA at `/` renders operator data and once hosted the wallet section
+//! (now `ergo-walletd`'s UI), so the SPA document and its static assets carry
+//! a strict CSP plus `Cache-Control: no-store` (a bfcache mitigation) and
 //! `Referrer-Policy: no-referrer`. These headers must cover `/` and the
 //! CSS/JS assets, and must NOT leak onto the CDN-backed `/swagger*` pages
 //! (whose `default-src 'self'` would block Swagger-UI). The self-hosted
@@ -13,13 +13,12 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+use ergo_api::server::{router_with_mempool_and_security, ServerCtx};
 use ergo_api::traits::{NodeReadState, NoopMempoolView};
 use ergo_api::types::{
     ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiPeer,
     ApiStatus, ApiSyncStatus, ApiTip,
 };
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
 
@@ -70,11 +69,13 @@ fn app() -> axum::Router {
         read: Arc::new(UnusedReadState),
         compat: None,
         submit: None,
+        wallet_chain: None,
         indexer: None,
         mempool: Arc::new(NoopMempoolView::new()),
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
@@ -84,7 +85,7 @@ fn app() -> axum::Router {
     };
     // Security gate is irrelevant to these header assertions; `None`
     // keeps the static routes reachable without a key.
-    router_with_mempool_and_wallet_and_security(ctx, None, Arc::new(NoopWalletAdmin), None)
+    router_with_mempool_and_security(ctx, None, None)
 }
 
 fn get(path: &str) -> Request<Body> {
@@ -147,13 +148,6 @@ async fn spa_js_carries_spa_security_headers() {
     assert_spa_security_headers("/js/app.js").await;
     assert_spa_security_headers("/js/activity.js").await;
     assert_spa_security_headers("/js/activity-model.js").await;
-}
-
-#[tokio::test]
-async fn wallet_js_module_carries_spa_security_headers() {
-    assert_spa_security_headers("/js/wallet.js").await;
-    assert_spa_security_headers("/js/wallet-builder.js").await;
-    assert_spa_security_headers("/js/wallet-transaction.js").await;
 }
 
 #[tokio::test]

@@ -356,6 +356,7 @@ fn app_changing_network(joins: bool) -> Router {
             chain: Some(network),
             admin: None,
             mining: None,
+            private_queue: None,
             network: NetworkPrefix::Mainnet,
         },
         Governor::new(Default::default()).unwrap(),
@@ -508,6 +509,7 @@ fn app_with_rent_state(
         chain: Some(Arc::new(StubChain)),
         admin: Some(Arc::new(SpyAdmin::default())),
         mining: Some(Arc::new(StubMining(rent_state))),
+        private_queue: None,
         network: NetworkPrefix::Mainnet,
     };
     let gov = Governor::new(Default::default()).expect("valid governor config");
@@ -522,6 +524,7 @@ fn app_with_admin(admin: Arc<SpyAdmin>, auth: Arc<V1AuthConfig>) -> Router {
         chain: Some(Arc::new(StubChain)),
         admin: Some(admin),
         mining: Some(Arc::new(StubMining(Default::default()))),
+        private_queue: None,
         network: NetworkPrefix::Mainnet,
     };
     let gov = Governor::new(Default::default()).expect("valid governor config");
@@ -536,6 +539,7 @@ fn app_no_mining(auth: Arc<V1AuthConfig>) -> Router {
         chain: Some(Arc::new(StubChain)),
         admin: Some(Arc::new(SpyAdmin::default())),
         mining: None,
+        private_queue: None,
         network: NetworkPrefix::Mainnet,
     };
     let gov = Governor::new(Default::default()).expect("valid governor config");
@@ -1252,6 +1256,7 @@ async fn sensitive_control_responses_are_not_cacheable() {
             chain: None,
             admin: Some(Arc::new(ConfigAdmin)),
             mining: None,
+            private_queue: None,
             network: NetworkPrefix::Mainnet,
         },
         Governor::new(Default::default()).unwrap(),

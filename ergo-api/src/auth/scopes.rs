@@ -3,28 +3,33 @@
 use super::CredentialScope;
 
 /// Unknown operations deny every scoped key, including scoped administrators.
+///
+/// `path` is a route template (`/wallet/boxes/:id`) or a concrete request
+/// path (`/wallet/boxes/ab12…`); a template's placeholder segment matches any
+/// one concrete segment. A literal template wins over a placeholder one, so
+/// `/a/select` never resolves through `/a/{id}`.
 pub fn required_scope(method: &str, path: &str) -> Option<CredentialScope> {
     let method = if method == "HEAD" { "GET" } else { method };
-    SCOPES.iter().find_map(|(verb, template, scope)| {
-        (*verb == method && matches_path(template, path)).then_some(*scope)
-    })
+    let candidates = || SCOPES.iter().filter(|(verb, ..)| *verb == method);
+    candidates()
+        .find(|(_, template, _)| matches_path(template, path, false))
+        .or_else(|| candidates().find(|(_, template, _)| matches_path(template, path, true)))
+        .map(|(_, _, scope)| *scope)
 }
 
-fn matches_path(template: &str, path: &str) -> bool {
-    let normalize = |route: &str| {
-        route
-            .split('/')
-            .map(|part| {
-                if part.starts_with(':') || (part.starts_with('{') && part.ends_with('}')) {
-                    "{}"
-                } else {
-                    part
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("/")
-    };
-    normalize(template) == normalize(path)
+fn is_placeholder(part: &str) -> bool {
+    part.starts_with(':') || (part.starts_with('{') && part.ends_with('}'))
+}
+
+fn matches_path(template: &str, path: &str, placeholders_match_values: bool) -> bool {
+    let template: Vec<_> = template.split('/').collect();
+    let path: Vec<_> = path.split('/').collect();
+    template.len() == path.len()
+        && template.iter().zip(&path).all(|(expected, actual)| {
+            expected == actual
+                || (is_placeholder(expected) && is_placeholder(actual))
+                || (placeholders_match_values && is_placeholder(expected) && !actual.is_empty())
+        })
 }
 
 const SCOPES: &[(&str, &str, CredentialScope)] = &[
@@ -82,6 +87,20 @@ const SCOPES: &[(&str, &str, CredentialScope)] = &[
     (
         "GET",
         "/api/v1/accounts/{account_id}/balance",
+        CredentialScope::Wallet,
+    ),
+    ("GET", "/api/v1/chain/blocks-since", CredentialScope::Wallet),
+    ("GET", "/api/v1/chain/boxes/{id}", CredentialScope::Wallet),
+    ("GET", "/api/v1/chain/snapshot", CredentialScope::Wallet),
+    (
+        "GET",
+        "/api/v1/chain/spending-context",
+        CredentialScope::Wallet,
+    ),
+    ("GET", "/api/v1/chain/tip", CredentialScope::Wallet),
+    (
+        "GET",
+        "/api/v1/chain/wallet-blocks/{height}",
         CredentialScope::Wallet,
     ),
     (
@@ -223,6 +242,12 @@ const SCOPES: &[(&str, &str, CredentialScope)] = &[
         CredentialScope::Admin,
     ),
     ("POST", "/api/v1/accounts/watch", CredentialScope::Wallet),
+    ("POST", "/api/v1/chain/admission", CredentialScope::Wallet),
+    (
+        "POST",
+        "/api/v1/chain/transactions",
+        CredentialScope::Wallet,
+    ),
     (
         "POST",
         "/api/v1/accounts/{account_id}/addresses",
@@ -387,3 +412,43 @@ const SCOPES: &[(&str, &str, CredentialScope)] = &[
         CredentialScope::Wallet,
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concrete_paths_resolve_through_their_templates() {
+        for (method, path, scope) in [
+            ("GET", "/wallet/status", Some(CredentialScope::Wallet)),
+            ("GET", "/wallet/status/", None),
+            (
+                "POST",
+                "/wallet/getPrivateKey",
+                Some(CredentialScope::Admin),
+            ),
+            (
+                "POST",
+                "/api/v1/wallet/mining-jobs/7/cancel",
+                Some(CredentialScope::Wallet),
+            ),
+            (
+                "POST",
+                "/api/v1/wallet/mining-jobs/:job_id/cancel",
+                Some(CredentialScope::Wallet),
+            ),
+            ("POST", "/api/v1/wallet/mining-jobs//cancel", None),
+            ("GET", "/wallet/unknown", None),
+            ("HEAD", "/wallet/status", Some(CredentialScope::Wallet)),
+        ] {
+            assert_eq!(required_scope(method, path), scope, "{method} {path}");
+        }
+    }
+
+    #[test]
+    fn a_literal_template_wins_over_a_placeholder_one() {
+        assert!(matches_path("/a/{id}", "/a/select", true));
+        assert!(!matches_path("/a/{id}", "/a/select", false));
+        assert!(matches_path("/a/:id", "/a/{id}", false));
+    }
+}

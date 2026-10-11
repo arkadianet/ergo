@@ -2,13 +2,12 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+use ergo_api::server::{router_with_mempool_and_security, ServerCtx};
 use ergo_api::traits::NodeReadState;
 use ergo_api::types::{
     ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiPeer,
     ApiStatus, ApiSyncGauges, ApiSyncStatus, ApiTip,
 };
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_api::NoopNodeAdmin;
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
@@ -66,11 +65,13 @@ fn app() -> axum::Router {
         read: Arc::new(MetricsReadState),
         compat: None,
         submit: None,
+        wallet_chain: None,
         indexer: None,
         mempool: Arc::new(ergo_api::NoopMempoolView::new()),
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
@@ -78,12 +79,7 @@ fn app() -> axum::Router {
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),
     };
-    router_with_mempool_and_wallet_and_security(
-        ctx,
-        Some(Arc::new(NoopNodeAdmin)),
-        Arc::new(NoopWalletAdmin),
-        None,
-    )
+    router_with_mempool_and_security(ctx, Some(Arc::new(NoopNodeAdmin)), None)
 }
 
 #[tokio::test]

@@ -36,15 +36,17 @@ pub mod wallet;
 mod web;
 
 pub use compat::{NodeChainQuery, Parameters, ScalaInfo};
+pub use ergo_wallet_protocol::chain;
 pub use mining::{mining_router, MiningApiError, NodeMining, NoopNodeMining};
 pub use server::{
-    bind, router_with_wallet, serve, serve_on, serve_on_with_mempool,
-    serve_on_with_mempool_and_wallet_and_security,
-    serve_on_with_mempool_and_wallet_and_security_and_hosts, ApiServices, ServerCtx,
+    bind, serve, serve_on, serve_on_with_mempool, serve_on_with_mempool_and_security,
+    serve_on_with_mempool_and_security_and_hosts,
+    serve_on_with_mempool_and_security_and_hosts_and_wallet_moved, ApiServices, ServerCtx,
 };
 pub use traits::{
-    ChainParamsView, MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView,
-    NoopNodeAdmin, PoolTxDetail, VotingControlError,
+    ChainParamsView, DefaultWalletChain, MempoolView, NodeAdmin, NodeReadState, NodeSubmit,
+    NoopMempoolView, NoopNodeAdmin, NoopWalletChain, PoolTxDetail, VotingControlError, WalletChain,
+    WalletChainError,
 };
 pub use types::*;
 
