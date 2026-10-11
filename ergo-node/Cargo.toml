@@ -22,7 +22,9 @@ ergo-ser        = { workspace = true }
 ergo-chain-spec = { workspace = true }
 ergo-crypto     = { workspace = true }
 ergo-validation = { workspace = true }
-ergo-wallet     = { workspace = true }
+ergo-wallet        = { workspace = true, features = ["keystore"] }
+ergo-wallet-service = { workspace = true }
+ergo-wallet-protocol = { workspace = true }
 ergo-state      = { workspace = true }
 ergo-p2p        = { workspace = true }
 ergo-sync       = { workspace = true }
@@ -62,9 +64,12 @@ flate2             = { workspace = true }
 tempfile           = { workspace = true }
 time               = { workspace = true }
 k256               = { workspace = true }
-zeroize            = { workspace = true }
 rand               = { workspace = true }
+zeroize            = { workspace = true }
 ergo-sigma         = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 axum = { workspace = true }
@@ -74,6 +79,8 @@ ergo-mempool       = { workspace = true, features = ["test-support"] }
 ergo-p2p           = { workspace = true }
 ergo-primitives    = { workspace = true }
 ergo-state         = { workspace = true, features = ["test-helpers", "test-utils"] }
+# Fast keystore key derivation in tests only (absent from release builds).
+ergo-wallet        = { workspace = true, features = ["keystore", "test-utils"] }
 ergo-sync          = { workspace = true }
 ergo-chain-spec    = { workspace = true }
 arc-swap           = { workspace = true }

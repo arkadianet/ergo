@@ -251,8 +251,8 @@ pub(super) fn admit(
         .store
         .as_utxo()
         .ok_or_else(|| MiningApiError::Unavailable("private mining requires UTXO state".into()))?;
-    owned.tx_context.miner_pubkey = match handle.resolve_reward_key(store) {
-        ergo_state::wallet::RewardKeyResolution::Ready(pk) => pk,
+    owned.tx_context.miner_pubkey = match handle.resolve_reward_key() {
+        ergo_mining::RewardKeyResolution::Ready(pk) => pk,
         _ => {
             return Err(MiningApiError::Unavailable(
                 "mining reward key is not ready".into(),

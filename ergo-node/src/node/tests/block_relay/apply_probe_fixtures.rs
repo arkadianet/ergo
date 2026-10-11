@@ -243,12 +243,9 @@ fn prepared_solution(state: &NodeState, handle: &MiningHandle) -> ergo_mining::s
 
 /// Drain stored blocks through the normal sequential executor.
 fn drain_prepared(state: &mut NodeState) {
-    state.executor.try_apply_next_blocks(
-        &mut state.store,
-        &mut state.coordinator,
-        Instant::now(),
-        None,
-    );
+    state
+        .executor
+        .try_apply_next_blocks(&mut state.store, &mut state.coordinator, Instant::now());
 }
 
 /// Validate a peer header through the remote executor path.
@@ -263,7 +260,6 @@ fn remote_header(state: &mut NodeState, bytes: &[u8]) {
         &mut state.store,
         &mut state.coordinator,
         Instant::now(),
-        None,
     );
     assert!(!actions.iter().any(|a| matches!(a, Action::Penalize { .. })));
     assert!(state.store.get_header(&id).unwrap().is_some());
@@ -291,13 +287,9 @@ fn remote_sections(source: &NodeState, target: &mut NodeState, id: [u8; 32], ass
                 if !assemble && matches!(action, Action::AssembleBlock { .. }) {
                     continue;
                 }
-                target.executor.execute(
-                    action,
-                    &mut target.store,
-                    &mut target.coordinator,
-                    now,
-                    None,
-                );
+                target
+                    .executor
+                    .execute(action, &mut target.store, &mut target.coordinator, now);
             }
         }
     }
@@ -342,7 +334,6 @@ fn session_sibling(later: bool, digest: bool, assemble: bool) {
             &mut state.store,
             &mut state.coordinator,
             Instant::now(),
-            None,
         );
     } else {
         drain_prepared(&mut state);

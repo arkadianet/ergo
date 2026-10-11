@@ -166,7 +166,6 @@ fn apply(
             None,
             rules.as_ref(),
             Some(perf),
-            None,
         )?;
         if let Some(header) = block.checked_header {
             cached.insert(0, header);
@@ -323,7 +322,7 @@ fn main() -> Result<()> {
                 })
                 .collect::<Result<Vec<_>>>()?;
             // Headers/bodies/protocol history remain in the copy; no downloads or header PoW timing.
-            store.rollback_to(start, None, None)?;
+            store.rollback_to(start)?;
             store.set_ad_proofs_apply_policy(match proof_policy {
                 ProofPolicy::Regenerate => ergo_state::store::AdProofsApplyPolicy::Regenerate,
                 ProofPolicy::VerifyShipped => ergo_state::store::AdProofsApplyPolicy::VerifyShipped,

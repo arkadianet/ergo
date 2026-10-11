@@ -167,6 +167,7 @@ pub(super) fn build_snapshot(
 
     let _ = p.now_unix_ms;
     NodeSnapshot {
+        publication_sequence: 0,
         gauges: p.sync_gauges,
         info,
         status,

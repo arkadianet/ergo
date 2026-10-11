@@ -5,11 +5,9 @@
 //! purely-in-memory variant would bypass the persistence contract
 //! the production boot path depends on.
 
-use ergo_state::wallet::reader::WalletReader;
-use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
+use ergo_wallet_service::state::WalletState;
 use redb::Database;
-use redb::ReadableDatabase;
 
 /// A test wallet that lives in a temporary directory. Owns:
 /// - a redb file at `<dir>/state.redb` for wallet tables
@@ -92,12 +90,13 @@ impl TestWallet {
             .expect("secret file must exist for reopen");
         let mut state = WalletState::empty(use_pre_1627);
         // Hydrate from redb tables. This is the boot-path contract.
-        let txn = db.begin_read().unwrap();
-        let reader = WalletReader::new(&txn);
+        let read = ergo_state::wallet::WalletStore::read(&db).unwrap();
+        let hydration =
+            ergo_state::wallet::hydration::HydrationSnapshot::load(read.as_ref()).unwrap();
         state
-            .hydrate_from_reader(&reader, ergo_ser::address::NetworkPrefix::Mainnet)
+            .hydrate_from_reader(&hydration, ergo_ser::address::NetworkPrefix::Mainnet)
             .expect("hydrate from redb");
-        drop(txn);
+        drop(read);
         Self {
             dir,
             db,
@@ -119,7 +118,7 @@ impl TestWallet {
     /// on-disk state after the call.
     pub fn reopen_and_unlock(dir: tempfile::TempDir, password: &str) -> Self {
         let mut t = Self::reopen(dir);
-        ergo_node::wallet_boot::WalletBootService::unlock_and_sync(
+        ergo_wallet_service::engine::WalletBootService::unlock_and_sync(
             &mut t.storage,
             &mut t.state,
             &t.db,
@@ -142,7 +141,7 @@ impl TestWallet {
         state: &mut WalletState,
         password: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        ergo_node::wallet_boot::WalletBootService::unlock_and_sync(
+        ergo_wallet_service::engine::WalletBootService::unlock_and_sync(
             storage,
             state,
             db,

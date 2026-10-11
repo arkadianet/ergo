@@ -366,12 +366,9 @@ fn block_failed_tx_remote_evicts_only_named_transaction() {
         .store
         .store_block_section_typed(&expected.extension_id, &writer.result(), 108)
         .unwrap();
-    state.executor.try_apply_next_blocks(
-        &mut state.store,
-        &mut state.coordinator,
-        Instant::now(),
-        None,
-    );
+    state
+        .executor
+        .try_apply_next_blocks(&mut state.store, &mut state.coordinator, Instant::now());
     flush_actions(&mut state, vec![]);
     assert!(
         state

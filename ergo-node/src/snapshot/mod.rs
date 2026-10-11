@@ -44,6 +44,8 @@ use ergo_ser::ergo_box::ErgoBox;
 /// so it can be parked in `ArcSwap` and read concurrently by axum
 /// handlers running on the tokio runtime.
 pub struct NodeSnapshot {
+    /// Monotonic immutable publication number, zero before the first publish.
+    pub publication_sequence: u64,
     pub info: ApiInfo,
     pub status: ApiStatus,
     pub tip: ApiTip,
@@ -207,6 +209,7 @@ impl NodeSnapshot {
             difficulty: "0".to_string(),
         };
         Self {
+            publication_sequence: 0,
             gauges: ergo_api::ApiSyncGauges::default(),
             status: ApiStatus {
                 bootstrap: None,

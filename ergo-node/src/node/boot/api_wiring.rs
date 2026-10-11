@@ -8,7 +8,6 @@
 //! it produces — so the natural boot order is `build_scaffold` →
 //! (mining subsystem) → `bind`.
 
-use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use ergo_state::HeaderSectionStore;
@@ -140,51 +139,62 @@ pub(super) struct ApiBind {
     pub api_addr: Option<std::net::SocketAddr>,
     pub api_handle: Option<JoinHandle<()>>,
     pub api_shutdown_tx: Option<oneshot::Sender<()>>,
-    pub wallet_rescan: Arc<crate::wallet_boot::RescanControl>,
-    pub wallet_cancel: tokio::sync::watch::Sender<bool>,
-    pub wallet_handle: JoinHandle<Result<(), ergo_api::wallet::WalletAdminError>>,
     pub api_services: Option<Arc<ergo_api::ApiServices>>,
-    pub live_wallet_hook: Option<Arc<super::super::wallet_bridge::WalletStateHook>>,
 }
 
-fn recover_interrupted_rescan(
-    store: &dyn ergo_state::wallet::WalletStore,
-) -> Result<(), ergo_state::wallet::WalletStoreError> {
-    let state = {
-        let read = store.begin_read()?;
-        read.rescan_state()?
-    };
-    let ergo_state::wallet::RescanState::Running { from_height } = state else {
-        return Ok(());
-    };
-    let mut write = store.begin_write()?;
-    write.set_scan_invalidated(true)?;
-    write.set_rescan_state(&ergo_state::wallet::RescanState::Failed {
-        height: from_height,
-        reason: "interrupted by restart".to_string(),
-    })?;
-    write.commit()
+#[derive(Default)]
+struct WalletChainConfig {
+    is_pruned: bool,
+    reemission_rules: Option<ergo_validation::ReemissionRuleInputs>,
+    reemission_inputs: Vec<ergo_wallet_service::chain::ReemissionInput>,
+    private_queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
+    spending: Option<(crate::snapshot::SnapshotHandle, u64, usize)>,
 }
 
-fn recover_wallet_for_boot(store: &dyn ergo_state::wallet::WalletStore) -> Result<(), NodeError> {
-    recover_interrupted_rescan(store)
-        .map_err(|error| format!("wallet boot: failed to mark interrupted rescan: {error}").into())
+/// The chain API the wallet daemon reads: committed chain, spending context
+/// and private queue, over the UTXO backend. `None` on the digest backend.
+fn build_wallet_chain(
+    store: &ergo_state::StateBackendKind,
+    submit_bridge: Arc<dyn ergo_api::NodeSubmit>,
+    config: WalletChainConfig,
+) -> Option<Arc<dyn ergo_api::WalletChain>> {
+    let WalletChainConfig {
+        is_pruned,
+        reemission_rules,
+        reemission_inputs,
+        private_queue,
+        spending,
+    } = config;
+    store.as_utxo()?;
+    let reader = store.reader_handle();
+    let accessor = Arc::new(
+        super::super::wallet_bridge::ChainStateAccessorImpl::chain_only(
+            reader.clone(),
+            is_pruned,
+            reemission_rules,
+        )
+        .with_private_queue(private_queue.clone()),
+    );
+    let mut client = super::super::wallet_bridge::InProcessChainClient::new(reader, submit_bridge)
+        .with_state_accessor(accessor)
+        .with_reemission_inputs(reemission_inputs);
+    if let Some((snapshot, fee, size)) = spending {
+        client = client.with_spending_context(snapshot, fee, size, private_queue);
+    }
+    Some(Arc::new(
+        super::super::wallet_bridge::WalletChainAdapter::new(
+            Arc::new(client) as Arc<dyn ergo_wallet_service::chain::ChainClient>
+        ),
+    ))
 }
 
 /// Bind the REST API (if `[api] bind = Some(_)`): builds the Scala-compat
-/// bridge, wires the wallet admin + writer task, assembles `ServerCtx`, and
-/// starts serving. REST bind failure is logged-and-degraded, not fatal — REST is
-/// an operator surface, not a prerequisite for sync/validation availability.
-/// Wallet rescan-recovery failure is fatal: wallet tables share the node's
-/// database, and serving a partially rebuilt scan without durable invalidation
-/// would expose stale wallet data.
+/// bridge, assembles `ServerCtx`, and starts serving. REST bind failure is
+/// logged-and-degraded, not fatal — REST is an operator surface, not a
+/// prerequisite for sync/validation availability.
 ///
-/// Wallet hydration + the writer task + `live_wallet_hook` are built
-/// UNCONDITIONALLY, before the REST-bind checks below: the wallet apply
-/// hook feeds `NodeState.wallet_hook`, which the action loop needs
-/// regardless of whether REST is configured on or successfully bound — a
-/// wallet-tracking node with `[api] disabled = true` (or a transient bind
-/// failure) must still see its balance move as blocks apply.
+/// The node hosts no wallet: wallet routes answer `410 wallet_moved` with the
+/// configured daemon address, and the chain API serves the wallet daemon.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn bind(
     config: &NodeConfig,
@@ -222,13 +232,8 @@ pub(super) async fn bind(
     // once here so both consumers share the same instance.
     let mempool_view = SnapshotMempoolView::new(snapshot_publisher.handle()).into_dyn();
 
-    // Production wallet admin. Owns the secret storage + wallet
-    // state behind RwLocks; the writer task is a dedicated tokio
-    // task receiving commands via a channel.
-    let db_arc = store.db_arc();
     let indexer_probe = indexer_handle.clone();
-    let wallet_probe_db = db_arc.clone();
-    runtime_control.set_dependencies(Arc::new(move |require_indexer, require_wallet| {
+    runtime_control.set_dependencies(Arc::new(move |require_indexer| {
         use ergo_indexer::IndexerQuery;
         let indexer_height = require_indexer
             .then(|| indexer_probe.as_ref().map(|handle| handle.indexed_height()))
@@ -237,132 +242,40 @@ pub(super) async fn bind(
             && indexer_probe
                 .as_ref()
                 .is_some_and(|handle| handle.is_caught_up());
-        let (wallet_height, wallet_healthy) = if require_wallet {
-            wallet_probe_db
-                .begin_read()
-                .ok()
-                .and_then(|txn| {
-                    let cursor = ergo_state::wallet::reader::WalletReader::new(&txn)
-                        .scan_cursor()
-                        .ok()??;
-                    let tip = ergo_state::reader::committed_tip_in(&txn).ok()??;
-                    Some((
-                        Some(cursor.height),
-                        cursor.height == tip.0 && cursor.header_id == Some(tip.1),
-                    ))
-                })
-                .unwrap_or((None, false))
-        } else {
-            (None, false)
-        };
         crate::runtime_control::Dependencies {
             indexer_height,
             indexer_healthy,
-            wallet_height,
-            wallet_healthy,
         }
     }));
-    let wallet_store: Arc<dyn ergo_state::wallet::WalletStore> =
-        Arc::new(ergo_state::wallet::RedbWalletStore::new(db_arc.clone()));
-    recover_wallet_for_boot(wallet_store.as_ref())?;
+    let wallet_moved = Some(config.wallet_daemon_address.as_str());
     let is_pruned = config.blocks_to_keep != -1;
-    // `ChainStateAccessorImpl::tip_height()` now reads the live committed
-    // tip from redb per-call (no captured value), so no boot-time tip is
-    // threaded in.
-    let chain_accessor: Arc<dyn super::super::wallet_bridge::ChainStateAccessor> = Arc::new(
-        super::super::wallet_bridge::ChainStateAccessorImpl::new(
-            db_arc.clone(),
+    let reemission_rules =
+        super::build_reemission_rules(&config.chain_spec, config.check_reemission_rules);
+    let reemission_inputs = reemission_rules
+        .as_ref()
+        .map(|rules| {
+            vec![ergo_wallet_service::chain::ReemissionInput {
+                token_id: rules.reemission_token_id,
+                amount: 0,
+                box_ids: Vec::new(),
+            }]
+        })
+        .unwrap_or_default();
+    let wallet_chain = build_wallet_chain(
+        store,
+        submit_bridge.clone(),
+        WalletChainConfig {
             is_pruned,
-            // Same EIP-27 rules the validator uses, so the wallet's
-            // burn-aware builder + self-verify gate share consensus.
-            super::build_reemission_rules(&config.chain_spec, config.check_reemission_rules),
-        )
-        .with_private_queue(private_queue.clone()),
+            reemission_rules,
+            reemission_inputs,
+            private_queue: private_queue.clone(),
+            spending: Some((
+                snapshot_publisher.handle(),
+                config.mempool_config.min_relay_fee_nano_erg,
+                config.mempool_config.max_tx_size_bytes,
+            )),
+        },
     );
-    let wallet_storage = {
-        let secret_dir = config.data_dir.join("wallet");
-        Arc::new(parking_lot::RwLock::new(
-            ergo_wallet::storage::SecretStorage::open(secret_dir),
-        ))
-    };
-    // Hydrate in-memory caches from redb on restart so that
-    // /wallet/addresses and friends serve correct data while the
-    // wallet is still locked. The wallet stays locked — operator
-    // must /wallet/unlock to load the master key.
-    let wallet_state = {
-        let use_pre_1627 = {
-            let mut s = wallet_storage.write();
-            match s.lock_state() {
-                ergo_wallet::storage::LockState::Uninitialized => false,
-                _ => s.load_metadata().unwrap_or_else(|e| {
-                    tracing::warn!("wallet boot: could not read use_pre_1627 metadata: {e}; defaulting to false");
-                    false
-                }),
-            }
-        };
-        let mut state = ergo_wallet::state::WalletState::empty(use_pre_1627);
-        match db_arc.begin_read() {
-            Ok(read_txn) => {
-                let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-                if let Err(e) = state.hydrate_from_reader(&reader, network_prefix) {
-                    tracing::warn!(
-                        "wallet boot: hydration from redb failed: {e}; starting with empty caches"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!("wallet boot: could not open redb read txn for hydration: {e}");
-            }
-        }
-        Arc::new(parking_lot::RwLock::new(state))
-    };
-    // Clone the Arc before moving into run_wallet_writer so the
-    // main loop retains a reference for the live apply hook.
-    let wallet_state_for_hook = Arc::clone(&wallet_state);
-    let (wallet_tx, wallet_rx) = mpsc::channel::<super::super::wallet_bridge::WalletCommand>(64);
-    let writer_cfg = super::super::wallet_bridge::WriterConfig {
-        network: network_prefix,
-        expose_private_keys: config.wallet_expose_private_keys,
-        // Same EIP-27 rule inputs the block/mempool validator uses, so
-        // the wallet's re-emission reserve + burn-aware builder cannot
-        // drift from consensus (None off EIP-27 nets, e.g. testnet).
-        reemission: super::build_reemission_rules(
-            &config.chain_spec,
-            config.check_reemission_rules,
-        ),
-        min_relay_fee_nano_erg: config.mempool_config.min_relay_fee_nano_erg,
-        max_tx_size_bytes: config.mempool_config.max_tx_size_bytes,
-    };
-    let submit_handle: Arc<dyn super::super::wallet_bridge::TxSubmitter> = Arc::new(
-        super::super::wallet_bridge::NodeSubmitAdapter::new(submit_bridge.clone())
-            .with_private_mining(mining_bridge.clone())
-            .with_stored_private_queue(private_queue),
-    );
-    let wallet_rescan = Arc::new(crate::wallet_boot::RescanControl::default());
-    let (wallet_cancel, wallet_shutdown) = tokio::sync::watch::channel(false);
-    let wallet_handle = tokio::spawn(super::super::wallet_bridge::run_wallet_writer_supervised(
-        wallet_rx,
-        wallet_storage,
-        wallet_state,
-        db_arc.clone(),
-        chain_accessor,
-        writer_cfg,
-        submit_handle,
-        // Clone the mempool view for the wallet's unconfirmed-balance
-        // overlay; the original moves into ServerCtx below.
-        mempool_view.clone(),
-        wallet_rescan.clone(),
-        wallet_shutdown,
-    ));
-    let wallet_admin: Arc<dyn ergo_api::wallet::WalletAdmin> = Arc::new(
-        super::super::wallet_bridge::NodeWalletAdmin::with_rescan(wallet_tx, wallet_rescan.clone()),
-    );
-    let hook = Arc::new(super::super::wallet_bridge::WalletStateHook {
-        wallet: wallet_state_for_hook,
-        rescan: wallet_rescan.clone(),
-        db: db_arc.clone(),
-        store: wallet_store,
-    });
 
     let Some(bind_addr) = config.api_bind else {
         info!("api disabled by config");
@@ -370,11 +283,7 @@ pub(super) async fn bind(
             api_addr: None,
             api_handle: None,
             api_shutdown_tx: None,
-            wallet_rescan,
-            wallet_cancel,
-            wallet_handle,
             api_services: None,
-            live_wallet_hook: Some(hook),
         });
     };
 
@@ -399,11 +308,7 @@ pub(super) async fn bind(
                 api_addr: None,
                 api_handle: None,
                 api_shutdown_tx: None,
-                wallet_rescan,
-                wallet_cancel,
-                wallet_handle,
                 api_services: None,
-                live_wallet_hook: Some(hook),
             });
         }
     };
@@ -512,11 +417,21 @@ pub(super) async fn bind(
         read: read_state.clone(),
         compat: Some(scala_compat.clone()),
         submit: mounted_submit,
+        wallet_chain,
         indexer: indexer_for_api,
         mempool: mempool_view,
         network: network_prefix,
         chain_params: Some(scala_compat_bridge_arc.clone().into_chain_params()),
         mining: mining_bridge.clone(),
+        private_queue: if mining_bridge.is_none() {
+            private_queue.clone().map(|queue| {
+                Arc::new(super::super::wallet_bridge::StoredPrivateQueueBridge::new(
+                    queue,
+                )) as Arc<dyn ergo_api::NodeMining>
+            })
+        } else {
+            None
+        },
         // Static per-network schedule math — always wired.
         // Public route by Scala parity (no withAuth).
         emission: Some(Arc::new(crate::api_bridge::EmissionScheduleBridge::new(
@@ -537,25 +452,21 @@ pub(super) async fn bind(
         services: api_services.clone(),
         script_config: config.api_script.clone(),
     };
-    let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts(
+    let handle = ergo_api::serve_on_with_mempool_and_security_and_hosts_and_wallet_moved(
         api_ctx,
         listener,
         api_shutdown_rx,
         Some(admin_handle),
-        wallet_admin,
         security,
         &config.api_allowed_hosts,
+        wallet_moved,
     );
 
     Ok(ApiBind {
         api_addr: Some(actual),
         api_handle: Some(handle),
         api_shutdown_tx: Some(api_shutdown_tx),
-        wallet_rescan,
-        wallet_cancel,
-        wallet_handle,
         api_services: Some(api_services),
-        live_wallet_hook: Some(hook),
     })
 }
 
@@ -585,11 +496,8 @@ fn api_security(
 mod tests {
     use super::*;
     use clap::Parser;
-    use ergo_state::wallet::{
-        RedbWalletStore, RescanState, WalletRead, WalletStore, WalletStoreError, WalletWrite,
-    };
-
-    // ----- helpers -----
+    use ergo_state::store::StateStore;
+    use std::sync::Arc;
 
     fn template_config(source: &str) -> (tempfile::TempDir, NodeConfig) {
         let dir = tempfile::tempdir().unwrap();
@@ -603,18 +511,6 @@ mod tests {
             dir.path().to_str().unwrap(),
         ]);
         (dir, NodeConfig::load(cli).expect("template loads"))
-    }
-
-    struct WriteFailingStore(RedbWalletStore);
-
-    impl WalletStore for WriteFailingStore {
-        fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
-            self.0.begin_read()
-        }
-
-        fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
-            Err(redb::Error::Io(std::io::Error::other("injected recovery write failure")).into())
-        }
     }
 
     #[tokio::test]
@@ -703,27 +599,39 @@ mod tests {
         }
     }
 
+    fn submit_bridge() -> Arc<dyn ergo_api::NodeSubmit> {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+        crate::api_bridge::SubmitBridge::new(tx, event_tx).into_dyn()
+    }
+
     #[test]
-    fn recover_interrupted_rescan_marks_failed_and_invalidated() {
+    fn chain_wiring_is_available_for_the_utxo_backend() {
         let dir = tempfile::tempdir().unwrap();
-        let store = RedbWalletStore::new(Arc::new(
-            redb::Database::create(dir.path().join("state.redb")).unwrap(),
-        ));
-        let mut write = store.begin_write().unwrap();
-        write
-            .set_rescan_state(&RescanState::Running { from_height: 7 })
-            .unwrap();
-        write.commit().unwrap();
+        let mut state = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        state.initialize_genesis(&[]).unwrap();
+        let backend = ergo_state::StateBackendKind::Utxo(state);
+        assert!(
+            build_wallet_chain(&backend, submit_bridge(), WalletChainConfig::default()).is_some()
+        );
+    }
 
-        recover_interrupted_rescan(&store).unwrap();
-
-        assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
-        assert_eq!(
-            store.begin_read().unwrap().rescan_state().unwrap(),
-            RescanState::Failed {
-                height: 7,
-                reason: "interrupted by restart".to_string(),
-            }
+    #[test]
+    fn chain_wiring_is_absent_for_digest_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ergo_state::DigestStateStore::open(
+            &dir.path().join("state.redb"),
+            ergo_validation::scala_launch(),
+            ergo_chain_spec::VotingParams {
+                voting_length: 2,
+                ..ergo_chain_spec::VotingParams::mainnet()
+            },
+            [0; 33],
+        )
+        .unwrap();
+        let backend = ergo_state::StateBackendKind::Digest(state);
+        assert!(
+            build_wallet_chain(&backend, submit_bridge(), WalletChainConfig::default()).is_none()
         );
     }
 
@@ -737,35 +645,5 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid api_key_hash"));
-    }
-
-    #[test]
-    fn wallet_rescan_recovery_failure_is_fatal() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RedbWalletStore::new(Arc::new(
-            redb::Database::create(dir.path().join("state.redb")).unwrap(),
-        ));
-        let mut write = store.begin_write().unwrap();
-        write
-            .set_rescan_state(&RescanState::Running { from_height: 7 })
-            .unwrap();
-        write.commit().unwrap();
-
-        let store = WriteFailingStore(store);
-        let error = recover_wallet_for_boot(&store).unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("wallet boot: failed to mark interrupted rescan"),
-            "{message}"
-        );
-        assert!(
-            message.contains("injected recovery write failure"),
-            "{message}"
-        );
-        assert_eq!(
-            store.begin_read().unwrap().rescan_state().unwrap(),
-            RescanState::Running { from_height: 7 }
-        );
-        assert!(!store.begin_read().unwrap().scan_invalidated().unwrap());
     }
 }

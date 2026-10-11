@@ -460,7 +460,7 @@ pub(super) async fn action_loop(
         "[node] shutdown complete in {:.1}s",
         t_shutdown.elapsed().as_secs_f64(),
     );
-    shutdown_result.map_err(|e| Box::new(e) as NodeError)
+    shutdown_result.map_err(|error| Box::new(error) as NodeError)
 }
 
 pub(super) fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandle>) {

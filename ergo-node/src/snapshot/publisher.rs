@@ -134,8 +134,9 @@ impl SnapshotPublisher {
         let mut info = self.info.clone();
         info.uptime_seconds = now.duration_since(self.started_at).as_secs();
 
-        let snap = build_snapshot(parts, info, effective_progress_age_ms);
+        let mut snap = build_snapshot(parts, info, effective_progress_age_ms);
         let prior = self.handle.load();
+        snap.publication_sequence = prior.publication_sequence.saturating_add(1);
         crate::activity::status_transitions(
             self.activity_primed.then_some(&prior.status),
             &snap.status,

@@ -145,9 +145,6 @@ pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
                     Ok(Err(e)) => e,
                     Err(join_err) => Box::new(join_err) as NodeError,
                 };
-                if let Err(error) = handle.drain_wallet().await {
-                    tracing::error!(%error, "wallet cleanup failed after action-loop exit");
-                }
                 handle.drain_api_and_inbound().await;
                 return Err(cause);
             }
@@ -166,9 +163,6 @@ pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
                     Ok(Err(e)) => e,
                     Err(join_err) => Box::new(join_err) as NodeError,
                 };
-                if let Err(error) = handle.drain_wallet().await {
-                    tracing::error!(%error, "wallet cleanup failed after action-loop exit");
-                }
                 handle.drain_api_and_inbound().await;
                 return Err(cause);
             }
@@ -371,14 +365,16 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         .await;
     }
 
-    let mut store = StateStore::open_with_cache_budgets_launch_voting(
+    // The node hosts no wallet: opening never creates or migrates wallet
+    // tables; a legacy wallet's rows are read only by the handoff.
+    let store_result = StateStore::open_with_cache_budgets_launch_voting_without_wallet(
         &db_path,
         cache_bytes,
         config.redb_cache_budgets.state,
         launch_parameters,
         config.chain_spec.voting,
-    )
-    .map_err(|e| {
+    );
+    let mut store = store_result.map_err(|e| {
         report_boot_storage_failure(&db_path, "open_state", &e);
         Box::new(e) as NodeError
     })?;
@@ -837,9 +833,54 @@ async fn run_inner_with_backend(
     )?;
     let identity_inputs = crate::node::identity::IdentityInputs::from_config(&config);
 
+    // The node hosts no wallet. It hands a legacy embedded wallet to the
+    // daemon once, in the background, from a read snapshot.
+    {
+        let db = store.db_arc();
+        let data_dir = config.data_dir.clone();
+        let network = config.network;
+        std::thread::Builder::new()
+            .name("wallet-handoff".into())
+            .spawn(move || {
+                use crate::node::legacy_wallet::{write_handoff, Handoff};
+                match write_handoff(&db, &data_dir, network) {
+                    Ok(Handoff::Written(path) | Handoff::Waiting(path)) => tracing::warn!(
+                        handoff = %path.display(),
+                        "a legacy embedded wallet is ready for the wallet daemon: run \
+                         `ergo-walletd adopt --handoff {} --data-dir <new wallet directory>`",
+                        path.display()
+                    ),
+                    Ok(Handoff::Adopted) => tracing::info!(
+                        "the legacy embedded wallet was adopted by the wallet daemon; \
+                         `ergo-node wallet-legacy-purge <data_dir>` removes its rows from this \
+                         node (stop the node first)"
+                    ),
+                    Ok(Handoff::NoLegacyWallet) => {}
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "the legacy embedded wallet could not be handed off; it is unchanged"
+                    ),
+                }
+            })
+            .map_err(|error| format!("start the wallet handoff: {error}"))?;
+    }
+
+    // An external-mode miner with no pinned key keeps mining with the reward
+    // key of a legacy embedded wallet still held in state.redb, read once.
+    let legacy_reward_key =
+        if config.mining_config.enabled && config.mining_config.miner_public_key_hex.is_none() {
+            crate::node::legacy_wallet::reward_key(&store.db_arc())?
+        } else {
+            None
+        };
+
     // Phase 3b: mining subsystem (the MiningHandle + API bridge).
-    let mining_subsystem =
-        mining::build_subsystem(&config, &scaffold.voting_targets_slot, &mining_submit_tx)?;
+    let mining_subsystem = mining::build_subsystem(
+        &config,
+        &scaffold.voting_targets_slot,
+        &mining_submit_tx,
+        legacy_reward_key,
+    )?;
     // Keep queued private transactions out of every public admission path
     // from the first loop iteration, whether or not mining is enabled.
     if let Some(queue) = mining_subsystem.private_queue.as_deref() {
@@ -885,10 +926,6 @@ async fn run_inner_with_backend(
     let api_handle = api_bind.api_handle;
     let api_shutdown_tx = api_bind.api_shutdown_tx;
     let api_services = api_bind.api_services;
-    let live_wallet_hook = api_bind.live_wallet_hook;
-    let wallet_rescan = api_bind.wallet_rescan;
-    let wallet_cancel = api_bind.wallet_cancel;
-    let wallet_handle = api_bind.wallet_handle;
 
     // Inbound P2P listener (opt-in via `[peers] bind_addr`). Without it
     // the node runs outbound-only: peers we dialed feed us blocks/txs
@@ -1001,19 +1038,6 @@ async fn run_inner_with_backend(
         bootstrap_was_active_this_session: false,
         installed_snapshot: None,
         snapshot_anchor_refusal_warned: false,
-        // The headers-only-digest (Mode 6) and digest-verifier (Mode 5)
-        // backends have no UTXO-state apply events to feed the wallet,
-        // so leave the hook empty to match the `NodeState.wallet_hook`
-        // doc invariant. The wallet bridge itself is still mounted —
-        // wallet routes process without erroring (UTXO-dependent reads
-        // see an empty set; secret-only ops like init/unlock work).
-        // Mode-aware route gating is tracked separately as feature work.
-        wallet_rescan: wallet_rescan.clone(),
-        wallet_hook: if sync.backend_is_utxo {
-            live_wallet_hook
-        } else {
-            None
-        },
         // True exactly when the mining engine was spawned (config.mining_config.enabled
         // AND the wiring was built above). `mining_handle.is_some()` is the
         // authoritative gate — it matches the expression that determined whether
@@ -1131,9 +1155,6 @@ async fn run_inner_with_backend(
         api_services,
         loop_handle,
         api_handle,
-        wallet_rescan,
-        wallet_cancel,
-        wallet_handle: Some(wallet_handle),
         inbound_handle,
         // Successful boot transfers the optional shadow future into its
         // supervised RunHandle. Earlier errors drop an unstarted future.

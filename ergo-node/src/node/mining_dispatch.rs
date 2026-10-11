@@ -52,7 +52,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ergo_mining::engine::{BestTip, BuildIntent, BuildReason, MINING_SYNC_TOLERANCE};
 use ergo_mining::handle::MiningHandle;
-use ergo_state::wallet::RewardKeyResolution;
+use ergo_mining::RewardKeyResolution;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::Action;
 use tokio::sync::watch;
@@ -475,14 +475,14 @@ pub(super) fn signal_mining_engine(
     if !synced {
         return now;
     }
-    let Some(store) = state.store.as_utxo() else {
+    if state.store.as_utxo().is_none() {
         return now; // mining is UTXO-only; defensive (the handle wouldn't exist)
-    };
+    }
     // Resolve the reward key on the loop. Pending (wallet not initialized) or
     // Corrupt → publish no intent; the serve path resolves the key again to
     // return a distinct 503 (Pending) / 500 (Corrupt), and the throttled
     // synced-but-uncovered recovery retries once the wallet becomes ready.
-    let miner_pk = match handle.resolve_reward_key(store) {
+    let miner_pk = match handle.resolve_reward_key() {
         RewardKeyResolution::Ready(pk) => pk,
         RewardKeyResolution::Pending | RewardKeyResolution::Corrupt => return now,
     };
@@ -594,29 +594,17 @@ pub(super) fn handle_mining_request(
     // the mining-started gate. The candidate path freezes the reward key; this
     // read does not generate a candidate.
     if let crate::mining_bridge::MiningRequest::GetRewardKey { reply } = req {
-        use ergo_state::wallet::RewardKeyResolution;
-        // Degrade to a transport error rather than panic if UTXO state is
-        // unavailable. In practice mining is config-gated to UTXO mode (so the
-        // handle wouldn't exist in digest mode and we'd have returned above),
-        // but the reward endpoints must never abort the process — they answer
-        // 503/500. A `Pinned` key doesn't consult state at all; only the
-        // `Wallet` path reads it.
-        let payload = match state.store.as_utxo() {
-            Some(store) => match handle.resolve_reward_key(store) {
-                RewardKeyResolution::Ready(pk) => Ok(pk),
-                RewardKeyResolution::Pending => Err(ergo_api::MiningApiError::Unavailable(
-                    "reward key pending: wallet not initialized — unlock the wallet \
-                     or set [mining].miner_public_key_hex"
-                        .into(),
-                )),
-                RewardKeyResolution::Corrupt => Err(ergo_api::MiningApiError::Internal(
-                    "reward key corrupt: wallet tracking has no/duplicate EIP-3 \
-                     first-address key"
-                        .into(),
-                )),
-            },
-            None => Err(ergo_api::MiningApiError::Internal(
-                "reward key unavailable: node is not running a UTXO state backend".into(),
+        let payload = match handle.resolve_reward_key() {
+            RewardKeyResolution::Ready(pk) => Ok(pk),
+            RewardKeyResolution::Pending => Err(ergo_api::MiningApiError::Unavailable(
+                "reward key pending: wallet not initialized — unlock the wallet \
+                 or set [mining].miner_public_key_hex"
+                    .into(),
+            )),
+            RewardKeyResolution::Corrupt => Err(ergo_api::MiningApiError::Internal(
+                "reward key corrupt: wallet tracking has no/duplicate EIP-3 \
+                 first-address key"
+                    .into(),
             )),
         };
         let _ = reply.send(payload);
@@ -681,7 +669,7 @@ pub(super) fn handle_mining_request(
                 None => match state
                     .store
                     .as_utxo()
-                    .map(|store| handle.resolve_reward_key(store))
+                    .map(|_store| handle.resolve_reward_key())
                 {
                     Some(RewardKeyResolution::Ready(pk)) => pk,
                     Some(RewardKeyResolution::Corrupt) => {
@@ -701,7 +689,7 @@ pub(super) fn handle_mining_request(
             let operator_key = state
                 .store
                 .as_utxo()
-                .map(|store| handle.resolve_reward_key(store));
+                .map(|_store| handle.resolve_reward_key());
             let own_miner =
                 matches!(operator_key, Some(RewardKeyResolution::Ready(pk)) if pk == miner_pk);
             let tip = MiningTipSnapshot::capture(state);
@@ -773,10 +761,7 @@ pub(super) fn handle_mining_request(
                         // permanent error as a retryable race — matching the prior
                         // on-loop path, which surfaced Corrupt as a 500 and a
                         // Pending wallet key as a distinct 503.
-                        let store = state.store.as_utxo().expect(
-                            "utxo-only: mining candidate serving is gated off in digest mode",
-                        );
-                        match handle.resolve_reward_key(store) {
+                        match handle.resolve_reward_key() {
                         RewardKeyResolution::Ready(_) => Err(ergo_api::MiningApiError::Unavailable(
                             "no candidate published for the current tip yet; retry shortly".into(),
                         )),
@@ -1165,22 +1150,12 @@ pub(super) fn handle_mining_request(
             // 4. Drive validation + apply through the executor's
             //    AssembleBlock path. Route follow-up actions through the
             //    same outbound dispatch used by peer-received blocks.
-            let rescan_guard = state.wallet_rescan.as_ref();
-            let wallet_wiring =
-                state
-                    .wallet_hook
-                    .as_deref()
-                    .map(|h| ergo_state::wallet::WalletWiring {
-                        hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-                        rescan_guard,
-                    });
             let apply_started = Instant::now();
             let follow_ups = state.executor.execute(
                 Action::AssembleBlock { header_id },
                 &mut state.store,
                 &mut state.coordinator,
                 apply_started,
-                wallet_wiring,
             );
             let apply_ms = apply_started.elapsed().as_millis() as u64;
             if super::block_relay::finish_local_apply(

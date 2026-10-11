@@ -202,8 +202,6 @@ fn make_state_with_backend(
         bootstrap_was_active_this_session: false,
         installed_snapshot: None,
         snapshot_anchor_refusal_warned: false,
-        wallet_rescan: std::sync::Arc::new(crate::wallet_boot::RescanControl::default()),
-        wallet_hook: None,
         mining_enabled: false,
         mined_apply_failed_parent: None,
         private_mining: Default::default(),

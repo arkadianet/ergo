@@ -60,9 +60,27 @@ pub enum Command {
     /// Discover tracked wallet holdings from current UTXOs; no historical blocks required.
     WalletScanUtxo {
         data_dir: PathBuf,
+        /// The wallet daemon's data directory; stop the daemon before discovery.
+        #[arg(long)]
+        wallet_data_dir: PathBuf,
+        /// Read the wallet database key from standard input, as
+        /// `ergo-walletd export-unseal-key` prints it. Needed once the daemon
+        /// has encrypted `wallet.redb`; the key opens the wallet's records,
+        /// not its spending key.
+        #[arg(long)]
+        wallet_key_stdin: bool,
         /// Discard a previous checkpoint and start at the current committed tip.
         #[arg(long)]
         restart: bool,
+    },
+    /// Remove a legacy embedded wallet's rows from a stopped node once the
+    /// wallet daemon has adopted it (`ergo-walletd adopt`).
+    WalletLegacyPurge {
+        data_dir: PathBuf,
+        /// Also delete the legacy encrypted keystore in `data_dir/wallet/`.
+        /// The daemon holds its own copy; keep a backup of the mnemonic.
+        #[arg(long)]
+        remove_keystore: bool,
     },
 }
 

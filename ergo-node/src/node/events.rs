@@ -145,8 +145,7 @@ fn process_header_modifier_batch(
         return;
     }
 
-    // Only accepted deliveries produce ValidateHeader, with ownership, type
-    // and claimed-ID checks already performed by the coordinator.
+    // Accepted header deliveries retain their request owner for validation attribution.
     let requested_headers: Vec<_> = batch_actions
         .iter()
         .filter_map(|action| match action {
@@ -157,21 +156,10 @@ fn process_header_modifier_batch(
         })
         .collect();
 
-    let rescan_guard = state.wallet_rescan.as_ref();
-    let wallet_wiring = state
-        .wallet_hook
-        .as_deref()
-        .map(|h| ergo_state::wallet::WalletWiring {
-            hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-            rescan_guard,
-        });
-    let mut all_actions = state.executor.execute_all(
-        batch_actions,
-        &mut state.store,
-        &mut state.coordinator,
-        now,
-        wallet_wiring,
-    );
+    let mut all_actions =
+        state
+            .executor
+            .execute_all(batch_actions, &mut state.store, &mut state.coordinator, now);
 
     let cs_after = state.store.chain_state_meta();
     let bh = cs_after.best_header_height;
@@ -804,14 +792,6 @@ fn inject_local_full_block(
     // calls `process_block`. If the local block isn't at tip+1 yet,
     // no-op — `try_apply_next_blocks` will pick it up on the next
     // chain advance.
-    let rescan_guard = state.wallet_rescan.as_ref();
-    let wallet_wiring = state
-        .wallet_hook
-        .as_deref()
-        .map(|h| ergo_state::wallet::WalletWiring {
-            hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-            rescan_guard,
-        });
     let follow_ups = state.executor.execute(
         Action::AssembleBlock {
             header_id: header_id_bytes,
@@ -819,7 +799,6 @@ fn inject_local_full_block(
         &mut state.store,
         &mut state.coordinator,
         now,
-        wallet_wiring,
     );
     flush_actions(state, follow_ups);
 
