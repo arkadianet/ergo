@@ -935,6 +935,17 @@ impl SecretStorage {
             .cached_secret_path
             .clone()
             .ok_or_else(|| WalletError::SecretFile("secret file path unknown".to_string()))?;
+        // The cached file may predate a concurrent rewrite (for example
+        // `install_data_key`). Replacing the file from a stale cache would
+        // drop whatever that rewrite added, so refuse unless the file on disk
+        // is still the one this unlock opened.
+        let on_disk = serde_json::to_vec(&Self::read_secret_file(&path)?);
+        let cached = serde_json::to_vec(&self.cached_secret_file);
+        if on_disk.is_err() || cached.is_err() || on_disk.ok() != cached.ok() {
+            return Err(WalletError::SecretFile(
+                "keystore changed since it was read; not upgrading it".to_string(),
+            ));
+        }
         let secret =
             EncryptedSecretV2::encrypt(seed, password, use_pre_1627, new_keystore_kdf(), data_key)?;
         let json = serde_json::to_vec_pretty(&secret)

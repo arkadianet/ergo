@@ -304,12 +304,18 @@ impl EncryptedBackend {
                 corrupt("no valid header")
             });
         };
-        let backend = Self::assemble(file, key, file_id, header, slot)?;
         let expected = HEADER_BYTES + sectors_for(header.logical_len) * PHYSICAL_SECTOR as u64;
         if length < expected {
             return Err(corrupt("file is shorter than its recorded length"));
         }
-        Ok(backend)
+        if length > expected {
+            // A shrink that crashed after publishing the new length leaves
+            // sealed copies of the dropped sectors behind. Discard them now:
+            // they still authenticate and must never come back.
+            file.set_len(expected)?;
+            file.sync_data()?;
+        }
+        Self::assemble(file, key, file_id, header, slot)
     }
 
     fn assemble(
@@ -512,6 +518,10 @@ impl EncryptedBackend {
                 plain[(old_len % SECTOR as u64) as usize..].fill(0);
                 self.write_sector(index, &plain)?;
             }
+            // An interrupted shrink can leave sealed copies above the logical
+            // length. Drop them before growing so a new sector never sits
+            // beside an older copy with a higher sequence number.
+            self.inner.set_len(Self::sector_offset(old_sectors))?;
             self.inner.set_len(Self::sector_offset(new_sectors))?;
             let zeros = vec![0u8; SECTOR];
             {

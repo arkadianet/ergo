@@ -253,8 +253,8 @@ pub(super) fn map_wallet_err(e: WalletAdminError) -> Response {
         ),
         E::Forbidden(_) | E::SensitiveOpDisabled => (
             Reason::SensitiveOpDisabled,
-            "this sensitive operation is disabled by node config",
-            "set [wallet] expose_private_keys = true to enable it".into(),
+            "this sensitive operation is not available in the wallet daemon",
+            String::new(),
         ),
         // No `wallet_exists` / `derivation_path_exists` reason in the v1 set;
         // both are client-correctable conflicts → bad_request with detail.

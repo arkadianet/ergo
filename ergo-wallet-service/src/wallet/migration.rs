@@ -39,8 +39,6 @@ pub fn export_embedded_wallet_with(
     destination: &Path,
     carry_scheduler_jobs: bool,
 ) -> Result<MigrationReport, WalletStoreError> {
-    let original = ReadableDatabase::begin_read(source)?;
-    let mut supported = BTreeMap::new();
     let mut reservation = std::fs::OpenOptions::new();
     reservation.write(true).create_new(true);
     #[cfg(unix)]
@@ -51,6 +49,22 @@ pub fn export_embedded_wallet_with(
     reservation
         .open(destination)
         .map_err(|error| WalletStoreError::decode(format!("reserve wallet export: {error}")))?;
+    // The reserved file is not an export until verification passes: remove it
+    // on any failure so a retry can proceed and nobody mistakes it for one.
+    let result = export_embedded_wallet_into(source, destination, carry_scheduler_jobs);
+    if result.is_err() {
+        let _ = std::fs::remove_file(destination);
+    }
+    result
+}
+
+fn export_embedded_wallet_into(
+    source: &Database,
+    destination: &Path,
+    carry_scheduler_jobs: bool,
+) -> Result<MigrationReport, WalletStoreError> {
+    let original = ReadableDatabase::begin_read(source)?;
+    let mut supported = BTreeMap::new();
     let target = Arc::new(Database::create(destination)?);
     let write = target.begin_write()?;
     macro_rules! copy {

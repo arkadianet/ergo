@@ -649,9 +649,6 @@ impl<'de> Deserialize<'de> for SnapshotId {
 pub struct UserScanId(u16);
 
 impl UserScanId {
-    pub const MINING: Self = Self(crate::scala::scan::MINING_SCAN_ID);
-    pub const PAYMENTS: Self = Self(crate::scala::scan::PAYMENTS_SCAN_ID);
-
     pub fn new(value: u16) -> Result<Self, String> {
         crate::scala::scan::validate_user_scan_id(value)
             .map_err(|_| "scan id is reserved".to_string())?;
