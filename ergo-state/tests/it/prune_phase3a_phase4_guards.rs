@@ -344,7 +344,7 @@ fn phase4_rollback_below_sentinel_rejects_before_mutation() {
     let pre_header_id = store.chain_state().best_header_id;
 
     let err = store
-        .rollback_to(1, None, None)
+        .rollback_to(1)
         .expect_err("rollback to h=1 below sentinel must reject");
     assert!(
         matches!(err, StateError::RollbackBelowPruningSentinel { .. }),
@@ -380,14 +380,14 @@ fn phase4_rollback_at_and_below_sentinel_by_one_succeeds() {
     }
     let sentinel = store.read_minimal_full_block_height().unwrap();
     // Below-by-one must not trip the Phase 4 guard.
-    if let Err(e) = store.rollback_to(sentinel - 1, None, None) {
+    if let Err(e) = store.rollback_to(sentinel - 1) {
         assert!(
             !format!("{e:?}").contains("RollbackBelowPruningSentinel"),
             "rollback to sentinel - 1 must not trip the Phase 4 guard, got {e:?}",
         );
     }
     // At-boundary likewise.
-    if let Err(e) = store.rollback_to(sentinel, None, None) {
+    if let Err(e) = store.rollback_to(sentinel) {
         assert!(
             !format!("{e:?}").contains("RollbackBelowPruningSentinel"),
             "rollback to sentinel must not trip the Phase 4 guard, got {e:?}",
@@ -421,7 +421,7 @@ fn phase4_rollback_to_sentinel_succeeds_and_forward_apply_re_advances() {
     // window. Must complete cleanly (no
     // `RollbackBelowPruningSentinel`, no `NoCommittedState`).
     store
-        .rollback_to(sentinel, None, None)
+        .rollback_to(sentinel)
         .expect("rollback to sentinel must succeed");
     assert_eq!(
         store.chain_state().best_full_block_height,
@@ -498,7 +498,7 @@ fn archive_toggle_after_natural_pruning_preserves_sentinel_and_blocks_resurrecti
     // `phase4_rollback_at_and_below_sentinel_by_one_succeeds`).
     assert!(advanced >= 2, "test premise: sentinel must be >= 2");
     let err = store
-        .rollback_to(advanced.saturating_sub(2), None, None)
+        .rollback_to(advanced.saturating_sub(2))
         .expect_err("rollback below the legal boundary must be refused");
     assert!(
         matches!(err, StateError::RollbackBelowPruningSentinel { .. }),
@@ -528,7 +528,7 @@ fn phase4_rollback_below_sentinel_pre_call_state_observable() {
     let pre_header_id = store.chain_state().best_header_id;
     let pre_header_height = store.chain_state().best_header_height;
 
-    let _ = store.rollback_to(1, None, None).expect_err("must reject");
+    let _ = store.rollback_to(1).expect_err("must reject");
 
     let post = store.chain_state();
     assert_eq!(pre_full_height, post.best_full_block_height);
@@ -568,7 +568,7 @@ fn phase4_rollback_below_bootstrap_sentinel_rejects_even_in_archive_mode() {
     // Rollback target h=50 is BELOW the bootstrap-seeded sentinel
     // (100). Must reject even though blocks_to_keep = -1.
     let err = store
-        .rollback_to(50, None, None)
+        .rollback_to(50)
         .expect_err("below-sentinel rollback must reject in Mode 2 archive too");
     assert!(
         matches!(err, StateError::RollbackBelowPruningSentinel { .. }),
@@ -588,7 +588,7 @@ fn phase4_archive_does_not_gate_rollback() {
         apply_empty_block(&mut store, h);
     }
     // Rollback to h=1 — archive must not see the Phase 4 error.
-    let result = store.rollback_to(1, None, None);
+    let result = store.rollback_to(1);
     if let Err(e) = result {
         assert!(
             !format!("{e:?}").contains("RollbackBelowPruningSentinel"),

@@ -317,7 +317,6 @@ fn locally_mined_block_session_marked_failure_rebuilt_sibling_applies() {
         &mut state.store,
         &mut state.coordinator,
         Instant::now(),
-        None,
     );
     assert_eq!(state.store.chain_state_meta().best_header_id, sibling.id);
     assert_eq!(

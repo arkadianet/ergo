@@ -247,7 +247,6 @@ fn drain_prepared(state: &mut NodeState) {
         &mut state.store,
         &mut state.coordinator,
         Instant::now(),
-        None,
     );
 }
 
@@ -263,7 +262,6 @@ fn remote_header(state: &mut NodeState, bytes: &[u8]) {
         &mut state.store,
         &mut state.coordinator,
         Instant::now(),
-        None,
     );
     assert!(!actions.iter().any(|a| matches!(a, Action::Penalize { .. })));
     assert!(state.store.get_header(&id).unwrap().is_some());
@@ -296,7 +294,6 @@ fn remote_sections(source: &NodeState, target: &mut NodeState, id: [u8; 32], ass
                     &mut target.store,
                     &mut target.coordinator,
                     now,
-                    None,
                 );
             }
         }
@@ -342,7 +339,6 @@ fn session_sibling(later: bool, digest: bool, assemble: bool) {
             &mut state.store,
             &mut state.coordinator,
             Instant::now(),
-            None,
         );
     } else {
         drain_prepared(&mut state);

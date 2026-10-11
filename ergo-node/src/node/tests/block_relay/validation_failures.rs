@@ -370,7 +370,6 @@ fn block_failed_tx_remote_evicts_only_named_transaction() {
         &mut state.store,
         &mut state.coordinator,
         Instant::now(),
-        None,
     );
     flush_actions(&mut state, vec![]);
     assert!(

@@ -41,7 +41,7 @@ pub use wallet::{
     BoundBlockTxs, BoxProvenance, BoxStatus, OwnedBlockOutput, OwnedBlockTxData, RedbWalletStore,
     RedbWalletWrite, RescanGuard, RescanReadError, RescanState, RewardKeyResolution, ScanBoxStatus,
     ScanMatchRecord, ScanRegistrySnapshot, ScanTrackedBox, ScanTxRecord, StoredScan,
-    TrackedPubkeyMeta, WalletApplyHook, WalletApplyPayload, WalletBox, WalletRead, WalletReader,
-    WalletScanCursor, WalletScanMatcher, WalletScanService, WalletStore, WalletStoreError,
-    WalletTransaction, WalletWiring, WalletWrite, WALLET_SCHEMA_VERSION,
+    TrackedPubkeyMeta, WalletApplyPayload, WalletBox, WalletRead, WalletReader, WalletScanCursor,
+    WalletScanMatcher, WalletScanService, WalletStore, WalletStoreError, WalletTransaction,
+    WalletWrite, WALLET_SCHEMA_VERSION,
 };

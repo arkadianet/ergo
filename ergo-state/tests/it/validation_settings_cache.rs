@@ -330,7 +330,7 @@ fn advertised_settings_replacement_survives_reopen_and_rollback() {
         reopened.active_params().announced_settings,
         replacement.announced_settings
     );
-    reopened.rollback_to(2047, None, None).unwrap();
+    reopened.rollback_to(2047).unwrap();
     assert_eq!(
         reopened.validation_settings().disabled_rules(),
         previous.rules_to_disable

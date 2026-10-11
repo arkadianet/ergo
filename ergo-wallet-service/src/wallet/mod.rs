@@ -236,7 +236,7 @@ fn read_index_header(
     Ok(header_id)
 }
 pub use apply::{owned_to_block_txs, BlockOutput, BlockTx, BoundBlockTxs, RescanGuard};
-pub use hydration::{HydrationSource, WalletApplyHook};
+pub use hydration::HydrationSource;
 pub use reader::{RewardKeyResolution, WalletReader};
 pub use scan::{
     RescanBlock, RescanError, RescanReadError, RescanTx, ScanRescanMatcher, WalletScanMatcher,
@@ -251,18 +251,6 @@ pub use types::{
     ScanMatchRecord, ScanTrackedBox, ScanTxRecord, TrackedPubkeyMeta, WalletApplyPayload,
     WalletBox, WalletTransaction,
 };
-
-/// Bundle of wallet-side dependencies threaded through the chain-
-/// apply / chain-rollback paths. Carries the apply hook (snapshot of
-/// tracked-pubkey state at block-apply time) plus the rescan guard
-/// (aborts an in-progress rescan atomically with rollback). Both
-/// references live on the main thread; this struct is short-lived
-/// and never crosses the persist-pipeline worker boundary.
-#[derive(Copy, Clone)]
-pub struct WalletWiring<'a> {
-    pub hook: &'a dyn WalletApplyHook,
-    pub rescan_guard: &'a dyn RescanGuard,
-}
 
 #[cfg(test)]
 mod tests {

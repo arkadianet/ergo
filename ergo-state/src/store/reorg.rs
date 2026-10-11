@@ -17,9 +17,8 @@ use tracing::{info, warn};
 use super::meta::StateMeta;
 use super::undo::undo_log_key;
 use super::{
-    build_wallet_block_txs_from_sections, node_to_bytes, StateError, StateStore, UndoEntry,
-    AVL_NODES, CHAIN_INDEX, CHAIN_STATE_META, NODE_FORMAT_V2, NODE_FORMAT_VERSION_KEY, STATE_META,
-    UNDO_LOG,
+    node_to_bytes, StateError, StateStore, UndoEntry, AVL_NODES, CHAIN_INDEX, CHAIN_STATE_META,
+    NODE_FORMAT_V2, NODE_FORMAT_VERSION_KEY, STATE_META, UNDO_LOG,
 };
 
 impl StateStore {
@@ -32,24 +31,7 @@ impl StateStore {
     /// truncation atomically via `persist_rollback`. Any failure
     /// after step 2 routes through `rebuild_from_committed` so the
     /// in-memory state is restored from committed disk state.
-    ///
-    /// `wallet_hook` and `rescan_guard` are optional. When supplied,
-    /// the wallet tables are rolled back for each block atomically
-    /// with the chain-state rollback (both in the same
-    /// `persist_rollback` txn). Pass `None, None` from test
-    /// harnesses and library callers that do not manage wallet
-    /// state. A wallet hook without a rescan guard is rejected before mutation.
-    pub fn rollback_to(
-        &mut self,
-        target_height: u32,
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
-        rescan_guard: Option<&dyn crate::wallet::apply::RescanGuard>,
-    ) -> Result<(), StateError> {
-        if wallet_hook.is_some() && rescan_guard.is_none() {
-            return Err(StateError::InvalidPrecondition {
-                what: "wallet rollback requires a rescan guard",
-            });
-        }
+    pub fn rollback_to(&mut self, target_height: u32) -> Result<(), StateError> {
         // Capture identity fields before any mutation so the
         // `_failed` event below carries the pre-attempt values,
         // never rebuilt-from-committed values. Depth is
@@ -84,9 +66,8 @@ impl StateStore {
         // committed apply work. Section bytes at the target have
         // been pruned (or were never downloaded after a Mode 2
         // snapshot install / Mode 4 NiPoPoW dense-from), so the
-        // wallet replay path (which re-reads BlockTransactions
-        // to recompute affected boxes) cannot reconstruct the
-        // rollback.
+        // rolled-back blocks' `BlockTransactions` could no longer be
+        // read back.
         //
         // The guard fires whenever `sentinel > 1`, NOT only when
         // `blocks_to_keep > 0`. The sentinel is also written by
@@ -100,14 +81,13 @@ impl StateStore {
         // Returns BEFORE the durable flush + undo-read path
         // below, so a rejected rollback leaves the chain-state
         // observably unchanged.
-        // Wallet replay re-reads `BlockTransactions` for the
-        // blocks `target_height + 1 ..= from_height`. The lowest
-        // replayed block is at height `target_height + 1`, so
+        // The rolled-back blocks are `target_height + 1 ..=
+        // from_height`. The lowest is at height `target_height + 1`, so
         // sections at that height MUST still be present. The
         // boundary is therefore `target_height + 1 >= sentinel`
         // (i.e. `target_height >= sentinel - 1`), NOT
         // `target_height >= sentinel`. Rejecting at the strict
-        // `<` would refuse a valid reorg whose replay set starts
+        // `<` would refuse a valid reorg whose rolled-back set starts
         // at the sentinel itself, which is the first retained
         // height.
         let sentinel = self.read_minimal_full_block_height()?;
@@ -256,9 +236,7 @@ impl StateStore {
         match result {
             Ok(()) => {
                 // Phase 3: persist — on failure, rebuild
-                if let Err(e) =
-                    self.persist_rollback(target_height, &undo_entries, wallet_hook, rescan_guard)
-                {
+                if let Err(e) = self.persist_rollback(target_height, &undo_entries) {
                     self.rebuild_from_committed()?;
                     warn!(
                         event = "state_rollback_failed",
@@ -345,13 +323,11 @@ impl StateStore {
     /// determine which AVL nodes need writing/deletion rather than
     /// snapshotting all live nodes. Single write transaction —
     /// AVL_NODES, CHAIN_INDEX, UNDO_LOG, STATE_META, CHAIN_STATE_META,
-    /// voted_params, and wallet tables all update before `commit()`.
+    /// and voted_params all update before `commit()`.
     fn persist_rollback(
         &mut self,
         target_height: u32,
         undo_entries: &[(u32, [u8; 32], UndoEntry)],
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
-        rescan_guard: Option<&dyn crate::wallet::apply::RescanGuard>,
     ) -> Result<(), StateError> {
         // Collect all node IDs touched by the rolled-back blocks
         use crate::avl::changelog::NodeChange;
@@ -437,107 +413,6 @@ impl StateStore {
                 source: Box::new(e),
             }
         })?;
-
-        // Wallet rollback: invoked inside the same write txn so the wallet
-        // state regresses atomically with chain state. Processed in
-        // REVERSE block order (highest height first), matching the undo
-        // entry ordering (undo_entries is tip-first since we walked
-        // self.height downward).
-        if let (Some(_hook), Some(guard)) = (wallet_hook, rescan_guard) {
-            // undo_entries is ordered tip-first; rollback processes each block
-            // from tip down to target+1.
-            for &(h, ref hid, _) in undo_entries {
-                // Re-read block transactions from BLOCK_SECTIONS.
-                match build_wallet_block_txs_from_sections(&self.db, hid) {
-                    Ok(Some(owned)) => {
-                        guard.abort_in_progress(&write_txn).map_err(|e| {
-                            StateError::WalletApply {
-                                what: "abort_in_progress",
-                                height: h,
-                                source: Box::new(e),
-                            }
-                        })?;
-                        let mut wallet_store =
-                            crate::wallet::RedbWalletStore::attach_write_transaction(&write_txn);
-                        crate::wallet::WalletWrite::rollback_block(
-                            &mut wallet_store,
-                            h,
-                            &owned,
-                            false,
-                        )
-                        .map_err(|e| StateError::WalletApply {
-                            what: "rollback",
-                            height: h,
-                            source: Box::new(e.into()),
-                        })?;
-                    }
-                    Ok(None) => {
-                        // Block section not available (pruned / not yet downloaded).
-                        // Wallet history cannot be replayed for this height —
-                        // force-invalidate so the next restart triggers a full
-                        // rescan. Distinct from `abort_in_progress` (which only
-                        // invalidates if a rescan was already running) because
-                        // wallet stale-ness here is by construction, not by
-                        // interrupted work.
-                        tracing::warn!(
-                            height = h,
-                            "wallet rollback: block section missing — invalidating for rescan",
-                        );
-                        guard.force_invalidate(&write_txn).map_err(|e| {
-                            StateError::WalletApply {
-                                what: "force_invalidate",
-                                height: h,
-                                source: Box::new(e),
-                            }
-                        })?;
-                        // Can't replay → can't selectively roll scans back; clear
-                        // the scan tables so no orphaned-fork boxes are served.
-                        crate::wallet::apply::clear_scan_tracking(&write_txn).map_err(|e| {
-                            StateError::WalletApply {
-                                what: "scan clear (invalidate)",
-                                height: h,
-                                source: Box::new(e),
-                            }
-                        })?;
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            height = h,
-                            error = %e,
-                            "wallet rollback: error reading block section — invalidating for rescan",
-                        );
-                        guard.force_invalidate(&write_txn).map_err(|e2| {
-                            StateError::WalletApply {
-                                what: "force_invalidate",
-                                height: h,
-                                source: Box::new(e2),
-                            }
-                        })?;
-                        crate::wallet::apply::clear_scan_tracking(&write_txn).map_err(|e2| {
-                            StateError::WalletApply {
-                                what: "scan clear (invalidate)",
-                                height: h,
-                                source: Box::new(e2),
-                            }
-                        })?;
-                        break;
-                    }
-                }
-            }
-        }
-        if wallet_hook.is_some() {
-            crate::wallet::apply::rewind_scan_cursor(
-                &write_txn,
-                target_height,
-                (target_height > 0).then_some(&new_tip_id),
-            )
-            .map_err(|e| StateError::WalletApply {
-                what: "cursor rewind",
-                height: target_height,
-                source: Box::new(e),
-            })?;
-        }
 
         write_txn.commit()?;
         // Mutation after successful commit.

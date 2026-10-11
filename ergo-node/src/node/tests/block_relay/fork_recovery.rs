@@ -120,7 +120,6 @@ fn remote_header_batch_new_best_preserves_selected_downloads() {
         &mut state.store,
         &mut state.coordinator,
         Instant::now(),
-        None,
     );
     for id in [first, second] {
         assert!(state
@@ -216,7 +215,6 @@ fn remote_tie_after_recovery_requests_ancestor_and_applies() {
                     &mut state.store,
                     &mut state.coordinator,
                     Instant::now(),
-                    None,
                 );
             }
             3 => process_header(&mut state, &child_bytes),
@@ -230,7 +228,6 @@ fn remote_tie_after_recovery_requests_ancestor_and_applies() {
                     &mut state.store,
                     &mut state.coordinator,
                     Instant::now(),
-                    None,
                 );
                 remote_header(
                     &mut state,

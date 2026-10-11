@@ -119,7 +119,6 @@ fn remote_block_sequential_apply_announces_once() {
         &mut state.store,
         &mut state.coordinator,
         Instant::now(),
-        None,
     );
     assert_eq!(state.store.chain_state_meta().best_full_block_id, id);
     flush_actions(&mut state, vec![]);
@@ -498,7 +497,6 @@ fn locally_mined_fork_block_joining_best_chain_later_announced_once() {
         &mut state.store,
         &mut state.coordinator,
         Instant::now(),
-        None,
     );
     assert_eq!(state.store.chain_state_meta().best_full_block_id, ours.id);
     flush_actions(&mut state, vec![]);
@@ -530,7 +528,6 @@ fn remote_blocks_real_catch_up_flush_announces_only_near_tip() {
         &mut state.store,
         &mut state.coordinator,
         Instant::now(),
-        None,
     );
     assert_eq!(
         state.store.chain_state_meta().best_full_block_height,

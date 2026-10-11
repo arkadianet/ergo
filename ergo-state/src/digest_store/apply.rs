@@ -295,18 +295,7 @@ impl crate::backend::BlockApply for DigestStateStore {
         &mut self,
         block: &ergo_validation::block::CheckedBlock,
         voted_params_row: Option<ActiveProtocolParameters>,
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
     ) -> Result<(), StateError> {
-        // The digest backend stores no box arena, so it cannot drive a
-        // wallet scan. Mode 5 gates the wallet routes off, so the
-        // executor must never attach a hook here; a `Some` is a wiring
-        // bug, surfaced loudly rather than silently dropping updates.
-        if wallet_hook.is_some() {
-            return Err(StateError::InvalidPrecondition {
-                what: "digest backend received a wallet hook; Mode 5 has no box arena to scan",
-            });
-        }
-
         let header = block.header().header();
 
         // Linear-only preflight: reject a non-tip parent BEFORE any
@@ -463,20 +452,7 @@ impl crate::backend::BlockApply for DigestStateStore {
         self.apply_block_digest(new_root, new_chain_state, voted_params_row)
     }
 
-    fn rollback_to(
-        &mut self,
-        target_height: u32,
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
-        rescan_guard: Option<&dyn crate::wallet::apply::RescanGuard>,
-    ) -> Result<(), StateError> {
-        // Same contract as apply: the digest backend has no wallet /
-        // rescan pipeline, so a non-`None` hook or guard is a wiring
-        // bug rather than something to silently ignore.
-        if wallet_hook.is_some() || rescan_guard.is_some() {
-            return Err(StateError::InvalidPrecondition {
-                what: "digest backend received a wallet hook/rescan guard; Mode 5 has no wallet pipeline",
-            });
-        }
+    fn rollback_to(&mut self, target_height: u32) -> Result<(), StateError> {
         DigestStateStore::rollback_to(self, target_height)
     }
 }
