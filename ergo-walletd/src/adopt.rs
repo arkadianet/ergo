@@ -274,7 +274,7 @@ mod tests {
         assert!(daemon.is_sealed(), "an adopted wallet starts sealed");
         let raw = fs::read(data_dir.join("wallet.redb")).unwrap();
         assert!(raw.starts_with(b"redb"), "cleartext until the first unseal");
-        let (unsealed_tx, _unsealed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (unsealed_tx, unsealed_rx) = tokio::sync::mpsc::unbounded_channel();
         let (seal_tx, _seal_rx) = tokio::sync::watch::channel(false);
         let gate = crate::seal::Gate::new(daemon.context, None, unsealed_tx, seal_tx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -292,6 +292,8 @@ mod tests {
         .unwrap();
         assert_eq!(keystore.version(), 2);
         assert!(keystore.has_data_key());
+        // The channel holds the gate's copy of the opened wallet.
+        drop(unsealed_rx);
         drop(opened);
         drop(gate);
         runtime.shutdown_timeout(std::time::Duration::from_secs(5));
