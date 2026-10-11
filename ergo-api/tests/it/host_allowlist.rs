@@ -4,7 +4,7 @@
 //! `ergo-api/src/host_guard.rs`.
 //!
 //! Mirrors production wiring in
-//! `ergo_api::server::serve_on_with_mempool_and_wallet_and_security_and_hosts`:
+//! `ergo_api::server::serve_on_with_mempool_and_security_and_hosts`:
 //! build the router, then layer `require_allowed_host` around it with a
 //! `HostAllowlist` resolved from a bind address + `allowed_hosts` list.
 //! Since the guard is the outermost layer (wraps the 404 fallback too),

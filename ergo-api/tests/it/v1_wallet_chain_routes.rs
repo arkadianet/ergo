@@ -5,7 +5,7 @@ use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use ergo_api::auth::{ApiSecurity, CredentialScope, ScopedCredentialConfig, API_KEY_HEADER};
-use ergo_api::server::{router_with_mempool_and_wallet_and_wallet_moved, ServerCtx};
+use ergo_api::server::{router_with_mempool_and_wallet_moved, ServerCtx};
 use ergo_api::traits::{NodeReadState, NoopMempoolView, WalletChain, WalletChainError};
 use ergo_api::types::{
     ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction,
@@ -15,7 +15,6 @@ use ergo_api::types::{
 use ergo_api::v1::auth::V1AuthConfig;
 use ergo_api::v1::governor::{Governor, GovernorConfig};
 use ergo_api::v1::{wallet_chain_router, WalletChainState};
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_ser::address::NetworkPrefix;
 use ergo_wallet_protocol::chain as wire;
 use serde_json::{json, Value};
@@ -363,13 +362,7 @@ fn production_app_with_security(
         emission_scripts: None,
         utxo_reads_supported: true,
     };
-    router_with_mempool_and_wallet_and_wallet_moved(
-        ctx,
-        None,
-        Arc::new(NoopWalletAdmin),
-        Some(security),
-        wallet_moved,
-    )
+    router_with_mempool_and_wallet_moved(ctx, None, Some(security), wallet_moved)
 }
 
 async fn send(

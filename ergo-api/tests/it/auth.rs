@@ -1,7 +1,9 @@
 //! Integration tests for the `api_key` middleware. Pins:
 //!
-//! * Scope: only `/wallet/*` and `/node/shutdown` are gated; the public
-//!   read surface (`/info`, `/blocks/*`, …) stays unauthenticated.
+//! * Scope: the retired `/wallet/*` and `/scan/*` paths and `/node/shutdown`
+//!   are gated; the public read surface (`/info`, `/blocks/*`, …) stays
+//!   unauthenticated. A key that passes the gate on a retired wallet path
+//!   reaches its `410 wallet_moved` answer.
 //! * Header: exactly `api_key` (lowercase, underscore) — `api-key` and
 //!   `x-api-key` do not work.
 //! * Hash: byte-for-byte parity with the Scala node's `apiKeyHash` —
@@ -18,7 +20,7 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use ergo_api::auth::{ApiSecurity, API_KEY_HEADER};
-use ergo_api::wallet::{router_with_security, NoopWalletAdmin, WalletAdmin};
+use ergo_api::wallet::compat_router;
 use tower::ServiceExt;
 
 // ----- helpers -----
@@ -40,13 +42,11 @@ pub(super) fn security() -> Arc<ApiSecurity> {
 }
 
 fn wallet_app_gated() -> axum::Router {
-    let admin: Arc<dyn WalletAdmin> = Arc::new(NoopWalletAdmin);
-    router_with_security(admin, Some(security()))
+    compat_router(Some("http://127.0.0.1:9090"), Some(security()))
 }
 
 fn wallet_app_unconfigured() -> axum::Router {
-    let admin: Arc<dyn WalletAdmin> = Arc::new(NoopWalletAdmin);
-    router_with_security(admin, None)
+    compat_router(Some("http://127.0.0.1:9090"), None)
 }
 
 async fn body_string(resp: axum::response::Response) -> String {
@@ -69,11 +69,11 @@ fn get_with_header(path: &str, header: &str, value: &str) -> Request<Body> {
 // ----- happy path -----
 
 #[tokio::test]
-async fn wallet_status_with_correct_api_key_returns_200() {
+async fn wallet_status_with_correct_api_key_passes_the_gate() {
     let app = wallet_app_gated();
     let req = get_with_header("/wallet/status", API_KEY_HEADER, PLAINTEXT_KEY);
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::GONE);
 }
 
 #[tokio::test]
@@ -128,9 +128,8 @@ async fn wallet_status_returns_403_not_404_to_avoid_route_leak() {
 
 #[tokio::test]
 async fn scan_routes_are_key_gated() {
-    // Pin the whole mounted /scan surface behind the key: every route 403s
-    // without it and stops 403ing with it (the Noop admin then answers 500
-    // from the trait defaults — the point is the gate, not the handler).
+    // Pin the whole retired /scan surface behind the key: every route 403s
+    // without it and reaches its `410 wallet_moved` answer with it.
     let routes: [(&str, &str); 8] = [
         ("POST", "/scan/register"),
         ("POST", "/scan/deregister"),
@@ -161,9 +160,9 @@ async fn scan_routes_are_key_gated() {
             .body(Body::empty())
             .unwrap();
         let resp = wallet_app_gated().oneshot(req).await.unwrap();
-        assert_ne!(
+        assert_eq!(
             resp.status(),
-            StatusCode::FORBIDDEN,
+            StatusCode::GONE,
             "{method} {path} must pass the gate with the key"
         );
     }
@@ -215,7 +214,7 @@ async fn scala_hello_secret_unlocks_scala_hello_hash() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::OK,
+        StatusCode::GONE,
         "Scala (secret=\"hello\", hash=324dcf...) must round-trip"
     );
 }
@@ -228,7 +227,7 @@ async fn scala_hello_secret_unlocks_scala_hello_hash() {
 // reproduce the shutdown router shape and verify the middleware
 // layer in isolation.
 //
-// The real `router_with_mempool_and_wallet_and_security(...)` merge
+// The real `router_with_mempool_and_security(...)` merge
 // path is exercised by `tests/openapi_native_runtime_mount.rs`, which
 // pins both the gated aliases AND the fallback discipline (an
 // unmatched path must 404 bare, never 403 — the `.layer` vs

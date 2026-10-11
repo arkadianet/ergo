@@ -14,8 +14,9 @@
 //!   matching Scala's `ApiError.ApiKeyNotValid`
 //!   (`http/api/ApiError.scala:37`).
 //!
-//! Mounted by [`crate::wallet::router_with_security`] and [`crate::server`] around the
-//! privileged routes (wallets, scans, admin controls, mining and block submission).
+//! Mounted by [`crate::server`] around the privileged routes (admin controls,
+//! mining and block submission); [`crate::wallet`]'s retired wallet and scan
+//! paths run the same check before answering `410 wallet_moved`.
 //! Without a configured [`ApiSecurity`], they fail closed. Public reads and
 //! transaction submissions do not receive the layer.
 //!

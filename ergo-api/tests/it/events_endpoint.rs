@@ -166,8 +166,8 @@ fn activity_app_with_services(
     services: Arc<ergo_api::ApiServices>,
 ) -> axum::Router {
     use ergo_api::auth::ApiSecurity;
-    use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
-    router_with_mempool_and_wallet_and_security(
+    use ergo_api::server::{router_with_mempool_and_security, ServerCtx};
+    router_with_mempool_and_security(
         ServerCtx {
             wallet_chain: None,
             read,
@@ -187,7 +187,6 @@ fn activity_app_with_services(
             script_config: Default::default(),
         },
         None,
-        Arc::new(ergo_api::wallet::NoopWalletAdmin),
         configured.then(|| Arc::new(ApiSecurity::new(ApiSecurity::hash_key(b"operator")).unwrap())),
     )
 }

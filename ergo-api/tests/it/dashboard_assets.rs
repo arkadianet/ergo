@@ -13,13 +13,12 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+use ergo_api::server::{router_with_mempool_and_security, ServerCtx};
 use ergo_api::traits::{NodeReadState, NoopMempoolView};
 use ergo_api::types::{
     ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiPeer,
     ApiStatus, ApiSyncStatus, ApiTip,
 };
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
 
@@ -82,7 +81,7 @@ fn app() -> axum::Router {
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),
     };
-    router_with_mempool_and_wallet_and_security(ctx, None, Arc::new(NoopWalletAdmin), None)
+    router_with_mempool_and_security(ctx, None, None)
 }
 
 async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Vec<u8>) {

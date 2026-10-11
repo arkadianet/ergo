@@ -5,7 +5,7 @@
 //! API document merges it with the legacy operator fragment.
 //!
 //! Registers every `#[utoipa::path]`-annotated handler across
-//! `crate::v1::{routes,accounts,operator,script,webhooks,realtime}` — see
+//! `crate::v1::{routes,operator,script,webhooks,realtime}` — see
 //! the module docs on each for the endpoint's semantics. Kept in this one
 //! file (rather than scattered `#[openapi(...)]` fragments) so the full
 //! v1 surface is auditable at a glance and the golden-snapshot test
@@ -42,7 +42,7 @@ impl utoipa::Modify for V1SecurityAddon {
         description = "Compatibility fragment for RUST API product routes under `/api/v1/*`: chain/boxes/tokens/addresses/mempool/transactions \
 reads, tx-intelligence (build/simulate/fee-estimate/status), the ErgoScript playground (`script/*`), semantic decode \
 (`protocols/*`, `boxes/decode`), light-client trustless-sync proofs (`light/*`), time-series analytics (`stats/*`), \
-operator diagnostics, webhooks, real-time WebSocket subscriptions, the scan/accounts surface, and node/network/mining/voting \
+operator diagnostics, webhooks, real-time WebSocket subscriptions, and node/network/mining/voting \
 operator controls. The canonical complete document is served at `/api-docs/openapi-rust.yaml`. \
 Every error from these routes follows the nested error envelope \
 (`error.reason`/`error.message`/`error.detail`); `reason` is the stable machine-readable field to switch on. Query \
@@ -53,21 +53,6 @@ preserve them exactly with a lossless JSON parser; JavaScript Number and ordinar
 Use BigInt with a lossless parser and send cursor query parameters as decimal text."
     ),
     paths(
-        crate::v1::accounts::scan::register,
-        crate::v1::accounts::scan::list,
-        crate::v1::accounts::scan::get_one,
-        crate::v1::accounts::scan::deregister,
-        crate::v1::accounts::scan::watch_unspent,
-        crate::v1::accounts::scan::unspent,
-        crate::v1::accounts::scan::transactions,
-        crate::v1::accounts::scan::attach_box,
-        crate::v1::accounts::scan::detach_box,
-        crate::v1::accounts::watch_register,
-        crate::v1::accounts::watch_list,
-        crate::v1::accounts::watch_delete,
-        crate::v1::accounts::private_key,
-        crate::v1::accounts::accounts_seam,
-        crate::v1::accounts::psbt_seam,
         crate::v1::operator::node::info,
         crate::v1::operator::node::status,
         crate::v1::operator::node::sync,
@@ -215,12 +200,6 @@ Use BigInt with a lossless parser and send cursor query parameters as decimal te
             crate::types::ApiSyncStatus,
             crate::types::ApiTip,
             crate::types::RawTransactionBytes,
-            crate::v1::accounts::PrivateKeyRequest,
-            crate::v1::accounts::WatchRequest,
-            crate::v1::accounts::scan::AttachBoxRequest,
-            crate::v1::accounts::scan::ScanBoxView,
-            crate::v1::accounts::scan::ScanRegisterRequest,
-            crate::v1::accounts::scan::ScanView,
             crate::v1::error::V1Error,
             crate::v1::routes::wallet_chain::WalletChainTip,
             crate::v1::routes::wallet_chain::WalletChainHeader,
@@ -283,7 +262,6 @@ Use BigInt with a lossless parser and send cursor query parameters as decimal te
             crate::v1::routes::diagnostics::TipHealth,
             crate::v1::routes::dto::Collection<String>,
             crate::v1::routes::dto::Collection<crate::types::ApiPeer>,
-            crate::v1::routes::dto::Collection<crate::v1::accounts::scan::ScanBoxView>,
             crate::v1::routes::dto::Collection<crate::v1::operator::network::BlacklistedPeer>,
             crate::v1::routes::dto::Collection<crate::v1::operator::network::SyncInfoEntry>,
             crate::v1::routes::dto::Collection<crate::v1::operator::voting::ConfiguredVote>,

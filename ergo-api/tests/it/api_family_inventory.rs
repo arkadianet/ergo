@@ -198,13 +198,6 @@ fn canonical_rust_openapi_is_the_union_of_both_fragments_and_known_aliases() {
         operation("/api/v1/mempool/check", "post"),
         operation("/api/v1/addresses/{address}/boxes", "get"),
         operation("/api/v1/addresses/{address}/unspent", "get"),
-        operation("/api/v1/accounts", "get"),
-        operation("/api/v1/accounts", "post"),
-        operation("/api/v1/accounts/{account_id}", "patch"),
-        operation("/api/v1/accounts/{account_id}", "delete"),
-        operation("/api/v1/transactions-psbt/{psbt_id}", "get"),
-        operation("/api/v1/transactions-psbt/{psbt_id}/contributions", "post"),
-        operation("/api/v1/transactions-psbt/{psbt_id}/finalize", "post"),
         operation("/api/v1/chain/tip", "get"),
         operation("/api/v1/chain/snapshot", "get"),
         operation("/api/v1/chain/spending-context", "get"),
@@ -215,6 +208,18 @@ fn canonical_rust_openapi_is_the_union_of_both_fragments_and_known_aliases() {
         operation("/api/v1/chain/transactions", "post"),
     ]);
     assert!(required.is_subset(&operations));
+    // The wallet runs in `ergo-walletd`: the node documents none of its
+    // wallet, scan, account or PSBT operations.
+    for op in &operations {
+        for prefix in [
+            "/api/v1/wallet",
+            "/api/v1/scan",
+            "/api/v1/accounts",
+            "/api/v1/transactions-psbt",
+        ] {
+            assert!(!op.path.starts_with(prefix), "{} {}", op.method, op.path);
+        }
+    }
 }
 
 #[test]
@@ -379,54 +384,6 @@ fn canonical_rust_openapi_preserves_prices_contract() {
 }
 
 #[test]
-fn supplemental_seam_operations_are_method_specific() {
-    let document = canonical_json();
-    for (path, method, operation_id, summary) in [
-        (
-            "/api/v1/accounts",
-            "post",
-            "accounts_create",
-            "Create named account (unavailable)",
-        ),
-        (
-            "/api/v1/accounts/{account_id}",
-            "patch",
-            "account_patch",
-            "Update named account (unavailable)",
-        ),
-        (
-            "/api/v1/accounts/{account_id}",
-            "delete",
-            "account_delete",
-            "Delete named account (unavailable)",
-        ),
-        (
-            "/api/v1/transactions-psbt/{psbt_id}",
-            "get",
-            "psbt_get",
-            "Get PSBT session (unavailable)",
-        ),
-    ] {
-        let operation = get_operation(&document, path, method);
-        assert_eq!(operation["operationId"], operation_id);
-        assert_eq!(operation["summary"], summary);
-        assert!(
-            operation.get("requestBody").is_none(),
-            "{method} {path} does not consume a request body while unavailable"
-        );
-        assert_eq!(
-            response_statuses(operation),
-            BTreeSet::from(["503"]),
-            "{method} {path} must document the seam's actual response"
-        );
-        assert_eq!(
-            response_schema_ref(operation, "503"),
-            "#/components/schemas/V1Error"
-        );
-    }
-}
-
-#[test]
 fn canonical_rust_openapi_preserves_transaction_detail_contract() {
     let document = canonical_json();
     let operation = get_operation(&document, "/api/v1/transactions/{txId}/detail", "get");
@@ -581,7 +538,7 @@ fn assert_operation_inventory_matches_fixture(
 fn canonical_scala_and_rust_operation_inventories_are_disjoint() {
     let scala = scala_openapi_operations();
     let rust = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI must merge"));
-    assert_eq!(scala.len(), 127);
+    assert_eq!(scala.len(), 92);
     assert_eq!(
         rust.len(),
         include_str!("../fixtures/api_family_rust_operations.txt")

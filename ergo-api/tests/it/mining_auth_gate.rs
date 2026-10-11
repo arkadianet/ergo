@@ -6,7 +6,7 @@
 //! with no gate. All four routes now sit behind the same
 //! api_key middleware as `/node/shutdown`. An absent verifier denies access.
 //!
-//! Pinned on the *real* merged router (`router_with_mempool_and_wallet_and_security`
+//! Pinned on the *real* merged router (`router_with_mempool_and_security`
 //! with `mining = Some(NoopNodeMining)`, `security = Some(hello)`):
 //! - without key → 403 from the gate (never a handler verdict)
 //! - with key → the Noop handler's own 503 "unavailable" verdict, proving
@@ -17,13 +17,12 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ergo_api::auth::{ApiSecurity, API_KEY_HEADER};
-use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+use ergo_api::server::{router_with_mempool_and_security, ServerCtx};
 use ergo_api::traits::{NodeReadState, NoopMempoolView};
 use ergo_api::types::{
     ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiPeer,
     ApiStatus, ApiSyncStatus, ApiTip,
 };
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_api::NoopNodeMining;
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
@@ -104,12 +103,7 @@ fn app_with_mining_and_security(
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),
     };
-    router_with_mempool_and_wallet_and_security(
-        ctx,
-        None,
-        Arc::new(NoopWalletAdmin),
-        Some(security),
-    )
+    router_with_mempool_and_security(ctx, None, Some(security))
 }
 
 fn get(path: &str) -> Request<Body> {
@@ -362,23 +356,6 @@ async fn private_queue_routes_require_owner_key_before_parsing_signed_bytes() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-}
-
-#[test]
-fn private_wallet_options_require_explicit_private_delivery() {
-    use ergo_api::wallet::native::dto::{SendTxRequest, TxDelivery};
-    let value = serde_json::json!({"type":"signed", "signedTransaction":{"type":"bytes", "bytes":"00"}, "privateOptions":{"expires_at_height":100}});
-    assert!(serde_json::from_value::<SendTxRequest>(value.clone()).is_err());
-    let mut private = value;
-    private["delivery"] = serde_json::json!("mine_private");
-    let request: SendTxRequest = serde_json::from_value(private).unwrap();
-    assert!(matches!(
-        request,
-        SendTxRequest::Signed {
-            delivery: TxDelivery::MinePrivate,
-            ..
-        }
-    ));
 }
 
 #[tokio::test]

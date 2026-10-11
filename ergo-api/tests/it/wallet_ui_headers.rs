@@ -13,13 +13,12 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+use ergo_api::server::{router_with_mempool_and_security, ServerCtx};
 use ergo_api::traits::{NodeReadState, NoopMempoolView};
 use ergo_api::types::{
     ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiPeer,
     ApiStatus, ApiSyncStatus, ApiTip,
 };
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
 
@@ -86,7 +85,7 @@ fn app() -> axum::Router {
     };
     // Security gate is irrelevant to these header assertions; `None`
     // keeps the static routes reachable without a key.
-    router_with_mempool_and_wallet_and_security(ctx, None, Arc::new(NoopWalletAdmin), None)
+    router_with_mempool_and_security(ctx, None, None)
 }
 
 fn get(path: &str) -> Request<Body> {
