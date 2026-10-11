@@ -34,7 +34,9 @@ impl WalletApi {
             .await
     }
     pub async fn unlock(&self, pass: String) -> Result<(), WalletAdminError> {
-        self.host.call(move |engine| engine.unlock(pass)).await
+        // Through the host so the unlock session starts and the idle/max-unlock
+        // lock policy applies to every unlock route.
+        self.host.unlock(pass).await
     }
     pub async fn lock(&self) -> Result<(), WalletAdminError> {
         self.host.lock().await

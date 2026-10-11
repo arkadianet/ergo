@@ -310,9 +310,7 @@ pub fn create(
         Some(
             existing
                 .iter()
-                .find(|(_, record)| {
-                    record.job.state.terminal() && record.job.state != WalletJobState::Conflicted
-                })
+                .find(|(_, record)| record.job.state.terminal() && !follows_queue(record))
                 .map(|(key, _)| *key)
                 .ok_or_else(|| {
                     WalletAdminError::BadRequest("private wallet job limit reached".into())

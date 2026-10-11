@@ -224,11 +224,17 @@ fn build_unsigned_tx_with_options(
         let mut per_input_reemission: Vec<(u64, u64)> = Vec::with_capacity(explicit_inputs.len());
         let mut selected: Vec<SelectedInputInfo> = Vec::with_capacity(explicit_inputs.len());
 
+        let mut seen_inputs = std::collections::BTreeSet::new();
         for hex_id in explicit_inputs {
             let id: [u8; 32] = hex::decode(hex_id)
                 .ok()
                 .and_then(|v| v.try_into().ok())
                 .ok_or_else(|| WalletAdminError::BadRequest(format!("bad input id: {hex_id}")))?;
+            if !seen_inputs.insert(id) {
+                return Err(WalletAdminError::BadRequest(format!(
+                    "duplicate input id: {hex_id}"
+                )));
+            }
 
             // A caller-named input absent from the UTXO set is a client error, not a
             // server fault (it may be already spent or never existed).
