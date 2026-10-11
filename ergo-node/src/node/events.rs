@@ -203,7 +203,11 @@ fn process_header_modifier_batch(
     let mut requested_peers: Vec<_> = requested_headers
         .into_iter()
         .filter(|(_, id)| {
-            state.coordinator.delivery().status(id) == ergo_p2p::delivery::ModifierStatus::Received
+            state
+                .coordinator
+                .delivery()
+                .status(ergo_p2p::types::ModifierTypeId::Header.as_byte(), id)
+                == ergo_p2p::delivery::ModifierStatus::Received
         })
         .map(|(peer, _)| peer)
         .collect();

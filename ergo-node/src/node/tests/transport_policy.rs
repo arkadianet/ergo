@@ -203,7 +203,10 @@ fn byte_throttle_over_cap_replayed_modifier_frame_drops_and_penalizes() {
     .expect("serialize modifiers");
     let _ = handle_message(&mut state, peer, message::CODE_MODIFIER, &payload, now);
     assert_eq!(
-        state.coordinator.delivery().status(&section_id),
+        state
+            .coordinator
+            .delivery()
+            .status(ModifierTypeId::ADProofs.as_byte(), &section_id),
         ergo_p2p::delivery::ModifierStatus::Received,
         "the first delivery must have been accepted for the replay to be a replay",
     );
@@ -373,11 +376,11 @@ fn coalesced_over_throttle_header_is_penalized_without_validation() {
 
     assert_eq!(state.sections_received_total, 1);
     assert_eq!(
-        state.coordinator.delivery().status(&rejected_id),
+        state.coordinator.delivery().status(101, &rejected_id),
         ergo_p2p::delivery::ModifierStatus::Unknown
     );
     assert_eq!(
-        state.coordinator.delivery().status(&admitted_id),
+        state.coordinator.delivery().status(101, &admitted_id),
         ergo_p2p::delivery::ModifierStatus::Received
     );
     assert_eq!(state.peer_manager.get(&peer).unwrap().score.raw_score(), 10);

@@ -27,6 +27,13 @@ use std::time::{Duration, Instant};
 
 use crate::peer::PeerId;
 
+/// Identity of a tracked modifier: `(modifier type id, modifier id)`.
+///
+/// Every map in the tracker is keyed by both parts, so an id announced or
+/// requested under one type never shadows, satisfies, or blocks a request
+/// for the same id under another type.
+pub type ModifierKey = (u8, [u8; 32]);
+
 pub const DELIVERY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Max in-flight modifier IDs per peer.
@@ -96,11 +103,11 @@ pub enum DeliveryAction {
 /// Result of cancelling a peer's requests.
 #[derive(Debug)]
 pub struct CancelResult {
-    /// Modifier IDs that can be retried from a different peer.
-    pub retryable: Vec<[u8; 32]>,
-    /// Modifier IDs that exhausted this retry cycle, now Unknown. A later
+    /// Modifiers that can be retried from a different peer.
+    pub retryable: Vec<ModifierKey>,
+    /// Modifiers that exhausted this retry cycle, now Unknown. A later
     /// download round can request them again.
-    pub exhausted: Vec<[u8; 32]>,
+    pub exhausted: Vec<ModifierKey>,
 }
 
 /// Result of checking for timed-out deliveries.
@@ -110,31 +117,25 @@ pub struct TimeoutResult {
     /// exhausted hard timeouts (so the coordinator can still attribute
     /// the final NonDelivery penalty). Callers must exclude
     /// [`Self::exhausted`] from same-tick re-request.
-    pub retryable: Vec<(PeerId, Vec<[u8; 32]>)>,
+    pub retryable: Vec<(PeerId, Vec<ModifierKey>)>,
     /// Modifier IDs that have exceeded MAX_RETRIES. Still present in
     /// [`Self::retryable`] for penalty attribution; not re-requested
     /// this tick. Status returns to Unknown (Scala parity).
-    pub exhausted: Vec<[u8; 32]>,
+    pub exhausted: Vec<ModifierKey>,
     /// Timed-out modifier IDs that should attract a NonDelivery penalty
     /// (and retry-count increment). Empty for "soft" timeouts where the
     /// node has received *some* modifier from anywhere since the request
     /// was issued — Scala `checkDelivery` connectivity gate
     /// (`ri.requestTime < lastModifierGotTime`). Includes the final
     /// exhausted attempt.
-    pub penalize: HashSet<[u8; 32]>,
+    pub penalize: HashSet<ModifierKey>,
 }
 
-/// A single in-flight request.
-// `dead_code`: `modifier_type` is read by the sync coordinator
-// (`ergo-sync`) when classifying timeouts; the field is kept on the
-// struct so the read path doesn't need a parallel side-channel, even
-// though no code in this crate reads it directly.
+/// A single in-flight request. The modifier type is part of the map key.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct InflightRequest {
     peer: PeerId,
     requested_at: Instant,
-    modifier_type: u8,
     /// HOL-hedge reassignments so far in this request cycle. Bounded by
     /// [`MAX_HEDGES`]; reset to 0 by a fresh `request` (re-entry after a
     /// timeout), not by `reassign`.
@@ -152,16 +153,16 @@ struct LateAllowance {
 /// Tracks modifier delivery state across all peers.
 pub struct DeliveryTracker {
     /// Modifier ID → in-flight request (if currently requested).
-    inflight: HashMap<[u8; 32], InflightRequest>,
+    inflight: HashMap<ModifierKey, InflightRequest>,
     /// Bounded set of received modifier IDs. FIFO eviction at MAX_RECEIVED_ENTRIES.
-    received_order: VecDeque<[u8; 32]>,
-    received_set: HashSet<[u8; 32]>,
+    received_order: VecDeque<ModifierKey>,
+    received_set: HashSet<ModifierKey>,
     /// Count of in-flight requests per peer.
     peer_inflight_count: HashMap<PeerId, usize>,
     /// Retry count per modifier ID. Incremented on each timeout/cancel.
-    retry_count: HashMap<[u8; 32], u8>,
+    retry_count: HashMap<ModifierKey, u8>,
     /// Explicit failures (not populated by ordinary timeout/cancel exhaustion).
-    failed: HashSet<[u8; 32]>,
+    failed: HashSet<ModifierKey>,
     /// Peers whose late delivery is still acceptable for a modifier.
     ///
     /// Timeout and HOL-reassignment remove a peer from the active owner slot,
@@ -174,13 +175,11 @@ pub struct DeliveryTracker {
     /// that old can never correspond to a useful answer, and without
     /// the sweep the map grows for the node's lifetime (issue #245 /
     /// audit M-7: abandoned IDs left permanent entries).
-    late_acceptable: HashMap<[u8; 32], LateAllowance>,
-    /// Last-known `modifier_type` for IDs whose `inflight` entry was
-    /// removed by `check_timeouts` / `cancel_peer`. Lets retry-bucket
-    /// classifiers read the original requested type AFTER the
-    /// inflight entry is gone.
+    late_acceptable: HashMap<ModifierKey, LateAllowance>,
+    /// Release time for modifiers whose `inflight` entry was removed by
+    /// `check_timeouts` / `cancel_peer` and that may be re-requested.
     ///
-    /// Value is `(modifier_type, released_at)`. Precise eviction drops an
+    /// Value is `released_at`. Precise eviction drops an
     /// entry when the ID re-enters `inflight` (via `request`), when
     /// retries are exhausted, or when it is marked received (a late
     /// delivery accepted post-timeout). An id that times out and is then
@@ -188,7 +187,7 @@ pub struct DeliveryTracker {
     /// `check_timeouts` sweep reclaims any entry older than
     /// `RELEASED_SHADOW_TTL`. Either way the map cannot grow for the
     /// node's lifetime.
-    recently_released: HashMap<[u8; 32], (u8, Instant)>,
+    recently_released: HashMap<ModifierKey, Instant>,
 }
 
 impl DeliveryTracker {
@@ -206,12 +205,13 @@ impl DeliveryTracker {
     }
 
     /// Get the delivery status of a modifier.
-    pub fn status(&self, modifier_id: &[u8; 32]) -> ModifierStatus {
-        if self.inflight.contains_key(modifier_id) {
+    pub fn status(&self, modifier_type: u8, modifier_id: &[u8; 32]) -> ModifierStatus {
+        let key = (modifier_type, *modifier_id);
+        if self.inflight.contains_key(&key) {
             ModifierStatus::Requested
-        } else if self.received_set.contains(modifier_id) {
+        } else if self.received_set.contains(&key) {
             ModifierStatus::Received
-        } else if self.failed.contains(modifier_id) {
+        } else if self.failed.contains(&key) {
             ModifierStatus::Failed
         } else {
             ModifierStatus::Unknown
@@ -220,19 +220,26 @@ impl DeliveryTracker {
 
     /// Determine what to do when a modifier arrives from a specific peer.
     /// Validates that the delivering peer is the one we requested from.
-    /// A modifier delivered by the wrong peer is treated as unsolicited.
-    pub fn on_received(&self, modifier_id: &[u8; 32], from_peer: &PeerId) -> DeliveryAction {
-        match self.inflight.get(modifier_id) {
+    /// A modifier delivered by the wrong peer, or under a type other than
+    /// the one requested, is treated as unsolicited.
+    pub fn on_received(
+        &self,
+        modifier_type: u8,
+        modifier_id: &[u8; 32],
+        from_peer: &PeerId,
+    ) -> DeliveryAction {
+        let key = (modifier_type, *modifier_id);
+        match self.inflight.get(&key) {
             Some(req) if req.peer == *from_peer => DeliveryAction::Accept,
             // Wrong current owner, but this peer is answering a request we
             // previously sent before timeout/reassignment. Accept it: a late
             // valid section is exactly what unblocks HOL stalls.
-            Some(_) if self.late_delivery_allowed(modifier_id, from_peer) => DeliveryAction::Accept,
+            Some(_) if self.late_delivery_allowed(&key, from_peer) => DeliveryAction::Accept,
             Some(_) => DeliveryAction::RejectSpam,
             None => {
-                if self.received_set.contains(modifier_id) {
+                if self.received_set.contains(&key) {
                     DeliveryAction::Ignore
-                } else if self.late_delivery_allowed(modifier_id, from_peer) {
+                } else if self.late_delivery_allowed(&key, from_peer) {
                     DeliveryAction::Accept
                 } else {
                     DeliveryAction::RejectSpam
@@ -287,24 +294,24 @@ impl DeliveryTracker {
             // Skip if already requested or received. Failed IDs are skipped
             // for ordinary requests but can be explicitly revived by recovery
             // paths that need to make forward progress.
-            if self.inflight.contains_key(id)
-                || self.received_set.contains(id)
-                || (!allow_failed && self.failed.contains(id))
+            let key = (modifier_type, *id);
+            if self.inflight.contains_key(&key)
+                || self.received_set.contains(&key)
+                || (!allow_failed && self.failed.contains(&key))
             {
                 continue;
             }
-            if allow_failed && self.failed.remove(id) {
-                self.retry_count.remove(id);
+            if allow_failed && self.failed.remove(&key) {
+                self.retry_count.remove(&key);
             }
             // Re-entering inflight clears any stale recently-released
-            // type record — the live entry below is now authoritative.
-            self.recently_released.remove(id);
+            // record — the live entry below is now authoritative.
+            self.recently_released.remove(&key);
             self.inflight.insert(
-                *id,
+                key,
                 InflightRequest {
                     peer,
                     requested_at: now,
-                    modifier_type,
                     hedge_count: 0,
                 },
             );
@@ -319,23 +326,24 @@ impl DeliveryTracker {
 
     /// Mark a modifier as successfully received. Removes from inflight.
     /// Evicts oldest entry if the received set exceeds MAX_RECEIVED_ENTRIES.
-    pub fn mark_received(&mut self, modifier_id: &[u8; 32]) {
-        if let Some(req) = self.inflight.remove(modifier_id) {
+    pub fn mark_received(&mut self, modifier_type: u8, modifier_id: &[u8; 32]) {
+        let key = (modifier_type, *modifier_id);
+        if let Some(req) = self.inflight.remove(&key) {
             if let Some(count) = self.peer_inflight_count.get_mut(&req.peer) {
                 *count = count.saturating_sub(1);
             }
         }
-        self.late_acceptable.remove(modifier_id);
-        self.failed.remove(modifier_id);
-        self.retry_count.remove(modifier_id);
+        self.late_acceptable.remove(&key);
+        self.failed.remove(&key);
+        self.retry_count.remove(&key);
         // A modifier can reach `received` via a late delivery accepted
         // after it timed out — in which case it still carries a
-        // `recently_released` type shadow. Receiving is terminal (it is
+        // `recently_released` record. Receiving is terminal (it is
         // never re-requested, re-timed-out, or exhausted), so evict the
         // shadow here or it would never leave.
-        self.recently_released.remove(modifier_id);
-        if self.received_set.insert(*modifier_id) {
-            self.received_order.push_back(*modifier_id);
+        self.recently_released.remove(&key);
+        if self.received_set.insert(key) {
+            self.received_order.push_back(key);
             // FIFO eviction when over capacity.
             while self.received_order.len() > MAX_RECEIVED_ENTRIES {
                 if let Some(old) = self.received_order.pop_front() {
@@ -352,10 +360,11 @@ impl DeliveryTracker {
     /// (for example, a far-ahead orphan header during IBD). If the bytes are
     /// dropped, keeping `Received` would make future legitimate `Inv`s skip the
     /// modifier and could strand header sync at that height.
-    pub fn forget_received(&mut self, modifier_id: &[u8; 32]) -> bool {
-        let removed = self.received_set.remove(modifier_id);
+    pub fn forget_received(&mut self, modifier_type: u8, modifier_id: &[u8; 32]) -> bool {
+        let key = (modifier_type, *modifier_id);
+        let removed = self.received_set.remove(&key);
         if removed {
-            self.received_order.retain(|id| id != modifier_id);
+            self.received_order.retain(|k| *k != key);
         }
         removed
     }
@@ -382,9 +391,9 @@ impl DeliveryTracker {
     /// — a tx may legitimately have left the peer's mempool, so the
     /// peer is not penalized and the tx is not re-requested
     /// (ErgoNodeViewSynchronizer.scala, "no reason to penalize").
-    pub fn forget_timed_out(&mut self, modifier_id: &[u8; 32]) {
-        self.recently_released.remove(modifier_id);
-        self.retry_count.remove(modifier_id);
+    pub fn forget_timed_out(&mut self, key: &ModifierKey) {
+        self.recently_released.remove(key);
+        self.retry_count.remove(key);
     }
 
     /// Check for timed-out requests. Returns a `TimeoutResult` with:
@@ -411,7 +420,7 @@ impl DeliveryTracker {
         now: Instant,
         last_modifier_got_time: Option<Instant>,
     ) -> TimeoutResult {
-        let mut by_peer: HashMap<PeerId, Vec<([u8; 32], Instant)>> = HashMap::new();
+        let mut by_peer: HashMap<PeerId, Vec<(ModifierKey, Instant)>> = HashMap::new();
         let mut to_remove = Vec::new();
 
         for (id, req) in &self.inflight {
@@ -427,9 +436,7 @@ impl DeliveryTracker {
         for id in &to_remove {
             if let Some(req) = self.inflight.remove(id) {
                 self.allow_late_delivery(*id, req.peer, now);
-                // Stash the modifier_type for the retry-bucket
-                // classifier after the inflight entry is gone.
-                self.recently_released.insert(*id, (req.modifier_type, now));
+                self.recently_released.insert(*id, now);
                 if let Some(count) = self.peer_inflight_count.get_mut(&req.peer) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
@@ -457,7 +464,7 @@ impl DeliveryTracker {
         // into `self.failed`, so future `delivery.request` calls
         // will accept it without needing the `request_allow_failed`
         // workaround.
-        let mut retryable: HashMap<PeerId, Vec<[u8; 32]>> = HashMap::new();
+        let mut retryable: HashMap<PeerId, Vec<ModifierKey>> = HashMap::new();
         let mut exhausted = Vec::new();
         let mut penalize = HashSet::new();
 
@@ -474,10 +481,9 @@ impl DeliveryTracker {
                     let count = self.retry_count.entry(id).or_insert(0);
                     *count += 1;
                     if *count >= MAX_RETRIES {
-                        // Clear retry bookkeeping but keep the
-                        // recently_released type shadow so the
-                        // coordinator can still classify the id
-                        // (header vs body) when emitting the final
+                        // Clear retry bookkeeping. The typed key
+                        // stays in the peer-scoped `retryable` bucket
+                        // so the coordinator can still emit the final
                         // NonDelivery / delivery-streak outcome.
                         // The id also stays in the peer-scoped
                         // `retryable` bucket below for that penalty
@@ -501,7 +507,7 @@ impl DeliveryTracker {
         // reorg). Entries created this tick are age-0, so the working set
         // the coordinator is about to re-request is never touched.
         self.recently_released
-            .retain(|_, (_, released_at)| now.duration_since(*released_at) < RELEASED_SHADOW_TTL);
+            .retain(|_, released_at| now.duration_since(*released_at) < RELEASED_SHADOW_TTL);
         // Retry counts belong to the live request or its short retry window.
         // Reclaim abandoned first/second attempts together with their type
         // shadows; retaining only the hidden count would leak per-id history.
@@ -536,21 +542,21 @@ impl DeliveryTracker {
         // retry-bucket classifier consults `recently_released` after
         // this loop, so the type must be stashed BEFORE the inflight
         // entry disappears.
-        let cancelled: Vec<([u8; 32], u8)> = self
+        let cancelled: Vec<ModifierKey> = self
             .inflight
             .iter()
             .filter(|(_, req)| req.peer == *peer)
-            .map(|(id, req)| (*id, req.modifier_type))
+            .map(|(key, _)| *key)
             .collect();
-        for (id, modifier_type) in &cancelled {
-            self.inflight.remove(id);
-            self.recently_released.insert(*id, (*modifier_type, now));
+        for key in &cancelled {
+            self.inflight.remove(key);
+            self.recently_released.insert(*key, now);
         }
         self.peer_inflight_count.remove(peer);
 
         let mut retryable = Vec::new();
         let mut exhausted = Vec::new();
-        for (id, _) in cancelled {
+        for id in cancelled {
             let count = self.retry_count.entry(id).or_insert(0);
             *count += 1;
             if *count >= MAX_RETRIES {
@@ -574,9 +580,14 @@ impl DeliveryTracker {
 
     /// Returns (how long inflight, current owner peer) if the ID is in-flight,
     /// else None. Used by the HOL hedge path to find stale section assignments.
-    pub fn inflight_age(&self, id: &[u8; 32], now: Instant) -> Option<(Duration, PeerId)> {
+    pub fn inflight_age(
+        &self,
+        modifier_type: u8,
+        id: &[u8; 32],
+        now: Instant,
+    ) -> Option<(Duration, PeerId)> {
         self.inflight
-            .get(id)
+            .get(&(modifier_type, *id))
             .map(|req| (now.duration_since(req.requested_at), req.peer))
     }
 
@@ -588,11 +599,18 @@ impl DeliveryTracker {
     ///
     /// Returns `true` if the reassignment happened, `false` if the ID
     /// was not in-flight or `new_peer` is the same as the current owner.
-    pub fn reassign(&mut self, id: &[u8; 32], new_peer: PeerId, now: Instant) -> bool {
+    pub fn reassign(
+        &mut self,
+        modifier_type: u8,
+        id: &[u8; 32],
+        new_peer: PeerId,
+        now: Instant,
+    ) -> bool {
         if self.available_slots(&new_peer) == 0 {
             return false;
         }
-        if let Some(req) = self.inflight.get_mut(id) {
+        let key = (modifier_type, *id);
+        if let Some(req) = self.inflight.get_mut(&key) {
             if req.peer == new_peer {
                 return false;
             }
@@ -614,14 +632,14 @@ impl DeliveryTracker {
                 }
             }
             *self.peer_inflight_count.entry(new_peer).or_insert(0) += 1;
-            self.allow_late_delivery(*id, old_peer, now);
+            self.allow_late_delivery(key, old_peer, now);
             true
         } else {
             false
         }
     }
 
-    fn allow_late_delivery(&mut self, id: [u8; 32], peer: PeerId, now: Instant) {
+    fn allow_late_delivery(&mut self, id: ModifierKey, peer: PeerId, now: Instant) {
         match self.late_acceptable.get_mut(&id) {
             Some(allowance) => {
                 allowance.peers.insert(peer);
@@ -655,15 +673,21 @@ impl DeliveryTracker {
     /// with a primary as a race-for-fastest-delivery strategy.
     /// Both populate the same `late_acceptable` map; the receive
     /// path treats them identically.
-    pub fn register_hedge_peers(&mut self, ids: &[[u8; 32]], peers: &[PeerId], now: Instant) {
+    pub fn register_hedge_peers(
+        &mut self,
+        modifier_type: u8,
+        ids: &[[u8; 32]],
+        peers: &[PeerId],
+        now: Instant,
+    ) {
         for id in ids {
             for &peer in peers {
-                self.allow_late_delivery(*id, peer, now);
+                self.allow_late_delivery((modifier_type, *id), peer, now);
             }
         }
     }
 
-    fn late_delivery_allowed(&self, id: &[u8; 32], peer: &PeerId) -> bool {
+    fn late_delivery_allowed(&self, id: &ModifierKey, peer: &PeerId) -> bool {
         self.late_acceptable
             .get(id)
             .is_some_and(|allowance| allowance.peers.contains(peer))
@@ -674,8 +698,9 @@ impl DeliveryTracker {
     /// that need to observe successive request_missing_sections calls
     /// against the same pending set without simulating timeouts.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn test_reset_status(&mut self, modifier_id: &[u8; 32]) {
-        if let Some(info) = self.inflight.remove(modifier_id) {
+    pub fn test_reset_status(&mut self, modifier_type: u8, modifier_id: &[u8; 32]) {
+        let key = (modifier_type, *modifier_id);
+        if let Some(info) = self.inflight.remove(&key) {
             if let Some(count) = self.peer_inflight_count.get_mut(&info.peer) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
@@ -683,7 +708,7 @@ impl DeliveryTracker {
                 }
             }
         }
-        self.late_acceptable.remove(modifier_id);
+        self.late_acceptable.remove(&key);
     }
 
     /// How many in-flight requests for a given peer.
@@ -730,27 +755,6 @@ impl DeliveryTracker {
     /// `failed` counter on `/peers/trackInfo`.
     pub fn failed_count(&self) -> usize {
         self.failed.len()
-    }
-
-    /// Type byte for a tracked modifier id (`101` for Header,
-    /// `102` for BlockTransactions, `104` for ADProofs, `108` for
-    /// Extension). Checks the live `inflight` map first and falls
-    /// back to the `recently_released` shadow — IDs whose inflight
-    /// entry was just removed by `check_timeouts` / `cancel_peer`
-    /// still report their original type until they're re-requested
-    /// or marked failed. Returns `None` only when the id has never
-    /// been requested or has been received / failed-and-pruned.
-    ///
-    /// Retry-bucket classification must use what was requested via
-    /// `request(...)` (recorded here), not what the `AssemblyTracker`
-    /// knows — block-section IDs from `on_inv` are registered into
-    /// `delivery` without an assembly entry, so assembly-keyed lookup
-    /// would misclassify them as headers.
-    pub fn modifier_type(&self, modifier_id: &[u8; 32]) -> Option<u8> {
-        self.inflight
-            .get(modifier_id)
-            .map(|i| i.modifier_type)
-            .or_else(|| self.recently_released.get(modifier_id).map(|(t, _)| *t))
     }
 
     /// Whether the aggregate in-flight count has dropped below

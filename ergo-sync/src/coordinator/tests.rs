@@ -289,7 +289,7 @@ fn on_modifier_received_rejects_header_id_mismatch_without_ack() {
         .iter()
         .any(|a| matches!(a, Action::ValidateHeader { .. })));
     assert_eq!(
-        coord.delivery().status(&claimed_id),
+        coord.delivery().status(101, &claimed_id),
         ModifierStatus::Requested
     );
 }
@@ -869,14 +869,9 @@ fn timed_out_transaction_is_forgotten_without_penalty() {
 
     // The tracker no longer tracks the forgotten tx.
     assert_eq!(
-        coord.delivery.status(&tx_id),
+        coord.delivery.status(2, &tx_id),
         ergo_p2p::delivery::ModifierStatus::Unknown,
         "forgotten tx should return to Unknown status"
-    );
-    assert_eq!(
-        coord.delivery.modifier_type(&tx_id),
-        None,
-        "forgotten tx should leave no residual type record in the tracker"
     );
 }
 
@@ -991,7 +986,7 @@ fn orphan_parent_request_revives_exhausted_header_id() {
 
     // After exhaustion: Unknown (not Failed) per Scala parity.
     assert_eq!(
-        coord.delivery().status(&header_id),
+        coord.delivery().status(101, &header_id),
         ergo_p2p::delivery::ModifierStatus::Unknown,
     );
 
@@ -1002,7 +997,7 @@ fn orphan_parent_request_revives_exhausted_header_id() {
         "parent-walk must be able to request an exhausted root header again"
     );
     assert_eq!(
-        coord.delivery().status(&header_id),
+        coord.delivery().status(101, &header_id),
         ergo_p2p::delivery::ModifierStatus::Requested,
     );
 }
@@ -1040,7 +1035,7 @@ fn orphan_parent_requests_chunk_before_delivery_registration() {
     assert_eq!(sizes, vec![400, 1]);
     assert_eq!(sent, ids);
     for id in &sent {
-        assert_eq!(coord.delivery().status(id), ModifierStatus::Requested);
+        assert_eq!(coord.delivery().status(101, id), ModifierStatus::Requested);
     }
     assert!(coord
         .request_missing_header_parents(p, &ids, Instant::now())
@@ -1883,11 +1878,10 @@ fn s1_bucketed_rotation_cursor_advances() {
                     .expected_section_ids(hid)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|(_, id)| id)
             })
             .collect();
-        for id in &ids {
-            coord.delivery.test_reset_status(id);
+        for (type_id, id) in &ids {
+            coord.delivery.test_reset_status(*type_id, id);
         }
 
         let actions = coord.request_missing_sections_bucketed(&chain, Instant::now(), &peers);
@@ -2136,7 +2130,7 @@ fn hol_repair_revives_failed_head_section() {
         if attempt + 1 < ergo_p2p::delivery::MAX_RETRIES {
             assert!(!result.retryable.is_empty());
         } else {
-            assert_eq!(result.exhausted, vec![tx_section]);
+            assert_eq!(result.exhausted, vec![(tx_type, tx_section)]);
         }
     }
     // 2Q Scala-parity: post-exhaustion status is Unknown, not Failed.
@@ -2147,7 +2141,10 @@ fn hol_repair_revives_failed_head_section() {
     // handled by the main request loop). This is identical to Scala:
     // ErgoNodeViewSynchronizer.scala:1287 sets setUnknown for
     // exhausted sections and leaves re-request to CheckModifiersToDownload.
-    assert_eq!(coord.delivery.status(&tx_section), ModifierStatus::Unknown);
+    assert_eq!(
+        coord.delivery.status(tx_type, &tx_section),
+        ModifierStatus::Unknown
+    );
 
     // Verify re-request goes through cleanly (delivery accepts it
     // without needing the request_allow_failed escape hatch).
@@ -2161,7 +2158,7 @@ fn hol_repair_revives_failed_head_section() {
         "exhausted section must be re-requestable in normal delivery path (Scala parity)",
     );
     assert_eq!(
-        coord.delivery.status(&tx_section),
+        coord.delivery.status(tx_type, &tx_section),
         ModifierStatus::Requested,
     );
 }
@@ -2379,7 +2376,7 @@ fn s3_bucketed_one_sided_demand_uses_full_budget() {
                     // during tx_ids collection.
                     let reg = coord.delivery.request(peers[0], tid, &[sid], now);
                     if !reg.is_empty() {
-                        coord.delivery.mark_received(&sid);
+                        coord.delivery.mark_received(tid, &sid);
                     }
                 }
             }
@@ -2390,7 +2387,7 @@ fn s3_bucketed_one_sided_demand_uses_full_budget() {
         if let Some(sections) = coord.assembly.expected_section_ids(hid) {
             for (tid, sid) in sections {
                 if tid == tx_code {
-                    coord.delivery.mark_received(&sid);
+                    coord.delivery.mark_received(tid, &sid);
                 }
             }
         }

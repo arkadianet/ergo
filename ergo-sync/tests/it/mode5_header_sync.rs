@@ -237,7 +237,7 @@ fn mode5_unlinked_header_is_buffered_not_fatal() {
     );
     coordinator
         .delivery_mut_for_test()
-        .mark_received(&orphan_id);
+        .mark_received(101, &orphan_id);
     executor.execute(
         Action::ValidateHeader {
             peer,
@@ -251,7 +251,7 @@ fn mode5_unlinked_header_is_buffered_not_fatal() {
     );
 
     assert_eq!(
-        coordinator.delivery().status(&orphan_id),
+        coordinator.delivery().status(101, &orphan_id),
         ergo_p2p::delivery::ModifierStatus::Received
     );
     assert_eq!(

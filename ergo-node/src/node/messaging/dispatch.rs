@@ -888,7 +888,11 @@ fn handle_modifier_batch(
     // Scala sends only for valid requested headers. The executor forgets
     // rejected deliveries, but retains AlreadyKnown and buffered headers.
     let delivered_requested_header = requested_headers.iter().any(|id| {
-        state.coordinator.delivery().status(id) == ergo_p2p::delivery::ModifierStatus::Received
+        state
+            .coordinator
+            .delivery()
+            .status(ModifierTypeId::Header.as_byte(), id)
+            == ergo_p2p::delivery::ModifierStatus::Received
     });
     if delivered_requested_header {
         send_post_header_sync_info(state, peer, now, &mut all_actions);
@@ -993,7 +997,7 @@ fn frame_answers_our_request(state: &NodeState, peer: &PeerId, payload: &[u8]) -
     let delivery = state.coordinator.delivery();
     mods.modifiers
         .iter()
-        .any(|(id, _)| delivery.on_received(id, peer) == DeliveryAction::Accept)
+        .any(|(id, _)| delivery.on_received(mods.type_id, id, peer) == DeliveryAction::Accept)
 }
 
 /// Does `bytes` actually parse to a `Transaction` whose canonical

@@ -567,9 +567,9 @@ fn far_ahead_orphan_during_ibd_is_deferred_and_requestable_later() {
     );
     coordinator
         .delivery_mut_for_test()
-        .mark_received(&header_id);
+        .mark_received(101, &header_id);
     assert_eq!(
-        coordinator.delivery().status(&header_id),
+        coordinator.delivery().status(101, &header_id),
         ergo_p2p::delivery::ModifierStatus::Received,
     );
 
@@ -591,7 +591,7 @@ fn far_ahead_orphan_during_ibd_is_deferred_and_requestable_later() {
     assert!(!kept);
     assert!(executor.orphan_headers.is_empty());
     assert_eq!(
-        coordinator.delivery().status(&header_id),
+        coordinator.delivery().status(101, &header_id),
         ergo_p2p::delivery::ModifierStatus::Unknown,
         "deferred bytes were dropped, so the header must remain requestable later",
     );
@@ -626,7 +626,7 @@ fn near_orphan_during_ibd_is_buffered_for_parent_walk() {
     );
     coordinator
         .delivery_mut_for_test()
-        .mark_received(&header_id);
+        .mark_received(101, &header_id);
 
     let pre = header_proc::PreValidatedHeader::for_test_unchecked(
         header_id,
@@ -653,7 +653,7 @@ fn near_orphan_during_ibd_is_buffered_for_parent_walk() {
     assert_eq!(stored[0].0, p);
     assert_eq!(stored[0].2, bytes);
     assert_eq!(
-        coordinator.delivery().status(&header_id),
+        coordinator.delivery().status(101, &header_id),
         ergo_p2p::delivery::ModifierStatus::Received,
     );
 }
@@ -736,10 +736,12 @@ fn batch_validation_rolls_back_hash_matching_malformed_headers() {
         &[first_id, second_id],
         now,
     );
-    coordinator.delivery_mut_for_test().mark_received(&first_id);
     coordinator
         .delivery_mut_for_test()
-        .mark_received(&second_id);
+        .mark_received(101, &first_id);
+    coordinator
+        .delivery_mut_for_test()
+        .mark_received(101, &second_id);
 
     let actions = executor.execute_all(
         vec![
@@ -768,11 +770,11 @@ fn batch_validation_rolls_back_hash_matching_malformed_headers() {
         2
     );
     assert_eq!(
-        coordinator.delivery().status(&first_id),
+        coordinator.delivery().status(101, &first_id),
         ergo_p2p::delivery::ModifierStatus::Unknown
     );
     assert_eq!(
-        coordinator.delivery().status(&second_id),
+        coordinator.delivery().status(101, &second_id),
         ergo_p2p::delivery::ModifierStatus::Unknown
     );
 }
