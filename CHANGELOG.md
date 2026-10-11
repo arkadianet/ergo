@@ -18,6 +18,7 @@ infrastructure.
 
 ### Fixed
 
+- Reject ErgoTrees with header version 0, 1 or 2 whose arithmetic operation (`+`, `-`, `*`, `/`, `%`, `min`, `max`) has an operand whose type cannot be read, such as a `filter` over a number, with sized or sizeless headers, as the reference does at parse time. The same code in `DeserializeContext` or `DeserializeRegister` payloads, nested box scripts and `Global.deserializeTo` is now handled the same way. These trees were previously accepted when the other operand had a different numeric type.
 - Reject ErgoTrees without a size field whose root is a nested function application that does not return SigmaProp, as the reference node does. These trees were previously accepted.
 
 ## [0.12.3] - 2026-10-07

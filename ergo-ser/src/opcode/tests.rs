@@ -2051,3 +2051,35 @@ fn every_registered_opcode_has_a_diagnostic_name() {
     }
     assert_eq!(opcode_name(0), "???");
 }
+
+/// A pre-v3 arithmetic upcast must not hide an operand's failed type read.
+/// `applyUpcast` reads `left.tpe` then `right.tpe`; a Filter over a Long
+/// throws ClassCastException there, which `deserializeErgoTree` does not
+/// catch, so the reference rejects every header version, sized or not.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L674-L684>
+#[test]
+fn pre_v3_arith_upcast_keeps_operand_type_read_failure() {
+    // Filter(3L, x: Long => true) and the Int constant 1.
+    let filter = "b50506d90107057f";
+    let int = "0402";
+    for op in ["99", "9a", "9c", "9d", "9e", "a1", "a2"] {
+        for (left, right) in [(filter, int), (int, filter)] {
+            // BoolToSigmaProp(EQ(op(left, right), 0L))
+            let body = format!("d193{op}{left}{right}0500");
+            let size = format!("{:02x}", body.len() / 2);
+            for header in ["00", "08", "09", "0a", "0b"] {
+                let hex = if header == "00" {
+                    format!("{header}{body}")
+                } else {
+                    format!("{header}{size}{body}")
+                };
+                let bytes = hex::decode(&hex).unwrap();
+                let result = crate::ergo_tree::read_ergo_tree(&mut VlqReader::new(&bytes));
+                assert!(
+                    matches!(result, Err(ReadError::ClassCast(_))),
+                    "{hex}: {result:?}"
+                );
+            }
+        }
+    }
+}

@@ -232,3 +232,10 @@ fn flat_map_mapper_result_types_match_reference() {
 fn runtime_parsed_group_elements_match_reference() {
     check_vectors("runtime-group-elements");
 }
+
+/// Arithmetic over an operand whose type read fails, in output, input, nested
+/// box, `deserializeTo`, `DeserializeContext` and `DeserializeRegister` code.
+#[test]
+fn arith_operand_type_read_failures_match_reference() {
+    check_vectors("arith-upcast-type-reads");
+}

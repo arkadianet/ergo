@@ -30,5 +30,10 @@ retained at that point. Generate it with `EvaluationOrderOracle.scala` using the
 same Scala/JVM options above. These cases run through the public reduction path,
 including short-circuit and exhausted-budget controls.
 
+`arith-upcast-type-reads` places arithmetic over an operand whose type read
+fails (a `filter` over a number) in output, input, nested box, `deserializeTo`,
+`DeserializeContext` and `DeserializeRegister` code, at tree versions 0, 1 and 3
+and several block versions, with valid-upcast controls.
+
 `lambda-sweep` covers map, filter, exists, forall, flatMap and option map/filter,
 with empty/nonempty inputs and valid and invalid callback values.
