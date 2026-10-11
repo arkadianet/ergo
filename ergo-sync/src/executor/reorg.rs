@@ -216,7 +216,7 @@ impl SyncExecutor {
     ///
     /// Shared by [`Self::try_apply_next_blocks`] and `handle_assemble_block`
     /// so both apply-failure paths classify a failure identically.
-    /// Handle a transaction-validation failure of a version-1 block by
+    /// Handle a spending-proof failure of a version-1 block by
     /// fetching its `BlockTransactions` again instead of judging the block.
     ///
     /// For header version 1 the transactions root commits to transaction
@@ -239,9 +239,21 @@ impl SyncExecutor {
         height: u32,
         err: &block_proc::BlockProcessError,
     ) -> bool {
+        // Only failures the spending proofs can cause: everything else in a
+        // transaction (inputs, outputs, data inputs) is covered by its id.
+        use ergo_validation::block::BlockValidationError;
+        use ergo_validation::ValidationError;
         if !matches!(
             err,
-            block_proc::BlockProcessError::TransactionValidation { .. }
+            block_proc::BlockProcessError::TransactionValidation {
+                source: BlockValidationError::Transaction {
+                    error: ValidationError::ScriptError { .. }
+                        | ValidationError::ProofFailed { .. }
+                        | ValidationError::CostExceeded { .. },
+                    ..
+                },
+                ..
+            }
         ) {
             return false;
         }

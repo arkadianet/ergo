@@ -2443,7 +2443,7 @@ mod v1_body_refetch {
             tx_id: [9; 32],
             source: ergo_validation::block::BlockValidationError::Transaction {
                 index: 0,
-                error: ergo_validation::ValidationError::Deserialization("proof".into()),
+                error: ergo_validation::ValidationError::ProofFailed { index: 0 },
             },
         }
     }
@@ -2528,6 +2528,21 @@ mod v1_body_refetch {
             v1,
             10,
             &block_proc::BlockProcessError::Deserialize("local".into()),
+        ));
+        // A failure the transaction id already commits to (no outputs) is a
+        // verdict on the block itself.
+        assert!(!executor.refetch_v1_block_transactions(
+            &mut store,
+            &mut coordinator,
+            v1,
+            10,
+            &block_proc::BlockProcessError::TransactionValidation {
+                tx_id: [9; 32],
+                source: ergo_validation::block::BlockValidationError::Transaction {
+                    index: 0,
+                    error: ergo_validation::ValidationError::NoOutputs,
+                },
+            },
         ));
     }
 }
