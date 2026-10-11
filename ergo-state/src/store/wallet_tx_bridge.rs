@@ -138,19 +138,26 @@ pub(crate) fn build_wallet_block_txs_from_read_txn_classified(
 }
 
 fn rescan_error(height: u32, source: StateError) -> RescanReadError {
-    if matches!(
-        &source,
-        StateError::Serialization(_) | StateError::DbCorruption { .. }
-    ) {
-        RescanReadError::Corrupt {
-            height,
-            reason: source.to_string(),
+    // Keep typed redb failures typed, so the wallet can tell a storage fault
+    // from bad data; anything else is reported as a decode problem.
+    let storage = match source {
+        StateError::Serialization(_) | StateError::DbCorruption { .. } => {
+            return RescanReadError::Corrupt {
+                height,
+                reason: source.to_string(),
+            };
         }
-    } else {
-        RescanReadError::Storage {
-            height,
-            source: WalletStoreError::decode(source.to_string()),
-        }
+        StateError::Db(error) => WalletStoreError::from(*error),
+        StateError::DatabaseError(error) => WalletStoreError::from(redb::Error::from(*error)),
+        StateError::StorageError(error) => WalletStoreError::from(redb::Error::from(*error)),
+        StateError::TransactionError(error) => WalletStoreError::from(redb::Error::from(*error)),
+        StateError::TableError(error) => WalletStoreError::from(redb::Error::from(*error)),
+        StateError::CommitError(error) => WalletStoreError::from(redb::Error::from(*error)),
+        other => WalletStoreError::decode(other.to_string()),
+    };
+    RescanReadError::Storage {
+        height,
+        source: storage,
     }
 }
 
