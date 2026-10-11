@@ -1,5 +1,6 @@
 pub mod box_selector;
 pub mod chain;
+pub mod encrypted_db;
 pub mod engine;
 pub mod runtime;
 pub mod scan;

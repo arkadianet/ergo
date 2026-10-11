@@ -47,11 +47,9 @@ the installed UTXO root** against an independently trusted node. Genesis sync
 sets both bootstrap flags false and takes hours to days. Explorer and full
 mining also need historical index catch-up.
 
-Mining requires `--reward address`, `--reward wallet` or `--reward public-key`.
+Mining requires `--reward address` or `--reward public-key`.
 Address rewards take `--miner-reward-address`, a P2PK address from any wallet,
-checked against the selected network. Wallet rewards omit
-`miner_public_key_hex`; initialize and **unlock** the node wallet in the
-dashboard before work is served. Public-key rewards require
+checked against the selected network. Public-key rewards require
 `--miner-public-key HEX`, a valid 33-byte compressed secp256k1 point beginning
 with `02` or `03`. The wizard displays its P2PK address for the selected
 network and requests confirmation in interactive mode. Use
@@ -401,7 +399,7 @@ and `readiness`.
 | `snapshot_max_age_ms` | `30000` | Maximum runtime snapshot age. |
 | `tip_max_age_ms` | `7200000` | Maximum chain-tip age; two hours accommodates normal block gaps. |
 | `require_indexer` | `false` | Require a healthy indexer caught up to the chain. |
-| `require_wallet` | `false` | Require a healthy wallet caught up to the chain. |
+| `require_wallet` | `false` | Ignored: the node hosts no wallet. Accepted so existing configs and `PATCH` bodies keep working. |
 
 Rates/weights must be finite and positive. Age thresholds accept
 `1000..86400000` milliseconds. Limits and readiness can also be changed for the
@@ -651,7 +649,7 @@ either way.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Enables the external-miner subsystem and mounts `/mining/*`. Rejected when `state_type = "digest"` (candidate generation needs UTXO state). CLI flag `--mining-enabled` forces it on. |
-| `miner_public_key_hex` | string (hex) | none | 33-byte compressed secp256k1 public key (66 hex chars) for the reward output. **Optional in embedded mode**: when set, it is the pinned reward pubkey; when omitted, the wallet's EIP-3 first-address key is resolved at candidate time. When `[wallet] mode = "external"` and mining is enabled without a key, boot takes the first-address key of a legacy embedded wallet still in `state.redb` and logs how to pin it; with no such wallet, boot fails. A value that is present must be well-formed (66 hex chars → 33 bytes) or load fails. CLI flag: `--mining-public-key`. |
+| `miner_public_key_hex` | string (hex) | none | 33-byte compressed secp256k1 public key (66 hex chars) for the reward output. With mining enabled and neither this nor `miner_reward_address` set, boot takes the first-address key of a wallet left in `state.redb` by an earlier release and logs how to pin it; with no such wallet, boot fails. A value that is present must be well-formed (66 hex chars → 33 bytes) or load fails. CLI flag: `--mining-public-key`. |
 | `miner_reward_address` | string | none | P2PK reward address, as wallets display it. Decoded into the reward key and checked against the node's `network`; setting it together with a different `miner_public_key_hex` is a load error. See [Wallet setup](wallet-setup.md). |
 | `block_candidate_generation_interval_ms` | u64 | `250` | Minimum interval (ms) between same-parent mempool-refresh signals; must be at least 50. The first pool change after a quiet interval signals immediately. Changes within the interval share a deadline and refresh the latest pool snapshot when it expires, independently of the mempool polling tick. Applied-parent changes bypass this interval; header-only changes do not rebuild work once mining has started. Lower values refresh transaction contents sooner but increase build load and churn of the 16 retained templates. |
 | `use_external_miner` | bool | `true` | Must be `true` — an internal CPU miner is not supported, so `false` is rejected at load. |
@@ -722,9 +720,15 @@ storageFeeFactor = 1250000
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `mode` | string | `"embedded"` | Wallet ownership mode. `"embedded"` keeps the existing wallet writer, secret storage, hydration, and apply hook. `"external"` does not open wallet secrets, hydrate wallet state, start the writer, or install the wallet apply hook; wallet-owned HTTP routes return `410` with `reason = "wallet_moved"` and the configured daemon address. |
-| `daemon_address` | string | `"http://127.0.0.1:9090"` | Address returned by external-mode wallet route responses. It is informational routing guidance; the node does not proxy requests to it. |
-| `expose_private_keys` | bool | `false` | When `true`, `POST /wallet/getPrivateKey` returns the derived secret scalar for an address; otherwise that route returns `403 Forbidden`. Setting this `true` lets any authenticated `api_key` request extract per-address private material. |
+The wallet runs in `ergo-walletd` ([Wallet setup](wallet-setup.md)). The node
+never opens wallet secrets; its former wallet routes return `410` with
+`reason = "wallet_moved"` and the daemon's address.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `daemon_address` | string | `"http://127.0.0.1:9090"` | Address returned by the `wallet_moved` responses. It is informational routing guidance; the node does not proxy requests to it. |
+| `mode` | string | none | Retired. `"external"` is accepted silently and `"embedded"` with a warning, so configs from earlier releases still load; any other value is a load error. |
+| `expose_private_keys` | bool | none | Retired; ignored with a warning. |
 
 ## `[logging]`
 
@@ -776,9 +780,9 @@ checks and are enforced at load:
   (the eligible-box scan reads the extra-index).
 - `[voting.targets]` set with `[mining] enabled = false` is rejected — the
   votes are only ever cast by blocks this node mines.
-- `[wallet] mode = "external"` with `[mining] enabled = true` and no reward
-  key boots only when a legacy embedded wallet in `state.redb` supplies one;
-  pin it with `miner_reward_address`.
+- `[mining] enabled = true` with no reward key boots only when a wallet left
+  in `state.redb` by an earlier release supplies one; pin it with
+  `miner_reward_address`.
 
 ## Minimal example
 
@@ -844,7 +848,7 @@ confirmed-only.
 | `data_dir` | string (path) | none (required) | Directory holding `wallet.redb`. Seed mode also stores encrypted secret files under `wallet/`. Use a fresh, separate directory when creating a seed wallet; there is no automatic migration from an embedded or descriptor wallet. Created on first start. |
 | `node_url` | string (URL) | none (required) | Base URL of the node API. Watch-only mode reads `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}`. Seed mode also uses coherent spending context, tip-bound block replay, transaction admission/submission and `/api/v1/mining/private-transactions` queue operations. Must be `http`/`https` with a host and no credentials, query, or fragment. Plain `http` is accepted only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), because the node credential travels in a header; a remote node needs `https`. CLI: `--node-url`. |
 | `node_ca_file` | string (path) | none | PEM bundle of the certificate authorities trusted for an `https` `node_url`. When set, the system roots are not trusted, so only a node certificate chaining to these CAs is accepted. Requires an `https` `node_url`; validated at load. |
-| `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Scoped credentials need `wallet`; seed private mining jobs additionally need `operator`. An `admin` credential or the legacy master key also authorizes these requests. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
+| `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Scoped credentials need `wallet`; seed private mining jobs additionally need `operator`. An `admin` credential or the legacy master key also authorizes these requests. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. Unix only; see [Windows](#socket-permissions). The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
 | `descriptor_file` | string (path) | none | Required in `watch_only` mode and rejected in `seed` mode. Public descriptor file (see [Descriptor file](#descriptor-file)); size-capped at 16 MiB and validated at load. CLI: `--descriptor-file`. |
 | `local_api_key_file` | string (path) | none (required) | Independent local `api_key` credential protecting every local API request in both modes, on both Unix and TCP listeners. Watch-only balances, addresses and history are as private as a seed wallet's. Uses the same file-permission, size and header-value checks as `api_key_file`; the two files must contain different credentials. Never forwarded to the node. CLI: `--local-api-key-file`. |
 | `sync_interval` | u64 or string | `15` | Delay after completed sync passes or retryable errors; incomplete passes continue immediately. Accepts plain seconds (`15`) or a duration string (`"500ms"`, `"30s"`, `"2m"`, `"1h"`). `0` is rejected. CLI: `--sync-interval`. |
@@ -970,6 +974,10 @@ unit and start with `--unseal-key-file ${CREDENTIALS_DIRECTORY}/unseal-key`.
 The daemon then unseals at boot without a password; spending still needs the
 password. That copy of the key is only as strong as the host that holds it: it
 protects a database copied elsewhere, not one read by root on the same host.
+
+The same key lets the node's offline UTXO discovery open the encrypted
+database without the password (see
+[offline discovery](wallet-extraction-offline-discovery.md)).
 
 ## Descriptor file
 
@@ -1111,6 +1119,19 @@ Both daemon modes restrict their listener addresses and socket permissions:
   does not provide TLS or bind non-loopback TCP.
 - The data directory is owner-only (`0700`) in both modes, as is a socket
   directory the daemon creates.
+
+**Windows.** The daemon neither sets nor checks file permissions on Windows:
+the data directory, credential files and `unseal_key_file` keep the access
+list they inherit from their parent directory, and a file other users can read
+is not refused. Put them in a directory only your account can read, such as
+one under your user profile. Whatever the permissions, the spending key is
+stored only under the wallet password, and `data-key.json` only under the
+watch-only passphrase. Another account that can read them gets:
+
+- `unseal_key_file`: the database key, which reads balances and history but
+  cannot spend;
+- the local credential (`local_api_key_file`): the daemon's local API, including
+  sending funds while the wallet is unlocked.
 
 ## Process hardening
 

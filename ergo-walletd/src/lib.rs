@@ -5,7 +5,7 @@ pub mod api;
 pub mod chain_http;
 pub mod config;
 pub mod descriptor;
-pub mod encrypted_db;
+pub use ergo_wallet_service::encrypted_db;
 pub mod engine_chain;
 pub mod full_api;
 pub mod hardening;

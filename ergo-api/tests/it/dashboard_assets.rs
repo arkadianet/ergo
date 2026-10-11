@@ -142,6 +142,12 @@ async fn every_dashboard_module_is_served_with_its_source() {
     assert!(modules.len() >= 30, "found only {} modules", modules.len());
     for (name, source) in &modules {
         let (status, body) = get(&app, &format!("/js/{name}")).await;
+        // The wallet modules live here for ergo-walletd's UI, which serves
+        // them; the node hosts no wallet.
+        if name.starts_with("wallet") {
+            assert_eq!(status, StatusCode::NOT_FOUND, "/js/{name} is served");
+            continue;
+        }
         assert_eq!(status, StatusCode::OK, "/js/{name} is not served");
         assert!(body == *source, "/js/{name} differs from web/js/{name}");
     }

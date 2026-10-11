@@ -1,9 +1,7 @@
-use ergo_node::config::WalletMode;
-
 use super::common::make_test_config;
 
 #[tokio::test]
-async fn external_wallet_boot_does_not_open_secret_storage() {
+async fn boot_does_not_open_secret_storage() {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("node");
     std::fs::create_dir_all(&data_dir).expect("data dir");
@@ -17,21 +15,19 @@ async fn external_wallet_boot_does_not_open_secret_storage() {
     write.commit().expect("commit fixture");
     drop(db);
     let mut config = make_test_config(data_dir.clone());
-    config.wallet_mode = WalletMode::External;
     config.wallet_daemon_address = "http://127.0.0.1:19090".into();
 
     let handle = ergo_node::run_inner(config)
         .await
-        .expect("external wallet mode boots without a wallet directory");
+        .expect("the node boots without a wallet directory");
     assert!(!data_dir.join("wallet").exists());
     handle.shutdown().await.expect("clean shutdown");
 }
 
 #[tokio::test]
-async fn external_wallet_boot_rejects_wallet_backed_mining_key() {
+async fn mining_without_a_reward_key_or_legacy_wallet_is_refused() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut config = make_test_config(temp.path().join("node"));
-    config.wallet_mode = WalletMode::External;
     config.mining_config.enabled = true;
     config.mining_config.miner_public_key_hex = None;
 

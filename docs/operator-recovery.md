@@ -89,16 +89,25 @@ replacing them.
 
 ## Wallet discovery without historical blocks
 
-Seed restore is available on pruned nodes and marks the wallet incomplete.
-Status reports scan invalidation; balance and box reads return the recovery error
-until verified discovery publishes. Restore/unlock the wallet and derive
-every address you want to track, then stop the node:
+Seed restore in `ergo-walletd` is available against a pruned node and marks the
+wallet incomplete. Status reports scan invalidation; balance and box reads
+return the recovery error until verified discovery publishes. Restore/unlock
+the wallet and derive every address you want to track, then stop the daemon
+and the node:
 
 ```sh
-ergo-node wallet-scan-utxo /srv/ergo
-# If the chain tip or tracked key set changed since an interrupted scan:
-ergo-node wallet-scan-utxo /srv/ergo --restart
+ergo-walletd export-unseal-key --config /etc/ergo-walletd/walletd.toml \
+  | ergo-node wallet-scan-utxo /srv/ergo --wallet-data-dir /srv/ergo-walletd \
+      --wallet-key-stdin
+# If the chain tip or tracked key set changed since an interrupted scan, add
+# --restart.
 ```
+
+`export-unseal-key` reads the wallet password from its standard input and
+prints the database key, which the node reads from its own. The key opens the
+encrypted `wallet.redb` but cannot spend; the node never sees the password.
+A wallet whose database is not encrypted yet (adopted but never unlocked)
+needs no key: omit the pipe and `--wallet-key-stdin`.
 
 This rebuilds owned P2PK holdings and canonical mainnet mining rewards using
 the current UTXO state. It needs no archived blocks and no unlocked secrets;

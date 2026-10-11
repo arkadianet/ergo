@@ -77,9 +77,7 @@ pub(super) fn cfg_with_mode(
         },
         mining_config: ergo_mining::MiningConfig::default(),
         voting_targets: std::collections::BTreeMap::new(),
-        wallet_mode: crate::config::WalletMode::Embedded,
         wallet_daemon_address: "http://127.0.0.1:9090".into(),
-        wallet_expose_private_keys: false,
     }
 }
 

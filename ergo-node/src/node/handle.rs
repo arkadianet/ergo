@@ -44,16 +44,12 @@ pub struct RunHandle {
     /// shutdown signal when the embedder drops the handle without
     /// calling [`shutdown`](Self::shutdown).
     pub(super) shutdown_tx: Option<oneshot::Sender<()>>,
-    pub(crate) wallet_session_id: u64,
     /// Graceful-shutdown channel for the API task. `Some` only when
     /// the API was actually bound. Sending (or dropping) triggers
     /// axum's `with_graceful_shutdown` so in-flight HTTP handlers
     /// drain naturally instead of seeing a TCP RST.
     pub(super) api_shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) loop_handle: JoinHandle<Result<(), NodeError>>,
-    pub(super) wallet_rescan: Arc<ergo_wallet_service::engine::RescanCoordinator>,
-    pub(super) wallet_cancel: tokio::sync::watch::Sender<bool>,
-    pub(super) wallet_handle: Option<JoinHandle<Result<(), ergo_api::wallet::WalletAdminError>>>,
     pub(crate) api_handle: Option<JoinHandle<()>>,
     /// Retains blocking-job ownership even if the HTTP task is aborted.
     pub(super) api_services: Option<Arc<ergo_api::ApiServices>>,
@@ -124,29 +120,24 @@ impl RunHandle {
     /// Stop admission, join storage-owning work and await durable loop shutdown.
     ///
     /// HTTP handlers receive up to five seconds to drain; slower handlers are
-    /// aborted. Accepted synchronous API jobs, wallet writers/rescans, mining
-    /// builders and the indexer are joined without a timeout before returning,
-    /// so their database references cannot outlive a successful shutdown.
+    /// aborted. Accepted synchronous API jobs, mining builders and the indexer
+    /// are joined without a timeout before returning, so their database
+    /// references cannot outlive a successful shutdown.
     ///
-    /// The action loop remains available while wallet submissions finish. Once
-    /// wallet and API blocking work is quiescent, loop cleanup closes submission
+    /// Once API blocking work is quiescent, loop cleanup closes submission
     /// admission and performs the final persistence barrier. Worker and storage
     /// errors are returned to the caller. Cancelling this future transfers its
-    /// retained wallet/API drain ownership to the best-effort Drop supervisor;
-    /// only awaiting this method provides a completion signal for safe reopen.
+    /// retained API drain ownership to the best-effort Drop supervisor; only
+    /// awaiting this method provides a completion signal for safe reopen.
     pub async fn shutdown(mut self) -> Result<(), NodeError> {
         let shutdown_started = std::time::Instant::now();
         info!("shutdown initiated");
-        // Stop wallet command admission and finish/cancel every blocking
-        // rescan before the action loop's final durability barrier. Keep the
-        // loop running until wallet submissions have received their replies.
         if let Some(tx) = self.api_shutdown_tx.take() {
             let _ = tx.send(());
         }
         if let Some(services) = &self.api_services {
             services.close_blocking();
         }
-        let wallet_result = self.drain_wallet().await;
         if let Some(services) = &self.api_services {
             services.shutdown_blocking().await;
         }
@@ -301,39 +292,13 @@ impl RunHandle {
         // Awaited shutdown releases the lock before returning, including on
         // a current-thread runtime where Drop supervision has not been polled.
         self.data_directory_lock.take();
-        let result = wallet_result.and(loop_result);
+        let result = loop_result;
         let elapsed_ms = shutdown_started.elapsed().as_millis() as u64;
         match &result {
             Ok(()) => info!(elapsed_ms, "shutdown complete"),
             Err(e) => warn!(elapsed_ms, error = %e, "shutdown completed with error"),
         }
         result
-    }
-
-    /// Close wallet admission and join its writer/rescans. The abnormal-loop
-    /// supervisor also uses this, so returning its error cannot leave a wallet
-    /// database owner running unnoticed.
-    pub(super) async fn drain_wallet(&mut self) -> Result<(), NodeError> {
-        self.wallet_rescan.request_shutdown();
-        let _ = self.wallet_cancel.send(true);
-        // Retain the handle until its await completes. If this shutdown future
-        // is cancelled, Drop can still supervise the writer's remaining work.
-        let mut wallet_result: Result<(), NodeError> = match self.wallet_handle.as_mut() {
-            Some(handle) => match handle.await {
-                Ok(result) => result.map_err(|error| Box::new(error) as NodeError),
-                Err(error) => Err(Box::new(error) as NodeError),
-            },
-            None => Ok(()),
-        };
-        self.wallet_handle.take();
-        // A writer panic must not detach its blocking rescans. Their handles
-        // remain in the shared controller so this owner can always join them.
-        if let Err(error) = crate::wallet_boot::await_wallet_tasks(self.wallet_session_id).await {
-            if wallet_result.is_ok() {
-                wallet_result = Err(Box::new(error));
-            }
-        }
-        wallet_result
     }
 
     /// Drain the API (graceful, with bounded abort fallback) and
@@ -413,7 +378,7 @@ impl RunHandle {
 /// tasks and bound ports.
 ///
 /// **Persistence guarantee — IMPORTANT for embedders.** This `Drop` is
-/// best-effort: on a live runtime a cleanup supervisor joins wallet and API blocking workers
+/// best-effort: on a live runtime a cleanup supervisor joins API blocking workers
 /// before signalling the action loop. Outside a runtime it only releases
 /// shutdown channels. The loop's
 /// task continues to run in the background until the persist pipeline
@@ -427,36 +392,15 @@ impl RunHandle {
 /// `shutdown().await`.
 impl Drop for RunHandle {
     fn drop(&mut self) {
-        self.wallet_rescan.request_shutdown();
-        let _ = self.wallet_cancel.send(true);
-        let wallet_handle = self.wallet_handle.take();
         let api_services = self.api_services.take();
         if let Some(services) = &api_services {
             services.close_blocking();
         }
         let loop_shutdown = self.shutdown_tx.take();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let wallet_session_id = self.wallet_session_id;
             let directory_lock = self.data_directory_lock.clone();
-            // This fallback offers no completion signal, but preserves the
-            // wallet-before-store ordering when Drop runs on a live runtime.
             runtime.spawn(async move {
                 let _directory_lock = directory_lock;
-                if let Some(handle) = wallet_handle {
-                    match handle.await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            error!(%error, "wallet writer failed during drop cleanup")
-                        }
-                        Err(error) => {
-                            error!(%error, "wallet writer join failed during drop cleanup")
-                        }
-                    }
-                }
-                if let Err(error) = crate::wallet_boot::await_wallet_tasks(wallet_session_id).await
-                {
-                    error!(%error, "wallet rescan join failed during drop cleanup");
-                }
                 if let Some(services) = api_services {
                     services.shutdown_blocking().await;
                     services.shutdown_background().await;
@@ -469,7 +413,6 @@ impl Drop for RunHandle {
             // No runtime is available to poll async cleanup. Releasing these
             // channels requests shutdown, but only explicit shutdown().await
             // provides the joined/durable completion contract.
-            drop(wallet_handle);
             drop(api_services);
             drop(loop_shutdown);
         }
@@ -488,7 +431,6 @@ impl Drop for RunHandle {
         //
         // If the handle was already drained by `shutdown().await`,
         // every `take()` returns `None` and this is a no-op.
-        crate::wallet_boot::request_rescan_shutdown_for(self.wallet_session_id);
         if let Some(tx) = self.api_shutdown_tx.take() {
             let _ = tx.send(());
         }
