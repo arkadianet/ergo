@@ -343,18 +343,27 @@ pub(in crate::node) fn handle_message(
         },
         message::CODE_SNAPSHOTS_INFO => match message::deserialize_snapshots_info(payload) {
             Ok(info) => {
+                // Votes count only from peers we asked in this discovery
+                // epoch; a SnapshotsInfo nobody asked for is dropped
+                // without a penalty (a late reply is not misbehaviour).
+                if !state.snapshot_bootstrap.was_queried(&peer) {
+                    debug!(peer = %peer, "unsolicited SnapshotsInfo; ignoring");
+                    return Vec::new();
+                }
                 note_progress(state, &peer, now);
-                // Feed the discovery reducer. The reducer tracks per-peer
-                // votes and applies the Scala quorum rule. Eligibility
-                // filtering — restricting which peers we *ask* for
-                // SnapshotsInfo — lives in the outbound fan-out instead.
-                // Inbound, we accept what we're given: a
-                // Mode 5/6 peer that pushes a SnapshotsInfo unsolicited
-                // will send an empty list anyway (they have no UTXO
-                // state) and the reducer drops empty-list votes.
-                state
-                    .snapshot_bootstrap
-                    .on_snapshots_info(peer, &info.available_manifests);
+                // Entries that contradict our header chain (wrong state
+                // root at that height, or above a synced header tip) are
+                // not votes. Entries we cannot judge yet are kept and
+                // re-checked by the manifest driver each tick.
+                let manifests: Vec<(i32, [u8; 32])> = info
+                    .available_manifests
+                    .iter()
+                    .copied()
+                    .filter(|(h, id)| {
+                        !crate::node::sync_tick::snapshot_vote_conflicts(state, *h, id)
+                    })
+                    .collect();
+                state.snapshot_bootstrap.on_snapshots_info(peer, &manifests);
                 Vec::new()
             }
             Err(e) => {

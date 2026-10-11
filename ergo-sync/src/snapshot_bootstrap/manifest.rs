@@ -321,6 +321,7 @@ impl SnapshotBootstrap {
     pub fn on_snapshots_info(&mut self, peer: PeerId, manifests: &[(i32, [u8; 32])]) {
         match manifests
             .iter()
+            .filter(|vote| vote.0 > 0)
             .filter(|vote| !self.rejected.contains(vote))
             .filter(|vote| {
                 !self
@@ -388,6 +389,46 @@ impl SnapshotBootstrap {
             BootstrapState::Idle | BootstrapState::Querying => {}
         }
         !self.discovery_queried.contains(peer)
+    }
+
+    /// Whether we sent `GetSnapshotsInfo` to this peer in the current
+    /// discovery epoch — i.e. whether a `SnapshotsInfo` from it is a reply.
+    pub fn was_queried(&self, peer: &PeerId) -> bool {
+        self.discovery_queried.contains(peer)
+    }
+
+    /// Distinct `(height, manifest_id)` votes currently held.
+    pub fn distinct_votes(&self) -> Vec<PeerVote> {
+        let mut votes: Vec<PeerVote> = self.votes.values().copied().collect();
+        votes.sort_unstable();
+        votes.dedup();
+        votes
+    }
+
+    /// Drop every vote for `vote` (it was found not to match the header
+    /// chain) and recompute the selection. A vote that is the target of a
+    /// pending request or a verified manifest is left to those paths.
+    /// Returns the number of votes removed.
+    pub fn drop_votes_for(&mut self, vote: PeerVote) -> usize {
+        if self
+            .pending_request
+            .is_some_and(|p| (p.height, p.manifest_id) == vote)
+            || self
+                .verified
+                .as_ref()
+                .is_some_and(|v| (v.height, v.manifest_id) == vote)
+            || self.retry_target == Some(vote)
+        {
+            return 0;
+        }
+        let before = self.votes.len();
+        self.votes.retain(|_, v| *v != vote);
+        let removed = before - self.votes.len();
+        if removed > 0 {
+            self.recompute_selection();
+            self.reopen_discovery_if_below_quorum();
+        }
+        removed
     }
 
     /// Record that we've sent `GetSnapshotsInfo` to this peer.
