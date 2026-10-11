@@ -848,7 +848,7 @@ confirmed-only.
 | `data_dir` | string (path) | none (required) | Directory holding `wallet.redb`. Seed mode also stores encrypted secret files under `wallet/`. Use a fresh, separate directory when creating a seed wallet; there is no automatic migration from an embedded or descriptor wallet. Created on first start. |
 | `node_url` | string (URL) | none (required) | Base URL of the node API. Watch-only mode reads `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}`. Seed mode also uses coherent spending context, tip-bound block replay, transaction admission/submission and `/api/v1/mining/private-transactions` queue operations. Must be `http`/`https` with a host and no credentials, query, or fragment. Plain `http` is accepted only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), because the node credential travels in a header; a remote node needs `https`. CLI: `--node-url`. |
 | `node_ca_file` | string (path) | none | PEM bundle of the certificate authorities trusted for an `https` `node_url`. When set, the system roots are not trusted, so only a node certificate chaining to these CAs is accepted. Requires an `https` `node_url`; validated at load. |
-| `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Scoped credentials need `wallet`; seed private mining jobs additionally need `operator`. An `admin` credential or the legacy master key also authorizes these requests. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
+| `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Scoped credentials need `wallet`; seed private mining jobs additionally need `operator`. An `admin` credential or the legacy master key also authorizes these requests. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. Unix only; see [Windows](#socket-permissions). The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
 | `descriptor_file` | string (path) | none | Required in `watch_only` mode and rejected in `seed` mode. Public descriptor file (see [Descriptor file](#descriptor-file)); size-capped at 16 MiB and validated at load. CLI: `--descriptor-file`. |
 | `local_api_key_file` | string (path) | none (required) | Independent local `api_key` credential protecting every local API request in both modes, on both Unix and TCP listeners. Watch-only balances, addresses and history are as private as a seed wallet's. Uses the same file-permission, size and header-value checks as `api_key_file`; the two files must contain different credentials. Never forwarded to the node. CLI: `--local-api-key-file`. |
 | `sync_interval` | u64 or string | `15` | Delay after completed sync passes or retryable errors; incomplete passes continue immediately. Accepts plain seconds (`15`) or a duration string (`"500ms"`, `"30s"`, `"2m"`, `"1h"`). `0` is rejected. CLI: `--sync-interval`. |
@@ -1119,6 +1119,19 @@ Both daemon modes restrict their listener addresses and socket permissions:
   does not provide TLS or bind non-loopback TCP.
 - The data directory is owner-only (`0700`) in both modes, as is a socket
   directory the daemon creates.
+
+**Windows.** The daemon neither sets nor checks file permissions on Windows:
+the data directory, credential files and `unseal_key_file` keep the access
+list they inherit from their parent directory, and a file other users can read
+is not refused. Put them in a directory only your account can read, such as
+one under your user profile. Whatever the permissions, the spending key is
+stored only under the wallet password, and `data-key.json` only under the
+watch-only passphrase. Another account that can read them gets:
+
+- `unseal_key_file`: the database key, which reads balances and history but
+  cannot spend;
+- the local credential (`local_api_key_file`): the daemon's local API, including
+  sending funds while the wallet is unlocked.
 
 ## Process hardening
 
