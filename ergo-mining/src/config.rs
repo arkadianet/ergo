@@ -71,7 +71,8 @@ pub struct MiningConfig {
     /// How long a superseded template stays solvable, in milliseconds. The
     /// newest 16 templates are always kept; older ones are kept while younger
     /// than this, within a fixed memory bound. A solution for a template no
-    /// longer held is answered `expired_candidate`. Default: 120000 (two of
+    /// longer held is answered `stale_candidate` on `/mining/solution` and
+    /// `expired_candidate` on `/api/v1/mining/solution`. Default: 120000 (two of
     /// the reference node's 60 s candidate refresh periods).
     #[serde(default = "default_template_retention_ms")]
     pub template_retention_ms: u64,

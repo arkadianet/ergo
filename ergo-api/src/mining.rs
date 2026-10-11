@@ -187,7 +187,10 @@ pub enum MiningApiError {
     #[error("stale candidate (best-full flipped or candidate withdrawn)")]
     StaleParent,
     /// The nonce solves a template the node built but no longer holds (it
-    /// aged out of the retained history). 400 `expired_candidate`.
+    /// aged out of the retained history). The Scala-compatible
+    /// `/mining/solution` route answers 400 `stale_candidate`, the reason
+    /// string Scala clients already handle; `/api/v1/mining/solution`
+    /// answers 400 `expired_candidate`.
     #[error("expired candidate (the solved template is no longer retained)")]
     TemplateExpired,
     /// Mining subsystem disabled or node not synced. 503.
@@ -221,7 +224,7 @@ impl IntoResponse for MiningApiError {
         let (status, reason): (StatusCode, &'static str) = match &self {
             MiningApiError::InvalidPow => (StatusCode::BAD_REQUEST, "invalid_pow"),
             MiningApiError::StaleParent => (StatusCode::BAD_REQUEST, "stale_candidate"),
-            MiningApiError::TemplateExpired => (StatusCode::BAD_REQUEST, "expired_candidate"),
+            MiningApiError::TemplateExpired => (StatusCode::BAD_REQUEST, "stale_candidate"),
             MiningApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             MiningApiError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             MiningApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
@@ -713,5 +716,64 @@ mod tests {
         let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(error["reason"], "bad_request");
         assert!(spy.seen.lock().unwrap().is_none());
+    }
+    // ----- solution reason mapping -----
+
+    struct SolutionStub(fn() -> MiningApiError);
+
+    #[async_trait]
+    impl NodeMining for SolutionStub {
+        async fn candidate(
+            &self,
+            _longpoll: Option<String>,
+        ) -> Result<Option<WorkMessageJson>, MiningApiError> {
+            Err(MiningApiError::Unavailable("n/a".into()))
+        }
+        async fn submit_solution(&self, _: AutolykosSolutionJson) -> Result<(), MiningApiError> {
+            Err((self.0)())
+        }
+        async fn reward_address(&self) -> Result<String, MiningApiError> {
+            Err(MiningApiError::Unavailable("n/a".into()))
+        }
+        async fn reward_pubkey(&self) -> Result<String, MiningApiError> {
+            Err(MiningApiError::Unavailable("n/a".into()))
+        }
+    }
+
+    async fn solution_reason(err: fn() -> MiningApiError) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mining/solution")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(r#"{"n":"0001020304050607"}"#))
+            .unwrap();
+        let response = mining_router(Arc::new(SolutionStub(err)))
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// Scala clients only know `stale_candidate` for a solution the node can
+    /// no longer use, so an aged-out template is reported with that string on
+    /// the Scala-compatible route.
+    #[tokio::test]
+    async fn expired_template_solution_is_stale_candidate_on_compat_route() {
+        let (status, body) = solution_reason(|| MiningApiError::TemplateExpired).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["reason"], "stale_candidate");
+        assert_eq!(body["error"], 400);
+    }
+
+    #[tokio::test]
+    async fn stale_parent_solution_is_stale_candidate_on_compat_route() {
+        let (status, body) = solution_reason(|| MiningApiError::StaleParent).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["reason"], "stale_candidate");
     }
 }
