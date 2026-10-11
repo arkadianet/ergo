@@ -100,9 +100,11 @@ pub(super) fn build_subsystem(
                  the node holds no wallet to take a reward key from"
                     .into()
             })?;
+            // The same mapping `NodeConfig::load` decodes `miner_reward_address`
+            // with, so the printed line can be pinned as-is.
             let prefix = match config.network {
-                crate::config::Network::Testnet => ergo_ser::address::NetworkPrefix::Testnet,
-                _ => ergo_ser::address::NetworkPrefix::Mainnet,
+                crate::config::Network::Mainnet => ergo_ser::address::NetworkPrefix::Mainnet,
+                _ => ergo_ser::address::NetworkPrefix::Testnet,
             };
             let address = ergo_ser::address::encode_p2pk_from_pubkey(prefix, &key).map_err(
                 |error| -> NodeError { format!("legacy reward address: {error}").into() },

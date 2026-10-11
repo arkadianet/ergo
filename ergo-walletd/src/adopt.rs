@@ -91,7 +91,6 @@ fn copy_handoff(handoff: &Path, destination: &Path) -> Result<(), ConfigError> {
     // The ownership marker last, as at publication.
     write_private(&destination.join("wallet-mode"), b"seed\n").map_err(fail)?;
     sync_directory(destination).map_err(fail)?;
-    fs::remove_dir_all(handoff)?;
     Ok(())
 }
 
@@ -108,11 +107,32 @@ pub fn adopt(args: &AdoptArgs) -> Result<CutoverReport, ConfigError> {
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    if fs::rename(&args.handoff, &args.data_dir).is_err() {
-        copy_handoff(&args.handoff, &args.data_dir)?;
-    }
+    let copied = match fs::rename(&args.handoff, &args.data_dir) {
+        Ok(()) => false,
+        // Only a move across file systems falls back to a copy; any other
+        // failure leaves both directories as they were.
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            if let Err(error) = copy_handoff(&args.handoff, &args.data_dir) {
+                // The destination did not exist before; drop the partial
+                // copy so a retry is not refused. The handoff is intact.
+                let _ = fs::remove_dir_all(&args.data_dir);
+                return Err(error);
+            }
+            true
+        }
+        Err(error) => return Err(error.into()),
+    };
     sync_directory(parent).map_err(|error| invalid(error.to_string()))?;
     verify(&args.data_dir)?;
+    if copied {
+        // Only now that the copy verified: the handoff's own copy goes.
+        if let Err(error) = fs::remove_dir_all(&args.handoff) {
+            eprintln!(
+                "ergo-walletd: adopted, but could not remove {}: {error}; remove it by hand",
+                args.handoff.display()
+            );
+        }
+    }
     let node_dir = args
         .handoff
         .parent()
@@ -126,7 +146,7 @@ pub fn adopt(args: &AdoptArgs) -> Result<CutoverReport, ConfigError> {
         format!("{report_hash}\n").as_bytes(),
     ) {
         eprintln!(
-            "ergo-walletd: adopted, but could not record {} in {}: {error}; create it there before purging the node's legacy wallet",
+            "ergo-walletd: adopted, but could not record {} in {}: {error}; before purging the node's legacy wallet, create it there containing the line {report_hash}",
             ADOPTED_MARKER,
             node_dir.display()
         );
@@ -312,7 +332,27 @@ mod tests {
         let daemon = tempfile::tempdir().unwrap();
         let data_dir = daemon.path().join("copied");
         copy_handoff(&source, &data_dir).unwrap();
-        assert!(!source.exists());
+        assert!(
+            source.exists(),
+            "the handoff stays until the copy is verified"
+        );
         verify(&data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_move_that_is_not_cross_device_changes_nothing() {
+        let node = tempfile::tempdir().unwrap();
+        let source = handoff(node.path());
+        let daemon = tempfile::tempdir().unwrap();
+        // The destination's parent does not exist: rename fails NotFound.
+        let data_dir = daemon.path().join("missing-parent").join("data");
+        assert!(adopt(&AdoptArgs {
+            handoff: source.clone(),
+            data_dir: data_dir.clone(),
+        })
+        .is_err());
+        assert!(!data_dir.exists());
+        verify(&source).unwrap();
+        assert!(!node.path().join(ADOPTED_MARKER).exists());
     }
 }

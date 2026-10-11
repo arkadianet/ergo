@@ -214,7 +214,25 @@ mod tests {
             })
         };
         assert!(purge(false).unwrap_err().to_string().contains("adopt"));
-        std::fs::write(dir.path().join(ADOPTED_MARKER), b"adopted\n").unwrap();
+        // A marker without the adopted report's digest does not unlock it.
+        for (marker, accepted) in [(b"adopted\n".as_slice(), false), (b"".as_slice(), false)] {
+            std::fs::write(dir.path().join(ADOPTED_MARKER), marker).unwrap();
+            assert_eq!(purge(false).is_ok(), accepted);
+        }
+        #[cfg(unix)]
+        {
+            let real = dir.path().join("elsewhere");
+            std::fs::write(&real, format!("{}\n", "ab".repeat(32))).unwrap();
+            std::fs::remove_file(dir.path().join(ADOPTED_MARKER)).unwrap();
+            std::os::unix::fs::symlink(&real, dir.path().join(ADOPTED_MARKER)).unwrap();
+            assert!(purge(false).is_err(), "a symlinked marker is refused");
+            std::fs::remove_file(dir.path().join(ADOPTED_MARKER)).unwrap();
+        }
+        std::fs::write(
+            dir.path().join(ADOPTED_MARKER),
+            format!("{}\n", "ab".repeat(32)),
+        )
+        .unwrap();
         let report: serde_json::Value = serde_json::from_str(&purge(false).unwrap()).unwrap();
         assert!(!report["tables_removed"].as_array().unwrap().is_empty());
         assert_eq!(report["keystore_removed"], false);

@@ -886,7 +886,8 @@ async fn run_inner_with_backend(
                     ),
                     Ok(Handoff::Adopted) => tracing::info!(
                         "the legacy embedded wallet was adopted by the wallet daemon; \
-                         `ergo-node wallet-legacy purge` removes its rows from this node"
+                         `ergo-node wallet-legacy-purge <data_dir>` removes its rows from this \
+                         node (stop the node first)"
                     ),
                     Ok(Handoff::NoLegacyWallet) => {}
                     Err(error) => tracing::warn!(

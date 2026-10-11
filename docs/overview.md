@@ -253,11 +253,11 @@ covers the descriptor format, the no-secret boundary, the read route
 inventory, socket ownership/permissions, the sync/reorg failure policy, the two
 sync budgets (`sync_batch` = blocks applied per pass, `blocks_page` = blocks
 requested per call), what the daemon verifies — every block id is recomputed
-from the raw header the node serves with it, while transactions are not bound
-to the header's transactions root and proof-of-work is not checked — and,
-stated plainly, the one known deviation: `/balance` / `/status` are
-confirmed-only values the daemon computes from applied blocks rather than the
-embedded wallet's embedded values re-served.
+from the raw header the node serves with it, every header's proof of work is
+checked, and every block's transactions are bound to its header's
+transactions root — and, stated plainly, the one known deviation: the
+diagnostic `/balance` / `/status` are confirmed-only values the daemon computes
+from applied blocks.
 
 ### Observability
 

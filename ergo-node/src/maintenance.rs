@@ -263,14 +263,28 @@ struct LegacyPurgeReport {
     keystore_removed: bool,
 }
 
+/// Whether `ergo-walletd adopt` recorded the adoption: a regular file (not a
+/// symlink) holding the SHA-256 of the adopted `migration.json`, so a stray or
+/// empty file cannot unlock the irreversible purge.
+fn adoption_recorded(marker: &Path) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.len() > 128 {
+        return Ok(false);
+    }
+    let contents = fs::read_to_string(marker)?;
+    let digest = contents.trim_end_matches(['\n', '\r']);
+    Ok(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 /// Drop every `wallet_*` table of a stopped node after the daemon adopted
 /// the wallet, and compact the file. Freed pages are not securely erased.
 fn purge_legacy_wallet(data_dir: &Path, remove_keystore: bool) -> Result<LegacyPurgeReport> {
     use redb::{MultimapTableHandle, TableHandle};
-    if !data_dir
-        .join(crate::node::legacy_wallet::ADOPTED_MARKER)
-        .is_file()
-    {
+    if !adoption_recorded(&data_dir.join(crate::node::legacy_wallet::ADOPTED_MARKER))? {
         return Err(fail(
             "the wallet daemon has not adopted this node's wallet; run `ergo-walletd adopt` first",
         ));

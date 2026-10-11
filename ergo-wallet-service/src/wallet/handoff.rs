@@ -71,17 +71,24 @@ pub fn read_single_secret(secret_dir: &Path) -> Result<(OsString, Vec<u8>), Wall
     }
     let path =
         SecretStorage::find_secret_file(secret_dir).map_err(|error| fail(error.to_string()))?;
-    let eligible = fs::read_dir(secret_dir)
-        .map_err(io)?
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry.path().is_file()
-                && !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".ergo-wallet-pending-")
-        })
-        .count();
+    // Classify entries without following symlinks, and never skip one that
+    // cannot be read.
+    let mut eligible = 0usize;
+    for entry in fs::read_dir(secret_dir).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        let kind = entry.file_type().map_err(io)?;
+        if kind.is_symlink() {
+            return Err(fail("the secret directory must not contain symlinks"));
+        }
+        if kind.is_file()
+            && !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".ergo-wallet-pending-")
+        {
+            eligible += 1;
+        }
+    }
     if eligible != 1 {
         return Err(fail(
             "the wallet needs one unambiguous encrypted secret file",
@@ -235,4 +242,23 @@ pub fn publish_seed_directory(
     sync_directory(destination)?;
     sync_directory(parent)?;
     Ok(report)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_symlink_in_the_secret_directory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_dir = dir.path().join("wallet");
+        fs::create_dir(&secret_dir).unwrap();
+        fs::write(secret_dir.join("secret.json"), b"{}").unwrap();
+        assert!(read_single_secret(&secret_dir).is_ok());
+        let elsewhere = dir.path().join("elsewhere.json");
+        fs::write(&elsewhere, b"{}").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, secret_dir.join("link.json")).unwrap();
+        let error = read_single_secret(&secret_dir).unwrap_err();
+        assert!(error.to_string().contains("symlink"), "{error}");
+    }
 }
