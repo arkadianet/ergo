@@ -21,8 +21,8 @@ use tracing::{debug, info, warn};
 use crate::address_book::AddressBook;
 use crate::handshake::PeerSpec;
 use crate::peer::{
-    ConnectionState, Direction, PeerId, PeerInfo, PeerRejectReason, Penalty, PenaltyOutcome,
-    DEGRADED_THRESHOLD, DELIVERY_DEGRADE_STREAK,
+    ConnectionState, Direction, PeerId, PeerInfo, PeerRejectReason, PeerScore, Penalty,
+    PenaltyOutcome, DEGRADED_THRESHOLD, DELIVERY_DEGRADE_STREAK,
 };
 
 mod known_peer;
@@ -60,6 +60,13 @@ const OPERATOR_BAN_RESERVE: usize = 1024;
 /// cost; the sweep is O(n) over a map capped at [`MAX_BANS`].
 pub(crate) const BAN_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
+/// Upper bound on per-IP penalty scores kept for disconnected peers. A peer
+/// that leaves with a non-zero score gets it back when the same IP connects
+/// again, so a disconnect does not reset misbehaviour scoring. Entries decay
+/// like a live score and are dropped once they reach zero; at the cap the
+/// lowest-scored entry is evicted first.
+pub(crate) const MAX_RETAINED_SCORES: usize = 4096;
+
 /// Upper bound on PeerSpec entries included in one outbound `Peers`
 /// reply. Scala parses inbound Peers with
 /// `require(length <= maxPeerSpecObjects = 64)`
@@ -81,6 +88,10 @@ pub struct PeerManager {
     peers: HashMap<PeerId, PeerInfo>,
     /// Ban list: IP → ban expiry. Separate from peers so bans survive disconnection.
     bans: HashMap<IpAddr, BanEntry>,
+    /// Penalty scores of disconnected peers, keyed by canonical IP and
+    /// restored on the next connection from that IP. Bounded by
+    /// [`MAX_RETAINED_SCORES`].
+    retained_scores: HashMap<IpAddr, PeerScore>,
     known_addresses: Vec<KnownPeer>,
     /// Recovery attempts do not feed dial backoff. Keep the marker through
     /// removal/timeout until success or the next registration, so a late
@@ -141,6 +152,7 @@ impl PeerManager {
         Self {
             peers: HashMap::new(),
             bans: HashMap::new(),
+            retained_scores: HashMap::new(),
             known_addresses: Vec::new(),
             recovery_dials: HashSet::new(),
             our_session_id: session_id,
@@ -194,7 +206,9 @@ impl PeerManager {
     pub fn register_outbound(&mut self, addr: PeerId, now: Instant) -> Result<(), ConnectError> {
         self.check_can_connect(addr, now)?;
         self.recovery_dials.remove(&addr);
-        self.peers.insert(addr, PeerInfo::new_outbound(addr, now));
+        let mut info = PeerInfo::new_outbound(addr, now);
+        self.restore_score(&mut info, now);
+        self.peers.insert(addr, info);
         Ok(())
     }
 
@@ -223,7 +237,9 @@ impl PeerManager {
             return Err(ConnectError::TooManyInbound);
         }
         self.recovery_dials.remove(&addr);
-        self.peers.insert(addr, PeerInfo::new_inbound(addr, now));
+        let mut info = PeerInfo::new_inbound(addr, now);
+        self.restore_score(&mut info, now);
+        self.peers.insert(addr, info);
         Ok(())
     }
 
@@ -389,7 +405,9 @@ impl PeerManager {
         } else {
             None
         };
-        self.peers.remove(addr);
+        if let Some(peer) = self.peers.remove(addr) {
+            self.retain_score(&peer, Instant::now());
+        }
         if let Some(dial_addr) = dial_addr {
             self.persist_touch(dial_addr);
         }
@@ -415,6 +433,10 @@ impl PeerManager {
             }
             self.record_ban(addr.ip(), now, false);
             self.peers.remove(addr);
+            // The ban record carries the escalation from here on; a fresh
+            // connection after it expires starts from a clean score.
+            self.retained_scores
+                .remove(&crate::peer::canonical_ip(addr.ip()));
         }
         outcome
     }
@@ -1082,7 +1104,9 @@ impl PeerManager {
                     "peer removed: idle timeout",
                 );
             }
-            self.peers.remove(addr);
+            if let Some(peer) = self.peers.remove(addr) {
+                self.retain_score(&peer, now);
+            }
         }
         to_remove
             .into_iter()
@@ -1146,6 +1170,72 @@ impl PeerManager {
         self.known_addresses
             .iter()
             .any(|k| k.addr == *addr && k.origin.is_seed())
+    }
+
+    /// Keep a departing peer's penalty score under its IP so the next
+    /// connection from the same address continues from it. Zero scores are
+    /// not kept. When the IP already has a retained score (several
+    /// connections from one address), the higher one wins.
+    fn retain_score(&mut self, peer: &PeerInfo, now: Instant) {
+        let score = peer.score.effective_score(now);
+        if score <= 0 {
+            return;
+        }
+        let ip = crate::peer::canonical_ip(peer.addr.ip());
+        let keep = match self.retained_scores.get(&ip) {
+            Some(existing) => existing.effective_score(now) < score,
+            None => true,
+        };
+        if keep {
+            self.retained_scores.insert(ip, peer.score.clone());
+        }
+        if self.retained_scores.len() > MAX_RETAINED_SCORES {
+            self.retained_scores
+                .retain(|_, s| s.effective_score(now) > 0);
+            while self.retained_scores.len() > MAX_RETAINED_SCORES {
+                let Some(victim) = self
+                    .retained_scores
+                    .iter()
+                    .min_by_key(|(_, s)| s.effective_score(now))
+                    .map(|(ip, _)| *ip)
+                else {
+                    break;
+                };
+                self.retained_scores.remove(&victim);
+            }
+        }
+    }
+
+    /// Seed a new connection's score from the score its IP left with, and
+    /// from any other live connection of the same IP, so penalties follow
+    /// the address rather than the connection.
+    fn restore_score(&mut self, info: &mut PeerInfo, now: Instant) {
+        let ip = crate::peer::canonical_ip(info.addr.ip());
+        let mut best = self.retained_scores.remove(&ip);
+        for live in self
+            .peers
+            .values()
+            .filter(|p| crate::peer::canonical_ip(p.addr.ip()) == ip)
+        {
+            if best
+                .as_ref()
+                .is_none_or(|b| b.effective_score(now) < live.score.effective_score(now))
+            {
+                best = Some(live.score.clone());
+            }
+        }
+        if let Some(score) = best {
+            if score.effective_score(now) > 0 {
+                info.score = score;
+            }
+        }
+    }
+
+    /// Penalty score retained for a disconnected IP, if any (after decay).
+    pub fn retained_score(&self, ip: IpAddr, now: Instant) -> Option<i32> {
+        self.retained_scores
+            .get(&crate::peer::canonical_ip(ip))
+            .map(|s| s.effective_score(now))
     }
 
     fn check_can_connect(&self, addr: PeerId, now: Instant) -> Result<(), ConnectError> {
@@ -1268,6 +1358,8 @@ impl PeerManager {
                 self.unban_persisted(*ip);
             }
         }
+        self.retained_scores
+            .retain(|_, s| s.effective_score(now) > 0);
         expired.len()
     }
 
