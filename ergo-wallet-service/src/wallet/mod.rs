@@ -13,6 +13,7 @@
 
 pub mod apply;
 pub mod error;
+pub mod handoff;
 pub mod hydration;
 pub mod maturity;
 pub mod migration;

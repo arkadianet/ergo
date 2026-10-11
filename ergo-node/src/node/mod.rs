@@ -35,6 +35,7 @@ mod first_deliverer;
 mod handle;
 mod heartbeat;
 pub mod identity;
+pub(crate) mod legacy_wallet;
 mod memory_sampler;
 mod messaging;
 mod mining_dispatch;

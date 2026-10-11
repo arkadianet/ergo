@@ -79,6 +79,8 @@ ergo-mempool       = { workspace = true, features = ["test-support"] }
 ergo-p2p           = { workspace = true }
 ergo-primitives    = { workspace = true }
 ergo-state         = { workspace = true, features = ["test-helpers", "test-utils"] }
+# Fast keystore key derivation in tests only (absent from release builds).
+ergo-wallet        = { workspace = true, features = ["keystore", "test-utils"] }
 ergo-sync          = { workspace = true }
 ergo-chain-spec    = { workspace = true }
 arc-swap           = { workspace = true }

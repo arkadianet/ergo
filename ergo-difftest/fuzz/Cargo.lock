@@ -686,6 +686,8 @@ dependencies = [
  "redb 4.3.0",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "zeroize",

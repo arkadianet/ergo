@@ -228,16 +228,22 @@ flows:
 `<data_dir>/wallet.redb`, syncs by reading the node's `/api/v1/chain/*` API, and
 serves a **read-only** local API. It holds no signing key — there is no send,
 sign, or unlock route, and every balance, box, and transaction it reports comes
-from confirmed blocks it has applied.
+from confirmed blocks it has applied. For a signing (seed) wallet, mining
+reward addresses and upgrading from a node-hosted wallet, see
+[`wallet-setup.md`](wallet-setup.md).
 
 ```bash
 # Start it against a local node with the bundled reference config.
 ./target/release/ergo-walletd --config ergo-walletd/ergo-walletd.toml
 
 # Read it back over the owner-only socket (mode 0600).
-curl --unix-socket ergo-walletd.sock http://local/api/v1/wallet/status
-curl --unix-socket ergo-walletd.sock http://local/api/v1/wallet/balances
-curl --unix-socket ergo-walletd.sock http://local/api/v1/wallet/addresses
+K=$(cat wallet-api-key)
+# The database is encrypted; the first start sets the watch-only passphrase.
+curl --unix-socket ergo-walletd.sock -H "api_key: $K" -d '{"pass":"<passphrase>"}' \
+  http://local/api/v1/wallet/unseal
+curl --unix-socket ergo-walletd.sock -H "api_key: $K" http://local/api/v1/wallet/status
+curl --unix-socket ergo-walletd.sock -H "api_key: $K" http://local/api/v1/wallet/balances
+curl --unix-socket ergo-walletd.sock -H "api_key: $K" http://local/api/v1/wallet/addresses
 ```
 
 Every field is documented by type in
@@ -247,11 +253,11 @@ covers the descriptor format, the no-secret boundary, the read route
 inventory, socket ownership/permissions, the sync/reorg failure policy, the two
 sync budgets (`sync_batch` = blocks applied per pass, `blocks_page` = blocks
 requested per call), what the daemon verifies — every block id is recomputed
-from the raw header the node serves with it, while transactions are not bound
-to the header's transactions root and proof-of-work is not checked — and,
-stated plainly, the one known deviation: `/balance` / `/status` are
-confirmed-only values the daemon computes from applied blocks rather than the
-embedded wallet's embedded values re-served.
+from the raw header the node serves with it, every header's proof of work is
+checked, and every block's transactions are bound to its header's
+transactions root — and, stated plainly, the one known deviation: the
+diagnostic `/balance` / `/status` are confirmed-only values the daemon computes
+from applied blocks.
 
 ### Observability
 

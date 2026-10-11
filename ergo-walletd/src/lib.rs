@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err)]
 
+pub mod adopt;
 pub mod api;
 pub mod chain_http;
 pub mod config;
@@ -13,6 +14,7 @@ mod host_guard;
 pub mod lifecycle_api;
 pub mod migration;
 pub mod nonce_vault;
+pub mod onboard;
 mod ownership;
 pub mod seal;
 #[cfg(unix)]

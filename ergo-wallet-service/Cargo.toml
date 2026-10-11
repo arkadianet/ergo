@@ -33,6 +33,10 @@ parking_lot          = { workspace = true }
 # External-secret scalar decoding and private-key export.
 k256                 = { workspace = true, features = ["arithmetic"] }
 zeroize              = { workspace = true }
+# Seed-directory publication (`wallet::handoff`): report hashes and a private
+# assembly directory beside the destination.
+sha2                 = { workspace = true }
+tempfile             = { workspace = true }
 
 [dev-dependencies]
 # Verify legacy standalone stores are refused without modifying their files.

@@ -185,20 +185,31 @@ pub(crate) fn start(context: &OpenContext) -> Result<Start, DaemonError> {
         return open(context, &key, new_wallet).map(Start::Open);
     }
     if config.mode == WalletMode::Seed && !keystore_exists(config)? {
-        // No wallet yet. A database sealed by a key that never reached a
-        // keystore is unreadable by construction; set it aside.
+        // No wallet yet. Set any existing database aside: an encrypted one is
+        // unreadable without a keystore, and a cleartext one must stay
+        // readable rather than be encrypted under a key that only a later
+        // `init` or `restore` would persist (a keystore moved or hidden by
+        // mistake would otherwise lose its wallet's history).
         let path = config.data_dir.join(WALLET_DB);
-        if path.exists() && !is_cleartext(&path)? {
+        if path.exists() {
             let aside = config.data_dir.join(format!(
                 "{WALLET_DB}.orphaned-{}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |elapsed| elapsed.as_secs())
             ));
-            tracing::warn!(
-                aside = %aside.display(),
-                "encrypted wallet.redb without a keystore cannot be opened; set aside"
-            );
+            if is_cleartext(&path)? {
+                tracing::warn!(
+                    aside = %aside.display(),
+                    "cleartext wallet.redb without a keystore set aside unchanged; restore \
+                     the keystore and move it back to keep its history"
+                );
+            } else {
+                tracing::warn!(
+                    aside = %aside.display(),
+                    "encrypted wallet.redb without a keystore cannot be opened; set aside"
+                );
+            }
             std::fs::rename(&path, &aside)?;
         }
         return open(context, &DataKey::generate(), true).map(Start::Open);
@@ -245,6 +256,50 @@ pub fn export_unseal_key(config: &Config, secret: &str) -> Result<DataKey, Daemo
             })
         }
     }
+}
+
+/// The wallet's first EIP-3 public key, for `[mining] miner_reward_address`:
+/// read from the database when the wallet has derived it, otherwise derived
+/// from the seed. Needs the password (or watch-only passphrase).
+pub fn reward_key(config: &Config, secret: &str) -> Result<[u8; 33], DaemonError> {
+    use ergo_wallet_service::WalletStore;
+    let from_database = |key: &DataKey| -> Result<Option<[u8; 33]>, DaemonError> {
+        let path = config.data_dir.join(WALLET_DB);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let db = encrypted_db::open_database(&path, key).map_err(store_error)?;
+        let store = RedbWalletStore::from_standalone_db(Arc::new(db))?;
+        match store.read()?.resolve_reward_key()? {
+            ergo_wallet_service::RewardKeyResolution::Ready(key) => Ok(Some(key)),
+            ergo_wallet_service::RewardKeyResolution::Pending => Ok(None),
+            ergo_wallet_service::RewardKeyResolution::Corrupt => Err(DaemonError::Server(
+                "the wallet's tracked keys are inconsistent".into(),
+            )),
+        }
+    };
+    if let Ok(key) = export_unseal_key(config, secret) {
+        if let Some(found) = from_database(&key)? {
+            return Ok(found);
+        }
+    }
+    if config.mode == WalletMode::WatchOnly {
+        return Err(DaemonError::Server(
+            "no first-address key among the watched descriptors".into(),
+        ));
+    }
+    let mut storage = SecretStorage::open(secret_dir(config));
+    storage.unlock(secret).map_err(|error| match error {
+        WalletError::Decryption => DaemonError::Server("wrong password".into()),
+        other => crate::host::HostError::from(other).into(),
+    })?;
+    let unlocked = storage
+        .unlocked()
+        .ok_or_else(|| DaemonError::Server("the wallet did not unlock".into()))?;
+    unlocked
+        .master
+        .derive_pubkey_at_path(&ergo_wallet::DerivationPath::eip3_first_address())
+        .map_err(|error| DaemonError::Server(error.to_string()))
 }
 
 /// Read a raw 32-byte database key, hex-encoded, from an owner-only file.
@@ -426,7 +481,7 @@ impl Gate {
 
     /// Release the database key with `secret` and open the database, unless
     /// already open. Returns the opened services.
-    async fn unseal(
+    pub(crate) async fn unseal(
         self: &Arc<Self>,
         secret: Zeroizing<String>,
     ) -> Result<Opened, WalletAdminError> {
@@ -711,5 +766,67 @@ mod tests {
             open_database(dir.path(), &DataKey::generate()),
             Err(DaemonError::Server(message)) if message.contains("different key")
         ));
+    }
+
+    /// A seed directory whose keystore is missing keeps a cleartext database
+    /// readable: it is set aside unchanged, not encrypted under a key nothing
+    /// persists.
+    #[test]
+    fn a_cleartext_database_without_a_keystore_is_set_aside_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let data_dir = root.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        std::fs::write(data_dir.join("wallet-mode"), b"seed\n").unwrap();
+        let path = data_dir.join(WALLET_DB);
+        drop(RedbWalletStore::open_standalone(&path).unwrap());
+        let before = std::fs::read(&path).unwrap();
+        let config = crate::config::Config {
+            mode: WalletMode::Seed,
+            network: crate::config::Network::Testnet,
+            data_dir: data_dir.clone(),
+            node_url: "http://127.0.0.1:9/".parse().unwrap(),
+            api_key_file: root.path().join("node-key"),
+            descriptor_file: None,
+            local_api_key_file: root.path().join("local-key"),
+            node_ca_file: None,
+            sync_interval: std::time::Duration::from_secs(60),
+            shutdown_timeout: std::time::Duration::from_secs(1),
+            sync_batch: 1,
+            blocks_page: 1,
+            unix_socket: None,
+            tcp_fallback: Some("127.0.0.1:0".parse().unwrap()),
+            allowed_hosts: Vec::new(),
+            lock_policy: crate::config::LockPolicy::default(),
+            lock_memory: false,
+            unseal_key_file: None,
+            multisig_nonces: crate::config::NonceHolder::Daemon,
+        };
+        let daemon = crate::prepare(crate::config::LoadedConfig {
+            config,
+            api_key: crate::config::ApiKey::from_test(b"node".to_vec()),
+            local_api_key: crate::config::ApiKey::from_test(b"local".to_vec()),
+        })
+        .unwrap();
+        assert!(
+            !daemon.is_sealed(),
+            "a seed directory without a wallet starts open"
+        );
+        drop(daemon);
+        let aside: Vec<_> = std::fs::read_dir(&data_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("wallet.redb.orphaned-")
+            })
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(std::fs::read(&aside[0]).unwrap(), before);
+        assert!(
+            !is_cleartext(&path).unwrap(),
+            "a fresh database replaced it"
+        );
     }
 }
