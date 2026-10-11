@@ -44,7 +44,7 @@ pub use mock::{MockPlan, MockStructure, MockValidator};
 pub(crate) use outcome::HeldCandidate;
 pub use outcome::{AdmissionOutcome, CheckOutcome, RejectReason};
 pub use revalidate::revalidate_pooled;
-pub(crate) use revalidate::{is_recheck_evictable, record_failed_tx};
+pub(crate) use revalidate::{is_recheck_evictable, record_failed_tx, FailureOrigin};
 
 pub(crate) use outcome::classify;
 use outcome::ReplacementDecision;
@@ -405,6 +405,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
                 cx.invalidated,
                 cx.unresolved,
                 peek_fee_value.tx_id,
+                FailureOrigin::Delivered(peer),
                 tx_bytes,
                 &err,
                 now,

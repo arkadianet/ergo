@@ -234,6 +234,14 @@ impl Mempool {
         self.invalidation.contains(tx_id)
     }
 
+    /// Should an inventory of `tx_id` advertised by `peer` be skipped? True
+    /// when the id failed in a way its proofs cannot change, or when bytes
+    /// delivered by this same peer failed a proof-dependent check.
+    pub fn is_invalidated_from(&self, tx_id: &TxId, peer: crate::types::PeerId) -> bool {
+        self.invalidation
+            .contains_for_peer(tx_id, peer, std::time::Instant::now())
+    }
+
     /// Invalidate a transaction named by block validation using the same bounded
     /// descendant removal and revocation semantics as a failed pool recheck.
     pub fn invalidate(&mut self, id: TxId, now: std::time::Instant) -> Vec<MempoolAction> {
@@ -875,6 +883,7 @@ impl Mempool {
                         &mut self.invalidation,
                         &mut self.unresolved,
                         s.tx_id,
+                        admission::FailureOrigin::Delivered(source.peer()),
                         c_bytes,
                         &error,
                         now,
@@ -1832,6 +1841,7 @@ impl Mempool {
                     &mut self.invalidation,
                     &mut self.unresolved,
                     id,
+                    admission::FailureOrigin::Recheck,
                     &bytes,
                     &err,
                     now,

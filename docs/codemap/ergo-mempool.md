@@ -34,6 +34,8 @@ staging, and reorg maintenance. Consensus validation is delegated to
   reserve. Peer and public API traffic use the remote budget; wallet/operator
   traffic can use the reserve. Rollback-demoted transactions are exempt.
 - `src/invalidation.rs` filters repeated inventory fetches by transaction ID.
+  Failures the input proofs cannot change are cached for the id; script and
+  cost failures are cached for the id and the delivering peer only.
   `src/unresolved.rs` briefly suppresses repeated unresolved raw bytes by hash.
   Both caches use insertion-order eviction and TTL; refresh owns one bounded
   node, lookups do not refresh order, and capacity zero disables retention.

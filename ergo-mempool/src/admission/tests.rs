@@ -849,10 +849,13 @@ fn validation_failure_blacklists_by_canonical_tx_id() {
     // the key the step-5 record_hit and the Inv-skip gate look up —
     // not by a hash of the wire bytes (which, including proofs, never
     // equals the proof-excluded tx_id).
+    // A script failure depends on the delivered proofs, so the entry is
+    // scoped to the delivering peer.
     assert!(
-        inv.contains(&id(7)),
+        inv.contains_for_peer(&id(7), peer(), Instant::now()),
         "invalidation cache keyed by canonical tx_id"
     );
+    assert!(!inv.contains(&id(7)), "not filtered for other peers");
     let bytes_hash = ergo_primitives::digest::blake2b256(b"bytes");
     assert!(!inv.contains(&bytes_hash), "no bytes-hash proxy entry");
 }
@@ -886,7 +889,10 @@ fn failed_then_corrected_resubmission_is_accepted() {
         weight_fn: &w,
     };
     let _ = process(b"bytes", TxSource::Peer(peer()), t0, &mut cx, &v_fail);
-    assert!(inv.contains(&id(7)), "failure blacklists the canonical id");
+    assert!(
+        inv.contains_for_peer(&id(7), peer(), t0),
+        "failure blacklists the canonical id for the delivering peer"
+    );
     // Resubmission that now validates (e.g. corrected proofs — same
     // proof-excluded tx_id) must be ADMITTED: Scala's process never
     // consults invalidatedTxIds, so a blacklisted-but-now-valid tx is
@@ -906,7 +912,10 @@ fn failed_then_corrected_resubmission_is_accepted() {
     let (out, _) = process(b"bytes", TxSource::Peer(peer()), t1, &mut cx, &v_ok);
     assert!(matches!(out, AdmissionOutcome::Admitted { .. }));
     assert!(pool.contains(&id(7)));
-    assert!(inv.contains(&id(7)), "fetch-filter entry remains");
+    assert!(
+        inv.contains_for_peer(&id(7), peer(), t1),
+        "fetch-filter entry remains"
+    );
 }
 
 #[test]
@@ -1837,7 +1846,7 @@ fn check_seeds_invalidation_cache_on_validation_failure() {
     let v = MockValidator::new().plan(
         b"bytes".to_vec(),
         MockPlan {
-            result: Err(ValidationErr::ScriptFailed),
+            result: Err(ValidationErr::MonetaryFailed),
             charge: 25_000,
             peek_fee: Some(5_000_000),
             peek_tx_id: Some(id(9)),
@@ -1861,7 +1870,7 @@ fn check_seeds_invalidation_cache_on_validation_failure() {
     // derivation.
     assert!(
         inv.contains(&id(9)),
-        "check must seed the invalidation cache on script failure (parity with process)",
+        "check must seed the invalidation cache on a rule failure (parity with process)",
     );
     assert_eq!(pool.len(), 0, "check must never insert into the pool");
 }
@@ -2456,4 +2465,83 @@ fn valid_rent_claim_policy_override_and_ordinary_spend() {
             assert_eq!(pool.size(), 1);
         }
     }
+}
+
+// ----- replacement, accounting and invalidation scope -----
+
+/// One admission against a fresh `AdmissionCtx` over the shared test state.
+#[allow(clippy::too_many_arguments)]
+fn admit(
+    pool: &mut OrderedPool,
+    budgets: &mut CostBudgets,
+    inv: &mut InvalidationCache,
+    unr: &mut UnresolvedCache,
+    cfg: &MempoolConfig,
+    bytes: &[u8],
+    source: TxSource,
+    validator: &MockValidator,
+) -> AdmissionOutcome {
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let w = ByCost;
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: cfg,
+        pool,
+        budgets,
+        invalidated: inv,
+        unresolved: unr,
+        weight_fn: &w,
+    };
+    process(bytes, source, Instant::now(), &mut cx, validator).0
+}
+
+fn plan_err(bytes: &[u8], err: ValidationErr, charge: u64) -> MockValidator {
+    MockValidator::new().plan(
+        bytes.to_vec(),
+        MockPlan {
+            result: Err(err),
+            charge,
+            peek_fee: Some(5_000_000),
+            peek_tx_id: Some(id(0x77)),
+        },
+    )
+}
+
+#[test]
+fn proof_dependent_failure_is_cached_for_the_delivering_peer_only() {
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    let other = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9001);
+    let v = plan_err(b"bad_proof", ValidationErr::ScriptFailed, 20_000);
+    admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"bad_proof",
+        TxSource::Peer(peer()),
+        &v,
+    );
+    let now = Instant::now();
+    assert!(inv.contains_for_peer(&id(0x77), peer(), now));
+    assert!(
+        !inv.contains_for_peer(&id(0x77), other, now),
+        "another peer may hold the same id with valid proofs"
+    );
+    // A failure the proofs cannot change filters the id from every peer.
+    let v = plan_err(b"bad_amounts", ValidationErr::MonetaryFailed, 20_000);
+    admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"bad_amounts",
+        TxSource::Peer(peer()),
+        &v,
+    );
+    assert!(inv.contains_for_peer(&id(0x77), other, now));
 }

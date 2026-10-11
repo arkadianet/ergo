@@ -60,6 +60,15 @@ pub fn revalidate_pooled<V: Validator>(
     (cost.consumed(), verdict)
 }
 
+/// Where a failed validation came from, for [`record_failed_tx`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FailureOrigin {
+    /// Bytes just delivered, by this peer when `Some`.
+    Delivered(Option<crate::types::PeerId>),
+    /// A pooled tx re-validated against a new tip.
+    Recheck,
+}
+
 /// Route a failed tx into the right anti-DoS CACHE. This is the classification
 /// policy shared by admission (`check`) and the proactive recheck
 /// (`Mempool::recheck_and_evict`) for the caching decision ("what does a failure
@@ -77,10 +86,16 @@ pub fn revalidate_pooled<V: Validator>(
 ///   computed from the *parsed* form, so a blacklist entry would also damn a
 ///   canonical re-encoding. Scala likewise skips `invalidatedTxIds` for
 ///   re-parse failures (`ErgoMemPool.process`).
-/// * everything else (script/monetary/structural/cost, plus the validator's
-///   catch-all `Other`) → the invalidation cache, keyed by the canonical
-///   `tx_id`, so the Inv path stops re-fetching these bytes
-///   (`Mempool::is_invalidated`). Mirrors Scala `OrderedTxPool.invalidate`.
+/// * failures the input proofs cannot change (structural, monetary,
+///   re-emission policy) → the invalidation cache for the canonical `tx_id`,
+///   so the Inv path stops fetching the id from any peer;
+/// * proof-dependent failures (script, cost, and the validator's catch-all
+///   `Other`) of freshly delivered bytes → the invalidation cache for
+///   `(tx_id, peer)` only: the id does not cover proofs, so another peer may
+///   hold a valid copy. Without a delivering peer (API, wallet, rollback)
+///   nothing is recorded. A pooled tx that fails its recheck already passed
+///   with these proofs, so its failure comes from the new tip and is
+///   recorded for the id ([`FailureOrigin::Recheck`]).
 ///   NB: this set is NOT identical to `is_recheck_evictable` — it additionally
 ///   includes `Other` (which admission blacklists but recheck does not evict
 ///   on), and excludes `UnresolvedDataInput` (which recheck evicts on but keeps
@@ -89,6 +104,7 @@ pub(crate) fn record_failed_tx(
     invalidated: &mut InvalidationCache,
     unresolved: &mut crate::unresolved::UnresolvedCache,
     tx_id: TxId,
+    origin: FailureOrigin,
     tx_bytes: &[u8],
     err: &ValidationErr,
     now: Instant,
@@ -98,8 +114,26 @@ pub(crate) fn record_failed_tx(
             unresolved.insert(tx_bytes, now);
         }
         ValidationErr::Deserialize | ValidationErr::NonCanonical => {}
-        _ => {
+        ValidationErr::Structural
+        | ValidationErr::MonetaryFailed
+        | ValidationErr::ReemissionPolicy => {
             invalidated.insert(tx_id, InvalidationReason::ValidationFailed, now);
+        }
+        ValidationErr::ScriptFailed | ValidationErr::CostExceeded | ValidationErr::Other(_) => {
+            match origin {
+                FailureOrigin::Recheck => {
+                    invalidated.insert(tx_id, InvalidationReason::ValidationFailed, now);
+                }
+                FailureOrigin::Delivered(Some(peer)) => {
+                    invalidated.insert_for_peer(
+                        tx_id,
+                        peer,
+                        InvalidationReason::ValidationFailed,
+                        now,
+                    );
+                }
+                FailureOrigin::Delivered(None) => {}
+            }
         }
     }
 }
