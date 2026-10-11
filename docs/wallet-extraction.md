@@ -248,6 +248,7 @@ a purge, is not supported.
 | Legacy-wallet handoff and `ergo-walletd adopt`, `wallet-legacy-purge`, `miner_reward_address`, `ergo-walletd init` / `reward-key`, [wallet setup](wallet-setup.md) | [#634](https://github.com/arkadianet/ergo/pull/634) |
 | Embedded wallet removed from the node; `wallet-scan-utxo` reads the daemon's encrypted database with its exported key | [#635](https://github.com/arkadianet/ergo/pull/635) |
 | Wallet hook removed from chain apply, rollback and sync; shadow comparison retired | [#636](https://github.com/arkadianet/ergo/pull/636) |
+| Node API wallet handlers replaced by one router answering `410 wallet_moved` | [#637](https://github.com/arkadianet/ergo/pull/637) |
 
 A miner without a configured reward key keeps the first-address key of a
 wallet an earlier release left in `state.redb`; otherwise `[mining]` needs
