@@ -162,16 +162,12 @@ pub(crate) const SECTION_HEIGHT_BACKFILL_DONE_VAL: &[u8] = b"1";
 /// migration.
 pub(crate) const MINIMAL_FULL_BLOCK_HEIGHT_KEY: &str = "minimal_full_block_height_v1";
 
-/// Wallet-rollback safety margin. The wallet hook re-reads
-/// `BlockTransactions` from `BLOCK_SECTIONS` during rollback; a
-/// rollback that crosses the prune sentinel reads `None` and
-/// the wallet desyncs silently. Config-load enforces
-/// `blocks_to_keep >= ROLLBACK_WINDOW + SAFETY_MARGIN` so the
-/// active rollback window can never fall into pruned territory.
-/// Anchored to `persist::MAX_BATCH_BLOCKS` — the maximum number
-/// of blocks the pipeline-batch worker commits between
-/// sentinel reads, covering the worst-case "wallet sees old
-/// sentinel while chain advanced N blocks" race window.
+/// Pruning safety margin above the rollback window. `rollback_to`
+/// refuses a target below the prune sentinel, so config-load enforces
+/// `blocks_to_keep >= ROLLBACK_WINDOW + SAFETY_MARGIN` and the active
+/// rollback window never falls into pruned territory. Anchored to
+/// `persist::MAX_BATCH_BLOCKS` — the maximum number of blocks the
+/// pipeline-batch worker commits between sentinel reads.
 pub const SAFETY_MARGIN: u32 = crate::persist::MAX_BATCH_BLOCKS as u32;
 
 /// Chain index: height → header_id (32 bytes). Best chain only (spec:339).

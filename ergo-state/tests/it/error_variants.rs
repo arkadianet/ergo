@@ -16,8 +16,6 @@ fn variant_label(e: &StateError) -> &'static str {
         StateError::PopowDataMissing { .. } => "PopowDataMissing",
         StateError::Serialization(_) => "Serialization",
         StateError::DbCorruption { .. } => "DbCorruption",
-        StateError::WalletApply { .. } => "WalletApply",
-        StateError::WalletApplyCommit { .. } => "WalletApplyCommit",
         StateError::VotedParamsWriteFailed { .. } => "VotedParamsWriteFailed",
         StateError::StateTypeMismatch { .. } => "StateTypeMismatch",
         StateError::InstallSnapshotRefused { .. } => "InstallSnapshotRefused",
@@ -312,58 +310,6 @@ fn early_ibd_carries_typed_heights_and_renders_both_in_display() {
 }
 
 #[test]
-fn wallet_apply_carries_what_height_and_typed_source() {
-    let inner = redb::Error::Corrupted("simulated".to_string());
-    let inner_msg = inner.to_string();
-    let e = StateError::WalletApply {
-        what: "apply hook",
-        height: 1_234_567,
-        source: Box::new(inner),
-    };
-    assert_eq!(variant_label(&e), "WalletApply");
-
-    // Exact Display format: `wallet {what} at h={height}: {source}`.
-    let expected_display = format!("wallet apply hook at h=1234567: {inner_msg}");
-    assert_eq!(e.to_string(), expected_display);
-
-    // `#[source]` must expose the redb error. Thiserror's `#[source]`
-    // on `Box<T>` casts the Box itself to `&dyn Error` (no auto-deref),
-    // so the trait-object's concrete type is `Box<redb::Error>`.
-    let src = std::error::Error::source(&e).expect("source missing");
-    src.downcast_ref::<Box<redb::Error>>()
-        .expect("source must downcast to Box<redb::Error>");
-}
-
-#[test]
-fn wallet_apply_commit_carries_height_and_typed_commit_error() {
-    // `redb::CommitError` is `#[non_exhaustive]` but its
-    // `Storage(StorageError)` variant is publicly constructible, and
-    // `StorageError::Corrupted(String)` is the simplest test seed.
-    let inner = redb::CommitError::Storage(redb::StorageError::Corrupted(
-        "simulated commit failure".to_string(),
-    ));
-    let inner_msg = inner.to_string();
-    let e = StateError::WalletApplyCommit {
-        height: 999_111,
-        source: Box::new(inner),
-    };
-    assert_eq!(variant_label(&e), "WalletApplyCommit");
-
-    // Exact Display format: `wallet commit at h={height}: {source}`.
-    let expected_display = format!("wallet commit at h=999111: {inner_msg}");
-    assert_eq!(e.to_string(), expected_display);
-
-    // `#[source]` must expose the commit error. Thiserror casts the
-    // Box itself to `&dyn Error`, so the trait-object's concrete type
-    // is `Box<redb::CommitError>`.
-    let src = std::error::Error::source(&e).expect("source missing");
-    src.downcast_ref::<Box<redb::CommitError>>()
-        .expect("source must downcast to Box<redb::CommitError>");
-}
-
-// ----- error paths / variant distinctness -----
-
-#[test]
 fn typed_variants_are_disjoint_under_pattern_match() {
     let cases: Vec<StateError> = vec![
         StateError::InvalidPrecondition { what: "x" },
@@ -421,17 +367,6 @@ fn typed_variants_are_disjoint_under_pattern_match() {
             key: "k".into(),
             reason: "r".into(),
         },
-        StateError::WalletApply {
-            what: "z",
-            height: 1,
-            source: Box::new(redb::Error::Corrupted("zz".to_string())),
-        },
-        StateError::WalletApplyCommit {
-            height: 2,
-            source: Box::new(redb::CommitError::Storage(redb::StorageError::Corrupted(
-                "qq".to_string(),
-            ))),
-        },
         StateError::VotedParamsWriteFailed {
             op: "apply",
             height: 3,
@@ -461,8 +396,6 @@ fn typed_variants_are_disjoint_under_pattern_match() {
             "ProveWithDbAnchorNotFound",
             "Serialization",
             "DbCorruption",
-            "WalletApply",
-            "WalletApplyCommit",
             "VotedParamsWriteFailed",
         ]
     );

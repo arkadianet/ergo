@@ -137,10 +137,9 @@ impl WalletEngine {
 
 /// Owns a registry snapshot for a `/wallet/rescan`, implementing the rescan's
 /// `ScanRescanMatcher`: it parses each serialized output box and matches it
-/// against the registered scan rules — the rescan analog of
-/// `WalletStateHook::match_boxes`, reusing the same
-/// `ScanRegistry::matching_scan_ids`, so a rescan reproduces live scan
-/// tracking exactly.
+/// against the registered scan rules with the same
+/// `ScanRegistry::matching_scan_ids` live sync uses, so a rescan reproduces
+/// live scan tracking exactly.
 #[derive(Debug, Error)]
 pub(crate) enum ScanRegistryLoadError {
     #[error("corrupt scan registry: {0}")]
@@ -222,8 +221,6 @@ fn dto_from_scan(scan: &Scan) -> Result<ScanDto, WalletAdminError> {
 /// Missing tables/rows (a fresh node) yield an empty registry whose counter
 /// defaults to [`PAYMENTS_SCAN_ID`], so the first allocated user id is 11.
 ///
-/// `pub(crate)` so the block-apply hook (`WalletStateHook`) can load the
-/// registry to match each block's boxes.
 pub(crate) fn load_registry(
     store: &dyn crate::wallet::WalletStore,
 ) -> Result<ScanRegistry, WalletAdminError> {

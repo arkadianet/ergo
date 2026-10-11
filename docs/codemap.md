@@ -36,8 +36,8 @@ universal: `ergo-wallet-protocol` intentionally has neither.
 | **L7** API & DTOs | [ergo-api](./codemap/ergo-api.md) | Axum HTTP server for Scala-compatible and native API routes; consumes protocol DTOs through `Arc<dyn …>` traits. |
 | **L7** | [ergo-rest-json](./codemap/ergo-rest-json.md) | JSON↔canonical-wire DTOs for the Scala-compat REST surface. |
 | **L7** | [ergo-indexer-types](./codemap/ergo-indexer-types.md) | Reader-side extra-index traits and DTOs, split out so the API does not depend on redb/state. |
-| **L8** Runtime | [ergo-node](./codemap/ergo-node.md) | Binary and embedded/API adapter: wires components, owns process lifecycle and the single-writer action loop, and hosts the wallet writer task as a thin adapter over the service's `WalletEngine`. |
-| **L8** Runtime | [ergo-walletd](./codemap/ergo-walletd.md) | Standalone watch-only wallet daemon: its own redb store, an HTTP chain client, a bounded sync/reorg loop, and a read-only local API on a Unix socket or loopback TCP. Hosts the embedded-vs-daemon **shadow harness** that proves the two wallet apply paths agree. No secrets, no signing, no submit. |
+| **L8** Runtime | [ergo-node](./codemap/ergo-node.md) | Binary and API adapter: wires components, owns process lifecycle and the single-writer action loop, and serves the chain API that external wallets sync from. Hosts no wallet. |
+| **L8** Runtime | [ergo-walletd](./codemap/ergo-walletd.md) | The wallet daemon: its own encrypted redb store, an HTTP chain client, a bounded sync/reorg loop, and an authenticated local API on a Unix socket or loopback TCP. Watch-only by default; seed mode hosts the shared `WalletEngine` for signing and sending. |
 | **Dev** Tooling | [ergo-difftest](./codemap/ergo-difftest.md) | Dev/test-only differential and fuzz harness over wire decoders and generators. |
 
 ## Dependency graph
@@ -118,24 +118,19 @@ graph TD
   on `ergo-node`, `ergo-api`, `ergo-state`, `ergo-mempool`, `ergo-sync`, or
   `ergo-chain-spec`: it reaches a node over `/api/v1/chain/*` HTTP, and its
   network identity is config, not a chain-spec lookup. `ergo-node`, `ergo-api`,
-  `ergo-state`, `ergo-validation`, and `parking_lot` **are**
-  `[dev-dependencies]`, for the integration tests alone: they stand the real
-  node chain API up in-process (real `StateStore`, real `InProcessChainClient`,
-  real `ergo-api` router with the real `api_key` gate) so the daemon's own
-  client and sync loop are exercised over real HTTP, and — in
-  `tests/it/shadow.rs` — drive the *embedded* side through the production
-  `StateStore::apply_block` (which needs a real `CheckedBlock`, hence
-  `ergo-validation`) with the production `WalletStateHook` as the node wires it
-  (whose shared state is a `parking_lot::RwLock`), so the two wallet apply paths can be
-  compared on the same blocks. A dev-dependency never reaches the released
+  `ergo-state`, `ergo-mining` and `ergo-mempool` **are** `[dev-dependencies]`,
+  for the integration tests alone: they stand the real node chain API up
+  in-process (real `StateStore`, real `InProcessChainClient`, real `ergo-api`
+  router with the real `api_key` gate) so the daemon's own client and sync loop
+  are exercised over real HTTP. A dev-dependency never reaches the released
   binary's graph, so the normal boundary above is unchanged — but moving any of
-  those five into `[dependencies]` would break it.
-- **Transitional edge:** `ergo-state -> ergo-wallet-service` is an intentional
-  normal edge during phase 2. `ergo-state/src/wallet/` and selected
-  `ergo-state/src/store` re-exports form a compatibility facade so the state
-  store can call service-owned apply/rollback code in the same redb write
-  transaction. The reverse edge is forbidden; full relocation of that facade
-  is not complete yet.
+  them into `[dependencies]` would break it.
+- **Legacy-wallet edge:** `ergo-state -> ergo-wallet-service` remains a normal
+  edge. The chain store no longer writes wallet rows, but it still reads the
+  wallet tables an earlier release left in `state.redb` (schema migration
+  before the handoff, offline UTXO discovery) and serves the owned block data
+  the chain API hands external wallets. `ergo-state/src/wallet/` is that
+  compatibility facade. The reverse edge is forbidden.
 
 ## Where do I find…?
 
@@ -148,9 +143,8 @@ graph TD
 | Wallet cryptography, derivation, secrets, or sigma signing | [ergo-wallet](./codemap/ergo-wallet.md) |
 | Wallet protocol DTOs, ID/byte validation, or transport shapes | [ergo-wallet-protocol](./codemap/ergo-wallet-protocol.md) |
 | Wallet command logic (`WalletEngine`), signing/sending, rescan orchestration, persistence, box selection, or runtime core | [ergo-wallet-service](./codemap/ergo-wallet-service.md) |
-| The embedded wallet adapter (command channel, seams over `ergo-state`) and node wiring | [ergo-node](./codemap/ergo-node.md) |
-| The standalone watch-only wallet daemon, its config, or its read-only API | [ergo-walletd](./codemap/ergo-walletd.md) |
-| Proving the node's embedded wallet and the standalone daemon agree (shadow harness, `scripts/shadow-compare.sh`) | [ergo-walletd](./codemap/ergo-walletd.md) §"The embedded-vs-daemon shadow harness" |
+| The node's chain API for external wallets, the legacy-wallet handoff, and node wiring | [ergo-node](./codemap/ergo-node.md) |
+| The wallet daemon (watch-only and seed), its config, or its API | [ergo-walletd](./codemap/ergo-walletd.md) |
 | Proof-of-work / difficulty | [ergo-crypto](./codemap/ergo-crypto.md) |
 | Block production / the mining API | [ergo-mining](./codemap/ergo-mining.md) |
 | Mempool admission / ordering | [ergo-mempool](./codemap/ergo-mempool.md) |

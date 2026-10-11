@@ -30,6 +30,8 @@ infrastructure.
 
 - **The node no longer hosts a wallet.** It never opens wallet secrets, runs no wallet writer, scheduler or chain-apply hook, and its wallet and scan routes answer `410 wallet_moved` with `[wallet] daemon_address`. The dashboard's wallet page moved to `ergo-walletd`. `[wallet] mode = "embedded"` and `expose_private_keys` still load, with a warning, and do nothing. `ergo-node init` no longer offers `--reward wallet`. The readiness option `require_wallet` is ignored.
 
+- The chain store and sync code no longer take a wallet hook: `StateStore::apply_block`, `rollback_to`, `BlockApply` and the `ergo-sync` executor lost their wallet arguments, and `ergo-wallet-service` drops `WalletStateHook`, `WalletApplyHook` and `WalletWiring`. The embedded-vs-daemon shadow comparison (`scripts/shadow-compare.sh`) is retired with them.
+
 ### Changed
 
 - `ergo-node wallet-scan-utxo` requires `--wallet-data-dir`. With `--wallet-key-stdin` it reads the key that `ergo-walletd export-unseal-key` prints and opens the daemon's encrypted database without the wallet password.

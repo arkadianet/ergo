@@ -29,8 +29,7 @@ use crate::wallet::tables::WALLET_SCAN_HEIGHT;
 pub use crate::wallet::types::OwnedBlockOutput;
 
 /// Matches a block's output boxes against registered scan rules during a
-/// rescan. The chain integration supplies this matcher, mirroring the live
-/// `WalletApplyHook::match_boxes` path.
+/// rescan. The host supplies this matcher.
 pub trait ScanRescanMatcher {
     /// For each serialized output box (in block order, across all of the
     /// block's transactions), the ids of registered scans whose rule matches

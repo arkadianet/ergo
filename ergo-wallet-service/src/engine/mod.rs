@@ -20,7 +20,7 @@
 //! - [`submit`] — [`TxSubmitter`]: async submission with a typed
 //!   [`TxSubmitError`].
 //! - [`rescan`] — [`RescanCoordinator`]: per-wallet rescan fence flags and
-//!   transition lock, and the rollback [`WalletRescanGuard`].
+//!   transition lock, and its rollback [`WalletRescanGuard`].
 //! - [`config`] — [`WalletEngineConfig`]: network, operator flags, EIP-27
 //!   rules and admission limits.
 //!
