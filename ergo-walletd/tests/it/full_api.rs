@@ -680,3 +680,44 @@ async fn unavailable_private_queue_and_future_account_routes_return_typed_errors
         assert_eq!(body["error"]["reason"], "route_unavailable");
     }
 }
+
+#[tokio::test]
+async fn status_and_confirmed_balance_reuse_the_first_node_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, spy, store) = app(&dir);
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/v1/wallet/restore",
+        Some(KEY),
+        &json!({"mnemonic":MNEMONIC,"pass":PASSWORD,"derivation":{"type":"eip3"}}).to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    store.persist_scan_invalidation(false).unwrap();
+    for path in [
+        "/api/v1/wallet/status",
+        "/api/v1/wallet/status",
+        "/api/v1/wallet/balance",
+        "/api/v1/wallet/balance",
+    ] {
+        let (status, body) = request(&app, "GET", path, Some(KEY), "").await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    }
+    assert_eq!(
+        spy.refreshes.load(Ordering::SeqCst),
+        1,
+        "only the first read fetches the node's spending context"
+    );
+    // Unconfirmed balances need the mempool, so they always refresh.
+    let (status, body) = request(
+        &app,
+        "GET",
+        "/api/v1/wallet/balance?includeUnconfirmed=true",
+        Some(KEY),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(spy.refreshes.load(Ordering::SeqCst), 2);
+}

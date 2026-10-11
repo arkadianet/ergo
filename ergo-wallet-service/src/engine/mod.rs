@@ -136,6 +136,9 @@ pub struct WalletEngine {
     check_limiter: admin::AttemptLimiter,
     /// When set, multisig nonces stay with the host (see [`NonceCustody`]).
     nonce_custody: Option<Arc<dyn NonceCustody>>,
+    /// Whether `config` came from a node refresh. The initial config carries no
+    /// re-emission rules, so reads that depend on them must not run before one.
+    spending_config_known: bool,
 }
 
 impl WalletEngine {
@@ -188,6 +191,7 @@ impl WalletEngine {
             unlock_limiter: admin::AttemptLimiter::new(),
             check_limiter: admin::AttemptLimiter::new(),
             nonce_custody: None,
+            spending_config_known: false,
         }
     }
 
@@ -225,6 +229,14 @@ impl WalletEngine {
         config.network = self.config.network;
         config.expose_private_keys = self.config.expose_private_keys;
         self.config = config;
+        self.spending_config_known = true;
+    }
+
+    /// True once a node refresh has supplied the spending config (re-emission
+    /// rules, fee floor, size limit). Those values are fixed per network, so
+    /// reads that only need them may reuse the last refresh.
+    pub fn spending_config_known(&self) -> bool {
+        self.spending_config_known
     }
 
     /// Refuse commands that consume scan results while the durable history

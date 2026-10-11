@@ -275,9 +275,16 @@ impl WalletApi {
         &self,
         include_unconfirmed: bool,
     ) -> Result<native::dto::WalletBalanceDto, WalletAdminError> {
-        self.host
-            .call_spending(move |engine| engine.native_balance(include_unconfirmed))
-            .await
+        if include_unconfirmed {
+            self.host
+                .call_spending(move |engine| engine.native_balance(true))
+                .await
+        } else {
+            // Confirmed balances need the re-emission rules, not the mempool.
+            self.host
+                .call_cached_spending(move |engine| engine.native_balance(false), false)
+                .await
+        }
     }
     pub async fn native_status(&self) -> Result<native::dto::WalletStatusDto, WalletAdminError> {
         self.host.native_status().await
