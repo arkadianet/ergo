@@ -129,7 +129,7 @@ jobs:
         if: (runner.os != 'Windows' || matrix.shard == matrix.shards) && (runner.os != 'macOS' || matrix.shard == matrix.shards)
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
           tool: cargo-nextest@${{ steps.rust.outputs.nextest }}
 
@@ -195,7 +195,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: VirtusLab/scala-cli-setup@c33dfbf1a5f16ee60efff453b7f9a987d2b6955b # v1
+      - uses: VirtusLab/scala-cli-setup@3f5bf11a33bb88343238780c18257c8fa43789e1 # v1
         with:
           scala-cli-version: ${{ steps.rust.outputs.scala_cli }}
       - uses: sbt/setup-sbt@6158cb0903b8ceeae04f830055f3155e1b6a5ad7 # v1
@@ -432,7 +432,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: documentation
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ steps.rust.outputs.node }}
       - name: Browser model regressions

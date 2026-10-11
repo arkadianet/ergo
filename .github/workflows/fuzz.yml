@@ -111,7 +111,7 @@ jobs:
 
       - name: upload mutation findings
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutation-transcripts
           path: |
@@ -258,7 +258,7 @@ jobs:
 
       - name: upload fuzz execution evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-evidence-${{ matrix.target }}
           path: ${{ runner.temp }}/fuzz-evidence/
@@ -266,7 +266,7 @@ jobs:
 
       - name: upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-crash-${{ matrix.target }}
           path: ergo-difftest/fuzz/artifacts/
@@ -277,7 +277,7 @@ jobs:
       # the committed corpus/<surface>/ by hand.
       - name: upload grown corpus
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-corpus-${{ matrix.target }}
           path: ergo-difftest/fuzz/corpus/${{ matrix.target }}/
@@ -318,7 +318,7 @@ jobs:
           distribution: temurin
           java-version: '11'
 
-      - uses: VirtusLab/scala-cli-setup@c33dfbf1a5f16ee60efff453b7f9a987d2b6955b # v1
+      - uses: VirtusLab/scala-cli-setup@3f5bf11a33bb88343238780c18257c8fa43789e1 # v1
 
       # scala-cli does not install sbt, which the cold publishLocal path needs.
       - uses: sbt/setup-sbt@5ffaf2b6f207c2df06fee08e16bd6110e300b04d # v1
@@ -409,7 +409,7 @@ jobs:
       # that proves the harness and the oracle stayed in step.
       - name: upload regressions + oracle transcript
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: consensus-guard-regressions
           path: |
