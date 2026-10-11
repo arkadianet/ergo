@@ -282,24 +282,16 @@ async fn request(
         },
     )
 }
+/// The native and Scala wallet operations the daemon serves: the wallet,
+/// scan, account, PSBT and private-queue routes the node's API documented
+/// before it stopped hosting a wallet.
+const WALLET_OPERATIONS: &str = include_str!("../fixtures/wallet_operations.txt");
+
 fn operation_paths() -> Vec<(String, String)> {
-    let native = include_str!("../../../ergo-api/tests/fixtures/api_family_rust_operations.txt");
-    let scala = include_str!("../../../ergo-api/tests/fixtures/api_family_scala_operations.txt");
-    native
+    WALLET_OPERATIONS
         .lines()
-        .chain(scala.lines())
         .filter_map(|line| {
             let (method, path) = line.split_once(' ')?;
-            let backed = path.starts_with("/api/v1/wallet/")
-                || path.starts_with("/wallet/")
-                || path.starts_with("/scan/")
-                || path.starts_with("/api/v1/scan/")
-                || path.starts_with("/api/v1/accounts")
-                || path.starts_with("/api/v1/transactions-psbt")
-                || path.starts_with("/api/v1/mining/private-transactions");
-            if !backed {
-                return None;
-            }
             let mut path = path.to_owned();
             for id in ["{scan_id}", "{scanId}"] {
                 path = path.replace(id, "1000");

@@ -277,9 +277,6 @@ pub(super) async fn bind(
         },
     );
 
-    let wallet_admin: Arc<dyn ergo_api::wallet::WalletAdmin> =
-        Arc::new(ergo_api::wallet::NoopWalletAdmin);
-
     let Some(bind_addr) = config.api_bind else {
         info!("api disabled by config");
         return Ok(ApiBind {
@@ -455,12 +452,11 @@ pub(super) async fn bind(
         services: api_services.clone(),
         script_config: config.api_script.clone(),
     };
-    let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts_and_wallet_moved(
+    let handle = ergo_api::serve_on_with_mempool_and_security_and_hosts_and_wallet_moved(
         api_ctx,
         listener,
         api_shutdown_rx,
         Some(admin_handle),
-        wallet_admin,
         security,
         &config.api_allowed_hosts,
         wallet_moved,

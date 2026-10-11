@@ -3,9 +3,8 @@
 use std::collections::BTreeSet;
 
 use utoipa::openapi::{
-    path::{HttpMethod, Operation, ParameterBuilder, ParameterIn},
-    schema::{ObjectBuilder, Type},
-    Components, Info, OpenApi as OpenApiDocument, Paths, Required,
+    path::{HttpMethod, Operation},
+    Components, Info, OpenApi as OpenApiDocument, Paths,
 };
 use utoipa::OpenApi;
 
@@ -67,30 +66,6 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         super::handlers::peers_handler,
         super::handlers::health_handler,
         super::handlers::shutdown_handler,
-        crate::wallet::native::balance,
-        crate::wallet::native::status,
-        crate::wallet::native::addresses,
-        crate::wallet::native::boxes,
-        crate::wallet::native::box_by_id,
-        crate::wallet::native::transactions,
-        crate::wallet::native::transaction_by_id,
-        crate::wallet::native::init,
-        crate::wallet::native::restore,
-        crate::wallet::native::unlock,
-        crate::wallet::native::lock,
-        crate::wallet::native::mnemonic_verify,
-        crate::wallet::native::derive_address,
-        crate::wallet::native::change_address_get,
-        crate::wallet::native::change_address_put,
-        crate::wallet::native::rescan,
-        crate::wallet::native::select_boxes,
-        crate::wallet::native::build_transaction,
-        crate::wallet::native::sign_transaction,
-        crate::wallet::native::send_transaction,
-        crate::wallet::native::retrieve_rewards,
-        crate::wallet::native::jobs::list,
-        crate::wallet::native::jobs::create,
-        crate::wallet::native::jobs::cancel,
     ),
     components(schemas(
         crate::types::ApiActivityRecord,
@@ -137,64 +112,7 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         ApiTxSource,
         SyncStateLabel,
         HealthStatus,
-        crate::wallet::native::schema::WalletBalanceDto,
-        crate::wallet::native::schema::NanoErgBreakdownDto,
-        crate::wallet::native::schema::ReemissionInfoDto,
-        crate::wallet::native::schema::UnconfirmedDeltaDto,
-        crate::wallet::native::schema::ScopeDto,
-        crate::wallet::native::schema::WalletAssetDto,
-        crate::wallet::native::schema::WalletJobTask,
-        crate::wallet::native::schema::WalletJobRequest,
-        crate::wallet::native::schema::WalletJobState,
-        crate::wallet::native::schema::WalletJob,
-        crate::wallet::native::schema::WalletJobs,
-        crate::wallet::native::schema::WalletStatusDto,
-        crate::wallet::native::schema::DiscoveryCoverageDto,
-        crate::wallet::native::schema::TxDelivery,
         crate::mining::PrivateTransactionOptions,
-        crate::wallet::native::schema::NetworkDto,
-        crate::wallet::native::schema::RescanStateDto,
-        crate::wallet::native::schema::WalletAddressDto,
-        crate::wallet::native::schema::AddressPage,
-        crate::wallet::native::schema::WalletBoxSummary,
-        crate::wallet::native::schema::BoxStatusDto,
-        crate::wallet::native::schema::BoxProvenanceDto,
-        crate::wallet::native::schema::BoxPage,
-        crate::wallet::native::schema::WalletTransactionSummary,
-        crate::wallet::native::schema::TxPage,
-        crate::wallet::native::schema::UnlockRequest,
-        crate::wallet::native::schema::MnemonicVerifyRequest,
-        crate::wallet::native::schema::MnemonicVerifyResult,
-        crate::wallet::native::schema::InitRequest,
-        crate::wallet::native::schema::InitResponse,
-        crate::wallet::native::schema::RestoreRequest,
-        crate::wallet::native::schema::DerivationMode,
-        crate::wallet::native::schema::DeriveKeyRequest,
-        crate::wallet::native::schema::DerivedAddress,
-        crate::wallet::native::schema::ChangeAddressDto,
-        crate::wallet::native::schema::SetChangeAddressRequest,
-        crate::wallet::native::schema::RescanRequest,
-        crate::wallet::native::schema::TxRepr,
-        crate::wallet::native::schema::OutputIntent,
-        crate::wallet::native::schema::InputSource,
-        crate::wallet::native::schema::DataInputSource,
-        crate::wallet::native::schema::TxIntent,
-        crate::wallet::native::schema::SelectTarget,
-        crate::wallet::native::schema::BoxSelectRequest,
-        crate::wallet::native::schema::SelectedBoxRef,
-        crate::wallet::native::schema::ChangePlan,
-        crate::wallet::native::schema::ReemissionBurn,
-        crate::wallet::native::schema::BoxSelectResponse,
-        crate::wallet::native::schema::BuildTxResponse,
-        crate::wallet::native::schema::ExternalSecret,
-        crate::wallet::native::schema::SignTxRequest,
-        crate::wallet::native::schema::SignTxResponse,
-        crate::wallet::native::schema::SendTxRequest,
-        crate::wallet::native::schema::SendTxResponse,
-        crate::wallet::native::schema::RetrieveRewardsRequest,
-        crate::wallet::native::schema::RetrieveRewardsResultDto,
-        crate::wallet::native::schema::SweptTokenDto,
-        crate::wallet::native::schema::NativeWalletError,
     )),
     tags(
         (name = "node", description = "Node identity, host, status"),
@@ -203,7 +121,6 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         (name = "mempool", description = "Mempool overlay + submission"),
         (name = "admin", description = "API-key-gated operator routes"),
         (name = "health", description = "Liveness + readiness"),
-        (name = "wallet", description = "Native api-key-gated wallet surface"),
     ),
     modifiers(&SecurityAddon),
 )]
@@ -412,27 +329,6 @@ fn add_alias(
     Ok(())
 }
 
-fn add_path_parameters(operation: &mut Operation, path: &str) {
-    let parameters = operation.parameters.get_or_insert_with(Vec::new);
-    let mut rest = path;
-    while let Some(start) = rest.find('{') {
-        let after_start = &rest[start + 1..];
-        let Some(end) = after_start.find('}') else {
-            break;
-        };
-        let name = &after_start[..end];
-        parameters.push(
-            ParameterBuilder::new()
-                .name(name)
-                .parameter_in(ParameterIn::Path)
-                .required(Required::True)
-                .schema(Some(ObjectBuilder::new().schema_type(Type::String)))
-                .build(),
-        );
-        rest = &after_start[end + 1..];
-    }
-}
-
 fn collect_schema_references(value: &serde_json::Value, references: &mut BTreeSet<String>) {
     match value {
         serde_json::Value::String(value) => {
@@ -549,24 +445,6 @@ pub(crate) fn supplemental_rust_operations() -> BTreeSet<RouteOperation> {
         .collect()
 }
 
-fn supplemental_seam_operation(
-    source: &Operation,
-    path: &str,
-    operation_id: &str,
-    summary: &str,
-    description: &str,
-) -> Operation {
-    let mut operation = Operation::new();
-    operation.tags = source.tags.clone();
-    operation.summary = Some(summary.to_string());
-    operation.description = Some(description.to_string());
-    operation.operation_id = Some(operation_id.to_string());
-    operation.responses = source.responses.clone();
-    operation.security = source.security.clone();
-    add_path_parameters(&mut operation, path);
-    operation
-}
-
 fn add_rust_only_operations(api: &mut OpenApiDocument) -> Result<(), OpenApiMergeError> {
     add_alias(
         api,
@@ -597,94 +475,6 @@ fn add_rust_only_operations(api: &mut OpenApiDocument) -> Result<(), OpenApiMerg
         "address_unspent_boxes",
     )?;
 
-    let account_get = operation_for(api, "/api/v1/accounts", HttpMethod::Get)?;
-    let psbt_post = operation_for(api, "/api/v1/transactions-psbt", HttpMethod::Post)?;
-    for (path, method, source, operation_id, summary, description) in [
-        (
-            crate::v1::ACCOUNTS_SEAM.openapi_path,
-            HttpMethod::Post,
-            &account_get,
-            "accounts_create",
-            "Create named account (unavailable)",
-            "The named-accounts subsystem is not wired; this operation returns 503.",
-        ),
-        (
-            crate::v1::ACCOUNT_SEAM.openapi_path,
-            HttpMethod::Get,
-            &account_get,
-            "account_get",
-            "Get named account (unavailable)",
-            "The named-accounts subsystem is not wired; this operation returns 503.",
-        ),
-        (
-            crate::v1::ACCOUNT_SEAM.openapi_path,
-            HttpMethod::Patch,
-            &account_get,
-            "account_patch",
-            "Update named account (unavailable)",
-            "The named-accounts subsystem is not wired; this operation returns 503.",
-        ),
-        (
-            crate::v1::ACCOUNT_SEAM.openapi_path,
-            HttpMethod::Delete,
-            &account_get,
-            "account_delete",
-            "Delete named account (unavailable)",
-            "The named-accounts subsystem is not wired; this operation returns 503.",
-        ),
-        (
-            crate::v1::ACCOUNT_BALANCE_SEAM.openapi_path,
-            HttpMethod::Get,
-            &account_get,
-            "account_balance",
-            "Get named-account balance (unavailable)",
-            "The named-accounts subsystem is not wired; this operation returns 503.",
-        ),
-        (
-            crate::v1::ACCOUNT_ADDRESSES_SEAM.openapi_path,
-            HttpMethod::Get,
-            &account_get,
-            "account_addresses",
-            "List named-account addresses (unavailable)",
-            "The named-accounts subsystem is not wired; this operation returns 503.",
-        ),
-        (
-            crate::v1::ACCOUNT_ADDRESSES_SEAM.openapi_path,
-            HttpMethod::Post,
-            &account_get,
-            "account_address_create",
-            "Create named-account address (unavailable)",
-            "The named-accounts subsystem is not wired; this operation returns 503.",
-        ),
-        (
-            crate::v1::PSBT_SEAM.openapi_path,
-            HttpMethod::Get,
-            &psbt_post,
-            "psbt_get",
-            "Get PSBT session (unavailable)",
-            "The PSBT-session subsystem is not wired; this operation returns 503.",
-        ),
-        (
-            crate::v1::PSBT_CONTRIBUTIONS_SEAM.openapi_path,
-            HttpMethod::Post,
-            &psbt_post,
-            "psbt_contribute",
-            "Add PSBT contribution (unavailable)",
-            "The PSBT-session subsystem is not wired; this operation returns 503.",
-        ),
-        (
-            crate::v1::PSBT_FINALIZE_SEAM.openapi_path,
-            HttpMethod::Post,
-            &psbt_post,
-            "psbt_finalize",
-            "Finalize PSBT session (unavailable)",
-            "The PSBT-session subsystem is not wired; this operation returns 503.",
-        ),
-    ] {
-        let operation =
-            supplemental_seam_operation(source, path, operation_id, summary, description);
-        api.paths.add_path_operation(path, vec![method], operation);
-    }
     Ok(())
 }
 
@@ -739,6 +529,10 @@ pub fn openapi_operations(openapi: &OpenApiDocument) -> BTreeSet<RouteOperation>
 fn exclude_from_scala_openapi(path: &str) -> bool {
     path.starts_with("/api/v1/")
         || path.starts_with("/blockchain/storageRent/")
+        // The wallet runs in `ergo-walletd`; the node only answers these
+        // paths with `410 wallet_moved`.
+        || path.starts_with("/wallet/")
+        || path.starts_with("/scan/")
         || matches!(
             path,
             "/transactions/unconfirmed/inputs/byBoxId/{boxId}"

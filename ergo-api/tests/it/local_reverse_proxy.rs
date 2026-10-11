@@ -5,13 +5,12 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use ergo_api::auth::ApiSecurity;
-use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+use ergo_api::server::{router_with_mempool_and_security, ServerCtx};
 use ergo_api::traits::{NodeReadState, NoopMempoolView};
 use ergo_api::types::{
     ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiPeer,
     ApiStatus, ApiSyncStatus, ApiTip,
 };
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
 
@@ -82,12 +81,7 @@ fn app(local_reverse_proxy: bool) -> axum::Router {
         )
         .expect("valid api key hash"),
     );
-    router_with_mempool_and_wallet_and_security(
-        ctx,
-        None,
-        Arc::new(NoopWalletAdmin),
-        Some(security),
-    )
+    router_with_mempool_and_security(ctx, None, Some(security))
 }
 
 fn request(peer: SocketAddr, forwarded_for: &str) -> Request<Body> {

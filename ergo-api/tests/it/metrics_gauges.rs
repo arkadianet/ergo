@@ -2,13 +2,12 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+use ergo_api::server::{router_with_mempool_and_security, ServerCtx};
 use ergo_api::traits::NodeReadState;
 use ergo_api::types::{
     ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiPeer,
     ApiStatus, ApiSyncGauges, ApiSyncStatus, ApiTip,
 };
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_api::NoopNodeAdmin;
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
@@ -80,12 +79,7 @@ fn app() -> axum::Router {
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),
     };
-    router_with_mempool_and_wallet_and_security(
-        ctx,
-        Some(Arc::new(NoopNodeAdmin)),
-        Arc::new(NoopWalletAdmin),
-        None,
-    )
+    router_with_mempool_and_security(ctx, Some(Arc::new(NoopNodeAdmin)), None)
 }
 
 #[tokio::test]

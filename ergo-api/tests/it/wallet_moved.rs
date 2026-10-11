@@ -1,19 +1,13 @@
-//! Auth-scope regression for the browser wallet UI.
+//! The node hosts no wallet: its former wallet, scan, account and PSBT routes
+//! answer `410 wallet_moved` with the configured daemon address. Pinned on the
+//! *real* merged router (`router_with_mempool_and_wallet_moved`):
 //!
-//! The wallet UI is served publicly so an operator can load it without
-//! first authenticating; the `/wallet/*` JSON API it drives stays
-//! api_key-gated. This test pins both halves of that boundary on the
-//! *real* merged router (`router_with_mempool_and_wallet_and_security`
-//! with `security = Some`), not a hand-assembled subset — so a future
-//! refactor that accidentally gates `/wallet/ui` or ungates
-//! `/wallet/status` fails here:
-//!
-//! * `GET /wallet/ui` / `…/index.html` / `…/wallet.js` → 308 redirect to
-//!   `/#wallet` with no key (retired to the SPA; public, NOT swallowed by the
-//!   gated `/wallet/*rest` catch-all).
-//! * `GET /wallet/status` → 403 with no key (gate unmoved), 200 with the
-//!   pinned Scala-parity key (proves the 403 is the gate, not a missing
-//!   route).
+//! * authentication still comes first, with the same credential scopes, so
+//!   an unauthenticated caller learns nothing about the wallet's location;
+//! * the retired `/wallet/ui*` bundle and the two watch-only reads answer
+//!   without a key, as they always did;
+//! * every method on every path under the retired prefixes answers, so no
+//!   request falls through to a handler.
 //!
 //! Reuses the Scala `(secret="hello", hash=324dcf…)` fixture pinned in
 //! `ergo-api/tests/auth.rs`.
@@ -23,16 +17,12 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use ergo_api::auth::{ApiSecurity, CredentialScope, ScopedCredentialConfig, API_KEY_HEADER};
-use ergo_api::server::{
-    router_with_mempool_and_wallet_and_security, router_with_mempool_and_wallet_and_wallet_moved,
-    ServerCtx,
-};
+use ergo_api::server::{router_with_mempool_and_wallet_moved, ServerCtx};
 use ergo_api::traits::{NodeReadState, NoopMempoolView};
 use ergo_api::types::{
     ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiPeer,
     ApiStatus, ApiSyncStatus, ApiTip,
 };
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
 
@@ -41,16 +31,15 @@ use tower::ServiceExt;
 const PLAINTEXT_KEY: &str = "hello";
 const SCALA_HELLO_HASH: &str = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf";
 
-/// `NodeReadState` stub whose methods panic if reached. The routes this
-/// test exercises — the static `/wallet/ui*` bundle and the gated
-/// `/wallet/status` (served by `NoopWalletAdmin`) — never touch the read
-/// surface, so a call here would mean a routing regression, which we
-/// want to surface loudly rather than mask with placeholder data.
+/// `NodeReadState` stub whose methods panic if reached. The retired wallet
+/// paths never touch the read surface, so a call here would mean a routing
+/// regression, which we want to surface loudly rather than mask with
+/// placeholder data.
 struct UnusedReadState;
 
 impl NodeReadState for UnusedReadState {
     fn info(&self) -> ApiInfo {
-        unreachable!("wallet-ui auth-scope test never hits the read surface")
+        unreachable!("the retired wallet paths never hit the read surface")
     }
     fn status(&self) -> ApiStatus {
         unreachable!()
@@ -82,39 +71,15 @@ fn security() -> Arc<ApiSecurity> {
     Arc::new(ApiSecurity::new(SCALA_HELLO_HASH.to_string()).expect("valid hex hash"))
 }
 
-/// The production merged router with the operator api_key gate enabled.
-fn app() -> axum::Router {
-    let ctx = ServerCtx {
-        read: Arc::new(UnusedReadState),
-        compat: None,
-        submit: None,
-        wallet_chain: None,
-        indexer: None,
-        mempool: Arc::new(NoopMempoolView::new()),
-        network: NetworkPrefix::Mainnet,
-        chain_params: None,
-        mining: None,
-        private_queue: None,
-        emission: None,
-        emission_scripts: None,
-        utxo_reads_supported: true,
-        local_reverse_proxy: false,
-        services: Arc::new(ergo_api::ApiServices::new()),
-        script_config: Default::default(),
-    };
-    router_with_mempool_and_wallet_and_security(
-        ctx,
-        None,
-        Arc::new(NoopWalletAdmin),
-        Some(security()),
-    )
-}
-
 fn moved_app(address: &str, with_security: bool) -> axum::Router {
     moved_app_with_security(address, with_security.then(security))
 }
 
 fn moved_app_with_security(address: &str, security: Option<Arc<ApiSecurity>>) -> axum::Router {
+    moved_app_at(Some(address), security)
+}
+
+fn moved_app_at(address: Option<&str>, security: Option<Arc<ApiSecurity>>) -> axum::Router {
     let ctx = ServerCtx {
         local_reverse_proxy: false,
         services: Arc::new(ergo_api::ApiServices::new()),
@@ -133,13 +98,7 @@ fn moved_app_with_security(address: &str, security: Option<Arc<ApiSecurity>>) ->
         emission_scripts: None,
         utxo_reads_supported: true,
     };
-    router_with_mempool_and_wallet_and_wallet_moved(
-        ctx,
-        None,
-        Arc::new(NoopWalletAdmin),
-        security,
-        Some(address),
-    )
+    router_with_mempool_and_wallet_moved(ctx, None, security, address)
 }
 
 fn get(path: &str) -> Request<Body> {
@@ -154,43 +113,63 @@ fn get_with_header(path: &str, name: &str, value: &str) -> Request<Body> {
         .unwrap()
 }
 
-fn location(resp: &axum::response::Response) -> Option<String> {
-    resp.headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_owned())
+async fn json(response: axum::response::Response) -> serde_json::Value {
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap()
 }
 
 // ----- happy path -----
 
 #[tokio::test]
-async fn wallet_ui_redirects_to_spa_without_api_key() {
-    // Retired to the SPA: a public 308 → /#wallet, NOT a 403 from the gated
-    // /wallet/*rest catch-all.
-    let resp = app().oneshot(get("/wallet/ui")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
-    assert_eq!(location(&resp).as_deref(), Some("/#wallet"));
+async fn retired_wallet_ui_paths_answer_moved_without_a_key() {
+    for path in [
+        "/wallet/ui",
+        "/wallet/ui/index.html",
+        "/wallet/ui/wallet.js",
+    ] {
+        let response = moved_app("http://127.0.0.1:19090", true)
+            .oneshot(get(path))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GONE, "{path}");
+        let body = json(response).await;
+        assert_eq!(body["reason"], "wallet_moved", "{path}");
+        assert_eq!(body["address"], "http://127.0.0.1:19090", "{path}");
+    }
 }
 
 #[tokio::test]
-async fn wallet_ui_index_html_alias_redirects_to_spa() {
-    let resp = app().oneshot(get("/wallet/ui/index.html")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
-    assert_eq!(location(&resp).as_deref(), Some("/#wallet"));
+async fn every_method_and_subpath_under_the_retired_prefixes_is_moved() {
+    for (method, path) in [
+        (Method::GET, "/wallet"),
+        (Method::DELETE, "/wallet/anything/at/all"),
+        (Method::PUT, "/scan/register"),
+        (Method::GET, "/scan"),
+        (Method::PATCH, "/api/v1/wallet"),
+        (Method::POST, "/api/v1/wallet/not/a/route"),
+        (Method::PUT, "/api/v1/scan"),
+        (Method::OPTIONS, "/api/v1/accounts/x/y/z"),
+        (Method::DELETE, "/api/v1/transactions-psbt/x"),
+    ] {
+        let request = Request::builder()
+            .method(method.clone())
+            .uri(path)
+            .header(API_KEY_HEADER, PLAINTEXT_KEY)
+            .body(Body::empty())
+            .unwrap();
+        let response = moved_app("http://127.0.0.1:19090", true)
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GONE, "{method} {path}");
+    }
 }
 
 #[tokio::test]
-async fn wallet_ui_js_alias_redirects_to_spa() {
-    let resp = app().oneshot(get("/wallet/ui/wallet.js")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
-    assert_eq!(location(&resp).as_deref(), Some("/#wallet"));
-}
-
-#[tokio::test]
-async fn wallet_status_with_correct_api_key_returns_200() {
-    // Positive control: with the key, the gate opens and the route
-    // exists — so the 403 below is the gate, never a missing route.
-    let resp = app()
+async fn without_a_configured_daemon_address_the_body_omits_it() {
+    let response = moved_app_at(None, Some(security()))
         .oneshot(get_with_header(
             "/wallet/status",
             API_KEY_HEADER,
@@ -198,7 +177,10 @@ async fn wallet_status_with_correct_api_key_returns_200() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::GONE);
+    let body = json(response).await;
+    assert_eq!(body["reason"], "wallet_moved");
+    assert!(body.get("address").is_none());
 }
 
 // ----- error paths -----
@@ -409,19 +391,25 @@ async fn external_v1_script_route_remains_available() {
     assert!(body["ergo_tree"].as_str().is_some());
 }
 
+/// The node serves the Scala script-compile routes itself, compiling without
+/// wallet keys: the daemon does not serve them.
 #[tokio::test]
-async fn external_wallet_script_routes_return_moved() {
+async fn script_compile_routes_stay_on_the_node() {
     for path in ["/script/p2sAddress", "/script/p2shAddress"] {
         let request = Request::builder()
             .method(Method::POST)
             .uri(path)
-            .body(Body::empty())
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"source":"sigmaProp(HEIGHT > 100)","treeVersion":0}"#,
+            ))
             .unwrap();
         let response = moved_app("http://127.0.0.1:19090", true)
             .oneshot(request)
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::GONE, "path {path}");
+        assert_eq!(response.status(), StatusCode::OK, "path {path}");
+        assert!(json(response).await["address"].as_str().is_some(), "{path}");
     }
 }
 
@@ -432,7 +420,11 @@ async fn wallet_mining_jobs_require_operator_key_before_body_parsing() {
         ("POST", "/api/v1/wallet/mining-jobs"),
         ("POST", "/api/v1/wallet/mining-jobs/1/cancel"),
     ] {
-        for key in [None, Some("wrong")] {
+        for (key, expected) in [
+            (None, StatusCode::FORBIDDEN),
+            (Some("wrong"), StatusCode::FORBIDDEN),
+            (Some(PLAINTEXT_KEY), StatusCode::GONE),
+        ] {
             let mut request = Request::builder()
                 .method(method)
                 .uri(path)
@@ -440,22 +432,11 @@ async fn wallet_mining_jobs_require_operator_key_before_body_parsing() {
             if let Some(key) = key {
                 request = request.header(API_KEY_HEADER, key);
             }
-            let response = app()
+            let response = moved_app("http://127.0.0.1:19090", true)
                 .oneshot(request.body(Body::from("malformed")).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+            assert_eq!(response.status(), expected, "{method} {path} {key:?}");
         }
     }
-    let request = Request::builder()
-        .method("POST")
-        .uri("/api/v1/wallet/mining-jobs")
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(API_KEY_HEADER, PLAINTEXT_KEY)
-        .body(Body::from("{\"unexpected\":true}"))
-        .unwrap();
-    assert_eq!(
-        app().oneshot(request).await.unwrap().status(),
-        StatusCode::BAD_REQUEST
-    );
 }

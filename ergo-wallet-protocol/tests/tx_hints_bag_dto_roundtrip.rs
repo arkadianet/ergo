@@ -5,7 +5,9 @@
 //! equality. Also pins the `hint` / `op` tag names to their canonical
 //! Scala/sigma-rust values so a schema regression shows up immediately.
 
-use ergo_api::wallet::sending::{FirstProverMessageJson, HintDto, SigmaBooleanJson, TxHintsBagDto};
+use ergo_wallet_protocol::scala::sending::{
+    FirstProverMessageJson, HintDto, SigmaBooleanJson, TxHintsBagDto,
+};
 
 // ----- helpers -----
 
@@ -94,7 +96,9 @@ fn round_trip_own_commitment() {
 
 #[test]
 fn signing_request_debug_redacts_secrets_without_changing_transport() {
-    use ergo_api::wallet::sending::{ExternalSecretDto, TransactionSignRequest, UnsignedTxDto};
+    use ergo_wallet_protocol::scala::sending::{
+        ExternalSecretDto, TransactionSignRequest, UnsignedTxDto,
+    };
 
     let nonce = fake_secret_hex();
     let dlog = "a1".repeat(32);
@@ -298,7 +302,7 @@ fn fpm_op_tag_names_pinned() {
 /// `node_position_to_str` and `node_position_from_str` roundtrip.
 #[test]
 fn node_position_str_roundtrip() {
-    use ergo_api::wallet::sending::{node_position_from_str, node_position_to_str};
+    use ergo_wallet_protocol::scala::sending::{node_position_from_str, node_position_to_str};
 
     let positions: Vec<u32> = vec![1, 0, 2];
     let s = node_position_to_str(&positions);

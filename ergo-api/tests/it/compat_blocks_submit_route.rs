@@ -21,7 +21,7 @@ use ergo_api::compat::types::{
     ScalaInfo, ScalaPowSolutions, ScalaTransactionInput,
 };
 use ergo_api::compat::NodeChainQuery;
-use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+use ergo_api::server::{router_with_mempool_and_security, ServerCtx};
 use ergo_api::traits::{NodeReadState, NodeSubmit, NoopMempoolView};
 use ergo_api::types::{
     ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction,
@@ -274,10 +274,9 @@ fn build_app(
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),
     };
-    router_with_mempool_and_wallet_and_security(
+    router_with_mempool_and_security(
         ctx,
         None,
-        Arc::new(ergo_api::wallet::NoopWalletAdmin),
         Some(Arc::new(
             ApiSecurity::new(ApiSecurity::hash_key(b"block-submit-test")).unwrap(),
         )),

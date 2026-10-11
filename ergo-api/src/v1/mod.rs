@@ -12,10 +12,9 @@
 //!   api-key verification, plus the boot-warn posture check.
 //!
 //! This module is pure infrastructure; every v1 route group ([`crate::v1::routes`],
-//! [`crate::v1::accounts`], [`crate::v1::operator`], [`crate::v1::script`], [`crate::v1::webhooks`]) consumes it.
+//! [`crate::v1::operator`], [`crate::v1::script`], [`crate::v1::webhooks`]) consumes it.
 //! Re-exports below are the stable surface those groups import.
 
-pub mod accounts;
 pub mod auth;
 pub mod blocking;
 pub mod compute;
@@ -32,7 +31,6 @@ pub mod routes;
 pub mod script;
 pub mod webhooks;
 
-pub use accounts::{accounts_router, AccountsState};
 pub use auth::{
     assess_posture, warn_startup_posture, InsecurePosture, Tier, V1AuthConfig, V1AuthState,
 };
@@ -101,61 +99,12 @@ supplemental_route!(
     "/api/v1/addresses/{address}/unspent",
     ["get"]
 );
-supplemental_route!(
-    ACCOUNTS_SEAM,
-    "/api/v1/accounts",
-    "/api/v1/accounts",
-    ["get", "post"]
-);
-supplemental_route!(
-    ACCOUNT_SEAM,
-    "/api/v1/accounts/:account_id",
-    "/api/v1/accounts/{account_id}",
-    ["get", "patch", "delete"]
-);
-supplemental_route!(
-    ACCOUNT_BALANCE_SEAM,
-    "/api/v1/accounts/:account_id/balance",
-    "/api/v1/accounts/{account_id}/balance",
-    ["get"]
-);
-supplemental_route!(
-    ACCOUNT_ADDRESSES_SEAM,
-    "/api/v1/accounts/:account_id/addresses",
-    "/api/v1/accounts/{account_id}/addresses",
-    ["get", "post"]
-);
-supplemental_route!(
-    PSBT_SEAM,
-    "/api/v1/transactions-psbt/:psbt_id",
-    "/api/v1/transactions-psbt/{psbt_id}",
-    ["get"]
-);
-supplemental_route!(
-    PSBT_CONTRIBUTIONS_SEAM,
-    "/api/v1/transactions-psbt/:psbt_id/contributions",
-    "/api/v1/transactions-psbt/{psbt_id}/contributions",
-    ["post"]
-);
-supplemental_route!(
-    PSBT_FINALIZE_SEAM,
-    "/api/v1/transactions-psbt/:psbt_id/finalize",
-    "/api/v1/transactions-psbt/{psbt_id}/finalize",
-    ["post"]
-);
 
 pub(crate) const SUPPLEMENTAL_ROUTES: &[SupplementalRoute] = &[
     MEMPOOL_SUBMIT_ALIAS,
     MEMPOOL_CHECK_ALIAS,
     ADDRESS_BOXES_ALIAS,
     ADDRESS_UNSPENT_ALIAS,
-    ACCOUNTS_SEAM,
-    ACCOUNT_SEAM,
-    ACCOUNT_BALANCE_SEAM,
-    ACCOUNT_ADDRESSES_SEAM,
-    PSBT_SEAM,
-    PSBT_CONTRIBUTIONS_SEAM,
-    PSBT_FINALIZE_SEAM,
 ];
 
 use axum::extract::ConnectInfo;

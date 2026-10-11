@@ -32,8 +32,12 @@ infrastructure.
 
 - The chain store and sync code no longer take a wallet hook: `StateStore::apply_block`, `rollback_to`, `BlockApply` and the `ergo-sync` executor lost their wallet arguments, and `ergo-wallet-service` drops `WalletStateHook`, `WalletApplyHook` and `WalletWiring`. The embedded-vs-daemon shadow comparison (`scripts/shadow-compare.sh`) is retired with them.
 
+- `ergo-api` no longer contains wallet handlers: the `WalletAdmin` trait, `NoopWalletAdmin`, the Scala-compatible and native wallet and scan modules and the v1 accounts module are gone. Every path under the retired wallet, scan, account and PSBT prefixes answers `410 wallet_moved` after the API-key check, with the same credential scopes. The node's OpenAPI documents none of those operations (the Scala document drops `/wallet/*` and `/scan/*`). Server builders lose their wallet argument and the `_and_wallet` part of their names (`serve_on_with_mempool_and_security[_and_hosts[_and_wallet_moved]]`, `router_with_mempool_and_security[_and_inventory]`, `router_with_mempool_and_wallet_moved`); `router_with_wallet` is removed.
+
 ### Changed
 
+- `[wallet] daemon_address` defaults to `http://127.0.0.1:3033`, the daemon templates' loopback listener (was `:9090`, which no daemon default used).
+- `/script/p2sAddress` and `/script/p2shAddress` compile with an empty environment: the node holds no wallet keys, so a script naming `myPubKey_N` is a `400` compile error.
 - `ergo-node wallet-scan-utxo` requires `--wallet-data-dir`. With `--wallet-key-stdin` it reads the key that `ergo-walletd export-unseal-key` prints and opens the daemon's encrypted database without the wallet password.
 
 ## [0.12.3] - 2026-10-07

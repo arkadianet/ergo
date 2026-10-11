@@ -193,18 +193,14 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
     always_open.merge(conditional).with_state(state)
 }
 
+/// The retired native `/api/v1/wallet/*` paths, which answer `410
+/// wallet_moved`. Undocumented: the wallet's API is `ergo-walletd`'s.
 pub(super) fn wallet_router(
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
     wallet_moved: Option<&str>,
 ) -> FamilyRouter {
-    let operations = super::openapi_operations(&super::legacy_rust_openapi())
-        .into_iter()
-        .filter(|operation| operation.path.starts_with("/api/v1/wallet/"));
-    FamilyRouter::new(ApiFamily::Rust).merge_documented(
-        crate::wallet::native::router_with_security_and_moved(wallet_admin, security, wallet_moved),
-        operations,
-    )
+    FamilyRouter::new(ApiFamily::Rust)
+        .merge_documented(crate::wallet::native_router(wallet_moved, security), [])
 }
 
 pub(super) struct ProductRouterState {
@@ -212,7 +208,6 @@ pub(super) struct ProductRouterState {
     pub api: crate::v1::V1State,
     pub wallet_chain: Option<Arc<dyn crate::traits::WalletChain>>,
     pub operator: crate::v1::OperatorState,
-    pub accounts: crate::v1::AccountsState,
     pub webhooks: crate::v1::WebhooksState,
     pub governor: Arc<crate::v1::governor::Governor>,
     pub auth: Arc<crate::v1::auth::V1AuthConfig>,
@@ -240,11 +235,9 @@ pub(super) fn product_router(state: ProductRouterState) -> FamilyRouter {
             state.governor.clone(),
             state.auth.clone(),
         ))
-        .merge(crate::v1::accounts_router(
-            state.accounts,
-            state.governor.clone(),
-            state.auth.clone(),
+        .merge(crate::wallet::product_router(
             state.wallet_moved.as_deref(),
+            state.auth.clone(),
         ))
         .merge(crate::v1::batch_router(state.api, state.governor))
         .merge(crate::v1::webhooks_router(state.webhooks, state.auth));

@@ -98,7 +98,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         },
         mining_config: ergo_mining::MiningConfig::default(),
         voting_targets: std::collections::BTreeMap::new(),
-        wallet_daemon_address: "http://127.0.0.1:9090".into(),
+        wallet_daemon_address: "http://127.0.0.1:3033".into(),
     }
 }
 

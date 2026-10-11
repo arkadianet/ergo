@@ -344,11 +344,10 @@ pub struct TransactionSendRequest {
     pub fee: Option<u64>,
 }
 
-// ---- boxes/collect DTOs (needed by WalletAdmin trait before boxes_collect.rs) ----
+// ---- boxes/collect DTOs ----
 
 /// `POST /wallet/boxes/collect` request: target value + optional token targets.
-/// Used by `WalletAdmin::boxes_collect` which calls the box selector without
-/// submitting.
+/// The engine's `boxes_collect` runs the box selector without submitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxesCollectRequest {

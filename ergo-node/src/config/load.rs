@@ -1016,7 +1016,7 @@ impl NodeConfig {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| "http://127.0.0.1:9090".to_string());
+            .unwrap_or_else(|| "http://127.0.0.1:3033".to_string());
         if wallet_daemon_address.is_empty() {
             return Err("[wallet] daemon_address must be non-empty".into());
         }
