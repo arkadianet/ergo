@@ -370,7 +370,7 @@ fn snapshot_install_preserves_mainnet_lookups_forward_apply_and_reopen() {
             }
             assert_eq!(store.root_digest(), parsed[9].0.state_root);
             assert_eq!(committed_tree_root(&store), parsed[9].0.state_root);
-            store.rollback_to(9, None, None).unwrap();
+            store.rollback_to(9).unwrap();
             assert_eq!(store.root_digest(), pinned_root);
             assert_eq!(store.get_box_bytes(&spend_id), Some(spend_bytes.clone()));
             assert_eq!(committed_tree_root(&store), pinned_root);
@@ -707,7 +707,7 @@ fn rollback_to_genesis_then_reapply() {
         .unwrap();
 
     // Rollback to genesis
-    store.rollback_to(0, None, None).unwrap();
+    store.rollback_to(0).unwrap();
     assert_eq!(store.height(), 0);
 
     // Re-apply block 1
@@ -767,7 +767,7 @@ fn rollback_to_height_4_then_reapply() {
     eprintln!("after apply 1-5: reachable={reachable} arena={arena} tree_h={tree_h}");
 
     // Rollback to height 4 (just 1 step)
-    store.rollback_to(4, None, None).unwrap();
+    store.rollback_to(4).unwrap();
     assert_eq!(store.height(), 4);
     let (reachable, arena, tree_h) = store.debug_tree_stats();
     eprintln!("after rollback to 4: reachable={reachable} arena={arena} tree_h={tree_h}");
@@ -926,7 +926,7 @@ fn undo_entries_within_window_survive() {
     }
 
     // All 10 undo entries survive (10 < ROLLBACK_WINDOW=200).
-    store.rollback_to(1, None, None).unwrap();
+    store.rollback_to(1).unwrap();
     assert_eq!(store.height(), 1);
     let expected_1 = digests.iter().find(|d| d.height == 1).unwrap();
     let expected_digest_1 = ADDigest::from_bytes(

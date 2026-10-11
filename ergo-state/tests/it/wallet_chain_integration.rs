@@ -1,10 +1,6 @@
-//! Integration test: wallet hook wiring between StateStore helpers and
-//! wallet apply / rollback functions.
-//!
-//! Tests the production path used in `StateStore::apply_block` and the
-//! post-apply wallet hook in `sync_tick.rs`:
-//! - `build_wallet_block_txs_checked` constructs `OwnedBlockTxData` from a
-//!   synthetic CheckedTransaction-equivalent
+//! Integration test: the owned block data the state crate exports, fed
+//! through the wallet apply / rollback functions behind its facade:
+//! - `OwnedBlockTxData` built from a synthetic transaction
 //! - `owned_to_block_txs` produces `BlockTx<'_>` slices with correct borrows
 //! - `apply_block_to_wallet` populates WALLET_BOXES for tracked outputs
 //! - `rollback_block_from_wallet` undoes the population

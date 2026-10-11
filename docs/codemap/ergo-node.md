@@ -1,10 +1,10 @@
 # ergo-node
 
-**Purpose:** The binary and embedded/API-adapter runtime crate. Wires chain
-state, P2P, sync, mempool, mining, indexer, API, wallet cryptography, and
-`ergo-wallet-service` into one supervised tokio process. It owns process
-lifecycle, the single-writer chain action loop, and the embedded wallet writer
-that adapts the service's wallet engine to the API and chain runtime.
+**Purpose:** The binary and API-adapter runtime crate. Wires chain state, P2P,
+sync, mempool, mining, indexer and API into one supervised tokio process. It
+owns process lifecycle and the single-writer chain action loop. It hosts no
+wallet: it serves the chain API and private mining queue that `ergo-walletd`
+uses, and hands a wallet an earlier release left in `state.redb` to the daemon.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-chain-spec,
 ergo-crypto, ergo-validation, ergo-wallet, ergo-state, ergo-p2p, ergo-sync,
@@ -15,7 +15,7 @@ ergo-wallet-service, ergo-wallet-protocol
 ## Start here
 - `node::boot::run_inner` (`src/node/boot/mod.rs:185`) — the whole bring-up
   sequence: store/genesis/AVL, handshake + peer manager, sync executor +
-  coordinator, indexer, wallet boot, API bind, mining wire-up, action-loop
+  coordinator, indexer, legacy-wallet handoff, API bind, mining wire-up, action-loop
   spawn. Returns the live `RunHandle`. `run` (`:65`) wraps it with signals.
 - `node::action_loop::action_loop` (`src/node/action_loop.rs:41`) — the
   single-writer event loop: four timers (dial/sync/mempool/memory) + inbound
@@ -63,12 +63,15 @@ ergo-wallet-service, ergo-wallet-protocol
 - `src/node/mining_dispatch.rs` / `mining_engine.rs` — bridge dispatch (serve
   cached candidate, apply submitted solution) + the off-loop candidate engine
   task fed `BuildIntent`s over a `watch` channel.
-- `src/node/wallet_bridge.rs` — the `EmbeddedWallet` / `WalletWriter` adapter:
-  serialize `WalletCommand`s into the service's `WalletEngine`, expose
-  `NodeWalletAdmin`, and adapt node chain, submission and mempool capabilities.
-  The service owns command logic and the shared rescan/apply coordinator.
-- `src/node/wallet_bridge/chain_client.rs` — in-process chain protocol adapter.
+- `src/node/wallet_bridge.rs` — node-side adapters for the wallet daemon:
+  `ChainStateAccessorImpl` (committed chain reads), the stored private mining
+  queue API, and the submodules below.
+- `src/node/wallet_bridge/chain_client.rs` — in-process chain protocol adapter
+  behind the `/api/v1/chain/*` routes the daemon syncs from.
 - `src/node/wallet_bridge/chain_snapshot.rs` — committed signing snapshot adapter.
+- `src/node/legacy_wallet.rs` — the legacy wallet an earlier release left in
+  `state.redb`: publishes the verified handoff copy at `data_dir/wallet-handoff/`
+  and resolves its first-address reward key for an unpinned miner.
 - `src/node/heartbeat.rs` — per-tick operator stderr heartbeat (diagnostics).
 - `src/node/snapshot_emit/mod.rs` / `snapshot_state.rs` — assemble `SnapshotParts`
   from `NodeState`; Mode-2 snapshot-server cache state.
@@ -94,14 +97,13 @@ ergo-wallet-service, ergo-wallet-protocol
 - `src/genesis.rs` — genesis-box JSON loading for state init.
 - `src/anchor_map.rs` / `anchor_scheduler.rs` — REST-sourced header-anchor map
   (Step B observation) + per-peer SyncInfo crafting (Step C).
-- `src/wallet_boot.rs` — service boot adapter and session-scoped rescan worker supervision.
 - `src/mem_*.rs` — optional memory-observability sampler (`ERGO_MEM_CSV`).
 
 ## Key types, traits & functions
 - `RunHandle` (struct) — live owned interface to a running node; `shutdown`/
   `Drop` enforce bounded graceful drain then durable close — `src/node/handle.rs:39`
 - `NodeState` (struct) — action-loop god-struct (store, sync, peers, mempool,
-  snapshot, wallet hook, bootstrap state machines) — `src/node/state.rs:73`
+  snapshot, bootstrap state machines) — `src/node/state.rs:73`
 - `run` / `run_inner` (async fn) — production entry / handle-returning entry —
   `src/node/boot/mod.rs:65` / `:185`
 - `action_loop` (async fn) — the single-writer select loop — `src/node/action_loop.rs:41`
@@ -115,8 +117,6 @@ ergo-wallet-service, ergo-wallet-protocol
   `src/peer_loop.rs:21`
 - `MempoolNotifier` (struct) + `DiffSource` (trait) + `PollOutcome` (enum) —
   `src/notifier.rs:60/24/39`
-- `WalletCommand`, `NodeWalletAdmin`, `EmbeddedWallet`, `WalletWriter` —
-  embedded single-writer adapter over `ergo-wallet-service::engine::WalletEngine`.
 - `NodeConfig` / `StateType` (struct/enum) + `NodeConfig::load` — `src/config/resolved.rs` / `src/config/load.rs`
 - `NodeMode` (enum) + `classify_node_mode` / `validate_runtime_mode_support` —
   mode taxonomy + activation gate — `src/node/identity.rs:100/240/584`
@@ -126,7 +126,7 @@ ergo-wallet-service, ergo-wallet-protocol
 ## Invariants & contracts
 - **Single-writer state.** All `StateStore` mutation and mempool mutation
   happen on the one action-loop task; the mempool needs no locking because it
-  is owned there. Cross-task work (API submit, mining, wallet) crosses bounded
+  is owned there. Cross-task work (API submit, mining) crosses bounded
   mpsc channels with per-request oneshot replies.
 - **Atomic durable shutdown.** Clean shutdown is bounded (5 s API drain cap)
   precisely so the action loop's terminal `StateStore::shutdown_cleanly()` runs
@@ -145,11 +145,6 @@ ergo-wallet-service, ergo-wallet-protocol
   registered runtime from that IP — other ports and pending handshakes — is
   torn down, not just the penalized connection (`cleanup_banned_ip`,
   `src/node/peer_actions.rs:379`).
-- **Change-address updates are unlocked-only and ownership-checked.**
-  `WalletAdmin::update_change_address` requires an unlocked wallet and
-  re-derives the recorded path with the active master key before persisting, so
-  a change address can never point at a key this wallet cannot sign for
-  (`../ergo-wallet-service/src/engine/admin.rs`).
 - **Anti-DoS recording survives a dropped reply.** A submission's mempool
   admission outcome is recorded even if the API handler already timed out and
   dropped its oneshot (`src/node/action_loop.rs:202`).
@@ -165,8 +160,6 @@ ergo-wallet-service, ergo-wallet-protocol
   `Arc<ArcSwap<NodeSnapshot>>` rebuilt once per sync tick; snapshot construction
   is bounded and the recent-blocks tail is cached by full-block tip id
   (`src/snapshot/mod.rs`, `src/node/snapshot_emit/mod.rs`).
-- **Supervised shutdown.** `RunHandle` cancels wallet command admission and
-  joins wallet/rescan workers before signalling the action loop to close the
-  store. `Drop` schedules the same wallet-before-store cleanup and cancels or
-  aborts its other background tasks; explicit `shutdown().await` provides the
-  completion guarantee (`src/node/handle.rs`).
+- **Supervised shutdown.** `RunHandle` signals the action loop to close the
+  store; `Drop` cancels or aborts its other background tasks, and explicit
+  `shutdown().await` provides the completion guarantee (`src/node/handle.rs`).

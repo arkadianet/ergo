@@ -11,7 +11,6 @@ mod node_api;
 mod routes;
 mod scan_registry_rewind;
 mod seed_daemon_boot;
-mod shadow;
 mod spending_context;
 mod store_reopen;
 mod support;

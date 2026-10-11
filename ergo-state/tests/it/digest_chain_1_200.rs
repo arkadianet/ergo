@@ -186,7 +186,7 @@ fn rollback_from_200_to_100_then_reapply() {
         fixtures.apply_block(&mut store, height);
     }
 
-    store.rollback_to(100, None, None).unwrap();
+    store.rollback_to(100).unwrap();
     assert_eq!(store.height(), 100);
     assert_eq!(store.root_digest(), fixtures.expected_digest(100));
 
@@ -212,7 +212,7 @@ fn rollback_from_200_to_genesis() {
         fixtures.apply_block(&mut store, height);
     }
 
-    store.rollback_to(0, None, None).unwrap();
+    store.rollback_to(0).unwrap();
     assert_eq!(store.height(), 0);
     assert_eq!(store.root_digest(), genesis_digest);
 }

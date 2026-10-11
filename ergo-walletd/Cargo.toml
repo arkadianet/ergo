@@ -71,18 +71,6 @@ ergo-node = { workspace = true }
 ergo-state = { workspace = true, features = ["test-helpers"] }
 ergo-mining = { workspace = true }
 ergo-mempool = { workspace = true }
-# TEST-TARGET ONLY, and only because of `tests/it/shadow.rs`. The shadow
-# harness drives the *embedded* side through the production
-# `StateStore::apply_block`, whose argument is a `CheckedBlock`. Building
-# one needs `CheckedBlock::from_parts` (already `test-helpers`-gated in
-# ergo-validation) and a `CheckedTransaction`, whose only constructors are
-# `validate_transaction` / `validate_transaction_parsed`. Without this
-# dev-dependency the embedded side would have to fall back to
-# `apply_block_unchecked_with_wallet_for_test`, which passes an EMPTY
-# `block_txs_owned` and therefore tracks no boxes at all — the shadow
-# comparison would be vacuous exactly where it matters. Dev-only: the
-# released binary's dependency graph is unchanged.
-ergo-validation = { workspace = true, features = ["test-helpers"] }
 bincode = { workspace = true }
 
 [[test]]

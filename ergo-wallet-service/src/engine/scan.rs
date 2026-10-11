@@ -137,10 +137,9 @@ impl WalletEngine {
 
 /// Owns a registry snapshot for a `/wallet/rescan`, implementing the rescan's
 /// `ScanRescanMatcher`: it parses each serialized output box and matches it
-/// against the registered scan rules — the rescan analog of
-/// `WalletStateHook::match_boxes`, reusing the same
-/// `ScanRegistry::matching_scan_ids`, so a rescan reproduces live scan
-/// tracking exactly.
+/// against the registered scan rules with the same
+/// `ScanRegistry::matching_scan_ids` live sync uses, so a rescan reproduces
+/// live scan tracking exactly.
 #[derive(Debug, Error)]
 pub(crate) enum ScanRegistryLoadError {
     #[error("corrupt scan registry: {0}")]
@@ -222,8 +221,6 @@ fn dto_from_scan(scan: &Scan) -> Result<ScanDto, WalletAdminError> {
 /// Missing tables/rows (a fresh node) yield an empty registry whose counter
 /// defaults to [`PAYMENTS_SCAN_ID`], so the first allocated user id is 11.
 ///
-/// `pub(crate)` so the block-apply hook (`WalletStateHook`) can load the
-/// registry to match each block's boxes.
 pub(crate) fn load_registry(
     store: &dyn crate::wallet::WalletStore,
 ) -> Result<ScanRegistry, WalletAdminError> {
@@ -2195,66 +2192,6 @@ mod tests {
             build_rescan_matcher(&db).unwrap().is_none(),
             "a node with no registered scans does no scan rescan"
         );
-    }
-
-    #[test]
-    fn scan_rebuild_in_progress_quiesces_live_scan_apply() {
-        // While a full rescan rebuilds the scan tables, the live block-apply
-        // scan path must no-op so it doesn't race the rebuild's block-by-block
-        // clear+repopulate. The gate lives in the `WalletApplyHook` impl:
-        // `registered_scan_count` (the load-bearing gate that skips
-        // `apply_block_to_scans`) and `match_boxes` both honor the flag.
-        use crate::wallet::WalletApplyHook;
-
-        let (_d, db) = temp_db();
-        register_impl(&db, req("a", 0x11)).unwrap(); // 1 registered scan, token 0x11
-
-        // A box carrying token 0x11 matches scan 11.
-        let parsed: ergo_rest_json::types::ScalaErgoBoxInput =
-            serde_json::from_value(box_json_with_asset(0x11)).unwrap();
-        let candidate = ergo_rest_json::decode::decode_output(&parsed.output).unwrap();
-        let b = ergo_ser::ergo_box::ErgoBox {
-            candidate,
-            transaction_id: ergo_primitives::digest::ModifierId::from_bytes(id_from_hex(
-                &parsed.transaction_id,
-            )),
-            index: parsed.index,
-        };
-
-        let db = std::sync::Arc::new(db);
-        let store = std::sync::Arc::new(crate::wallet::RedbWalletStore::new(db));
-        let coordinator = std::sync::Arc::new(RescanCoordinator::new());
-        let hook = crate::engine::WalletStateHook::new(
-            std::sync::Arc::new(parking_lot::RwLock::new(crate::state::WalletState::empty(
-                false,
-            ))),
-            store,
-            coordinator.clone(),
-        );
-
-        // Baseline (flag clear): the scan is live and the box matches.
-        assert_eq!(hook.registered_scan_count(), 1);
-        assert_eq!(
-            hook.match_boxes(std::slice::from_ref(&b)),
-            vec![vec![11u16]]
-        );
-
-        // Flag set: both hook methods quiesce. Capture under the flag; the
-        // hook shares the coordinator, so clearing it re-enables live apply.
-        coordinator.set_scan_rebuild_for_test(true);
-        let gated_count = hook.registered_scan_count();
-        let gated_match = hook.match_boxes(std::slice::from_ref(&b));
-        coordinator.set_scan_rebuild_for_test(false);
-
-        assert_eq!(gated_count, 0, "live scan count gated to 0 during rebuild");
-        assert_eq!(
-            gated_match,
-            vec![Vec::<u16>::new()],
-            "live match suppressed during rebuild (one empty result per box)"
-        );
-
-        // Flag cleared: live apply sees the scan again.
-        assert_eq!(hook.registered_scan_count(), 1);
     }
 
     #[test]

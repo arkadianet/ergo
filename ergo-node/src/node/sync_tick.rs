@@ -214,14 +214,9 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
             // Try to assemble and apply blocks sequentially. Successful applies
             // are relayed by flush_actions below, alongside missing-section requests.
 
-            // The node hosts no wallet: no wallet rows join the chain commit.
-            let wallet_wiring = None;
-            state.executor.try_apply_next_blocks(
-                &mut state.store,
-                &mut state.coordinator,
-                now,
-                wallet_wiring,
-            );
+            state
+                .executor
+                .try_apply_next_blocks(&mut state.store, &mut state.coordinator, now);
             // Mirror the post-apply prune sentinel into
             // sync_state. Mode 2 / NiPoPoW writers can advance
             // the sentinel even when blocks_to_keep = -1. Only

@@ -307,7 +307,7 @@ fn post_reorg_matches_oracle() {
     // Pure rollback to height 3 — exercise the same surface the
     // production sync layer uses (`rollback_to` followed by forward-
     // apply of the new chain).
-    store.rollback_to(3, None, None).unwrap();
+    store.rollback_to(3).unwrap();
     assert_eq!(store.height(), 3);
 
     // Post-reorg: the oracle and reader must both walk the rolled-back tree.

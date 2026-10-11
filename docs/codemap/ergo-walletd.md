@@ -14,7 +14,7 @@ uses redb for explicit copy migration, bounded HTTP/RPC, Axum/Hyper/Tokio for
 local serving and supervision, protected file/CLI/config support and zeroizing
 credentials. No normal `ergo-node`, `ergo-state`, `ergo-api`, `ergo-mempool` or
 `ergo-sync` dependency enters the daemon. Node, state, API, mempool and mining
-crates are test-only for real HTTP, shadow and private-reservation fixtures.
+crates are test-only for real HTTP and private-reservation fixtures.
 
 **Phase 3 hosting:** `host.rs` owns command admission, blocking engine work,
 command-scoped spending refresh/release, rescan fencing and secret erasure.
@@ -28,7 +28,7 @@ in [ergo-wallet-service](ergo-wallet-service.md).
 
 The historical read/sync details below describe the watch-only adapter and the
 short diagnostic routes. Seed native routes use engine schemas and capabilities
-as described above; confirmed-only comparison is the Phase 2 shadow boundary.
+as described above.
 
 ## Start here
 - `src/main.rs` — process entry. **Blocking first, async second**: load the
@@ -298,12 +298,10 @@ What remains trusted:
 This is a real gap in what this daemon reports. It is not hidden behind a
 passing test suite.
 
-### 1. Balance and status values are confirmed-only, not byte-identical to the
-### embedded values
+### 1. Balance and status values are confirmed-only projections
 
 Every read route is a **projection the daemon computes from blocks it has
-applied**. The values it returns are not the node's embedded values re-served
-verbatim, and the differences are visible in the DTOs:
+applied**, and the shape is visible in the DTOs:
 
 - `WalletBalanceDto.nanoErg.confirmed` and `.available` are the **same** number
   (the confirmed total), not two independently-sourced quantities. `reserved` and
@@ -318,9 +316,9 @@ verbatim, and the differences are visible in the DTOs:
   wallet store's own maturity rule, and `provenance` is the wallet's tracked-key
   classification — neither is a field the node serves.
 
-Consequence: the daemon's `/balance` is not comparable byte-for-byte against the
-embedded wallet's `/wallet/balance`, and a difference is not by itself evidence
-of a bug. What *is* exact is the box layer: box ids and box bytes are validated
+Consequence: the diagnostic `/balance` is not comparable byte-for-byte against a
+seed wallet's native `/api/v1/wallet/balance`, and a difference is not by itself
+evidence of a bug. What *is* exact is the box layer: box ids and box bytes are validated
 against canonical ErgoBox serialization on the way in, so a box the daemon
 reports is a box it re-derived.
 
@@ -354,131 +352,6 @@ and `WALLET_SCAN_TXS`.
 | `tests/it/sync.rs` | The sync state machine against a scripted node: paging limits, the page budget bounding every request independently of the apply budget, an out-of-range page failing before the node is called, an oversized page failing closed with one request and no loop, ancestor rewind, pruned history, conflict retry, gap/duplicate/parent-mismatch terminal errors, unprogressing-rewind bound, tip publication, and the durable-write count of a caught-up pass (no `running` on an idle tick). |
 | `tests/it/routes.rs` | `READ_ROUTE_INVENTORY` is the only default watch surface, and its lifecycle/signing/private-key routes are `404`. |
 | `tests/it/store_reopen.rs` | The standalone store reopens with its keys, cursor, and cleared invalidation flag. |
-| `tests/it/shadow.rs` | The **shadow harness** (see its own section below): embedded vs daemon over the same blocks, plus the cheap negative controls that keep the comparison honest. Its five scenarios are `#[ignore]`d — run with `scripts/shadow-compare.sh` or the `wallet-shadow` CI job. |
-
-## The embedded-vs-daemon shadow harness
-
-Phase 2 moved the wallet core out of the node into `ergo-wallet-service`, so
-the node and this daemon now reach the same tables by two different routes:
-
-- **Embedded** — the node's `StateStore` redb *is* the wallet database, and
-  the chain-apply seam writes the wallet tables inside the same redb write
-  transaction as the UTXO mutation.
-- **Daemon** — a separate `RedbWalletStore` fed by blocks pulled from the
-  node's `/api/v1/chain/*` over HTTP, applied by `StandaloneSyncer`.
-
-`tests/it/shadow.rs` runs both against the same blocks and compares the
-**normalized `WalletRead` state** of the two stores. It does **not** compare
-daemon DTOs: `/balance`'s `reserved == "0"` and `/status`'s cached tip are
-documented projections ("Known deviations" §1), so comparing them would report
-differences that are not divergences. Both sides write their state through the
-same service functions, so the persisted result *is* comparable.
-
-**What is compared**, field by field, with a rendered diff that names the field
-that moved: cursor identity (height *and* header id), committed tip, balances,
-every box (id, creation tx/index/height, value, assets, status incl.
-`Immature { matures_at }` and spend attribution, provenance), the unspent
-subset separately, wallet transactions, the scan registry (rows, last-used id,
-count), scan boxes and scan transactions when a scan is seeded, tracked keys
-with full metadata, visible keys, derivation head, change address, the
-`scan_invalidated` flag, and the EIP-3 reward-key resolution (including the
-`Pending` / `Corrupt` discrimination). Every collection is sorted by a total
-order at capture, so a diff can only mean "a value differs".
-
-**Both paths are real.** The embedded side uses the production
-`StateStore::apply_block` with the production `WalletStateHook` (the wallet
-service's hook, as `ergo-node` wires it; hydrated from the store's own
-`WALLET_TRACKED_PUBKEYS`, and built with `WalletStateHook::standalone`, since
-no wallet engine runs in the harness), so the wallet apply is the atomic
-in-txn one, and
-`StateStore::rollback_to` with the hook's real `WalletRescanGuard` for the
-reorg. The daemon side uses the real
-`StandaloneSyncer` over the real `HttpChainClient` against the real `ergo-api`
-router with its real `ApiSecurity` gate and real `Governor`, backed by that
-same `StateStore` through ergo-node's real `InProcessChainClient` +
-`WalletChainAdapter`. Blocks are applied one at a time and the daemon catches
-up after each, which is the deployment shape.
-
-**Scenarios** (all `#[ignore]`d, so the default nextest job never pays for
-them):
-
-| Name | What it pins |
-|---|---|
-| `shadow_sweep_digest_1_1000_agrees_embedded_and_daemon` | The headline: real mainnet blocks 1..=1000 from `test-vectors`, every height's state root asserted against the captured one, and both sides compared at **every** applied height — not only at the tip, because the divergences worth catching are transient (a status the next block promotes, a box only one side re-adds, a flag the next pass reconciles) and a tip-only comparison would report "agree" for a wallet that never agreed. The box floor is carried forward across heights, so a comparison that quietly went empty fails at the height it went empty. Also asserts a real `MinerReward` box and at least one `Immature` box exist, so the maturity comparison is not vacuous. |
-| `shadow_synthetic_smoke_agrees_embedded_and_daemon` | A harness-built chain where every classification branch is reachable deterministically: `Owned`/`Confirmed`, `MinerReward`/`Immature`, a spend, a token-bearing box, a box paid to an untracked key (both paths must ignore it), and a seeded scan so `WALLET_SCAN_BOXES`/`_INDEX`/`_TXS` are non-empty on both sides. |
-| `shadow_reorg_rewinds_and_reapplies_on_both_sides` | A real fork: the node rolls back with its own `rollback_to` and re-derives the fork with a different solution nonce (so genuinely different block ids); the daemon must take the node's `Ancestor` answer, rewind, and follow. Compared before the reorg and after both sides follow the fork. |
-| `shadow_survives_a_node_and_daemon_restart` | Both redb databases are closed and re-opened — the node's `StateStore` and the daemon's `RedbWalletStore` — and the node's served API is torn down and rebuilt. Asserts neither the chain height nor either durable cursor moved, and that a caught-up pass completes having applied **zero** blocks: a restart that silently replayed the chain would be a rescan wearing a restart's clothes. |
-| `shadow_daemon_rescan_from_zero_reproduces_the_embedded_state` | Full-rescan preparation resets the durable cursor and invalidates the wallet. The next real pass must replay every block from genesis over HTTP, clear the flag, and reproduce the embedded state. The processed-block count is asserted so an idle pass cannot satisfy the test. |
-
-**Recovery and restart checks:**
-
-- *The daemon can be polled mid-reorg.* A durable cursor above the node's
-  reported tip produces a retryable `StaleTip`, preserving the wallet cursor.
-  The reorg scenario polls at the rollback height, then retries the same
-  daemon after the replacement fork catches up and checks that it rewinds
-  and applies the new chain.
-- *A restart has to release every handle.* redb takes an exclusive `flock` on
-  the file, so a close/re-open only succeeds once the last `Arc<Database>` is
-  dropped. The harness's `EmbeddedFiles` and `DaemonSide::store` are both held
-  behind an `Option` for exactly this: the node's served API (whose
-  `ChainStoreReader` holds the same `Arc<Database>`) has to be torn down before
-  the store can be re-opened. Getting this wrong is a
-  `DatabaseAlreadyOpen`, not a silent no-op.
-
-**The comparator is itself tested.** Two cheap, non-`#[ignore]`d tests keep the
-suite from being self-congratulatory:
-`shadow_comparator_detects_an_injected_divergence_in_every_compared_field`
-mutates one field at a time and requires the diff to be non-empty *and* to name
-that field, and
-`shadow_comparator_rejects_a_vacuous_zero_box_comparison` proves the
-non-zero-box floor fires. Every scenario also passes a minimum box count, so a
-harness that tracked nothing would fail rather than pass for the wrong reason.
-
-The sweep carries a third, in-band regression: at height 100 it injects a real
-durable divergence (the daemon-side `scan_invalidated` flag) and requires the
-comparison *at that height* to reject it and name the field. The flag is exactly
-the transient case a tip-only sweep cannot see — the very next sync pass
-rebuilds from genesis and clears it — so a sweep without per-height comparison
-would finish green. The scenario then continues to 1000, which also proves the
-reconciling rescan lands back on the embedded side's state rather than papering
-over the injection.
-
-**Running it:**
-
-```
-scripts/shadow-compare.sh            # cheap negative controls only (seconds)
-scripts/shadow-compare.sh --all      # controls + all five slow scenarios
-scripts/shadow-compare.sh sweep      # one named scenario
-scripts/shadow-compare.sh --list     # scenario name -> test name
-```
-
-The script redirects `CARGO_TARGET_DIR` and `TMPDIR` into `.shadow-target/`
-unless the caller already set `CARGO_TARGET_DIR`: the harness links the
-`ergo-node` + `ergo-api` + `ergo-state` test binary, and sharing the normal
-target dir would evict (or be evicted by) the developer's build cache. The
-directory is removed on success; `SHADOW_KEEP=1` retains it. CI runs the same
-command in the separate `wallet-shadow` job, which is deliberately **not** part
-of the `check` matrix and does not touch
-`scripts/ci-shards.py`'s crate-group ledger — the scenarios live inside the
-existing `it` target precisely so shard coverage is unchanged. That job sets
-`CARGO_TARGET_DIR` (and `SHADOW_KEEP=1`) at job level, *above* its
-`Swatinem/rust-cache` step and to the same path the script would have chosen:
-the script only claims the variable when the caller left it unset, and
-`rust-cache` keys and restores on the target dir cargo really used, so a
-`rust-cache` that warmed the default `./target` would be a cache the run could
-never hit. `TMPDIR` is deliberately left to the script — it has no bearing on
-what is cached, and a job-level `TMPDIR` would point at a directory that does
-not exist until the script creates it.
-
-**One deviation from `tests/it/node_api.rs`, and why.** The shadow harness
-serves the router through `into_make_service_with_connect_info::<SocketAddr>()`
-(the shape `ergo_api::server` uses) rather than a bare `axum::serve`. Without
-`ConnectInfo` the `Governor` cannot read the peer IP, so every caller is
-bucketed under one shared "unknown" key; a sweep's thousands of `blocks-since`
-calls then get throttled into 429s that have nothing to do with wallet
-behaviour. With it, a loopback daemon is exempt on a direct bind — the
-production posture. `node_api.rs` makes a handful of requests, so it never
-reached the limiter and needs no change.
 
 ## Invariants & contracts
 - **Confirmed only, and a projection rather than a re-serve.** The wallet is fed
@@ -487,9 +360,8 @@ reached the limiter and needs no change.
   `confirmed == available` and `reserved == immature == "0"`; `unconfirmed` and
   `reemission` are `null`. Seed key changes reset history for replay; seed spending uses the
   shared engine rather than these diagnostic projections. These
-  are values the daemon *computes* from applied blocks, not the embedded wallet's
-  values re-served verbatim — see "Known deviations" §1 for the exact
-  differences and what they mean for comparison against an embedded wallet.
+  are values the daemon *computes* from applied blocks — see "Known
+  deviations" §1 for the exact shape.
 - **Watch descriptor boundary.** The default watch mode reads public wallet data only. The descriptor file
   carries compressed public keys, derivation paths, and labels — anything else
   (a `private_key` field, a non-secp256k1 curve) is a hard parse error. The

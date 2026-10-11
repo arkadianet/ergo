@@ -10,9 +10,9 @@ completed their refresh and validation. The subsequent main merge carries the
 integration branch: [#619](https://github.com/arkadianet/ergo/pull/619) added
 the seed lifecycle host and [#620](https://github.com/arkadianet/ergo/pull/620)
 completed the daemon engine, migration, packaging and portable library work.
-Seed ownership remains opt-in and the embedded node remains the default.
-These are the three documented extraction phases; promoting the integration
-branch to main and choosing a release/cutover are subsequent delivery work.
+Phase 4 removes the embedded wallet: the node hosts no wallet, and
+`ergo-walletd` is the only wallet host (see [Phase 4](#phase-4-the-node-hosts-no-wallet)).
+Promoting the integration branch to main is the remaining delivery step.
 
 ## Phase 2 milestones
 
@@ -36,9 +36,9 @@ branch to main and choosing a release/cutover are subsequent delivery work.
   overlays and transaction submission enter through capability traits. The
   service's normal graph has no `ergo-node`, `ergo-state`, `ergo-api`,
   `ergo-mempool` or Tokio dependency.
-- `ergo-node` embeds the engine through a serialized command adapter, committed
-  chain views and supervised wallet/rescan workers. Embedded wallet rows still
-  co-commit with chain rows in the same `state.redb` transaction.
+- `ergo-node` hosts no wallet. It serves the committed-chain API and private
+  mining queue the daemon uses, writes no wallet rows, and hands a wallet an
+  earlier release left in `state.redb` to the daemon.
 - `ergo-walletd` owns a separate `wallet.redb`, resumes from a durable cursor,
   and defaults to an authenticated watch-only local read API. Opt-in seed mode hosts
   `WalletEngine` for lifecycle, selection, construction, signing, sending,
@@ -48,12 +48,12 @@ branch to main and choosing a release/cutover are subsequent delivery work.
   Watch reads and short diagnostic projections remain confirmed-only. Seed
   routes use the shared engine and coherently captured node/pool state.
 
-`[wallet] mode = "embedded"` remains the default. External mode skips embedded
-wallet boot, secrets, writer and apply hooks. Privileged wallet routes require
-a configured API key before returning `410 wallet_moved` with the configured
-daemon address. Public wallet UI/watch routes retain their public ownership
-guidance. The node does not proxy requests. Mining in external mode requires
-a pinned reward public key.
+The node never opens wallet secrets and runs no wallet writer, scheduler,
+rescan worker or chain-apply hook. Privileged wallet routes require a
+configured API key before returning `410 wallet_moved` with `[wallet]
+daemon_address`. Public wallet UI/watch routes retain their public ownership
+guidance. The node does not proxy requests. Mining pays a reward key from the
+node's own configuration.
 
 The refresh retains main's rescan ownership and cancellation guarantees,
 atomic cache hydration, tracked-key/master checks, path visibility and
@@ -70,11 +70,12 @@ embedded-to-daemon wallet cutover below.
 
 ## Completion checks
 
-Phase 2 and Phase 3 completion require the workspace formatting/fragment checks,
-all-target/all-feature Clippy, workspace tests and doctests, strict rustdoc,
-dependency-boundary checks and CI shard coverage. The dedicated shadow gate is
-`scripts/shadow-compare.sh --all`: both negative controls plus the synthetic,
-reorg, node/daemon restart, rescan and mainnet 1–1000 scenarios must run.
+Each phase requires the workspace formatting/fragment checks, all-target/
+all-feature Clippy, workspace tests and doctests, strict rustdoc,
+dependency-boundary checks and CI shard coverage. Phases 2 and 3 also ran the
+embedded-vs-daemon shadow comparison (synthetic, reorg, restart, rescan and
+mainnet 1–1000 scenarios). Phase 4 retired it with the embedded wallet: there
+is no second wallet path left to compare.
 
 ## Phase 3: daemon engine hosting
 
@@ -136,15 +137,14 @@ unlocked secrets after admitted commands drain.
 
 ### Migration and rollback
 
-[Wallet setup](wallet-setup.md) describes the routine upgrade: a node that
-does not host its wallet publishes `wallet-handoff/` while running, and
-`ergo-walletd adopt` takes it over. The offline `migrate` command below remains
-for a stopped node.
+[Wallet setup](wallet-setup.md) describes the routine upgrade: the node
+publishes `wallet-handoff/` while running, and `ergo-walletd adopt` takes it
+over. The offline `migrate` command below remains for a stopped node.
 
-Stop the embedded node and retain a complete backup. If its database uses an
-old redb format, first run the existing `ergo-node migrate-redb` copy migration.
-Upgrade the embedded wallet application schema with the current node before
-cutover. Before stopping, cancel queued wallet jobs and withdraw their private
+Stop the node and retain a complete backup. If its database uses an old redb
+format, first run the existing `ergo-node migrate-redb` copy migration. The
+export requires the current wallet application schema; a wallet last opened by
+an older release fails closed. Before stopping, cancel queued wallet jobs and withdraw their private
 transactions through the wallet/node APIs. Mined and conflicted job records
 with a transaction ID still belong to the scheduler because they follow that
 transaction through chain reorganizations. Default migration refuses these
@@ -190,20 +190,19 @@ An interrupted publication remains unmarked and cannot be adopted as a seed
 wallet; inspect and retain that directory before retrying at another path.
 
 Point the seed config at the resulting directory with the recorded network.
-Set the node's `[wallet] mode = "external"` and its daemon address, retain the
-original node directory, and pin a mining reward public key if mining is used.
-Start the node and daemon, inspect authenticated status/balances/addresses,
-and unlock only when needed. The node returns ownership guidance and never
-proxies secrets or runs a second wallet writer.
+Set the node's `[wallet] daemon_address`, retain the original node directory,
+and pin a mining reward key if mining is used. Start the node and daemon,
+inspect authenticated status/balances/addresses, and unlock only when needed.
+The node returns ownership guidance and never proxies secrets.
 
-For rollback, stop both processes before changing ownership. Stop using the
-standalone directory and restore the node's embedded config and original
-wallet directory. Its retained cursor catches up against retained chain
-history; transactions sent since cutover still exist on chain and must be
-rescanned before trusting the old balance. Do not run both owners concurrently.
-The original job journal and node private queue also remain available; review
-their approvals before restoring embedded ownership, because retained work may
-resume after a rollback.
+Rolling back means running the previous node release, which hosted the wallet,
+against the retained node directory. The node never modifies the legacy
+wallet's rows or keystore, so this works until `ergo-node wallet-legacy-purge`
+removes them. Stop both processes first and do not run both owners
+concurrently. Transactions sent from the daemon since cutover still exist on
+chain and must be rescanned before trusting the old balance. The original job
+journal and node private queue also remain available; review their approvals
+before rolling back, because retained work may resume.
 Current-UTXO discovery retains its incomplete-history metadata rather than
 inventing historical inclusion heights. See [standalone offline discovery](wallet-extraction-offline-discovery.md)
 for the stopped-node traversal command and its ownership/network checks.
@@ -228,13 +227,31 @@ node's bounded RPC deadline and set `TimeoutStopSec` above it. The unit keeps
 daemon memory out of swap and core files, filters system calls, drops all
 capabilities and allows only loopback networking; add a remote `https` node's
 address with `IPAddressAllow`. Installing these examples does not change the
-embedded-node or watch-only-daemon defaults.
+watch-only daemon default.
 
 The daemon's security controls — the version-2 Argon2id keystore and its
 automatic upgrade, idle and maximum-duration locks, the persisted unlock
 budget, local authentication in both modes, the `Host` allowlist, node
 transport rules and process hardening — are described in the
 [daemon configuration reference](configuration.md#ergo-walletdtoml-security).
+
+## Phase 4: the node hosts no wallet
+
+Phase 4 lands as PRs into `integration/wallet-extraction`. Upgrading is
+non-breaking; downgrading after the daemon upgrades its keystore copy, or after
+a purge, is not supported.
+
+| Change | PR |
+|---|---|
+| Daemon hardening: version-2 Argon2id keystore with automatic upgrade, idle and maximum-duration locks, a persisted unlock budget, local authentication in both modes, `Host` allowlist, node transport rules, process hardening | [#631](https://github.com/arkadianet/ergo/pull/631) |
+| Encrypted `wallet.redb` with sealed start, proof-of-work and transactions-root verification of every synced block, daemon-held multisig nonces | [#632](https://github.com/arkadianet/ergo/pull/632) |
+| Legacy-wallet handoff and `ergo-walletd adopt`, `wallet-legacy-purge`, `miner_reward_address`, `ergo-walletd init` / `reward-key`, [wallet setup](wallet-setup.md) | [#634](https://github.com/arkadianet/ergo/pull/634) |
+| Embedded wallet removed from the node; `wallet-scan-utxo` reads the daemon's encrypted database with its exported key | [#635](https://github.com/arkadianet/ergo/pull/635) |
+| Wallet hook removed from chain apply, rollback and sync; shadow comparison retired | [#636](https://github.com/arkadianet/ergo/pull/636) |
+
+A miner without a configured reward key keeps the first-address key of a
+wallet an earlier release left in `state.redb`; otherwise `[mining]` needs
+`miner_reward_address` or `miner_public_key_hex`.
 
 ## Parallel library work
 
@@ -244,9 +261,9 @@ transaction bytes for EIP-19 cold signing, offline proofs and commitments.
 Its fixtures cross-check AppKit and sigma-rust, including QR and ErgoPay
 round trips. The existing `Prover::sign` gate remains unchanged in that review.
 The second adds direct signing with an explicit intended candidate and an
-optional host capability tied to its committed view. Standard embedded-node
-and daemon views retain their synthetic-context script gate until an actual
-candidate provider supplies the full context. See the [library guide](wallet-reduced-transactions.md)
+optional host capability tied to its committed view. The daemon's standard
+views retain their synthetic-context script gate until an actual candidate
+provider supplies the full context. See the [library guide](wallet-reduced-transactions.md)
 and [oracle provenance](../test-vectors/wallet/README.md#reduced-transactions-and-cold-transport).
 
 Implemented in [#620](https://github.com/arkadianet/ergo/pull/620),

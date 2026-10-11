@@ -8,10 +8,10 @@ header/section chain index, voted protocol parameters, Mode 2 UTXO-snapshot
 install, Mode 3 suffix pruning, and a sibling Mode 5 digest-verifier backend
 (`DigestStateStore`).
 
-Wallet tables and wallet apply/rescan code are now owned by
-`ergo-wallet-service`. `ergo-state` keeps a compatibility wallet facade and
-coordinates service-backed wallet writes inside the same `state.redb` write
-transaction, as the supported Phase 2 embedded compatibility boundary.
+The chain store writes no wallet rows. Wallet tables and wallet apply/rescan
+code are owned by `ergo-wallet-service`; `ergo-state` keeps a compatibility
+wallet facade for the tables an earlier release left in `state.redb` (schema
+migration before the handoff, offline UTXO discovery).
 
 **Depends on (workspace):** `ergo-primitives`, `ergo-ser`, `ergo-chain-spec`,
 `ergo-crypto`, `ergo-validation`, `ergo-sigma`, `ergo-wallet`,
@@ -20,11 +20,9 @@ transaction, as the supported Phase 2 embedded compatibility boundary.
 
 ## Start here
 - `src/lib.rs` — module map and the public state/apply surface.
-- `src/store/mod.rs` — `StateStore` plus the chain-state data model and the
-  service-backed wallet re-exports used by the state integration.
-- `src/store/apply.rs` — the apply pipeline: builds the service-owned
-  `WalletApplyPayload`, applies UTXO changes, and commits chain plus wallet
-  state atomically.
+- `src/store/mod.rs` — `StateStore` plus the chain-state data model.
+- `src/store/apply.rs` — the apply pipeline: applies UTXO changes and commits
+  chain state atomically.
 - `src/avl/tree.rs` — the authenticated AVL+ tree and its O(1) root digest.
 - `src/backend.rs` — `StateBackend`, `ChainStateRead`, `HeaderSectionStore`,
   and `BlockApply` dispatch for UTXO and digest backends.
@@ -32,8 +30,9 @@ transaction, as the supported Phase 2 embedded compatibility boundary.
   read helpers.
 - `src/wallet/mod.rs` — the transitional facade: most `wallet` submodules are
   re-exports from `ergo-wallet-service`, not a second implementation.
-- `src/store/wallet_tx_bridge.rs` — the chain-side adapter that builds owned
-  wallet block data and maps state errors into the service rescan error model.
+- `src/store/wallet_tx_bridge.rs` — re-reads a committed block's transactions
+  as owned wallet block data for the chain API and offline discovery, and maps
+  state errors into the service rescan error model.
 
 ## Modules
 - `src/store/` — `StateStore`: open / genesis / apply / rollback / reorg /
@@ -77,8 +76,7 @@ transaction, as the supported Phase 2 embedded compatibility boundary.
   from its ADProofs so the digest backend can run full tx validation.
 - `src/wallet/` — compatibility facade over `ergo-wallet-service`, which owns
   wallet tables, reader/writer types, apply/maturity/scan logic and schema migration.
-  Embedded writes still share the chain's `state.redb` transaction; the daemon
-  uses its own `wallet.redb`.
+  The daemon uses its own `wallet.redb`.
 - `src/redb_util.rs` — `begin_write_qr` (quick-repair write txn) +
   `open_with_repair_logging`; every production write txn must route through here.
 
@@ -115,8 +113,7 @@ transaction, as the supported Phase 2 embedded compatibility boundary.
 ## Invariants & contracts
 - **Atomic commit per applied block.** `persist_apply` writes undo_log +
   AVL+ node mutations + chain_index + state_meta + (epoch-boundary) voted_params
-  + (when hooked) wallet rows in a single redb write transaction. Either all
-  land or none do.
+  in a single redb write transaction. Either all land or none do.
 - **Chain metadata ownership.** Header writes merge only their header pointer,
   score and availability with the full-block pointer already committed in the
   same transaction. Persist batches merge their full-block pointer with the
@@ -192,16 +189,15 @@ transaction, as the supported Phase 2 embedded compatibility boundary.
   validation "is this block legal?" before applying; it never defines
   acceptance rules.
 
-## Transitional wallet facade
+## Legacy wallet facade
 
 `ergo-state/src/wallet/` and selected `ergo-state/src/store` exports preserve
 the historical `ergo_state::wallet` paths while delegating implementation to
-`ergo-wallet-service`. The state crate remains the owner of the chain apply
-and rollback orchestration; the service owns wallet tables, reader/writer
-semantics, apply classification, maturity, scan tracking, and rescan logic.
-The edge is deliberately one-way. Phase 2 retains this compatibility facade
-and embedded co-commit boundary; hosting the spending engine in the daemon and
-cutting over embedded storage are follow-on deployment work.
+`ergo-wallet-service`. Chain apply and rollback no longer touch wallet tables;
+the facade remains for reading and migrating the wallet an earlier release
+left in `state.redb`, which the node hands to `ergo-walletd`. The edge is
+deliberately one-way.
+
 ## Doc accuracy notes
 - The crate's read-only handle is `reader::ChainStoreReader`
   (`src/reader.rs:31`), reached via `StateStore::reader_handle()`. There is no

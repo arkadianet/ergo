@@ -1733,7 +1733,7 @@ mod tests {
         let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
         store.initialize_genesis(&[]).unwrap();
         let old_ids = apply_empty_blocks(&mut store, 3);
-        store.rollback_to(1, None, None).unwrap();
+        store.rollback_to(1).unwrap();
         let new_tip = apply_empty_block_at_with_nonce(
             &mut store,
             2,

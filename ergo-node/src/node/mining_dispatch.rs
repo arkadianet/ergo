@@ -1150,15 +1150,12 @@ pub(super) fn handle_mining_request(
             // 4. Drive validation + apply through the executor's
             //    AssembleBlock path. Route follow-up actions through the
             //    same outbound dispatch used by peer-received blocks.
-            // The node hosts no wallet: no wallet rows join the chain commit.
-            let wallet_wiring = None;
             let apply_started = Instant::now();
             let follow_ups = state.executor.execute(
                 Action::AssembleBlock { header_id },
                 &mut state.store,
                 &mut state.coordinator,
                 apply_started,
-                wallet_wiring,
             );
             let apply_ms = apply_started.elapsed().as_millis() as u64;
             if super::block_relay::finish_local_apply(

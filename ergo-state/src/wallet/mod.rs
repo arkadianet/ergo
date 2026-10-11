@@ -16,9 +16,9 @@ pub use ergo_wallet_service::wallet::{
     OwnedBlockOutput, OwnedBlockTxData, RedbWalletStore, RedbWalletWrite, RescanGuard,
     RescanReadError, RescanState, RewardKeyResolution, ScanBoxStatus, ScanMatchRecord,
     ScanRegistrySnapshot, ScanRescanMatcher, ScanTrackedBox, ScanTxRecord, StoredScan,
-    TrackedPubkeyMeta, WalletApplyHook, WalletApplyPayload, WalletBox, WalletRead, WalletReader,
-    WalletScanCursor, WalletScanMatcher, WalletScanService, WalletStore, WalletStoreError,
-    WalletTransaction, WalletWiring, WalletWrite, WALLET_SCHEMA_VERSION,
+    TrackedPubkeyMeta, WalletApplyPayload, WalletBox, WalletRead, WalletReader, WalletScanCursor,
+    WalletScanMatcher, WalletScanService, WalletStore, WalletStoreError, WalletTransaction,
+    WalletWrite, WALLET_SCHEMA_VERSION,
 };
 
 pub fn migrate_schema(db: &std::sync::Arc<redb::Database>) -> Result<(), WalletStoreError> {

@@ -1,8 +1,8 @@
 //! `NodeState` — the runtime god-struct threaded through every
 //! action-loop handler. Owns the store, the sync coordinator +
 //! executor, the peer manager + per-peer outbound channels, the
-//! mempool, the snapshot publisher, the wallet apply hook, and every
-//! other piece of mutable runtime state the loop needs.
+//! mempool, the snapshot publisher, and every other piece of mutable
+//! runtime state the loop needs.
 //!
 //! `PeerRegistry` is the inner map of `PeerId → PeerRuntime` plus the
 //! `try_send(peer, code, payload)` accessor used by `send_to_peer`.

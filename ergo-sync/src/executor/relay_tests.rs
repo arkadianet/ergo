@@ -195,7 +195,7 @@ fn applied_feedback_sequential_batch_records_height_order_and_drains() {
         DifficultyParams::mainnet(),
     );
     let mut coordinator = SyncCoordinator::new(0);
-    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now());
     assert_eq!(
         store.chain_state_meta().best_full_block_height,
         3,
@@ -227,9 +227,9 @@ fn applied_feedback_reorg_records_only_applied_new_branch() {
         DifficultyParams::mainnet(),
     );
     let mut coordinator = SyncCoordinator::new(0);
-    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now());
     assert_eq!(executor.take_applied_blocks(), ids);
-    store.rollback_to(1, None, None).unwrap();
+    store.rollback_to(1).unwrap();
     let concrete = store.as_utxo_mut().unwrap();
     let old2 = apply_empty_block(concrete, 2, ids[0]);
     let old3 = apply_empty_block(concrete, 3, old2);
@@ -260,7 +260,7 @@ fn applied_feedback_reorg_records_only_applied_new_branch() {
         .unwrap();
     assert_eq!(
         executor
-            .rollback_full_chain_to_best_header(&mut store, &mut coordinator, None)
+            .rollback_full_chain_to_best_header(&mut store, &mut coordinator)
             .unwrap(),
         ReorgOutcome::Performed
     );
@@ -269,7 +269,7 @@ fn applied_feedback_reorg_records_only_applied_new_branch() {
         executor.take_applied_blocks().is_empty(),
         "rollback must not report an applied id"
     );
-    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now());
     assert_eq!(
         store.chain_state_meta().best_full_block_id,
         ids[2],
@@ -322,9 +322,9 @@ fn competing_fixture() -> (
         DifficultyParams::mainnet(),
     );
     let mut coordinator = SyncCoordinator::new(0);
-    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now());
     assert_eq!(store.chain_state_meta().best_full_block_id, ids[2]);
-    store.rollback_to(1, None, None).unwrap();
+    store.rollback_to(1).unwrap();
     let concrete = store.as_utxo_mut().unwrap();
     let old2 = apply_empty_block(concrete, 2, ids[0]);
     let old3 = apply_empty_block(concrete, 3, old2);
@@ -373,7 +373,7 @@ fn missing_replacement_sections_preserve_tip_until_complete_better_chain() {
         DifficultyParams::mainnet(),
     );
     let mut coordinator = SyncCoordinator::new(3);
-    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now());
     assert_eq!(
         store.chain_state_meta().best_full_block_id,
         old3,
@@ -382,7 +382,7 @@ fn missing_replacement_sections_preserve_tip_until_complete_better_chain() {
     store
         .store_block_section_typed(&expected.transactions_id, &saved, 102)
         .unwrap();
-    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now());
     assert_eq!(store.chain_state_meta().best_full_block_id, ids[2]);
     assert_eq!(executor.take_applied_blocks(), ids[1..]);
 }
@@ -412,7 +412,7 @@ fn shorter_heavier_available_chain_is_adopted_by_full_score() {
         DifficultyParams::mainnet(),
     );
     let mut coordinator = SyncCoordinator::new(3);
-    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now());
     assert_eq!(store.chain_state_meta().best_full_block_id, ids[1]);
     assert_eq!(store.chain_state_meta().best_full_block_height, 2);
     assert_eq!(executor.take_applied_blocks(), vec![ids[1]]);
@@ -520,7 +520,7 @@ fn digest_executor_adopts_shorter_heavier_chain_after_restart() {
         DifficultyParams::mainnet(),
     );
     let mut coordinator = SyncCoordinator::new(3);
-    executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now(), None);
+    executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now());
     assert_eq!(
         backend.chain_state_meta().best_full_block_id,
         ids[1],
@@ -573,7 +573,7 @@ fn available_prefix_can_outscore_applied_tip_before_header_tip_body_arrives() {
         DifficultyParams::mainnet(),
     );
     let mut coordinator = SyncCoordinator::new(3);
-    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now());
     assert_eq!(store.chain_state_meta().best_full_block_id, ids[1]);
     assert_eq!(store.chain_state_meta().best_header_id, ids[2]);
     assert_eq!(executor.take_applied_blocks(), vec![ids[1]]);
@@ -619,7 +619,7 @@ fn complete_side_branch_can_beat_full_tip_while_best_headers_withhold_bodies() {
         DifficultyParams::mainnet(),
     );
     let mut coordinator = SyncCoordinator::new(3);
-    executor.handle_assemble_block(&ids[2], &mut store, &mut coordinator, None);
+    executor.handle_assemble_block(&ids[2], &mut store, &mut coordinator);
     assert_eq!(store.chain_state_meta().best_full_block_id, ids[2]);
     assert_eq!(store.chain_state_meta().best_header_id, withheld_tip);
     assert_eq!(executor.take_applied_blocks(), ids[1..]);
@@ -759,13 +759,13 @@ fn reorg_crash_child() {
     let mut coordinator = SyncCoordinator::new(3);
     assert!(matches!(
         executor
-            .rollback_full_chain_to_best_header(&mut backend, &mut coordinator, None)
+            .rollback_full_chain_to_best_header(&mut backend, &mut coordinator)
             .unwrap(),
         super::ReorgOutcome::Performed
     ));
     assert_eq!(backend.chain_state_meta().best_full_block_id, ids[0]);
     if phase == "partial_apply" {
-        executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now(), None);
+        executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now());
         assert_eq!(backend.chain_state_meta().best_full_block_id, ids[1]);
     } else {
         assert_eq!(phase, "rollback");
@@ -897,7 +897,7 @@ fn interrupted_reorg_restarts(digest_mode: bool, phase: &str) {
     executor
         .recover_coordinator(&backend, &mut coordinator)
         .unwrap();
-    executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now(), None);
+    executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now());
     assert_eq!(
         backend.chain_state_meta().best_full_block_id,
         ids[2],

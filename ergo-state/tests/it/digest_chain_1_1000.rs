@@ -196,7 +196,7 @@ fn pruning_beyond_rollback_window() {
     assert_eq!(store.height(), 1000);
 
     // Rollback to 800 (within ROLLBACK_WINDOW=200): should succeed
-    store.rollback_to(800, None, None).unwrap();
+    store.rollback_to(800).unwrap();
     assert_eq!(store.height(), 800);
     assert_eq!(store.root_digest(), fixtures.expected_digest(800));
 
@@ -213,7 +213,7 @@ fn pruning_beyond_rollback_window() {
     // applied (prune drops entries at height <= tip - ROLLBACK_WINDOW = 800),
     // so the Phase-1 pre-read could only surface this as an undistinguished
     // `NoCommittedState`; the pre-mutation depth guard returns the typed error.
-    let result = store.rollback_to(799, None, None);
+    let result = store.rollback_to(799);
     assert!(
         matches!(
             result,
@@ -265,7 +265,7 @@ fn rollback_from_1000_to_800_then_reapply() {
         fixtures.apply_block(&mut store, height);
     }
 
-    store.rollback_to(800, None, None).unwrap();
+    store.rollback_to(800).unwrap();
     assert_eq!(store.height(), 800);
     assert_eq!(store.root_digest(), fixtures.expected_digest(800));
 
@@ -391,7 +391,7 @@ fn rollback_with_in_flight_persist_jobs_under_cache_pressure_matches_oracle() {
         fixtures.apply_block(&mut store, height);
     }
     // No explicit flush: the queue may hold up to 64 uncommitted jobs.
-    store.rollback_to(900, None, None).unwrap();
+    store.rollback_to(900).unwrap();
     assert_eq!(store.height(), 900);
     assert_eq!(store.root_digest(), fixtures.expected_digest(900));
 

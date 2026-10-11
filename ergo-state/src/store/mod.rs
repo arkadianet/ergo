@@ -162,16 +162,12 @@ pub(crate) const SECTION_HEIGHT_BACKFILL_DONE_VAL: &[u8] = b"1";
 /// migration.
 pub(crate) const MINIMAL_FULL_BLOCK_HEIGHT_KEY: &str = "minimal_full_block_height_v1";
 
-/// Wallet-rollback safety margin. The wallet hook re-reads
-/// `BlockTransactions` from `BLOCK_SECTIONS` during rollback; a
-/// rollback that crosses the prune sentinel reads `None` and
-/// the wallet desyncs silently. Config-load enforces
-/// `blocks_to_keep >= ROLLBACK_WINDOW + SAFETY_MARGIN` so the
-/// active rollback window can never fall into pruned territory.
-/// Anchored to `persist::MAX_BATCH_BLOCKS` — the maximum number
-/// of blocks the pipeline-batch worker commits between
-/// sentinel reads, covering the worst-case "wallet sees old
-/// sentinel while chain advanced N blocks" race window.
+/// Pruning safety margin above the rollback window. `rollback_to`
+/// refuses a target below the prune sentinel, so config-load enforces
+/// `blocks_to_keep >= ROLLBACK_WINDOW + SAFETY_MARGIN` and the active
+/// rollback window never falls into pruned territory. Anchored to
+/// `persist::MAX_BATCH_BLOCKS` — the maximum number of blocks the
+/// pipeline-batch worker commits between sentinel reads.
 pub const SAFETY_MARGIN: u32 = crate::persist::MAX_BATCH_BLOCKS as u32;
 
 /// Chain index: height → header_id (32 bytes). Best chain only (spec:339).
@@ -509,8 +505,7 @@ mod wallet_tx_bridge;
 
 pub use backfill::ModifierIndexBackfillEvent;
 pub use ergo_wallet_service::wallet::{
-    owned_to_block_txs, BoundBlockTxs, OwnedBlockOutput, OwnedBlockTxData, ScanMatchRecord,
-    WalletApplyPayload,
+    owned_to_block_txs, BoundBlockTxs, OwnedBlockOutput, OwnedBlockTxData,
 };
 pub use error::{PopowByIdLookup, PopowMissingAt, StateError, VotedParamsWriteError};
 pub(crate) use height_index::{
@@ -523,10 +518,7 @@ use undo::undo_log_key;
 pub use undo::UndoEntry;
 use votes::compute_epoch_votes_via_txn;
 pub use wallet_tx_bridge::block_txs_for_wallet_at_height;
-pub(crate) use wallet_tx_bridge::{
-    block_txs_for_wallet_at_height_in_read_txn, build_scan_match_records,
-    build_wallet_block_txs_checked, build_wallet_block_txs_from_sections,
-};
+pub(crate) use wallet_tx_bridge::block_txs_for_wallet_at_height_in_read_txn;
 
 // (StateMeta lives in store/meta.rs.)
 
@@ -543,13 +535,6 @@ struct UtxoMutation<'a> {
     to_remove: &'a UtxoRemoveMap,
     to_insert: &'a UtxoInsertMap,
     voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
-    /// Wallet apply payload committed atomically with the chain
-    /// mutation. Consumed by `persist_apply`'s synchronous path
-    /// inside its write_txn; or queued on the `PersistJob` for the
-    /// worker's `execute_batch` to apply inside the batch write_txn
-    /// on the pipeline path. Either way, chain + wallet commit
-    /// together.
-    wallet_payload: Option<&'a WalletApplyPayload>,
 }
 
 // ---- Persistent state store ----
@@ -3774,7 +3759,6 @@ impl StateStore {
         new_digest: &ADDigest,
         undo_and_emission: (&UndoEntry, &emission::EmissionTransition),
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
-        wallet_payload: Option<&WalletApplyPayload>,
     ) -> Result<crate::avl::arena::CommitDurability, StateError> {
         let (undo, emission) = undo_and_emission;
         // Defensive: voted_params_row should be `Some` iff this is an
@@ -3879,13 +3863,6 @@ impl StateStore {
         if let Some(ref pipeline) = self.persist_pipeline {
             self.drain_persist_results()?;
 
-            // M5 final-slice atomicity: clone the wallet payload into
-            // the job so the worker can apply wallet writes inside
-            // its batch's write_txn. The payload is owned data
-            // (BTreeSet/BTreeMap/Vec) so it crosses the worker boundary;
-            // the worker invokes the wallet store against that same
-            // transaction before committing.
-            let wallet_payload_owned = wallet_payload.cloned();
             let job = crate::persist::PersistJob {
                 height,
                 header_id: *header_id,
@@ -3904,7 +3881,6 @@ impl StateStore {
                 prune_below,
                 parent_header_id,
                 voted_params_row,
-                wallet_payload: wallet_payload_owned,
             };
 
             if height.is_multiple_of(1000) || height <= 5 {
@@ -4128,25 +4104,6 @@ impl StateStore {
                     source: Box::new(e),
                 }
             })?;
-        }
-
-        // M5 atomic-commit: wallet apply lands inside the SAME
-        // write_txn as chain state. A crash between AVL/undo/chain-
-        // index writes and the wallet-table writes is no longer
-        // reachable: redb's single-write-txn atomicity covers both.
-        // Failure of `apply_block_to_wallet` aborts the whole txn,
-        // so chain state does not advance with stale wallet tables.
-        // Maturity-promotion at this height is part of the same
-        // atomic unit.
-        if let Some(payload) = wallet_payload {
-            let mut wallet_store =
-                crate::wallet::RedbWalletStore::attach_write_transaction(&write_txn);
-            crate::wallet::WalletWrite::apply_block(&mut wallet_store, height, header_id, payload)
-                .map_err(|e| StateError::WalletApply {
-                    what: "apply hook (atomic)",
-                    height,
-                    source: Box::new(e.into()),
-                })?;
         }
 
         let t0 = std::time::Instant::now();
@@ -4574,66 +4531,6 @@ mod tests {
                 .expect("open HEADER_CHAIN_INDEX");
         }
         txn.commit().expect("commit");
-    }
-
-    // ----- WalletApplyPayload::has_wallet_tracking -----
-
-    fn payload_with(
-        trees: std::collections::BTreeSet<Vec<u8>>,
-        pubkeys: std::collections::BTreeMap<u64, [u8; 33]>,
-        scan_matches: Vec<ScanMatchRecord>,
-    ) -> WalletApplyPayload {
-        WalletApplyPayload {
-            tracked_p2pk_trees: trees,
-            has_registered_scans: !scan_matches.is_empty(),
-            cached_pubkeys: pubkeys,
-            block_txs_owned: Vec::new(),
-            scan_matches,
-            allow_non_contiguous_wallet: false,
-        }
-    }
-
-    fn one_scan_match() -> Vec<ScanMatchRecord> {
-        vec![ScanMatchRecord {
-            box_id: [0xAB; 32],
-            scan_ids: vec![11],
-            box_bytes: vec![0x01, 0x02],
-            inclusion_height: 100,
-            creation_out_index: 0,
-        }]
-    }
-
-    #[test]
-    fn scan_only_payload_is_not_wallet_tracking() {
-        // Empty trees + empty pubkeys, but scan matches present: this
-        // payload exists ONLY to carry scan tracking. It must NOT count
-        // as wallet-active, so the commit sites skip apply_block_to_wallet
-        // / promote_matured_boxes (which would otherwise advance
-        // WALLET_SCAN_HEIGHT past blocks the wallet never classified).
-        let p = payload_with(Default::default(), Default::default(), one_scan_match());
-        assert!(!p.has_wallet_tracking());
-    }
-
-    #[test]
-    fn payload_with_tracked_tree_is_wallet_tracking() {
-        let mut trees = std::collections::BTreeSet::new();
-        trees.insert(vec![0x00, 0x08, 0xcd]);
-        let p = payload_with(trees, Default::default(), one_scan_match());
-        assert!(p.has_wallet_tracking());
-    }
-
-    #[test]
-    fn payload_with_cached_pubkey_is_wallet_tracking() {
-        let mut pubkeys = std::collections::BTreeMap::new();
-        pubkeys.insert(0u64, [0x02; 33]);
-        let p = payload_with(Default::default(), pubkeys, Vec::new());
-        assert!(p.has_wallet_tracking());
-    }
-
-    #[test]
-    fn empty_payload_is_not_wallet_tracking() {
-        let p = payload_with(Default::default(), Default::default(), Vec::new());
-        assert!(!p.has_wallet_tracking());
     }
 
     // ----- happy path -----

@@ -156,15 +156,10 @@ fn process_header_modifier_batch(
         })
         .collect();
 
-    // The node hosts no wallet: no wallet rows join the chain commit.
-    let wallet_wiring = None;
-    let mut all_actions = state.executor.execute_all(
-        batch_actions,
-        &mut state.store,
-        &mut state.coordinator,
-        now,
-        wallet_wiring,
-    );
+    let mut all_actions =
+        state
+            .executor
+            .execute_all(batch_actions, &mut state.store, &mut state.coordinator, now);
 
     let cs_after = state.store.chain_state_meta();
     let bh = cs_after.best_header_height;
@@ -797,8 +792,6 @@ fn inject_local_full_block(
     // calls `process_block`. If the local block isn't at tip+1 yet,
     // no-op — `try_apply_next_blocks` will pick it up on the next
     // chain advance.
-    // The node hosts no wallet: no wallet rows join the chain commit.
-    let wallet_wiring = None;
     let follow_ups = state.executor.execute(
         Action::AssembleBlock {
             header_id: header_id_bytes,
@@ -806,7 +799,6 @@ fn inject_local_full_block(
         &mut state.store,
         &mut state.coordinator,
         now,
-        wallet_wiring,
     );
     flush_actions(state, follow_ups);
 

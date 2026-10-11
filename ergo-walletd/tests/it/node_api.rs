@@ -1010,7 +1010,7 @@ fn assert_real_node_reorg(store: &mut StateStore, ids: &[[u8; 32]], chain: Arc<C
     // Roll the node back to height 1 and re-derive 2..=3 with new nonces, so
     // height 1 is the common ancestor and the server's cloneable reader sees
     // the new chain without a restart.
-    store.rollback_to(1, None, None).unwrap();
+    store.rollback_to(1).unwrap();
     assert_eq!(store.height(), 1);
     let before_rollback = chain.requests().len();
     let report = syncer.sync_once().unwrap();

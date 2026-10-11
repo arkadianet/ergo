@@ -2,10 +2,9 @@
 //!
 //! One [`RescanCoordinator`] per wallet (the replacement for the node's
 //! former process-global rescan flags) is shared by `Arc` between the wallet
-//! engine, the chain-apply hook and the chain-rollback [`WalletRescanGuard`].
-//! It owns the rescan fence flags and the transition lock that serializes
-//! every multi-flag transition, so the engine, the hook and the guard always
-//! agree on whether a rescan is running, whether live wallet apply must be
+//! engine and its rollback [`WalletRescanGuard`]. It owns the rescan fence
+//! flags and the transition lock that serializes every multi-flag transition,
+//! so the engine and the guard always agree on whether a rescan is running, whether live wallet apply must be
 //! quiesced, and whether the wallet is failed closed.
 //!
 //! [`WalletEngine::prepare_rescan`] validates and claims a `/wallet/rescan`
@@ -50,8 +49,7 @@ pub enum BeginRescanError {
 ///
 /// Flag meanings (all `SeqCst`):
 ///
-/// - `in_progress`: set when a rescan starts; read by the chain-apply hook
-///   (`allow_non_contiguous_wallet_apply`) and by the command fences. Cleared
+/// - `in_progress`: set when a rescan starts; read by the command fences. Cleared
 ///   on normal completion; retained when rescan invalidation or outcome
 ///   persistence fails closed.
 /// - `cancel_requested`: set by rollback or shutdown while a rescan task is
@@ -305,17 +303,15 @@ impl RescanCoordinator {
 ///   true`, queued on the caller's write transaction) and fails closed ONLY
 ///   if a rescan task was actually running — a successful rollback without an
 ///   active rescan stays consistent with the rolled-back chain.
-/// - `force_invalidate`: called by `StateStore::rollback_to`'s failure
-///   branches (missing block section, block-section read error). Always
+/// - `force_invalidate`: for a rollback that cannot replay a block. Always
 ///   invalidates and fails closed.
 ///
 /// The flags are process-local, not persisted; the invalidation row is
 /// durable once the caller commits, and an operator-driven rescan completing
 /// successfully is the only path that clears it.
 ///
-/// Obtained from its [`WalletStateHook`](super::WalletStateHook)
-/// (`rescan_guard()` / `wiring()`), so it always shares the hook's — and so
-/// the engine's — coordinator.
+/// Obtained from [`RescanCoordinator::rescan_guard`], so it always shares its
+/// coordinator.
 #[derive(Debug, Clone)]
 pub struct WalletRescanGuard {
     coordinator: Arc<RescanCoordinator>,

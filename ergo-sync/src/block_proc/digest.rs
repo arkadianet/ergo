@@ -97,20 +97,7 @@ pub(super) fn process_block_digest(
     script_validation_checkpoint: Option<(u32, [u8; 32])>,
     reemission: Option<&ergo_validation::ReemissionRuleInputs>,
     perf: Option<&BlockPerfCounters>,
-    wallet_hook: Option<&dyn ergo_state::wallet::WalletApplyHook>,
 ) -> Result<ProcessedBlock, BlockProcessError> {
-    // The digest backend has no box arena, so it cannot drive a wallet
-    // scan. Mode 5 gates the wallet routes off, so the executor must
-    // never attach a hook here; a `Some` is a wiring bug, surfaced
-    // loudly rather than silently dropping updates.
-    if wallet_hook.is_some() {
-        return Err(BlockProcessError::State(
-            ergo_state::store::StateError::InvalidPrecondition {
-                what: "digest backend received a wallet hook; Mode 5 has no box arena to scan",
-            },
-        ));
-    }
-
     let t_total = Instant::now();
 
     // 1. Load and parse header.

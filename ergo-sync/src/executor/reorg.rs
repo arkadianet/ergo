@@ -361,7 +361,6 @@ impl SyncExecutor {
         store: &mut ergo_state::StateBackendKind,
         coordinator: &mut SyncCoordinator,
         _now: Instant,
-        wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) {
         // Mode 6 (headers-only) AND Mode 2 (mid-bootstrap)
         // defense-in-depth: even if a block section somehow landed
@@ -376,7 +375,7 @@ impl SyncExecutor {
         let mut hit_section_wait = false;
         let mut progressed = false;
         loop {
-            match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
+            match self.rollback_full_chain_to_best_header(store, coordinator) {
                 Ok(ReorgOutcome::Performed) => {
                     progressed = true;
                     continue;
@@ -463,7 +462,7 @@ impl SyncExecutor {
                 }
             };
             if parent_id != store.chain_state_meta().best_full_block_id {
-                match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
+                match self.rollback_full_chain_to_best_header(store, coordinator) {
                     Ok(ReorgOutcome::Performed) => {
                         progressed = true;
                         continue;
@@ -506,7 +505,6 @@ impl SyncExecutor {
                 self.script_validation_checkpoint,
                 self.reemission.as_ref(),
                 Some(&self.block_perf),
-                wallet_wiring.map(|w| w.hook),
             );
             match apply_result {
                 Ok(processed) => {
@@ -546,7 +544,7 @@ impl SyncExecutor {
                     | block_proc::BlockProcessError::DigestOutOfOrder { .. },
                 ) => {
                     guard.failure();
-                    match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
+                    match self.rollback_full_chain_to_best_header(store, coordinator) {
                         Ok(ReorgOutcome::Performed) => {
                             progressed = true;
                             continue;
@@ -855,7 +853,6 @@ impl SyncExecutor {
         &mut self,
         store: &mut ergo_state::StateBackendKind,
         coordinator: &mut SyncCoordinator,
-        wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) -> StorageResult<ReorgOutcome> {
         if !self.reorg_blocks.is_empty() {
             return Ok(ReorgOutcome::NotNeeded);
@@ -928,17 +925,7 @@ impl SyncExecutor {
         // `state_rollback_failed` event but reporting them here too
         // gives operators the reorg-level context (old_id, fork_id,
         // depth) the state event doesn't carry.
-        // M5 atomic rollback: wallet hook + rescan guard threaded
-        // from the node level so wallet tables roll back inside the
-        // same redb write_txn as chain state. Without this, a reorg
-        // would leave wallet state on the abandoned branch — the
-        // pre-M5 gap that the rescan-on-restart path covered. The
-        // hook is `None` for tests and library callers that don't
-        // manage wallet state; the rescan guard is `None` whenever
-        // there's no rescan-in-progress to abort.
-        let wallet_hook_arg = wallet_wiring.map(|w| w.hook);
-        let rescan_guard_arg = wallet_wiring.map(|w| w.rescan_guard);
-        if let Err(e) = store.rollback_to(fork_height, wallet_hook_arg, rescan_guard_arg) {
+        if let Err(e) = store.rollback_to(fork_height) {
             warn!(
                 event = "full_block_reorg_failed",
                 old_height,

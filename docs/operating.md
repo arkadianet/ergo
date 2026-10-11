@@ -105,8 +105,8 @@ Notes on the modes that boot today:
   treating the bootstrapped UTXO state as authoritative, cross-check the
   installed root against a known-good reference manifest. Set a
   `[chain] checkpoint` (below) to anchor the install.
-- **Mode 6** never requests block sections, force-disables the mempool, and
-  does not run the wallet apply hook. `blocks_to_keep` must be exactly `0`
+- **Mode 6** never requests block sections and force-disables the mempool.
+  `blocks_to_keep` must be exactly `0`
   for this combo.
 
 Config consistency is enforced at load time, mirroring four of the Scala
@@ -271,17 +271,18 @@ or the top-level `data_dir` key. The node creates the following under it:
 
 | Path | Holds | When present |
 |---|---|---|
-| `state.redb` | Consensus state: AVL+ UTXO tree, undo log, chain index, state meta, headers, block sections, voted params, wallet tables — the load-bearing DB | Always |
+| `state.redb` | Consensus state: AVL+ UTXO tree, undo log, chain index, state meta, headers, block sections, voted params (plus any wallet tables an earlier release left) — the load-bearing DB | Always |
 | `peers.redb` | Peer address book (known peers + bans); independent of the consensus DB | Always |
-| `wallet/` | Encrypted (AES-GCM) wallet secret storage | When the wallet is initialized |
+| `wallet/` | Encrypted wallet secret storage an earlier release left; the node never opens it | Until `ergo-node wallet-legacy-purge --remove-keystore` |
+| `wallet-handoff/` | Verified copy of that legacy wallet for `ergo-walletd adopt` ([wallet setup](wallet-setup.md)) | From the first start with a legacy wallet until it is adopted |
 | `indexer.redb` | Extra-index (address / token / template) DB | Only when `[indexer] enabled = true` |
 | `webhooks.redb` | Private webhook registrations, signing secrets, delivery history, pending retries and bounded realtime replay | When the API listener is enabled |
 | `logs/` (or the configured `[logging.file].dir`) | Rotated log files | Only when `[logging.file]` is configured |
 | `ergo-node.toml` | Config file, when you keep it in the data dir | Operator-placed |
 
-With `[wallet] mode = "external"`, the node does not open or create the
-`wallet/` secret directory, does not require wallet tables in `state.redb`, and
-returns `410 wallet_moved` for wallet-owned routes.
+The node hosts no wallet: it does not open or create the `wallet/` secret
+directory, writes no wallet tables, and returns `410 wallet_moved` with
+`[wallet] daemon_address` for wallet-owned routes.
 
 Each redb file is updated under its own transactions; the consensus state DB
 applies every block under a single atomic commit (undo log + AVL mutations +
@@ -351,7 +352,7 @@ binary and start with the same configuration. A large archival database can
 take a long time to copy and verify; progress reports the path, file size,
 elapsed time, copy bytes, verification tables and rows every five seconds.
 
-The inventory is `state.redb` (UTXO/digest and all embedded wallet tables),
+The inventory is `state.redb` (UTXO/digest and any legacy wallet tables),
 `peers.redb`, `webhooks.redb`, and `[indexer] db_filename` (default
 `indexer.redb`). Encrypted wallet secrets, the private mining queue, mining
 policy/history and maintenance journals are files/JSON, not separate redb

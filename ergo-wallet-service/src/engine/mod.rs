@@ -20,8 +20,7 @@
 //! - [`submit`] — [`TxSubmitter`]: async submission with a typed
 //!   [`TxSubmitError`].
 //! - [`rescan`] — [`RescanCoordinator`]: per-wallet rescan fence flags and
-//!   transition lock, shared with the chain-apply [`WalletStateHook`] and its
-//!   rollback [`WalletRescanGuard`].
+//!   transition lock, and its rollback [`WalletRescanGuard`].
 //! - [`config`] — [`WalletEngineConfig`]: network, operator flags, EIP-27
 //!   rules and admission limits.
 //!
@@ -47,7 +46,6 @@
 //!   unlock-time key derivation ([`WalletBootService`]).
 //! - `scan` — the `/scan/*` registry, tracked-box reads and writes, and the
 //!   rescan scan matcher.
-//! - `hook` — [`WalletStateHook`], the chain-apply hook.
 
 use std::sync::Arc;
 
@@ -64,7 +62,6 @@ pub mod chain;
 pub mod config;
 mod dto;
 mod hints_codec;
-mod hook;
 pub mod jobs;
 mod keys;
 pub mod mempool;
@@ -84,7 +81,6 @@ pub use chain::{
     map_chain_error, ChainAccessError, SigningView, StoreCursorChain, WalletChainAccess,
 };
 pub use config::WalletEngineConfig;
-pub use hook::WalletStateHook;
 pub use keys::WalletBootService;
 pub use mempool::{MempoolOverlay, NoopMempoolOverlay};
 pub use nonce_custody::{NonceCustody, NONCE_HANDLE_PREFIX};
@@ -97,7 +93,7 @@ pub use submit::{map_submit_error, TxSubmitError, TxSubmitter};
 pub struct WalletEngineParts {
     /// Encrypted seed storage (locked / unlocked master key).
     pub storage: Arc<RwLock<SecretStorage>>,
-    /// In-memory wallet projection, shared with the chain-apply hook.
+    /// In-memory wallet projection.
     pub state: Arc<RwLock<WalletState>>,
     /// The persistent wallet store.
     pub store: Arc<dyn WalletStore>,
@@ -111,7 +107,7 @@ pub struct WalletEngineParts {
     /// Runtime-backed reads and rescans when present; the store directly
     /// otherwise.
     pub service: Option<Arc<WalletService>>,
-    /// The wallet's rescan coordinator, shared with the chain-apply hook.
+    /// The wallet's rescan coordinator.
     pub rescan: Arc<RescanCoordinator>,
 }
 
