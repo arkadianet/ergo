@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ergo_primitives::cost::{CostAccumulator, JitCost};
+use ergo_primitives::digest::Digest32;
 use ergo_validation::{TxValidationCtx, TxValidationRules};
 use tracing::warn;
 
@@ -469,6 +470,23 @@ pub(crate) fn check_capturing_held<V: Validator>(
         let closure = cx
             .pool
             .descendant_closure(&conflicts, cx.config.max_family_depth);
+        // A replacement may not spend an output of a tx it removes: that box
+        // would exist nowhere once the commit runs, leaving an entry the
+        // pool can never mine.
+        let removed_outputs: std::collections::HashSet<&Digest32> =
+            closure.iter().flat_map(|e| e.outputs.iter()).collect();
+        if validated
+            .input_box_ids
+            .iter()
+            .any(|input| removed_outputs.contains(input))
+        {
+            return (
+                CheckOutcome::Rejected {
+                    reason: RejectReason::UnresolvedInput,
+                },
+                actions,
+            );
+        }
         // Replace only when the new tx outranks every conflict (each weight
         // already carries its family credit) and pays more in absolute fee
         // than everything it removes.
@@ -781,10 +799,21 @@ fn apply_commit(
         .iter()
         .map(|id| (*id, pool.get(id).map(|e| e.weight).unwrap_or(0)))
         .collect();
+    let mut removed_outputs: std::collections::HashSet<Digest32> = std::collections::HashSet::new();
     for id in replaced_ids {
         for e in pool.remove_with_descendants_debiting(id, config.max_family_depth, bounds) {
+            removed_outputs.extend(e.outputs.iter().copied());
             removed_for_actions.push(e.tx_id);
         }
+    }
+    // Backstop for `check`: never seat a tx whose input was created by a tx
+    // this commit just removed (on the staged path the clone is discarded).
+    if validated
+        .input_box_ids
+        .iter()
+        .any(|input| removed_outputs.contains(input))
+    {
+        return Err(RejectReason::UnresolvedInput);
     }
 
     // 15b — compute parents_in_pool now that loser removals are done.

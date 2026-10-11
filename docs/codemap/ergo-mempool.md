@@ -66,9 +66,12 @@ staging, and reorg maintenance. Consensus validation is delegated to
   budget refusal preserves held ancestors and reports the submitter's own budget
   state (an unresolved input when only an ancestor's source is exhausted).
   Demoted-source exemption is explicit.
-- Replacement uses weight rather than only absolute fee. Package replacement
-  additionally compares aggregate fee and weight against its measured conflict
-  closure. Evicting admission changes are staged and adopted only on success.
+- A single-tx replacement must outweigh every conflict and pay more absolute
+  fee than the conflicts plus their in-pool descendants. Package replacement
+  compares aggregate fee and weight against its measured conflict closure.
+  Neither may spend an output of a tx it removes. Evicting admission changes
+  are staged and adopted only on success. Each validation attempt charges the
+  admission budgets at least a fixed minimum cost.
 - Confirming a parent keeps its children. Evicting a parent removes descendants
   under a node cap, retaining unfinished work in the committed pool. Maintenance
   ticks continue the frontier under the cleanup budget even between blocks;

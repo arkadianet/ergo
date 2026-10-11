@@ -2545,6 +2545,103 @@ fn validated(tx: u8, inputs: &[u8], outputs: &[u8], fee: u64) -> Validated {
 }
 
 #[test]
+fn replacement_spending_an_output_of_the_tx_it_replaces_is_rejected() {
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    // A spends i1 (0xA0) and creates o (0xB0).
+    let a = plan_ok(b"tx_a", validated(10, &[0xA0], &[0xB0], 2_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_a",
+        TxSource::Api,
+        &a,
+    );
+    assert!(matches!(out, AdmissionOutcome::Admitted { .. }));
+    // R spends i1 (conflicts with A) and o (A's own output), at a much
+    // higher fee. Replacing A would leave o nowhere.
+    let r = plan_ok(b"tx_r", validated(11, &[0xA0, 0xB0], &[0xC0], 50_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_r",
+        TxSource::Peer(peer()),
+        &r,
+    );
+    assert!(
+        matches!(
+            out,
+            AdmissionOutcome::Rejected {
+                reason: RejectReason::UnresolvedInput
+            }
+        ),
+        "{out:?}"
+    );
+    assert!(pool.contains(&id(10)), "A stays pooled");
+    assert!(!pool.contains(&id(11)));
+    pool.check_invariants();
+}
+
+#[test]
+fn replacement_spending_an_output_of_a_removed_descendant_is_rejected() {
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    let a = plan_ok(b"tx_a", validated(10, &[0xA0], &[0xB0], 2_000_000));
+    admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_a",
+        TxSource::Api,
+        &a,
+    );
+    // D spends A's output and creates 0xD0.
+    let d = plan_ok(b"tx_d", validated(12, &[0xB0], &[0xD0], 2_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_d",
+        TxSource::Api,
+        &d,
+    );
+    assert!(matches!(out, AdmissionOutcome::Admitted { .. }));
+    // R conflicts with A and spends D's output: replacing A removes D too.
+    let r = plan_ok(b"tx_r", validated(11, &[0xA0, 0xD0], &[0xC0], 90_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_r",
+        TxSource::Peer(peer()),
+        &r,
+    );
+    assert!(
+        matches!(
+            out,
+            AdmissionOutcome::Rejected {
+                reason: RejectReason::UnresolvedInput
+            }
+        ),
+        "{out:?}"
+    );
+    assert!(pool.contains(&id(10)) && pool.contains(&id(12)));
+    pool.check_invariants();
+}
+
+#[test]
 fn replacement_must_pay_more_than_the_sum_of_what_it_removes() {
     let (mut pool, mut b, mut inv, mut unr) = fresh();
     let cfg = default_config();

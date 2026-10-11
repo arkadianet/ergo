@@ -1241,8 +1241,10 @@ impl Mempool {
             let mut inc_cost: u64 = 0;
             let mut inc_seen: HashSet<TxId> = HashSet::new();
             let mut removed_incumbents: Vec<TxId> = Vec::new();
+            let mut removed_outputs: HashSet<ergo_primitives::digest::Digest32> = HashSet::new();
             for c in &conflicts {
                 for e in staged.remove_with_descendants_debiting(c, max_depth, bounds) {
+                    removed_outputs.extend(e.outputs.iter().copied());
                     if inc_seen.insert(e.tx_id) {
                         inc_fee = inc_fee.saturating_add(e.fee);
                         inc_size += e.size_bytes as usize;
@@ -1261,6 +1263,15 @@ impl Mempool {
             // aggregate absolute fee (the anti-pinning teeth). BOTH required.
             if !(pkg_weight > inc_weight && pkg_fee > inc_fee) {
                 return None; // clone discarded — live pool untouched
+            }
+            // No member may spend an output of a tx the package removes: that
+            // box would exist nowhere after the swap.
+            if members.iter().any(|m| {
+                m.input_box_ids
+                    .iter()
+                    .any(|input| removed_outputs.contains(input))
+            }) {
+                return None;
             }
             // Accepted: the closure is already removed from `staged`.
             evicted = removed_incumbents;
