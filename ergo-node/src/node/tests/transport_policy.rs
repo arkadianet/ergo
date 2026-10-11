@@ -145,18 +145,17 @@ fn byte_throttle_over_cap_modifier_frame_admitted_without_penalty() {
 
     // Solicit it first, so the delivery below is one we actually asked this
     // peer for — the case the byte axis must never drop.
-    let inv = message::serialize_inv(&InvData {
-        type_id: ModifierTypeId::ADProofs.as_byte(),
-        ids: vec![section_id],
-    })
-    .expect("serialize inv");
-    let requested = handle_message(&mut state, peer, message::CODE_INV, &inv, now);
-    assert!(
-        requested.iter().any(|a| matches!(
-            a,
-            Action::SendToPeer { code, .. } if *code == message::CODE_REQUEST_MODIFIER
-        )),
-        "the section must actually be requested for this test to mean anything: {requested:?}",
+    // (The synthetic section has no stored header, so an Inv would not be
+    // turned into a request; register the request directly.)
+    assert_eq!(
+        state.coordinator.delivery_mut().request(
+            peer,
+            ModifierTypeId::ADProofs.as_byte(),
+            &[section_id],
+            now
+        ),
+        vec![section_id],
+        "the section must actually be requested for this test to mean anything",
     );
 
     saturate_byte_window(&mut state, peer, now);
@@ -190,12 +189,12 @@ fn byte_throttle_over_cap_replayed_modifier_frame_drops_and_penalizes() {
 
     // Request it, then deliver it once under the cap so it lands in the
     // tracker's received set.
-    let inv = message::serialize_inv(&InvData {
-        type_id: ModifierTypeId::ADProofs.as_byte(),
-        ids: vec![section_id],
-    })
-    .expect("serialize inv");
-    let _ = handle_message(&mut state, peer, message::CODE_INV, &inv, now);
+    state.coordinator.delivery_mut().request(
+        peer,
+        ModifierTypeId::ADProofs.as_byte(),
+        &[section_id],
+        now,
+    );
     let payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
         type_id: ModifierTypeId::ADProofs.as_byte(),
         modifiers: vec![(section_id, section_bytes)],
@@ -262,12 +261,12 @@ fn byte_throttle_over_cap_modifier_frame_still_charged_to_the_window() {
     let budget = state.throttle.limits().max_bytes_per_window;
     let (section_id, section_bytes) = canonical_ad_proofs_section(4096);
 
-    let inv = message::serialize_inv(&InvData {
-        type_id: ModifierTypeId::ADProofs.as_byte(),
-        ids: vec![section_id],
-    })
-    .expect("serialize inv");
-    let _ = handle_message(&mut state, peer, message::CODE_INV, &inv, now);
+    state.coordinator.delivery_mut().request(
+        peer,
+        ModifierTypeId::ADProofs.as_byte(),
+        &[section_id],
+        now,
+    );
 
     // Leave a sliver of headroom: the 4 KiB delivery below is over-cap (and so
     // takes the exempt path), but a 1-byte probe fits UNLESS that delivery was
