@@ -277,14 +277,6 @@ pub(crate) struct PersistJob {
     /// is an epoch start). Computed in the sync layer (block_proc)
     /// before the job is queued.
     pub voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
-    /// Owned wallet-apply payload (M5 final slice). When `Some`, the
-    /// worker applies the wallet writes inside the same redb
-    /// write_txn that commits the chain mutation — chain + wallet
-    /// atomic on the pipeline path too. Bundled as owned data so it
-    /// crosses the worker-thread boundary without lifetime or
-    /// Send/Sync friction. `None` when no wallet hook is wired (no-
-    /// wallet deployments, tests).
-    pub wallet_payload: Option<crate::store::WalletApplyPayload>,
 }
 
 #[derive(Clone, Copy)]
@@ -434,11 +426,6 @@ impl PersistBatchError {
             source: Some(Box::new(source)),
             observed: false,
         }
-    }
-
-    fn with_message(mut self, message: String) -> Self {
-        self.message = message;
-        self
     }
 
     fn report_if_needed(&self, context: PersistFailureContext<'_>) {
@@ -917,7 +904,6 @@ impl PersistPipeline {
         write_txn
             .set_durability(durability)
             .observe_persist_error(failure_context, "background_persist_set_durability")?;
-        let mut wallet_store = crate::wallet::RedbWalletStore::attach_write_transaction(&write_txn);
 
         // 1. AVL_NODES — apply in job order so later blocks overwrite
         //    earlier writes on the same node id (redb insert is upsert).
@@ -1262,35 +1248,6 @@ impl PersistPipeline {
             }
         }
 
-        // 9. WALLET — apply each job's wallet payload inside this
-        //    batch's write_txn (M5 final-slice atomicity). Chain +
-        //    wallet now commit together on the pipeline path too,
-        //    matching the synchronous-path guarantee from
-        //    `persist_apply`. Maturity promotion at each height is
-        //    part of the same atomic unit. A failure here aborts
-        //    the entire batch via the `?` propagation (redb txn
-        //    dropped without commit).
-        //
-        //    Per-job ordering matters: wallet apply at height N
-        //    must observe inputs from heights <N as already-spent,
-        //    so the loop runs the payloads in batch order — same
-        //    order chain mutations were applied above.
-        for job in &jobs {
-            if let Some(payload) = &job.wallet_payload {
-                crate::wallet::WalletWrite::apply_block(
-                    &mut wallet_store,
-                    job.height,
-                    &job.header_id,
-                    payload,
-                )
-                .map_err(|error| {
-                    let message = format!("wallet store apply at h={}: {error}", job.height);
-                    observe_persist_error(failure_context, "background_persist_wallet_store", error)
-                        .with_message(message)
-                })?;
-            }
-        }
-
         let commit_start = std::time::Instant::now();
         let write_ms =
             commit_start.duration_since(batch_start).as_secs_f64() * 1000.0 - writer_wait_ms;
@@ -1378,7 +1335,6 @@ mod tests {
             prune_below: None,
             parent_header_id: [0u8; 32],
             voted_params_row: None,
-            wallet_payload: None,
         }
     }
 
@@ -1468,40 +1424,6 @@ mod tests {
         assert!(chain.get(3).unwrap().is_none());
         assert!(chain.get(4).unwrap().is_none());
         assert!(chain.get(2).unwrap().is_some());
-    }
-
-    /// Build a `PersistJob` carrying a wallet payload with one
-    /// tracked output. Used by the M5 atomic-pipeline test.
-    fn job_with_tracked_output(
-        height: u32,
-        tracked_tree_bytes: Vec<u8>,
-        output_box_id: [u8; 32],
-        output_value: u64,
-    ) -> PersistJob {
-        let mut j = minimal_job(height);
-        let mut trees = std::collections::BTreeSet::new();
-        trees.insert(tracked_tree_bytes.clone());
-        let tx = crate::store::OwnedBlockTxData {
-            tx_id: [height as u8; 32],
-            inputs: Vec::new(),
-            outputs: vec![crate::store::OwnedBlockOutput {
-                box_id: output_box_id,
-                output_index: 0,
-                ergo_tree_bytes: tracked_tree_bytes,
-                value: output_value,
-                assets: Vec::new(),
-                miner_reward_pubkey: None,
-                box_bytes: Vec::new(),
-            }],
-        };
-        j.wallet_payload = Some(crate::store::WalletApplyPayload {
-            tracked_p2pk_trees: trees,
-            cached_pubkeys: std::collections::BTreeMap::new(),
-            block_txs_owned: vec![tx],
-            scan_matches: Vec::new(),
-            has_registered_scans: false,
-        });
-        j
     }
 
     fn fresh_pipeline(queue_depth: usize) -> (tempfile::TempDir, PersistPipeline) {
@@ -1813,48 +1735,6 @@ mod tests {
             s.committed_count, 4,
             "watch should reflect 4 committed jobs, got {}",
             s.committed_count
-        );
-    }
-
-    /// M5 final-slice atomic-pipeline test: a `PersistJob` carrying
-    /// `Some(wallet_payload)` lands wallet writes inside the same
-    /// redb write_txn as chain mutations. The test sends a job
-    /// with one tracked output, flushes, then opens the database
-    /// and reads `WALLET_BOXES` directly to assert the entry
-    /// committed atomically with the chain batch.
-    ///
-    /// Forcing function: if the worker dropped the payload (the
-    /// pre-M5-final-slice behavior), `WALLET_BOXES` would be
-    /// empty after flush. The assertion catches that regression
-    /// without needing fixture-heavy CheckedBlock construction.
-    #[test]
-    fn worker_applies_wallet_payload_inside_batch_txn() {
-        use crate::wallet::tables::WALLET_BOXES;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("persist.redb");
-        let db = Arc::new(Database::create(&path).unwrap());
-        let p = PersistPipeline::new(Arc::clone(&db), path.clone(), 4, 1024, -1, None);
-
-        let tracked_tree = vec![0x00, 0x08, 0xCDu8, 0x02, 0xAA, 0xBB];
-        let box_id = [0xA1u8; 32];
-        let job = job_with_tracked_output(1, tracked_tree.clone(), box_id, 5_000_000_000);
-
-        p.send(job).expect("send job");
-        assert!(p.flush().is_none(), "flush succeeds, batch committed");
-        drop(p);
-
-        // Read WALLET_BOXES directly via a fresh read txn — the
-        // worker's batch must have committed the wallet entry
-        // atomically with the chain mutation.
-        let read_txn = db.begin_read().unwrap();
-        let tbl = read_txn
-            .open_table(WALLET_BOXES)
-            .expect("wallet table exists");
-        let entry = tbl.get(box_id).expect("read box_id").map(|g| g.value());
-        assert!(
-            entry.is_some(),
-            "WALLET_BOXES must contain the tracked output box_id after pipeline flush — \
-             chain + wallet committed together inside the batch write_txn",
         );
     }
 

@@ -3,30 +3,45 @@
 //! No transaction history or historical inclusion height is invented.
 
 use super::tables::*;
-use super::types::{BoxProvenance, BoxStatus, WalletBox};
+#[cfg(test)]
+use super::types::{BoxProvenance, BoxStatus};
 use crate::maintenance::{inspect_tip, visit_utxos, MaintenanceTip};
 use crate::store::StateError;
-use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, ReadTransaction, ReadableDatabase};
+#[cfg(test)]
+use redb::{ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-const JOB: TableDefinition<(), Vec<u8>> = TableDefinition::new("wallet_utxo_discovery_job");
-const STAGING: TableDefinition<[u8; 32], Vec<u8>> =
-    TableDefinition::new("wallet_utxo_discovery_staging");
+#[cfg(test)]
+use ergo_wallet_service::wallet::utxo_scan::invalidate_below_anchor;
+pub use ergo_wallet_service::wallet::utxo_scan::DiscoveryCoverage;
+use ergo_wallet_service::wallet::utxo_scan::{DISCOVERY_JOB as JOB, DISCOVERY_STAGING as STAGING};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiscoveryCoverage {
-    pub version: u32,
-    pub anchor_height: u32,
-    pub anchor_header_id: String,
-    pub state_root: String,
-    /// Historical transactions before this height have not been reconstructed.
-    pub history_complete: bool,
-    pub matched_boxes: u64,
-    /// Public keys included in the verified UTXO traversal. Older coverage
-    /// without this field needs discovery again before claiming complete funds.
-    #[serde(default)]
-    pub covered_pubkeys: Vec<String>,
+fn wallet_error(error: super::WalletStoreError) -> StateError {
+    match error {
+        super::WalletStoreError::Decode(reason) => corrupt(reason),
+        error => error.into(),
+    }
+}
+
+pub fn coverage(txn: &ReadTransaction) -> Result<Option<DiscoveryCoverage>, StateError> {
+    ergo_wallet_service::wallet::utxo_scan::coverage(txn).map_err(wallet_error)
+}
+
+pub fn uncovered_pubkeys(
+    txn: &ReadTransaction,
+    meta: &DiscoveryCoverage,
+) -> Result<Vec<String>, StateError> {
+    ergo_wallet_service::wallet::utxo_scan::uncovered_pubkeys(txn, meta).map_err(wallet_error)
+}
+
+pub fn requires_discovery(txn: &ReadTransaction) -> Result<bool, StateError> {
+    ergo_wallet_service::wallet::utxo_scan::requires_discovery(txn).map_err(wallet_error)
+}
+
+pub fn inclusion_height_known(txn: &ReadTransaction, id: [u8; 32]) -> Result<bool, StateError> {
+    ergo_wallet_service::wallet::utxo_scan::inclusion_height_known(txn, id).map_err(wallet_error)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,48 +59,6 @@ fn corrupt(reason: impl Into<String>) -> StateError {
         table: "wallet UTXO discovery",
         key: String::new(),
         reason: reason.into(),
-    }
-}
-
-pub fn coverage(txn: &ReadTransaction) -> Result<Option<DiscoveryCoverage>, StateError> {
-    match txn.open_table(WALLET_UTXO_DISCOVERY) {
-        Ok(table) => table
-            .get(())?
-            .map(|v| serde_json::from_slice(&v.value()).map_err(|e| corrupt(e.to_string())))
-            .transpose(),
-        Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-pub fn uncovered_pubkeys(
-    txn: &ReadTransaction,
-    meta: &DiscoveryCoverage,
-) -> Result<Vec<String>, StateError> {
-    let covered: BTreeSet<_> = meta.covered_pubkeys.iter().collect();
-    let current: BTreeSet<_> = super::reader::WalletReader::new(txn)
-        .tracked_pubkeys_with_paths()?
-        .into_iter()
-        .map(|(_, pk, _)| hex::encode(pk))
-        .collect();
-    Ok(current
-        .into_iter()
-        .filter(|pk| !covered.contains(pk))
-        .collect())
-}
-
-pub fn requires_discovery(txn: &ReadTransaction) -> Result<bool, StateError> {
-    match coverage(txn)? {
-        Some(meta) => Ok(!uncovered_pubkeys(txn, &meta)?.is_empty()),
-        None => Ok(false),
-    }
-}
-
-pub fn inclusion_height_known(txn: &ReadTransaction, id: [u8; 32]) -> Result<bool, StateError> {
-    match txn.open_table(WALLET_DISCOVERED_BOXES) {
-        Ok(table) => Ok(table.get(id)?.is_none()),
-        Err(redb::TableError::TableDoesNotExist(_)) => Ok(true),
-        Err(e) => Err(e.into()),
     }
 }
 
@@ -140,13 +113,25 @@ fn checkpoint(
 /// may be resumed only at the identical root/tip with identical tracked keys.
 pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, StateError> {
     let snapshot = db.begin_read()?;
-    let tip = inspect_tip(&snapshot)?;
+    discover_into(&snapshot, db, restart)
+}
+
+/// Verify the stopped node's committed UTXO snapshot while writing discovery
+/// staging and wallet projections only into the independently locked target.
+/// The caller validates target ownership/network before entering this adapter.
+pub fn discover_into(
+    snapshot: &ReadTransaction,
+    db: &Database,
+    restart: bool,
+) -> Result<DiscoveryCoverage, StateError> {
+    let wallet_snapshot = db.begin_read()?;
+    let tip = inspect_tip(snapshot)?;
     if tip.state_type.as_deref().is_some_and(|kind| kind != "utxo") || tip.state_root.is_none() {
         return Err(StateError::WalletDiscoveryUnavailable(
             "discovery requires an initialized UTXO backend".into(),
         ));
     }
-    let pubkeys: BTreeSet<Vec<u8>> = super::reader::WalletReader::new(&snapshot)
+    let pubkeys: BTreeSet<Vec<u8>> = super::reader::WalletReader::new(&wallet_snapshot)
         .tracked_pubkeys_with_paths()?
         .into_iter()
         .map(|(_, pk, _)| pk.to_vec())
@@ -154,7 +139,7 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
     if pubkeys.is_empty() {
         return Err(StateError::WalletDiscoveryUnavailable("no persisted tracked keys; initialize/restore and unlock the wallet before stopping the node".into()));
     }
-    match snapshot.open_table(WALLET_SCANS) {
+    match wallet_snapshot.open_table(WALLET_SCANS) {
         Ok(scans) => {
             use redb::ReadableTableMetadata;
             if !scans.is_empty()? {
@@ -164,13 +149,13 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
         Err(redb::TableError::TableDoesNotExist(_)) => {}
         Err(e) => return Err(e.into()),
     }
-    if !super::mining_jobs::pending_jobs(&snapshot)?.is_empty() {
+    if !super::mining_jobs::pending_jobs(&wallet_snapshot)?.is_empty() {
         return Err(StateError::WalletDiscoveryUnavailable(
             "non-terminal wallet mining jobs require wallet history; finish or cancel them before discovery".into(),
         ));
     }
     let key_strings: Vec<_> = pubkeys.iter().map(hex::encode).collect();
-    let previous = match snapshot.open_table(JOB) {
+    let previous = match wallet_snapshot.open_table(JOB) {
         Ok(table) => table
             .get(())?
             .map(|v| serde_json::from_slice::<Job>(&v.value()).map_err(|e| corrupt(e.to_string())))
@@ -201,17 +186,17 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
     };
     let resume_key = job.last_key;
     let resumed_staging = if resume_key.is_some() {
-        Some(snapshot.open_table(STAGING)?)
+        Some(wallet_snapshot.open_table(STAGING)?)
     } else {
         None
     };
     let mut pending = Vec::new();
     let mut pending_bytes = 0usize;
     let mut verified_matches = 0u64;
-    let verified = visit_utxos(&snapshot, |id, bytes, ergo_box| {
+    let verified = visit_utxos(snapshot, |id, bytes, ergo_box| {
         let tree = ergo_box.candidate.ergo_tree_bytes();
         let owned = tree.len() == 36 && tree[..3] == [0, 8, 0xcd] && pubkeys.contains(&tree[3..]);
-        let reward = super::miner_reward::extract_miner_reward_pubkey(tree)
+        let reward = ergo_wallet::proving::miner_reward::extract_miner_reward_pubkey(tree)
             .is_some_and(|pk| pubkeys.contains(pk.as_slice()));
         if owned || reward {
             verified_matches += 1;
@@ -255,130 +240,8 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
         matched_boxes: job.matched,
         covered_pubkeys: job.pubkeys.clone(),
     };
-    let txn = crate::begin_write_qr(db)?;
-    {
-        let staged = txn.open_table(STAGING)?;
-        use redb::ReadableTableMetadata;
-        if staged.len()? != job.matched {
-            return Err(corrupt(
-                "checkpoint contains unexpected staged boxes; use --restart",
-            ));
-        }
-        let mut boxes = txn.open_table(WALLET_BOXES)?;
-        let mut bytes_table = txn.open_table(WALLET_BOX_BYTES)?;
-        let mut index = txn.open_table(WALLET_BOXES_BY_TX)?;
-        let mut unknown = txn.open_table(WALLET_DISCOVERED_BOXES)?;
-        boxes.retain(|_, _| false)?;
-        bytes_table.retain(|_, _| false)?;
-        index.retain(|_, _| false)?;
-        unknown.retain(|_, _| false)?;
-        txn.open_table(WALLET_TXS)?.retain(|_, _| false)?;
-        for entry in staged.iter()? {
-            let (id, bytes) = entry?;
-            let raw = bytes.value();
-            let mut reader = ergo_primitives::reader::VlqReader::new(&raw).trusted();
-            let b = ergo_ser::ergo_box::read_ergo_box(&mut reader)
-                .map_err(|e| corrupt(e.to_string()))?;
-            let reward =
-                super::miner_reward::extract_miner_reward_pubkey(b.candidate.ergo_tree_bytes())
-                    .is_some();
-            let matures_at = b
-                .candidate
-                .creation_height
-                .saturating_add(super::apply::REWARD_MATURITY_MAINNET);
-            let wb = WalletBox {
-                box_id: id.value(),
-                creation_tx_id: *b.transaction_id.as_bytes(),
-                creation_output_index: b.index,
-                // First observation, NOT a fabricated historical inclusion height.
-                creation_height: tip.height,
-                value: b.candidate.value,
-                assets: b
-                    .candidate
-                    .tokens
-                    .iter()
-                    .map(|t| (*t.token_id.as_bytes(), t.amount))
-                    .collect(),
-                status: if reward && matures_at > tip.height {
-                    BoxStatus::Immature { matures_at }
-                } else {
-                    BoxStatus::Confirmed
-                },
-                provenance: if reward {
-                    BoxProvenance::MinerReward
-                } else {
-                    BoxProvenance::Owned
-                },
-            };
-            boxes.insert(
-                wb.box_id,
-                bincode::serialize(&wb).map_err(|e| corrupt(e.to_string()))?,
-            )?;
-            bytes_table.insert(wb.box_id, raw)?;
-            index.insert(
-                box_by_tx_key(&wb.creation_tx_id, wb.creation_output_index),
-                wb.box_id,
-            )?;
-            unknown.insert(wb.box_id, b.candidate.creation_height)?;
-        }
-    }
-    txn.open_table(WALLET_SCAN_HEIGHT)?.insert((), tip.height)?;
-    let header_id: [u8; 32] = hex::decode(&tip.header_id)
-        .map_err(|e| corrupt(e.to_string()))?
-        .try_into()
-        .map_err(|_| corrupt("invalid anchor header ID"))?;
-    if tip.height > 0 {
-        txn.open_table(WALLET_SCAN_HEADER_ID)?
-            .insert((), header_id)?;
-    } else {
-        txn.open_table(WALLET_SCAN_HEADER_ID)?.remove(())?;
-    }
-    txn.open_table(WALLET_UTXO_DISCOVERY)?.insert(
-        (),
-        serde_json::to_vec(&result).map_err(|e| corrupt(e.to_string()))?,
-    )?;
-    txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), false)?;
-    txn.open_table(WALLET_RESCAN_STATE)?.insert(
-        (),
-        bincode::serialize(&super::store::RescanState::Idle).map_err(|e| corrupt(e.to_string()))?,
-    )?;
-    txn.open_table(STAGING)?.retain(|_, _| false)?;
-    txn.open_table(JOB)?.remove(())?;
-    txn.commit()?;
+    ergo_wallet_service::wallet::utxo_scan::publish_discovery(db, &result).map_err(wallet_error)?;
     Ok(result)
-}
-
-/// Rollback below the discovery anchor cannot reconstruct boxes already spent
-/// before that anchor. Invalidate rather than silently presenting partial funds.
-pub(crate) fn invalidate_below_anchor(
-    txn: &redb::WriteTransaction,
-    removed_height: u32,
-) -> Result<(), redb::Error> {
-    let table = txn.open_table(WALLET_UTXO_DISCOVERY)?;
-    if let Some(row) = table.get(())? {
-        let invalidate = match serde_json::from_slice::<DiscoveryCoverage>(&row.value()) {
-            Ok(meta) => removed_height <= meta.anchor_height,
-            Err(error) => {
-                tracing::warn!(%error, "unreadable wallet discovery coverage; invalidating wallet during rollback");
-                true
-            }
-        };
-        if invalidate {
-            txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn reward_creation_height(
-    txn: &redb::WriteTransaction,
-    id: [u8; 32],
-    fallback: u32,
-) -> Result<u32, redb::Error> {
-    Ok(txn
-        .open_table(WALLET_DISCOVERED_BOXES)?
-        .get(id)?
-        .map_or(fallback, |v| v.value()))
 }
 
 #[cfg(test)]

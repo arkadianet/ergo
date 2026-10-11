@@ -73,7 +73,6 @@ impl SyncExecutor {
         header_id: &[u8; 32],
         store: &mut ergo_state::StateBackendKind,
         coordinator: &mut SyncCoordinator,
-        wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) -> Vec<Action> {
         match store.get_header_meta(header_id) {
             Ok(Some(meta)) => match store.get_header_id_at_height(meta.height) {
@@ -100,7 +99,7 @@ impl SyncExecutor {
                 return Vec::new();
             }
         }
-        self.try_apply_next_blocks(store, coordinator, Instant::now(), wallet_wiring);
+        self.try_apply_next_blocks(store, coordinator, Instant::now());
         Vec::new()
     }
 

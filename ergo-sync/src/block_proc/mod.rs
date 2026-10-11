@@ -224,12 +224,6 @@ pub struct ProcessedBlock {
 /// of reading from store. Must be aligned to best_full_block (the parent
 /// of the block being processed). Pass None to fall back to store reads.
 ///
-/// `wallet_hook`: forwarded to the UTXO `apply_block` so wallet table
-/// writes land inside the same redb write_txn as chain mutations on the
-/// synchronous path (M5 atomic commit). The digest backend has no box
-/// arena to scan, so a non-`None` hook in digest mode is a wiring bug —
-/// the digest arm hard-errors rather than silently dropping it.
-///
 /// Dispatch is one match on the backend. The UTXO arm runs the original
 /// pipeline byte-for-byte (`process_block_utxo`); the digest arm runs the
 /// proof-backed validation pipeline (`process_block_digest`). Both share
@@ -243,7 +237,6 @@ pub fn process_block(
     script_validation_checkpoint: Option<(u32, [u8; 32])>,
     reemission: Option<&ergo_validation::ReemissionRuleInputs>,
     perf: Option<&BlockPerfCounters>,
-    wallet_hook: Option<&dyn ergo_state::wallet::WalletApplyHook>,
 ) -> Result<ProcessedBlock, BlockProcessError> {
     match store {
         ergo_state::StateBackendKind::Utxo(s) => process_block_utxo(
@@ -254,7 +247,6 @@ pub fn process_block(
             script_validation_checkpoint,
             reemission,
             perf,
-            wallet_hook,
         ),
         ergo_state::StateBackendKind::Digest(d) => process_block_digest(
             d,
@@ -263,7 +255,6 @@ pub fn process_block(
             script_validation_checkpoint,
             reemission,
             perf,
-            wallet_hook,
         ),
     }
 }

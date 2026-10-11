@@ -1730,7 +1730,6 @@ mod c2_bridge {
     use ergo_ser::modifier_id::{compute_section_id, TYPE_AD_PROOFS};
     use ergo_validation::block::CheckedBlock;
     use ergo_validation::header::CheckedHeader;
-    use std::collections::{BTreeMap, BTreeSet};
 
     // ----- helpers -----
 
@@ -1831,26 +1830,6 @@ mod c2_bridge {
         };
     }
 
-    struct NoopHook;
-    impl crate::wallet::WalletApplyHook for NoopHook {
-        fn tracked_p2pk_trees(&self) -> BTreeSet<Vec<u8>> {
-            BTreeSet::new()
-        }
-        fn cached_pubkeys(&self) -> BTreeMap<u64, [u8; 33]> {
-            BTreeMap::new()
-        }
-    }
-
-    struct NoopGuard;
-    impl crate::wallet::apply::RescanGuard for NoopGuard {
-        fn abort_in_progress(&self, _txn: &redb::WriteTransaction) -> Result<(), redb::Error> {
-            Ok(())
-        }
-        fn force_invalidate(&self, _txn: &redb::WriteTransaction) -> Result<(), redb::Error> {
-            Ok(())
-        }
-    }
-
     // ----- happy path (no-op transition: commit plumbing) -----
 
     #[test]
@@ -1872,7 +1851,7 @@ mod c2_bridge {
             )
             .expect("store ADProofs section");
 
-        BlockApply::apply_full_block(&mut store, &block, None, None).expect("apply_full_block");
+        BlockApply::apply_full_block(&mut store, &block, None).expect("apply_full_block");
 
         // A no-op transition keeps the root; only the full-block tip
         // advances. A successful return means apply_block_digest
@@ -1885,38 +1864,6 @@ mod c2_bridge {
     // ----- error paths -----
 
     #[test]
-    fn apply_full_block_rejects_wallet_hook() {
-        let tmp = tempdir().expect("tempdir");
-        let mut store = open_at(tmp.path());
-        let header = synth_block_header(1, [0u8; 32], [0u8; 33], [0u8; 32]);
-        let (_, block) = empty_block(header);
-        let hook = NoopHook;
-        let err = BlockApply::apply_full_block(&mut store, &block, None, Some(&hook))
-            .expect_err("wallet hook must be rejected");
-        assert!(
-            matches!(err, StateError::InvalidPrecondition { .. }),
-            "got {err:?}"
-        );
-        assert_eq!(store.height(), 0, "no state advance on rejection");
-    }
-
-    #[test]
-    fn rollback_rejects_wallet_hook_and_rescan_guard() {
-        let tmp = tempdir().expect("tempdir");
-        let mut store = open_at(tmp.path());
-        let hook = NoopHook;
-        let guard = NoopGuard;
-        assert!(matches!(
-            BlockApply::rollback_to(&mut store, 0, Some(&hook), None).expect_err("hook"),
-            StateError::InvalidPrecondition { .. }
-        ));
-        assert!(matches!(
-            BlockApply::rollback_to(&mut store, 0, None, Some(&guard)).expect_err("guard"),
-            StateError::InvalidPrecondition { .. }
-        ));
-    }
-
-    #[test]
     fn apply_full_block_wrong_height_is_out_of_order() {
         let tmp = tempdir().expect("tempdir");
         let mut store = open_at(tmp.path()); // tip at genesis height 0
@@ -1925,7 +1872,7 @@ mod c2_bridge {
                                              // preflight before any section/proof work.
         let header = synth_block_header(5, [0u8; 32], [0u8; 33], [0u8; 32]);
         let (_, block) = empty_block(header);
-        let err = BlockApply::apply_full_block(&mut store, &block, None, None)
+        let err = BlockApply::apply_full_block(&mut store, &block, None)
             .expect_err("out-of-order height must be rejected");
         assert!(
             matches!(
@@ -1952,7 +1899,7 @@ mod c2_bridge {
         let foreign_parent = synth_header_id(99);
         let header = synth_block_header(5, foreign_parent, [1u8; 33], [0xCDu8; 32]);
         let (header_id, block) = empty_block(header);
-        let err = BlockApply::apply_full_block(&mut store, &block, None, None)
+        let err = BlockApply::apply_full_block(&mut store, &block, None)
             .expect_err("non-tip parent must be rejected");
         assert!(
             matches!(err, StateError::DigestNonLinearParent { height: 5, .. }),
@@ -1979,8 +1926,8 @@ mod c2_bridge {
         // digest, is covered elsewhere by a real-corpus replay.)
         let header = synth_block_header(1, genesis_tip, [1u8; 33], [0xCDu8; 32]);
         let (_, block) = empty_block(header);
-        let err = BlockApply::apply_full_block(&mut store, &block, None, None)
-            .expect_err("missing section");
+        let err =
+            BlockApply::apply_full_block(&mut store, &block, None).expect_err("missing section");
         assert!(
             matches!(err, StateError::DigestAdProofsSectionMissing { .. }),
             "genesis-parent block must clear the linear gate, got {err:?}"
@@ -1995,7 +1942,7 @@ mod c2_bridge {
         let header = synth_block_header(5, synth_header_id(4), [1u8; 33], [0xCDu8; 32]);
         let (header_id, block) = empty_block(header);
         // No section stored.
-        let err = BlockApply::apply_full_block(&mut store, &block, None, None)
+        let err = BlockApply::apply_full_block(&mut store, &block, None)
             .expect_err("missing section must error");
         assert!(
             matches!(err, StateError::DigestAdProofsSectionMissing { .. }),
@@ -2023,7 +1970,7 @@ mod c2_bridge {
             .headers
             .store_block_section_typed(&section_id(header_id, ad_root), &bytes, TYPE_AD_PROOFS)
             .expect("store section");
-        let err = BlockApply::apply_full_block(&mut store, &block, None, None)
+        let err = BlockApply::apply_full_block(&mut store, &block, None)
             .expect_err("trailing bytes must error");
         assert!(
             matches!(
@@ -2052,7 +1999,7 @@ mod c2_bridge {
             .headers
             .store_block_section_typed(&section_id(header_id, ad_root), &bytes, TYPE_AD_PROOFS)
             .expect("store section");
-        let err = BlockApply::apply_full_block(&mut store, &block, None, None)
+        let err = BlockApply::apply_full_block(&mut store, &block, None)
             .expect_err("inner header-id mismatch must error");
         assert!(
             matches!(
@@ -2082,7 +2029,7 @@ mod c2_bridge {
             .headers
             .store_block_section_typed(&section_id(header_id, ad_root), &bytes, TYPE_AD_PROOFS)
             .expect("store section");
-        let err = BlockApply::apply_full_block(&mut store, &block, None, None)
+        let err = BlockApply::apply_full_block(&mut store, &block, None)
             .expect_err("bad ad_proofs_root must be rejected");
         assert!(
             matches!(err, StateError::DigestApplyRejected { .. }),

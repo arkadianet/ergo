@@ -452,17 +452,6 @@ pub enum StateError {
         #[source]
         source: ergo_validation::ActiveParamsError,
     },
-    /// Wallet apply / rollback hook failed while the chain and wallet
-    /// shared the same redb write transaction. `what` names the operation,
-    /// `height` is the block height, and `source` is the underlying store
-    /// error. A failure aborts the chain commit as well.
-    #[error("wallet {what} at h={height}: {source}")]
-    WalletApply {
-        what: &'static str,
-        height: u32,
-        #[source]
-        source: Box<redb::Error>,
-    },
     /// `voted_params` writer failed at a specific block height
     /// during reconcile / migrate / apply. The underlying typed
     /// error (`VotedParamsWriteError::Db` for the redb insert path,
@@ -480,27 +469,6 @@ pub enum StateError {
         height: u32,
         #[source]
         source: Box<crate::active_params::VotedParamsWriteError>,
-    },
-    /// Wallet apply path's `write_txn.commit()` failed with a
-    /// `redb::CommitError`. Separate variant from `WalletApply`
-    /// because commit returns a distinct error type; kept distinct
-    /// from the generic `CommitError` variant so the wallet-seam
-    /// classification (and the block `height`) survive at the type
-    /// level.
-    ///
-    /// Historical: emitted by the pre-M5-final-slice
-    /// `flush_chain_then_apply_wallet` path, which committed wallet
-    /// writes on a separate write_txn after the queued chain batch
-    /// drained. That path is gone now that the worker consumes the
-    /// wallet payload inside the batch's write_txn. The variant is
-    /// retained for the error-variants exhaustiveness test in
-    /// `tests/error_variants.rs` and as a stable wire-API element;
-    /// no live code emits it.
-    #[error("wallet commit at h={height}: {source}")]
-    WalletApplyCommit {
-        height: u32,
-        #[source]
-        source: Box<redb::CommitError>,
     },
     /// `prove_with_db(Some(anchor))` was called with a caller-supplied
     /// header id that does not exist in the canonical chain. The
@@ -607,6 +575,15 @@ pub enum StateError {
         /// The block header's actual `parent_id`.
         got: String,
     },
+}
+
+impl From<crate::wallet::WalletStoreError> for StateError {
+    fn from(e: crate::wallet::WalletStoreError) -> Self {
+        match e {
+            crate::wallet::WalletStoreError::Database(error) => StateError::from(*error),
+            crate::wallet::WalletStoreError::Decode(message) => StateError::Serialization(message),
+        }
+    }
 }
 
 impl From<redb::Error> for StateError {

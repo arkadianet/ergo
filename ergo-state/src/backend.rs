@@ -150,19 +150,10 @@ pub trait BlockApply {
         &mut self,
         block: &ergo_validation::block::CheckedBlock,
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
     ) -> Result<(), StateError>;
 
-    /// Roll committed state back to `target_height`. The digest backend
-    /// has no wallet hook or rescan guard; it rejects non-`None` values
-    /// as a hard error (an assert would no-op in release and silently
-    /// drop the arguments).
-    fn rollback_to(
-        &mut self,
-        target_height: u32,
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
-        rescan_guard: Option<&dyn crate::wallet::apply::RescanGuard>,
-    ) -> Result<(), StateError>;
+    /// Roll committed state back to `target_height`.
+    fn rollback_to(&mut self, target_height: u32) -> Result<(), StateError>;
 }
 
 /// Umbrella bound the executor binds against.
@@ -296,17 +287,11 @@ impl BlockApply for StateStore {
         &mut self,
         block: &ergo_validation::block::CheckedBlock,
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
     ) -> Result<(), StateError> {
-        StateStore::apply_block(self, block, voted_params_row, wallet_hook)
+        StateStore::apply_block(self, block, voted_params_row)
     }
-    fn rollback_to(
-        &mut self,
-        target_height: u32,
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
-        rescan_guard: Option<&dyn crate::wallet::apply::RescanGuard>,
-    ) -> Result<(), StateError> {
-        StateStore::rollback_to(self, target_height, wallet_hook, rescan_guard)
+    fn rollback_to(&mut self, target_height: u32) -> Result<(), StateError> {
+        StateStore::rollback_to(self, target_height)
     }
 }
 
@@ -608,27 +593,19 @@ impl BlockApply for StateBackendKind {
         &mut self,
         block: &ergo_validation::block::CheckedBlock,
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
     ) -> Result<(), StateError> {
         match self {
-            StateBackendKind::Utxo(s) => s.apply_full_block(block, voted_params_row, wallet_hook),
-            StateBackendKind::Digest(d) => d.apply_full_block(block, voted_params_row, wallet_hook),
+            StateBackendKind::Utxo(s) => s.apply_full_block(block, voted_params_row),
+            StateBackendKind::Digest(d) => d.apply_full_block(block, voted_params_row),
         }
     }
-    fn rollback_to(
-        &mut self,
-        target_height: u32,
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
-        rescan_guard: Option<&dyn crate::wallet::apply::RescanGuard>,
-    ) -> Result<(), StateError> {
+    fn rollback_to(&mut self, target_height: u32) -> Result<(), StateError> {
         match self {
             // `DigestStateStore` has an inherent `rollback_to(height)`
             // that shadows the trait method on a plain `d.rollback_to`
             // call, so name the trait explicitly here.
-            StateBackendKind::Utxo(s) => s.rollback_to(target_height, wallet_hook, rescan_guard),
-            StateBackendKind::Digest(d) => {
-                BlockApply::rollback_to(d, target_height, wallet_hook, rescan_guard)
-            }
+            StateBackendKind::Utxo(s) => StateStore::rollback_to(s, target_height),
+            StateBackendKind::Digest(d) => BlockApply::rollback_to(d, target_height),
         }
     }
 }

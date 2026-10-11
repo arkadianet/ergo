@@ -52,7 +52,7 @@ fn every_mainnet_reward_box_in_corpus_extracts_its_pubkey() {
         let tree = hex::decode(&v.reward_box.ergo_tree_hex)
             .unwrap_or_else(|e| panic!("height {h}: bad ergo_tree_hex: {e}"));
 
-        let pk = ergo_state::wallet::miner_reward::extract_miner_reward_pubkey(&tree)
+        let pk = ergo_wallet::proving::miner_reward::extract_miner_reward_pubkey(&tree)
             .unwrap_or_else(|| panic!("height {h}: canonical reward tree must extract a pubkey"));
 
         // The extracted pubkey is exactly the 33 bytes at offset [7..40] of

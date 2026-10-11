@@ -39,6 +39,14 @@ macro_rules! fixture_rows {
             b"box".as_slice()
         );
         $row!("wallet_scan_height", (), u32, (), 23);
+        $row!(
+            "wallet_applied_headers",
+            u64,
+            &[u8],
+            23,
+            [1u8; 32].as_slice()
+        );
+        $row!("wallet_applied_header_ids", [u8; 32], u64, [1; 32], 23);
         $row!("wallet_scan_header_id", (), [u8; 32], (), [1; 32]);
         $row!("wallet_boxes", [u8; 32], Vec<u8>, [2; 32], vec![3, 4]);
         $row!("wallet_boxes_by_tx", [u8; 34], [u8; 32], [5; 34], [2; 32]);
@@ -115,8 +123,8 @@ fn actual_v2_tables_upgrade_and_reopen_with_identical_typed_values() {
     assert_eq!(
         report,
         MigrationReport {
-            tables: 21,
-            rows: 21,
+            tables: 23,
+            rows: 23,
             upgraded: true
         }
     );

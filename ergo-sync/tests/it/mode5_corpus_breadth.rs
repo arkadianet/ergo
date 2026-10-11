@@ -201,7 +201,6 @@ fn apply(backend: &mut StateBackendKind, height: u32, row: &serde_json::Value) {
         None,
         None,
         None,
-        None,
     )
     .unwrap_or_else(|error| panic!("captured block {height} failed: {error}"));
     assert_eq!(processed.height, height);
@@ -222,7 +221,7 @@ fn replay(directory: &str) {
     for (&height, row) in &rows {
         apply(&mut backend, height, row);
     }
-    backend.rollback_to(from + 2, None, None).unwrap();
+    backend.rollback_to(from + 2).unwrap();
     let StateBackendKind::Digest(ref store) = backend else {
         unreachable!()
     };
@@ -283,7 +282,6 @@ fn mode5_scala_breadth_corrupted_proofs_preserve_committed_state() {
             &mut backend,
             &id,
             &ergo_validation::context::ProtocolParams::mainnet_default(),
-            None,
             None,
             None,
             None,
