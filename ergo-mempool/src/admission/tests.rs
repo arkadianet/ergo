@@ -2510,6 +2510,31 @@ fn plan_err(bytes: &[u8], err: ValidationErr, charge: u64) -> MockValidator {
 }
 
 #[test]
+fn a_validation_attempt_is_charged_at_least_the_minimum_cost() {
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    let before = b.global_consumed();
+    let v = plan_err(b"missing_input", ValidationErr::UnresolvedInput, 0);
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"missing_input",
+        TxSource::Peer(peer()),
+        &v,
+    );
+    assert!(matches!(
+        out,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::UnresolvedInput
+        }
+    ));
+    assert_eq!(b.global_consumed() - before, MIN_ACCOUNTED_COST);
+}
+
+#[test]
 fn proof_dependent_failure_is_cached_for_the_delivering_peer_only() {
     let (mut pool, mut b, mut inv, mut unr) = fresh();
     let cfg = default_config();

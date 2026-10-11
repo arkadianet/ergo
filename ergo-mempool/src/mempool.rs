@@ -1131,7 +1131,10 @@ impl Mempool {
         // drain exhaust the local budget and strand its own tail. Reachable only
         // with `staging_enabled`.
         if !matches!(source, TxSource::DemotedFromBlock) {
-            self.budgets.charge(source.budget_source(), cost.consumed());
+            self.budgets.charge(
+                source.budget_source(),
+                admission::accounted_cost(cost.consumed()),
+            );
         }
         res.map_err(PackageValidationError::Validation)
     }

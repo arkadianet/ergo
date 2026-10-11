@@ -388,7 +388,8 @@ pub(crate) fn check_capturing_held<V: Validator>(
             // Charge whatever cost the validator consumed (skipped for demoted
             // re-admission — see `budget_exempt`).
             if !budget_exempt {
-                cx.budgets.charge(budget_source, cost.consumed());
+                cx.budgets
+                    .charge(budget_source, accounted_cost(cost.consumed()));
             }
 
             // Classify the error for routing + peer penalty.
@@ -416,7 +417,8 @@ pub(crate) fn check_capturing_held<V: Validator>(
 
     // Full validation spent this cost regardless of the later pool decision.
     if !budget_exempt {
-        cx.budgets.charge(budget_source, validated.consumed_cost);
+        cx.budgets
+            .charge(budget_source, accounted_cost(validated.consumed_cost));
     }
 
     // No invalidation-cache check here, deliberately. The cache is a
@@ -569,6 +571,18 @@ pub(crate) fn check_capturing_held<V: Validator>(
         },
         actions,
     )
+}
+
+/// Minimum cost charged to the admission budgets for one validation attempt.
+/// A tx that fails before its scripts run (for example on a missing input)
+/// consumes almost no interpreter cost, yet still costs a parse, a lookup
+/// and a cache write; the floor keeps such attempts counted.
+pub(crate) const MIN_ACCOUNTED_COST: u64 = 5_000;
+
+/// The cost an admission attempt charges: what validation consumed, but at
+/// least [`MIN_ACCOUNTED_COST`].
+pub(crate) fn accounted_cost(consumed: u64) -> u64 {
+    consumed.max(MIN_ACCOUNTED_COST)
 }
 
 /// Steps 15 + 17 — apply the validated, capacity-cleared candidate to
