@@ -681,6 +681,36 @@ impl OrderedPool {
         self.get(tx_id)?.output_boxes.get(*index as usize)
     }
 
+    /// Read-only: the entries `remove_with_descendants_*` would remove for
+    /// each of `roots` (the root plus its in-pool descendants, at most
+    /// `max_nodes` per root), each listed once. Used to price and check a
+    /// replacement before the pool is touched.
+    pub(crate) fn descendant_closure(&self, roots: &[TxId], max_nodes: usize) -> Vec<&Entry> {
+        let mut seen: std::collections::HashSet<TxId> = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for root in roots {
+            let mut to_visit = vec![*root];
+            let mut visited_here = 0usize;
+            while let Some(next) = to_visit.pop() {
+                if visited_here >= max_nodes.max(1) {
+                    break;
+                }
+                if !seen.insert(next) {
+                    continue;
+                }
+                let Some(entry) = self.get(&next) else {
+                    continue;
+                };
+                visited_here += 1;
+                out.push(entry);
+                if let Some(children) = self.children_of.get(&next) {
+                    to_visit.extend(children.iter().filter(|c| !seen.contains(*c)));
+                }
+            }
+        }
+        out
+    }
+
     /// Materialize a `BoxId → ErgoBox` map over all pool-created outputs.
     /// Used by admission to build the `PoolUtxoOverlay` for the
     /// incoming candidate. Entries whose `output_boxes` is empty

@@ -464,13 +464,23 @@ pub(crate) fn check_capturing_held<V: Validator>(
     let replacement = if conflicts.is_empty() {
         ReplacementDecision::NoConflict
     } else {
-        // avg = sum(conflict weights) / conflict count, in u128.
-        let sum: u128 = conflicts
+        // Everything the replacement would remove: the conflicts and their
+        // in-pool descendants (the same bounded walk the commit runs).
+        let closure = cx
+            .pool
+            .descendant_closure(&conflicts, cx.config.max_family_depth);
+        // Replace only when the new tx outranks every conflict (each weight
+        // already carries its family credit) and pays more in absolute fee
+        // than everything it removes.
+        let max_conflict_weight = conflicts
             .iter()
-            .filter_map(|id| cx.pool.get(id).map(|e| e.weight as u128))
-            .sum();
-        let avg = sum / conflicts.len() as u128;
-        if (weight as u128) > avg {
+            .filter_map(|id| cx.pool.get(id).map(|e| e.weight))
+            .max()
+            .unwrap_or(0);
+        let removed_fee = closure
+            .iter()
+            .fold(0u64, |sum, e| sum.saturating_add(e.fee));
+        if weight > max_conflict_weight && validated.fee > removed_fee {
             ReplacementDecision::Replace(conflicts.clone())
         } else {
             actions.push(MempoolAction::Observe {

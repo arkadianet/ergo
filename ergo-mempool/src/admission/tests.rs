@@ -2507,6 +2507,19 @@ fn admit(
     process(bytes, source, Instant::now(), &mut cx, validator).0
 }
 
+fn plan_ok(bytes: &[u8], validated: Validated) -> MockValidator {
+    let charge = validated.consumed_cost;
+    MockValidator::new().plan(
+        bytes.to_vec(),
+        MockPlan {
+            result: Ok(validated),
+            charge,
+            peek_fee: None,
+            peek_tx_id: None,
+        },
+    )
+}
+
 fn plan_err(bytes: &[u8], err: ValidationErr, charge: u64) -> MockValidator {
     MockValidator::new().plan(
         bytes.to_vec(),
@@ -2517,6 +2530,84 @@ fn plan_err(bytes: &[u8], err: ValidationErr, charge: u64) -> MockValidator {
             peek_tx_id: Some(id(0x77)),
         },
     )
+}
+
+fn validated(tx: u8, inputs: &[u8], outputs: &[u8], fee: u64) -> Validated {
+    Validated {
+        tx_id: id(tx),
+        input_box_ids: inputs.iter().map(|b| id(*b)).collect(),
+        output_box_ids: outputs.iter().map(|b| id(*b)).collect(),
+        outputs: vec![],
+        fee,
+        size_bytes: 100,
+        consumed_cost: 10_000,
+    }
+}
+
+#[test]
+fn replacement_must_pay_more_than_the_sum_of_what_it_removes() {
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    let cfg = default_config();
+    // Two equal-weight txs spending different boxes.
+    let a = plan_ok(b"tx_a", validated(10, &[0xA1], &[0xB1], 10_000_000));
+    let bb = plan_ok(b"tx_b", validated(11, &[0xA2], &[0xB2], 10_000_000));
+    admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_a",
+        TxSource::Api,
+        &a,
+    );
+    admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_b",
+        TxSource::Api,
+        &bb,
+    );
+    // R spends both at 1.1x one tx's weight but below their combined fee.
+    let r = plan_ok(b"tx_r", validated(12, &[0xA1, 0xA2], &[0xC0], 11_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_r",
+        TxSource::Peer(peer()),
+        &r,
+    );
+    assert!(
+        matches!(
+            out,
+            AdmissionOutcome::Rejected {
+                reason: RejectReason::DoubleSpendLoser
+            }
+        ),
+        "{out:?}"
+    );
+    assert!(pool.contains(&id(10)) && pool.contains(&id(11)));
+    // Above both the highest conflict weight and the combined fee: replaces.
+    let r2 = plan_ok(b"tx_r2", validated(13, &[0xA1, 0xA2], &[0xC1], 21_000_000));
+    let out = admit(
+        &mut pool,
+        &mut b,
+        &mut inv,
+        &mut unr,
+        &cfg,
+        b"tx_r2",
+        TxSource::Peer(peer()),
+        &r2,
+    );
+    assert!(matches!(out, AdmissionOutcome::Admitted { .. }), "{out:?}");
+    assert!(!pool.contains(&id(10)) && !pool.contains(&id(11)));
+    pool.check_invariants();
 }
 
 #[test]
