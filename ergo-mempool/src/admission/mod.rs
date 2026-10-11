@@ -11,13 +11,10 @@
 //! `ergo_validation::validate_transaction_parsed`; the
 //! [`MockValidator`] below is the unit-test counterpart.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use ergo_primitives::cost::{CostAccumulator, JitCost};
-use ergo_primitives::digest::Digest32;
-use ergo_ser::ergo_box::ErgoBox;
 use ergo_validation::{TxValidationCtx, TxValidationRules};
 use tracing::warn;
 
@@ -343,11 +340,10 @@ pub(crate) fn check_capturing_held<V: Validator>(
         );
     }
 
-    // Build overlay from the pool's materialized output boxes.
-    // Empty for tests that don't exercise pool-chaining; populated in
-    // production once admission threads `output_boxes` onto Entry.
-    let pool_outputs: HashMap<Digest32, ErgoBox> = cx.pool.output_map();
-    let overlay_view = PoolUtxoOverlay::new(cx.tip_ctx.utxo, &pool_outputs);
+    // Regular inputs resolve against the committed UTXO plus outputs created
+    // by pooled txs, read straight from the pool (no per-admission copy of
+    // every pooled output).
+    let overlay_view = PoolUtxoOverlay::new(cx.tip_ctx.utxo, &*cx.pool);
     let committed_view = CommittedOnly::new(cx.tip_ctx.utxo);
 
     // ── Steps 4–6 and 9–12 — validator handles deserialize, tx_id,

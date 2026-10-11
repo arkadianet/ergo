@@ -14,16 +14,34 @@ use ergo_primitives::digest::Digest32;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_validation::UtxoView;
 
+/// Source of outputs created by pooled transactions: a materialized map, or
+/// the pool itself (borrowed, no copy).
+pub trait PoolOutputs {
+    fn pool_output(&self, box_id: &Digest32) -> Option<&ErgoBox>;
+}
+
+impl PoolOutputs for HashMap<Digest32, ErgoBox> {
+    fn pool_output(&self, box_id: &Digest32) -> Option<&ErgoBox> {
+        self.get(box_id)
+    }
+}
+
+impl PoolOutputs for crate::pool::OrderedPool {
+    fn pool_output(&self, box_id: &Digest32) -> Option<&ErgoBox> {
+        self.output_box(box_id)
+    }
+}
+
 /// Overlay over a committed UTXO view, augmented with outputs created by
 /// currently-pooled transactions. Used to resolve regular inputs during
 /// admission.
 pub struct PoolUtxoOverlay<'a> {
     base: &'a dyn UtxoView,
-    created_by_pool: &'a HashMap<Digest32, ErgoBox>,
+    created_by_pool: &'a dyn PoolOutputs,
 }
 
 impl<'a> PoolUtxoOverlay<'a> {
-    pub fn new(base: &'a dyn UtxoView, created_by_pool: &'a HashMap<Digest32, ErgoBox>) -> Self {
+    pub fn new(base: &'a dyn UtxoView, created_by_pool: &'a dyn PoolOutputs) -> Self {
         Self {
             base,
             created_by_pool,
@@ -37,7 +55,7 @@ impl UtxoView for PoolUtxoOverlay<'_> {
         // never overlap because `box_id = H(tx_id || out_idx)` and
         // tx_ids are unique. Explicit priority keeps the contract
         // unambiguous.
-        if let Some(b) = self.created_by_pool.get(box_id) {
+        if let Some(b) = self.created_by_pool.pool_output(box_id) {
             return Some(b.clone());
         }
         self.base.get_box(box_id)

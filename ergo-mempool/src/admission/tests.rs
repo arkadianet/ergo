@@ -5,6 +5,7 @@ use crate::types::TipPointer;
 use crate::unresolved::UnresolvedCache;
 use crate::weight::ByCost;
 use ergo_primitives::digest::Digest32;
+use ergo_ser::ergo_box::ErgoBox;
 use ergo_validation::{ProtocolParams, TransactionContext, UtxoView};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -1612,6 +1613,15 @@ fn pool_output_map_feeds_overlay_for_child_tx() {
         map.contains_key(&id(0xBB)),
         "output_map must expose pool-created output box for overlay"
     );
+    // The pool resolves the same output without building a map, and a
+    // staging copy shares the materialized boxes instead of copying them.
+    assert!(pool.output_box(&id(0xBB)).is_some());
+    assert!(pool.output_box(&id(0xCC)).is_none());
+    let staged = pool.clone_for_staging();
+    assert!(Arc::ptr_eq(
+        &staged.get(&id(1)).unwrap().output_boxes,
+        &pool.get(&id(1)).unwrap().output_boxes
+    ));
 
     // Admit a child that "spends" that output — MockValidator
     // returns success regardless of the overlay (it's a mock), but

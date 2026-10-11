@@ -377,7 +377,10 @@ impl Funded {
         let owned = crate::node::tip_context::build_tip_context(&node).unwrap();
         assert_eq!(owned.tip.height, TIP);
         let store = node.store.as_utxo().unwrap();
-        let outputs = Default::default();
+        let outputs: std::collections::HashMap<
+            ergo_primitives::digest::Digest32,
+            ergo_ser::ergo_box::ErgoBox,
+        > = Default::default();
         let inputs = ergo_mempool::overlay::PoolUtxoOverlay::new(store, &outputs);
         let mut cost = ergo_primitives::cost::CostAccumulator::new(
             ergo_primitives::cost::JitCost::from_block_cost(node.mempool.config().max_tx_cost)

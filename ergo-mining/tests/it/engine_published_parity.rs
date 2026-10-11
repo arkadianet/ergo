@@ -613,7 +613,7 @@ fn candidate_metrics_describe_retained_transactions_and_collected_fees() {
         inputs: vec![input.box_id().unwrap()],
         outputs: vec![],
         parents_in_pool: vec![],
-        output_boxes: vec![],
+        output_boxes: vec![].into(),
         // Deliberately stale admission metadata: the metric must use the final
         // fee transaction and fresh validation, not these cached values.
         fee: 999,
@@ -744,7 +744,7 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
             inputs: tx.inputs.iter().map(|i| i.box_id).collect(),
             outputs: vec![],
             parents_in_pool: vec![],
-            output_boxes: vec![],
+            output_boxes: vec![].into(),
             fee: FEE,
             weight: FEE,
             cost: 0,
