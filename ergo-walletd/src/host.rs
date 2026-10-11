@@ -493,18 +493,39 @@ impl WalletHost {
     pub async fn native_status(
         &self,
     ) -> Result<ergo_wallet_protocol::native::dto::WalletStatusDto, WalletAdminError> {
+        self.call_cached_spending(|engine| engine.native_status(), true)
+            .await
+    }
+
+    /// Run a read that needs the spending config (EIP-27 rules) but not a
+    /// current mempool. The first call fetches the node's context; later calls
+    /// reuse it, so these reads neither hold the writer during a node request
+    /// nor fail when the node is briefly unreachable. Without a refresh the
+    /// engine would report EIP-27 as inactive, so a failed first fetch is an
+    /// error rather than a guess.
+    pub(crate) async fn call_cached_spending<T, F>(
+        &self,
+        command: F,
+        during_rescan: bool,
+    ) -> Result<T, WalletAdminError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut WalletEngine) -> Result<T, WalletAdminError> + Send + 'static,
+    {
         let preparation = self.inner.preparation.clone();
         self.call_inner(
             move |engine| {
-                // Pruning and EIP-27 are properties of a validated node view.
-                // Keep that view pinned until status finishes reading it.
-                let scope = preparation.map(SpendingScope);
-                if let Some(scope) = &scope {
-                    engine.refresh_spending_config(scope.0.refresh()?);
-                }
-                engine.native_status()
+                let _scope = match preparation {
+                    Some(preparation) if !engine.spending_config_known() => {
+                        let scope = SpendingScope(preparation);
+                        engine.refresh_spending_config(scope.0.refresh()?);
+                        Some(scope)
+                    }
+                    _ => None,
+                };
+                command(engine)
             },
-            true,
+            during_rescan,
         )
         .await
     }

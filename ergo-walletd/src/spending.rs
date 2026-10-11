@@ -65,6 +65,9 @@ pub struct RemoteSpendingAccess {
     chain: Arc<HttpChainClient>,
     network: Network,
     context: Arc<RwLock<Option<Arc<OwnedContext>>>>,
+    /// The node's pruning state at the last successful refresh. It survives
+    /// `finish`, so status reads between spending commands need no new fetch.
+    last_pruned: Arc<RwLock<Option<bool>>>,
 }
 
 impl RemoteSpendingAccess {
@@ -74,6 +77,7 @@ impl RemoteSpendingAccess {
             chain,
             network,
             context: Arc::new(RwLock::new(None)),
+            last_pruned: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -157,6 +161,7 @@ impl SpendingPreparation for RemoteSpendingAccess {
             min_relay_fee_nano_erg: context.min_relay_fee,
             max_tx_size_bytes: context.max_tx_size,
         };
+        *self.last_pruned.write() = Some(context.pruned);
         *self.context.write() = Some(context);
         Ok(config)
     }
@@ -214,7 +219,11 @@ impl WalletChainAccess for RemoteSpendingAccess {
         }
     }
     fn is_pruned(&self) -> bool {
-        self.context.read().as_ref().is_none_or(|ctx| ctx.pruned)
+        match self.context.read().as_ref() {
+            Some(ctx) => ctx.pruned,
+            // No pinned context: use the last refresh, else assume pruned.
+            None => self.last_pruned.read().unwrap_or(true),
+        }
     }
     fn reserved_wallet_inputs(&self) -> Result<BTreeSet<[u8; 32]>, WalletAdminError> {
         self.context()
