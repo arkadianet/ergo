@@ -1,0 +1,713 @@
+//! Native transaction sign + send, and the shared sign/self-verify/serialize
+//! building blocks the send/sweep/generate paths all route through.
+
+use parking_lot::RwLock;
+
+use super::build::build_transaction_impl_with_snapshot;
+use super::send::transaction_sign_impl_with_snapshot;
+use crate::engine::{
+    map_chain_error, map_submit_error, SigningView, TxSubmitter, WalletChainAccess,
+};
+use ergo_wallet_protocol::WalletAdminError;
+
+/// Convert a native [`ExternalSecret`](ergo_wallet_protocol::native::dto::ExternalSecret)
+/// to the compat `ExternalSecretDto` so the single existing prover decoder
+/// ([`decode_external_secret`]) is reused. (`secret` maps to the compat `dlog`/`x`.)
+pub(crate) fn native_external_to_compat(
+    s: &ergo_wallet_protocol::native::dto::ExternalSecret,
+) -> ergo_wallet_protocol::scala::sending::ExternalSecretDto {
+    use ergo_wallet_protocol::native::dto::ExternalSecret as N;
+    use ergo_wallet_protocol::scala::sending::ExternalSecretDto as C;
+    match s {
+        N::Dlog { secret } => C::Dlog {
+            dlog: secret.clone(),
+        },
+        N::DhTuple { g, h, u, v, secret } => C::DhTuple {
+            g: g.clone(),
+            h: h.clone(),
+            u: u.clone(),
+            v: v.clone(),
+            x: secret.clone(),
+        },
+    }
+}
+
+/// `(transaction, tx_id_hex)` from serialized signed-tx bytes.
+pub(crate) fn signed_tx_id_hex(signed_bytes: &[u8]) -> Result<String, WalletAdminError> {
+    let mut r = ergo_primitives::reader::VlqReader::new(signed_bytes);
+    let tx = ergo_ser::transaction::read_transaction(&mut r)
+        .map_err(|e| WalletAdminError::Internal(format!("signed tx decode: {e:?}")))?;
+    let id = ergo_ser::transaction::transaction_id(&tx)
+        .map_err(|e| WalletAdminError::Internal(format!("transaction_id: {e:?}")))?;
+    Ok(hex::encode(id.as_bytes()))
+}
+
+/// Native `transactions/sign`: sign a caller-supplied unsigned tx. Runs NO `Locked`
+/// precondition (works while locked when `externalSecrets` cover all inputs); the
+/// prover's missing-secret surfaces as `missing_secret(422)`. The EIP-27
+/// self-verify gate runs inside [`sign_unsigned_tx`], so an unsigned tx that
+/// violates the burn rule is caught here rather than network-rejected.
+pub(crate) fn sign_transaction_native_impl(
+    req: &ergo_wallet_protocol::native::dto::SignTxRequest,
+    storage: &RwLock<ergo_wallet::storage::SecretStorage>,
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
+    mempool: &dyn crate::engine::MempoolOverlay,
+) -> Result<ergo_wallet_protocol::native::dto::SignTxResponse, WalletAdminError> {
+    let externals: Vec<ergo_wallet_protocol::scala::sending::ExternalSecretDto> = req
+        .external_secrets
+        .iter()
+        .map(native_external_to_compat)
+        .collect();
+    let snapshot = super::chain::PoolSigningView::new(
+        chain.signing_view().map_err(map_chain_error)?,
+        mempool.box_snapshot(&[]).outputs,
+    );
+    let signed_bytes = transaction_sign_impl_with_snapshot(
+        req.unsigned_transaction.bytes_hex(),
+        Some(&externals),
+        None,
+        storage,
+        state,
+        store,
+        &snapshot,
+    )?;
+    let tx_id = signed_tx_id_hex(&signed_bytes)?;
+    Ok(ergo_wallet_protocol::native::dto::SignTxResponse {
+        signed_transaction: ergo_wallet_protocol::native::dto::TxRepr::from_bytes(&signed_bytes),
+        tx_id,
+    })
+}
+
+/// Map a prover/sign error to a typed native error so the sign path's advertised
+/// 422s are reachable. A missing prover secret — the locked-sign-without-covering-
+/// external-secrets case the whole "no Locked precheck on sign" design hinges on —
+/// becomes `missing_secret` (NOT `internal`/500, NEVER `wallet_locked`); an
+/// input whose script the prover's gate rejects becomes `unsupported_script`. The
+/// unsupported-script message is the one the prover emits (`prover.rs`).
+pub(crate) fn map_sign_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
+    use ergo_wallet::error::WalletError as W;
+    match e {
+        W::MissingSecret(_) => WalletAdminError::MissingSecret,
+        W::TxBuild(m) if m.contains("unsupported script family") => {
+            WalletAdminError::UnsupportedScript
+        }
+        other => WalletAdminError::Internal(format!("sign: {other}")),
+    }
+}
+
+/// Native `transactions/send`. **txId-first** idempotency: compute the
+/// id, short-circuit a known wallet tx BEFORE any UTXO-dependent self-verify, then
+/// submit. `intent` builds (burn-aware) + signs with the wallet's own secrets;
+/// `signed` submits caller-supplied bytes. A `duplicate` submit reason maps to an
+/// idempotent `accepted` (never a 5xx on a re-seen tx).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_transaction_native_impl(
+    req: &ergo_wallet_protocol::native::dto::SendTxRequest,
+    storage: &RwLock<ergo_wallet::storage::SecretStorage>,
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
+    submitter: &dyn TxSubmitter,
+    network: ergo_ser::address::NetworkPrefix,
+    mempool: &dyn crate::engine::MempoolOverlay,
+) -> Result<ergo_wallet_protocol::native::dto::SendTxResponse, WalletAdminError> {
+    use ergo_wallet_protocol::native::dto::{SendTxRequest, SendTxResponse};
+
+    // 1. Produce signed bytes (build+sign own secrets for `intent`; decode for `signed`).
+    let (signed_bytes, snapshot) = match req {
+        SendTxRequest::Intent { intent, .. } => {
+            let (built, pool_snapshot) = build_transaction_impl_with_snapshot(
+                intent, state, store, chain, network, mempool,
+            )?;
+            let snapshot: Box<dyn SigningView> = Box::new(super::chain::PoolSigningView::new(
+                chain.signing_view().map_err(map_chain_error)?,
+                pool_snapshot.outputs,
+            ));
+            let bytes = transaction_sign_impl_with_snapshot(
+                built.unsigned_transaction.bytes_hex(),
+                None,
+                None,
+                storage,
+                state,
+                store,
+                snapshot.as_ref(),
+            )?;
+            (bytes, Some(snapshot))
+        }
+        SendTxRequest::Signed {
+            signed_transaction, ..
+        } => {
+            let bytes = hex::decode(signed_transaction.bytes_hex())
+                .map_err(|_| WalletAdminError::BadRequest("signedTransaction: bad hex".into()))?;
+            let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+            ergo_ser::transaction::read_transaction(&mut r).map_err(|e| {
+                WalletAdminError::BadRequest(format!(
+                    "signedTransaction: not a valid transaction: {e:?}"
+                ))
+            })?;
+            (bytes, None)
+        }
+    };
+
+    // 2. txId FIRST — so an already-known tx never trips the UTXO-dependent
+    //    self-verify (a confirmed tx's inputs are spent → `lookup_utxo` None).
+    let tx_id_hex = signed_tx_id_hex(&signed_bytes)?;
+    let tx_id: [u8; 32] = hex::decode(&tx_id_hex)
+        .ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(|| WalletAdminError::Internal("tx id not 32 bytes".into()))?;
+
+    // Known-tx short-circuit: a confirmed wallet row → idempotent accept with its
+    // summary, no re-submit. (Without an indexer a confirmed non-wallet tx is not
+    // detectable here; it falls through to submit, where `duplicate` is caught.)
+    {
+        let read = store
+            .read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        if let Some(wt) = read
+            .transaction_by_id(&tx_id)
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        {
+            return Ok(SendTxResponse {
+                tx_id: tx_id_hex,
+                accepted: true,
+                transaction: Some(super::dto::tx_to_summary(wt)),
+            });
+        }
+    }
+
+    if let Some(snapshot) = snapshot.as_ref() {
+        chain
+            .ensure_view_current(snapshot.as_ref())
+            .map_err(map_chain_error)?;
+    }
+    drop(snapshot);
+
+    let (delivery, options) = match req {
+        SendTxRequest::Intent {
+            delivery,
+            private_options,
+            ..
+        }
+        | SendTxRequest::Signed {
+            delivery,
+            private_options,
+            ..
+        } => (*delivery, private_options.clone().unwrap_or_default()),
+    };
+    let result = match delivery {
+        ergo_wallet_protocol::native::dto::TxDelivery::Broadcast => {
+            submitter.submit_transaction(signed_bytes).await
+        }
+        ergo_wallet_protocol::native::dto::TxDelivery::MinePrivate => {
+            submitter
+                .submit_private_transaction(signed_bytes, options)
+                .await
+        }
+    };
+    // 3. Submit. A `duplicate` reason (already in-pool) is idempotently accepted.
+    match result {
+        Ok(_) => Ok(SendTxResponse {
+            tx_id: tx_id_hex,
+            accepted: true,
+            transaction: None,
+        }),
+        Err(e) if e.reason == "duplicate" => Ok(SendTxResponse {
+            tx_id: tx_id_hex,
+            accepted: true,
+            transaction: None,
+        }),
+        // The private queue could not durably store the transaction: a node
+        // fault, not a request the caller can fix.
+        Err(e) if e.reason == "private_mining_error" => Err(WalletAdminError::Internal(
+            e.detail
+                .unwrap_or_else(|| "private mining queue error".into()),
+        )),
+        Err(e) => Err(map_submit_error(e)),
+    }
+}
+
+pub(crate) fn serialize_unsigned_tx(
+    utx: &ergo_ser::transaction::UnsignedTransaction,
+) -> Result<Vec<u8>, WalletAdminError> {
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::transaction::write_unsigned_transaction(&mut w, utx)
+        .map_err(|e| WalletAdminError::Internal(format!("serialize unsigned tx: {e:?}")))?;
+    Ok(w.result())
+}
+
+pub(crate) fn serialize_signed_tx(
+    tx: &ergo_ser::transaction::Transaction,
+) -> Result<Vec<u8>, WalletAdminError> {
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::transaction::write_transaction(&mut w, tx)
+        .map_err(|e| WalletAdminError::Internal(format!("serialize signed tx: {e:?}")))?;
+    Ok(w.result())
+}
+
+/// Decode an `ExternalSecretDto` hex payload into `ProverExternalSecret`.
+pub(crate) fn decode_external_secret(
+    dto: &ergo_wallet_protocol::scala::sending::ExternalSecretDto,
+) -> Result<ergo_wallet::proving::external::ProverExternalSecret, WalletAdminError> {
+    use ergo_wallet::proving::external::ProverExternalSecret;
+    use ergo_wallet_protocol::scala::sending::ExternalSecretDto;
+    use k256::elliptic_curve::ops::Reduce;
+    use k256::{FieldBytes, Scalar, U256};
+
+    fn decode_scalar(hex_str: &str) -> Result<Scalar, WalletAdminError> {
+        let bytes: [u8; 32] = hex::decode(hex_str)
+            .ok()
+            .and_then(|v| v.try_into().ok())
+            .ok_or_else(|| {
+                // Never interpolate the value — this is a raw private-key
+                // scalar. Report only the structural fault.
+                WalletAdminError::Internal(format!(
+                    "external secret: invalid scalar hex (expected 64 hex chars / 32 bytes, got {} chars)",
+                    hex_str.len()
+                ))
+            })?;
+        let s = <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::from(bytes));
+        if s == Scalar::ZERO {
+            return Err(WalletAdminError::Internal(
+                "external secret: scalar is zero".into(),
+            ));
+        }
+        Ok(s)
+    }
+    fn decode_pk(hex_str: &str, label: &str) -> Result<[u8; 33], WalletAdminError> {
+        hex::decode(hex_str)
+            .ok()
+            .and_then(|v| v.try_into().ok())
+            .ok_or_else(|| {
+                WalletAdminError::Internal(format!("external secret: bad point hex for {label}"))
+            })
+    }
+
+    match dto {
+        ExternalSecretDto::Dlog { dlog } => {
+            let scalar = decode_scalar(dlog)?;
+            // Recover the corresponding pubkey from the scalar. Read the
+            // scalar through a borrow so we don't hold a bare copy past
+            // the wrap below.
+            use k256::elliptic_curve::group::GroupEncoding;
+            use k256::elliptic_curve::ops::MulByGenerator;
+            use k256::ProjectivePoint;
+            let pk_point = ProjectivePoint::mul_by_generator(&scalar);
+            let pk_bytes: [u8; 33] = pk_point.to_affine().to_bytes().into();
+            Ok(ProverExternalSecret::Dlog {
+                pk: pk_bytes,
+                // Wrap so the scalar zeroizes when the enum drops.
+                scalar: zeroize::Zeroizing::new(scalar),
+            })
+        }
+        ExternalSecretDto::DhTuple { g, h, u, v, x } => Ok(ProverExternalSecret::DhTuple {
+            g: decode_pk(g, "g")?,
+            h: decode_pk(h, "h")?,
+            u: decode_pk(u, "u")?,
+            v: decode_pk(v, "v")?,
+            scalar: zeroize::Zeroizing::new(decode_scalar(x)?),
+        }),
+    }
+}
+
+/// Build a `Prover` from wallet secrets and/or caller-supplied external secrets.
+///
+/// If the wallet is unlocked, the HD-derived secrets for all tracked pubkeys
+/// are pre-loaded into the registry. If the wallet is locked, the registry
+/// starts empty and relies on `externals` to cover all required propositions.
+/// A locked wallet with no externals will produce a registry that fails at
+/// proof time with `MissingSecret` — that is the correct failure mode.
+pub(crate) fn build_prover(
+    storage: &ergo_wallet::storage::SecretStorage,
+    store: &dyn crate::wallet::WalletStore,
+    params: &ergo_wallet::tx_context::BlockchainParameters,
+    externals: &[ergo_wallet::proving::external::ProverExternalSecret],
+) -> Result<ergo_wallet::proving::prover::Prover, WalletAdminError> {
+    let registry = if let Some(unlocked) = storage.unlocked() {
+        // Wallet unlocked: pre-derive secrets for all tracked pubkeys.
+        let read = store
+            .read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let tracked_with_paths: std::collections::BTreeMap<u64, ([u8; 33], Vec<u32>)> = read
+            .tracked_pubkeys_with_paths()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .into_iter()
+            .map(|(idx, pk, path)| (idx, (pk, path)))
+            .collect();
+
+        ergo_wallet::proving::secrets::SecretRegistry::from_master_key(
+            &unlocked.master,
+            &tracked_with_paths,
+        )
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        .merge_external_secrets(externals)
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+    } else {
+        // Wallet locked: start with an empty registry. If externals cover all
+        // required propositions, signing succeeds; otherwise prove_sigma returns
+        // MissingSecret, which surfaces as a sign error (not a Locked error).
+        ergo_wallet::proving::secrets::SecretRegistry::empty()
+            .merge_external_secrets(externals)
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+    };
+
+    Ok(ergo_wallet::proving::prover::Prover::new(
+        registry,
+        params.clone(),
+    ))
+}
+
+/// Sign an `UnsignedTransaction` using the wallet prover, performing
+/// mandatory self-verify before returning the signed bytes.
+///
+/// `hints` is threaded through to the prover so multi-sig callers can
+/// supply a populated `TransactionHintsBag`; single-sig callers pass
+/// `&TransactionHintsBag::empty()`.
+pub(crate) fn sign_unsigned_tx(
+    unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
+    storage: &ergo_wallet::storage::SecretStorage,
+    store: &dyn crate::wallet::WalletStore,
+    snapshot: &dyn SigningView,
+    externals: &[ergo_wallet::proving::external::ProverExternalSecret],
+    hints: &ergo_wallet::proving::hints::TransactionHintsBag,
+) -> Result<ergo_ser::transaction::Transaction, WalletAdminError> {
+    let state_ctx = snapshot.state_context();
+    let params = snapshot.signing_params();
+    let prover = build_prover(storage, store, params, externals)?;
+
+    let boxes_to_spend: Vec<ergo_ser::ergo_box::ErgoBox> = unsigned_tx
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(idx, ui)| {
+            let box_id = ui.box_id.as_bytes();
+            snapshot
+                .lookup_utxo(box_id)
+                .map_err(|error| {
+                    WalletAdminError::Internal(format!("snapshot UTXO read: {error}"))
+                })?
+                .ok_or_else(|| {
+                    WalletAdminError::Internal(format!(
+                        "input {} box {} not found in UTXO set",
+                        idx,
+                        hex::encode(box_id)
+                    ))
+                })
+        })
+        .collect::<Result<_, _>>()?;
+
+    let data_boxes: Vec<ergo_ser::ergo_box::ErgoBox> = unsigned_tx
+        .data_inputs
+        .iter()
+        .enumerate()
+        .map(|(idx, di)| {
+            let box_id = di.box_id.as_bytes();
+            snapshot
+                .lookup_utxo(box_id)
+                .map_err(|error| {
+                    WalletAdminError::Internal(format!("snapshot UTXO read: {error}"))
+                })?
+                .ok_or_else(|| {
+                    WalletAdminError::Internal(format!(
+                        "data input {} box {} not found in UTXO set",
+                        idx,
+                        hex::encode(box_id)
+                    ))
+                })
+        })
+        .collect::<Result<_, _>>()?;
+
+    let intended = super::chain::intended_signing_context(snapshot)?;
+    let signed_tx = match intended.as_ref() {
+        Some(context) => prover.sign(unsigned_tx, &boxes_to_spend, &data_boxes, context, hints),
+        None => prover.sign(unsigned_tx, &boxes_to_spend, &data_boxes, state_ctx, hints),
+    }
+    .map_err(map_sign_error)?;
+
+    let protocol_params = snapshot.protocol_params();
+    ergo_validation::tx::structural::validate_structural(&signed_tx, protocol_params)
+        .map_err(|e| WalletAdminError::BadRequest(format!("transaction rejected: {e}")))?;
+
+    self_verify_signed_tx(
+        &signed_tx,
+        &boxes_to_spend,
+        &data_boxes,
+        snapshot,
+        intended.as_ref(),
+    )?;
+
+    Ok(signed_tx)
+}
+
+/// Self-verify every input's spending proof against the real block cost limit.
+///
+/// Reproduces the chain validator's cost accounting exactly:
+///
+/// 1. Compute the transaction-level init cost (same formula as
+///    `ergo_validation::compute_tx_init_cost`) and pre-charge it into the
+///    accumulator before the input loop.
+/// 2. Reuse ONE `CostAccumulator` across all inputs — this matches
+///    `ergo-validation/src/tx/mod.rs` where the accumulator is threaded
+///    through `validate_scripts` across the entire input set.  A per-input
+///    fresh accumulator would miss cross-input cost overages that the chain
+///    validator would catch.
+///
+/// The per-call `verify_spending_proof_with_context_and_cost` still fires
+/// its own cost check, so a single input that alone exceeds the limit is
+/// still caught immediately.
+pub(crate) fn self_verify_signed_tx(
+    tx: &ergo_ser::transaction::Transaction,
+    boxes_to_spend: &[ergo_ser::ergo_box::ErgoBox],
+    data_boxes: &[ergo_ser::ergo_box::ErgoBox],
+    snapshot: &dyn SigningView,
+    intended: Option<&ergo_wallet::tx_context::SigningContext<'_>>,
+) -> Result<(), WalletAdminError> {
+    use ergo_primitives::cost::{CostAccumulator, JitCost};
+    use ergo_sigma::reduce::verify_spending_proof_with_context_and_cost;
+    let state_ctx = intended
+        .map(|context| context.state_context)
+        .unwrap_or_else(|| snapshot.state_context());
+    let params = snapshot.signing_params();
+
+    // Fail-closed EIP-27 gate: refuse to EMIT a tx that spends reward boxes
+    // without burning the re-emission tokens + paying pay-to-reemission. Uses the
+    // SAME shared validator the node runs (`verify_reemission_spending`), at the
+    // CANDIDATE height (`tip+1` = `state_ctx.sigma_pre_header.height`) the tx will
+    // be validated at — so the wallet never relays/mines a tx the node rejects.
+    // No-op off EIP-27 nets (`reemission` is `None`, e.g. testnet).
+    if let Some(rules) = snapshot.reemission_rules() {
+        ergo_validation::verify_reemission_spending(
+            tx,
+            boxes_to_spend,
+            state_ctx.sigma_pre_header.height,
+            rules,
+        )
+        .map_err(|e| WalletAdminError::ReemissionObligationUnmet(e.to_string()))?;
+    }
+
+    let jit_limit = JitCost::from_block_cost(params.max_block_cost)
+        .map_err(|e| WalletAdminError::Internal(format!("self-verify cost limit: {e}")))?;
+
+    // ONE accumulator for the entire tx, matching ergo-validation's tx-wide accounting.
+    let mut cost_acc = CostAccumulator::new(jit_limit);
+
+    // Pre-charge the tx-level init cost.  Mirrors the validator's Stage 5.5
+    // (ergo-validation/src/tx/mod.rs: `compute_tx_init_cost` → `cx.cost.add`).
+    // Shared with the consensus validator via ergo-validation, so the
+    // self-verify gate can't drift from on-chain cost accounting.
+    let init_cost = ergo_validation::compute_tx_init_cost_with_costs(
+        tx,
+        boxes_to_spend,
+        params.interpreter_init_cost,
+        params.input_cost,
+        params.data_input_cost,
+        params.output_cost,
+        params.token_access_cost,
+    );
+    let init_jit = JitCost::from_block_cost(init_cost)
+        .map_err(|e| WalletAdminError::Internal(format!("self-verify init cost: {e}")))?;
+    cost_acc.add(init_jit).map_err(|_| {
+        WalletAdminError::Internal("self-verify: tx init cost exceeds limit".into())
+    })?;
+
+    let message = if intended.is_some() {
+        ergo_wallet::proving::prover::Prover::bytes_to_sign_for_signed_tx_bounded(tx)
+            .map_err(|e| WalletAdminError::Internal(format!("bytes_to_sign: {e}")))
+    } else {
+        ergo_ser::transaction::bytes_to_sign(tx)
+            .map_err(|e| WalletAdminError::Internal(format!("bytes_to_sign: {e:?}")))
+    }?;
+
+    let all_input_extensions: Vec<ergo_ser::input::ContextExtension> = tx
+        .inputs
+        .iter()
+        .map(|i| i.spending_proof.extension().clone())
+        .collect();
+
+    let mut strict_context = intended
+        .map(|context| {
+            let unsigned = ergo_ser::transaction::UnsignedTransaction {
+                inputs: tx
+                    .inputs
+                    .iter()
+                    .map(|input| ergo_ser::input::UnsignedInput {
+                        box_id: input.box_id,
+                        extension: input.spending_proof.extension().clone(),
+                    })
+                    .collect(),
+                data_inputs: tx.data_inputs.clone(),
+                output_candidates: tx.output_candidates.clone(),
+            };
+            context.build_reduction_owned_for_tx(
+                &unsigned,
+                0,
+                boxes_to_spend,
+                data_boxes,
+                params.activated_script_version(),
+            )
+        })
+        .transpose()
+        .map_err(|e| WalletAdminError::Internal(format!("self-verify context: {e}")))?;
+
+    for (idx, (input, input_box)) in tx.inputs.iter().zip(boxes_to_spend.iter()).enumerate() {
+        let mut legacy_context;
+        let ctx = if let Some(owned) = strict_context.as_mut() {
+            owned.self_box = owned.inputs[idx].clone();
+            owned.self_creation_height = input_box.candidate.creation_height;
+            owned.extension = input.spending_proof.extension().values.clone();
+            owned.as_borrowed()
+        } else {
+            legacy_context = state_ctx.build_reduction_owned(
+                input_box,
+                input.spending_proof.extension(),
+                boxes_to_spend,
+                data_boxes,
+                &tx.output_candidates,
+                &all_input_extensions,
+            );
+            legacy_context.validation_settings =
+                snapshot.protocol_params().validation_settings.clone();
+            legacy_context.activated_script_version = params.activated_script_version();
+            legacy_context.as_borrowed()
+        };
+        let ergo_tree = input_box.candidate.ergo_tree();
+        let ok = verify_spending_proof_with_context_and_cost(
+            ergo_tree,
+            &input.spending_proof.proof,
+            &message,
+            &ctx,
+            &mut cost_acc,
+        )
+        .map_err(|e| WalletAdminError::Internal(format!("self-verify input {idx}: {e:?}")))?;
+        if !ok {
+            return Err(WalletAdminError::Internal(format!(
+                "self-verify failed for input {idx}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "sign/context_tests.rs"]
+mod context_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sign-path error mapper makes the advertised 422s reachable: a missing
+    /// prover secret → `missing_secret` (NOT internal/500 — the locked-sign-with-
+    /// externals contract); an unsupported input script → `unsupported_script`;
+    /// anything else stays internal.
+    #[test]
+    fn map_sign_error_surfaces_typed_422s() {
+        use ergo_wallet::error::WalletError as W;
+        assert!(matches!(
+            map_sign_error(W::MissingSecret("no secret for input 0".into())),
+            WalletAdminError::MissingSecret
+        ));
+        assert!(matches!(
+            map_sign_error(W::TxBuild(
+                "input 0 has an unsupported script family; only P2PK/DHT".into()
+            )),
+            WalletAdminError::UnsupportedScript
+        ));
+        assert!(matches!(
+            map_sign_error(W::TxBuild("reduce: boom".into())),
+            WalletAdminError::Internal(_)
+        ));
+    }
+
+    /// A durable private queue failure is a server error, never a broadcast.
+    #[test]
+    fn a_private_queue_storage_failure_is_an_internal_error() {
+        use std::future::Future;
+        struct FailingQueue;
+        #[async_trait::async_trait]
+        impl TxSubmitter for FailingQueue {
+            async fn submit_transaction(
+                &self,
+                _: Vec<u8>,
+            ) -> Result<String, crate::engine::TxSubmitError> {
+                panic!("private delivery never broadcasts");
+            }
+            async fn submit_private_transaction(
+                &self,
+                _: Vec<u8>,
+                _: ergo_wallet_protocol::mining::PrivateTransactionOptions,
+            ) -> Result<String, crate::engine::TxSubmitError> {
+                Err(crate::engine::TxSubmitError {
+                    reason: "private_mining_error".into(),
+                    detail: Some("private queue commit failed: no space left".into()),
+                })
+            }
+        }
+        struct NoChain;
+        impl WalletChainAccess for NoChain {
+            fn wallet_scan_height(&self) -> Result<u32, crate::engine::ChainAccessError> {
+                Ok(0)
+            }
+            fn tip_height(&self) -> Result<u32, crate::engine::ChainAccessError> {
+                Ok(0)
+            }
+            fn is_pruned(&self) -> bool {
+                false
+            }
+            fn read_block_at(
+                &self,
+                _: u32,
+            ) -> Result<
+                Option<crate::wallet::scan::RescanBlock>,
+                crate::wallet::scan::RescanReadError,
+            > {
+                Ok(None)
+            }
+        }
+        let tx = ergo_ser::transaction::Transaction {
+            inputs: vec![ergo_ser::input::Input {
+                box_id: ergo_primitives::digest::Digest32::from_bytes([1; 32]),
+                spending_proof: ergo_ser::input::SpendingProof::new(
+                    vec![],
+                    ergo_ser::input::ContextExtension::empty(),
+                )
+                .unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        };
+        let request: ergo_wallet_protocol::native::dto::SendTxRequest = serde_json::from_value(serde_json::json!({
+            "type": "signed",
+            "signedTransaction": {"type": "bytes", "bytes": hex::encode(serialize_signed_tx(&tx).unwrap())},
+            "delivery": "mine_private"
+        })).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let storage = RwLock::new(ergo_wallet::storage::SecretStorage::open(
+            dir.path().join("secrets"),
+        ));
+        let state = RwLock::new(crate::state::WalletState::empty(false));
+        let pool = crate::engine::NoopMempoolOverlay::new();
+        let future = send_transaction_native_impl(
+            &request,
+            &storage,
+            &state,
+            &db,
+            &NoChain,
+            &FailingQueue,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            &pool,
+        );
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(result) = std::pin::pin!(future).as_mut().poll(&mut context)
+        else {
+            panic!("immediate queue failure should complete");
+        };
+        assert!(
+            matches!(result, Err(WalletAdminError::Internal(ref detail)) if detail.contains("no space left")),
+            "{result:?}"
+        );
+    }
+}
