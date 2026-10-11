@@ -427,6 +427,7 @@ pub(super) fn cleanup_disconnected_peer(state: &mut NodeState, peer: &PeerId) {
     state.registry.remove(peer);
     state.mempool.on_peer_disconnected(peer);
     state.throttle.forget_peer(peer);
+    state.serve_throttle.forget_peer(peer);
     state.snapshot_bootstrap.on_peer_disconnect(peer);
     if let Some(ca) = state.chunk_assembly.as_mut() {
         let _freed = ca.drop_peer(peer);

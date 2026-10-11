@@ -423,3 +423,69 @@ fn peers_reply_is_capped_deduplicated_and_skips_self() {
         .iter()
         .all(|a| *a != own));
 }
+
+fn served_ids(actions: &[Action]) -> Vec<[u8; 32]> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::SendToPeer { code, payload, .. } if *code == message::CODE_MODIFIER => {
+                Some(message::deserialize_modifiers(payload).unwrap().modifiers)
+            }
+            _ => None,
+        })
+        .flatten()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// A `RequestModifier` naming the same id many times is answered with that
+/// modifier once; the store is read once per distinct id.
+#[test]
+fn request_modifier_serves_each_id_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let header_id = mid(1);
+    state
+        .store
+        .store_header(&header_id, &[0xAAu8; 80])
+        .expect("seed header");
+    let peer = test_peer();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+
+    let ids = vec![header_id; 400];
+    let payload = req_modifier_payload(ModifierTypeId::Header.as_byte(), &ids);
+    let actions = handle_message(&mut state, peer, message::CODE_REQUEST_MODIFIER, &payload, now);
+    assert_eq!(served_ids(&actions), vec![header_id]);
+}
+
+/// Bytes served to one peer are budgeted per window: once a peer has been
+/// sent its budget, further requests go unanswered until the window moves.
+#[test]
+fn request_modifier_respects_per_peer_serve_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let header_id = mid(1);
+    state
+        .store
+        .store_header(&header_id, &[0xAAu8; 80])
+        .expect("seed header");
+    let peer = test_peer();
+    let other: SocketAddr = "10.9.9.9:9030".parse().unwrap();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+    let _rx2 = connect_test_peer(&mut state, other, now);
+    let payload = req_modifier_payload(ModifierTypeId::Header.as_byte(), &[header_id]);
+
+    let budget = ergo_p2p::throttle::SERVE_LIMITS.max_bytes_per_window;
+    state.serve_throttle.record(peer, now, budget);
+    let actions = handle_message(&mut state, peer, message::CODE_REQUEST_MODIFIER, &payload, now);
+    assert!(served_ids(&actions).is_empty(), "spent budget: no reply");
+
+    // Other peers are unaffected, and the budget refills with the window.
+    let actions = handle_message(&mut state, other, message::CODE_REQUEST_MODIFIER, &payload, now);
+    assert_eq!(served_ids(&actions), vec![header_id]);
+    let later = now + ergo_p2p::throttle::SERVE_LIMITS.window + Duration::from_secs(1);
+    let actions = handle_message(&mut state, peer, message::CODE_REQUEST_MODIFIER, &payload, later);
+    assert_eq!(served_ids(&actions), vec![header_id]);
+}

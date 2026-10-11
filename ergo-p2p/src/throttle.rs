@@ -47,6 +47,17 @@ pub struct ThroughputLimits {
     pub max_bytes_per_window: u64,
 }
 
+/// Budget for modifier bytes served to one peer in answer to its
+/// `RequestModifier`s: 200 MB per 10 s (20 MB/s), far above what an honest
+/// downloader pulls from a single peer. Requests past the budget are left
+/// unanswered; the requester's own delivery timeout moves it to another
+/// peer.
+pub const SERVE_LIMITS: ThroughputLimits = ThroughputLimits {
+    window: Duration::from_secs(10),
+    max_msgs_per_window: u32::MAX,
+    max_bytes_per_window: 200_000_000,
+};
+
 impl Default for ThroughputLimits {
     fn default() -> Self {
         Self {
@@ -171,6 +182,24 @@ impl ThroughputLimiter {
         let state = self.peers.entry(peer).or_default();
         state.prune(now, self.limits.window);
         state.record(now, bytes);
+    }
+
+    /// Bytes `peer` may still be charged in the current window before the
+    /// byte cap is reached. Only the byte axis is considered.
+    pub fn remaining_bytes(&mut self, peer: SocketAddr, now: Instant) -> u64 {
+        let state = self.peers.entry(peer).or_default();
+        state.prune(now, self.limits.window);
+        self.limits
+            .max_bytes_per_window
+            .saturating_sub(state.bytes_in_window)
+    }
+
+    /// Charge `bytes` to `peer` without a cap check (the caller already
+    /// sized the work with [`Self::remaining_bytes`]).
+    pub fn record(&mut self, peer: SocketAddr, now: Instant, bytes: u64) {
+        let state = self.peers.entry(peer).or_default();
+        state.prune(now, self.limits.window);
+        state.record(now, u32::try_from(bytes).unwrap_or(u32::MAX));
     }
 
     /// Drop per-peer state on disconnect. Frees the per-peer

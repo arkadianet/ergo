@@ -241,42 +241,7 @@ pub(in crate::node) fn handle_message(
         message::CODE_REQUEST_MODIFIER => match message::deserialize_inv(payload) {
             Ok(inv) => {
                 let type_id = inv.type_id;
-                let hits: Vec<([u8; 32], Vec<u8>)> = match ModifierTypeId::from_byte(type_id) {
-                    Some(ModifierTypeId::Transaction) => inv
-                        .ids
-                        .iter()
-                        .filter_map(|id| {
-                            state
-                                .mempool
-                                .get_bytes(&Digest32::from_bytes(*id))
-                                .map(|b| (*id, b.to_vec()))
-                        })
-                        .collect(),
-                    Some(ModifierTypeId::Header) => inv
-                        .ids
-                        .iter()
-                        .filter_map(|id| {
-                            state.store.get_header(id).ok().flatten().map(|b| (*id, b))
-                        })
-                        .collect(),
-                    Some(
-                        ModifierTypeId::BlockTransactions
-                        | ModifierTypeId::ADProofs
-                        | ModifierTypeId::Extension,
-                    ) => {
-                        let Some(sentinel) = serving_sentinel(&state.store) else {
-                            return Vec::new();
-                        };
-                        inv.ids
-                            .iter()
-                            .filter_map(|id| {
-                                servable_section(&state.store, id, sentinel)
-                                    .map(|bytes| (*id, bytes))
-                            })
-                            .collect()
-                    }
-                    None => Vec::new(),
-                };
+                let hits = collect_requested_modifiers(state, peer, inv, now);
                 if hits.is_empty() {
                     // Asking costs nothing; being served does. Only a
                     // request we actually answered counts as progress, so
@@ -291,11 +256,14 @@ pub(in crate::node) fn handle_message(
                         modifiers: hits,
                     };
                     match message::serialize_modifiers(&data) {
-                        Ok(payload) => vec![Action::SendToPeer {
-                            peer,
-                            code: message::CODE_MODIFIER,
-                            payload,
-                        }],
+                        Ok(payload) => {
+                            state.serve_throttle.record(peer, now, payload.len() as u64);
+                            vec![Action::SendToPeer {
+                                peer,
+                                code: message::CODE_MODIFIER,
+                                payload,
+                            }]
+                        }
                         Err(e) => {
                             warn!(type_id = type_id, error = %e, "failed to serialize Modifier");
                             Vec::new()
@@ -603,6 +571,76 @@ pub(in crate::node) fn handle_message(
             Vec::new()
         }
     }
+}
+
+/// Read the modifiers a `RequestModifier` asks for, in request order.
+///
+/// Each id is looked up once even when the request repeats it, and reading
+/// stops once the bytes collected reach what one `Modifier` reply can carry
+/// or what is left of the peer's serve budget
+/// ([`ergo_p2p::throttle::SERVE_LIMITS`]), whichever is smaller — the
+/// encoder would drop anything beyond that, so it is never read. A peer
+/// whose budget is spent gets no reply until the window moves on.
+fn collect_requested_modifiers(
+    state: &mut NodeState,
+    peer: PeerId,
+    inv: InvData,
+    now: Instant,
+) -> Vec<([u8; 32], Vec<u8>)> {
+    let Some(kind) = ModifierTypeId::from_byte(inv.type_id) else {
+        return Vec::new();
+    };
+    let budget = state
+        .serve_throttle
+        .remaining_bytes(peer, now)
+        .min(message::MAX_MODIFIER_WITH_RESERVE as u64);
+    if budget == 0 {
+        debug!(peer = %peer, "serve budget spent; not answering RequestModifier");
+        return Vec::new();
+    }
+    let sentinel = match kind {
+        ModifierTypeId::BlockTransactions
+        | ModifierTypeId::ADProofs
+        | ModifierTypeId::Extension => match serving_sentinel(&state.store) {
+            Some(sentinel) => Some(sentinel),
+            None => return Vec::new(),
+        },
+        _ => None,
+    };
+    let mut seen = std::collections::HashSet::with_capacity(inv.ids.len());
+    let mut hits = Vec::new();
+    let mut collected: u64 = 0;
+    for id in inv.ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        let bytes = match kind {
+            ModifierTypeId::Transaction => state
+                .mempool
+                .get_bytes(&Digest32::from_bytes(id))
+                .map(|b| b.to_vec()),
+            ModifierTypeId::Header => state.store.get_header(&id).ok().flatten(),
+            ModifierTypeId::BlockTransactions
+            | ModifierTypeId::ADProofs
+            | ModifierTypeId::Extension => {
+                servable_section(&state.store, &id, sentinel.unwrap_or_default())
+            }
+        };
+        let Some(bytes) = bytes else {
+            continue;
+        };
+        // id + length prefix + payload, as the encoder accounts it.
+        let entry = 36 + bytes.len() as u64;
+        if collected + entry > budget && !hits.is_empty() {
+            break;
+        }
+        collected += entry;
+        hits.push((id, bytes));
+        if collected >= budget {
+            break;
+        }
+    }
+    hits
 }
 
 /// Handle a parsed `Inv` (message code 60): tx-typed advertisements are
