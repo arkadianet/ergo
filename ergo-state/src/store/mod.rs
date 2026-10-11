@@ -2576,6 +2576,13 @@ impl StateStore {
         self.headers.get_block_section(modifier_id)
     }
 
+    /// Remove one stored block section so it can be downloaded again.
+    /// Returns whether a section was stored.
+    pub fn delete_block_section(&self, modifier_id: &[u8; 32]) -> Result<bool, StateError> {
+        self.drain_persist_results()?;
+        self.headers.delete_block_section(modifier_id)
+    }
+
     /// Store header metadata (parent, height, cumulative score, validity).
     pub fn store_header_meta(
         &self,

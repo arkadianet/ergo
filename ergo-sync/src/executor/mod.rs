@@ -154,6 +154,10 @@ pub struct SyncExecutor {
     block_context_headers: Vec<CheckedHeader>,
     /// Available replacement suffix selected by cumulative full-chain work.
     reorg_blocks: VecDeque<[u8; 32]>,
+    /// Version-1 blocks whose stored `BlockTransactions` failed transaction
+    /// validation, with the number of times the section has been discarded
+    /// and fetched again. See [`SyncExecutor::refetch_v1_block_transactions`].
+    v1_body_refetches: std::collections::HashMap<[u8; 32], u8>,
     /// An assembled block outside the best-header branch may complete a
     /// better full chain even while the best-header branch withholds bodies.
     full_candidate_height: Option<u32>,
@@ -267,6 +271,7 @@ impl SyncExecutor {
             last_headers: VecDeque::with_capacity(LAST_HEADERS_WINDOW),
             block_context_headers: Vec::with_capacity(10),
             reorg_blocks: VecDeque::new(),
+            v1_body_refetches: std::collections::HashMap::new(),
             full_candidate_height: None,
             recently_installed: HashSet::new(),
             orphan_headers: HashMap::new(),
