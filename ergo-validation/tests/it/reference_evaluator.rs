@@ -292,3 +292,8 @@ fn map_results_need_a_convertible_element_type() {
 fn pre_jit_xor_reads_the_right_operand_by_left_length() {
     check_vectors("pre-jit-xor");
 }
+
+#[test]
+fn zip_pairs_read_from_their_columns() {
+    check_vectors("zip-columns");
+}

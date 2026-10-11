@@ -422,11 +422,11 @@ fn flatmap_mixed_carrier_fixture_results_are_flat() {
     let expected = [
         (
             "flatmap-mixed-width-token-first",
-            pairs(vec![wide.clone(), narrow.clone()]),
+            pairs(vec![wide.clone(), narrow.clone()].into()),
         ),
         (
             "flatmap-mixed-width-generic-first",
-            pairs(vec![narrow, wide]),
+            pairs(vec![narrow, wide].into()),
         ),
         (
             "flatmap-mixed-box-generic-first",

@@ -572,7 +572,10 @@ fn eval_op(
                                 .and_then(crate::evaluator::helpers::reject_sstring)?,
                         );
                     }
-                    Ok(Value::CollGeneric(vals, Box::new(SigmaType::SGroupElement)))
+                    Ok(Value::CollGeneric(
+                        vals.into(),
+                        Box::new(SigmaType::SGroupElement),
+                    ))
                 }
                 _ => {
                     // Boxed-element coll fallback (Coll[Tuple],
@@ -591,7 +594,7 @@ fn eval_op(
                         opcodes::binding::check_runtime_tuple_type(elem_type, &value)?;
                         vals.push(value);
                     }
-                    Ok(Value::CollGeneric(vals, Box::new(elem_type.clone())))
+                    Ok(Value::CollGeneric(vals.into(), Box::new(elem_type.clone())))
                 }
             }
         }

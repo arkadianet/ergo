@@ -252,7 +252,7 @@ pub(super) fn get_many(
     // the carrier with that exact element type so empty
     // results and serialize-back preserve the right shape.
     Ok(Value::CollGeneric(
-        results,
+        results.into(),
         Box::new(SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(
             SigmaType::SByte,
         ))))),

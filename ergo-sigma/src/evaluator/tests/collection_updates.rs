@@ -597,7 +597,7 @@ fn subst_constants_coll_of_none_preserves_template_option_type() {
     let mut w = ergo_primitives::writer::VlqWriter::new();
     write_ergo_tree(&mut w, &template).expect("template write");
     let template_bytes = w.result();
-    let new_value = Value::CollGeneric(vec![Value::Opt(None)], Box::new(opt_ty));
+    let new_value = Value::CollGeneric(vec![Value::Opt(None)].into(), Box::new(opt_ty));
     let (new_bytes, _) = subst_constants(&template_bytes, &[0], &[new_value], true)
         .expect("subst_constants succeeds");
     let mut r = ergo_primitives::reader::VlqReader::new(&new_bytes);
@@ -858,7 +858,7 @@ fn coll_updated_collgeneric_rejects_sany_declared_carrier() {
     // signals "carrier built without proper type info". A concrete
     // replacement must REJECT here.
     let coll = Value::CollGeneric(
-        vec![Value::Opt(None), Value::Opt(None)],
+        vec![Value::Opt(None), Value::Opt(None)].into(),
         Box::new(SigmaType::SOption(Box::new(SigmaType::SAny))),
     );
     let new_concrete = Value::Opt(Some(Box::new(Value::CollBytes(vec![0xAA; 32]))));

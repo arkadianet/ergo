@@ -1139,7 +1139,8 @@ fn methodcall_global_serialize_roundtrips_via_deserializeto() {
                 vec![
                     Value::Tuple(vec![Value::Int(1), Value::Long(10)]),
                     Value::Tuple(vec![Value::Int(2), Value::Long(20)]),
-                ],
+                ]
+                .into(),
                 Box::new(SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SLong])),
             ),
         ),
@@ -1160,7 +1161,7 @@ fn methodcall_global_serialize_roundtrips_via_deserializeto() {
                 val: SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Values(vec![])),
             },
             Value::CollGeneric(
-                vec![],
+                vec![].into(),
                 Box::new(SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SLong])),
             ),
         ),
@@ -1192,7 +1193,8 @@ fn methodcall_global_serialize_roundtrips_via_deserializeto() {
                     Value::Opt(Some(Box::new(Value::CollBytes(vec![0xAA; 4])))),
                     Value::Opt(None),
                     Value::Opt(Some(Box::new(Value::CollBytes(vec![0xBB; 4])))),
-                ],
+                ]
+                .into(),
                 Box::new(SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(
                     SigmaType::SByte,
                 ))))),

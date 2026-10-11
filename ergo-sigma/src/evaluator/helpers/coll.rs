@@ -73,9 +73,8 @@ pub(crate) fn fast_len(coll: &Value) -> Option<usize> {
         Value::CollLong(v) => Some(v.len()),
         Value::CollBool(v) => Some(v.len()),
         Value::CollSigmaProp(v) => Some(v.len()),
-        Value::CollBox(v) | Value::CollGeneric(v, _) | Value::CollLegacyPair(v, _, _) => {
-            Some(v.len())
-        }
+        Value::CollBox(v) => Some(v.len()),
+        Value::CollGeneric(v, _) | Value::CollLegacyPair(v, _, _) => Some(v.len()),
         _ => None,
     }
 }
@@ -90,16 +89,16 @@ pub(crate) fn fast_element(coll: &Value, i: usize) -> Option<Value> {
         Value::CollLong(v) => v.get(i).copied().map(Value::Long),
         Value::CollBool(v) => v.get(i).copied().map(Value::Bool),
         Value::CollSigmaProp(v) => v.get(i).cloned().map(Value::SigmaProp),
-        Value::CollBox(v) | Value::CollGeneric(v, _) | Value::CollLegacyPair(v, _, _) => {
-            v.get(i).cloned()
-        }
+        Value::CollBox(v) => v.get(i).cloned(),
+        Value::CollGeneric(v, _) | Value::CollLegacyPair(v, _, _) => v.item(i),
         _ => None,
     }
 }
 
 /// `coll.slice(from, until)` (clamped, `from <= until`) for the primitive
-/// carriers, copying only the slice; `None` for any other carrier (the
-/// caller then takes the unpacking path).
+/// carriers and boxed-element collections, copying only the slice (a zip
+/// stays a view of its columns); `None` for any other carrier (the caller
+/// then takes the unpacking path).
 pub(crate) fn fast_slice(coll: &Value, from: usize, until: usize) -> Option<Value> {
     macro_rules! cut {
         ($v:expr) => {{
@@ -115,6 +114,9 @@ pub(crate) fn fast_slice(coll: &Value, from: usize, until: usize) -> Option<Valu
         Value::CollLong(v) => Some(Value::CollLong(cut!(v))),
         Value::CollBool(v) => Some(Value::CollBool(cut!(v))),
         Value::CollSigmaProp(v) => Some(Value::CollSigmaProp(cut!(v))),
+        Value::CollGeneric(v, elem_type) => {
+            Some(Value::CollGeneric(v.slice(from, until), elem_type.clone()))
+        }
         _ => None,
     }
 }
@@ -162,7 +164,7 @@ pub(crate) fn collection_to_values(
         // is discarded here; downstream callers that need it should
         // capture via `coll_elem_type` on the input value.
         Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => {
-            Ok((CollKind::Tuple, items))
+            Ok((CollKind::Tuple, items.into_vec()))
         }
         Value::CollBox(items) => Ok((CollKind::Box, items)),
         Value::CollHeader(headers) => Ok((
@@ -370,9 +372,9 @@ pub(crate) fn values_to_collection(
                                 continue;
                             }
                         }
-                        return Ok(Value::CollGeneric(items, Box::new(token_elem_type)));
+                        return Ok(Value::CollGeneric(items.into(), Box::new(token_elem_type)));
                     }
-                    _ => return Ok(Value::CollGeneric(items, Box::new(token_elem_type))),
+                    _ => return Ok(Value::CollGeneric(items.into(), Box::new(token_elem_type))),
                 }
             }
             Ok(Value::Tokens(tokens))
@@ -381,7 +383,7 @@ pub(crate) fn values_to_collection(
         // here flows from the caller's static type knowledge (input
         // collection's elem type, IR-inferred type, etc.) so an
         // empty result preserves the original `Coll[T]` shape.
-        _ => Ok(Value::CollGeneric(items, Box::new(elem_type))),
+        _ => Ok(Value::CollGeneric(items.into(), Box::new(elem_type))),
     }
 }
 
@@ -412,7 +414,7 @@ pub(crate) fn infer_collection(
             // back paths still reject loudly rather than emit wrong
             // bytes.
             _ => Ok(Value::CollGeneric(
-                vec![],
+                Vec::new().into(),
                 Box::new(inferred.unwrap_or(SigmaType::SAny)),
             )),
         };
@@ -438,7 +440,7 @@ pub(crate) fn infer_collection(
                 .clone()
                 .or_else(|| items.iter().find_map(strict_value_sigma_type))
                 .unwrap_or(SigmaType::SAny);
-            return Ok(Value::CollGeneric(items, Box::new(elem_type)));
+            return Ok(Value::CollGeneric(items.into(), Box::new(elem_type)));
         }
     };
     let elem_type = ir_elem_type
@@ -486,7 +488,7 @@ pub(crate) fn unpack_collection(val: Value) -> Result<Vec<Value>, EvalError> {
         // SubstConstants takes a Coll[T] of replacement values; a
         // real STuple is not a collection, so accept only the
         // boxed-element coll carrier here.
-        Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => Ok(items),
+        Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => Ok(items.into_vec()),
         // Native Coll[Header] carrier (e.g. CONTEXT.headers used as
         // substitution values). Yields Header elements so the
         // subst_constants header v3 gate + value_to_typed_sigma run.
@@ -510,7 +512,7 @@ pub(crate) fn legacy_pair(a: Value, b: Value, ctx: &ReductionContext) -> Result<
         .map(|(a, b)| Value::Tuple(vec![a, b]))
         .collect();
     Ok(Value::CollLegacyPair(
-        items,
+        CollItems::new(items),
         Box::new(SigmaType::STuple(vec![elem_a, elem_b])),
         Some(Box::new((a, b))),
     ))

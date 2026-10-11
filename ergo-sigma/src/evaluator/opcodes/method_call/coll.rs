@@ -230,6 +230,20 @@ pub(super) fn zip(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     // with `STuple(A, B)`.
     let elem_a = coll_elem_type(&obj_val).unwrap_or(SigmaType::SAny);
     let elem_b = coll_elem_type(&ys_val).unwrap_or(SigmaType::SAny);
+    let elem_type = Box::new(SigmaType::STuple(vec![elem_a, elem_b]));
+    // Like the reference's PairOfCols, keep the two columns and build the
+    // pairs only when they are read (CollsOverArrays.scala:183-203), so a
+    // zip that is only sized, indexed or sliced does not box every row.
+    let fast = (
+        crate::evaluator::helpers::fast_len(&obj_val),
+        crate::evaluator::helpers::fast_len(&ys_val),
+    );
+    if let (Some(len_a), Some(len_b)) = fast {
+        return Ok(Value::CollGeneric(
+            crate::evaluator::CollItems::zip(obj_val, ys_val, len_a.min(len_b)),
+            elem_type,
+        ));
+    }
     let (_kind_a, items_a) = collection_to_values(obj_val, cx.ctx)?;
     let (_kind_b, items_b) = collection_to_values(ys_val, cx.ctx)?;
     let zipped: Vec<Value> = items_a
@@ -240,10 +254,7 @@ pub(super) fn zip(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     // Outer is Coll[(A, B)] — boxed-element coll carrier;
     // each inner element is a real 2-tuple pair (kept as
     // `Value::Tuple`).
-    Ok(Value::CollGeneric(
-        zipped,
-        Box::new(SigmaType::STuple(vec![elem_a, elem_b])),
-    ))
+    Ok(Value::CollGeneric(zipped.into(), elem_type))
 }
 
 // SColl(12).reverse(30) is a zero-arg method handled by the shared
@@ -381,7 +392,7 @@ fn empty_coll_for_elem(elem: &SigmaType) -> Value {
         SigmaType::SSigmaProp => Value::CollSigmaProp(Vec::new()),
         SigmaType::SBox => Value::CollBox(Vec::new()),
         SigmaType::SHeader => Value::CollHeader(Vec::new()),
-        other => Value::CollGeneric(Vec::new(), Box::new(other.clone())),
+        other => Value::CollGeneric(Vec::new().into(), Box::new(other.clone())),
     }
 }
 
@@ -458,7 +469,7 @@ pub(super) fn flat_map(
                 Value::CollHeader(_) => Value::CollHeader(vec![]),
                 Value::Tokens(_) => Value::Tokens(vec![]),
                 Value::CollGeneric(_, elem) | Value::CollLegacyPair(_, elem, _) => {
-                    Value::CollGeneric(vec![], elem.clone())
+                    Value::CollGeneric(Vec::new().into(), elem.clone())
                 }
                 _ => Value::CollBytes(vec![]),
             });

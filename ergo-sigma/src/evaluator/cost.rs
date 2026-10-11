@@ -441,7 +441,7 @@ fn eq_with_cost_inner(
             cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
             let b_view = match right {
                 Value::Tokens(b) => token_tuple_values(b),
-                Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _) => b.clone(),
+                Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _) => (**b).clone(),
                 // `require_comparable` gates the operand types; any other right
                 // carrier is unreachable. The case-2 MatchType is charged;
                 // defer the boolean to the uncosted authority.
@@ -473,9 +473,10 @@ fn descriptor_coll_eq(
 ) -> Result<bool, EvalError> {
     fn item(value: &Value, index: usize) -> Result<Value, EvalError> {
         match value {
-            Value::CollGeneric(items, _)
-            | Value::CollLegacyPair(items, _, _)
-            | Value::CollBox(items) => Ok(items[index].clone()),
+            Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => {
+                Ok(items[index].clone())
+            }
+            Value::CollBox(items) => Ok(items[index].clone()),
             Value::CollHeader(items) => Ok(Value::Header(Box::new(items[index].clone()))),
             Value::BoxCollection(source) => Ok(Value::BoxRef {
                 source: *source,
@@ -518,7 +519,8 @@ fn eq_coll_fallback(
     // Scala `equalColls` fallback).
     let b_owned;
     let b: &[Value] = match right {
-        Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _) | Value::CollBox(b) => b,
+        Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _) => b,
+        Value::CollBox(b) => b,
         Value::Tokens(t) => {
             b_owned = token_tuple_values(t);
             &b_owned
@@ -529,7 +531,10 @@ fn eq_coll_fallback(
         // authority for the boolean; cost already reflects the MatchType.
         _ => {
             return super::helpers::values_equal(
-                &Value::CollGeneric(a.to_vec(), Box::new(ergo_ser::sigma_type::SigmaType::SAny)),
+                &Value::CollGeneric(
+                    a.to_vec().into(),
+                    Box::new(ergo_ser::sigma_type::SigmaType::SAny),
+                ),
                 right,
                 ctx,
             )
@@ -1045,7 +1050,8 @@ mod token_eq_tests {
             vec![Value::Tuple(vec![
                 Value::CollBytes([0xAA; 32].to_vec()),
                 Value::Long(100),
-            ])],
+            ])]
+            .into(),
             Box::new(token_elem),
         );
         // left = CollGeneric (-> eq_coll_fallback), right = Tokens.

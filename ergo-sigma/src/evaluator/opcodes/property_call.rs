@@ -1080,7 +1080,7 @@ pub(super) fn eval_no_arg_method(
                     let elem_type = coll_elem_type(&other).unwrap_or(SigmaType::SAny);
                     let (_kind, mut items) = collection_to_values(other, ctx)?;
                     items.reverse();
-                    Value::CollGeneric(items, Box::new(elem_type))
+                    Value::CollGeneric(items.into(), Box::new(elem_type))
                 }
             };
             Ok(Some(reversed))

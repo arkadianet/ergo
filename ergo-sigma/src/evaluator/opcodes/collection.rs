@@ -242,8 +242,8 @@ pub(in crate::evaluator) fn eval_by_index(
         // the type-error arm — STuple field access goes through
         // `SelectField` (0x8C), not `ByIndex` (0xB2).
         Value::CollGeneric(ref items, _) | Value::CollLegacyPair(ref items, _, _) => {
-            if idx < items.len() {
-                Ok(items[idx].clone())
+            if let Some(item) = items.item(idx) {
+                Ok(item)
             } else if let Some(d) = default {
                 take_default(d, &mut eager_default, cx)
             } else {
