@@ -625,3 +625,164 @@ fn avltree_update_digest_operations_fixed_cost_invariant() {
         "updateOperations FixedCost(45) - updateDigest FixedCost(40) = 5",
     );
 }
+
+// ── AVL keys of the wrong length: verdict and cost as when the crate failed them ──
+
+/// A tree of 32-byte keys `[0x10; 32]` .. `[0x60; 32]`, its digest, and a
+/// proof for the well-formed prefix of `ops` (stopping at the first key of
+/// another length or the first failing operation).
+fn avl_tree_and_proof(ops: &[ergo_avltree_rust::operation::Operation]) -> (Vec<u8>, Vec<u8>) {
+    use bytes::Bytes;
+    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
+    use ergo_avltree_rust::batch_node::{AVLTree, Node, NodeHeader};
+    use ergo_avltree_rust::operation::{KeyValue, Operation};
+
+    let mut prover = BatchAVLProver::new(
+        AVLTree::new(
+            |d| Node::LabelOnly(NodeHeader::new(Some(*d), None)),
+            32,
+            None,
+        ),
+        true,
+    );
+    for b in [0x10u8, 0x20, 0x30, 0x40, 0x50, 0x60] {
+        prover
+            .perform_one_operation(&Operation::Insert(KeyValue {
+                key: Bytes::from(vec![b; 32]),
+                value: Bytes::from(vec![b; 4]),
+            }))
+            .expect("seed insert");
+    }
+    let _ = prover.generate_proof();
+    let digest = prover.digest().expect("digest").to_vec();
+    for op in ops {
+        if op.key().len() != 32 || prover.perform_one_operation(op).is_err() {
+            break;
+        }
+    }
+    (digest, prover.generate_proof().to_vec())
+}
+
+/// Every AVL method that runs verifier operations, given keys of the wrong
+/// length alone, after a well-formed key, and before one: the result and the
+/// JIT cost must match handing those keys to `ergo_avltree_rust` (the
+/// behaviour before the wrapper's early return), under v0 and v3 trees.
+#[test]
+fn avl_wrong_length_keys_keep_verdict_and_cost() {
+    use bytes::Bytes;
+    use ergo_avltree_rust::operation::{KeyValue, Operation};
+    use ergo_ser::sigma_value::CollValue;
+
+    fn lookup(k: &[u8]) -> Operation {
+        Operation::Lookup(Bytes::from(k.to_vec()))
+    }
+    fn remove(k: &[u8]) -> Operation {
+        Operation::Remove(Bytes::from(k.to_vec()))
+    }
+    fn kv(k: &[u8]) -> KeyValue {
+        KeyValue {
+            key: Bytes::from(k.to_vec()),
+            value: Bytes::from(vec![0x77; 4]),
+        }
+    }
+    fn update(k: &[u8]) -> Operation {
+        Operation::Update(kv(k))
+    }
+    fn insert(k: &[u8]) -> Operation {
+        Operation::Insert(kv(k))
+    }
+    fn insert_or_update(k: &[u8]) -> Operation {
+        Operation::InsertOrUpdate(kv(k))
+    }
+
+    let bytes_val = |b: &[u8]| SigmaValue::Coll(CollValue::Bytes(b.to_vec()));
+    let bytes_ty = || SigmaType::SColl(Box::new(SigmaType::SByte));
+    let keys_arg = |keys: &[Vec<u8>]| Expr::Const {
+        tpe: SigmaType::SColl(Box::new(bytes_ty())),
+        val: SigmaValue::Coll(CollValue::Values(
+            keys.iter().map(|k| bytes_val(k)).collect(),
+        )),
+    };
+    let entries_arg = |keys: &[Vec<u8>]| Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::STuple(vec![bytes_ty(), bytes_ty()]))),
+        val: SigmaValue::Coll(CollValue::Values(
+            keys.iter()
+                .map(|k| SigmaValue::Tuple(vec![bytes_val(k), bytes_val(&[0x77; 4])]))
+                .collect(),
+        )),
+    };
+
+    let present = vec![0x20u8; 32];
+    let absent = vec![0x35u8; 32];
+    let wrong_keys: Vec<Vec<u8>> = vec![
+        vec![],
+        vec![0x00; 31],
+        vec![0x00; 33],
+        vec![0xFF; 31],
+        vec![0xFF; 33],
+        vec![0x20; 31],
+        vec![0x20; 33],
+    ];
+
+    let mut cases = 0;
+    let mut distinct = std::collections::BTreeSet::new();
+    for wrong in &wrong_keys {
+        type ProverOp = fn(&[u8]) -> Operation;
+        let mut calls: Vec<(u8, Vec<Vec<u8>>, ProverOp)> = vec![
+            (9, vec![wrong.clone()], lookup),
+            (10, vec![wrong.clone()], lookup),
+        ];
+        for keys in [
+            vec![wrong.clone()],
+            vec![present.clone(), wrong.clone()],
+            vec![wrong.clone(), present.clone()],
+        ] {
+            calls.push((11, keys.clone(), lookup));
+            calls.push((14, keys.clone(), remove));
+            calls.push((13, keys.clone(), update));
+            calls.push((16, keys, insert_or_update));
+        }
+        for keys in [
+            vec![wrong.clone()],
+            vec![absent.clone(), wrong.clone()],
+            vec![wrong.clone(), absent.clone()],
+        ] {
+            calls.push((12, keys, insert));
+        }
+
+        for (method_id, keys, prover_op) in calls {
+            let ops: Vec<Operation> = keys.iter().map(|k| prover_op(k)).collect();
+            let (digest, proof) = avl_tree_and_proof(&ops);
+            let keys_expr = match method_id {
+                9 | 10 => const_bytes(keys[0].clone()),
+                11 | 14 => keys_arg(&keys),
+                _ => entries_arg(&keys),
+            };
+            let expr = avl_method(
+                avl_const_expr(digest),
+                method_id,
+                vec![keys_expr, const_bytes(proof)],
+            );
+            for version in [0u8, 3] {
+                let ctx = ctx_with_tree_version(version);
+                let run = || {
+                    let (res, cost) = eval_value_and_cost(&expr, &ctx);
+                    (format!("{res:?}"), cost)
+                };
+                let before = crate::avl::with_crate_key_length_check(run);
+                let after = run();
+                assert_eq!(
+                    before, after,
+                    "method {method_id}, keys {keys:?}, tree version {version}"
+                );
+                distinct.insert(after);
+                cases += 1;
+            }
+        }
+    }
+    assert_eq!(cases, wrong_keys.len() * (2 + 3 * 4 + 3) * 2);
+    // The cases reach the methods' different outcomes (false, None, script
+    // errors, pre-v3 insert failure) at several costs, not one shared error.
+    assert!(distinct.len() >= 10, "{distinct:?}");
+}

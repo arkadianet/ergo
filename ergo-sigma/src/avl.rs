@@ -145,6 +145,87 @@ pub fn proof_tree_height(
     }
 }
 
+/// `BatchAVLVerifier::perform_one_operation`, failing a key whose length is
+/// not the tree's key length without handing it to the crate.
+///
+/// The crate checks the key against its `-inf` / `+inf` sentinel keys
+/// (`authenticated_tree_ops.rs` `return_result_of_one_operation`) before it
+/// checks the length, and builds both sentinels afresh on every operation as
+/// `key_length`-byte vectors. `key_length` is the tree's declared length,
+/// which script data sets (anything the KeyTooLong guard in
+/// `make_avl_verifier` lets through, up to `i32::MAX - 2`), so a short key
+/// against a large declared length cost an allocation and fill of up to
+/// gigabytes per operation, only for the operation to fail on the length
+/// check.
+///
+/// A key of the wrong length always fails that check, whichever of the three
+/// fires first, and every failure inside the crate's operation leaves the
+/// same state: `perform_one_operation` clears the root and sets the height
+/// to 0, so later operations fail with "Empty tree" and the digest is
+/// absent. The early return reproduces exactly that: `Err` and the cleared
+/// root and height. (The crate also resets its private replay cursor; it is
+/// only read while walking a tree, which a cleared root never reaches.) A
+/// verifier whose root is already cleared fails the same way in the crate,
+/// so the order of the two checks does not matter.
+fn perform_one_operation(
+    bv: &mut BatchAVLVerifier,
+    operation: &Operation,
+) -> Result<Option<bytes::Bytes>, ()> {
+    if operation_key(operation).len() != bv.get_state().tree.key_length
+        && !crate_key_length_check_only()
+    {
+        let state = bv.state();
+        state.tree.root = None;
+        state.tree.height = 0;
+        return Err(());
+    }
+    bv.perform_one_operation(operation).map_err(|_| ())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: hand wrong-length keys to the crate as before, so tests
+    /// can compare the early return against the crate's own failure.
+    static CRATE_KEY_LENGTH_CHECK_ONLY: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+fn crate_key_length_check_only() -> bool {
+    CRATE_KEY_LENGTH_CHECK_ONLY.with(Cell::get)
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn crate_key_length_check_only() -> bool {
+    false
+}
+
+/// Test-only: run `f` with wrong-length keys handed to the crate (the
+/// behaviour before the early return in [`perform_one_operation`]).
+#[cfg(test)]
+pub(crate) fn with_crate_key_length_check<R>(f: impl FnOnce() -> R) -> R {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CRATE_KEY_LENGTH_CHECK_ONLY.with(|c| c.set(self.0));
+        }
+    }
+    let _reset = Reset(CRATE_KEY_LENGTH_CHECK_ONLY.with(|c| c.replace(true)));
+    f()
+}
+
+/// The key an operation addresses, borrowed (`Operation::key` clones it).
+fn operation_key(operation: &Operation) -> &[u8] {
+    match operation {
+        Operation::Lookup(key)
+        | Operation::UnknownModification(key)
+        | Operation::Remove(key)
+        | Operation::RemoveIfExists(key) => key,
+        Operation::Insert(kv) | Operation::InsertOrUpdate(kv) | Operation::Update(kv) => &kv.key,
+        Operation::UpdateLongBy(delta) => &delta.key,
+    }
+}
+
 /// Opaque handle to a BatchAVLVerifier from `ergo_avltree_rust`.
 ///
 /// Operation methods return `Result<_, ()>` because the underlying crate's
@@ -439,7 +520,7 @@ impl AvlVerifier {
     /// Single-key lookup. Returns the value bytes if found.
     pub fn lookup(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, ()> {
         self.guarded(|bv| {
-            match bv.perform_one_operation(&Operation::Lookup(bytes::Bytes::from(key.to_vec()))) {
+            match perform_one_operation(bv, &Operation::Lookup(bytes::Bytes::from(key.to_vec()))) {
                 Ok(Some(v)) => Ok(Some(v.to_vec())),
                 Ok(None) => Ok(None),
                 Err(_) => Err(()),
@@ -455,10 +536,13 @@ impl AvlVerifier {
     /// exists" error.
     pub fn update(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, ()> {
         self.guarded(|bv| {
-            bv.perform_one_operation(&Operation::Update(KeyValue {
-                key: bytes::Bytes::from(key.to_vec()),
-                value: bytes::Bytes::from(value.to_vec()),
-            }))
+            perform_one_operation(
+                bv,
+                &Operation::Update(KeyValue {
+                    key: bytes::Bytes::from(key.to_vec()),
+                    value: bytes::Bytes::from(value.to_vec()),
+                }),
+            )
             .map(|old| old.map(|v| v.to_vec()))
             .map_err(|_| ())
         })
@@ -469,10 +553,13 @@ impl AvlVerifier {
     /// scrypto's `update_fn` "Key already exists" error).
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, ()> {
         self.guarded(|bv| {
-            bv.perform_one_operation(&Operation::Insert(KeyValue {
-                key: bytes::Bytes::from(key.to_vec()),
-                value: bytes::Bytes::from(value.to_vec()),
-            }))
+            perform_one_operation(
+                bv,
+                &Operation::Insert(KeyValue {
+                    key: bytes::Bytes::from(key.to_vec()),
+                    value: bytes::Bytes::from(value.to_vec()),
+                }),
+            )
             .map(|old| old.map(|v| v.to_vec()))
             .map_err(|_| ())
         })
@@ -486,10 +573,13 @@ impl AvlVerifier {
     /// `None` when the key was absent (fresh insert).
     pub fn insert_or_update(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, ()> {
         self.guarded(|bv| {
-            bv.perform_one_operation(&Operation::InsertOrUpdate(KeyValue {
-                key: bytes::Bytes::from(key.to_vec()),
-                value: bytes::Bytes::from(value.to_vec()),
-            }))
+            perform_one_operation(
+                bv,
+                &Operation::InsertOrUpdate(KeyValue {
+                    key: bytes::Bytes::from(key.to_vec()),
+                    value: bytes::Bytes::from(value.to_vec()),
+                }),
+            )
             .map(|old| old.map(|v| v.to_vec()))
             .map_err(|_| ())
         })
@@ -501,9 +591,12 @@ impl AvlVerifier {
     /// `Some(old)` when the key existed, `None` when it did not.
     pub fn remove_if_exists(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, ()> {
         self.guarded(|bv| {
-            bv.perform_one_operation(&Operation::RemoveIfExists(bytes::Bytes::from(key.to_vec())))
-                .map(|old| old.map(|v| v.to_vec()))
-                .map_err(|_| ())
+            perform_one_operation(
+                bv,
+                &Operation::RemoveIfExists(bytes::Bytes::from(key.to_vec())),
+            )
+            .map(|old| old.map(|v| v.to_vec()))
+            .map_err(|_| ())
         })
     }
 
@@ -514,10 +607,13 @@ impl AvlVerifier {
     /// no-op if zero). Returns the OLD value the proof witnessed.
     pub fn update_long_by(&mut self, key: &[u8], delta: i64) -> Result<Option<Vec<u8>>, ()> {
         self.guarded(|bv| {
-            bv.perform_one_operation(&Operation::UpdateLongBy(KeyDelta {
-                key: bytes::Bytes::from(key.to_vec()),
-                delta,
-            }))
+            perform_one_operation(
+                bv,
+                &Operation::UpdateLongBy(KeyDelta {
+                    key: bytes::Bytes::from(key.to_vec()),
+                    delta,
+                }),
+            )
             .map(|old| old.map(|v| v.to_vec()))
             .map_err(|_| ())
         })
@@ -530,9 +626,10 @@ impl AvlVerifier {
     /// ErgoTree surface for it.
     pub fn unknown_modification(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, ()> {
         self.guarded(|bv| {
-            bv.perform_one_operation(&Operation::UnknownModification(bytes::Bytes::from(
-                key.to_vec(),
-            )))
+            perform_one_operation(
+                bv,
+                &Operation::UnknownModification(bytes::Bytes::from(key.to_vec())),
+            )
             .map(|old| old.map(|v| v.to_vec()))
             .map_err(|_| ())
         })
@@ -541,7 +638,7 @@ impl AvlVerifier {
     /// Remove a key from the tree. Returns Ok(()) on success.
     pub fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         self.guarded(|bv| {
-            bv.perform_one_operation(&Operation::Remove(bytes::Bytes::from(key.to_vec())))
+            perform_one_operation(bv, &Operation::Remove(bytes::Bytes::from(key.to_vec())))
                 .map(|_| ())
                 .map_err(|_| ())
         })
@@ -563,7 +660,7 @@ impl AvlVerifier {
     ///   etc.). Opaque from this side; treat as session-scoped.
     pub fn remove_with_presence(&mut self, key: &[u8]) -> Result<bool, ()> {
         self.guarded(|bv| {
-            bv.perform_one_operation(&Operation::Remove(bytes::Bytes::from(key.to_vec())))
+            perform_one_operation(bv, &Operation::Remove(bytes::Bytes::from(key.to_vec())))
                 .map(|opt| opt.is_some())
                 .map_err(|_| ())
         })
@@ -579,7 +676,7 @@ impl AvlVerifier {
     /// that `remove_with_presence` discards.
     pub fn remove_returning_value(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, ()> {
         self.guarded(|bv| {
-            bv.perform_one_operation(&Operation::Remove(bytes::Bytes::from(key.to_vec())))
+            perform_one_operation(bv, &Operation::Remove(bytes::Bytes::from(key.to_vec())))
                 .map(|opt| opt.map(|v| v.to_vec()))
                 .map_err(|_| ())
         })
@@ -1253,6 +1350,288 @@ pub(crate) mod deep_proof_tests {
                 proof.truncate(proof.len() - spine_directions_len(FAR_TOO_DEEP) - 1);
                 assert!(AvlVerifier::new(&digest, &proof, 1, Some(0), None, None).is_err());
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod key_length_tests {
+    use super::*;
+
+    /// A proof that reconstructs to a single label-only root, and the digest
+    /// it matches. No key bytes are read, so any declared key length passes
+    /// construction.
+    fn label_only_proof() -> (Vec<u8>, Vec<u8>) {
+        let label = [0x5au8; PROOF_LABEL_LENGTH];
+        let mut proof = vec![PROOF_LABEL];
+        proof.extend_from_slice(&label);
+        proof.push(PROOF_END_OF_TREE);
+        let mut digest = label.to_vec();
+        digest.push(0);
+        (proof, digest)
+    }
+
+    #[test]
+    fn huge_declared_key_length_op_is_cheap() {
+        // `AVL_REPRO_KEY_LENGTH=<hex>` overrides the length for manual
+        // measurement (`/usr/bin/time -v` on the test binary).
+        let key_length = std::env::var("AVL_REPRO_KEY_LENGTH")
+            .ok()
+            .and_then(|s| usize::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0x7fff_fffd);
+        let (proof, digest) = label_only_proof();
+        let mut v = AvlVerifier::new(&digest, &proof, key_length, None, None, None)
+            .expect("label-only proof reconstructs");
+        let start = std::time::Instant::now();
+        assert_eq!(v.lookup(&[0x11; 32]), Err(()));
+        let elapsed = start.elapsed();
+        eprintln!("key_length {key_length:#x}: one op took {elapsed:?}");
+        // The crate's sentinel keys alone took about a second (and two
+        // gigabytes resident) at this length; the early return takes
+        // microseconds.
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "{elapsed:?}"
+        );
+        assert_eq!(v.digest(), None);
+        assert_eq!(v.digest_checked(), Ok(None));
+        assert_eq!(v.lookup(&[0x11; 32]), Err(()));
+    }
+
+    // ----- early return versus the crate's own failure -----
+
+    const KEY_LENGTH: usize = 32;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Op {
+        Lookup,
+        Update,
+        Insert,
+        InsertOrUpdate,
+        RemoveIfExists,
+        UpdateLongBy,
+        UnknownModification,
+        Remove,
+        RemoveWithPresence,
+        RemoveReturningValue,
+    }
+
+    const ALL_OPS: [Op; 10] = [
+        Op::Lookup,
+        Op::Update,
+        Op::Insert,
+        Op::InsertOrUpdate,
+        Op::RemoveIfExists,
+        Op::UpdateLongBy,
+        Op::UnknownModification,
+        Op::Remove,
+        Op::RemoveWithPresence,
+        Op::RemoveReturningValue,
+    ];
+
+    const VALUE: [u8; 8] = [0x77; 8];
+
+    /// One wrapper call, its result flattened to a comparable form.
+    fn apply(v: &mut AvlVerifier, op: Op, key: &[u8]) -> Result<Option<Vec<u8>>, ()> {
+        match op {
+            Op::Lookup => v.lookup(key),
+            Op::Update => v.update(key, &VALUE),
+            Op::Insert => v.insert(key, &VALUE),
+            Op::InsertOrUpdate => v.insert_or_update(key, &VALUE),
+            Op::RemoveIfExists => v.remove_if_exists(key),
+            Op::UpdateLongBy => v.update_long_by(key, 5),
+            Op::UnknownModification => v.unknown_modification(key),
+            Op::Remove => v.remove(key).map(|()| None),
+            Op::RemoveWithPresence => v
+                .remove_with_presence(key)
+                .map(|present| Some(vec![u8::from(present)])),
+            Op::RemoveReturningValue => v.remove_returning_value(key),
+        }
+    }
+
+    fn prover_op(op: Op, key: &[u8]) -> Operation {
+        let key = bytes::Bytes::from(key.to_vec());
+        let kv = KeyValue {
+            key: key.clone(),
+            value: bytes::Bytes::from(VALUE.to_vec()),
+        };
+        match op {
+            Op::Lookup => Operation::Lookup(key),
+            Op::Update => Operation::Update(kv),
+            Op::Insert => Operation::Insert(kv),
+            Op::InsertOrUpdate => Operation::InsertOrUpdate(kv),
+            Op::RemoveIfExists => Operation::RemoveIfExists(key),
+            Op::UpdateLongBy => Operation::UpdateLongBy(KeyDelta { key, delta: 5 }),
+            Op::UnknownModification => Operation::UnknownModification(key),
+            Op::Remove | Op::RemoveWithPresence | Op::RemoveReturningValue => {
+                Operation::Remove(key)
+            }
+        }
+    }
+
+    /// A tree of 32-byte keys `[0x10; 32]` .. `[0x60; 32]` (each holding an
+    /// 8-byte big-endian long), its digest, and a proof for `ops` against it.
+    fn tree_and_proof(ops: &[(Op, Vec<u8>)]) -> (Vec<u8>, Vec<u8>) {
+        use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
+        let mut prover = BatchAVLProver::new(
+            AVLTree::new(
+                |d| Node::LabelOnly(NodeHeader::new(Some(*d), None)),
+                KEY_LENGTH,
+                None,
+            ),
+            true,
+        );
+        for b in [0x10u8, 0x20, 0x30, 0x40, 0x50, 0x60] {
+            prover
+                .perform_one_operation(&Operation::Insert(KeyValue {
+                    key: bytes::Bytes::from(vec![b; KEY_LENGTH]),
+                    value: bytes::Bytes::from(7i64.to_be_bytes().to_vec()),
+                }))
+                .expect("seed insert");
+        }
+        let _ = prover.generate_proof();
+        let digest = prover.digest().expect("digest").to_vec();
+        for (op, key) in ops {
+            // A wrong-length key and everything after it fail on the
+            // verifier side; the proof covers the well-formed prefix.
+            if key.len() != KEY_LENGTH
+                || prover.perform_one_operation(&prover_op(*op, key)).is_err()
+            {
+                break;
+            }
+        }
+        (digest, prover.generate_proof().to_vec())
+    }
+
+    type Step = (
+        Result<Option<Vec<u8>>, ()>,
+        Result<Option<Vec<u8>>, AvlHeightOutOfRange>,
+    );
+
+    /// Run `ops` and then one well-formed lookup on a fresh verifier,
+    /// recording each result and the digest after it.
+    fn trace(digest: &[u8], proof: &[u8], ops: &[(Op, Vec<u8>)]) -> Vec<Step> {
+        let mut v = AvlVerifier::new(digest, proof, KEY_LENGTH, None, None, None)
+            .expect("well-formed proof");
+        let mut out = vec![(Ok(None), v.digest_checked())];
+        let tail = (Op::Lookup, vec![0x30; KEY_LENGTH]);
+        for (op, key) in ops.iter().chain(std::iter::once(&tail)) {
+            let r = apply(&mut v, *op, key);
+            out.push((r, v.digest_checked()));
+        }
+        out
+    }
+
+    fn assert_same_as_crate(ops: &[(Op, Vec<u8>)]) {
+        let (digest, proof) = tree_and_proof(ops);
+        let before = with_crate_key_length_check(|| trace(&digest, &proof, ops));
+        let after = trace(&digest, &proof, ops);
+        assert_eq!(before, after, "ops {ops:?}");
+    }
+
+    /// Wrong-length keys reaching each of the crate's three checks first:
+    /// not above `-inf` (zeros), not below `+inf` (0xFF), and between the
+    /// sentinels but of the wrong length; shorter, longer and empty.
+    fn wrong_length_keys() -> Vec<Vec<u8>> {
+        vec![
+            vec![],
+            vec![0x00; KEY_LENGTH - 1],
+            vec![0x00; KEY_LENGTH + 1],
+            vec![0xFF; KEY_LENGTH - 1],
+            vec![0xFF; KEY_LENGTH + 1],
+            vec![0x20; KEY_LENGTH - 1],
+            vec![0x20; KEY_LENGTH + 1],
+            vec![0x35; KEY_LENGTH + 1],
+            vec![0x20; 2 * KEY_LENGTH],
+        ]
+    }
+
+    #[test]
+    fn wrong_length_key_fails_like_the_crate_on_a_fresh_verifier() {
+        for op in ALL_OPS {
+            for key in wrong_length_keys() {
+                assert_same_as_crate(&[(op, key)]);
+            }
+        }
+    }
+
+    #[test]
+    fn wrong_length_key_after_successful_ops_fails_like_the_crate() {
+        for op in ALL_OPS {
+            for key in wrong_length_keys() {
+                assert_same_as_crate(&[
+                    (Op::Lookup, vec![0x20; KEY_LENGTH]),
+                    (Op::Insert, vec![0x35; KEY_LENGTH]),
+                    (Op::Update, vec![0x40; KEY_LENGTH]),
+                    (op, key.clone()),
+                    (Op::Remove, vec![0x50; KEY_LENGTH]),
+                ]);
+            }
+        }
+    }
+
+    #[test]
+    fn wrong_length_key_after_a_failed_op_fails_like_the_crate() {
+        for op in ALL_OPS {
+            for key in wrong_length_keys() {
+                // An Insert of a present key fails cleanly in the crate and
+                // clears the root; the wrong-length op then meets an empty
+                // tree.
+                assert_same_as_crate(&[
+                    (Op::Lookup, vec![0x20; KEY_LENGTH]),
+                    (Op::Insert, vec![0x30; KEY_LENGTH]),
+                    (op, key.clone()),
+                ]);
+                // Two wrong-length operations in a row.
+                assert_same_as_crate(&[(op, key.clone()), (op, key.clone())]);
+            }
+        }
+    }
+
+    #[test]
+    fn wrong_length_key_after_a_contained_panic_fails_like_the_crate() {
+        // A lookup proof driven through a remove makes the crate panic (see
+        // `remove_structurally_valid_wrong_proof_fails_closed_not_panic`); the
+        // wrapper drops the verifier and later operations fail.
+        let (digest, proof) = tree_and_proof(&[(Op::Lookup, vec![0x20; KEY_LENGTH])]);
+        for key in wrong_length_keys() {
+            let run = || {
+                let mut v = AvlVerifier::new(&digest, &proof, KEY_LENGTH, None, None, None)
+                    .expect("well-formed proof");
+                let first = v.remove(&[0x20; KEY_LENGTH]);
+                let second = v.lookup(&key);
+                (first, second, v.digest_checked())
+            };
+            let before = with_crate_key_length_check(run);
+            let after = run();
+            assert_eq!(before, after);
+            assert_eq!(after, (Err(()), Err(()), Ok(None)));
+        }
+    }
+
+    #[test]
+    fn well_formed_ops_are_unchanged() {
+        let ops: Vec<(Op, Vec<u8>)> = vec![
+            (Op::Lookup, vec![0x20; KEY_LENGTH]),
+            (Op::Insert, vec![0x35; KEY_LENGTH]),
+            (Op::UpdateLongBy, vec![0x40; KEY_LENGTH]),
+            (Op::RemoveIfExists, vec![0x45; KEY_LENGTH]),
+            (Op::Remove, vec![0x50; KEY_LENGTH]),
+        ];
+        // The proof also covers the lookup `trace` appends.
+        let mut proved = ops.clone();
+        proved.push((Op::Lookup, vec![0x30; KEY_LENGTH]));
+        let (digest, proof) = tree_and_proof(&proved);
+        let after = trace(&digest, &proof, &ops);
+        assert!(
+            after
+                .iter()
+                .all(|(r, d)| r.is_ok() && matches!(d, Ok(Some(_)))),
+            "{after:?}"
+        );
+        assert_eq!(
+            with_crate_key_length_check(|| trace(&digest, &proof, &ops)),
+            after
         );
     }
 }

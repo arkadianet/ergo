@@ -33,6 +33,7 @@ infrastructure.
 - Reject `map` and `flatMap` calls whose result element type is not a concrete type (a failed method specialization, or a mapper whose body has no type), even on an empty collection; these were previously accepted.
 - Collection element access (`getOrElse`, `apply`, `get`, `indexOf`, `slice`), `append` of primitive collections, lambda calls inside collection operations and blocks no longer copy whole collections or environments per call. A transaction indexing a 60 KB context variable 60,000 times took 20 s to validate and now takes 0.2 s; verdicts and costs are unchanged.
 - `zip` keeps its two collections and builds pairs only when they are read, so sizing, indexing or slicing a zip no longer builds every pair. A transaction that sized a zip of a 60 KB context variable once per index took 26 s to reject and now takes 0.01 s; verdicts and costs are unchanged.
+- AVL tree operations in scripts no longer allocate memory proportional to the tree's declared key length when the key has a different length. With a large declared key length, each such operation allocated up to 4 GB and took about a second; it now fails immediately with the same result and cost as before.
 
 ## [0.12.3] - 2026-10-07
 
