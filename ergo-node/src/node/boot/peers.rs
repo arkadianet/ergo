@@ -23,6 +23,7 @@ pub(super) fn setup(config: &NodeConfig) -> Result<(i64, PeerManager), NodeError
     // Set before any address is restored, learned, or dialed: it decides
     // which addresses the routability filter admits.
     peer_manager.set_allow_local(config.allow_local);
+    peer_manager.set_self_addresses(config.declared_addr.into_iter().chain(config.bind_addr));
 
     match AddressBook::open_at_with_cache(
         &config.data_dir.join("peers.redb"),

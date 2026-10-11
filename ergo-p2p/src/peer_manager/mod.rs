@@ -76,6 +76,11 @@ pub(crate) const MAX_RETAINED_SCORES: usize = 4096;
 /// `maxToSend / 8` = 8 specs, so clamping well below 64 costs nothing.
 pub const MAX_SHARED_PEER_SPECS: usize = 48;
 
+/// Upper bound on PeerSpec entries taken from one inbound `Peers` reply.
+/// Matches Scala's `maxPeerSpecObjects = 64`; the parser stays more
+/// lenient (100) so a slightly larger reply is truncated, not rejected.
+pub const MAX_ACCEPTED_PEER_SPECS: usize = 64;
+
 /// Minimum gap between `storage_error` ERROR log lines for the SAME
 /// write-through operation (issue #281 review fix P2-1) — mirrors
 /// `ergo_state::storage_observability`'s `DEFAULT_SUMMARY_INTERVAL` so
@@ -134,6 +139,9 @@ pub struct PeerManager {
     /// and gossipable like any other, which is what a LAN devnet needs to
     /// form by gossip. See [`is_routable_for_p2p`].
     allow_local: bool,
+    /// Addresses this node itself listens on or declares. Gossip naming
+    /// one of them is not added to the dial pool.
+    self_addresses: HashSet<SocketAddr>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,7 +171,29 @@ impl PeerManager {
             last_storage_error: std::cell::RefCell::new(None),
             storage_error_log_state: std::cell::RefCell::new(HashMap::new()),
             allow_local: false,
+            self_addresses: HashSet::new(),
         }
+    }
+
+    /// Register addresses that identify this node (declared and bind
+    /// addresses). Gossip naming them is ignored.
+    pub fn set_self_addresses(&mut self, addrs: impl IntoIterator<Item = SocketAddr>) {
+        self.self_addresses = addrs.into_iter().collect();
+    }
+
+    /// Record that a `GetPeers` was sent to `addr`.
+    pub fn note_get_peers_sent(&mut self, addr: &PeerId, now: Instant) {
+        if let Some(peer) = self.peers.get_mut(addr) {
+            peer.note_get_peers_sent(now);
+        }
+    }
+
+    /// Whether a `Peers` message from `addr` answers a recent `GetPeers`.
+    /// Consumes the allowance; unsolicited replies return `false`.
+    pub fn take_peers_reply_allowance(&mut self, addr: &PeerId, now: Instant) -> bool {
+        self.peers
+            .get_mut(addr)
+            .is_some_and(|peer| peer.take_peers_reply_allowance(now))
     }
 
     /// Set the operator's `[peers] allow_local` policy. Called once at
@@ -763,7 +793,10 @@ impl PeerManager {
     /// every `GetPeers`) and counting every routable spec as "added"
     /// produces misleading dial-pool diagnostics.
     pub fn add_known_address(&mut self, addr: SocketAddr, origin: PeerOrigin) -> AddKnownOutcome {
-        if !origin.is_seed() && !is_routable_for_p2p(&addr, self.allow_local) {
+        if !origin.is_seed()
+            && (!is_routable_for_p2p(&addr, self.allow_local)
+                || self.self_addresses.contains(&addr))
+        {
             return AddKnownOutcome::FilteredNonRoutable;
         }
         if let Some(existing) = self.known_addresses.iter_mut().find(|k| k.addr == addr) {

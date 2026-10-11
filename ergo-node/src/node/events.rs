@@ -24,7 +24,7 @@ use crate::peer_loop::{self, PeerEvent};
 
 use super::{
     admit_frame, cleanup_disconnected_peer, flush_actions, handle_message, penalize_peer,
-    send_post_header_sync_info, send_to_peer, NodeState, PeerRuntime,
+    send_post_header_sync_info, NodeState, PeerRuntime,
 };
 
 /// events flow through `handle_event` individually as before.
@@ -459,7 +459,7 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             // Sync-S4: request the peer's known addresses so the dial
             // pool can fill beyond the CLI-seeded peer(s) over time.
             if state.peer_manager.needs_outbound() {
-                send_to_peer(state, &addr, message::CODE_GET_PEERS, Vec::new());
+                super::peer_actions::send_get_peers(state, &addr, now);
                 debug!(
                     peer = %addr,
                     deficit = state.peer_manager.outbound_deficit(),

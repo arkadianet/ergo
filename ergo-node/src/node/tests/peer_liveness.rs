@@ -72,6 +72,9 @@ fn survives_trickle(dir: &Path, name: &str, code: u8, payload: &[u8], every: Dur
     let mut t = now;
     while t < deadline {
         t += every;
+        if code == message::CODE_PEERS {
+            state.peer_manager.note_get_peers_sent(&peer, t);
+        }
         deliver_frame(&mut state, peer, code, payload, t);
     }
     evicted_addrs(&mut state, t).is_empty()
@@ -340,4 +343,83 @@ fn no_progress_eviction_does_not_take_dial_backoff() {
             .contains(&peer),
         "a pre-handshake timeout is a dial failure and must take the backoff",
     );
+}
+
+fn gossip_spec(ip: [u8; 4], port: u32) -> PeerSpec {
+    PeerSpec {
+        agent_name: "ergoref".to_string(),
+        version: Version::NIPOPOW,
+        node_name: "gossiped".to_string(),
+        declared_address: Some(ergo_p2p::handshake::DeclaredAddress {
+            addr: ip.to_vec(),
+            port,
+        }),
+        features: Vec::new(),
+    }
+}
+
+/// `Peers` is a reply to `GetPeers`. One that arrives without a recent
+/// request from us is not taken into the address pool and is not progress.
+#[test]
+fn unsolicited_peers_are_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+    let before = state.peer_manager.known_addresses_len();
+    let payload = message::serialize_peers(&[gossip_spec([45, 79, 113, 7], 9030)]);
+
+    let _ = handle_message(&mut state, peer, message::CODE_PEERS, &payload, now);
+    assert_eq!(state.peer_manager.known_addresses_len(), before);
+
+    // A solicited reply is accepted once.
+    state.peer_manager.note_get_peers_sent(&peer, now);
+    let _ = handle_message(&mut state, peer, message::CODE_PEERS, &payload, now);
+    assert_eq!(state.peer_manager.known_addresses_len(), before + 1);
+    let second = message::serialize_peers(&[gossip_spec([45, 79, 113, 8], 9030)]);
+    let _ = handle_message(&mut state, peer, message::CODE_PEERS, &second, now);
+    assert_eq!(
+        state.peer_manager.known_addresses_len(),
+        before + 1,
+        "one GetPeers admits one Peers reply",
+    );
+
+    // A reply after the window has closed is ignored.
+    state.peer_manager.note_get_peers_sent(&peer, now);
+    let late = now + ergo_p2p::peer::PEERS_REPLY_WINDOW + Duration::from_secs(1);
+    let _ = handle_message(&mut state, peer, message::CODE_PEERS, &second, late);
+    assert_eq!(state.peer_manager.known_addresses_len(), before + 1);
+}
+
+/// A `Peers` reply is truncated to the protocol's 64-entry limit, duplicate
+/// entries are counted once, and our own declared address is not learned.
+#[test]
+fn peers_reply_is_capped_deduplicated_and_skips_self() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let own: SocketAddr = "45.80.100.200:9030".parse().unwrap();
+    state.peer_manager.set_self_addresses([own]);
+    let peer = test_peer();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+    let before = state.peer_manager.known_addresses_len();
+
+    let mut specs = vec![gossip_spec([45, 80, 100, 200], 9030)];
+    specs.push(gossip_spec([45, 79, 113, 50], 9030));
+    specs.push(gossip_spec([45, 79, 113, 50], 9030));
+    for i in 0..90u8 {
+        specs.push(gossip_spec([45, 33, i, 1], 9030));
+    }
+    let payload = message::serialize_peers(&specs);
+    state.peer_manager.note_get_peers_sent(&peer, now);
+    let _ = handle_message(&mut state, peer, message::CODE_PEERS, &payload, now);
+    // 64 entries taken: self (skipped), one duplicate pair (one add), and
+    // 61 distinct addresses.
+    assert_eq!(state.peer_manager.known_addresses_len(), before + 62);
+    assert!(state
+        .peer_manager
+        .addresses_to_connect(now, 1000)
+        .iter()
+        .all(|a| *a != own));
 }

@@ -40,7 +40,7 @@ use std::time::Instant;
 use ergo_p2p::handshake::PeerSpec;
 use ergo_p2p::message;
 use ergo_p2p::peer::{PeerId, Penalty, SyncVersion};
-use ergo_p2p::peer_manager::MAX_SHARED_PEER_SPECS;
+use ergo_p2p::peer_manager::{MAX_ACCEPTED_PEER_SPECS, MAX_SHARED_PEER_SPECS};
 use ergo_p2p::throttle::LimiterVerdict;
 use ergo_p2p::types::{InvData, ModifierTypeId, ModifiersData};
 use ergo_primitives::digest::Digest32;
@@ -350,6 +350,14 @@ pub(in crate::node) fn handle_message(
         }
         message::CODE_PEERS => match message::deserialize_peers(payload, 100) {
             Ok(peers) => {
+                // Only a reply to a `GetPeers` we sent recently is taken
+                // into the address pool; Scala and Rust nodes send `Peers`
+                // only in answer to `GetPeers`. Anything else is dropped
+                // without a penalty (a late reply is not misbehaviour).
+                if !state.peer_manager.take_peers_reply_allowance(&peer, now) {
+                    debug!(peer = %peer, count = peers.len(), "unsolicited Peers; ignoring");
+                    return Vec::new();
+                }
                 // Only a `Peers` reply carrying something we could
                 // actually dial is progress. An empty list is as cheap as
                 // a keepalive, and so is a list of specs with no declared
@@ -909,7 +917,8 @@ fn handle_peers_response(state: &mut NodeState, peer: PeerId, peers: Vec<PeerSpe
     let mut malformed = 0usize;
     let mut filtered = 0usize;
     let mut dropped_pool_full = 0usize;
-    for spec in peers {
+    let mut seen = std::collections::HashSet::new();
+    for spec in peers.into_iter().take(MAX_ACCEPTED_PEER_SPECS) {
         let Some(declared) = &spec.declared_address else {
             no_declared += 1;
             continue;
@@ -923,6 +932,10 @@ fn handle_peers_response(state: &mut NodeState, peer: PeerId, peers: Vec<PeerSpe
             malformed += 1;
             continue;
         };
+        if !seen.insert(sock) {
+            already_known += 1;
+            continue;
+        }
         match state
             .peer_manager
             .add_known_address(sock, PeerOrigin::Gossip)
