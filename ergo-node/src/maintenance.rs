@@ -425,7 +425,9 @@ fn discover_external_wallet(
         }
         None => match redb::Database::open(&target_path) {
             Ok(database) => database,
-            Err(_) if !is_cleartext_redb(&target_path)? => {
+            // Windows refuses reading a file a live daemon holds locked, so an
+            // unreadable header means locked, not encrypted.
+            Err(_) if matches!(is_cleartext_redb(&target_path), Ok(false)) => {
                 return Err(fail(
                     "wallet.redb is encrypted; pipe its key in with `ergo-walletd \
                      export-unseal-key --config <walletd.toml> | ergo-node wallet-scan-utxo \
