@@ -279,6 +279,22 @@ impl SyncCoordinator {
             return actions;
         }
 
+        // Only headers and the three block-section types are fetched
+        // through this path (transactions have their own); any other type
+        // has nothing to request.
+        if !is_header_inv
+            && !matches!(
+                ModifierTypeId::from_byte(inv.type_id),
+                Some(
+                    ModifierTypeId::BlockTransactions
+                        | ModifierTypeId::ADProofs
+                        | ModifierTypeId::Extension
+                )
+            )
+        {
+            return actions;
+        }
+
         // Filter to IDs we don't already have. Headers and block sections
         // use different storage lookups. Count each rejection cause so the
         // heartbeat can show where Inv-throughput goes — without this the
@@ -299,9 +315,12 @@ impl SyncCoordinator {
         let mut filt_received: u64 = 0;
         let mut filt_pruned: u64 = 0;
         let sentinel = self.sync_state.prune_sentinel();
+        // An Inv may name an id more than once; consider each id once.
+        let mut seen = std::collections::HashSet::with_capacity(inv.ids.len());
         let needed: Vec<[u8; 32]> = inv
             .ids
             .iter()
+            .filter(|id| seen.insert(**id))
             .filter(|id| {
                 let have = if is_header_inv {
                     chain.has_header(id) || chain.is_invalid(id)
@@ -314,25 +333,23 @@ impl SyncCoordinator {
                 !have
             })
             .filter(|id| {
-                // Mode 3 Phase 3a — request-side gate on the
-                // Inv-driven section path. Peers may advertise
-                // ids we never indexed (unknown sections —
-                // pass-through) or ids whose parent is below
-                // our prune sentinel (skip; we'd just evict on
-                // apply or refuse to serve later). Inert when
-                // `sentinel == 0` (archive / Mode 6 / pre-
-                // eviction store).
-                if is_header_inv || sentinel == 0 {
+                // A block section is only worth requesting when it belongs
+                // to a header we hold: `SECTION_HEIGHT_INDEX` has a row for
+                // every section id of every stored header. An id with no
+                // row names no block we know, so asking for it (and
+                // re-asking other peers when it times out) cannot help.
+                // Sections of headers we do not have yet are fetched from
+                // the header path once the header arrives.
+                //
+                // Mode 3 Phase 3a adds the prune gate on top: ids whose
+                // block is below the prune sentinel are skipped (we'd evict
+                // on apply or refuse to serve later). Inert when
+                // `sentinel == 0` (archive / Mode 6 / pre-eviction store).
+                if is_header_inv {
                     return true;
                 }
-                // Fail-CLOSED on unknown / unreadable height.
-                // The boot backfill gate makes SECTION_HEIGHT_INDEX
-                // complete when sentinel > 1, so None here means
-                // orphan id or read failure — requesting either
-                // would resurrect bytes or amplify a partial-
-                // failure state.
                 match chain.get_section_height(id) {
-                    Some(h) if h >= sentinel => true,
+                    Some(h) if sentinel == 0 || h >= sentinel => true,
                     Some(_) | None => {
                         filt_pruned += 1;
                         false
@@ -474,10 +491,19 @@ impl SyncCoordinator {
                 return actions; // duplicate
             }
             DeliveryAction::RejectSpam => {
-                actions.push(Action::Penalize {
-                    peer,
-                    penalty: Penalty::Spam,
-                });
+                // A peer answering our request with the wrong modifier type
+                // is misbehaving rather than sending unsolicited data; the
+                // real request stays outstanding either way.
+                let penalty =
+                    if self
+                        .delivery
+                        .requested_under_other_type(type_id, &modifier_id, &peer)
+                    {
+                        Penalty::Misbehavior
+                    } else {
+                        Penalty::Spam
+                    };
+                actions.push(Action::Penalize { peer, penalty });
                 return actions;
             }
         }

@@ -34,6 +34,8 @@ struct MockChain {
     best_header_score: Vec<u8>,
     id_to_score: std::collections::HashMap<[u8; 32], Vec<u8>>,
     recent_ids: Vec<[u8; 32]>,
+    /// Section id → block height, for sections of headers the chain holds.
+    section_heights: std::collections::HashMap<[u8; 32], u32>,
 }
 
 impl MockChain {
@@ -49,6 +51,7 @@ impl MockChain {
             best_header_score: vec![1],
             id_to_score: std::collections::HashMap::new(),
             recent_ids: Vec::new(),
+            section_heights: std::collections::HashMap::new(),
         }
     }
 
@@ -64,6 +67,9 @@ impl MockChain {
 }
 
 impl ChainView for MockChain {
+    fn get_section_height(&self, modifier_id: &[u8; 32]) -> Option<u32> {
+        self.section_heights.get(modifier_id).copied()
+    }
     fn best_header_id(&self) -> [u8; 32] {
         self.best_header_id
     }
@@ -158,6 +164,7 @@ fn on_inv_section_uses_has_block_section_not_has_header() {
     let mut chain = MockChain::new(10, 10);
     chain.known_headers.insert(mk(1)); // known as header
                                        // has_block_section returns false for everything in MockChain
+    chain.section_heights.insert(mk(1), 5);
     let now = Instant::now();
     let p = peer(9030);
 
@@ -301,7 +308,8 @@ fn on_modifier_received_rejects_wire_type_mismatch() {
     // against the requested type: penalize misbehavior, do NOT route, and keep
     // the request outstanding (no mark_received) so a retry can still land.
     let mut coord = SyncCoordinator::new(100);
-    let chain = MockChain::new(101, 100);
+    let mut chain = MockChain::new(101, 100);
+    chain.section_heights.insert(mk(7), 101);
     let now = Instant::now();
     let p = peer(9030);
 
@@ -3806,4 +3814,46 @@ fn v1_empty_and_pregenesis_peers_receive_initial_continuation() {
         coord.peer_sync[&p].status,
         ergo_p2p::sync::PeerChainStatus::Equal
     );
+}
+
+#[test]
+fn on_inv_skips_sections_of_unknown_blocks_and_duplicate_ids() {
+    let mut coord = SyncCoordinator::new(0);
+    let mut chain = MockChain::new(10, 10);
+    chain.section_heights.insert(mk(1), 9);
+    let now = Instant::now();
+    let p = peer(9030);
+
+    // mk(2) is not a section of any header we hold; mk(1) is listed twice.
+    let inv = InvData {
+        type_id: ModifierTypeId::BlockTransactions.as_byte(),
+        ids: vec![mk(2), mk(1), mk(1)],
+    };
+    let actions = coord.on_inv(p, &inv, &chain, now);
+    let requested: Vec<[u8; 32]> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::SendToPeer { code, payload, .. } if *code == message::CODE_REQUEST_MODIFIER => {
+                Some(message::deserialize_inv(payload).unwrap().ids)
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(requested, vec![mk(1)]);
+    assert_eq!(
+        coord
+            .delivery()
+            .status(ModifierTypeId::BlockTransactions.as_byte(), &mk(2)),
+        ModifierStatus::Unknown
+    );
+
+    // A transaction-typed or unknown-typed Inv is not fetched here.
+    for type_id in [ModifierTypeId::Transaction.as_byte(), 77] {
+        let inv = InvData {
+            type_id,
+            ids: vec![mk(3)],
+        };
+        assert!(coord.on_inv(p, &inv, &chain, now).is_empty());
+    }
 }

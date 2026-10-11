@@ -248,6 +248,34 @@ impl DeliveryTracker {
         }
     }
 
+    /// Whether `peer` owes us `modifier_id` under a type other than
+    /// `modifier_type` — i.e. a delivery arrived carrying the wrong type for
+    /// an id we did ask this peer for. Lets the caller tell a mistyped answer
+    /// apart from an unsolicited one.
+    pub fn requested_under_other_type(
+        &self,
+        modifier_type: u8,
+        modifier_id: &[u8; 32],
+        peer: &PeerId,
+    ) -> bool {
+        use crate::types::ModifierTypeId as T;
+        [
+            T::Header,
+            T::BlockTransactions,
+            T::ADProofs,
+            T::Extension,
+            T::Transaction,
+        ]
+        .into_iter()
+        .map(T::as_byte)
+        .filter(|t| *t != modifier_type)
+        .any(|t| {
+            self.inflight
+                .get(&(t, *modifier_id))
+                .is_some_and(|req| req.peer == *peer)
+        })
+    }
+
     /// Register a request: we've sent RequestModifier for these IDs to this peer.
     /// Returns the IDs that were actually registered (skipping already-requested,
     /// already-received, or failed ones, and respecting per-peer limits).
