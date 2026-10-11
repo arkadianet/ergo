@@ -403,7 +403,7 @@ fn retired_embedded_wallet_keys_still_load() {
          [wallet]\nmode = \"embedded\"\nexpose_private_keys = true\n",
     );
     let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("retired keys load");
-    assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:9090");
+    assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:3033");
 }
 
 #[test]
@@ -2615,7 +2615,7 @@ fn reemission_check_defaults_and_mining_override() {
 fn wallet_daemon_address_has_a_default() {
     let path = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n");
     let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("default config loads");
-    assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:9090");
+    assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:3033");
 }
 
 #[test]

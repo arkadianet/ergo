@@ -36,6 +36,7 @@ infrastructure.
 
 ### Changed
 
+- `[wallet] daemon_address` defaults to `http://127.0.0.1:3033`, the daemon templates' loopback listener (was `:9090`, which no daemon default used).
 - `/script/p2sAddress` and `/script/p2shAddress` compile with an empty environment: the node holds no wallet keys, so a script naming `myPubKey_N` is a `400` compile error.
 - `ergo-node wallet-scan-utxo` requires `--wallet-data-dir`. With `--wallet-key-stdin` it reads the key that `ergo-walletd export-unseal-key` prints and opens the daemon's encrypted database without the wallet password.
 

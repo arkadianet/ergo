@@ -726,7 +726,7 @@ never opens wallet secrets; its former wallet routes return `410` with
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `daemon_address` | string | `"http://127.0.0.1:9090"` | Address returned by the `wallet_moved` responses. It is informational routing guidance; the node does not proxy requests to it. |
+| `daemon_address` | string | `"http://127.0.0.1:3033"` | Address returned by the `wallet_moved` responses: where clients reach `ergo-walletd`. The default matches the daemon templates' and `ergo-walletd init --tcp`'s loopback listener; set it to your daemon's listener. It is informational routing guidance; the node does not proxy requests to it. |
 | `mode` | string | none | Retired. `"external"` is accepted silently and `"embedded"` with a warning, so configs from earlier releases still load; any other value is a load error. |
 | `expose_private_keys` | bool | none | Retired; ignored with a warning. |
 

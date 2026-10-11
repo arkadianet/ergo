@@ -42,11 +42,11 @@ pub(super) fn security() -> Arc<ApiSecurity> {
 }
 
 fn wallet_app_gated() -> axum::Router {
-    compat_router(Some("http://127.0.0.1:9090"), Some(security()))
+    compat_router(Some("http://127.0.0.1:3033"), Some(security()))
 }
 
 fn wallet_app_unconfigured() -> axum::Router {
-    compat_router(Some("http://127.0.0.1:9090"), None)
+    compat_router(Some("http://127.0.0.1:3033"), None)
 }
 
 async fn body_string(resp: axum::response::Response) -> String {

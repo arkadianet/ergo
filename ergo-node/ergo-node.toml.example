@@ -230,7 +230,7 @@ peer_details.reverse_dns = false
 [wallet]
 # The wallet runs in ergo-walletd (docs/wallet-setup.md); the node answers
 # its former wallet routes with `wallet_moved` and this address.
-# daemon_address = "http://127.0.0.1:9090"
+# daemon_address = "http://127.0.0.1:3033"
 
 [mining]
 # External-miner API (GET /mining/candidate + POST /mining/solution).
