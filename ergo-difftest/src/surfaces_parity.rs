@@ -220,7 +220,7 @@ fn normalize_value(value: &mut SigmaValue, version: u8, after_write: bool) {
                 .for_each(|x| normalize_value(x, version, after_write));
         }
         SigmaValue::Opt(Some(inner)) => normalize_value(inner, version, after_write),
-        SigmaValue::Unevaluated(expr) => normalize_expr(expr, version, after_write),
+        SigmaValue::Unevaluated(expr) => normalize_expr(expr, version, after_write, &[]),
         _ => {}
     }
 }
@@ -273,7 +273,12 @@ impl ParityNormalize for SigmaValue {
     }
 }
 
-fn normalize_expr(expr: &mut Expr, version: u8, after_write: bool) {
+fn normalize_expr(
+    expr: &mut Expr,
+    version: u8,
+    after_write: bool,
+    constants: &[(SigmaType, SigmaValue)],
+) {
     // Test the DIRECT input before descending: Scala strips one level per pass.
     // Collapsing chains to their fixed point would hide lost cast targets or
     // a writer that incorrectly removes multiple levels in a single pass.
@@ -349,11 +354,25 @@ fn normalize_expr(expr: &mut Expr, version: u8, after_write: bool) {
         | Payload::NoneValue { .. } => vec![],
     };
     for child in children {
-        normalize_expr(child, version, after_write);
+        normalize_expr(child, version, after_write, constants);
     }
     // MethodCall.companion chooses PropertyCall for an empty argument list.
     if after_write && matches!(&node.payload, Payload::MethodCall { args, .. } if args.is_empty()) {
         node.opcode = 0xdb;
+    }
+    // Relations (0x8F-0x94) and arithmetic (Minus, Plus, Multiply, Division,
+    // Modulo, Min, Max) in trees below v3 reinsert the builder's Upcast on the
+    // narrower operand when the operand types differ. The writer's one-level
+    // strip can turn an Upcast(Const) operand back into a bare constant, so
+    // model that reinsertion when both operand types are known.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala#L674-L711
+    if after_write
+        && version < 3
+        && matches!(node.opcode, 0x8f..=0x94 | 0x99..=0x9a | 0x9c..=0x9e | 0xa1..=0xa2)
+    {
+        if let Payload::Two(a, b) = &mut node.payload {
+            reinsert_operand_upcast(a, b, constants);
+        }
     }
     // ByIndexSerializer.parse reinserts an Int Upcast for a byte/short index
     // before v3. Model that context after the writer's one-level stripping.
@@ -377,6 +396,59 @@ fn normalize_expr(expr: &mut Expr, version: u8, after_write: bool) {
         }
     }
 }
+
+/// Numeric type of a binary-operator operand: explicit in the IR for a constant or a
+/// numeric cast, otherwise the node's own static typer. `None` when unknown.
+fn operand_numeric_type(expr: &Expr, constants: &[(SigmaType, SigmaValue)]) -> Option<SigmaType> {
+    let tpe = match expr {
+        Expr::Const { tpe, .. } => tpe.clone(),
+        Expr::Op(IrNode {
+            payload: Payload::NumericCast { tpe, .. },
+            ..
+        }) => tpe.clone(),
+        _ => ergo_ser::ergo_tree::determinable_root_type_of(expr, constants)?,
+    };
+    numeric_rank(&tpe).map(|_| tpe)
+}
+
+fn numeric_rank(tpe: &SigmaType) -> Option<u8> {
+    match tpe {
+        SigmaType::SByte => Some(1),
+        SigmaType::SShort => Some(2),
+        SigmaType::SInt => Some(3),
+        SigmaType::SLong => Some(4),
+        SigmaType::SBigInt => Some(5),
+        SigmaType::SUnsignedBigInt => Some(6),
+        _ => None,
+    }
+}
+
+/// The parser's pre-v3 binary-operator Upcast: wrap the narrower of two numeric
+/// operands of known type in an Upcast to the wider type.
+fn reinsert_operand_upcast(a: &mut Expr, b: &mut Expr, constants: &[(SigmaType, SigmaValue)]) {
+    let (Some(ta), Some(tb)) = (
+        operand_numeric_type(a, constants),
+        operand_numeric_type(b, constants),
+    ) else {
+        return;
+    };
+    if ta == tb {
+        return;
+    }
+    let (narrow, target) = if numeric_rank(&ta) < numeric_rank(&tb) {
+        (a, tb)
+    } else {
+        (b, ta)
+    };
+    *narrow = Expr::Op(IrNode {
+        opcode: 0x7e,
+        payload: Payload::NumericCast {
+            input: Box::new(narrow.clone()),
+            tpe: target,
+        },
+    });
+}
+
 fn has_pending_strip(expr: &Expr) -> bool {
     let Expr::Op(node) = expr else {
         return false; // Never inspect retained Expr::Unparsed bytes.
@@ -807,7 +879,8 @@ pub(super) fn normalized_tree(tree: &ErgoTree, after_write: bool) -> ErgoTree {
     for (_, value) in &mut tree.constants {
         normalize_value(value, tree.version, after_write);
     }
-    normalize_expr(&mut tree.body, tree.version, after_write);
+    let constants = tree.constants.clone();
+    normalize_expr(&mut tree.body, tree.version, after_write, &constants);
     tree
 }
 

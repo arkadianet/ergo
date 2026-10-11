@@ -402,16 +402,12 @@ pub(crate) fn infer_node_type(
                     child_type(a, store, constants);
                 }
                 // A constant's wire type and a numeric cast's target are
-                // explicit, so either callee's type is exact in both modes.
-                let exact = precise_types
-                    || matches!(
-                        &**func,
-                        crate::opcode::Expr::Const { .. }
-                            | crate::opcode::Expr::Op(crate::opcode::IrNode {
-                                payload: Payload::NumericCast { .. },
-                                ..
-                            })
-                    );
+                // explicit, so either callee's type is exact in both modes. An
+                // Apply whose own callee is exact has an exact type too (its
+                // range, element type or `NoType`), so nested Applies over such
+                // a callee are judged as Scala's `Apply.tpe` judges them.
+                // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/values.scala#L1242-L1251
+                let exact = precise_types || apply_callee_is_exact(func);
                 match t {
                     Some(SigmaType::SFunc { t_range, .. }) if precise_types => Some(*t_range),
                     Some(SigmaType::SColl(elem)) if exact => Some(*elem),
@@ -539,6 +535,25 @@ pub(crate) fn infer_node_type(
             }
         },
         crate::opcode::Expr::Unparsed(_) => None,
+    }
+}
+
+/// `true` when an `Apply` callee's type is known exactly without the precise
+/// parse-time types: a constant, a numeric cast, or another `Apply` whose own
+/// callee is exact.
+fn apply_callee_is_exact(func: &crate::opcode::Expr) -> bool {
+    use crate::opcode::{Expr, IrNode, Payload};
+    match func {
+        Expr::Const { .. }
+        | Expr::Op(IrNode {
+            payload: Payload::NumericCast { .. },
+            ..
+        }) => true,
+        Expr::Op(IrNode {
+            payload: Payload::FuncApply { func, .. },
+            ..
+        }) => apply_callee_is_exact(func),
+        _ => false,
     }
 }
 

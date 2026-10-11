@@ -82,7 +82,7 @@ md5      = "0.7"
 pbkdf2   = "0.12"
 sha2     = "0.10"
 gf2_192  = "0.28"
-bip39    = { version = "2", features = ["zeroize"] }
+bip39    = { version = "3", features = ["zeroize"] }
 hmac     = "0.12"
 
 # Numerics
@@ -100,7 +100,7 @@ indexmap   = { version = "2", features = ["serde"] }
 serde      = "1"
 serde_json = "1"
 serde_norway = "0.9.42"
-toml       = "0.8"
+toml       = "1.1"
 uuid       = "1"
 bs58       = "0.5"
 base64     = "0.22"

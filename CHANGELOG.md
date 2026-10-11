@@ -40,6 +40,10 @@ infrastructure.
 - `/script/p2sAddress` and `/script/p2shAddress` compile with an empty environment: the node holds no wallet keys, so a script naming `myPubKey_N` is a `400` compile error.
 - `ergo-node wallet-scan-utxo` requires `--wallet-data-dir`. With `--wallet-key-stdin` it reads the key that `ergo-walletd export-unseal-key` prints and opens the daemon's encrypted database without the wallet password.
 
+### Fixed
+
+- Reject ErgoTrees without a size field whose root is a nested function application that does not return SigmaProp, as the reference node does. These trees were previously accepted.
+
 ## [0.12.3] - 2026-10-07
 
 A consensus release for mainnet. Upgrade every 0.12.2 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.

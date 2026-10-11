@@ -1682,8 +1682,7 @@ mod tests {
     /// the `Vec<T>` impl did not forward the predicate at all.
     #[test]
     fn boolean_depth_exemption_survives_vec_nesting() {
-        let bytes: &[u8] =
-            include_bytes!("../fuzz/corpus/transaction/nightly-2026-10-02-boolean-depth");
+        let bytes = &boolean_depth_transaction_bytes();
         let mut reader = VlqReader::new(bytes).with_activated_script_version(3);
         let tx = ergo_ser::transaction::read_transaction(&mut reader).unwrap();
 
@@ -1801,9 +1800,27 @@ mod tests {
         candidate
     }
 
+    /// The boolean-depth box seed as the only output of a transaction with no
+    /// inputs, data inputs or tokens. sigma-state 6.0.7 parses these bytes; the
+    /// original transaction seed fails rule 1001 in its sizeless tree on both
+    /// nodes, so it cannot carry this regression.
+    fn boolean_depth_transaction_bytes() -> Vec<u8> {
+        let original =
+            include_bytes!("../fuzz/corpus/transaction/nightly-2026-10-02-boolean-depth");
+        assert_eq!(
+            (registry(Some("transaction"))[0].run)(original),
+            Outcome::Rejected
+        );
+        let mut bytes = vec![0, 0, 0, 1];
+        bytes.extend_from_slice(include_bytes!(
+            "../fuzz/corpus/ergo_box_candidate/nightly-2026-10-02-boolean-depth"
+        ));
+        bytes
+    }
+
     fn boolean_depth_transaction_for_writing() -> ergo_ser::transaction::Transaction {
-        let seed = include_bytes!("../fuzz/corpus/transaction/nightly-2026-10-02-boolean-depth");
-        let mut reader = VlqReader::new(seed).with_activated_script_version(3);
+        let seed = boolean_depth_transaction_bytes();
+        let mut reader = VlqReader::new(&seed).with_activated_script_version(3);
         let mut tx = ergo_ser::transaction::read_transaction(&mut reader).unwrap();
         tx.output_candidates = vec![boolean_depth_candidate_for_writing()];
         tx
@@ -1925,16 +1942,20 @@ mod tests {
         }
     }
 
-    /// Run 36775308168: all three first serializations match sigma-state 6.0.6.
+    /// Runs 36775308168 (sigma-state 6.0.6) and 38036611491 (6.0.7): every
+    /// first serialization matches the reference's.
     #[test]
-    fn nightly_20261001_crashes_match_scala_serialization_and_outcomes() {
+    fn nightly_crashes_match_scala_serialization_and_outcomes() {
         std::thread::Builder::new()
             .stack_size(32 * 1024 * 1024)
             .spawn(|| {
-                for line in
-                    include_str!("../../test-vectors/scala/sigma/nightly_roundtrip_2026_10_01.tsv")
-                        .lines()
-                        .filter(|line| !line.starts_with('#'))
+                for line in [
+                    include_str!("../../test-vectors/scala/sigma/nightly_roundtrip_2026_10_01.tsv"),
+                    include_str!("../../test-vectors/scala/sigma/nightly_roundtrip_2026_10_10.tsv"),
+                ]
+                .iter()
+                .flat_map(|tsv| tsv.lines())
+                .filter(|line| !line.starts_with('#'))
                 {
                     let fields: Vec<_> = line.split_whitespace().collect();
                     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

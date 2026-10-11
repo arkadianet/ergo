@@ -1,0 +1,25 @@
+apply2_short_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	7	-	-	-
+apply2_short_v0s	WRAPPED	8	1001	-	-
+apply2_short_v3s	WRAPPED	8	1001	-	-
+apply3_short_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	9	-	-	-
+apply3_short_v0s	WRAPPED	10	1001	-	-
+apply3_short_v3s	WRAPPED	10	1001	-	-
+apply2_upcast_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	9	-	-	-
+apply2_upcast_v0s	WRAPPED	10	1001	-	-
+apply2_upcast_v3s	WRAPPED	10	1001	-	-
+apply2_collcollbool_idx_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	13	-	-	-
+apply2_collcollbool_idx_v0s	WRAPPED	14	1001	-	-
+apply2_collcollbool_idx_v3s	WRAPPED	14	1001	-	-
+apply2_collcollsigma_idx_v0n	ACCEPT	13	-	00dada200101d3010400010400	-
+apply2_collcollsigma_idx_v0s	ACCEPT	14	-	080cdada200101d3010400010400	-
+apply2_collcollsigma_idx_v3s	ACCEPT	14	-	0b0cdada200101d3010400010400	-
+apply1_short_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	5	-	-	-
+apply1_short_v0s	WRAPPED	6	1001	-	-
+apply1_short_v3s	WRAPPED	6	1001	-	-
+apply1_collsigma_idx_v0n	ACCEPT	8	-	00da1401d3010400	-
+apply1_collsigma_idx_v0s	ACCEPT	9	-	0807da1401d3010400	-
+apply1_collsigma_idx_v3s	ACCEPT	9	-	0b07da1401d3010400	-
+apply1_collbool_idx_v0n	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	8	-	-	-
+apply1_collbool_idx_v0s	WRAPPED	9	1001	-	-
+apply1_collbool_idx_v3s	WRAPPED	9	1001	-	-
+nightly_fuzz_transaction_crash	SerializerException:Cannot handle ValidationException, ErgoTree serialized without size bit.	142	-	-	-
