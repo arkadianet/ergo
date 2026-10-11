@@ -2424,6 +2424,44 @@ fn api_script_policy_resolves_and_rejects_misspellings_and_invalid_costs() {
         "[api]\nscript_require_api_key = true\n",
         "[api.script]\nmax_cost = 0\n",
         "[api.script]\nmax_cost = 8001092\n",
+        "[api.script]\nmax_eval_bytes = 1023\n",
+        "[api.script]\nmax_eval_bytes = 4294967297\n",
+    ] {
+        let path = write_toml(source);
+        assert!(
+            NodeConfig::load(minimal_cli(Some(&path))).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn api_script_policy_defaults_bound_cost_and_evaluation_bytes() {
+    let path = write_toml("[api.script]\n");
+    let config = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert_eq!(config.api_script.max_cost, 1_000_000);
+    assert_eq!(config.api_script.max_eval_bytes, 64 * 1024 * 1024);
+    let path = write_toml("[api.script]\nmax_cost = 8001091\nmax_eval_bytes = 1048576\n");
+    let config = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert_eq!(config.api_script.max_cost, 8_001_091);
+    assert_eq!(config.api_script.max_eval_bytes, 1_048_576);
+}
+
+#[test]
+fn api_block_batch_limits_default_resolve_and_reject_out_of_range() {
+    let path = write_toml("[api]\n");
+    let config = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert_eq!(config.api_block_batch.max_blocks, 1000);
+    assert_eq!(config.api_block_batch.max_response_bytes, 64 * 1024 * 1024);
+    let path =
+        write_toml("[api]\nmax_blocks_per_request = 50\nmax_blocks_response_bytes = 2097152\n");
+    let config = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert_eq!(config.api_block_batch.max_blocks, 50);
+    assert_eq!(config.api_block_batch.max_response_bytes, 2_097_152);
+    for source in [
+        "[api]\nmax_blocks_per_request = 0\n",
+        "[api]\nmax_blocks_per_request = 16385\n",
+        "[api]\nmax_blocks_response_bytes = 1048575\n",
     ] {
         let path = write_toml(source);
         assert!(

@@ -81,6 +81,7 @@ fn app() -> axum::Router {
         local_reverse_proxy: false,
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),
+        block_batch: Default::default(),
     };
     // Security gate is irrelevant to these header assertions; `None`
     // keeps the static routes reachable without a key.

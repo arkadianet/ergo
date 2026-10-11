@@ -328,7 +328,7 @@ fn bench_snapshot(pool_size: usize, size: usize) {
         let started = Instant::now();
         for _ in 0..JSON_RESPONSES {
             let snapshot = handle.load_full();
-            black_box(serde_json::to_vec(&snapshot.mempool_transactions).unwrap());
+            black_box(serde_json::to_vec(&*snapshot.mempool_transactions).unwrap());
         }
         let ns = started.elapsed().as_nanos();
         row(

@@ -35,6 +35,15 @@ use crate::wallet::{WalletAdmin, WalletAdminError};
 /// tracked-address set can't turn every compile request into unbounded work.
 const MAX_ENV_KEYS: usize = 100;
 
+/// The 400 answer for a `source` above
+/// [`crate::v1::script::MAX_SOURCE_LEN`], the same cap the native
+/// `/api/v1/script/compile` applies. Checked before the wallet read and
+/// before the compiler runs.
+fn source_too_long(source: &str) -> Option<Response> {
+    let cap = crate::v1::script::MAX_SOURCE_LEN;
+    (source.len() > cap).then(|| bad_request(format!("Script source is limited to {cap} bytes")))
+}
+
 /// Wire request DTO — Scala `CompileRequest`
 /// (`http/api/requests/CompileRequest.scala:10`: `case class
 /// CompileRequest(source: String, treeVersion: Byte)`), decoded via
@@ -109,6 +118,9 @@ async fn compile_address_response(
     compute: crate::v1::ComputePool,
     pick: fn(&ergo_compiler::CompileResult) -> &str,
 ) -> Response {
+    if let Some(resp) = source_too_long(&req.source) {
+        return resp;
+    }
     let addrs = match wallet_admin.addresses().await {
         Ok(list) => list.0,
         Err(e) => return wallet_error_response(e),
@@ -192,6 +204,42 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn source_above_the_cap_is_rejected_and_at_the_cap_is_not() {
+        let cap = crate::v1::script::MAX_SOURCE_LEN;
+        assert!(source_too_long(&"a".repeat(cap)).is_none());
+        let resp = source_too_long(&"a".repeat(cap + 1)).expect("over the cap");
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    /// A flat chain of single-use `val`s is inlined into one nested
+    /// expression, so its depth grows with the source length rather than
+    /// with the parser's nesting. At the source cap, compiling it must end
+    /// with a result or an error on the node's 8 MiB compute stack (a stack
+    /// overflow would abort the test process).
+    #[test]
+    fn val_chain_at_the_source_cap_compiles_within_the_compute_stack() {
+        let cap = crate::v1::script::MAX_SOURCE_LEN;
+        let mut source = String::from("{ val a0 = HEIGHT\n");
+        let mut n = 0usize;
+        loop {
+            let line = format!("val a{} = a{} + 1\n", n + 1, n);
+            if source.len() + line.len() + 64 > cap {
+                break;
+            }
+            source.push_str(&line);
+            n += 1;
+        }
+        source.push_str(&format!("sigmaProp(a{n} > 0) }}"));
+        assert!(source.len() <= cap && n > 2000, "chain length {n}");
+        let handle = std::thread::Builder::new()
+            .stack_size(ergo_ser::decode_stack::DECODE_THREAD_STACK_BYTES)
+            .spawn(move || compile(&ScriptEnv::new(), &source, 0, NetworkPrefix::Mainnet).is_ok())
+            .expect("spawn compile thread");
+        // Either outcome is acceptable; reaching here means no overflow.
+        let _compiled = handle.join().expect("compile thread did not panic");
+    }
 
     #[test]
     fn build_env_invalid_address_errors() {

@@ -257,6 +257,8 @@ beyond loopback.
 | `public_bind` | bool | `false` | Permits binding a non-loopback address. A non-loopback `bind` without `public_bind = true` is rejected at load. See the security note below. |
 | `local_reverse_proxy` | bool | `false` | Declares a reverse proxy terminating on loopback in front of the API. When `true`, loopback peers lose the v1 rate-limit exemption, Admin requests use the remote warn-and-allow policy, and API transaction submissions use the public mempool budget. Proxied clients share limits by peer IP; see the security notes below. `X-Forwarded-For` is not trusted. |
 | `allowed_hosts` | array of string | `[]` | Extra `Host` header values the DNS-rebinding guard accepts, beyond `localhost` / `127.0.0.1` / `::1` / the literal `bind` address (always accepted on a loopback bind). An entry may include a port (`"example.com:9099"`) to pin it, or omit one to match any port. On a non-loopback bind, the guard only activates when this list is non-empty — see the security note below. |
+| `max_blocks_per_request` | integer | `1000` | Distinct header ids accepted per `POST /blocks/headerIds` or `POST /blockchain/block/byHeaderIds` request; accepts `1..=16384`. A larger request answers 400. |
+| `max_blocks_response_bytes` | integer | `67108864` | Serialized response budget, in bytes, for the same two routes (64 MiB); accepts `1048576..=4294967296`. Blocks are serialized one at a time and the request answers 400 as soon as the response would exceed the budget; no partial result is returned. |
 
 ### Webhook state
 
@@ -417,7 +419,8 @@ change authentication on the Scala-compatible `/script/p2sAddress` and
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `require_api_key` | bool | `false` | Require a configured API credential for all seven native script endpoints. When enabled without a configured hash, those endpoints fail closed. |
-| `max_cost` | u64 | `8001091` | Maximum native reduction cost; accepts `1..=8001091`. A request can lower the limit, and cannot raise it above this policy. Invalid values reject configuration even when the API is disabled. |
+| `max_cost` | u64 | `1000000` | Maximum native reduction cost; accepts `1..=8001091`. A request can lower the limit, and cannot raise it above this policy. Invalid values reject configuration even when the API is disabled. The default matches the reference node's default per-transaction cost limit; raise it to dry-run scripts that cost more. |
+| `max_eval_bytes` | u64 | `67108864` | Budget, in bytes, for the collection values one reduction may build (64 MiB). Each collection a script produces is counted by element count times element size; a reduction above the budget answers `400 cost_limit`. Accepts `1024..=4294967296`. Applies only to the playground; block and mempool validation are not affected. |
 
 Compilation and reduction use a per-node compute pool with two running jobs,
 eight waiting jobs, a two-second queue wait and a thirty-second response
@@ -427,6 +430,27 @@ does not stop an accepted blocking job: it retains its slot until execution
 finishes, and shutdown drains accepted jobs. Point and scan read lanes use
 sixteen/four running jobs and sixty-four/sixteen waiting jobs respectively.
 These resource limits are code defaults rather than TOML keys.
+
+Scala-compatible P2S/P2SH compilation accepts at most 65536 bytes of `source`
+(the same cap as `/api/v1/script/compile`); a longer source answers 400.
+
+#### Batch-by-id routes
+
+These routes answer each distinct id once: repeated ids in one request
+(compared case-insensitively) are folded to their first occurrence before the
+count cap applies. A request above the cap answers 400 with the usual
+`{"error": 400, "reason": "bad-request", "detail": ...}` body. The two
+full-block routes take their cap and a response-size budget from
+`[api] max_blocks_per_request` and `max_blocks_response_bytes`; the other caps
+are code defaults rather than TOML keys.
+
+| Route | Distinct ids per request |
+|---|---|
+| `POST /blocks/headerIds` | `[api] max_blocks_per_request` (1000), response ≤ `max_blocks_response_bytes` (64 MiB) |
+| `POST /blockchain/block/byHeaderIds` | `[api] max_blocks_per_request` (1000), response ≤ `max_blocks_response_bytes` (64 MiB) |
+| `POST /blockchain/tokens` | 1000 |
+| `POST /utxo/withPool/byIds` | 1000 |
+| `POST /api/v1/chain/blocks/by-ids` | 200 (unchanged; repeated ids now answered once) |
 
 ### Security notes for the API
 

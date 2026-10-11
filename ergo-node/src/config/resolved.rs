@@ -226,6 +226,8 @@ pub struct NodeConfig {
     pub api_local_reverse_proxy: bool,
     /// Native script authentication and execution cost policy.
     pub api_script: ergo_api::v1::ScriptConfig,
+    /// `[api] max_blocks_per_request` / `max_blocks_response_bytes`.
+    pub api_block_batch: ergo_api::batch_ids::BlockBatchLimits,
     /// Devnet-only POST /blocks opt-in; defaults to false.
     pub allow_direct_block_submit: bool,
     /// Private devnet genesis cost cap; validated at configuration load.

@@ -68,7 +68,7 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
         Digest32::from_bytes(*id.as_bytes()),
         Arc::from(bytes),
     )]);
-    snap.mempool_transactions
+    Arc::make_mut(&mut snap.mempool_transactions)
         .transactions
         .push(ApiMempoolTransaction {
             tx_id: id_hex.clone(),
@@ -126,7 +126,9 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
         crate::snapshot::NodeSnapshot::empty(handle.load().info.clone(), ApiWeightFunction::Cost);
     let old = handle.swap(Arc::new(empty));
     let mut snap = Arc::try_unwrap(old).ok().unwrap();
-    snap.mempool_transactions.transactions.clear();
+    Arc::make_mut(&mut snap.mempool_transactions)
+        .transactions
+        .clear();
     handle.store(Arc::new(snap));
     let next_snapshot = handle.load_full();
     let next_ranked = bridge.ranked_pool(&next_snapshot);
@@ -260,7 +262,7 @@ fn compat_histogram_uses_pool_residence_age_and_fee_factor() {
             },
             weight,
         );
-        snap.mempool_transactions.transactions = [0, 12_000, 60_000]
+        Arc::make_mut(&mut snap.mempool_transactions).transactions = [0, 12_000, 60_000]
             .into_iter()
             .enumerate()
             .map(|(index, age)| ApiMempoolTransaction {
@@ -280,8 +282,7 @@ fn compat_histogram_uses_pool_residence_age_and_fee_factor() {
             })
             .collect();
         let mut full_txs = Vec::new();
-        for (index, row) in snap
-            .mempool_transactions
+        for (index, row) in Arc::make_mut(&mut snap.mempool_transactions)
             .transactions
             .iter_mut()
             .enumerate()

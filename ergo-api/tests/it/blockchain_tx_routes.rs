@@ -765,6 +765,7 @@ fn build_app_with_mempool(indexer: IndexerHandle, mempool: Arc<dyn MempoolView>)
         local_reverse_proxy: false,
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),
+        block_batch: Default::default(),
     };
     router_with_mempool(ctx, None)
 }

@@ -50,7 +50,9 @@ pub struct NodeSnapshot {
     pub sync: ApiSyncStatus,
     pub peers: Vec<ApiPeer>,
     pub mempool: ApiMempoolSummary,
-    pub mempool_transactions: ApiMempoolTransactions,
+    /// Shared so API reads hand out the projected pool list without
+    /// copying it per request.
+    pub mempool_transactions: Arc<ApiMempoolTransactions>,
     pub health: ApiHealth,
     /// Wall-clock instant the snapshot was built. Bridge subtracts from
     /// `Instant::now()` to compute `snapshot_age_ms` on each read.
@@ -266,10 +268,10 @@ impl NodeSnapshot {
                 capacity_bytes: 0,
                 revalidation_pending: 0,
             },
-            mempool_transactions: ApiMempoolTransactions {
+            mempool_transactions: Arc::new(ApiMempoolTransactions {
                 transactions: Vec::new(),
                 weight_function,
-            },
+            }),
             health: ApiHealth {
                 status: HealthStatus::Disconnected,
                 behind: 0,

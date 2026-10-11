@@ -704,6 +704,12 @@ pub enum EvalError {
     ArityMismatch { expected: usize, got: usize },
     #[error("cost limit exceeded: {0}")]
     CostExceeded(String),
+    /// The evaluation materialised more collection bytes than the
+    /// thread's [`crate::evaluator::EvalMemoryBudget`] allows. Only
+    /// raised when a caller installed a budget (the API script
+    /// playground); consensus and mempool validation never install one.
+    #[error("evaluation memory budget exceeded: {used} > {limit} bytes")]
+    MemoryBudgetExceeded { used: u64, limit: u64 },
     /// `JitCost` arithmetic overflowed the Scala `Int.MaxValue` bound
     /// (see `ergo_primitives::cost::SCALA_INT_MAX`). Held typed so the
     /// validation boundary can route it to

@@ -1163,6 +1163,27 @@ fn status_overlays_live_apply_phase_metrics() {
     assert!(after.last_apply_age_ms.is_some());
 }
 
+/// Pool-list read routes share the snapshot's projected list: two reads of
+/// the same snapshot hand out the same allocation instead of copies.
+#[test]
+fn shared_mempool_list_is_not_copied_per_read() {
+    use ergo_api::NodeReadState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let read = read_state_with_slot_and_apply(
+        HostPaths {
+            state_db: dir.path().join("s.redb"),
+            index_db: dir.path().join("i.redb"),
+            data_dir: dir.path().to_path_buf(),
+        },
+        std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
+        std::sync::Arc::new(ergo_sync::ApplyPhaseMetrics::default()),
+    );
+    let first = read.mempool_transactions_shared();
+    let second = read.mempool_transactions_shared();
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
 /// Issue #266: the starvation-free telemetry atomics overlay onto
 /// `ApiStatus` per request, so RSS / uptime / running-apply age / wedge
 /// verdict stay truthful even when a long apply has starved the snapshot

@@ -422,7 +422,7 @@ pub(super) fn resolve_page(q: PagedQuery, noun: &str) -> Result<Page, Box<Respon
     })
 }
 
-fn bad_request(detail: &str) -> Response {
+pub(super) fn bad_request(detail: &str) -> Response {
     let body = ErrorEnvelope {
         error: 400,
         reason: "bad-request",

@@ -700,11 +700,23 @@ impl NodeChainQuery for ScalaCompatBridge {
     ) -> Option<ergo_api::compat::types::ScalaUnconfirmedTransaction> {
         let target_bytes: [u8; 32] = hex::decode(tx_id_hex).ok()?.try_into().ok()?;
         let snap = self.handle.load();
-        let costs = pool_costs(&snap);
-        snap.pool_full_txs
+        let (_, bytes) = snap
+            .pool_full_txs
             .iter()
-            .find(|(id, _)| id.as_bytes() == &target_bytes)
-            .and_then(|(_, bytes)| pool_bytes_to_scala_tx(bytes, &costs))
+            .find(|(id, _)| id.as_bytes() == &target_bytes)?;
+        let tx = parse_pool_tx(bytes)?;
+        let tx = crate::api_bridge::compat::encode_transaction(&tx).ok()?;
+        // Cost of this one row only; no per-request map of the whole pool.
+        let cost = snap
+            .mempool_transactions
+            .transactions
+            .iter()
+            .find(|row| row.tx_id == tx.id)
+            .map(|row| row.validation_cost_units);
+        Some(ergo_api::compat::types::ScalaUnconfirmedTransaction {
+            transaction: tx,
+            cost,
+        })
     }
 
     fn pool_txs_by_ergo_tree(

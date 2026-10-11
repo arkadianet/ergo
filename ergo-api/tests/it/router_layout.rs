@@ -2204,6 +2204,25 @@ async fn utxo_with_pool_by_ids_returns_only_resolved_boxes() {
 }
 
 #[tokio::test]
+async fn utxo_with_pool_by_ids_answers_repeated_ids_once_and_caps_distinct_ids() {
+    let body = serde_json::json!(vec!["cc".repeat(32); 30_000]);
+    let (s, v) = json_post(build_compat_app(), "/utxo/withPool/byIds", &body).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v.as_array().expect("array").len(), 1);
+
+    let cap = ergo_api::batch_ids::MAX_LOOKUP_IDS;
+    let ids: Vec<String> = (0..=cap).map(|i| format!("{i:064x}")).collect();
+    let (s, v) = json_post(
+        build_compat_app(),
+        "/utxo/withPool/byIds",
+        &serde_json::json!(ids),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(v["reason"], "bad-request");
+}
+
+#[tokio::test]
 async fn utxo_with_pool_by_ids_empty_input_returns_empty_array() {
     let body = serde_json::json!([]);
     let (s, v) = json_post(build_compat_app(), "/utxo/withPool/byIds", &body).await;
@@ -2253,6 +2272,7 @@ fn build_compat_app_digest_backend() -> axum::Router {
             local_reverse_proxy: false,
             services: Arc::new(ergo_api::ApiServices::new()),
             script_config: Default::default(),
+            block_batch: Default::default(),
         },
         None,
     )

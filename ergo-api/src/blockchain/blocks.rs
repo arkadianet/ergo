@@ -78,17 +78,33 @@ pub async fn block_by_header_id_handler(
     }
 }
 
+/// `POST /blockchain/block/byHeaderIds`. Repeated ids are answered once;
+/// the distinct-id cap and the response-size budget come from
+/// [`crate::batch_ids::BlockBatchLimits`] and both refusals are a 400.
+/// Blocks are assembled and serialized one at a time, so an oversized
+/// request stops at the block that crosses the budget.
 pub async fn blocks_by_header_ids_handler(
     State(state): State<BlockchainState>,
+    limits: Option<axum::Extension<crate::batch_ids::BlockBatchLimits>>,
     Json(ids): Json<Vec<String>>,
 ) -> Response {
+    let limits = crate::batch_ids::BlockBatchLimits::from_extension(limits);
     let chain = match state.chain.as_ref() {
         Some(c) => c,
         None => {
             return internal_error("chain reader missing; block routes require chain plumbing");
         }
     };
-    let mut out: Vec<IndexedFullBlockResponse> = Vec::with_capacity(ids.len());
+    let ids = match crate::batch_ids::dedupe_and_cap(ids, limits.max_blocks) {
+        Ok(ids) => ids,
+        Err(detail) => return super::bad_request(&detail),
+    };
+    let too_large = || {
+        super::bad_request(&crate::batch_ids::response_too_large(
+            limits.max_response_bytes,
+        ))
+    };
+    let mut out = crate::batch_ids::BudgetedJsonArray::new(limits.max_response_bytes);
     for id in &ids {
         if parse_modifier_id(id).is_none() {
             continue;
@@ -97,12 +113,19 @@ pub async fn blocks_by_header_ids_handler(
             continue;
         };
         match build_indexed_full_block_response(&state, scala_block) {
-            Ok(Some(resp)) => out.push(resp),
+            Ok(Some(resp)) => {
+                if out.push(&resp).is_err() {
+                    return too_large();
+                }
+            }
             Ok(None) => {}
             Err(error) => return internal_error(&error),
         }
     }
-    Json(out).into_response()
+    match out.finish() {
+        Ok(bytes) => crate::batch_ids::json_bytes_response(bytes),
+        Err(_) => too_large(),
+    }
 }
 
 fn build_indexed_full_block_response(
