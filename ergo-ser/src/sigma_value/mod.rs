@@ -25,7 +25,7 @@ mod shared;
 mod sigma_boolean;
 
 pub use shared::{SigmaChildren, SigmaChildrenIntoIter};
-pub use sigma_boolean::write_sigma_boolean;
+pub use sigma_boolean::{write_sigma_boolean, write_sigma_boolean_bounded};
 
 use avl_tree::{read_avl_tree, write_avl_tree};
 use bigint::{
@@ -636,6 +636,11 @@ fn read_value_in_frame(
             "Not defined DataSerializer for type {tpe:?} (Scala SerializerException)"
         ))),
     }
+}
+
+/// Decode a standalone SigmaBoolean with the reference recursion bound.
+pub fn read_sigma_boolean(r: &mut VlqReader) -> Result<SigmaBoolean, ReadError> {
+    read_sigma_boolean_at_depth(r, 0)
 }
 
 #[cfg(test)]

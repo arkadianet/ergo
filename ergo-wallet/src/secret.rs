@@ -8,7 +8,7 @@ use crate::extended_key::ExtendedSecretKey;
 
 /// Secret material the wallet holds. The variant determines which
 /// sigma-protocol proof can be produced.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum SecretKey {
     /// Schnorr-style secret: x such that P = G*x. Backs `P2PK(ProveDlog(P))`.
     Dlog(ExtendedSecretKey),

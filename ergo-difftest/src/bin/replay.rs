@@ -998,7 +998,7 @@ fn apply_one_block(
         .map_err(|e| format!("store_header_meta h={h}: {e}"))?;
 
     // 9. Apply block to state
-    match store.apply_block(&checked_block, None, None) {
+    match store.apply_block(&checked_block, None) {
         Ok(()) => {
             complete_pin(
                 h,
