@@ -925,7 +925,10 @@ locked; unsigned jobs wait for the next unlock without spending retries.
 with AES-256-GCM under a random wallet database key, with the sector's index
 and the file's identifier authenticated, so a copied or recovered database
 reveals no addresses, balances or history, and a modified sector fails to
-read. The database key is never stored in the clear:
+read. Each sector keeps two sealed copies and a write never overwrites the
+last copy made durable, so a crash or power loss mid-write leaves the
+database at its previous commit. The database key is never stored in the
+clear:
 
 - **Seed wallets** seal it in the keystore under the wallet password.
 - **Watch-only wallets** seal it in `data_dir/data-key.json` under an operator
@@ -944,8 +947,9 @@ database and does not sync. Lifecycle status reports
 
 Unseal attempts share the persisted unlock budget. Auto-lock (`idle_lock`,
 `max_unlock`) wipes only the spending key, so an unsealed wallet keeps syncing
-while locked. `POST /api/v1/wallet/seal` stops the daemon; it starts sealed
-again. A fresh seed directory starts unsealed with a new key, which `init` or
+while locked. `POST /api/v1/wallet/seal` drops the database key and exits the
+daemon cleanly (status 0); its next start is sealed. The shipped systemd unit
+restarts only on failure, so start the service again. A fresh seed directory starts unsealed with a new key, which `init` or
 `restore` seals into the new keystore.
 
 An existing cleartext `wallet.redb` (a migrated or earlier wallet) is encrypted
@@ -1055,7 +1059,7 @@ copy-on-write file systems.
 |---|---|---|
 | GET | `/api/v1/wallet/lifecycle/status` | `{initialized, locked}` from local state; `sealed: true` is added while sealed; works while the node is unavailable |
 | POST | `/api/v1/wallet/unseal` | `{pass}`; release the database key without unlocking spending (watch-only: the passphrase) |
-| POST | `/api/v1/wallet/seal` | Stop the daemon; it starts sealed. `202` |
+| POST | `/api/v1/wallet/seal` | Drop the database key and exit cleanly; start the daemon again to run sealed. `202` |
 | POST | `/api/v1/wallet/init` | `{pass, mnemonicPass?, strength?}`; strength is 12, 15, 18, 21 or 24 words, default 24; response `{mnemonic}` |
 | POST | `/api/v1/wallet/restore` | `{mnemonic, mnemonicPass?, pass, derivation}`; derivation is `{type:"eip3"}` or `{type:"legacyPre1627"}` |
 | POST | `/api/v1/wallet/unlock` | `{pass}`; unlock and reconcile public keys |

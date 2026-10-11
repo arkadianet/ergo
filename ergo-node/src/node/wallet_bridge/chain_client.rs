@@ -297,18 +297,13 @@ impl InProcessChainClient {
                 transactions.transactions,
             );
         }
-        if let Some(state) = &self.state {
-            let block = state
-                .read_block_at(height)
-                .map_err(|error| Self::state_error("state block read", error))?
-                .ok_or_else(|| {
-                    ChainClientError::Failure(format!("no committed block at height {height}"))
-                })?;
-            return self.chain_block_from_rescan(block_id, header, header_bytes, block);
-        }
-        Err(ChainClientError::Failure(format!(
-            "block transaction section is missing at height {height}"
-        )))
+        // No other store holds serialized transactions, and a block without
+        // them cannot be bound to its header: report typed unavailable
+        // history (pruned below the floor) rather than a failure.
+        Err(self.history_unavailable_at(
+            Some(height),
+            format!("block transactions are not stored at height {height}"),
+        ))
     }
 
     fn chain_block_from_transactions(
@@ -372,56 +367,6 @@ impl InProcessChainClient {
                     inputs,
                     outputs,
                     bytes: Some(writer.result().to_vec()),
-                })
-            })
-            .collect::<Result<Vec<_>, ChainClientError>>()?;
-        Ok(ChainBlock {
-            block_id,
-            height: header.height,
-            parent_id: *header.parent_id.as_bytes(),
-            header_bytes,
-            transactions,
-        })
-    }
-
-    fn chain_block_from_rescan(
-        &self,
-        block_id: [u8; 32],
-        header: Header,
-        header_bytes: Vec<u8>,
-        block: ergo_wallet_service::wallet::scan::RescanBlock,
-    ) -> Result<ChainBlock, ChainClientError> {
-        let transactions: Vec<ChainTransaction> = block
-            .txs
-            .into_iter()
-            .map(|transaction| {
-                Ok(ChainTransaction {
-                    tx_id: transaction.tx_id,
-                    inputs: transaction
-                        .inputs
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, box_id)| {
-                            Ok(ChainInput {
-                                box_id,
-                                index: u16::try_from(index).map_err(|_| {
-                                    Self::state_error("transaction input index overflow", "")
-                                })?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, ChainClientError>>()?,
-                    outputs: transaction
-                        .outputs
-                        .into_iter()
-                        .map(|output| ChainOutput {
-                            box_id: output.box_id,
-                            index: output.output_index,
-                            bytes: output.box_bytes,
-                        })
-                        .collect(),
-                    // State rows hold wallet-relevant parts only; a remote
-                    // consumer cannot bind such a block to its header.
-                    bytes: None,
                 })
             })
             .collect::<Result<Vec<_>, ChainClientError>>()?;
@@ -1937,6 +1882,55 @@ mod tests {
         assert!(matches!(
             result,
             Err(ChainClientError::UnsupportedHistory { .. })
+        ));
+    }
+
+    /// A block whose transaction section is gone is typed unavailable
+    /// history, never a block without serialized transactions.
+    #[test]
+    fn a_missing_transaction_section_is_typed_unavailable_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let ids = apply_empty_blocks(&mut store, 3);
+        let reader = ChainStoreReader::new_from_db(store.db_arc());
+        let header_bytes = reader.get_header(&ids[1]).unwrap().unwrap();
+        let header =
+            read_header(&mut ergo_primitives::reader::VlqReader::new(&header_bytes)).unwrap();
+        let section_id = compute_section_id(
+            TYPE_BLOCK_TRANSACTIONS,
+            &ids[1],
+            header.transactions_root.as_bytes(),
+        );
+        let txn = ergo_state::begin_write_qr(&store.db_arc()).unwrap();
+        {
+            let mut sections = txn
+                .open_table(redb::TableDefinition::<&[u8], &[u8]>::new("block_sections"))
+                .unwrap();
+            assert!(sections.remove(section_id.as_slice()).unwrap().is_some());
+        }
+        txn.commit().unwrap();
+        let client = InProcessChainClient::from_chain_reader(
+            reader,
+            None::<Arc<dyn ergo_api::NodeSubmit>>,
+            false,
+            None,
+        );
+        let request = || BlocksSinceRequest {
+            cursor: ChainCursor {
+                height: 1,
+                header_id: ids[0],
+            },
+            limit: 2,
+        };
+        assert!(matches!(
+            client.blocks_since(request()),
+            Err(ChainClientError::UnsupportedHistory { .. })
+        ));
+        store.write_minimal_full_block_height(3).unwrap();
+        assert!(matches!(
+            client.blocks_since(request()),
+            Err(ChainClientError::HistoryPruned { .. }) | Ok(BlocksSinceResponse::Pruned(_))
         ));
     }
 

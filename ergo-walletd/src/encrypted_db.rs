@@ -14,16 +14,27 @@
 //! watch-only wallets) and holds it in memory only while unsealed.
 //!
 //! Layout: a plaintext header region of [`HEADER_BYTES`], then sector `i` at
-//! `HEADER_BYTES + i * PHYSICAL_SECTOR`, each `nonce ‖ ciphertext ‖ tag`. The
-//! header holds two slots written alternately with a sequence number and an
-//! HMAC, so a torn header write leaves the other slot valid. Space added by
-//! growth is written as sealed zeros, so an all-zero sector on disk is
-//! corruption, never an implicit hole.
+//! `HEADER_BYTES + i * PHYSICAL_SECTOR`. The header holds two slots written
+//! alternately with a sequence number and an HMAC, so a torn header write
+//! leaves the other slot valid. Space added by growth is written as sealed
+//! zeros, so an all-zero sector on disk is corruption, never an implicit hole.
+//!
+//! Each sector is stored as two copies, `sequence ‖ nonce ‖ ciphertext ‖ tag`,
+//! with the sequence number in the associated data; a read uses the newest
+//! copy that authenticates. A write never touches the last copy made durable
+//! by `sync_data`: it goes to the other copy, or rewrites a copy written since
+//! the last sync. Plain redb relies on a torn write damaging only the bytes
+//! written, and it rewrites its commit header in place; here every write
+//! re-seals a whole sector, so without the second copy a crash during a
+//! header update would leave neither commit slot readable. With it, an
+//! interrupted write leaves the sector's last durable contents intact.
 //!
 //! Residual exposure: the file length reveals the database size, sectors
 //! rewritten with identical contents are not linkable (fresh nonces) but write
-//! timing is observable, and an attacker who can replace the file can roll a
-//! sector back to an older sealed version of itself.
+//! timing is observable, and an attacker who can modify the file can roll a
+//! sector back to an older sealed version of itself, for example by damaging
+//! its newest copy.
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -33,7 +44,7 @@ use std::path::Path;
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key};
 use hmac::{Hmac, Mac};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use redb::backends::FileBackend;
 use redb::{BackendError, StorageBackend};
 use sha2::Sha256;
@@ -44,13 +55,15 @@ use zeroize::Zeroizing;
 pub const SECTOR: usize = 4096;
 const NONCE: usize = 12;
 const TAG: usize = 16;
-/// On-disk bytes per sector.
-pub const PHYSICAL_SECTOR: usize = NONCE + SECTOR + TAG;
+/// On-disk bytes of one sealed copy of a sector.
+const COPY: usize = 8 + NONCE + SECTOR + TAG;
+/// On-disk bytes per sector: two copies.
+pub const PHYSICAL_SECTOR: usize = 2 * COPY;
 /// Plaintext header region at the start of the file.
 pub const HEADER_BYTES: u64 = 4096;
 const SLOT_BYTES: usize = 2048;
 const MAGIC: &[u8; 8] = b"ERGWDBE\x01";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const REDB_MAGIC: &[u8] = b"redb";
 
 /// A 256-bit data key. Wiped on drop.
@@ -121,6 +134,21 @@ struct State {
     current_slot: usize,
 }
 
+/// The copy of a sector that holds its newest contents.
+#[derive(Clone, Copy)]
+struct Current {
+    copy: usize,
+    sequence: u64,
+}
+
+/// Which copy of each sector is current, learned as sectors are touched, and
+/// which sectors were written since the last `sync_data`.
+#[derive(Default)]
+struct Copies {
+    current: HashMap<u64, Current>,
+    dirty: HashSet<u64>,
+}
+
 /// redb [`StorageBackend`] that seals every sector with AES-256-GCM.
 pub struct EncryptedBackend {
     inner: FileBackend,
@@ -129,6 +157,7 @@ pub struct EncryptedBackend {
     key_check: [u8; 32],
     file_id: [u8; 16],
     state: RwLock<State>,
+    copies: Mutex<Copies>,
 }
 
 impl fmt::Debug for EncryptedBackend {
@@ -146,7 +175,25 @@ fn corrupt(message: impl Into<String>) -> EncryptedDbError {
 
 impl EncryptedBackend {
     /// Create a new, empty encrypted database file. The path must not exist.
+    ///
+    /// The file is initialized under a temporary name and renamed into place
+    /// only after its header is durable, so a crash never leaves a
+    /// half-initialized file at `path`.
     pub fn create(path: &Path, key: &DataKey) -> Result<Self, EncryptedDbError> {
+        if std::fs::symlink_metadata(path).is_ok() {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
+        }
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let mut pending_name = file_name.to_os_string();
+        pending_name.push(".creating");
+        let pending = path.with_file_name(pending_name);
+        // A leftover from an interrupted create was never published.
+        match std::fs::remove_file(&pending) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
         #[cfg(unix)]
@@ -154,7 +201,24 @@ impl EncryptedBackend {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options.open(path)?;
+        let file = options.open(&pending)?;
+        let backend = match Self::initialize(file, key) {
+            Ok(backend) => backend,
+            Err(error) => {
+                let _ = std::fs::remove_file(&pending);
+                return Err(error);
+            }
+        };
+        if let Err(error) = publish(&pending, path) {
+            let _ = backend.inner.close();
+            drop(backend);
+            let _ = std::fs::remove_file(&pending);
+            return Err(error.into());
+        }
+        Ok(backend)
+    }
+
+    fn initialize(file: File, key: &DataKey) -> Result<Self, EncryptedDbError> {
         let mut file_id = [0u8; 16];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut file_id);
         let backend = Self::assemble(
@@ -264,6 +328,7 @@ impl EncryptedBackend {
                 header,
                 current_slot,
             }),
+            copies: Mutex::new(Copies::default()),
         })
     }
 
@@ -304,36 +369,77 @@ impl EncryptedBackend {
         HEADER_BYTES + index * PHYSICAL_SECTOR as u64
     }
 
-    fn aad(&self, index: u64) -> [u8; 24] {
-        let mut aad = [0u8; 24];
+    fn copy_offset(index: u64, copy: usize) -> u64 {
+        Self::sector_offset(index) + (copy * COPY) as u64
+    }
+
+    fn aad(&self, index: u64, sequence: u64) -> [u8; 32] {
+        let mut aad = [0u8; 32];
         aad[..16].copy_from_slice(&self.file_id);
-        aad[16..].copy_from_slice(&index.to_be_bytes());
+        aad[16..24].copy_from_slice(&index.to_be_bytes());
+        aad[24..].copy_from_slice(&sequence.to_be_bytes());
         aad
     }
 
-    fn read_sector(&self, index: u64) -> io::Result<Zeroizing<Vec<u8>>> {
-        let mut sealed = vec![0u8; PHYSICAL_SECTOR];
-        self.inner.read(Self::sector_offset(index), &mut sealed)?;
-        let (nonce, body) = sealed.split_at(NONCE);
-        let nonce: [u8; NONCE] = nonce.try_into().expect("split at the nonce length");
+    /// Authenticate one sealed copy, returning its sequence and contents.
+    fn unseal_copy(&self, index: u64, sealed: &[u8]) -> Option<(u64, Zeroizing<Vec<u8>>)> {
+        let sequence = u64::from_be_bytes(sealed[..8].try_into().expect("8-byte sequence"));
+        let nonce: [u8; NONCE] = sealed[8..8 + NONCE].try_into().expect("nonce length");
         self.cipher
             .decrypt(
                 (&nonce).into(),
                 Payload {
-                    msg: body,
-                    aad: &self.aad(index),
+                    msg: &sealed[8 + NONCE..],
+                    aad: &self.aad(index, sequence),
                 },
             )
-            .map(Zeroizing::new)
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("wallet database sector {index} failed authentication"),
-                )
-            })
+            .ok()
+            .map(|plain| (sequence, Zeroizing::new(plain)))
     }
 
-    fn write_sector(&self, index: u64, plain: &[u8]) -> io::Result<()> {
+    /// Read both copies and return the newest that authenticates.
+    fn load(&self, index: u64) -> io::Result<Option<(Current, Zeroizing<Vec<u8>>)>> {
+        let mut sealed = vec![0u8; PHYSICAL_SECTOR];
+        self.inner.read(Self::sector_offset(index), &mut sealed)?;
+        let sequence = |copy: usize| {
+            u64::from_be_bytes(sealed[copy * COPY..copy * COPY + 8].try_into().unwrap())
+        };
+        let order = if sequence(1) > sequence(0) {
+            [1, 0]
+        } else {
+            [0, 1]
+        };
+        Ok(order.into_iter().find_map(|copy| {
+            self.unseal_copy(index, &sealed[copy * COPY..(copy + 1) * COPY])
+                .map(|(sequence, plain)| (Current { copy, sequence }, plain))
+        }))
+    }
+
+    fn unreadable(index: u64) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("wallet database sector {index} failed authentication"),
+        )
+    }
+
+    fn read_sector(&self, index: u64) -> io::Result<Zeroizing<Vec<u8>>> {
+        let known = self.copies.lock().current.get(&index).copied();
+        if let Some(current) = known {
+            let mut sealed = vec![0u8; COPY];
+            self.inner
+                .read(Self::copy_offset(index, current.copy), &mut sealed)?;
+            return match self.unseal_copy(index, &sealed) {
+                Some((sequence, plain)) if sequence == current.sequence => Ok(plain),
+                _ => Err(Self::unreadable(index)),
+            };
+        }
+        let (current, plain) = self.load(index)?.ok_or_else(|| Self::unreadable(index))?;
+        self.copies.lock().current.entry(index).or_insert(current);
+        Ok(plain)
+    }
+
+    /// Seal `plain` into one copy of sector `index`.
+    fn store_copy(&self, index: u64, copy: usize, sequence: u64, plain: &[u8]) -> io::Result<()> {
         debug_assert_eq!(plain.len(), SECTOR);
         let mut nonce = [0u8; NONCE];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
@@ -343,14 +449,45 @@ impl EncryptedBackend {
                 (&nonce).into(),
                 Payload {
                     msg: plain,
-                    aad: &self.aad(index),
+                    aad: &self.aad(index, sequence),
                 },
             )
             .map_err(|_| io::Error::other("wallet database sector encryption failed"))?;
-        let mut physical = Vec::with_capacity(PHYSICAL_SECTOR);
+        let mut physical = Vec::with_capacity(COPY);
+        physical.extend_from_slice(&sequence.to_be_bytes());
         physical.extend_from_slice(&nonce);
         physical.extend_from_slice(&sealed);
-        self.inner.write(Self::sector_offset(index), &physical)
+        self.inner.write(Self::copy_offset(index, copy), &physical)
+    }
+
+    /// Write a sector without touching its last durable copy.
+    fn write_sector(&self, index: u64, plain: &[u8]) -> io::Result<()> {
+        let mut copies = self.copies.lock();
+        let current = match copies.current.get(&index) {
+            Some(current) => Some(*current),
+            None => self.load(index)?.map(|(current, _)| current),
+        };
+        let (copy, sequence) = match current {
+            None => (0, 1),
+            // Written since the last sync: the other copy is the durable one.
+            Some(current) if copies.dirty.contains(&index) => (current.copy, current.sequence + 1),
+            Some(current) => (1 - current.copy, current.sequence + 1),
+        };
+        self.store_copy(index, copy, sequence, plain)?;
+        copies.current.insert(index, Current { copy, sequence });
+        copies.dirty.insert(index);
+        Ok(())
+    }
+
+    /// Flush to disk, then treat every sector written before the flush as
+    /// durable.
+    fn sync_inner(&self) -> io::Result<()> {
+        let flushed = std::mem::take(&mut self.copies.lock().dirty);
+        if let Err(error) = self.inner.sync_data() {
+            self.copies.lock().dirty.extend(flushed);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Resize under the exclusive state lock.
@@ -369,14 +506,31 @@ impl EncryptedBackend {
             }
             self.inner.set_len(Self::sector_offset(new_sectors))?;
             let zeros = vec![0u8; SECTOR];
-            for index in old_sectors..new_sectors {
-                self.write_sector(index, &zeros)?;
+            {
+                let mut copies = self.copies.lock();
+                for index in old_sectors..new_sectors {
+                    // A new sector has no durable copy yet: seal copy 0.
+                    self.store_copy(index, 0, 1, &zeros)?;
+                    copies.current.insert(
+                        index,
+                        Current {
+                            copy: 0,
+                            sequence: 1,
+                        },
+                    );
+                    copies.dirty.insert(index);
+                }
             }
-            self.inner.sync_data()?;
+            self.sync_inner()?;
             self.publish_len(state, len)?;
         } else if len < old_len {
             self.publish_len(state, len)?;
-            self.inner.sync_data()?;
+            self.sync_inner()?;
+            {
+                let mut copies = self.copies.lock();
+                copies.current.retain(|index, _| *index < new_sectors);
+                copies.dirty.retain(|index| *index < new_sectors);
+            }
             if !len.is_multiple_of(SECTOR as u64) {
                 let index = len / SECTOR as u64;
                 let mut plain = self.read_sector(index)?;
@@ -391,6 +545,23 @@ impl EncryptedBackend {
 
 fn sectors_for(len: u64) -> u64 {
     len.div_ceil(SECTOR as u64)
+}
+
+/// Rename a fully written file into place without replacing anything, and
+/// make the rename durable.
+fn publish(pending: &Path, path: &Path) -> io::Result<()> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
+    std::fs::rename(pending, path)?;
+    #[cfg(unix)]
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn slot_mac(mac_key: &[u8; 32], body: &[u8]) -> [u8; 32] {
@@ -485,7 +656,7 @@ impl StorageBackend for EncryptedBackend {
     }
 
     fn sync_data(&self) -> Result<(), io::Error> {
-        self.inner.sync_data()
+        self.sync_inner()
     }
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
@@ -612,6 +783,25 @@ mod tests {
 
     const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("t");
 
+    /// The copy of sector `index` with the higher sequence number on disk.
+    fn newest_copy(raw: &[u8], index: u64) -> usize {
+        let at = EncryptedBackend::sector_offset(index) as usize;
+        let sequence =
+            |copy: usize| u64::from_be_bytes(raw[at + copy * COPY..][..8].try_into().unwrap());
+        usize::from(sequence(1) > sequence(0))
+    }
+
+    /// Garble the middle of one copy, as a write interrupted after its
+    /// sequence number landed would.
+    fn tear(path: &Path, index: u64, copy: usize) {
+        let mut raw = std::fs::read(path).unwrap();
+        let at = EncryptedBackend::copy_offset(index, copy) as usize;
+        for byte in &mut raw[at + 2048..at + 2100] {
+            *byte ^= 0x5a;
+        }
+        std::fs::write(path, &raw).unwrap();
+    }
+
     fn model_check(backend: &EncryptedBackend, model: &[u8]) {
         assert_eq!(backend.len().unwrap(), model.len() as u64);
         let mut out = vec![0u8; model.len()];
@@ -708,9 +898,10 @@ mod tests {
             EncryptedBackend::open(&path, &DataKey::generate()),
             Err(EncryptedDbError::WrongKey)
         ));
-        // Flip one byte inside a sealed sector.
+        // Flip one byte inside both copies of a sealed sector.
         let mut raw = std::fs::read(&path).unwrap();
-        raw[HEADER_BYTES as usize + NONCE + 100] ^= 1;
+        raw[HEADER_BYTES as usize + 100] ^= 1;
+        raw[HEADER_BYTES as usize + COPY + 100] ^= 1;
         let tampered = dir.path().join("tampered.redb");
         std::fs::write(&tampered, &raw).unwrap();
         let backend = EncryptedBackend::open(&tampered, &key).unwrap();
@@ -792,5 +983,97 @@ mod tests {
             encrypt_file(&clear, &encrypted, &key).is_err(),
             "never overwrites"
         );
+    }
+
+    #[test]
+    fn a_torn_write_leaves_the_last_durable_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let key = DataKey::generate();
+        let backend = EncryptedBackend::create(&path, &key).unwrap();
+        backend.set_len(SECTOR as u64).unwrap();
+        backend.write(0, b"durable").unwrap();
+        backend.sync_data().unwrap();
+        backend.write(0, b"pending").unwrap();
+        backend.sync_data().unwrap();
+        drop(backend);
+        let pending = newest_copy(&std::fs::read(&path).unwrap(), 0);
+        tear(&path, 0, pending);
+        let reopened = EncryptedBackend::open(&path, &key).unwrap();
+        let mut out = [0u8; 7];
+        reopened.read(0, &mut out).unwrap();
+        assert_eq!(&out, b"durable");
+    }
+
+    #[test]
+    fn writes_since_the_last_sync_never_touch_the_durable_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let key = DataKey::generate();
+        let backend = EncryptedBackend::create(&path, &key).unwrap();
+        backend.set_len(SECTOR as u64).unwrap();
+        backend.write(0, b"durable").unwrap();
+        backend.sync_data().unwrap();
+        let durable = newest_copy(&std::fs::read(&path).unwrap(), 0);
+        let at = EncryptedBackend::copy_offset(0, durable) as usize;
+        let before = std::fs::read(&path).unwrap()[at..at + COPY].to_vec();
+        for value in [b"second!", b"third!!", b"fourth!"] {
+            backend.write(0, value).unwrap();
+            assert_eq!(
+                std::fs::read(&path).unwrap()[at..at + COPY],
+                before[..],
+                "an unsynced rewrite must not overwrite the durable copy"
+            );
+        }
+        // Lose everything written since the sync: the durable copy remains.
+        drop(backend);
+        tear(&path, 0, 1 - durable);
+        let reopened = EncryptedBackend::open(&path, &key).unwrap();
+        let mut out = [0u8; 7];
+        reopened.read(0, &mut out).unwrap();
+        assert_eq!(&out, b"durable");
+    }
+
+    #[test]
+    fn a_torn_redb_header_write_reopens_at_the_previous_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.redb");
+        let key = DataKey::generate();
+        let commit = |value: &[u8]| {
+            let db = open_database(&path, &key).unwrap();
+            let txn = db.begin_write().unwrap();
+            txn.open_table(TABLE).unwrap().insert(1, value).unwrap();
+            txn.commit().unwrap();
+        };
+        commit(b"first");
+        commit(b"second");
+        // The commit that wrote "second" last rewrote redb's header in sector
+        // 0; tear that write.
+        let newest = newest_copy(&std::fs::read(&path).unwrap(), 0);
+        tear(&path, 0, newest);
+        let db = open_database(&path, &key).unwrap();
+        let read = db.begin_read().unwrap();
+        let value = read.open_table(TABLE).unwrap().get(1).unwrap().unwrap();
+        assert!(
+            [b"first".as_slice(), b"second".as_slice()].contains(&value.value()),
+            "the database opens at a committed state"
+        );
+    }
+
+    #[test]
+    fn create_publishes_only_a_complete_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.redb");
+        let pending = dir.path().join("wallet.redb.creating");
+        // An interrupted earlier create left a partial file behind.
+        std::fs::write(&pending, b"partial").unwrap();
+        let key = DataKey::generate();
+        drop(EncryptedBackend::create(&path, &key).unwrap());
+        assert!(!pending.exists());
+        EncryptedBackend::open(&path, &key).unwrap();
+        assert!(matches!(
+            EncryptedBackend::create(&path, &key),
+            Err(EncryptedDbError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists
+        ));
     }
 }
