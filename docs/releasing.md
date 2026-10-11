@@ -14,7 +14,7 @@ use loopback, peer enrichment is disabled, and temporary credentials/state are
 removed afterward. Linux glibc, Linux musl, macOS and Windows run this check on
 their native runners. A smoke timeout fails the build and prevents upload.
 
-Each `ergo-<target>.tar.gz` archive (`.zip` on Windows) contains both programs
+Each `ergo-<target>.tar.gz` archive (`.zip` on Windows) contains the node, wallet CLI and wallet daemon
 at its root, `config/ergo-node.toml`, the commented example, a binary quickstart,
 operator docs, `deploy/` examples and licenses. Internal `release-info.json`
 (schema version 1) records the tag, workspace version, source SHA, target and
@@ -61,7 +61,7 @@ Local helper validation requires Python 3.11 or later:
 ```sh
 python3 scripts/ci-policy.py
 python3 -m unittest discover -s scripts -p 'test_release*.py'
-cargo build --locked --release --bin ergo-node --bin ergo-wallet
+cargo build --locked --release --bin ergo-node --bin ergo-wallet --bin ergo-walletd --features ergo-wallet/cli
 python3 scripts/release.py package --target x86_64-unknown-linux-gnu \
   --binaries target/release --output target/release-smoke
 python3 scripts/release.py aggregate --input target/release-smoke \

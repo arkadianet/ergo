@@ -1,10 +1,10 @@
 name: Release binaries
 
 # Triggered by pushing a tag of the form `v*` (e.g. `v0.3.0`), or manually via
-# workflow_dispatch with a `tag` input. Builds ergo-node + ergo-wallet for
+# workflow_dispatch with a `tag` input. Builds ergo-node + ergo-wallet + ergo-walletd for
 # Linux (glibc + static musl), macOS, and Windows on x86_64, plus native
 # Linux glibc and macOS ARM64. For each platform
-# it packages one combined `.tar.gz` / `.zip` archive (both programs + README +
+# it packages one combined `.tar.gz` / `.zip` archive (all programs + README +
 # config + operating docs + licenses). Publication validates all six receipts,
 # then uploads only those archives, SHA256SUMS and release.json (eight assets).
 on:
@@ -101,9 +101,9 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build release binaries
-        run: cargo build --locked --release --bin ergo-node --bin ergo-wallet --target ${{ matrix.target }}
+        run: cargo build --locked --release --bin ergo-node --bin ergo-wallet --bin ergo-walletd --features ergo-wallet/cli --target ${{ matrix.target }}
 
-      - name: Package combined archive and test both extracted binaries
+      - name: Package combined archive and test all extracted binaries
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           RELEASE_SHA: ${{ needs.resolve.outputs.sha }}

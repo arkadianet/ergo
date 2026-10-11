@@ -11,35 +11,38 @@ with the code, the code wins.
 ## Layers
 
 The workspace is a strict dependency DAG (no cycles), listed foundation-first.
-**Every crate depends on `ergo-primitives` and (above L0) `ergo-ser`** — those
-universal edges are omitted below and in the graph for clarity.
+The graph below shows the important workspace edges; the many direct edges to
+`ergo-primitives` and `ergo-ser` are omitted for clarity, but they are not
+universal: `ergo-wallet-protocol` intentionally has neither.
 
-| Layer | Crate | Responsibility |
+| Layer | Crate  | Responsibility |
 |---|---|---|
 | **L0** Foundation | [ergo-primitives](./codemap/ergo-primitives.md) | Byte-level types + codecs: Blake2b256, `Digest32`/`ModifierId`/`ADDigest`, VLQ/zigzag readers/writers, the JIT cost model. No curve math, no consensus serializers. |
 | **L1** Wire format | [ergo-ser](./codemap/ergo-ser.md) | Byte-exact, round-trippable codecs for every consensus structure (headers, txs, boxes, ErgoTree + opcode AST, sigma type/value, PoW, NiPoPoW). Bytes↔structs only — every content-addressed ID originates here. |
-| **L2** Chain & crypto | [ergo-chain-spec](./codemap/ergo-chain-spec.md) | Per-network params: magic, address prefix, difficulty/voting/monetary/reemission schedules, genesis identity, seed peers. Constants + constructors only. |
+| **L2** Chain & capability | [ergo-chain-spec](./codemap/ergo-chain-spec.md) | Per-network params: magic, address prefix, difficulty/voting/monetary/reemission schedules, genesis identity, seed peers. Constants + constructors only. |
 | **L2** | [ergo-crypto](./codemap/ergo-crypto.md) | Autolykos v1/v2 PoW verification, difficulty-retarget math (incl. EIP-37), Blake2b256 Merkle trees. No interpreter, no state. |
-| **L3** Interpreter | [ergo-sigma](./codemap/ergo-sigma.md) | AST-walking ErgoTree evaluator + sigma-protocol verifier (Schnorr DLog, ProveDHTuple, CAND/COR/threshold) with JIT cost. The "may this input be spent?" decision. |
-| **L3** | [ergo-compiler](./codemap/ergo-compiler.md) | ErgoScript source → ErgoTree compiler, byte-parity with Scala's `SigmaCompiler` (pinned sigma-state oracles): parse → bind → typecheck → emit → graph build → constant segregation → P2S/P2SH addresses. Not a consensus surface — but a wrong tree or address strands funds. |
-| **L4** Consensus rules | [ergo-validation](./codemap/ergo-validation.md) | Header/block/tx legality: structural/monetary/script/cost checks, voted-param epoch recomputation, NiPoPoW verify. Emits unforgeable `Checked*` proofs. No storage or fork-choice. |
-| **L5** State | [ergo-state](./codemap/ergo-state.md) | redb-backed authenticated UTXO state: in-memory AVL+ tree, atomic `apply_block`/`rollback_to` (delta-based reorg), header/section chain index, voted params, Mode 2/3 + Mode 5 digest backend. |
-| **L5** Wallet | [ergo-wallet](./codemap/ergo-wallet.md) | HD wallet: BIP39/BIP32, encrypted secret storage (Scala-compatible), native sigma-proof signing (single + multi-sig hints), tx building, box selection. Ships the `ergo-wallet` CLI. |
-| **L6** Subsystems | [ergo-mempool](./codemap/ergo-mempool.md) | Single-writer mempool: 17-step admission, weight-ordered pool, anti-DoS budgets, pool-aware UTXO overlay, reorg demotion/revalidation. Consensus checks delegated to `ergo-validation`. |
-| **L6** | [ergo-p2p](./codemap/ergo-p2p.md) | P2P transport: TCP frame codec, handshake + feature negotiation, message codecs, per-peer state/scoring, peer manager (eviction/anti-eclipse), address book, modifier delivery. Wire + accounting only. |
-| **L6** | [ergo-sync](./codemap/ergo-sync.md) | Header-first sync: a pure `SyncCoordinator` (peer events → `Action`s) + a stateful `SyncExecutor` (validate + persist via `ergo-state`) + UTXO-snapshot (Mode 2) and NiPoPoW bootstrap reducers. |
-| **L6** | [ergo-mining](./codemap/ergo-mining.md) | External-miner block production: candidate assembly (coinbase + emission/reemission, mempool selection, optional zero-fee storage-rent self-claim, AVL dry-run), Autolykos v2 work messages, solution apply. |
-| **L6** | [ergo-indexer](./codemap/ergo-indexer.md) | Opt-in `/blockchain/*` extra-index (writer half): per-block box/tx/address/template/token rows, atomic apply + delta rollback, storage-rent eligibility index, tip-following poller. Requires Mode 1. |
-| **L7** API & DTOs | [ergo-api](./codemap/ergo-api.md) | Operator-facing read-mostly axum HTTP server: Scala-compat surface + `/api/v1/*` dashboard + embedded UIs. Talks to the node **only** through `Arc<dyn …>` trait bridges; never reaches into node internals. |
-| **L7** | [ergo-rest-json](./codemap/ergo-rest-json.md) | JSON↔canonical-wire-bytes DTOs for the Scala-compat REST. The canonicalizing decoders reproduce Scala's bytes exactly so content-addressed IDs verify (anchored by the `b4_*` byte-parity oracle). |
-| **L7** | [ergo-indexer-types](./codemap/ergo-indexer-types.md) | Reader-side surface of the extra-index: the `IndexerQuery` trait + return DTOs, split out so `ergo-api` consumes the read surface without depending on redb / `ergo-state`. |
-| **L8** Runtime | [ergo-node](./codemap/ergo-node.md) | The binary + runtime: wires every crate into one supervised tokio runtime, owns lifecycle (config, data-dir, genesis, shutdown) and the **single-writer action loop**, and bridges to `ergo-api` via a lock-free `ArcSwap` snapshot. |
-| **Dev** Tooling | [ergo-difftest](./codemap/ergo-difftest.md) | Invariant + differential fuzz harness: byte-stream generators, structured mutators, oracle-free checks (no-panic, parse→serialize fixed-point), JVM-oracle accept/reject parity. Dev-only; not in the node binary DAG. |
+| **L2** Protocol | [ergo-wallet-protocol](./codemap/ergo-wallet-protocol.md) | Transport-neutral wallet and node-chain wire DTOs, ID/byte validation, and native/Scala response shapes. No storage, node, or async runtime. |
+| **L3** Interpreter | [ergo-sigma](./codemap/ergo-sigma.md) | AST-walking ErgoTree evaluator + sigma-protocol verifier with JIT cost. The “may this input be spent?” decision. |
+| **L3** | [ergo-compiler](./codemap/ergo-compiler.md) | ErgoScript source → ErgoTree compiler with Scala byte-parity. A consensus-adjacent capability, not a storage or transport layer. |
+| **L3** Validation | [ergo-validation](./codemap/ergo-validation.md) | Header/block/tx legality, voted-param epochs, and NiPoPoW verification. |
+| **L4** Wallet core | [ergo-wallet](./codemap/ergo-wallet.md) | HD cryptography and secret storage: BIP39/BIP32, P2PK addresses, sigma-proof signing, and the wallet CLI. |
+| **L4** | [ergo-wallet-service](./codemap/ergo-wallet-service.md) | Wallet orchestration and persistence core: the `WalletEngine` (every wallet command: lifecycle, reads, build/sign/send, sweep, multi-sig, keys, scans, rescan) over chain / mempool / submit seams, plus state, redb store, apply/rescan/sync, box selection, and transaction construction. |
+| **L5** State | [ergo-state](./codemap/ergo-state.md) | Redb-backed authenticated UTXO state, AVL+ tree, atomic apply/rollback, chain index, voted parameters, and snapshot/pruning backends. Keeps a transitional wallet facade over `ergo-wallet-service`. |
+| **L6** Subsystems | [ergo-mempool](./codemap/ergo-mempool.md) | Single-writer mempool: admission, weight ordering, anti-DoS budgets, UTXO overlay, and reorg revalidation. |
+| **L6** | [ergo-p2p](./codemap/ergo-p2p.md) | P2P transport: framing, handshake, message codecs, peer accounting, and modifier delivery. |
+| **L6** | [ergo-sync](./codemap/ergo-sync.md) | Header-first sync coordinator/executor, UTXO-snapshot and NiPoPoW bootstrap reducers. |
+| **L6** | [ergo-mining](./codemap/ergo-mining.md) | External-miner candidate assembly and solution application. |
+| **L6** | [ergo-indexer](./codemap/ergo-indexer.md) | Optional extra-index writer for `/blockchain/*`, with atomic apply/rollback. |
+| **L7** API & DTOs | [ergo-api](./codemap/ergo-api.md) | Axum HTTP server for Scala-compatible and native API routes; consumes protocol DTOs through `Arc<dyn …>` traits. |
+| **L7** | [ergo-rest-json](./codemap/ergo-rest-json.md) | JSON↔canonical-wire DTOs for the Scala-compat REST surface. |
+| **L7** | [ergo-indexer-types](./codemap/ergo-indexer-types.md) | Reader-side extra-index traits and DTOs, split out so the API does not depend on redb/state. |
+| **L8** Runtime | [ergo-node](./codemap/ergo-node.md) | Binary and API adapter: wires components, owns process lifecycle and the single-writer action loop, and serves the chain API that external wallets sync from. Hosts no wallet. |
+| **L8** Runtime | [ergo-walletd](./codemap/ergo-walletd.md) | The wallet daemon: its own encrypted redb store, an HTTP chain client, a bounded sync/reorg loop, and an authenticated local API on a Unix socket or loopback TCP. Watch-only by default; seed mode hosts the shared `WalletEngine` for signing and sending. |
+| **Dev** Tooling | [ergo-difftest](./codemap/ergo-difftest.md) | Dev/test-only differential and fuzz harness over wire decoders and generators. |
 
 ## Dependency graph
 
-Universal edges to `ergo-primitives`/`ergo-ser` are omitted; arrows read
-"depends on."
+Important workspace edges are shown; arrows read “depends on.”
 
 ```mermaid
 graph TD
@@ -49,10 +52,17 @@ graph TD
   compiler[ergo-compiler] --> crypto
   validation[ergo-validation] --> sigma
   validation --> chainspec
+  protocol[ergo-wallet-protocol]
+  wallet[ergo-wallet] --> sigma
+  wallet --> validation
+  service[ergo-wallet-service] --> wallet
+  service --> protocol
+  service --> validation
+  service --> sigma
   state[ergo-state] --> validation
   state --> sigma
-  wallet[ergo-wallet] --> state
-  wallet --> sigma
+  state --> wallet
+  state --> service
   mempool[ergo-mempool] --> state
   mempool --> validation
   p2p[ergo-p2p] --> ser
@@ -67,15 +77,60 @@ graph TD
   indexer --> indexertypes
   restjson[ergo-rest-json] --> ser
   api[ergo-api] --> restjson
+  api --> protocol
   api --> compiler
   api --> indexertypes
   node[ergo-node] --> api
   node --> sync
   node --> mining
   node --> indexer
+  node --> state
   node --> wallet
+  node --> service
   node --> sigma
+  walletd[ergo-walletd] --> service
+  walletd --> protocol
+  walletd --> wallet
+  walletd --> ser
 ```
+
+## Dependency boundaries
+
+- **`ergo-wallet-protocol`:** normal dependencies are limited to `serde`,
+  `serde_json`, and `hex`. It is transport-neutral and intentionally does not
+  depend on any Ergo workspace crate, `redb`, `tokio`, `axum`, or `utoipa`.
+- **`ergo-wallet`:** normal workspace dependencies are `ergo-primitives`,
+  `ergo-ser`, `ergo-sigma`, and `ergo-validation`; it does not depend on
+  `ergo-state`, `ergo-wallet-service`, `ergo-wallet-protocol`, `ergo-api`, or
+  `ergo-node`.
+- **`ergo-wallet-service`:** normal direct dependencies are
+  `ergo-wallet`, `ergo-wallet-protocol`, `ergo-primitives`, `ergo-ser`,
+  `ergo-validation`, `ergo-sigma` (the engine's signed-transaction
+  self-verify), `serde`, `serde_json`, `hex`, `thiserror`, `redb`,
+  `bincode`, `tracing`, `async-trait` (runtime-agnostic async submit seam; a
+  proc macro, no executor), `parking_lot`, `k256`, and `zeroize`. It must not
+  depend on `ergo-state`, `ergo-api`, `ergo-node`, `ergo-mempool`,
+  `ergo-mining`, `ergo-sync`, `tokio`, or `axum`; `ergo-rest-json` is a
+  test-only dev-dependency.
+- **`ergo-walletd`:** a separate process, not a node component. Its normal
+  workspace dependencies are `ergo-wallet`, `ergo-wallet-service`,
+  `ergo-wallet-protocol`, `ergo-primitives`, and `ergo-ser`. It must not depend
+  on `ergo-node`, `ergo-api`, `ergo-state`, `ergo-mempool`, `ergo-sync`, or
+  `ergo-chain-spec`: it reaches a node over `/api/v1/chain/*` HTTP, and its
+  network identity is config, not a chain-spec lookup. `ergo-node`, `ergo-api`,
+  `ergo-state`, `ergo-mining` and `ergo-mempool` **are** `[dev-dependencies]`,
+  for the integration tests alone: they stand the real node chain API up
+  in-process (real `StateStore`, real `InProcessChainClient`, real `ergo-api`
+  router with the real `api_key` gate) so the daemon's own client and sync loop
+  are exercised over real HTTP. A dev-dependency never reaches the released
+  binary's graph, so the normal boundary above is unchanged — but moving any of
+  them into `[dependencies]` would break it.
+- **Legacy-wallet edge:** `ergo-state -> ergo-wallet-service` remains a normal
+  edge. The chain store no longer writes wallet rows, but it still reads the
+  wallet tables an earlier release left in `state.redb` (schema migration
+  before the handoff, offline UTXO discovery) and serves the owned block data
+  the chain API hands external wallets. `ergo-state/src/wallet/` is that
+  compatibility facade. The reverse edge is forbidden.
 
 ## Where do I find…?
 
@@ -83,23 +138,26 @@ graph TD
 |---|---|
 | A consensus ID or wire format (`header_id`, `tx_id`, `box_id`, `section_id`) | [ergo-ser](./codemap/ergo-ser.md) |
 | Compiling ErgoScript source to a tree / address | [ergo-compiler](./codemap/ergo-compiler.md) |
-| "Is this header / block / tx legal?" | [ergo-validation](./codemap/ergo-validation.md) (+ [ergo-sigma](./codemap/ergo-sigma.md) for the script verdict) |
-| The UTXO set, AVL+ tree, reorgs, persistence | [ergo-state](./codemap/ergo-state.md) |
+| “Is this header / block / tx legal?” | [ergo-validation](./codemap/ergo-validation.md) (+ [ergo-sigma](./codemap/ergo-sigma.md) for the script verdict) |
+| The UTXO set, AVL+ tree, reorgs, chain persistence | [ergo-state](./codemap/ergo-state.md) |
+| Wallet cryptography, derivation, secrets, or sigma signing | [ergo-wallet](./codemap/ergo-wallet.md) |
+| Wallet protocol DTOs, ID/byte validation, or transport shapes | [ergo-wallet-protocol](./codemap/ergo-wallet-protocol.md) |
+| Wallet command logic (`WalletEngine`), signing/sending, rescan orchestration, persistence, box selection, or runtime core | [ergo-wallet-service](./codemap/ergo-wallet-service.md) |
+| The node's chain API for external wallets, the legacy-wallet handoff, and node wiring | [ergo-node](./codemap/ergo-node.md) |
+| The wallet daemon (watch-only and seed), its config, or its API | [ergo-walletd](./codemap/ergo-walletd.md) |
 | Proof-of-work / difficulty | [ergo-crypto](./codemap/ergo-crypto.md) |
 | Block production / the mining API | [ergo-mining](./codemap/ergo-mining.md) |
 | Mempool admission / ordering | [ergo-mempool](./codemap/ergo-mempool.md) |
 | Peer networking / the wire protocol | [ergo-p2p](./codemap/ergo-p2p.md) (driven by [ergo-sync](./codemap/ergo-sync.md)) |
 | Chain sync / IBD / bootstrap | [ergo-sync](./codemap/ergo-sync.md) |
 | REST endpoints | [ergo-api](./codemap/ergo-api.md) (+ [ergo-rest-json](./codemap/ergo-rest-json.md), and [ergo-indexer](./codemap/ergo-indexer.md) for `/blockchain/*`) |
-| Wallet / signing | [ergo-wallet](./codemap/ergo-wallet.md) |
-| Boot, config, the action loop, mode selection | [ergo-node](./codemap/ergo-node.md) |
+| Boot, config, action loop, mode selection | [ergo-node](./codemap/ergo-node.md) |
 
 ## Keeping it current
 
 Each `codemap/<crate>.md` page is verified against that crate's source. When a
 crate's public surface or owned invariants change materially, update its page;
-this index changes when crates, dependencies, or responsibilities shift. Line
-counts are omitted because they do not describe ownership and quickly drift. See
+this index changes when crates are added/removed or dependencies shift. See
 [`../ARCHITECTURE.md`](../ARCHITECTURE.md) for the cross-crate big picture
-(data-flow paths, the single-writer model, consensus/persistence/reorg
+(data-flow paths, the single-writer model, and the consensus/persistence/reorg
 contracts).

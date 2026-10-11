@@ -16,6 +16,30 @@ infrastructure.
 
 ## [Unreleased]
 
+### Security
+
+- **Wallet keystore version 2.** New wallets use Argon2id (256 MiB, 3 passes) with AES-256-GCM that authenticates every parameter. A version-1 (Scala/Appkit PBKDF2) keystore is rewritten as version 2 in place by its first successful unlock; `ergo-wallet export-keystore` still writes version 1 for JVM tools. Version-2 files cannot be read by earlier releases. Keystore cost parameters are bounded on read.
+- **`ergo-walletd`:** watch-only mode now requires `local_api_key_file`, like seed mode. The loopback TCP listener refuses unknown `Host` headers. A plain-`http` `node_url` must be loopback, and `node_ca_file` pins the CAs for an `https` node. Unlocked seed wallets lock after 15 minutes without a wallet operation and after 12 hours (`[security]`). The unlock attempt budget survives restarts and escalates up to 24-hour lockouts. The daemon disables core dumps and ptrace at startup and can lock its memory into RAM (`[security] lock_memory`). The systemd unit adds swap, syscall, capability and network restrictions.
+- Passwords, mnemonics and derived secret bytes are wiped after use, and secret key types are no longer `Clone`.
+- **`ergo-walletd` encrypts `wallet.redb` at rest** (AES-256-GCM per 4 KiB sector). The database key is sealed in the keystore under the wallet password (seed) or in `data-key.json` under an operator passphrase (watch-only). A restarted daemon starts sealed: no key, no open database, no sync, until `unlock` or `unseal`. Auto-lock wipes only the spending key, so sync continues while locked. An existing cleartext database is encrypted on its first unseal. `[security] unseal_key_file` and `export-unseal-key` support a TPM-bound systemd credential for unattended starts.
+- **`ergo-walletd` verifies the chain it is served:** each header's proof of work, and each block's transactions against its header's transactions root, recomputed from the serialized transactions the node now sends. The daemon's response cap is 16 MiB.
+- **Wallet handoff and setup:** a node that does not host its wallet publishes a verified copy of a legacy embedded wallet at `data_dir/wallet-handoff/`; `ergo-walletd adopt` takes it over and `ergo-node wallet-legacy-purge` removes the old rows afterwards. An external-mode miner without a reward key keeps the legacy wallet's key. `[mining] miner_reward_address` accepts a P2PK address; `ergo-node init --reward address`, `ergo-walletd init` and `ergo-walletd reward-key` cover new installations. See `docs/wallet-setup.md`.
+- **Multisig nonces stay in the daemon** by default: `generateCommitments` returns single-use handles instead of secret nonces (`[security] multisig_nonces = "caller"` restores the Scala form).
+
+### Removed
+
+- **The node no longer hosts a wallet.** It never opens wallet secrets, runs no wallet writer, scheduler or chain-apply hook, and its wallet and scan routes answer `410 wallet_moved` with `[wallet] daemon_address`. The dashboard's wallet page moved to `ergo-walletd`. `[wallet] mode = "embedded"` and `expose_private_keys` still load, with a warning, and do nothing. `ergo-node init` no longer offers `--reward wallet`. The readiness option `require_wallet` is ignored.
+
+- The chain store and sync code no longer take a wallet hook: `StateStore::apply_block`, `rollback_to`, `BlockApply` and the `ergo-sync` executor lost their wallet arguments, and `ergo-wallet-service` drops `WalletStateHook`, `WalletApplyHook` and `WalletWiring`. The embedded-vs-daemon shadow comparison (`scripts/shadow-compare.sh`) is retired with them.
+
+- `ergo-api` no longer contains wallet handlers: the `WalletAdmin` trait, `NoopWalletAdmin`, the Scala-compatible and native wallet and scan modules and the v1 accounts module are gone. Every path under the retired wallet, scan, account and PSBT prefixes answers `410 wallet_moved` after the API-key check, with the same credential scopes. The node's OpenAPI documents none of those operations (the Scala document drops `/wallet/*` and `/scan/*`). Server builders lose their wallet argument and the `_and_wallet` part of their names (`serve_on_with_mempool_and_security[_and_hosts[_and_wallet_moved]]`, `router_with_mempool_and_security[_and_inventory]`, `router_with_mempool_and_wallet_moved`); `router_with_wallet` is removed.
+
+### Changed
+
+- `[wallet] daemon_address` defaults to `http://127.0.0.1:3033`, the daemon templates' loopback listener (was `:9090`, which no daemon default used).
+- `/script/p2sAddress` and `/script/p2shAddress` compile with an empty environment: the node holds no wallet keys, so a script naming `myPubKey_N` is a `400` compile error.
+- `ergo-node wallet-scan-utxo` requires `--wallet-data-dir`. With `--wallet-key-stdin` it reads the key that `ergo-walletd export-unseal-key` prints and opens the daemon's encrypted database without the wallet password.
+
 ### Fixed
 
 - Reject ErgoTrees without a size field whose root is a nested function application that does not return SigmaProp, as the reference node does. These trees were previously accepted.

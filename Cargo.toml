@@ -9,6 +9,9 @@ members = [
     "ergo-compiler",
     "ergo-validation",
     "ergo-wallet",
+    "ergo-wallet-service",
+    "ergo-walletd",
+    "ergo-wallet-protocol",
     "ergo-state",
     "ergo-p2p",
     "ergo-sync",
@@ -52,6 +55,9 @@ ergo-sigma         = { path = "ergo-sigma" }
 ergo-compiler      = { path = "ergo-compiler" }
 ergo-validation    = { path = "ergo-validation" }
 ergo-wallet        = { path = "ergo-wallet" }
+ergo-wallet-service = { path = "ergo-wallet-service" }
+ergo-walletd         = { path = "ergo-walletd" }
+ergo-wallet-protocol = { path = "ergo-wallet-protocol" }
 ergo-state         = { path = "ergo-state" }
 ergo-p2p           = { path = "ergo-p2p" }
 ergo-sync          = { path = "ergo-sync" }
@@ -61,9 +67,15 @@ ergo-indexer-types = { path = "ergo-indexer-types" }
 ergo-indexer       = { path = "ergo-indexer" }
 ergo-api           = { path = "ergo-api" }
 ergo-rest-json     = { path = "ergo-rest-json" }
+# Only ever pulled in as a dev-dependency (ergo-walletd's real-node
+# integration test). It is the workspace binary crate, so it is not referenced
+# by any member's normal `[dependencies]`.
+ergo-node          = { path = "ergo-node" }
 
 # Cryptography
 aes-gcm  = "0.11"
+# Memory-hard keystore key derivation (version-2 wallet files).
+argon2   = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
 blake2   = "0.10"
 k256     = "0.13"
 md5      = "0.7"
@@ -100,6 +112,8 @@ tokio       = "1"
 async-trait = "0.1.92"
 zeroize    = { version = "1", features = ["derive"] }
 rpassword  = "7"
+# Safe Unix-only socket creation mask used by the wallet daemon.
+rustix     = "1.1"
 
 # Storage / data structures
 redb              = { version = "4", features = ["cache_metrics"] }
@@ -117,7 +131,9 @@ rayon = "1.11"
 
 # HTTP
 axum            = "0.7"
+hyper           = { version = "1", features = ["http1", "server"] }
 tower           = "0.5"
+hyper-util      = { version = "0.1", features = ["http1", "server", "tokio"] }
 tower-http      = "0.5"
 http-body-util  = "0.1"
 # The v1 webhooks outbound delivery client (features set at the member —

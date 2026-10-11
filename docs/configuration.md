@@ -47,9 +47,9 @@ the installed UTXO root** against an independently trusted node. Genesis sync
 sets both bootstrap flags false and takes hours to days. Explorer and full
 mining also need historical index catch-up.
 
-Mining requires `--reward wallet` or `--reward public-key`. Wallet rewards omit
-`miner_public_key_hex`; initialize and **unlock** the node wallet in the
-dashboard before work is served. Public-key rewards require
+Mining requires `--reward address` or `--reward public-key`.
+Address rewards take `--miner-reward-address`, a P2PK address from any wallet,
+checked against the selected network. Public-key rewards require
 `--miner-public-key HEX`, a valid 33-byte compressed secp256k1 point beginning
 with `02` or `03`. The wizard displays its P2PK address for the selected
 network and requests confirmation in interactive mode. Use
@@ -399,7 +399,7 @@ and `readiness`.
 | `snapshot_max_age_ms` | `30000` | Maximum runtime snapshot age. |
 | `tip_max_age_ms` | `7200000` | Maximum chain-tip age; two hours accommodates normal block gaps. |
 | `require_indexer` | `false` | Require a healthy indexer caught up to the chain. |
-| `require_wallet` | `false` | Require a healthy wallet caught up to the chain. |
+| `require_wallet` | `false` | Ignored: the node hosts no wallet. Accepted so existing configs and `PATCH` bodies keep working. |
 
 Rates/weights must be finite and positive. Age thresholds accept
 `1000..86400000` milliseconds. Limits and readiness can also be changed for the
@@ -649,7 +649,8 @@ either way.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Enables the external-miner subsystem and mounts `/mining/*`. Rejected when `state_type = "digest"` (candidate generation needs UTXO state). CLI flag `--mining-enabled` forces it on. |
-| `miner_public_key_hex` | string (hex) | none | 33-byte compressed secp256k1 public key (66 hex chars) for the reward output. **Optional**: when set, it is the pinned reward pubkey; when omitted, the wallet's EIP-3 first-address key is resolved at candidate time (the node must have a wallet). A value that is present must be well-formed (66 hex chars → 33 bytes) or load fails. CLI flag: `--mining-public-key`. |
+| `miner_public_key_hex` | string (hex) | none | 33-byte compressed secp256k1 public key (66 hex chars) for the reward output. With mining enabled and neither this nor `miner_reward_address` set, boot takes the first-address key of a wallet left in `state.redb` by an earlier release and logs how to pin it; with no such wallet, boot fails. A value that is present must be well-formed (66 hex chars → 33 bytes) or load fails. CLI flag: `--mining-public-key`. |
+| `miner_reward_address` | string | none | P2PK reward address, as wallets display it. Decoded into the reward key and checked against the node's `network`; setting it together with a different `miner_public_key_hex` is a load error. See [Wallet setup](wallet-setup.md). |
 | `block_candidate_generation_interval_ms` | u64 | `250` | Minimum interval (ms) between same-parent mempool-refresh signals; must be at least 50. The first pool change after a quiet interval signals immediately. Changes within the interval share a deadline and refresh the latest pool snapshot when it expires, independently of the mempool polling tick. Applied-parent changes bypass this interval; header-only changes do not rebuild work once mining has started. Lower values refresh transaction contents sooner but increase build load and churn of the 16 retained templates. |
 | `use_external_miner` | bool | `true` | Must be `true` — an internal CPU miner is not supported, so `false` is rejected at load. |
 | `candidate_base_cache` | bool | `false` | With the default `false`, candidate proofs load only authenticated AVL operation paths from the committed snapshot and retain no full-tree graph between builds. Legacy v1 nodes without child labels may require subtree reads. Setting `true` enables the alternative cache of the hydrated AVL working set between candidate builds, keyed on the committed tip. Same-tip rebuilds reuse the tree and loaded paths; transaction validation and proof generation for changed transaction sets still run. Independently of this setting, the worker can reuse a prior state root and proof for an identical applied parent and ordered transaction bytes after fresh transaction validation. When the committed tip moves, the engine walks back at most six headers to the cached tip or to one of up to three retained ancestor trees, and replays the stored blocks from there. It checks each block's state root against its header and the final root against the committed state. This covers growth by a few blocks and reorgs up to three deep. Full rehydration remains the fallback beyond that window, and on missing data, decode or prover errors, or digest mismatches. Holds the full UTXO AVL node graph resident — multi-GB on a mainnet archival node, scaling with the UTXO-set size — so enable it only on a mining node with RAM headroom. |
@@ -719,7 +720,15 @@ storageFeeFactor = 1250000
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `expose_private_keys` | bool | `false` | When `true`, `POST /wallet/getPrivateKey` returns the derived secret scalar for an address; otherwise that route returns `403 Forbidden`. Setting this `true` lets any authenticated `api_key` request extract per-address private material. |
+The wallet runs in `ergo-walletd` ([Wallet setup](wallet-setup.md)). The node
+never opens wallet secrets; its former wallet routes return `410` with
+`reason = "wallet_moved"` and the daemon's address.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `daemon_address` | string | `"http://127.0.0.1:3033"` | Address returned by the `wallet_moved` responses: where clients reach `ergo-walletd`. The default matches the daemon templates' and `ergo-walletd init --tcp`'s loopback listener; set it to your daemon's listener. It is informational routing guidance; the node does not proxy requests to it. |
+| `mode` | string | none | Retired. `"external"` is accepted silently and `"embedded"` with a warning, so configs from earlier releases still load; any other value is a load error. |
+| `expose_private_keys` | bool | none | Retired; ignored with a warning. |
 
 ## `[logging]`
 
@@ -771,6 +780,9 @@ checks and are enforced at load:
   (the eligible-box scan reads the extra-index).
 - `[voting.targets]` set with `[mining] enabled = false` is rejected — the
   votes are only ever cast by blocks this node mines.
+- `[mining] enabled = true` with no reward key boots only when a wallet left
+  in `state.redb` by an earlier release supplies one; pin it with
+  `miner_reward_address`.
 
 ## Minimal example
 
@@ -802,4 +814,362 @@ Configuration is unstable until 1.0; keys and shapes may change between
 minor versions — see [`./compatibility.md`](./compatibility.md) for the
 versioning policy.
 
+---
+
+# `ergo-walletd.toml`: the standalone wallet daemon
+
+Everything above configures `ergo-node`. This section configures
+`ergo-walletd`, the separate wallet daemon documented in
+[`codemap/ergo-walletd.md`](./codemap/ergo-walletd.md). A daemon config is read
+only by `ergo-walletd --config <path>`, and its schema is strict
+(`deny_unknown_fields`), so a node key pasted into a daemon config is a hard
+parse error rather than a silently ignored line.
+
+The default watch-only reference config ships at
+[`../ergo-walletd/ergo-walletd.toml`](../ergo-walletd/ergo-walletd.toml).
+[`../ergo-walletd/ergo-walletd-seed.toml`](../ergo-walletd/ergo-walletd-seed.toml)
+shows the opt-in encrypted seed mode. The config schema rejects
+unknown fields and combinations that mix descriptor and seed ownership.
+
+`mode = "watch_only"` imports public descriptors and exposes the existing
+read API without opening secret storage. `mode = "seed"` hosts the shared
+wallet engine for encrypted seed lifecycle, transaction construction, signing,
+submission, scans/rescans and durable private mining jobs. In both modes an
+independent credential protects all local reads and writes. Seed-mode native balance reads
+can include an explicitly requested mempool delta; watch-only reads remain
+confirmed-only.
+
+## `ergo-walletd.toml` top-level keys
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `mode` | string | `"watch_only"` | `"watch_only"` requires a public `descriptor_file`. `"seed"` rejects `descriptor_file`. Both require `local_api_key_file`. CLI: `--mode <watch-only\|seed>`. |
+| `network` | string | `"mainnet"` | Required network identity: `"mainnet"` or `"testnet"`. Any other value (including `devnet`) is a load error. It selects the base58 address prefix used for descriptor validation and for every address the local API returns, so it **must** match the network the configured `node_url` serves — the daemon cannot infer that from the node. CLI: `--network`. |
+| `data_dir` | string (path) | none (required) | Directory holding `wallet.redb`. Seed mode also stores encrypted secret files under `wallet/`. Use a fresh, separate directory when creating a seed wallet; there is no automatic migration from an embedded or descriptor wallet. Created on first start. |
+| `node_url` | string (URL) | none (required) | Base URL of the node API. Watch-only mode reads `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}`. Seed mode also uses coherent spending context, tip-bound block replay, transaction admission/submission and `/api/v1/mining/private-transactions` queue operations. Must be `http`/`https` with a host and no credentials, query, or fragment. Plain `http` is accepted only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), because the node credential travels in a header; a remote node needs `https`. CLI: `--node-url`. |
+| `node_ca_file` | string (path) | none | PEM bundle of the certificate authorities trusted for an `https` `node_url`. When set, the system roots are not trusted, so only a node certificate chaining to these CAs is accepted. Requires an `https` `node_url`; validated at load. |
+| `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Scoped credentials need `wallet`; seed private mining jobs additionally need `operator`. An `admin` credential or the legacy master key also authorizes these requests. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. Unix only; see [Windows](#socket-permissions). The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
+| `descriptor_file` | string (path) | none | Required in `watch_only` mode and rejected in `seed` mode. Public descriptor file (see [Descriptor file](#descriptor-file)); size-capped at 16 MiB and validated at load. CLI: `--descriptor-file`. |
+| `local_api_key_file` | string (path) | none (required) | Independent local `api_key` credential protecting every local API request in both modes, on both Unix and TCP listeners. Watch-only balances, addresses and history are as private as a seed wallet's. Uses the same file-permission, size and header-value checks as `api_key_file`; the two files must contain different credentials. Never forwarded to the node. CLI: `--local-api-key-file`. |
+| `sync_interval` | u64 or string | `15` | Delay after completed sync passes or retryable errors; incomplete passes continue immediately. Accepts plain seconds (`15`) or a duration string (`"500ms"`, `"30s"`, `"2m"`, `"1h"`). `0` is rejected. CLI: `--sync-interval`. |
+| `shutdown_timeout_secs` | u64 | `5` | Maximum seconds to wait for a cancelled sync worker during shutdown. Must be greater than zero. Cancellation prevents subsequent requests and block application; an in-flight blocking HTTP request can finish after the deadline. |
+| `sync_batch` | u32 | `256` | **Apply budget**: the maximum number of blocks *applied* (committed to the wallet database) by one sync pass. Must be `1..=1024`. It is not a request size — a pass may reach the node tip through many HTTP calls, and it is not what bounds a single response. Larger values trade memory and pass latency for fewer passes. CLI: `--sync-batch`. |
+| `blocks_page` | u32 | `1` | **Request budget**: the maximum number of blocks asked for in a single `blocks-since` call, independent of `sync_batch`. Must be `1..=1024`. The wire form hex-encodes every transaction and output box, so a page of `N` blocks costs roughly four times their serialized bytes and must fit the daemon's hard 16 MiB response cap. The default `1` is the largest page whose *worst legal* body provably fits that cap (see [The two sync budgets](#the-two-sync-budgets)); raising it is an operator decision made against their own node's `maxBlockSize`. A block too large even for a one-block page is a terminal error naming the cap and the page — the daemon never retries with a smaller page. CLI: `--blocks-page`. |
+| `unix_socket` | string (path) | none | Path of the owner-only Unix socket serving the local API. Both modes require the local credential on every request. See [Socket permissions](#socket-permissions). CLI: `--unix-socket`. |
+| `tcp_fallback` | string (socket addr) | none | Optional loopback TCP listener for the local API. A non-loopback bind is rejected at load. Both modes require the same local credential used on the Unix socket. Alias: `tcp_addr`. CLI: `--tcp-fallback`. |
+
+At least one of `unix_socket` / `tcp_fallback` is required.
+
+### The two sync budgets
+
+`sync_batch` and `blocks_page` bound different things and are deliberately not
+the same knob:
+
+- `sync_batch` (apply budget) is how much work one pass may do: at most that
+  many blocks committed to the wallet database. It is a *pass* budget.
+- `blocks_page` (request budget) is how much one HTTP call may ask for: at most
+  that many blocks in a single `blocks-since` page. It is a *request* budget,
+  and it is what keeps a response body bounded.
+
+A pass with `sync_batch = 256` and `blocks_page = 1` therefore issues up to 256
+requests to apply 256 blocks. The default `1` is chosen against the adapter's
+hard 16 MiB response cap: the chain protocol carries each transaction and output
+box as a hex string, so a page costs roughly four times the serialized bytes of
+the blocks in it,
+and consensus bounds one block's `BlockTransactions` section by the voted
+`maxBlockSize` parameter. Sizing it against the largest value this document
+shows an operator voting for (`maxBlockSize = 2097152`, 2 MiB) makes the default
+provably safe for any node the daemon may be pointed at: one maxed-out block is
+8 MiB of hex, so a page of `1` fits with about half the cap spare, while a
+page of `2` would be 16 MiB *before* the JSON envelope (ids, indices, braces) is
+added. Today's mainnet parameter is smaller than that, so the default is
+deliberately conservative rather than minimal. Sizing the request from the apply
+budget instead (the earlier behaviour, `min(sync_batch, remaining)`) would ask
+for up to 1024 blocks and hit the cap on any real chain.
+
+`blocks_page` stays configurable (`1..=1024`) because a node with a much smaller
+`maxBlockSize` — or one serving an archive height where a page is known to be
+small — can safely serve a wider page. Raising it is an operator decision made
+against that node's own parameter, and the byte cap, not the block count, is
+what actually bounds a body.
+
+A block that cannot fit even a one-block page is **not** retried smaller — the
+daemon never shrinks a page — so the adapter reports it once, as a terminal
+error naming both the cap and the page size, and the durable rescan state becomes
+`failed`. `tests/it/node_api.rs` pins both halves of this against the real node
+API with ~1.5 MiB blocks, and `tests/it/sync.rs` pins the arithmetic above
+against the documented 2 MiB `maxBlockSize`.
+
+## `ergo-walletd.toml` `[api]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `unix_socket` | string (path) | none | Same as the top-level key. |
+| `tcp_fallback` | string (socket addr) | none | Same as the top-level key (alias `tcp_addr`). |
+| `allowed_hosts` | array of strings | `[]` | Extra `Host` header values (`host:port`) accepted on `tcp_fallback`, besides the listener's own loopback names (`localhost:<port>` and its IP). Any other `Host` is refused with `403 host_not_allowed` before routing, which stops DNS-rebinding requests from a browser. |
+
+For the listener keys, `[api]` is an *alternative spelling* of the top-level
+keys: specifying a listener in both places is a load error, so a half-edited
+file cannot leave the daemon listening somewhere unintended.
+
+## `ergo-walletd.toml` `[security]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `idle_lock` | u64 or string | `"15m"` | Lock an unlocked seed wallet after this long without a wallet operation: an authenticated non-`GET` request (unlock, sign, send, key or scan changes). Reads do not extend it, so a polling client cannot keep the wallet unlocked. `0` disables it. |
+| `max_unlock` | u64 or string | `"12h"` | Lock an unlocked seed wallet this long after unlocking, whatever its activity. `0` disables it. |
+| `lock_memory` | bool | `false` | Lock all current and future daemon memory into RAM (Linux). Startup fails unless the memory-lock limit is unlimited (systemd `LimitMEMLOCK=infinity`, which the shipped unit sets), because a bounded limit would make later allocations fail. |
+| `unseal_key_file` | string (path) | none | Owner-only file holding the wallet database key as 64 hex characters, read at start so the daemon unseals without a password (see [Sealed start](#sealed-start-and-database-encryption)). Intended for a systemd `LoadCredentialEncrypted=` credential bound to the host's TPM. CLI: `--unseal-key-file`. |
+| `multisig_nonces` | string | `"daemon"` | Who holds multisig signing nonces between `generateCommitments` and signing. `"daemon"` returns single-use `custody:` handles in place of each own commitment's secret nonce and resolves them when signing; they expire after an hour and are wiped on lock. `"caller"` returns the secret nonce as hex, as the Scala node does: anyone who sees it with the final signature can recover the signing key. |
+
+Durations accept plain seconds or `"500ms"`, `"30s"`, `"15m"`, `"12h"`. Private
+mining jobs whose signed bytes are already journaled keep retrying while
+locked; unsigned jobs wait for the next unlock without spending retries.
+
+## Sealed start and database encryption
+
+`wallet.redb` is encrypted at rest in both modes: every 4 KiB sector is sealed
+with AES-256-GCM under a random wallet database key, with the sector's index
+and the file's identifier authenticated, so a copied or recovered database
+reveals no addresses, balances or history, and a modified sector fails to
+read. Each sector keeps two sealed copies and a write never overwrites the
+last copy made durable, so a crash or power loss mid-write leaves the
+database at its previous commit. The database key is never stored in the
+clear:
+
+- **Seed wallets** seal it in the keystore under the wallet password.
+- **Watch-only wallets** seal it in `data_dir/data-key.json` under an operator
+  passphrase of at least 12 characters, set by the first unseal.
+
+A daemon that restarts is **sealed**: it holds no key, does not open the
+database and does not sync. Lifecycle status reports
+`{initialized, locked, sealed: true}`; other wallet routes answer
+`503 wallet_sealed`. To resume:
+
+- `POST /api/v1/wallet/unlock` (or Scala `/wallet/unlock`) with the wallet
+  password unseals the database, starts sync and unlocks spending.
+- `POST /api/v1/wallet/unseal` with `{pass}` unseals without unlocking:
+  sync resumes, spending stays locked. Watch-only wallets use this route with
+  their passphrase.
+
+Unseal attempts share the persisted unlock budget. Auto-lock (`idle_lock`,
+`max_unlock`) wipes only the spending key, so an unsealed wallet keeps syncing
+while locked. `POST /api/v1/wallet/seal` drops the database key and exits the
+daemon cleanly (status 0); its next start is sealed. The shipped systemd unit
+restarts only on failure, so start the service again. A fresh seed directory starts unsealed with a new key, which `init` or
+`restore` seals into the new keystore.
+
+An existing cleartext `wallet.redb` (a migrated or earlier wallet) is encrypted
+on its first unseal through a verified copy and an atomic rename; a wallet
+whose keystore has no database key gets one sealed first. Encryption is not
+secure erasure: the former cleartext blocks can remain on disk until
+overwritten, so use full-disk encryption as well.
+
+For an unattended host, `ergo-walletd export-unseal-key --config <path>`
+reads the password (or passphrase) from the first line of standard input and
+prints the database key as hex. Pipe it straight into
+`systemd-creds encrypt --with-key=tpm2 --name=unseal-key - /etc/ergo-walletd/unseal-key.cred`,
+add `LoadCredentialEncrypted=unseal-key:/etc/ergo-walletd/unseal-key.cred` to the
+unit and start with `--unseal-key-file ${CREDENTIALS_DIRECTORY}/unseal-key`.
+The daemon then unseals at boot without a password; spending still needs the
+password. That copy of the key is only as strong as the host that holds it: it
+protects a database copied elsewhere, not one read by root on the same host.
+
+The same key lets the node's offline UTXO discovery open the encrypted
+database without the password (see
+[offline discovery](wallet-extraction-offline-discovery.md)).
+
+## Descriptor file
+
+In `watch_only` mode, `descriptor_file` points at the daemon's public input.
+Seed mode rejects this key. JSON or TOML, with
+`descriptors` (or `keys`) as an array of entries:
+
+```toml
+version = 1
+
+[[keys]]
+path        = "m/44'/429'/0'/0/0"                      # derivation path
+public_key  = "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2"
+label       = "cold storage"                          # optional, <= 256 chars
+curve       = "secp256k1"                             # optional, only value
+```
+
+| Key | Required | Description |
+|---|---|---|
+| `path` | yes | `m/…` derivation path; hardened components may use `'`, `h`, or `H`; at most 255 components; leading zeros and values above `0x7fffffff` are rejected. |
+| `public_key` | yes | 66 lowercase hex characters: a 33-byte **compressed** secp256k1 point (`02`/`03` prefix). |
+| `label` | no | Free-form label returned by `/addresses`; longer than 256 characters is rejected. |
+| `curve` | no | Must be `"secp256k1"` if present. |
+| `version` (file) | no | Must be `1` if present. |
+
+Validation rules that matter operationally:
+
+- **No secrets.** A `private_key` (or any unknown) field is a parse error, not
+  a warning: the schema is strict, so a descriptor file cannot smuggle key
+  material into a watch-only daemon. Watch-only mode never opens secret storage.
+- **Keys are validated, not trusted.** Each public key must decode as a
+  compressed point *and* render as a P2PK address for the configured
+  `network`, so a bad key fails at startup instead of on a read route.
+- **Import is idempotent and additive.** Re-running with the same file changes
+  nothing; a *new* key resets the scan cursor in the same transaction that adds
+  the key, so a crash can expose either the old wallet or a clearly invalidated
+  rebuild target — never new keys beside a clean cursor.
+- **Prefixes are never persisted.** The store keeps 33-byte public keys and the
+  API renders base58 at read time, so changing `network` changes the addresses
+  the API returns without touching the database. (The chain history itself
+  still has to be re-synced from the new network's node.)
+- **The descriptor file cannot register a scan.** It admits public keys,
+  paths, and labels. The daemon exposes persisted scan registrations through
+  `/scans` and `/scan/listAll` and rewinds their tracked boxes and transactions
+  on reorgs. A fresh descriptor-only database has an empty registry. Registration
+  remains a node capability (`/scan/register`); the daemon has no scan mutation
+  routes in either mode.
+  `tests/it/scan_registry_rewind.rs` covers the persisted registry's apply and
+  rewind behavior, and `tests/it/daemon_boot.rs` covers a fresh database.
+
+## Seed wallet API
+
+Start with `mode = "seed"`, a fresh data directory, `local_api_key_file` and
+no `descriptor_file`. The daemon will not automatically migrate embedded
+wallet data or turn an existing descriptor wallet into a seed wallet. Initialize
+or restore through the local API; encrypted files are stored under
+`data_dir/wallet/`. Existing seed wallets always start locked. Unlocking
+reconciles the seed's public keys, and later syncing continues while locked.
+Seed restarts require the daemon's persisted `wallet-mode` marker; an unmarked
+directory containing `wallet.redb`, `wallet/` or `state.redb` is rejected.
+
+Every API request, in either mode, must contain exactly one `api_key` header
+matching the local credential, on both Unix and TCP listeners. The node
+credential is insufficient. Missing, duplicate or incorrect credentials return
+`401` before body parsing; credentials are compared as SHA-256 digests in
+constant time. All authenticated responses include `Cache-Control: no-store`.
+Lifecycle bodies are capped at 16 KiB, use strict protocol DTOs, and return
+generic parse errors without echoing secret fields. Internal error details are
+withheld from the local API.
+
+The engine's failed-attempt budget protects password and mnemonic checks: five
+failures within a minute lock unlock for five minutes, and each further lockout
+before a successful unlock doubles, up to 24 hours. The unlock budget is kept in
+the owner-only `data_dir/unlock-attempts.json`, so restarting the daemon neither
+resets it nor ends a lockout.
+
+New wallets are written in the version-2 keystore format: Argon2id
+(256 MiB, 3 passes) and AES-256-GCM whose associated data authenticates every
+parameter and the derivation mode. A version-1 file (the Scala/Appkit PBKDF2
+format, including a migrated embedded wallet) is rewritten in place as version 2
+by its first successful unlock; the rewrite is an atomic replace, and if it
+fails the original file is kept and the unlock still succeeds. Version-2 files
+cannot be read by Scala, Appkit or earlier releases; `ergo-wallet
+export-keystore` writes a version-1 copy for those tools. Both formats reject
+cost parameters large enough to stall unlock. The old file's blocks may remain
+on disk until overwritten: replacement is not secure erasure on SSDs or
+copy-on-write file systems.
+
+| Method | Route | Request / response |
+|---|---|---|
+| GET | `/api/v1/wallet/lifecycle/status` | `{initialized, locked}` from local state; `sealed: true` is added while sealed; works while the node is unavailable |
+| POST | `/api/v1/wallet/unseal` | `{pass}`; release the database key without unlocking spending (watch-only: the passphrase) |
+| POST | `/api/v1/wallet/seal` | Drop the database key and exit cleanly; start the daemon again to run sealed. `202` |
+| POST | `/api/v1/wallet/init` | `{pass, mnemonicPass?, strength?}`; strength is 12, 15, 18, 21 or 24 words, default 24; response `{mnemonic}` |
+| POST | `/api/v1/wallet/restore` | `{mnemonic, mnemonicPass?, pass, derivation}`; derivation is `{type:"eip3"}` or `{type:"legacyPre1627"}` |
+| POST | `/api/v1/wallet/unlock` | `{pass}`; unlock and reconcile public keys |
+| POST | `/api/v1/wallet/lock` | Drop unlocked secret material; idempotent |
+| POST | `/api/v1/wallet/mnemonic/verify` | `{mnemonic, mnemonicPass?}`; response `{matched}` |
+| POST | `/api/v1/wallet/addresses` | `{type:"next"}` or `{type:"path", derivationPath:"m/..."}`; response `{address, derivationPath, index}` |
+| GET | `/api/v1/wallet/change-address` | `{address}`; address may be `null` |
+| PUT | `/api/v1/wallet/change-address` | `{address}`; requires an unlocked seed that owns the tracked address |
+
+Seed mode also serves shared engine selection/build/sign/send, reward sweeps,
+multisig, scan/rescan and private mining-job routes, including Scala adapters.
+Transaction/scan bodies have a separate 8 MiB limit. Private-key export keeps
+its disabled operator default. `/api/v1/wallet/status` refreshes a validated
+node context for pruning and EIP-27 flags, and returns `node_unavailable` when
+the node cannot provide it. `/status` retains cursor, node-tip, lag and sync diagnostics.
+The static wallet UI is public so a browser can enter its local credential.
+All API reads and writes remain authenticated.
+
+Commands and sync share a writer; actual key additions atomically reset history.
+Spending refreshes complete coherent node/pool context and fails before the
+engine when required data cannot be validated. Rescans fence mutations and
+suspend sync while their cancellable supervised replay runs. Restore marks
+unknown/pruned historical coverage incomplete; neither sync nor discovery
+invents unavailable historical transactions. See
+[daemon engine hosting and cutover](wallet-extraction.md#phase-3-daemon-engine-hosting)
+for migration, background jobs, API boundaries and deployment.
+
+## Socket permissions
+
+Both daemon modes restrict their listener addresses and socket permissions:
+
+- The Unix socket is created under a `0o077` umask and then explicitly
+  `chmod 0600`; failure to set the mode removes the socket and aborts startup.
+- A `<socket>.owner` marker file (`ergo-walletd-socket:<pid>:<nanos>`, mode
+  `0600`) records ownership. On start, a socket with a valid marker that refuses
+  a connection is treated as stale and removed; a socket that still accepts a
+  connection, or one with a missing/invalid marker, is left alone and startup
+  fails. A daemon therefore never steals or clobbers a live socket.
+- The marker and the socket are removed on clean shutdown.
+- Unix connection tasks are tracked and cancelled during listener shutdown;
+  TCP listeners drain gracefully within the configured shutdown deadline.
+- `tcp_fallback`, when used, must bind a loopback address (rejected otherwise),
+  and accepts only its own loopback `Host` names plus `[api] allowed_hosts`.
+- Both modes require the independent local `api_key` credential for every read
+  and write, in addition to socket permissions or loopback binding. The daemon
+  does not provide TLS or bind non-loopback TCP.
+- The data directory is owner-only (`0700`) in both modes, as is a socket
+  directory the daemon creates.
+
+**Windows.** The daemon neither sets nor checks file permissions on Windows:
+the data directory, credential files and `unseal_key_file` keep the access
+list they inherit from their parent directory, and a file other users can read
+is not refused. Put them in a directory only your account can read, such as
+one under your user profile. Whatever the permissions, the spending key is
+stored only under the wallet password, and `data-key.json` only under the
+watch-only passphrase. Another account that can read them gets:
+
+- `unseal_key_file`: the database key, which reads balances and history but
+  cannot spend;
+- the local credential (`local_api_key_file`): the daemon's local API, including
+  sending funds while the wallet is unlocked.
+
+## Process hardening
+
+Before it reads any credential, the daemon sets its core-file limit to zero and,
+on Linux, marks itself non-dumpable, which also blocks same-user debuggers and
+`/proc/<pid>/mem` reads. `[security] lock_memory` additionally locks its memory
+into RAM. The shipped [systemd unit](../deploy/ergo-walletd.service) adds
+`MemorySwapMax=0` and `LimitCORE=0`, an `@system-service` syscall filter,
+`MemoryDenyWriteExecute`, no capabilities, private `/proc`, IPC and users, and
+loopback-only networking (`IPAddressAllow=localhost`; add a remote `https`
+node's address explicitly). Memory protection does not defend against root on
+the running host.
+
+## `ergo-walletd` CLI flags
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--config`, `-c <path>` | path | `ergo-walletd.toml` | Daemon config file. A missing file is a startup error; required paths and credentials depend on the selected mode. |
+| `--mode <watch-only\|seed>` | string | — | Overrides the file's `mode`. TOML spells the default mode `watch_only`. |
+| `--network <mainnet\|testnet>` | string | — | Overrides the file's `network`. |
+| `--data-dir <path>` | path | — | Overrides `data_dir`. |
+| `--node-url <url>` | string | — | Overrides `node_url`. |
+| `--api-key-file <path>` | path | — | Overrides `api_key_file`. |
+| `--descriptor-file <path>` | path | — | Overrides `descriptor_file`. |
+| `--local-api-key-file <path>` | path | — | Overrides `local_api_key_file`. |
+| `--sync-interval <secs>` | u64 | — | Overrides `sync_interval`. |
+| `--sync-batch <n>` | u32 | — | Overrides `sync_batch` (the per-pass apply budget). |
+| `--blocks-page <n>` | u32 | — | Overrides `blocks_page` (the per-request page size). |
+| `--unix-socket <path>` | path | — | Overrides `unix_socket`. |
+| `--tcp-fallback <addr>` | socket addr | — | Overrides `tcp_fallback`. |
+| `--unseal-key-file <path>` | path | — | Overrides `[security] unseal_key_file`. |
+| `export-unseal-key` | subcommand | — | Print the wallet database key as hex, reading the password or passphrase from standard input. |
+| `init` | subcommand | — | `--config <path> --data-dir <path> [--node-url] [--network] [--tcp] [--mining-jobs]`: write a seed-mode config and two owner-only credentials, and print the node's `[[api.security.keys]]` entry. |
+| `adopt` | subcommand | — | `--handoff <node data_dir>/wallet-handoff --data-dir <new>`: take over a node's wallet handoff. See [Wallet setup](wallet-setup.md). |
+| `reward-key` | subcommand | — | Print the wallet's first-address reward address, public key and `miner_reward_address` line; reads the password from standard input. |
+
+Logging uses `tracing` with the `RUST_LOG` filter (default `info`): reorgs and
+retries log at `warn`, protocol violations and other terminal sync failures log
+at `error`. Log lines carry locally generated messages and heights only — never
+credentials, recovery phrases, passwords or node response bodies.
 See [operator controls](operator-controls.md) for configurable API request budgets, readiness policy, named credentials, runtime changes and durable peer administration.

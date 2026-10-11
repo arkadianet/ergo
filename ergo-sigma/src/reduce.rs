@@ -238,6 +238,62 @@ pub fn verify_spending_proof_with_context_and_cost(
         return Ok(accepted);
     }
 
+    let proposition = reduce_ergo_tree_inner(ergo_tree, ctx, cost, ReductionPurpose::Verification)?;
+
+    // Scala `Interpreter.addCryptoCost` adds `estimateCryptoVerifyCost(sb).toBlockCost`,
+    // i.e. the per-input crypto JitCost is truncated to a block-unit multiple before it
+    // joins the running total. Adding the raw JitCost would carry the remainder into
+    // the next input's snap baseline and into the JIT-unit limit check.
+    let crypto_cost = super::crypto_cost::estimate_crypto_cost(&proposition);
+    let crypto_cost_snapped = JitCost::from_jit_block_aligned(crypto_cost);
+    #[cfg(feature = "cost-trace")]
+    super::cost_trace::record(
+        format!("Crypto:{}", crypto_cost_snapped.value()),
+        crypto_cost_snapped.value(),
+        cost.total().value() + crypto_cost_snapped.value(),
+    );
+    cost.add(crypto_cost_snapped)
+        .map_err(|e| VerifySpendingError::Eval(e.into()))?;
+
+    super::verify::verify_sigma_proof(&proposition, proof_bytes, bytes_to_sign)
+        .map_err(VerifySpendingError::Verification)
+}
+
+/// Reduce a full ErgoTree using the same evaluator and metering as spending validation.
+/// The accumulator includes prior transaction costs and enforces its supplied limit.
+/// Crypto verification cost is separate and is not charged by this operation.
+/// A script accepted by verification without evaluation cannot be reduced for
+/// signing; this operation rejects all verifier-only soft-fork paths, including
+/// future versions, retained parser failures and validation failures during evaluation.
+pub fn reduce_ergo_tree_with_context_and_cost(
+    ergo_tree: &ErgoTree,
+    ctx: &super::evaluator::ReductionContext<'_>,
+    cost: &mut CostAccumulator,
+) -> Result<SigmaBoolean, VerifySpendingError> {
+    if check_soft_fork_condition(ergo_tree, ctx.activated_script_version)?.is_some() {
+        return Err(unsupported_script_for_signing());
+    }
+    reduce_ergo_tree_inner(ergo_tree, ctx, cost, ReductionPurpose::Signing)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReductionPurpose {
+    Verification,
+    Signing,
+}
+
+fn unsupported_script_for_signing() -> VerifySpendingError {
+    VerifySpendingError::Eval(super::evaluator::EvalError::RuntimeException(
+        "cannot reduce an unsupported soft-fork script for signing",
+    ))
+}
+
+fn reduce_ergo_tree_inner(
+    ergo_tree: &ErgoTree,
+    ctx: &super::evaluator::ReductionContext<'_>,
+    cost: &mut CostAccumulator,
+    purpose: ReductionPurpose,
+) -> Result<SigmaBoolean, VerifySpendingError> {
     // Whole-tree, pre-reduction parity checks Scala performs at context build /
     // deserialize (ContextExtension key domain via `toSigmaContext`; every
     // GroupElement constant on-curve via `GroupElementSerializer.parse`). These
@@ -312,6 +368,9 @@ pub fn verify_spending_proof_with_context_and_cost(
                     )
                 }) =>
         {
+            if purpose == ReductionPurpose::Signing {
+                return Err(unsupported_script_for_signing());
+            }
             Ok(SigmaBoolean::TrivialProp(true))
         }
         _ => trivial_reduce(ergo_tree),
@@ -343,6 +402,9 @@ pub fn verify_spending_proof_with_context_and_cost(
                         ctx.activated_script_version,
                     ) =>
                 {
+                    if purpose == ReductionPurpose::Signing {
+                        return Err(unsupported_script_for_signing());
+                    }
                     // Interpreter.scala:249 uses (TrueSigmaProp, context1), discarding
                     // partial substitution charges even before A6. The evaluator then
                     // charges the inline constant (5 JIT), NOT the trivial fast path.
@@ -367,23 +429,7 @@ pub fn verify_spending_proof_with_context_and_cost(
     #[cfg(feature = "cost-trace")]
     super::cost_trace::record_snap(before_snap, cost.total().value());
 
-    // Scala `Interpreter.addCryptoCost` adds `estimateCryptoVerifyCost(sb).toBlockCost`,
-    // i.e. the per-input crypto JitCost is truncated to a block-unit multiple before it
-    // joins the running total. Adding the raw JitCost would carry the remainder into
-    // the next input's snap baseline and into the JIT-unit limit check.
-    let crypto_cost = super::crypto_cost::estimate_crypto_cost(&proposition);
-    let crypto_cost_snapped = JitCost::from_jit_block_aligned(crypto_cost);
-    #[cfg(feature = "cost-trace")]
-    super::cost_trace::record(
-        format!("Crypto:{}", crypto_cost_snapped.value()),
-        crypto_cost_snapped.value(),
-        cost.total().value() + crypto_cost_snapped.value(),
-    );
-    cost.add(crypto_cost_snapped)
-        .map_err(|e| VerifySpendingError::Eval(e.into()))?;
-
-    super::verify::verify_sigma_proof(&proposition, proof_bytes, bytes_to_sign)
-        .map_err(VerifySpendingError::Verification)
+    Ok(proposition)
 }
 
 /// Errors produced by the spending-proof entry points. Variants
@@ -1580,6 +1626,132 @@ mod soft_fork_condition_tests {
     #[test]
     fn spend_under_unsupported_activation_accepts_future_tree_unverified() {
         assert!(verify_at(&tree("0d0208d3"), 4).unwrap());
+    }
+
+    #[test]
+    fn signing_reduction_cannot_turn_verifier_future_script_skip_into_true() {
+        let tree = tree("0d0208d3");
+        let context = super::super::evaluator::ReductionContext {
+            activated_script_version: 4,
+            ergo_tree_version: tree.version,
+            ..super::super::evaluator::ReductionContext::minimal(0, 0)
+        };
+        let mut cost = CostAccumulator::new(JitCost::from_jit(1000));
+        assert!(reduce_ergo_tree_with_context_and_cost(&tree, &context, &mut cost).is_err());
+        assert_eq!(cost.total(), JitCost::ZERO);
+        assert!(
+            verify_spending_proof_with_context_and_cost(&tree, &[], &[], &context, &mut cost,)
+                .unwrap()
+        );
+        assert_eq!(cost.total(), JitCost::ZERO);
+    }
+
+    #[test]
+    fn signing_reduction_rejects_soft_forked_unparsed_tree() {
+        use crate::evaluator::{ReductionContext, RuleStatus};
+
+        // JVM soft-fork-wrapped.json: a sized IntConstant fails rule 1001.
+        let tree = tree("08020402");
+        assert!(matches!(&tree.body, Expr::Unparsed(t)
+            if t.validation_error.as_ref().map(|e| e.0) == Some(1001)));
+        for activated in [2, 3] {
+            let mut context = ReductionContext {
+                activated_script_version: activated,
+                ergo_tree_version: tree.version,
+                ..ReductionContext::minimal(0, 0)
+            };
+            context
+                .validation_settings
+                .0
+                .insert(1001, RuleStatus::Replaced(2000));
+            let mut cost = CostAccumulator::recording_only();
+            cost.add(JitCost::from_jit(170)).unwrap();
+            let error = reduce_ergo_tree_with_context_and_cost(&tree, &context, &mut cost)
+                .expect_err("an unrecognized script must not become a signable True proposition");
+            assert!(error.to_string().contains("cannot reduce"), "{error}");
+            assert_eq!(cost.total(), JitCost::from_jit(170));
+
+            // Consensus still accepts the replaced parser rule and charges the
+            // same five block units as the JVM, on top of the existing cost.
+            assert!(verify_spending_proof_with_context_and_cost(
+                &tree,
+                &[],
+                &[],
+                &context,
+                &mut cost,
+            )
+            .unwrap());
+            assert_eq!(cost.total(), JitCost::from_jit(220));
+            context.validation_settings.0.clear();
+            assert!(verify_spending_proof_with_context(&tree, &[], &[], &context).is_err());
+        }
+    }
+
+    #[test]
+    fn signing_reduction_rejects_soft_forked_deserialize_validation() {
+        use crate::evaluator::{ReductionContext, RuleStatus};
+        use ergo_ser::sigma_value::CollValue;
+
+        // sigmaProp(deserializeContext[Boolean](0)); the supplied IntConstant
+        // parses, but substitution raises type-mismatch validation rule 1000.
+        let tree = tree("00d1d40100");
+        for activated in [2, 3] {
+            let mut context = ReductionContext {
+                activated_script_version: activated,
+                ergo_tree_version: tree.version,
+                ..ReductionContext::minimal(0, 0)
+            };
+            context.extension.insert(
+                0,
+                (
+                    SigmaType::SColl(Box::new(SigmaType::SByte)),
+                    SigmaValue::Coll(CollValue::Bytes(vec![0x04, 0x02])),
+                ),
+            );
+            context
+                .validation_settings
+                .0
+                .insert(1000, RuleStatus::Replaced(2000));
+            let mut cost = CostAccumulator::recording_only();
+            cost.add(JitCost::from_jit(170)).unwrap();
+            let error = reduce_ergo_tree_with_context_and_cost(&tree, &context, &mut cost)
+                .expect_err("a substitution validation fallback must not be signable");
+            assert!(error.to_string().contains("cannot reduce"), "{error}");
+
+            // The verifier retains the substitution context, discards partial
+            // charges and snaps the inline True constant on both sides of A6.
+            let mut cost = CostAccumulator::recording_only();
+            cost.add(JitCost::from_jit(170)).unwrap();
+            assert!(verify_spending_proof_with_context_and_cost(
+                &tree,
+                &[],
+                &[],
+                &context,
+                &mut cost,
+            )
+            .unwrap());
+            assert_eq!(cost.total(), JitCost::from_jit(270));
+            context.validation_settings.0.clear();
+            assert!(verify_spending_proof_with_context(&tree, &[], &[], &context).is_err());
+
+            // A supported payload still reduces normally, even while the rule
+            // is replaced: rejecting a fallback must not disable deserialize.
+            context
+                .validation_settings
+                .0
+                .insert(1000, RuleStatus::Replaced(2000));
+            context.extension.get_mut(&0).unwrap().1 =
+                SigmaValue::Coll(CollValue::Bytes(vec![0x7f]));
+            assert_eq!(
+                reduce_ergo_tree_with_context_and_cost(
+                    &tree,
+                    &context,
+                    &mut CostAccumulator::recording_only(),
+                )
+                .unwrap(),
+                SigmaBoolean::TrivialProp(true),
+            );
+        }
     }
 
     // ----- error paths -----

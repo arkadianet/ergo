@@ -4,32 +4,35 @@
 redb-backed `StateStore` that validated blocks apply to: an in-memory AVL+
 tree with arena-backed node storage and incremental root-label maintenance,
 an atomic `apply_block` / `rollback_to` (delta-based reorg) commit path, the
-header/section chain index (best-header vs best-full-block), per-epoch voted
-protocol parameters, Mode 2 UTXO-snapshot install, Mode 3 suffix pruning, and
-a sibling Mode 5 digest-verifier backend (`DigestStateStore`) that derives the
-same state root from a block's ADProofs instead of a box arena.
+header/section chain index, voted protocol parameters, Mode 2 UTXO-snapshot
+install, Mode 3 suffix pruning, and a sibling Mode 5 digest-verifier backend
+(`DigestStateStore`).
 
-**Depends on (workspace):** ergo-primitives, ergo-ser, ergo-chain-spec, ergo-crypto, ergo-validation, ergo-sigma
+The chain store writes no wallet rows. Wallet tables and wallet apply/rescan
+code are owned by `ergo-wallet-service`; `ergo-state` keeps a compatibility
+wallet facade for the tables an earlier release left in `state.redb` (schema
+migration before the handoff, offline UTXO discovery).
+
+**Depends on (workspace):** `ergo-primitives`, `ergo-ser`, `ergo-chain-spec`,
+`ergo-crypto`, `ergo-validation`, `ergo-sigma`, `ergo-wallet`,
+`ergo-wallet-service`
 **Depended on by:** (see codemap index)
 
 ## Start here
-- `lib.rs` (`src/lib.rs:1`) — module map + re-export surface. Names the
-  three-trait backend dispatch (`StateBackend` = `ChainStateRead` +
-  `HeaderSectionStore` + `BlockApply`) and the two concrete backends.
-- `StateStore` (`src/store/mod.rs:641`) — the Mode 1/2/3/6 store. Its
-  inherent methods (`open`, `initialize_genesis`/`apply_genesis`,
-  `apply_block`, `rollback_to`, `install_snapshot_state`, `reader_handle`)
-  are the whole forward contract. The largest module in the crate.
-- `apply_block` → `apply_checked_transactions` → `apply_utxo_changes` →
-  `persist_apply` (`src/store/apply.rs:139`, `:208`, `:451`; `src/store/mod.rs:4271`)
-  — the apply pipeline. `persist_apply` is the atomic-commit unit (one redb
-  write txn for undo + AVL + chain_index + state_meta + voted_params + wallet).
-- `AvlTree` (`src/avl/tree.rs:61`) — the authenticated AVL+ tree; maintains the
-  root label incrementally so `root_digest()` is O(1). Read alongside
-  `avl/digest.rs` for the consensus-critical label hash inputs.
-- `backend.rs` (`src/backend.rs:40`) — the `StateBackend` trait family and the
-  `StateBackendKind` enum (`Utxo(StateStore)` / `Digest(DigestStateStore)`) the
-  node binds against generically.
+- `src/lib.rs` — module map and the public state/apply surface.
+- `src/store/mod.rs` — `StateStore` plus the chain-state data model.
+- `src/store/apply.rs` — the apply pipeline: applies UTXO changes and commits
+  chain state atomically.
+- `src/avl/tree.rs` — the authenticated AVL+ tree and its O(1) root digest.
+- `src/backend.rs` — `StateBackend`, `ChainStateRead`, `HeaderSectionStore`,
+  and `BlockApply` dispatch for UTXO and digest backends.
+- `src/reader.rs` — lock-free `ChainStoreReader` and committed block/wallet
+  read helpers.
+- `src/wallet/mod.rs` — the transitional facade: most `wallet` submodules are
+  re-exports from `ergo-wallet-service`, not a second implementation.
+- `src/store/wallet_tx_bridge.rs` — re-reads a committed block's transactions
+  as owned wallet block data for the chain API and offline discovery, and maps
+  state errors into the service rescan error model.
 
 ## Modules
 - `src/store/` — `StateStore`: open / genesis / apply / rollback / reorg /
@@ -71,8 +74,9 @@ same state root from a block's ADProofs instead of a box arena.
   `ResolvedBoxes`: verifies a block's ADProofs and derives the post-apply digest.
 - `src/digest_utxo_view.rs` — `DigestUtxoView`: resolves a block's input boxes
   from its ADProofs so the digest backend can run full tx validation.
-- `src/wallet/` — wallet persistence in the same `state.redb`: `WalletApplyHook`
-  / `RescanGuard` hooks, `WalletReader`, value types, apply/maturity/scan logic.
+- `src/wallet/` — compatibility facade over `ergo-wallet-service`, which owns
+  wallet tables, reader/writer types, apply/maturity/scan logic and schema migration.
+  The daemon uses its own `wallet.redb`.
 - `src/redb_util.rs` — `begin_write_qr` (quick-repair write txn) +
   `open_with_repair_logging`; every production write txn must route through here.
 
@@ -109,8 +113,7 @@ same state root from a block's ADProofs instead of a box arena.
 ## Invariants & contracts
 - **Atomic commit per applied block.** `persist_apply` writes undo_log +
   AVL+ node mutations + chain_index + state_meta + (epoch-boundary) voted_params
-  + (when hooked) wallet rows in a single redb write transaction. Either all
-  land or none do.
+  in a single redb write transaction. Either all land or none do.
 - **Chain metadata ownership.** Header writes merge only their header pointer,
   score and availability with the full-block pointer already committed in the
   same transaction. Persist batches merge their full-block pointer with the
@@ -185,6 +188,15 @@ same state root from a block's ADProofs instead of a box arena.
 - **`ergo-state` depends on `ergo-validation`, not vice versa.** State asks
   validation "is this block legal?" before applying; it never defines
   acceptance rules.
+
+## Legacy wallet facade
+
+`ergo-state/src/wallet/` and selected `ergo-state/src/store` exports preserve
+the historical `ergo_state::wallet` paths while delegating implementation to
+`ergo-wallet-service`. Chain apply and rollback no longer touch wallet tables;
+the facade remains for reading and migrating the wallet an earlier release
+left in `state.redb`, which the node hands to `ergo-walletd`. The edge is
+deliberately one-way.
 
 ## Doc accuracy notes
 - The crate's read-only handle is `reader::ChainStoreReader`

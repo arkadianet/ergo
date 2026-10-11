@@ -1,29 +1,29 @@
 # ergo-wallet
 
-**Purpose:** Ergo HD wallet. BIP39 mnemonics, post-/pre-1627 BIP32 HD
-derivation, P2PK address rendering, AES-GCM/PBKDF2 encrypted secret-file
-storage, sigma-proof production for transaction signing (single- and
-multi-sig hint bags), unsigned-tx building, and box selection. Ships its
-own `ergo-wallet` CLI binary. Proving is implemented natively over `k256`
-and `gf2_192` — sigma-rust is never a runtime dependency.
+**Purpose:** Portable wallet cryptography, pure box selection and transaction
+construction. Owns mnemonics, HD keys, P2PK addresses, sigma proving and hint bags.
+Filesystem keystore support and the CLI are opt-in features. Orchestration,
+persistence and scans live in `ergo-wallet-service`; wire DTOs live in
+`ergo-wallet-protocol`.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-sigma,
-ergo-validation, ergo-state, gf2_192
+ergo-chain-spec, gf2_192. No validation/state/node/runtime dependency.
 **Depended on by:** (see codemap index)
 
 ## Start here
-- `src/lib.rs` — module tree + crate-root re-exports (`Mnemonic`,
-  `ExtendedSecretKey`, `DerivationPath`, `SecretKey`, `WalletState`,
-  `SecretStorage`, `WalletError`) and `miner_pubkey_for_seed`.
-- `extended_key::ExtendedSecretKey` (`src/extended_key.rs:20`) — the BIP32
-  derivation engine; read this and `ExtendedSecretKeyLegacy` to understand
-  the post-/pre-1627 split.
-- `storage::SecretStorage` (`src/storage.rs:148`) — the lock/unlock state
-  machine + Scala-compatible encrypted-secret-file format.
-- `proving::prover::Prover::sign` (`src/proving/prover.rs:67`) — the single
-  entry point that signs every input of a transaction.
-- `proving::sigma::prove_sigma` (`src/proving/sigma/mod.rs:67`) — compound
-  AND/OR/threshold sigma-proof composition (the proving core).
+- `src/lib.rs` — crate root, module tree, convenience re-exports, and
+  `miner_pubkey_for_seed`; orchestration is explicitly delegated to
+  `ergo-wallet-service`.
+- `src/extended_key.rs:20` — the BIP32 derivation engine and the post-/pre-1627
+  split.
+- `src/storage.rs:148` — encrypted secret-file format plus the
+  `SecretStorage` lock/unlock state machine.
+- `src/proving/prover.rs:39` — the single entry point that signs transaction
+  inputs.
+- `src/proving/sigma/mod.rs:67` — compound sigma-proof composition and
+  self-verification.
+- `src/proving/miner_reward.rs:22` — canonical reward-wrapper recognition used
+  by the service/state apply integration.
 
 ## Modules
 - `src/lib.rs` — crate root: module tree, re-exports, `miner_pubkey_for_seed`.
@@ -43,31 +43,15 @@ ergo-validation, ergo-state, gf2_192
   `Zeroizing` (ciphertext and caller-owned inputs do not).
 - `src/storage.rs` — encrypted-secret-file format (`EncryptedSecret`,
   `CipherParams`, `uuid_from_ciphertext`), `SecretStorage` lock/unlock
-  state machine, `UnlockedMaster`/`UnlockedSecret`.
-- `src/state.rs` — `WalletState`: in-memory caches (tracked pubkeys, P2PK
-  trees, visible addresses, change address) + redb rehydration. Read by
-  the `ergo-state` apply hook through a reader trait.
-- `src/scan/` — `/scan/*` wallet subsystem (Scala scanning API).
-- `src/scan/mod.rs` — module root; re-exports `ScanRegister`,
-  `ScanningPredicate` (from `predicate`) and `Scan`, `ScanRegistry`,
-  `ScanRequest`, `WalletInteraction`, `MAX_SCAN_NAME_LENGTH`,
-  `MINING_SCAN_ID`, `PAYMENTS_SCAN_ID` (from `registry`).
-- `src/scan/predicate.rs` — `ScanningPredicate` tracking-rule language:
-  `Contains`, `Equals`, `ContainsAsset`, `And`, `Or` variants; Scala
-  `ScanningPredicateJsonCodecs` wire format; box-matcher (`matches`).
-- `src/scan/registry.rs` — `ScanRegistry` + `Scan`/`ScanRequest`/
-  `WalletInteraction`; Scala scanId allocation (ids 1-10 reserved,
-  user scans from 11; monotonic counter, ids never reused);
-  `MAX_SCAN_NAME_LENGTH = 255`, `MINING_SCAN_ID = 9`,
-  `PAYMENTS_SCAN_ID = 10`.
-- `src/tx_builder.rs` — `UnsignedTxBuilder` + `PaymentRequest`: payment
-  requests → `UnsignedTransaction` (pure; no chain access).
+  state machine (requires `keystore`).
+- `src/master.rs` — portable zeroized `UnlockedMaster`/`UnlockedSecret`,
+  available without filesystem support. Storage compatibility reexports retain
+  the existing import paths when `keystore` is enabled.
 - `src/tx_context.rs` — `BlockchainStateContext`, `BlockchainParameters`,
   `ReductionContextOwned`: per-input evaluation context for `Prover::sign`.
-- `src/box_selector/` — `BoxSelector` trait + `SelectionTarget`/`BoxSummary`/
-  `SelectionResult` (`mod.rs`); `DefaultBoxSelector` (greedy value-DESC,
-  `default.rs`); `ReplaceCompactCollectBoxSelector` (delegates today,
-  `replace_compact.rs`).
+  Candidate pre-header types come from `ergo-ser` without a validation dependency.
+- `src/box_selector/`, `src/tx_builder.rs` — pure selection/building, including
+  explicit mint/burn requests and the shared EIP-27 obligation arithmetic.
 - `src/proving/` — sigma proving subsystem (see below).
 - `src/proving/sigma/` — compound-proof composition: `build` (phase 1 tree
   walk), `finalize` (challenge propagation + GF(2^192) threshold), `serialize`
@@ -76,7 +60,8 @@ ergo-validation, ergo-state, gf2_192
   `address`.
 
 ### `src/proving/` submodules
-- `prover.rs` — `Prover::sign` tx-level orchestrator + script gate.
+- `prover.rs` — `Prover::sign` tx-level orchestrator and script gate;
+  `sign_bound` consumes native transaction-bound commitment hints.
 - `secrets.rs` — `SecretRegistry`: `ProveDlog(pk) → Scalar` / DHT lookup;
   zeroized storage.
 - `external.rs` — `ProverExternalSecret`: decoded external secret for the
@@ -91,28 +76,23 @@ ergo-validation, ergo-state, gf2_192
 - `commitments.rs` — `generate_commitments_for` (multi-sig commitment round).
 - `extract.rs` — `bag_for_multisig` (hint extraction from a partial proof).
 
+The orchestration and persistence module map is in
+[`ergo-wallet-service`](./ergo-wallet-service.md).
+
 ## Key types, traits & functions
-- `Mnemonic` (struct) — BIP39 phrase newtype; `generate`/`import`/`to_seed` — `src/mnemonic.rs:41`
-- `DerivationPath` (struct) — parsed BIP32/BIP44 path; `eip3_first_address`/`pre_eip3_first_address` — `src/derivation.rs:22`
-- `ExtendedSecretKey` (struct) — modern BIP32 xsk; `derive_master_key`/`derive_child`/`derive_at_path`/`public_key` — `src/extended_key.rs:20`
-- `ExtendedSecretKeyLegacy` (struct) — pre-1627 xsk (variable-length secret bytes) — `src/extended_key.rs:238`
-- `ExtendedPublicKey` (struct) — compressed-SEC1 xpub; `compressed_bytes` — `src/extended_key.rs:182`
-- `SecretStorage` (struct) — secret-file dir owner + lock/unlock; `open`/`init`/`restore`/`unlock`/`lock`/`load_metadata`/`check_seed` — `src/storage.rs:148`
-- `LockState` (enum) — `Uninitialized`/`Locked`/`Unlocked` — `src/storage.rs:133`
-- `UnlockedMaster` (enum) — `Modern`/`Legacy` in-memory master key; `derive_pubkey_at_path`/`derive_scalar_at_path` — `src/storage.rs:169`
-- `EncryptedSecret` / `CipherParams` (struct) — on-disk JSON wire shape (Scala-compatible) — `src/storage.rs:56` / `:19`
-- `uuid_from_ciphertext` (fn) — Java `UUID.nameUUIDFromBytes` filename derivation — `src/storage.rs:98`
-- `WalletState` (struct) — in-memory wallet caches; `hydrate_from_reader`/`insert_tracked_pubkey`/`is_tracked_tree`/`visible_addresses` — `src/state.rs:26`
-- `pubkey_to_p2pk_address` (fn) — curve-checked P2PK base58 encoding — `src/address.rs:20`
-- `UnsignedTxBuilder` / `PaymentRequest` (struct) — requests → `UnsignedTransaction` — `src/tx_builder.rs:40` / `:17`
-- `BoxSelector` (trait) — UTXO selection; `select` — `src/box_selector/mod.rs:50`
-- `DefaultBoxSelector` (struct) — greedy value-DESC selector — `src/box_selector/default.rs:13`
-- `Prover` (struct) — tx-level signer; `Prover::sign` — `src/proving/prover.rs:39` / `:67`
-- `prove_sigma` (fn) — compound sigma-proof composition + self-verify — `src/proving/sigma/mod.rs:67`
-- `SecretRegistry` (struct) — pubkey→scalar lookup; `from_master_key`/`merge_external_secrets`/`dlog_secret` — `src/proving/secrets.rs:44`
-- `HintsBag` / `TransactionHintsBag` (struct) — multi-sig hint bags — `src/proving/hints.rs:129` / `:166`
-- `bag_for_multisig` (fn) — extract hints from a partial proof — `src/proving/extract.rs:30`
-- `WalletError` (enum) — one variant per failure class — `src/error.rs:10`
+- `Mnemonic` — BIP39 phrase newtype with `generate`/`import`/`to_seed`.
+- `DerivationPath` — parsed BIP32/BIP44 path and EIP-3 helpers.
+- `ExtendedSecretKey`, `ExtendedSecretKeyLegacy`, `ExtendedPublicKey` — HD key
+  derivation and compressed public-key output.
+- `SecretStorage`, `EncryptedSecret`, `CipherParams` — secret-file persistence
+  and lock/unlock lifecycle.
+- `Prover`, `prove_sigma`, `SecretRegistry` — transaction signing and
+  compound-proof composition.
+- `extract_miner_reward_pubkey` — canonical reward-script classification hook.
+- `BlockchainStateContext`, `BlockchainParameters` — chain context supplied by
+  an embedding runtime.
+- `WalletError` — crypto/storage/derivation error taxonomy.
+- `miner_pubkey_for_seed` — EIP-3 first-address public-key convenience helper.
 
 ## Invariants & contracts
 - **Secret-file format parity.** The `<uuid>.json` encrypted-secret file is
@@ -158,17 +138,24 @@ ergo-validation, ergo-state, gf2_192
   returning (`SelfVerifyFailed` otherwise) — a produced proof must survive the
   verifier unmodified (`src/proving/sigma/mod.rs`). Threshold challenges use
   Lagrange interpolation over GF(2^192).
-- **Script gate at signing.** `Prover::sign` rejects any input whose ErgoTree
-  is not bare ProveDlog/ProveDHTuple or a matured miner-reward wrapper, because
-  context-sensitive scripts could self-verify against the synthetic pre-header
-  yet fail the chain's real context (`src/proving/prover.rs:90-106`). Cost
-  enforcement is NOT done here — the bridge self-verify is authoritative.
+- **Script gate at signing.** `Prover::sign` retains its existing support for
+  bare ProveDlog/ProveDHTuple and canonical matured miner-reward wrappers.
+  Context-sensitive scripts remain gated because the candidate pre-header can
+  be synthetic. The prover records reduction costs; the service's self-verify
+  applies authoritative chain cost limits before returning signed bytes.
+  Full contract signing and reduced transaction interchange are deferred to
+  [#612](https://github.com/arkadianet/ergo/issues/612), after Phase 3 merges.
+- **Portable capability boundary.** Defaults enable no host features. `keystore`
+  adds file storage and md5/uuid/tempfile; `cli` adds keystore plus clap/rpassword.
+  Existing node, state, service and daemon consumers opt into keystore explicitly.
+  `scripts/check-wallet-portable.py` checks the normal dependency graph; CI checks
+  core libraries on aarch64/x86_64 Android without an NDK link.
 - **Change-address ownership.** The persisted change address must be owned by
   the active master key: both the unlock-time boot check and the node's
   update path re-derive the recorded path and reject a mismatch
   (`ChangeAddressUntracked`), so the wallet never signs for an address it
-  cannot prove possession of (`ergo-node/src/node/wallet_bridge/commands/admin.rs:419`,
-  `ergo-node/src/wallet_boot.rs:128`).
+  cannot prove possession of (`ergo-wallet-service/src/engine/admin.rs`,
+  `ergo-wallet-service/src/engine/keys.rs`).
 - **Secret-material ownership.** The BIP39 mnemonic, generated entropy and
   seed, master keys, registry secrets, owned real proof-tree scalars/nonces,
   AES-derived keys, decrypted plaintext and owned commitment randomness have
