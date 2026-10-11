@@ -78,7 +78,8 @@ transitional `ergo-state -> ergo-wallet-service` integration
     Mutable engine entrypoints preserve command ordering; background RPC
     deadlines belong to the embedding node's submission adapter.
   - `multisig.rs`, `hints_codec.rs` — `generateCommitments` / `extractHints`
-    and the hints-bag JSON codec.
+    and the hints-bag JSON codec; `nonce_custody.rs` is the host trait for
+    single-use, input- and commitment-bound signing-nonce handles.
   - `keys.rs` — `deriveKey` / `deriveNextKey` / `getPrivateKey` and
     `WalletBootService` (unlock + hydrate + unlock-time key derivation +
     change-address backfill).

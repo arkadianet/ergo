@@ -202,9 +202,26 @@ pub(crate) fn transaction_sign_impl(
     chain: &dyn WalletChainAccess,
     custody: Option<&dyn super::NonceCustody>,
 ) -> Result<Vec<u8>, WalletAdminError> {
+    // Keys the caller supplied in this request: a hex nonce for one of them
+    // reveals nothing the caller does not already hold.
+    let caller_images: Vec<ergo_ser::sigma_value::SigmaBoolean> = match (hints, custody) {
+        (Some(_), Some(_)) => external_secret_dtos
+            .unwrap_or(&[])
+            .iter()
+            .map(|dto| decode_external_secret(dto).map(|secret| proven_image(&secret)))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
+        _ => Vec::new(),
+    };
+    let policy = super::hints_codec::OwnNoncePolicy {
+        custody,
+        caller_images: &caller_images,
+    };
     let hints = hints
         .map(|dto| {
-            tx_hints_bag_from_dto(dto, custody).map_err(|e| match e {
+            tx_hints_bag_from_dto(dto, policy).map_err(|e| match e {
                 WalletAdminError::BadRequest(_) => e,
                 other => WalletAdminError::Internal(format!("decode hints: {other:?}")),
             })
@@ -220,6 +237,39 @@ pub(crate) fn transaction_sign_impl(
         store,
         snapshot.as_ref(),
     )
+}
+
+/// The public image a caller-supplied secret proves. A DH tuple counts only
+/// when its scalar really maps `g`, `h` to `u`, `v`: the tuple's points are
+/// caller-chosen, unlike a discrete-log key derived from its scalar.
+pub(crate) fn proven_image(
+    secret: &ergo_wallet::proving::external::ProverExternalSecret,
+) -> Option<ergo_ser::sigma_value::SigmaBoolean> {
+    use ergo_primitives::group_element::GroupElement;
+    use ergo_ser::sigma_value::SigmaBoolean;
+    use ergo_wallet::proving::external::ProverExternalSecret;
+    use k256::elliptic_curve::group::GroupEncoding;
+    use k256::{CompressedPoint, ProjectivePoint};
+
+    match secret {
+        ProverExternalSecret::Dlog { pk, .. } => {
+            Some(SigmaBoolean::ProveDlog(GroupElement::from_bytes(*pk)))
+        }
+        ProverExternalSecret::DhTuple { g, h, u, v, scalar } => {
+            let point = |bytes: &[u8; 33]| {
+                Option::<ProjectivePoint>::from(ProjectivePoint::from_bytes(
+                    &CompressedPoint::from(*bytes),
+                ))
+            };
+            let (pg, ph, pu, pv) = (point(g)?, point(h)?, point(u)?, point(v)?);
+            (pg * **scalar == pu && ph * **scalar == pv).then(|| SigmaBoolean::ProveDHTuple {
+                g: GroupElement::from_bytes(*g),
+                h: GroupElement::from_bytes(*h),
+                u: GroupElement::from_bytes(*u),
+                v: GroupElement::from_bytes(*v),
+            })
+        }
+    }
 }
 
 pub(crate) fn transaction_sign_impl_with_snapshot(

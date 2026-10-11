@@ -138,6 +138,15 @@ pub fn prepare(config: LoadedConfig) -> Result<Daemon, DaemonError> {
             ConfigError::Invalid("seed mode does not accept descriptor_file".into()).into(),
         );
     }
+    if config.config.mode == WalletMode::Seed
+        && config.config.multisig_nonces == config::NonceHolder::Caller
+    {
+        tracing::warn!(
+            "[security] multisig_nonces = \"caller\": generateCommitments returns secret nonces \
+             and transaction/sign accepts them; a nonce seen with its signature, or used twice, \
+             reveals the signing key"
+        );
+    }
     ownership::claim(&config.config.data_dir, config.config.mode)?;
     ownership::claim_network(&config.config.data_dir, config.config.network)?;
     let chain = Arc::new(match &config.config.node_ca_file {

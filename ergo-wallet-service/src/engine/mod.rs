@@ -83,7 +83,7 @@ pub use chain::{
 pub use config::WalletEngineConfig;
 pub use keys::WalletBootService;
 pub use mempool::{MempoolOverlay, NoopMempoolOverlay};
-pub use nonce_custody::{NonceCustody, NONCE_HANDLE_PREFIX};
+pub use nonce_custody::{NonceBinding, NonceCustody, NonceRefusal, NONCE_HANDLE_PREFIX};
 pub use rescan::{
     recover_interrupted_rescan, BeginRescanError, RescanCoordinator, RescanJob, WalletRescanGuard,
 };
@@ -196,7 +196,10 @@ impl WalletEngine {
     }
 
     /// Keep multisig nonces in `custody`: `generateCommitments` returns
-    /// single-use handles instead of secret nonces, and signing resolves them.
+    /// single-use handles instead of secret nonces, signing resolves them and
+    /// refuses a caller-supplied nonce for a wallet key, and [`Self::lock`]
+    /// wipes every held nonce. Without custody the engine uses the Scala wire
+    /// form (`multisig_nonces = "caller"`).
     pub fn set_nonce_custody(&mut self, custody: Arc<dyn NonceCustody>) {
         self.nonce_custody = Some(custody);
     }

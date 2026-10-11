@@ -109,8 +109,10 @@ selection and gate.
 
 Each service operation acquires a fresh view. Embeddings and callers must
 freeze the intended candidate throughout a commitment/signing/extraction round
-and never reuse an own nonce after its context changes. Existing service hint
-DTOs do not enforce that ownership; native consuming reduced-bound APIs do.
+and never reuse an own nonce after its context changes. Service hint DTOs bind
+an own nonce only to its input and public commitment: with nonce custody
+(`ergo-walletd`'s default) each handle signs at most once, but it is not tied
+to a transaction message; native consuming reduced-bound APIs are.
 
 Direct calls accept references to legacy state contexts, including mutable
 references and borrowed `Box`/`Arc` contexts. Other wrappers must supply their

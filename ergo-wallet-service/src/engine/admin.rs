@@ -361,6 +361,10 @@ impl WalletEngine {
         let mut state = self.state.write();
         storage.lock();
         state.set_unlocked(false);
+        // Outstanding multisig commitments die with the unlocked session.
+        if let Some(custody) = &self.nonce_custody {
+            custody.clear();
+        }
         info!("wallet locked");
         Ok(())
     }

@@ -144,21 +144,37 @@ pub(crate) fn fpm_from_json(
 /// Partitions each per-input bag into (secret, public) using the same
 /// semantics as `HintsBag::partition`: `OwnCommitment` goes into
 /// `secret_hints`, everything else into `public_hints`.
+///
+/// With `custody`, each `OwnCommitment`'s secret nonce is deposited there,
+/// bound to its input index and public commitment, and its `secret` field
+/// carries the single-use handle instead. Without it the nonce is written out
+/// as hex (the Scala wire form; only for `multisig_nonces = "caller"` and for
+/// bags that hold no `OwnCommitment`, such as `extractHints` output).
 pub(crate) fn tx_hints_bag_to_dto(
     bag: &ergo_wallet::proving::hints::TransactionHintsBag,
     custody: Option<&dyn super::NonceCustody>,
 ) -> ergo_wallet_protocol::scala::sending::TxHintsBagDto {
-    use ergo_wallet::proving::hints::Hint;
+    use ergo_wallet::proving::hints::{Hint, RealCommitment};
     use ergo_wallet_protocol::scala::sending::node_position_to_str;
     use ergo_wallet_protocol::scala::sending::{HintDto, TxHintsBagDto};
     use std::collections::BTreeMap;
 
-    let hint_to_dto = |hint: &Hint| -> HintDto {
+    let hint_to_dto = |input: u32, hint: &Hint| -> HintDto {
         match hint {
             Hint::OwnCommitment(oc) => HintDto::OwnCommitment {
                 image: sigma_boolean_to_json(&oc.image),
                 secret: match custody {
-                    Some(custody) => custody.deposit(oc.secret_randomness.clone()),
+                    Some(custody) => custody.deposit(
+                        oc.secret_randomness.clone(),
+                        super::NonceBinding {
+                            input,
+                            commitment: RealCommitment {
+                                image: oc.image.clone(),
+                                commitment: oc.commitment.clone(),
+                                position: oc.position.clone(),
+                            },
+                        },
+                    ),
                     None => hex::encode(&oc.secret_randomness[..]),
                 },
                 commitment: fpm_to_json(&oc.commitment),
@@ -195,7 +211,11 @@ pub(crate) fn tx_hints_bag_to_dto(
 
     // secret_hints from the bag's secret_hints map.
     for (idx, hints_bag) in &bag.secret_hints {
-        let dtos: Vec<HintDto> = hints_bag.hints.iter().map(&hint_to_dto).collect();
+        let dtos: Vec<HintDto> = hints_bag
+            .hints
+            .iter()
+            .map(|hint| hint_to_dto(*idx, hint))
+            .collect();
         if !dtos.is_empty() {
             secret_hints.insert(idx.to_string(), dtos);
         }
@@ -203,7 +223,11 @@ pub(crate) fn tx_hints_bag_to_dto(
 
     // public_hints from the bag's public_hints map.
     for (idx, hints_bag) in &bag.public_hints {
-        let dtos: Vec<HintDto> = hints_bag.hints.iter().map(&hint_to_dto).collect();
+        let dtos: Vec<HintDto> = hints_bag
+            .hints
+            .iter()
+            .map(|hint| hint_to_dto(*idx, hint))
+            .collect();
         if !dtos.is_empty() {
             public_hints.insert(idx.to_string(), dtos);
         }
@@ -215,14 +239,37 @@ pub(crate) fn tx_hints_bag_to_dto(
     }
 }
 
+/// How [`tx_hints_bag_from_dto`] resolves the secret nonce of a
+/// `cmtWithSecret` (`OwnCommitment`) hint.
+///
+/// `Default` is the Scala form with no caller keys.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct OwnNoncePolicy<'a> {
+    /// Daemon-held nonces issued by `generateCommitments`. `None` is the
+    /// Scala form (`multisig_nonces = "caller"`): a hex nonce is accepted for
+    /// any key and a handle is refused.
+    pub custody: Option<&'a dyn super::NonceCustody>,
+    /// Images whose secret the caller supplied in this same request
+    /// (`externalSecrets`). With custody, a hex nonce is accepted for these
+    /// keys only: the caller already holds the key, so the nonce reveals
+    /// nothing new.
+    pub caller_images: &'a [ergo_ser::sigma_value::SigmaBoolean],
+}
+
 /// Convert a `TxHintsBagDto` back to a `TransactionHintsBag`.
 ///
 /// Called by `transaction_sign_impl` to thread operator-supplied hints into
 /// the prover. The `image` field is parsed so the prover can match hints
 /// by proposition at sign time.
+///
+/// A `cmtWithSecret` hint's nonce comes from `policy`: a custody handle is
+/// withdrawn for the input and public commitment it sits next to, and is
+/// consumed whether or not signing then succeeds. With custody, a hex nonce
+/// is refused unless its key is in `policy.caller_images`: a caller who picks
+/// or replays the nonce for a wallet key learns that key from the signature.
 pub(crate) fn tx_hints_bag_from_dto(
     dto: &ergo_wallet_protocol::scala::sending::TxHintsBagDto,
-    custody: Option<&dyn super::NonceCustody>,
+    policy: OwnNoncePolicy<'_>,
 ) -> Result<ergo_wallet::proving::hints::TransactionHintsBag, WalletAdminError> {
     use ergo_wallet::proving::hints::{
         Hint, HintsBag, OwnCommitment, RealCommitment, RealSecretProof, SimulatedCommitment,
@@ -274,22 +321,43 @@ pub(crate) fn tx_hints_bag_from_dto(
             })
     }
 
-    let own_secret = |secret: &str| -> Result<zeroize::Zeroizing<[u8; 32]>, WalletAdminError> {
-        match (secret.strip_prefix(super::NONCE_HANDLE_PREFIX), custody) {
-            (Some(_), Some(custody)) => custody.withdraw(secret).ok_or_else(|| {
-                WalletAdminError::BadRequest(
-                    "unknown, expired or already used commitment handle; generate new commitments"
-                        .into(),
-                )
-            }),
-            (Some(_), None) => Err(WalletAdminError::BadRequest(
+    let own_secret = |secret: &str,
+                      binding: super::NonceBinding|
+     -> Result<zeroize::Zeroizing<[u8; 32]>, WalletAdminError> {
+        let handle = secret.starts_with(super::NONCE_HANDLE_PREFIX);
+        match (handle, policy.custody) {
+            (true, Some(custody)) => {
+                custody
+                    .withdraw(secret, &binding)
+                    .map_err(|refusal| match refusal {
+                        super::NonceRefusal::Unavailable => WalletAdminError::BadRequest(
+                            "unknown, expired or already used commitment handle; generate new \
+                             commitments"
+                                .into(),
+                        ),
+                        super::NonceRefusal::WrongCommitment => WalletAdminError::BadRequest(
+                            "commitment handle was issued for another input or commitment; it \
+                             is now used up, generate new commitments"
+                                .into(),
+                        ),
+                    })
+            }
+            (true, None) => Err(WalletAdminError::BadRequest(
                 "commitment handles require nonce custody".into(),
             )),
-            (None, _) => parse_secret(secret).map(zeroize::Zeroizing::new),
+            (false, Some(_)) if !policy.caller_images.contains(&binding.commitment.image) => {
+                Err(WalletAdminError::BadRequest(
+                    "caller-supplied secret nonces are refused; pass the commitment handle \
+                     returned by generateCommitments (a hex nonce is accepted only for a key \
+                     supplied in externalSecrets)"
+                        .into(),
+                ))
+            }
+            (false, _) => parse_secret(secret).map(zeroize::Zeroizing::new),
         }
     };
 
-    let dto_to_hint = |h: &HintDto| -> Result<Hint, WalletAdminError> {
+    let dto_to_hint = |input: u32, h: &HintDto| -> Result<Hint, WalletAdminError> {
         match h {
             HintDto::OwnCommitment {
                 image,
@@ -297,16 +365,24 @@ pub(crate) fn tx_hints_bag_from_dto(
                 commitment,
                 position,
             } => {
-                let sb = sigma_boolean_from_json(image)?;
-                let pos = NodePosition {
-                    positions: node_position_from_str(position)
-                        .map_err(|e| WalletAdminError::Internal(format!("bad position: {e}")))?,
+                let public = RealCommitment {
+                    image: sigma_boolean_from_json(image)?,
+                    commitment: fpm_from_json(commitment)?,
+                    position: NodePosition {
+                        positions: node_position_from_str(position).map_err(|e| {
+                            WalletAdminError::Internal(format!("bad position: {e}"))
+                        })?,
+                    },
+                };
+                let binding = super::NonceBinding {
+                    input,
+                    commitment: public.clone(),
                 };
                 Ok(Hint::OwnCommitment(OwnCommitment {
-                    image: sb,
-                    secret_randomness: own_secret(secret)?,
-                    commitment: fpm_from_json(commitment)?,
-                    position: pos,
+                    secret_randomness: own_secret(secret, binding)?,
+                    image: public.image,
+                    commitment: public.commitment,
+                    position: public.position,
                 }))
             }
             HintDto::RealCommitment {
@@ -406,7 +482,7 @@ pub(crate) fn tx_hints_bag_from_dto(
             .map_err(|_| WalletAdminError::Internal(format!("bad input index: {idx_str}")))?;
         let mut bag = HintsBag::empty();
         for h in hints_list {
-            bag.add(dto_to_hint(h)?);
+            bag.add(dto_to_hint(idx, h)?);
         }
         // Use add_for_input (preserves existing) — mirrors Scala addHintsForInput.
         tbag.add_for_input(idx, bag);
@@ -419,7 +495,7 @@ pub(crate) fn tx_hints_bag_from_dto(
             .map_err(|_| WalletAdminError::Internal(format!("bad input index: {idx_str}")))?;
         let mut bag = HintsBag::empty();
         for h in hints_list {
-            bag.add(dto_to_hint(h)?);
+            bag.add(dto_to_hint(idx, h)?);
         }
         tbag.add_for_input(idx, bag);
     }
@@ -430,20 +506,79 @@ pub(crate) fn tx_hints_bag_from_dto(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{NonceBinding, NonceCustody, NonceRefusal, NONCE_HANDLE_PREFIX};
     use ergo_wallet_protocol::scala::sending::{
         FirstProverMessageJson, HintDto, SigmaBooleanJson, TxHintsBagDto,
     };
 
+    const POINT: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
     fn own_hint() -> HintDto {
-        let point = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
         HintDto::OwnCommitment {
             image: SigmaBooleanJson {
-                inner: serde_json::json!({"type": "proveDlog", "h": point}),
+                inner: serde_json::json!({"type": "proveDlog", "h": POINT}),
             },
             secret: "ab".repeat(32),
-            commitment: FirstProverMessageJson::Dlog { a: point.into() },
+            commitment: FirstProverMessageJson::Dlog { a: POINT.into() },
             position: "0".into(),
         }
+    }
+
+    fn own_bag() -> TxHintsBagDto {
+        let mut dto = TxHintsBagDto::default();
+        dto.secret_hints.insert("0".into(), vec![own_hint()]);
+        dto
+    }
+
+    fn secret_of(dto: &TxHintsBagDto) -> &str {
+        let HintDto::OwnCommitment { secret, .. } = &dto.secret_hints["0"][0] else {
+            panic!("own commitment expected");
+        };
+        secret
+    }
+
+    /// A minimal custodian with the binding and single-use contract.
+    #[derive(Default)]
+    struct Vault(std::sync::Mutex<std::collections::BTreeMap<String, ([u8; 32], NonceBinding)>>);
+
+    impl NonceCustody for Vault {
+        fn deposit(&self, nonce: zeroize::Zeroizing<[u8; 32]>, binding: NonceBinding) -> String {
+            let mut map = self.0.lock().unwrap();
+            let handle = format!("{NONCE_HANDLE_PREFIX}{}", map.len());
+            map.insert(handle.clone(), (*nonce, binding));
+            handle
+        }
+        fn withdraw(
+            &self,
+            handle: &str,
+            binding: &NonceBinding,
+        ) -> Result<zeroize::Zeroizing<[u8; 32]>, NonceRefusal> {
+            let (nonce, issued) = self
+                .0
+                .lock()
+                .unwrap()
+                .remove(handle)
+                .ok_or(NonceRefusal::Unavailable)?;
+            if issued != *binding {
+                return Err(NonceRefusal::WrongCommitment);
+            }
+            Ok(zeroize::Zeroizing::new(nonce))
+        }
+        fn clear(&self) {
+            self.0.lock().unwrap().clear();
+        }
+    }
+
+    fn custody(vault: &Vault) -> OwnNoncePolicy<'_> {
+        OwnNoncePolicy {
+            custody: Some(vault),
+            caller_images: &[],
+        }
+    }
+
+    /// The internal bag of [`own_bag`], decoded in the Scala form.
+    fn internal_own_bag() -> ergo_wallet::proving::hints::TransactionHintsBag {
+        tx_hints_bag_from_dto(&own_bag(), OwnNoncePolicy::default()).unwrap()
     }
 
     #[test]
@@ -454,13 +589,13 @@ mod tests {
             image.inner = serde_json::Value::Null;
         }
         dto.public_hints.insert("0".into(), vec![hint]);
-        let error = tx_hints_bag_from_dto(&dto, None).unwrap_err();
+        let error = tx_hints_bag_from_dto(&dto, OwnNoncePolicy::default()).unwrap_err();
         assert!(matches!(error, WalletAdminError::BadRequest(_)));
         assert!(!error.to_string().contains(&"ab".repeat(32)));
     }
 
     #[test]
-    fn explicit_private_commitments_and_public_commitments_roundtrip() {
+    fn explicit_private_commitments_and_public_commitments_roundtrip_in_caller_form() {
         let own = own_hint();
         let HintDto::OwnCommitment {
             image,
@@ -479,61 +614,129 @@ mod tests {
         let mut dto = TxHintsBagDto::default();
         dto.secret_hints.insert("0".into(), vec![own]);
         dto.public_hints.insert("0".into(), vec![public]);
-        let internal = tx_hints_bag_from_dto(&dto, None).unwrap();
+        let internal = tx_hints_bag_from_dto(&dto, OwnNoncePolicy::default()).unwrap();
         assert_eq!(tx_hints_bag_to_dto(&internal, None), dto);
     }
 
-    #[derive(Default)]
-    struct Vault(std::sync::Mutex<std::collections::BTreeMap<String, [u8; 32]>>);
-
-    impl crate::engine::NonceCustody for Vault {
-        fn deposit(&self, nonce: zeroize::Zeroizing<[u8; 32]>) -> String {
-            let mut map = self.0.lock().unwrap();
-            let handle = format!("{}{}", crate::engine::NONCE_HANDLE_PREFIX, map.len());
-            map.insert(handle.clone(), *nonce);
-            handle
-        }
-        fn withdraw(&self, handle: &str) -> Option<zeroize::Zeroizing<[u8; 32]>> {
-            self.0
-                .lock()
-                .unwrap()
-                .remove(handle)
-                .map(zeroize::Zeroizing::new)
-        }
-    }
-
     #[test]
-    fn custody_replaces_secret_nonces_with_single_use_handles() {
-        let mut dto = TxHintsBagDto::default();
-        dto.secret_hints.insert("0".into(), vec![own_hint()]);
-        let internal = tx_hints_bag_from_dto(&dto, None).unwrap();
+    fn custody_returns_a_single_use_handle_and_never_the_nonce() {
         let vault = Vault::default();
-        let wire = tx_hints_bag_to_dto(&internal, Some(&vault));
+        let wire = tx_hints_bag_to_dto(&internal_own_bag(), Some(&vault));
         let json = serde_json::to_string(&wire).unwrap();
         assert!(
             !json.contains(&"ab".repeat(32)),
             "the nonce must not leave: {json}"
         );
-        let HintDto::OwnCommitment { secret, .. } = &wire.secret_hints["0"][0] else {
-            panic!("own commitment expected");
-        };
-        assert!(secret.starts_with(crate::engine::NONCE_HANDLE_PREFIX));
+        assert!(!format!("{wire:?}").contains(&"ab".repeat(32)));
+        assert!(secret_of(&wire).starts_with(NONCE_HANDLE_PREFIX));
         // Without custody a handle is refused rather than parsed.
         assert!(matches!(
-            tx_hints_bag_from_dto(&wire, None),
+            tx_hints_bag_from_dto(&wire, OwnNoncePolicy::default()),
             Err(WalletAdminError::BadRequest(_))
         ));
         // The handle resolves to the nonce once.
-        let resolved = tx_hints_bag_from_dto(&wire, Some(&vault)).unwrap();
-        assert_eq!(tx_hints_bag_to_dto(&resolved, None), dto);
+        let resolved = tx_hints_bag_from_dto(&wire, custody(&vault)).unwrap();
+        assert_eq!(tx_hints_bag_to_dto(&resolved, None), own_bag());
         assert!(matches!(
-            tx_hints_bag_from_dto(&wire, Some(&vault)),
+            tx_hints_bag_from_dto(&wire, custody(&vault)),
             Err(WalletAdminError::BadRequest(message)) if message.contains("already used")
         ));
-        // Raw secrets from Scala-style callers are still accepted.
-        assert_eq!(
-            tx_hints_bag_to_dto(&tx_hints_bag_from_dto(&dto, Some(&vault)).unwrap(), None),
-            dto
+    }
+
+    #[test]
+    fn handle_moved_to_another_input_is_refused_and_consumed() {
+        let vault = Vault::default();
+        let wire = tx_hints_bag_to_dto(&internal_own_bag(), Some(&vault));
+        let mut moved = TxHintsBagDto::default();
+        moved
+            .secret_hints
+            .insert("1".into(), wire.secret_hints["0"].clone());
+        let error = tx_hints_bag_from_dto(&moved, custody(&vault)).unwrap_err();
+        assert!(
+            matches!(&error, WalletAdminError::BadRequest(m) if m.contains("another input")),
+            "{error:?}"
         );
+        assert!(
+            tx_hints_bag_from_dto(&wire, custody(&vault)).is_err(),
+            "the refused attempt used the handle up"
+        );
+    }
+
+    #[test]
+    fn handle_paired_with_another_commitment_is_refused() {
+        let vault = Vault::default();
+        let mut wire = tx_hints_bag_to_dto(&internal_own_bag(), Some(&vault));
+        let other = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+        if let Some(HintDto::OwnCommitment { commitment, .. }) = wire
+            .secret_hints
+            .get_mut("0")
+            .and_then(|hints| hints.first_mut())
+        {
+            *commitment = FirstProverMessageJson::Dlog { a: other.into() };
+        }
+        let error = tx_hints_bag_from_dto(&wire, custody(&vault)).unwrap_err();
+        assert!(
+            matches!(&error, WalletAdminError::BadRequest(m) if m.contains("another input or commitment")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn caller_supplied_nonce_is_refused_with_custody_without_revealing_it() {
+        let vault = Vault::default();
+        let error = tx_hints_bag_from_dto(&own_bag(), custody(&vault)).unwrap_err();
+        let WalletAdminError::BadRequest(message) = &error else {
+            panic!("expected a client error, got {error:?}");
+        };
+        assert!(message.contains("caller-supplied secret nonces are refused"));
+        assert!(!message.contains(&"ab".repeat(32)));
+        assert!(!format!("{error:?}").contains(&"ab".repeat(32)));
+    }
+
+    #[test]
+    fn caller_supplied_nonce_is_accepted_for_a_key_supplied_in_the_same_request() {
+        let vault = Vault::default();
+        let image = ergo_ser::sigma_value::SigmaBoolean::ProveDlog(
+            ergo_primitives::group_element::GroupElement::from_bytes(
+                hex::decode(POINT).unwrap().try_into().unwrap(),
+            ),
+        );
+        let policy = OwnNoncePolicy {
+            custody: Some(&vault),
+            caller_images: std::slice::from_ref(&image),
+        };
+        let internal = tx_hints_bag_from_dto(&own_bag(), policy).unwrap();
+        assert_eq!(tx_hints_bag_to_dto(&internal, None), own_bag());
+    }
+
+    #[test]
+    fn unknown_handle_is_refused_in_either_form() {
+        let mut dto = own_bag();
+        if let Some(HintDto::OwnCommitment { secret, .. }) = dto
+            .secret_hints
+            .get_mut("0")
+            .and_then(|hints| hints.first_mut())
+        {
+            *secret = format!("{NONCE_HANDLE_PREFIX}{}", "00".repeat(16));
+        }
+        let vault = Vault::default();
+        for policy in [OwnNoncePolicy::default(), custody(&vault)] {
+            assert!(matches!(
+                tx_hints_bag_from_dto(&dto, policy),
+                Err(WalletAdminError::BadRequest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn one_handle_presented_twice_in_a_request_is_refused() {
+        let vault = Vault::default();
+        let mut wire = tx_hints_bag_to_dto(&internal_own_bag(), Some(&vault));
+        let hint = wire.secret_hints["0"][0].clone();
+        wire.secret_hints.get_mut("0").unwrap().push(hint);
+        assert!(matches!(
+            tx_hints_bag_from_dto(&wire, custody(&vault)),
+            Err(WalletAdminError::BadRequest(m)) if m.contains("already used")
+        ));
     }
 }
