@@ -5,12 +5,14 @@
 
 mod coll;
 mod equality;
+mod runtime_type;
 pub(crate) mod serialize;
 mod subst_constants;
 mod type_infer;
 
 pub(crate) use coll::*;
 pub(crate) use equality::*;
+pub(crate) use runtime_type::*;
 pub(crate) use subst_constants::*;
 pub(crate) use type_infer::*;
 

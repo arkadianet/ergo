@@ -985,3 +985,9 @@ Startup logs and CSV samples expose budgets, and per-database eviction counters
 are enabled. For IBD memory profiling, setting
 `ERGO_MEM_CSV=<path>` makes the node append a per-tick memory sample to a
 CSV.
+
+Threads that decode or validate transactions (the Tokio workers and blocking
+pool, the Rayon pool, startup, mining and indexer threads) get a 32 MiB stack.
+This is reserved address space; only the pages a thread actually touches count
+toward RSS. Hosts with strict overcommit (`vm.overcommit_memory = 2`) must allow
+for the reservation.

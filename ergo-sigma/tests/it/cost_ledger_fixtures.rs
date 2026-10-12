@@ -564,6 +564,38 @@ fn jvm_failure(
             expected: "serializable value for SubstConstants",
             got,
         }) if got == "PreHeader" => Ok(("RejectScript", "sigma.serialization.SerializerException")),
+        // Value.checkType (values.scala:251-260): a value whose class does not
+        // match its node's static type throws InterpreterException; a type
+        // without a runtime class reaches SType.isValueOfType's sys.error.
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "value of the static type (Value.checkType)",
+            ..
+        }) => Ok(("RejectScript", "sigma.exceptions.InterpreterException")),
+        VerifySpendingError::Eval(EvalError::RuntimeException(
+            "Value.checkType: type without a runtime class",
+        )) => Ok(("RejectOther", "java.lang.RuntimeException")),
+        // A method invoked on a receiver of another class: reflection throws
+        // IllegalArgumentException ("object is not an instance of declaring
+        // class"); the numeric methods' `obj.asInstanceOf[T]` throws
+        // ClassCastException.
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "method receiver of the declaring type",
+            got,
+        }) => {
+            let numeric = ["(2,", "(3,", "(4,", "(5,", "(6,", "(9,"]
+                .iter()
+                .any(|p| got.starts_with(p));
+            if numeric {
+                Ok(("RejectScript", "java.lang.ClassCastException"))
+            } else {
+                Ok(("RejectScript", "java.lang.IllegalArgumentException"))
+            }
+        }
+        // scrypto allocates a keyLength-byte infinity key before reading the
+        // proof; past the JVM array limit that is a fatal error.
+        VerifySpendingError::Eval(EvalError::RuntimeException(
+            "AVL key length exceeds the JVM array size limit",
+        )) => Ok(("RejectScript", "java.lang.OutOfMemoryError")),
         _ => anyhow::bail!("no oracle-backed JVM failure mapping for {error:?}"),
     }
 }

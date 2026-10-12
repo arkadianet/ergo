@@ -68,7 +68,8 @@ pub(in crate::evaluator) fn eval_val_use(
 // caller's env is untouched once the block returns. Bindings must not
 // leak past the block, and a shadowed outer id must reappear
 // afterwards (an expression evaluated after the block sees the
-// PRE-block env). Mirrored with a block-local clone; closures created
+// PRE-block env). Mirrored by binding in place and restoring every
+// shadowed or new id when the block returns; closures created
 // inside the block capture the block env, exactly like Scala's
 // FuncValue capturing `curEnv`.
 /// Scala's shallow tuple check also rejects a register's CreateTuple carrier
@@ -124,7 +125,30 @@ pub(in crate::evaluator) fn eval_block_value(
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
     add_cost_per_item(cx.cost, 0xD8, items.len() as u32)?;
-    let mut block_env = cx.env.clone();
+    // The block binds into the caller's environment and restores every
+    // shadowed or new id afterwards (on success and on error), instead of
+    // copying the whole environment per block evaluation.
+    let mut saved: Vec<(u32, Option<Value>)> = Vec::with_capacity(items.len());
+    let result = eval_block_bindings(items, result, cx, &mut saved);
+    for (id, old) in saved.into_iter().rev() {
+        match old {
+            Some(v) => {
+                cx.env.insert(id, v);
+            }
+            None => {
+                cx.env.remove(&id);
+            }
+        }
+    }
+    result
+}
+
+fn eval_block_bindings(
+    items: &[Expr],
+    result: &Expr,
+    cx: &mut EvalCtx<'_>,
+    saved: &mut Vec<(u32, Option<Value>)>,
+) -> Result<Value, EvalError> {
     for item in items {
         match item {
             Expr::Op(node) => match &node.payload {
@@ -133,12 +157,18 @@ pub(in crate::evaluator) fn eval_block_value(
                         rhs,
                         cx.ctx,
                         cx.constants,
-                        &mut block_env,
+                        cx.env,
                         cx.depth,
                         cx.cost,
                         cx.trace,
                     )?;
                     let val = reject_sstring(val)?;
+                    // Value.checkType(vd, v): ValDef.tpe is rhs.tpe.
+                    crate::evaluator::static_types::check_node(
+                        rhs,
+                        &val,
+                        cx.ctx.is_v3_ergo_tree(),
+                    )?;
                     // AddToEnvironment — Scala charges it AFTER the rhs
                     // eval (addFixedCost wraps only the env update).
                     add_cost(cx.cost, 0xD6)?;
@@ -151,7 +181,7 @@ pub(in crate::evaluator) fn eval_block_value(
                             value: trace_val(&val),
                         });
                     }
-                    block_env.insert(*id, val);
+                    saved.push((*id, cx.env.insert(*id, val)));
                 }
                 _ => {
                     return Err(EvalError::TypeError {
@@ -178,11 +208,13 @@ pub(in crate::evaluator) fn eval_block_value(
         result,
         cx.ctx,
         cx.constants,
-        &mut block_env,
+        cx.env,
         cx.depth,
         cx.cost,
         cx.trace,
     )?;
+    // Value.checkType(result, res) (values.scala:1034).
+    crate::evaluator::static_types::check_node(result, &result_val, cx.ctx.is_v3_ergo_tree())?;
     if let Some(t) = cx.trace.as_mut() {
         t.push(TraceEntry {
             label: "BlockValue result".into(),
@@ -208,8 +240,22 @@ pub(in crate::evaluator) fn eval_if(
         });
     }
     match c {
-        Value::Bool(true) => cx.eval_expr(then_br).and_then(reject_sstring),
-        Value::Bool(false) => cx.eval_expr(else_br).and_then(reject_sstring),
+        // Value.checkType(branch, res) (trees.scala:1360-1364): each branch
+        // against its OWN static type.
+        Value::Bool(true) => cx
+            .eval_expr(then_br)
+            .and_then(reject_sstring)
+            .and_then(|v| {
+                crate::evaluator::static_types::check_node(then_br, &v, cx.ctx.is_v3_ergo_tree())?;
+                Ok(v)
+            }),
+        Value::Bool(false) => cx
+            .eval_expr(else_br)
+            .and_then(reject_sstring)
+            .and_then(|v| {
+                crate::evaluator::static_types::check_node(else_br, &v, cx.ctx.is_v3_ergo_tree())?;
+                Ok(v)
+            }),
         _ => Err(EvalError::TypeError {
             expected: "Bool for If condition",
             got: format!("{c:?}"),
@@ -244,6 +290,7 @@ pub(in crate::evaluator) fn eval_tuple(
     let mut values = Vec::with_capacity(items.len());
     for item in items {
         let v = cx.eval_expr(item).and_then(reject_sstring)?;
+        crate::evaluator::static_types::check_node(item, &v, cx.ctx.is_v3_ergo_tree())?;
         // Scala `Tuple.eval` runs `Value.checkType(item, itemV)` per item;
         // `SType.isValueOfType` then `sys.error("Unsupported tuple type")` for
         // any item whose type is a tuple of arity != 2 — only pairs are a valid
@@ -325,7 +372,7 @@ pub(in crate::evaluator) fn eval_func_value(
         captured_env: std::rc::Rc::new(env.clone()),
         params,
         param_types: args.to_vec(),
-        body: Box::new(body.clone()),
+        body: crate::evaluator::static_types::func_body(body),
     })
 }
 
@@ -359,6 +406,34 @@ pub(in crate::evaluator) fn check_closure_param_types(
     Ok(())
 }
 
+/// Scala's closure runs `Value.checkType(argTpe, vArg)` on its argument
+/// before binding it (values.scala:1074): a shallow class test against the
+/// DECLARED parameter type, so `(x: BigInt) => ..` over a `Coll[Int]` fails on
+/// its first call. Types without a runtime class (type variables, `SString`)
+/// throw whatever the argument.
+pub(in crate::evaluator) fn check_closure_arg(
+    param_types: &[(u32, Option<SigmaType>)],
+    arg: &Value,
+    ctx: &super::super::types::ReductionContext<'_>,
+) -> Result<(), EvalError> {
+    check_closure_param_types(param_types)?;
+    if let Some((_, Some(tpe))) = param_types.first() {
+        crate::evaluator::helpers::check_value_type(tpe, arg, ctx.is_v3_ergo_tree())?;
+    }
+    Ok(())
+}
+
+/// Scala's closure runs `Value.checkType(body, res)` on its result
+/// (values.scala:1080) against the body's static type.
+pub(in crate::evaluator) fn check_closure_result(
+    body: &Expr,
+    result: Value,
+    ctx: &super::super::types::ReductionContext<'_>,
+) -> Result<Value, EvalError> {
+    crate::evaluator::static_types::check_node(body, &result, ctx.is_v3_ergo_tree())?;
+    Ok(result)
+}
+
 // 0xDA FuncApply — closure invocation. Charges AddToEnv (5 jit) per call.
 pub(in crate::evaluator) fn eval_func_apply(
     func: &Expr,
@@ -383,7 +458,7 @@ pub(in crate::evaluator) fn eval_func_apply(
             let mut call_env = (*captured_env).clone();
             for (param_id, arg_expr) in params.iter().zip(arg_exprs.iter()) {
                 let arg_val = cx.eval_expr(arg_expr)?;
-                check_closure_param_types(&param_types)?;
+                check_closure_arg(&param_types, &arg_val, cx.ctx)?;
                 call_env.insert(*param_id, arg_val);
             }
             // AddToEnvironment — charged once per invocation, AFTER
@@ -411,6 +486,7 @@ pub(in crate::evaluator) fn eval_func_apply(
                 cx.trace,
             )
             .and_then(reject_sstring)
+            .and_then(|r| check_closure_result(&body, r, cx.ctx))
         }
         _ => Err(EvalError::TypeError {
             expected: "Func for FuncApply",

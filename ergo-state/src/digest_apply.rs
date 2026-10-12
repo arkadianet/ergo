@@ -27,6 +27,12 @@ use ergo_sigma::avl::AvlVerifier;
 /// indexes boxes by their 32-byte `ErgoBox.box_id`.
 const BOX_ID_KEY_LENGTH: usize = 32;
 
+/// Levels allowed above the parent digest's height byte when bounding an
+/// ADProofs tree. An honest proof is never taller than the parent tree, so
+/// any value here leaves every honest verdict unchanged; the margin only
+/// guards against an off-by-one in height bookkeeping.
+const ADPROOF_HEIGHT_SLACK: usize = 2;
+
 /// Box bytes the ADProofs witness for a block's data-input lookups and
 /// spent-input removes: `(box_id, serialized_box_bytes)` pairs. These
 /// are the input/data-input boxes the digest-mode validator resolves
@@ -249,14 +255,22 @@ impl DigestProofVerifier {
         // padded with extra nodes — SANTA `adverse-malicious-extra-nodes`
         // class. `max_deletes` stays None on both sides (defaults to
         // `max_num_operations`).
+        //
+        // The proof encodes a pruned copy of the parent tree: the same root,
+        // with whole subtrees replaced by label-only nodes of height 0. Its
+        // height can therefore never exceed the parent tree's height, which
+        // is the digest's trailing byte; a taller proof cannot hash to the
+        // parent root and is rejected before any tree is built.
+        let max_tree_height = usize::from(parent_state_root[32]) + ADPROOF_HEIGHT_SLACK;
         let construct = || {
-            AvlVerifier::new(
+            AvlVerifier::new_with_height_bound(
                 &parent_owned,
                 &proof_owned,
                 BOX_ID_KEY_LENGTH,
                 None,
                 max_num_operations,
                 None,
+                max_tree_height,
             )
         };
         let inner_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(construct))
@@ -268,8 +282,9 @@ impl DigestProofVerifier {
                     .unwrap_or_else(|| "verifier construction panicked".to_string());
                 DigestApplyError::VerifierConstructionPanic { reason }
             })?;
-        let inner = inner_result
-            .map_err(|e| DigestApplyError::VerifierConstructionRejected { reason: e })?;
+        let inner = inner_result.map_err(|e| DigestApplyError::VerifierConstructionRejected {
+            reason: e.to_string(),
+        })?;
         Ok(Self {
             inner,
             parent_state_root: *parent_state_root,
@@ -689,6 +704,72 @@ mod tests {
                     | DigestApplyError::VerifierConstructionRejected { .. }
             ),
             "expected session-scoped construction failure, got {err:?}",
+        );
+    }
+
+    /// Packed ADProofs-shaped proof (32-byte keys, length-prefixed values)
+    /// of a left spine with `depth` internal nodes.
+    fn deep_spine_adproof(depth: usize) -> Vec<u8> {
+        let mut proof = vec![2u8];
+        proof.extend_from_slice(&[0x10; 32]); // key
+        proof.extend_from_slice(&[0x30; 32]); // next-leaf key
+        proof.extend_from_slice(&[0, 0, 0, 0]); // value length
+        for _ in 0..depth {
+            proof.push(2);
+            proof.extend_from_slice(&[0x20; 32]);
+            proof.extend_from_slice(&[0, 0, 0, 0]);
+            proof.push(0); // internal node, balance 0
+        }
+        proof.push(4);
+        proof.extend(std::iter::repeat_n(0xFFu8, depth / 8 + 8));
+        proof
+    }
+
+    #[test]
+    fn deep_adproofs_fail_closed() {
+        // A stack overflow aborts the process it happens in, so the body
+        // runs in a child process on the validation stack; a regression
+        // fails this test instead of aborting the test binary.
+        const CHILD_ENV: &str = "ERGO_STATE_DEEP_ADPROOF_CHILD";
+        const TEST_PATH: &str = "digest_apply::tests::deep_adproofs_fail_closed";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([TEST_PATH, "--exact", "--test-threads=1", "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .output()
+                .expect("run child test process");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child run failed ({}):\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+        let verdict = std::thread::Builder::new()
+            .stack_size(ergo_ser::decode_stack::DECODE_THREAD_STACK_BYTES)
+            .spawn(|| {
+                // 100,000 levels stay inside the node-count bound for 2,000
+                // operations at parent height 30, so only the height bound
+                // keeps the crate from walking the spine.
+                let proof = deep_spine_adproof(100_000);
+                let header = synth_header(*blake2b256(&proof).as_bytes());
+                let modifier_id = correct_modifier_id_for(&header);
+                let mut parent = [0x5Au8; 33];
+                parent[32] = 30;
+                DigestProofVerifier::new(modifier_id, &proof, &header, &parent, Some(2_000))
+                    .map(|_| ())
+            })
+            .expect("spawn validation-stack thread")
+            .join()
+            .expect("deep ADProofs check");
+        assert!(
+            matches!(
+                verdict,
+                Err(DigestApplyError::VerifierConstructionRejected { .. })
+            ),
+            "expected a construction rejection, got {verdict:?}",
         );
     }
 

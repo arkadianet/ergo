@@ -1,0 +1,16 @@
+bool-op-binor-int-rhs	false	null
+bool-op-binand-int-rhs	false	null
+bool-op-binor-skipped-int-rhs	true	12106
+bool-op-binand-skipped-int-rhs	true	12106
+bool-op-binor-bool-rhs	true	12107
+bool-op-binand-bool-rhs	true	12107
+bool-op-binor-sigmaprop-rhs	false	null
+bool-op-binxor-int-rhs	false	null
+bool-op-and-empty-coll-int	true	12103
+bool-op-and-coll-int	false	null
+bool-op-not-or-empty-coll-int	true	12104
+bool-op-not-xorof-empty-coll-int	true	12106
+bool-op-binor-int-lhs	false	null
+bool-op-not-int	false	null
+bool-op-if-int-cond	false	null
+bool-op-sigmaprop-int	false	null

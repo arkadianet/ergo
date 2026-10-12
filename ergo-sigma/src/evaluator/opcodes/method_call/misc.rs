@@ -128,13 +128,14 @@ pub(super) fn get_var_from_input(
 ) -> Result<Value, EvalError> {
     check_arity(args, 2)?;
     let idx_val = cx.eval_expr(&args[0])?;
-    let input_idx = match idx_val {
-        Value::Short(n) => n,
-        other => {
+    let input_idx = match super::widen_to_short(&idx_val) {
+        Some(n) => n,
+        None => {
+            let other = idx_val;
             return Err(EvalError::TypeError {
                 expected: "Short for SContext.getVarFromInput input index",
                 got: format!("{other:?}"),
-            })
+            });
         }
     };
     let var_val = cx.eval_expr(&args[1])?;

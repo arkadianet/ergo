@@ -904,7 +904,7 @@ fn methodcall_box_getreg_v5_dispatches_while_v6_gated_at_pre_eip50() {
             payload: Payload::MethodCall {
                 type_id: 99,
                 method_id: mid,
-                obj: Box::new(op(0xDD, Payload::Zero)),
+                obj: Box::new(op(0xA7, Payload::Zero)),
                 args: vec![],
                 type_args: vec![],
             },
