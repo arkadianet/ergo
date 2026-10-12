@@ -1009,17 +1009,13 @@ impl NodeConfig {
                 "[wallet] expose_private_keys is ignored: the node no longer hosts a wallet"
             );
         }
-        let wallet_daemon_address = toml_cfg
-            .wallet
-            .daemon_address
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| "http://127.0.0.1:3033".to_string());
-        if wallet_daemon_address.is_empty() {
-            return Err("[wallet] daemon_address must be non-empty".into());
-        }
+        // The default applies only when the key is absent: an explicit empty
+        // value is a mistake, not a request for the default.
+        let wallet_daemon_address = match toml_cfg.wallet.daemon_address.as_deref().map(str::trim) {
+            None => "http://127.0.0.1:3033".to_string(),
+            Some("") => return Err("[wallet] daemon_address must be non-empty".into()),
+            Some(address) => address.to_string(),
+        };
 
         // [mining] — external-miner subsystem. Defaults disabled. CLI
         // overrides applied below.

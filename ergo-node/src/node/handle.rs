@@ -103,6 +103,10 @@ pub struct RunHandle {
     /// still finishing a build can never detach and keep reading/publishing
     /// past shutdown. `Option` so `Drop`/`shutdown` can `take()` it.
     pub(super) mining_worker_handle: Option<std::thread::JoinHandle<()>>,
+    /// The one-shot legacy-wallet handoff thread. It holds a read snapshot of
+    /// the state database, so `shutdown()` joins it before the data directory
+    /// lock is released (it ends on its own; it never waits on the node).
+    pub(super) wallet_handoff_handle: Option<std::thread::JoinHandle<()>>,
     /// Latched-cancellation sender for the mining engine (`watch<bool>`).
     /// `send(true)` flips the value so the engine leaves its `select!`/backoff
     /// promptly. Always allocated (cheap); fired by both `shutdown()` and
@@ -279,6 +283,13 @@ impl RunHandle {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => error!("indexer worker thread panicked"),
                 Err(error) => error!(%error, "indexer worker join task failed"),
+            }
+        }
+        if let Some(worker) = self.wallet_handoff_handle.take() {
+            match tokio::task::spawn_blocking(move || worker.join()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => error!("wallet handoff thread panicked"),
+                Err(error) => error!(%error, "wallet handoff join task failed"),
             }
         }
         // Loop completion — surfaces shutdown_cleanly result.
@@ -473,6 +484,7 @@ impl Drop for RunHandle {
             h.abort();
         }
         drop(self.mining_worker_handle.take());
+        drop(self.wallet_handoff_handle.take());
     }
 }
 

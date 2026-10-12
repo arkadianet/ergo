@@ -835,7 +835,7 @@ async fn run_inner_with_backend(
 
     // The node hosts no wallet. It hands a legacy embedded wallet to the
     // daemon once, in the background, from a read snapshot.
-    {
+    let wallet_handoff_handle = {
         let db = store.db_arc();
         let data_dir = config.data_dir.clone();
         let network = config.network;
@@ -862,8 +862,8 @@ async fn run_inner_with_backend(
                     ),
                 }
             })
-            .map_err(|error| format!("start the wallet handoff: {error}"))?;
-    }
+            .map_err(|error| format!("start the wallet handoff: {error}"))?
+    };
 
     // An external-mode miner with no pinned key keeps mining with the reward
     // key of a legacy embedded wallet still held in state.redb, read once.
@@ -1165,6 +1165,7 @@ async fn run_inner_with_backend(
         anchor_builder_cancel_tx: anchor_cancel_tx_for_handle,
         mining_engine_handle: mining_engine.engine_handle,
         mining_worker_handle: mining_engine.worker_handle,
+        wallet_handoff_handle: Some(wallet_handoff_handle),
         mining_engine_cancel_tx,
         shutdown_notify,
     })
