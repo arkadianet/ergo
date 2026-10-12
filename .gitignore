@@ -23,7 +23,15 @@
 # default; `.owner` is the guard marker the daemon leaves beside the
 # socket it owns.
 /node-api-key
+/wallet-api-key
 /ergo-walletd-data/
+/ergo-walletd-seed-data/
+# The same files when the daemon runs from its own directory, where the
+# example configs' relative paths put them.
+/ergo-walletd/node-api-key
+/ergo-walletd/wallet-api-key
+/ergo-walletd/ergo-walletd-data/
+/ergo-walletd/ergo-walletd-seed-data/
 *.sock
 *.sock.owner
 

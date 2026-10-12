@@ -85,10 +85,12 @@ that is inside an async context — so building it from `run` (or from under
 `#[tokio::main]`) panicked before the first log line in a dev build. `prepare`
 does every blocking construction step and `main` calls it *before* the runtime
 exists; `run` then takes an already-built `Daemon` and cannot construct a
-client at all. The daemon's only scan input is the descriptor file, which the
-strict schema limits to public keys, so the `/scan/*` registry the backing store
-also implements is always empty here and `/scans` always returns `[]`; scan
-registration stays a node capability.
+client at all. In watch-only mode the daemon's only scan input is the descriptor
+file, which the strict schema limits to public keys, so the `/scan/*` registry
+the backing store also implements is always empty there and `/scans` always
+returns `[]`; that mode has no scan registration route. A seed wallet serves
+the full `/scan/*` management routes (`register`, `deregister`, `stopTracking`,
+`addBox` and the box reads).
 
 Two layering decisions diverge from the Scala reference and are worth
 internalizing first:

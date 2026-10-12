@@ -434,10 +434,10 @@ The API distinguishes public routes from privileged routes:
 
 | Privileged (require a configured hash and valid `api_key`) | Public (no key required) |
 |---|---|
-| `/wallet/*`, `/scan/*`, `/api/v1/wallet/*` | Dashboard `/`, `/wallet/ui*` redirects, swagger |
+| `/wallet/*`, `/scan/*`, `/api/v1/wallet/*` (answer `410 wallet_moved` after the key check) | Dashboard `/`, swagger |
 | `POST /node/shutdown`, `POST /api/v1/node/shutdown`, `POST /peers/connect`, `POST /api/v1/votes`, `POST /blocks` | Read REST, including `GET /api/v1/votes`, `/info`, `/blocks/*`, `/peers/*`, `/blockchain/*` |
 | `/mining/*` (including supplied-transaction candidates; the four legacy routes can be explicitly opened as above) | Transaction submission/checks: `POST /transactions`, `/transactions/bytes`, `/transactions/check`, `/transactions/checkBytes`, `/api/v1/mempool/{submit,check}` |
-| v1 Operator/Admin routes (node config, network controls, mining controls, operator votes, scans, account management/PSBT, watch writes, private-key export, webhooks); script compute when configured to require a key | Public v1 queries including watch-only account reads, `/emission/*`, `/utils/*`, `/metrics` |
+| v1 Operator/Admin routes (node config, network controls, mining controls, operator votes, scans, account management/PSBT, watch reads and writes, private-key export, webhooks); script compute when configured to require a key | Public v1 queries, `/emission/*`, `/utils/*`, `/metrics` |
 
 The whole wallet, scan and node prefixes are gated, including unknown subpaths;
 other unmatched paths return `404`. Public means no API-key authentication;
@@ -879,7 +879,8 @@ the blocks in it,
 and consensus bounds one block's `BlockTransactions` section by the voted
 `maxBlockSize` parameter. Sizing it against the largest value this document
 shows an operator voting for (`maxBlockSize = 2097152`, 2 MiB) makes the default
-provably safe for any node the daemon may be pointed at: one maxed-out block is
+safe for a node whose `maxBlockSize` is 2 MiB or less (check the node's
+configured parameter before relying on this): one maxed-out block is
 8 MiB of hex, so a page of `1` fits with about half the cap spare, while a
 page of `2` would be 16 MiB *before* the JSON envelope (ids, indices, braces) is
 added. Today's mainnet parameter is smaller than that, so the default is
@@ -1022,9 +1023,9 @@ Validation rules that matter operationally:
 - **The descriptor file cannot register a scan.** It admits public keys,
   paths, and labels. The daemon exposes persisted scan registrations through
   `/scans` and `/scan/listAll` and rewinds their tracked boxes and transactions
-  on reorgs. A fresh descriptor-only database has an empty registry. Registration
-  remains a node capability (`/scan/register`); the daemon has no scan mutation
-  routes in either mode.
+  on reorgs. A fresh descriptor-only database has an empty registry. A
+  watch-only daemon has no scan mutation routes; a seed daemon registers and
+  manages scans itself through `/scan/register` and the other `/scan/*` routes.
   `tests/it/scan_registry_rewind.rs` covers the persisted registry's apply and
   rewind behavior, and `tests/it/daemon_boot.rs` covers a fresh database.
 

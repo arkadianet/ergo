@@ -583,12 +583,12 @@ same data the metrics project. During IBD, watch `best_header_height` and
 
 **Web UIs.** The node serves a single-page operator dashboard at `/` with
 seven sections — Overview, Explorer, Peers, Mempool, Mining, Voting, and
-Wallet — Scala API docs at `/swagger`, and RUST API docs for the `/api/v1/*`
+Activity — Scala API docs at `/swagger`, and RUST API docs for the `/api/v1/*`
 and Rust-only `/blockchain/*` surface at `/swagger/native`. `/swagger/v1`
 serves the same RUST API page for compatibility. These pages are public; the
-dashboard reads the public `/api/v1/*` endpoints, and the Wallet section authenticates each
-`/wallet/*` call with the operator `api_key` that you enter in the browser. The
-legacy `/wallet/ui` path permanently redirects to `/#wallet`. Notable endpoints
+dashboard reads the public `/api/v1/*` endpoints. The node hosts no wallet page:
+that UI is served by `ergo-walletd`, and the node answers `/wallet/ui` with
+`410 wallet_moved` after the API-key check. Notable endpoints
 the dashboard surfaces and operators can poll directly:
 `GET /api/v1/events` (the bounded node event ring, up to 512 buffered
 entries), `GET /api/v1/indexer/status` (indexer self-repair progress), and

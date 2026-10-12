@@ -327,8 +327,10 @@ reports is a box it re-derived.
 The backing store supports scan registries, and the read API returns persisted
 registrations. The descriptor schema accepts public keys, derivation paths and
 labels, but no tracking rules. A fresh descriptor-only store therefore has no
-registered scans. The daemon has no registration or mutation route; scan
-management remains a separate completion task. `sync::scan_records` applies
+registered scans. A watch-only daemon has no registration or mutation route.
+A seed daemon serves the Scala-compatible management routes (`/scan/register`,
+`/scan/deregister`, `/scan/stopTracking`, `/scan/addBox`, and the box reads),
+and its registrations persist in the same store. `sync::scan_records` applies
 any registry already persisted in the wallet store.
 
 `tests/it/scan_registry_rewind.rs` registers a scan through the store's own
