@@ -750,6 +750,21 @@ async fn malformed_inputs_are_rejected_before_the_chain_call() {
             "/api/v1/chain/transactions",
             Body::from(r#"{"transaction":"0G"}"#),
         ),
+        (
+            Method::POST,
+            "/api/v1/chain/admission",
+            Body::from(r#"{"transaction":"0G"}"#),
+        ),
+        (
+            Method::POST,
+            "/api/v1/chain/admission",
+            Body::from(r#"{"transaction":"AB"}"#),
+        ),
+        (
+            Method::POST,
+            "/api/v1/chain/admission",
+            Body::from(r#"{"transaction":"00","snapshotId":"not-a-snapshot"}"#),
+        ),
     ];
     for (method, uri, body) in cases {
         let (status, value) = send(app.clone(), method, uri, body, Some(key)).await;

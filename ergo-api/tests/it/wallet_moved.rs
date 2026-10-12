@@ -358,7 +358,7 @@ async fn external_v1_operator_routes_preserve_auth_before_moved() {
 }
 
 #[tokio::test]
-async fn external_v1_public_watch_routes_return_moved_without_auth() {
+async fn external_v1_retired_watch_reads_require_the_key() {
     for path in [
         "/api/v1/accounts/watch",
         "/api/v1/accounts/watch/11/unspent",
@@ -367,7 +367,7 @@ async fn external_v1_public_watch_routes_return_moved_without_auth() {
             .oneshot(get(path))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::GONE, "path {path}");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "path {path}");
     }
 }
 
