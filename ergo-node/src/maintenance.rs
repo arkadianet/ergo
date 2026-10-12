@@ -271,6 +271,10 @@ struct LegacyPurgeReport {
 /// Whether `ergo-walletd adopt` recorded the adoption: a regular file (not a
 /// symlink) holding the SHA-256 of the adopted `migration.json`, so a stray or
 /// empty file cannot unlock the irreversible purge.
+///
+/// While the handoff report is still present, the marker must name exactly
+/// that report. Without a report (the daemon removes it after a verified
+/// copy) the marker's format is all that can be checked.
 fn adoption_recorded(marker: &Path) -> Result<bool> {
     let metadata = match fs::symlink_metadata(marker) {
         Ok(metadata) => metadata,
@@ -280,9 +284,36 @@ fn adoption_recorded(marker: &Path) -> Result<bool> {
     if !metadata.is_file() || metadata.len() > 128 {
         return Ok(false);
     }
-    let contents = fs::read_to_string(marker)?;
+    // Open once without following symlinks, then read what was opened.
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
+    }
+    let file = options.open(marker)?;
+    if !file.metadata()?.is_file() {
+        return Ok(false);
+    }
+    let mut contents = String::new();
+    file.take(129).read_to_string(&mut contents)?;
     let digest = contents.trim_end_matches(['\n', '\r']);
-    Ok(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    if !(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+        return Ok(false);
+    }
+    let report = marker
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(crate::node::legacy_wallet::HANDOFF_DIR)
+        .join("migration.json");
+    match fs::read(&report) {
+        Ok(bytes) => Ok(hex::encode(Sha256::digest(bytes)).eq_ignore_ascii_case(digest)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Drop every `wallet_*` table of a stopped node after the daemon adopted
@@ -968,6 +999,28 @@ fn restore_with_options(
 mod tests {
     use super::*;
     use ergo_state::store::StateStore;
+
+    #[test]
+    fn adoption_marker_must_match_a_present_handoff_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(crate::node::legacy_wallet::ADOPTED_MARKER);
+        let handoff = dir.path().join(crate::node::legacy_wallet::HANDOFF_DIR);
+        let hash = hex::encode(Sha256::digest(b"report"));
+        // No marker: not adopted.
+        assert!(!adoption_recorded(&marker).unwrap());
+        // A well-formed marker with the report gone is accepted.
+        fs::write(&marker, format!("{hash}\n")).unwrap();
+        assert!(adoption_recorded(&marker).unwrap());
+        // With the report present, the marker must name it.
+        fs::create_dir(&handoff).unwrap();
+        fs::write(handoff.join("migration.json"), b"report").unwrap();
+        assert!(adoption_recorded(&marker).unwrap());
+        fs::write(handoff.join("migration.json"), b"another report").unwrap();
+        assert!(!adoption_recorded(&marker).unwrap());
+        // Malformed markers never count.
+        fs::write(&marker, "adopted\n").unwrap();
+        assert!(!adoption_recorded(&marker).unwrap());
+    }
 
     #[test]
     fn only_staging_commands_require_interruption_cleanup() {

@@ -2619,6 +2619,18 @@ fn wallet_daemon_address_has_a_default() {
 }
 
 #[test]
+fn wallet_daemon_address_rejects_an_explicit_empty_value() {
+    for value in ["", "   "] {
+        let path = write_toml(&format!(
+            "[peers]\nknown = [\"127.0.0.1:9030\"]\n[wallet]\ndaemon_address = \"{value}\"\n"
+        ));
+        let err = NodeConfig::load(minimal_cli(Some(&path)))
+            .expect_err("an empty daemon_address is a mistake, not the default");
+        assert!(err.contains("daemon_address"), "{err}");
+    }
+}
+
+#[test]
 fn wallet_mode_external_accepts_daemon_address() {
     let path = write_toml(
         "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
