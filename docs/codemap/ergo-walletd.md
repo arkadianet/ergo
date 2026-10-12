@@ -327,8 +327,10 @@ reports is a box it re-derived.
 The backing store supports scan registries, and the read API returns persisted
 registrations. The descriptor schema accepts public keys, derivation paths and
 labels, but no tracking rules. A fresh descriptor-only store therefore has no
-registered scans. The daemon has no registration or mutation route; scan
-management remains a separate completion task. `sync::scan_records` applies
+registered scans. A watch-only daemon has no registration or mutation route.
+A seed daemon serves the Scala-compatible management routes (`/scan/register`,
+`/scan/deregister`, `/scan/stopTracking`, `/scan/addBox`, and the box reads),
+and its registrations persist in the same store. `sync::scan_records` applies
 any registry already persisted in the wallet store.
 
 `tests/it/scan_registry_rewind.rs` registers a scan through the store's own
@@ -389,7 +391,11 @@ and `WALLET_SCAN_TXS`.
   sectors; `seal` starts the daemon without its database key and opens the
   database only when a password, passphrase or `unseal_key_file` releases it,
   encrypting a cleartext database on the way. `nonce_vault` keeps multisig
-  nonces under single-use handles.
+  nonces in memory under single-use handles bound to their input and public
+  commitment (consumed on any attempt; 1 h expiry, 4096 cap). The engine
+  wipes it on every lock and, with custody on, refuses a hex nonce for any
+  key not supplied in `externalSecrets` (`ergo-wallet-service`
+  `engine/hints_codec.rs`).
 - **Locked by default, and again.** Seed wallets restart sealed and locked; `host` locks
   them after `[security] idle_lock` without a non-`GET` operation and after
   `max_unlock`. The unlock attempt budget persists in

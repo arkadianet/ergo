@@ -206,8 +206,10 @@ With the bundled default config the node:
   Requests to those routes require a matching `api_key` header. The
   [configuration reference](configuration.md#apisecurity) lists the protected
   wallet, node-control, peer, voting, block and mining routes.
-- Serves browser UIs at `/` (operator dashboard) and `/wallet/ui` (wallet), plus
-  Scala API docs at `/swagger` and RUST API docs at `/swagger/native`.
+- Serves the browser UI at `/` (operator dashboard), plus Scala API docs at
+  `/swagger` and RUST API docs at `/swagger/native`. The wallet page lives in
+  `ergo-walletd`; the node answers `/wallet/ui` with `410 wallet_moved` after the
+  API-key check.
   `/swagger/v1` is a compatibility URL for the same RUST API page.
 - Uses the bundled mainnet seed list plus any `[peers].known`.
 
