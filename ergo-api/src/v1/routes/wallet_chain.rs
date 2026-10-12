@@ -811,7 +811,23 @@ pub(crate) async fn admit_transaction(
     V1Json(request): V1Json<wire::SubmitRequest>,
 ) -> Response {
     if request.transaction.is_empty() {
-        return invalid_params("transaction is empty", "supply signed transaction bytes");
+        return v1_error(
+            Reason::InvalidHex,
+            "transaction bytes must be non-empty lowercase hex",
+            "supply an even-length lowercase hexadecimal string",
+        );
+    }
+    if let Err(error) = wire::validate_hex_bytes(&request.transaction, "transaction") {
+        return v1_error(
+            Reason::InvalidHex,
+            "transaction bytes must be lowercase hexadecimal",
+            error,
+        );
+    }
+    if let Some(snapshot_id) = request.snapshot_id.as_deref() {
+        if let Err(error) = wire::validate_snapshot_id(snapshot_id) {
+            return invalid_params("snapshotId is invalid", error);
+        }
     }
     let chain = match state.chain() {
         Ok(chain) => chain.clone(),

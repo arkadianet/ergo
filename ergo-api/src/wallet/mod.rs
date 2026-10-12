@@ -11,9 +11,10 @@
 //!   `{"reason": "wallet_moved", "address": …}`.
 //! - Native `/api/v1/scan/*`, `/api/v1/accounts/*` and
 //!   `/api/v1/transactions-psbt/*` check the v1 operator tier and answer the
-//!   v1 error envelope. The two watch-only reads that were public
+//!   v1 error envelope. The two watch-only reads that used to be public
 //!   (`GET /api/v1/accounts/watch` and `GET /api/v1/accounts/watch/{id}/unspent`)
-//!   answer without a key, as they always did.
+//!   now check the key as well: they serve nothing, and the answer carries the
+//!   daemon address.
 //!
 //! All mounts are explicit catch-all routes guarded with `route_layer`, never
 //! a router-wide `layer` or fallback, so they cannot gate unrelated paths.
@@ -22,7 +23,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{MatchedPath, State};
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -74,24 +75,11 @@ async fn moved_after_api_key(
     wallet_moved_response(guard.daemon_address.as_deref())
 }
 
-/// The watch-only reads the accounts surface served without a key.
-fn is_public_watch_read(method: &Method, path: &str) -> bool {
-    method == Method::GET
-        && (path == "/api/v1/accounts/watch"
-            || path
-                .strip_prefix("/api/v1/accounts/watch/")
-                .and_then(|rest| rest.strip_suffix("/unspent"))
-                .is_some_and(|id| !id.is_empty() && !id.contains('/')))
-}
-
 async fn product_auth(
     State(auth): State<V1AuthState>,
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
-    if is_public_watch_read(req.method(), req.uri().path()) {
-        return next.run(req).await;
-    }
     forget_route_template(&mut req);
     require_tier(State(auth), req, next).await
 }
@@ -163,29 +151,4 @@ pub fn product_router(daemon_address: Option<&str>, auth: Arc<V1AuthConfig>) -> 
             auth.state(Tier::Operator),
             product_auth,
         ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_the_two_watch_reads_are_public() {
-        for (method, path, public) in [
-            (Method::GET, "/api/v1/accounts/watch", true),
-            (Method::GET, "/api/v1/accounts/watch/7/unspent", true),
-            (Method::POST, "/api/v1/accounts/watch", false),
-            (Method::DELETE, "/api/v1/accounts/watch/7", false),
-            (Method::GET, "/api/v1/accounts/watch//unspent", false),
-            (Method::GET, "/api/v1/accounts/watch/7/8/unspent", false),
-            (Method::GET, "/api/v1/accounts", false),
-            (Method::GET, "/api/v1/scan/scans", false),
-        ] {
-            assert_eq!(
-                is_public_watch_read(&method, path),
-                public,
-                "{method} {path}"
-            );
-        }
-    }
 }
