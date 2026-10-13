@@ -74,10 +74,10 @@ admission and block validation call to check whether an input may be spent.
 - `src/crypto_cost.rs` — `estimate_crypto_cost`: AOT crypto cost charged once
   per reduced proposition before proof verification.
 - `src/avl.rs` — `AvlVerifier`, the sole dependency boundary onto
-  `ergo_avltree_rust` (lookup/insert/update/insert_or_update/remove + digest).
+  `ergo-avltree` (lookup/insert/update/insert_or_update/remove + digest).
   Wraps every operation (including construction) in `catch_unwind` to match
   Scala's fail-closed `Try` behaviour: a malformed proof that would cause
-  `ergo_avltree_rust` to panic instead poisons the verifier (`None`) and
+  `ergo-avltree` to panic instead poisons the verifier (`None`) and
   returns an error. Exports `in_expected_avl_panic` so the node's global
   panic hook can suppress the log for a contained AVL panic.
 - `src/cost_trace.rs` (feature `cost-trace`) — debug-only per-step cost recorder
@@ -179,7 +179,7 @@ admission and block validation call to check whether an input may be spent.
 - **Depth bound.** Recursion is capped at `MAX_EVAL_DEPTH = 110`
   (`DepthLimitExceeded`) — `src/evaluator/dispatch/mod.rs:430-432`,
   `src/evaluator/types.rs:693`.
-- **AVL dependency containment.** All `ergo_avltree_rust` imports are confined
+- **AVL dependency containment.** All `ergo-avltree` imports are confined
   to `src/avl.rs`; the rest of the evaluator never touches the underlying crate.
   All operations (construction and per-op) are wrapped in `catch_unwind` so a
   malformed-proof panic from the underlying crate is caught, the verifier is

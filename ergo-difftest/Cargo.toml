@@ -42,7 +42,7 @@ rustix = { version = "1.1.4", features = ["process"] }
 [dev-dependencies]
 flate2 = { workspace = true }
 # Used in avl_frame tests to generate proof fixtures via the prover side.
-ergo_avltree_rust = { workspace = true }
+ergo-avltree = { workspace = true }
 bytes             = { workspace = true }
 
 [[bin]]

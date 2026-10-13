@@ -31,7 +31,7 @@ ergo-validation   = { workspace = true }
 ergo-sigma        = { workspace = true }
 ergo-wallet       = { workspace = true, features = ["keystore"] }
 ergo-wallet-service = { workspace = true }
-ergo_avltree_rust = { workspace = true }
+ergo-avltree = { workspace = true }
 bincode           = { workspace = true }
 blake2            = { workspace = true }
 bytes             = { workspace = true }

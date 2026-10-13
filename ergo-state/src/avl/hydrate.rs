@@ -1,7 +1,7 @@
 //! Hydrate a `BatchAVLProver` from the current `AvlTree` state.
 //!
 //! Walks the arena-backed tree from the root and builds the equivalent
-//! `Rc<RefCell<Node>>` graph that `ergo_avltree_rust`'s prover operates
+//! `Rc<RefCell<Node>>` graph that `ergo-avltree`'s prover operates
 //! on. The constructed prover can then run a batch of operations
 //! (insert / remove / update) to produce a new root digest and the
 //! AD-proof bytes that mainnet validators expect.
@@ -16,11 +16,11 @@
 //! follow-up; v1 hydrates per dry-run.
 
 use bytes::Bytes;
-use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-use ergo_avltree_rust::batch_node::{
+use ergo_avltree::batch_avl_prover::BatchAVLProver;
+use ergo_avltree::batch_node::{
     AVLTree as OracleTree, InternalNode, LeafNode, Node, NodeHeader, NodeId as OracleNodeId,
 };
-use ergo_avltree_rust::operation::Digest32 as OracleDigest32;
+use ergo_avltree::operation::Digest32 as OracleDigest32;
 
 use super::node::{AvlNode, NodeId};
 use super::tree::AvlTree;
@@ -175,7 +175,7 @@ fn mark_loaded(node: &OracleNodeId) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
     use ergo_primitives::digest::Digest32;
 
     // ----- helpers -----

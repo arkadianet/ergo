@@ -915,10 +915,10 @@ fn methodcall_coll_get_v6_returns_option_for_inbounds_and_oob() {
 #[test]
 fn methodcall_avltree_contains_matches_get() {
     use bytes::Bytes;
-    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-    use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-    use ergo_avltree_rust::batch_node::{AVLTree as OracleTree, Node, NodeHeader};
-    use ergo_avltree_rust::operation::{KeyValue, Operation};
+    use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree::batch_avl_prover::BatchAVLProver;
+    use ergo_avltree::batch_node::{AVLTree as OracleTree, Node, NodeHeader};
+    use ergo_avltree::operation::{KeyValue, Operation};
 
     let key_present: [u8; 32] = [0x42; 32];
     let value: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF];
@@ -989,7 +989,7 @@ fn methodcall_avltree_contains_matches_get() {
     );
 }
 
-/// AVL crate-boundary: a malformed proof makes `ergo_avltree_rust` PANIC
+/// AVL crate-boundary: a malformed proof makes `ergo-avltree` PANIC
 /// during proof-graph reconstruction. The `try_make_avl_verifier`
 /// catch_unwind boundary must contain it and degrade per Scala: `contains`
 /// returns `false` (contains_eval `case Failure(_) => false`), `get` errors
@@ -1202,10 +1202,10 @@ fn deep_proofs_fail_closed_body() {
 #[test]
 fn methodcall_avltree_root_height_out_of_range_is_script_error() {
     use bytes::Bytes;
-    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-    use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-    use ergo_avltree_rust::batch_node::{AVLTree as OracleTree, Node, NodeHeader};
-    use ergo_avltree_rust::operation::{KeyValue, Operation};
+    use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree::batch_avl_prover::BatchAVLProver;
+    use ergo_avltree::batch_node::{AVLTree as OracleTree, Node, NodeHeader};
+    use ergo_avltree::operation::{KeyValue, Operation};
     use ergo_ser::sigma_value::CollValue;
 
     let key = vec![0x42u8; 32];

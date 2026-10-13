@@ -39,9 +39,11 @@ infrastructure.
 - `[wallet] daemon_address` defaults to `http://127.0.0.1:3033`, the daemon templates' loopback listener (was `:9090`, which no daemon default used).
 - `/script/p2sAddress` and `/script/p2shAddress` compile with an empty environment: the node holds no wallet keys, so a script naming `myPubKey_N` is a `400` compile error.
 - `ergo-node wallet-scan-utxo` requires `--wallet-data-dir`. With `--wallet-key-stdin` it reads the key that `ergo-walletd export-unseal-key` prints and opens the daemon's encrypted database without the wallet password.
+- The authenticated AVL+ tree (UTXO set prover, script-level and ADProofs verifier) is now the workspace crate `ergo-avltree`, copied from ergoplatform/ergo_avltree_rust master (`9231458`), in place of crates.io `ergo_avltree_rust` 0.1.1. UTXO set digests and proofs are byte-identical. Verifier operations on proofs whose shape no valid tree has now fail with an error instead of a contained panic, with the same results.
 
 ### Fixed
 
+- Reject AVL proofs with a leaf value longer than 4 MiB, as the reference verifier (scrypto 3.1.1) does; these were previously accepted. Script proofs and block ADProofs cannot carry a value this long under current transaction, collection and box size limits.
 - Build and announce UTXO set snapshots on the last block of each 52,224-block epoch (heights 52223, 104447, ...) as the reference does, and only while within one epoch of the best header. They were previously built at heights that are multiples of 52,224, which no other node matched against its headers.
 - A pooled transaction whose regular input is in neither the UTXO set nor an output of a pooled transaction is now removed by the tip recheck, once no demoted transaction is waiting for revalidation. It previously stayed in the pool until it was squeezed out by weight. Candidate building reports such a transaction for an immediate recheck instead of skipping it silently.
 - The wallet engine now keeps multisig signing nonces itself unless the host opts out: `generateCommitments` returns single-use handles and signing refuses a caller-supplied nonce for a wallet key. An engine built without configuration previously returned the secret nonces to the caller. `ergo-walletd` opts into the caller form only with `[security] multisig_nonces = "caller"`.

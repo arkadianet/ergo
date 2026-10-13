@@ -742,7 +742,7 @@ pub(crate) fn make_avl_verifier(
 
 /// Construct an AVL verifier, degrading gracefully on ANY construction
 /// failure — both the typed `Err` (digest mismatch) AND a panic from the
-/// third-party `ergo_avltree_rust` crate's eager proof-graph reconstruction
+/// third-party `ergo-avltree` crate's eager proof-graph reconstruction
 /// (a malformed/empty/truncated/0x00 proof panics inside
 /// `BatchAVLVerifier::new`). Returns `None` on failure, mirroring scrypto,
 /// where non-fatal reconstruction failures yield `reconstructedTree = None`

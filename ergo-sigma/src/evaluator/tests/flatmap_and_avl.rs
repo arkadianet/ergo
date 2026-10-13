@@ -631,12 +631,12 @@ fn avltree_update_digest_operations_fixed_cost_invariant() {
 /// A tree of 32-byte keys `[0x10; 32]` .. `[0x60; 32]`, its digest, and a
 /// proof for the well-formed prefix of `ops` (stopping at the first key of
 /// another length or the first failing operation).
-fn avl_tree_and_proof(ops: &[ergo_avltree_rust::operation::Operation]) -> (Vec<u8>, Vec<u8>) {
+fn avl_tree_and_proof(ops: &[ergo_avltree::operation::Operation]) -> (Vec<u8>, Vec<u8>) {
     use bytes::Bytes;
-    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-    use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-    use ergo_avltree_rust::batch_node::{AVLTree, Node, NodeHeader};
-    use ergo_avltree_rust::operation::{KeyValue, Operation};
+    use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree::batch_avl_prover::BatchAVLProver;
+    use ergo_avltree::batch_node::{AVLTree, Node, NodeHeader};
+    use ergo_avltree::operation::{KeyValue, Operation};
 
     let mut prover = BatchAVLProver::new(
         AVLTree::new(
@@ -666,12 +666,12 @@ fn avl_tree_and_proof(ops: &[ergo_avltree_rust::operation::Operation]) -> (Vec<u
 
 /// Every AVL method that runs verifier operations, given keys of the wrong
 /// length alone, after a well-formed key, and before one: the result and the
-/// JIT cost must match handing those keys to `ergo_avltree_rust` (the
+/// JIT cost must match handing those keys to `ergo-avltree` (the
 /// behaviour before the wrapper's early return), under v0 and v3 trees.
 #[test]
 fn avl_wrong_length_keys_keep_verdict_and_cost() {
     use bytes::Bytes;
-    use ergo_avltree_rust::operation::{KeyValue, Operation};
+    use ergo_avltree::operation::{KeyValue, Operation};
     use ergo_ser::sigma_value::CollValue;
 
     fn lookup(k: &[u8]) -> Operation {

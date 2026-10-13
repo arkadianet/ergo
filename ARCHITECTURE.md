@@ -267,7 +267,7 @@ oracle-parity tests.
   (cryptographically definitive PoW failure). All other failures are
   session-scoped (`session_invalids`, cleared on restart) because they might be
   our own bug.
-- **AVL+ label hashing** matches `scorex-util`/`ergo_avltree_rust` exactly
+- **AVL+ label hashing** matches `scorex-util`/`ergo-avltree` exactly
   (`leaf = blake2b256(0x00‖key‖value‖next_key)`, `internal =
   blake2b256(0x01‖balance‖left‖right)`, `ADDigest = root_label‖tree_height`).
 - **Crash-repair contract.** Every write transaction routes through

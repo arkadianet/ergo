@@ -24,8 +24,8 @@ use redb::ReadableDatabase;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-use ergo_avltree_rust::batch_node::AVLTree as OracleTree;
+use ergo_avltree::batch_avl_prover::BatchAVLProver;
+use ergo_avltree::batch_node::AVLTree as OracleTree;
 use ergo_primitives::digest::{blake2b256, ADDigest, Digest32};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::block_transactions::read_stored_block_transactions;

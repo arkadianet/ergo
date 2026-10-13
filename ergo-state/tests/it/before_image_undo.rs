@@ -13,10 +13,10 @@ use ergo_state::avl::changelog::{ChangeLog, NodeChange};
 use ergo_state::avl::tree::AvlTree;
 
 use bytes::Bytes;
-use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-use ergo_avltree_rust::batch_node::{AVLTree as OracleTree, Node, NodeHeader};
-use ergo_avltree_rust::operation::{KeyValue, Operation};
+use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+use ergo_avltree::batch_avl_prover::BatchAVLProver;
+use ergo_avltree::batch_node::{AVLTree as OracleTree, Node, NodeHeader};
+use ergo_avltree::operation::{KeyValue, Operation};
 
 fn oracle_tree() -> BatchAVLProver {
     BatchAVLProver::new(

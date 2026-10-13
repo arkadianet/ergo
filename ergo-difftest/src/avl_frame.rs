@@ -319,15 +319,15 @@ mod tests {
     ///
     /// This test generates and prints the trigger hex so it can be pinned in
     /// the manifest as `trigger_hex`.  It does not assert the hex value itself
-    /// (the bytes depend on `ergo_avltree_rust` internals); instead it asserts
+    /// (the bytes depend on `ergo-avltree` internals); instead it asserts
     /// the structural invariant that the guarded verifier rejects the trigger
     /// without panicking.
     #[test]
     fn avl_panic_trigger_guarded_rejects_not_panics() {
-        use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-        use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-        use ergo_avltree_rust::batch_node::{AVLTree, Node, NodeHeader};
-        use ergo_avltree_rust::operation::{KeyValue, Operation};
+        use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+        use ergo_avltree::batch_avl_prover::BatchAVLProver;
+        use ergo_avltree::batch_node::{AVLTree, Node, NodeHeader};
+        use ergo_avltree::operation::{KeyValue, Operation};
         use ergo_sigma::avl::AvlVerifier;
 
         fn new_prover() -> BatchAVLProver {
