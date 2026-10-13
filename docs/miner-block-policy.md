@@ -86,6 +86,12 @@ that starts with `required_`:
   could not include it or one of its ancestors.
 - `required_final_fee_or_section_budget`: it was trimmed, after every
   optional transaction, so that the fee transaction and section fit.
+- `required_fee_collection_invalid`: it was trimmed, after every optional
+  transaction, because the fee transaction built with it did not validate.
+  At most three transactions are trimmed for this reason, lowest priority
+  first. If the fee transaction still does not validate, or only requested
+  transactions remain, the candidate is built without a fee transaction and
+  the fee boxes stay unspent.
 
 Bundles set an order; they are not atomic. Each member is included or
 reported on its own. Initial emission-only templates are published as usual,

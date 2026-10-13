@@ -10570,6 +10570,7 @@ components:
       - no_inputs_found
       - dust_change
       - stale_candidate
+      - expired_candidate
       - forced_tx_exceeds_budget
       - insufficient_signatures
       - script_error

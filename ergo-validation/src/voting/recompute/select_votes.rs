@@ -36,6 +36,25 @@ pub fn select_candidate_votes(
     is_epoch_start: bool,
     rule_215_disabled: bool,
 ) -> [u8; 3] {
+    select_candidate_votes_seeded(active, targets, is_epoch_start, rule_215_disabled, None)
+}
+
+/// [`select_candidate_votes`] restricted, off an epoch start, to the votes the
+/// epoch-start header seeded (`epoch_seed`, its `votes` field). The epoch
+/// tally only counts later votes for seeded entries (Scala `VotingData.update`,
+/// [`crate::compute_epoch_votes`]), and Scala's miner votes mid-epoch only for
+/// those (`Parameters.vote` over `epochVotes`). Restricting before taking the
+/// two allowed votes keeps an unseeded target from crowding out a seeded one.
+/// `None` (or an epoch start) selects as [`select_candidate_votes`].
+pub fn select_candidate_votes_seeded(
+    active: &ActiveProtocolParameters,
+    targets: &std::collections::BTreeMap<u8, i64>,
+    is_epoch_start: bool,
+    rule_215_disabled: bool,
+    epoch_seed: Option<&[u8; 3]>,
+) -> [u8; 3] {
+    let seeded =
+        |vote: i8| is_epoch_start || epoch_seed.is_none_or(|seed| seed.contains(&(vote as u8)));
     /// `Parameters.ParamVotesCount` — max non-soft-fork votes per header.
     const MAX_PARAM_VOTES: usize = 2;
     let mut chosen: Vec<i8> = Vec::new();
@@ -80,7 +99,11 @@ pub fn select_candidate_votes(
         if is_epoch_start && !rule_215_disabled && (!increase || d.id == SUBBLOCKS_PER_BLOCK_ID) {
             continue;
         }
-        chosen.push(if increase { d.id as i8 } else { -(d.id as i8) });
+        let vote = if increase { d.id as i8 } else { -(d.id as i8) };
+        if !seeded(vote) {
+            continue;
+        }
+        chosen.push(vote);
     }
     let mut out = [0u8; 3];
     for (i, v) in chosen.into_iter().enumerate() {
@@ -208,5 +231,35 @@ mod tests {
         let mut t = BTreeMap::new();
         t.insert(1u8, -5i64); // below StorageFeeFactorMin
         assert_eq!(select_candidate_votes(&p, &t, false, false), [0, 0, 0]);
+    }
+
+    #[test]
+    fn select_votes_mid_epoch_keeps_only_seeded_votes() {
+        use std::collections::BTreeMap;
+        let p = launch_at(1024);
+        // Targets on ids 1, 2 and 3 (all increases); the epoch seeded only 3.
+        let t: BTreeMap<u8, i64> = [(1u8, 2_000_000i64), (2, 9_000), (3, 600_000)]
+            .into_iter()
+            .collect();
+        let seed = [3u8, 0, 0];
+        assert_eq!(
+            select_candidate_votes_seeded(&p, &t, false, false, Some(&seed)),
+            [3, 0, 0]
+        );
+        // A decrease seed does not admit an increase vote.
+        let seed = [(-3i8) as u8, 0, 0];
+        assert_eq!(
+            select_candidate_votes_seeded(&p, &t, false, false, Some(&seed)),
+            [0, 0, 0]
+        );
+        // The seed does not restrict an epoch start, and None selects as before.
+        assert_eq!(
+            select_candidate_votes_seeded(&p, &t, true, false, Some(&[3, 0, 0])),
+            [1, 2, 0]
+        );
+        assert_eq!(
+            select_candidate_votes_seeded(&p, &t, false, false, None),
+            select_candidate_votes(&p, &t, false, false)
+        );
     }
 }

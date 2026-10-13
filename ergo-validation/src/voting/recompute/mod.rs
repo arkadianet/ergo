@@ -26,7 +26,7 @@ pub use descriptors::{
     votable_param_bounds, votable_param_description, votable_param_descriptors, votable_param_id,
     votable_param_name, ParamDescriptor,
 };
-pub use select_votes::select_candidate_votes;
+pub use select_votes::{select_candidate_votes, select_candidate_votes_seeded};
 
 use crate::active_params::ActiveProtocolParameters;
 use crate::voting::validation_settings::ErgoValidationSettingsUpdate;

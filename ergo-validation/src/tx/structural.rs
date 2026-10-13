@@ -163,12 +163,14 @@ fn check_output_box(
     Ok(())
 }
 
-/// Compute the serialized size of a box for min-value calculation.
+/// Compute the serialized size of output `index` as the box-size (rule
+/// 120) and min-value (rule 111) checks measure it.
 ///
 /// Scala uses `box.bytes.length` which includes transaction_id (32 bytes)
 /// and the VLQ-encoded output index. We serialize the candidate and add
-/// 32 + vlq_size(index) to match.
-fn serialized_box_size(out: &ErgoBoxCandidate, index: u16) -> Result<usize, ValidationError> {
+/// 32 + vlq_size(index) to match. Public so transaction builders can size
+/// an output with exactly the measure this validator applies.
+pub fn serialized_box_size(out: &ErgoBoxCandidate, index: u16) -> Result<usize, ValidationError> {
     let mut w = VlqWriter::new();
     ergo_ser::ergo_box::write_ergo_box_candidate_versioned(&mut w, out, 1)
         .map_err(|e| ValidationError::Deserialization(e.to_string()))?;

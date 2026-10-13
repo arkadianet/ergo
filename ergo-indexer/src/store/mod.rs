@@ -585,6 +585,55 @@ impl IndexerStore {
         Ok(out)
     }
 
+    /// Oldest-first keyset page of `unspent_by_creation_height`: up to
+    /// `limit` rows with `creationHeight ≤ height_cutoff` whose key
+    /// `(creation_height, global_box_index)` is strictly after `after`
+    /// (`None` starts at the oldest row). The next page continues from the
+    /// last returned row's key, so rows added or removed between reads
+    /// never shift later rows past the cursor, and the read starts at the
+    /// cursor instead of stepping over earlier rows.
+    pub fn read_storage_rent_eligible_after(
+        &self,
+        height_cutoff: u32,
+        after: Option<(u32, i64)>,
+        limit: u32,
+    ) -> Result<Vec<ergo_indexer_types::StorageRentEligibleDto>, IndexerError> {
+        use std::ops::Bound;
+        let read_txn = self.db.begin_read()?;
+        let table = match read_txn.open_table(storage_rent::UNSPENT_BY_CREATION_HEIGHT) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let lo = match after {
+            Some(key) => Bound::Excluded(key),
+            None => Bound::Included((0u32, i64::MIN)),
+        };
+        let hi = Bound::Included((height_cutoff, i64::MAX));
+        if let (Bound::Excluded(start), Bound::Included(end)) = (&lo, &hi) {
+            if start >= end {
+                return Ok(Vec::new());
+            }
+        }
+        let mut out = Vec::with_capacity(limit.min(1024) as usize);
+        for entry in table.range::<(u32, i64)>((lo, hi))? {
+            if out.len() >= limit as usize {
+                break;
+            }
+            let (k, v) = entry?;
+            let (creation_height, global_box_index) = k.value();
+            let (box_id, box_value, box_bytes_len) = storage_rent::decode_value(v.value())?;
+            out.push(ergo_indexer_types::StorageRentEligibleDto {
+                creation_height,
+                global_box_index,
+                box_id,
+                box_value,
+                box_bytes_len,
+            });
+        }
+        Ok(out)
+    }
+
     /// Paged scan of `unspent_by_creation_height` for boxes with
     /// `creationHeight ≤ height_cutoff`. Sort direction picks the scan
     /// side; both directions decode the same value bytes, just

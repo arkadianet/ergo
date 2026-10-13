@@ -30,9 +30,9 @@ pub use extension_validation::{
     validate_epoch_extension, ExtensionValidationError, ExtensionValidationOutcome,
 };
 pub use recompute::{
-    compute_next_params, select_candidate_votes, votable_param_bounds, votable_param_description,
-    votable_param_descriptors, votable_param_id, votable_param_name, ParamDescriptor,
-    RecomputeError, VotingSettings,
+    compute_next_params, select_candidate_votes, select_candidate_votes_seeded,
+    votable_param_bounds, votable_param_description, votable_param_descriptors, votable_param_id,
+    votable_param_name, ParamDescriptor, RecomputeError, VotingSettings,
 };
 pub use validation_settings::{
     ErgoValidationSettings, ErgoValidationSettingsUpdate, RuleStatus, ValidationSettingsCodecError,

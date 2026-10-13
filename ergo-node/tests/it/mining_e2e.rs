@@ -1307,7 +1307,11 @@ async fn lithos_requested_package_proves_and_applies_with_lender_key() {
         assert_eq!(history.status, 200, "{}", history.body);
         let history: ergo_rest_json::mining_inspection::MiningHistoryJson =
             serde_json::from_str(&history.body).unwrap();
-        assert_eq!(history.retention, 1040);
+        assert_eq!(
+            history.retention,
+            ergo_mining::handle::MAX_ORDINARY_TEMPLATES
+                + ergo_mining::handle::MAX_REQUESTED_TEMPLATES
+        );
         let accepted = history
             .outcomes
             .iter()

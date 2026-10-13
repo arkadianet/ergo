@@ -1760,6 +1760,16 @@ fn load_mining_explicit_refresh_interval_preserves_override() {
     );
 }
 
+#[test]
+fn load_mining_template_retention_defaults_and_overrides() {
+    let path = write_toml("[mining]\nenabled = true\n");
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("load");
+    assert_eq!(cfg.mining_config.template_retention_ms, 120_000);
+    let path = write_toml("[mining]\nenabled = true\ntemplate_retention_ms = 300000\n");
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("load");
+    assert_eq!(cfg.mining_config.template_retention_ms, 300_000);
+}
+
 // ----- Mode 2 (UTXO snapshot bootstrap) part 1 -----
 
 #[test]
