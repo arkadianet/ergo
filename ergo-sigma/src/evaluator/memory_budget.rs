@@ -81,9 +81,9 @@ fn shallow_bytes(value: &Value) -> u64 {
         Value::Tokens(v) => v.len() * size_of::<([u8; 32], u64)>(),
         Value::CollSigmaProp(v) => v.len() * size_of::<ergo_ser::sigma_value::SigmaBoolean>(),
         Value::CollHeader(v) => v.len() * size_of::<super::types::EvalHeader>(),
-        Value::CollGeneric(v, _) | Value::CollLegacyPair(v, _, _) | Value::CollBox(v) => {
-            v.len() * size_of::<Value>()
-        }
+        // `len` reads a lazy zip's row count without building its pairs.
+        Value::CollGeneric(v, _) | Value::CollLegacyPair(v, _, _) => v.len() * size_of::<Value>(),
+        Value::CollBox(v) => v.len() * size_of::<Value>(),
         Value::Tuple(v) => v.len() * size_of::<Value>(),
         Value::Str(s) => s.len(),
         _ => 0,
