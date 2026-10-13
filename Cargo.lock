@@ -800,6 +800,7 @@ dependencies = [
  "blake2",
  "byteorder",
  "bytes",
+ "ergo_avltree_rust",
  "rand 0.8.6",
  "sha2 0.9.9",
 ]
@@ -1283,6 +1284,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zeroize",
+]
+
+[[package]]
+name = "ergo_avltree_rust"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "040e68223ab3775e54463c0f97b340d8fe6b4080acc5236fb4c19da477650668"
+dependencies = [
+ "anyhow",
+ "base16",
+ "blake2",
+ "byteorder",
+ "bytes",
+ "rand 0.8.6",
+ "sha2 0.9.9",
 ]
 
 [[package]]
@@ -2994,7 +3010,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
