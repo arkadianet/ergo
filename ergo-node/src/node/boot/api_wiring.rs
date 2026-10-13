@@ -536,6 +536,7 @@ pub(super) async fn bind(
         local_reverse_proxy: config.api_local_reverse_proxy,
         services: api_services.clone(),
         script_config: config.api_script.clone(),
+        block_batch: config.api_block_batch,
     };
     let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts(
         api_ctx,

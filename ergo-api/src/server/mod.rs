@@ -137,6 +137,8 @@ pub struct ServerCtx {
     pub services: Arc<ApiServices>,
     /// Resolved production configuration for every native script endpoint.
     pub script_config: crate::v1::ScriptConfig,
+    /// Distinct-id cap and response budget for the full-block batch routes.
+    pub block_batch: crate::batch_ids::BlockBatchLimits,
 }
 
 /// Bind a TCP listener for the API server without starting axum.
@@ -196,6 +198,7 @@ pub fn serve_on(
         local_reverse_proxy: false,
         services: Arc::new(crate::ApiServices::new()),
         script_config: Default::default(),
+        block_batch: Default::default(),
     };
     serve_on_with_mempool(ctx, listener, shutdown_rx, None)
 }
@@ -577,6 +580,7 @@ pub fn router_with_wallet(
         local_reverse_proxy: false,
         services: Arc::new(crate::ApiServices::new()),
         script_config: Default::default(),
+        block_batch: Default::default(),
     };
     router_with_mempool_and_wallet_and_security(ctx, None, wallet_admin, None)
 }
@@ -690,6 +694,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         local_reverse_proxy,
         services,
         script_config,
+        block_batch,
     } = ctx;
     // Native `/api/v1/*` product-API route group inputs (chain/* + transactions/*
     // reads). Cloned up front because the compat / submit handles are moved into
@@ -1026,24 +1031,40 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     // adding per-request INFO lines. Matched route templates are code-defined
     // and contain neither query strings nor user-supplied path values.
     // Unmatched requests use a fixed label.
-    let router = assembled.layer(from_fn(spa_security_headers)).layer(
-        TraceLayer::new_for_http()
-            .make_span_with(make_http_span)
-            // 503 is this API's expected-unavailability reply (e.g. the
-            // tip-change gap on /mining/candidate, polled at 2 Hz by miners)
-            // — operational, not a fault. Everything else keeps the
-            // tower-http default ERROR. The closure cannot see the request
-            // path (tower-http classify gives only the failure class), so
-            // the demotion is status-scoped; the entered request span still
-            // attaches req_id/method/path to the event either way.
-            .on_failure(
-                |class: ServerErrorsFailureClass,
-                 latency: std::time::Duration,
-                 _span: &tracing::Span| {
-                    log_http_response_failure(class, latency);
-                },
-            ),
-    );
+    let router = assembled
+        .layer(from_fn(
+            move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+                // An extension installed further out (an embedder wrapping
+                // this router) takes precedence over the context value.
+                if req
+                    .extensions()
+                    .get::<crate::batch_ids::BlockBatchLimits>()
+                    .is_none()
+                {
+                    req.extensions_mut().insert(block_batch);
+                }
+                next.run(req)
+            },
+        ))
+        .layer(from_fn(spa_security_headers))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_http_span)
+                // 503 is this API's expected-unavailability reply (e.g. the
+                // tip-change gap on /mining/candidate, polled at 2 Hz by miners)
+                // — operational, not a fault. Everything else keeps the
+                // tower-http default ERROR. The closure cannot see the request
+                // path (tower-http classify gives only the failure class), so
+                // the demotion is status-scoped; the entered request span still
+                // attaches req_id/method/path to the event either way.
+                .on_failure(
+                    |class: ServerErrorsFailureClass,
+                     latency: std::time::Duration,
+                     _span: &tracing::Span| {
+                        log_http_response_failure(class, latency);
+                    },
+                ),
+        );
     (router, inventory)
 }
 

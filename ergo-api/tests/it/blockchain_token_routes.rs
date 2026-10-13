@@ -212,6 +212,24 @@ async fn tokens_post_200_returns_known_tokens_in_input_order() {
 }
 
 #[tokio::test]
+async fn tokens_post_answers_repeated_ids_once_and_caps_distinct_ids() {
+    let stub = StubIndexer::caught_up().with_token(sample_token_dto());
+    let app = build_app(Arc::new(stub));
+    let body_json = serde_json::to_vec(&vec![SAMPLE_TOKEN_HEX; 30_000]).unwrap();
+    let (status, body) = json_post(app, "/blockchain/tokens", body_json).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+
+    let cap = ergo_api::batch_ids::MAX_LOOKUP_IDS;
+    let ids: Vec<String> = (0..=cap).map(|i| format!("{i:064x}")).collect();
+    let app = build_app(Arc::new(StubIndexer::caught_up()));
+    let (status, body) =
+        json_post(app, "/blockchain/tokens", serde_json::to_vec(&ids).unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["reason"], "bad-request");
+}
+
+#[tokio::test]
 async fn tokens_post_200_empty_array_on_empty_input() {
     let app = build_app(Arc::new(StubIndexer::caught_up()));
     let body_json = serde_json::to_vec::<Vec<String>>(&vec![]).unwrap();
@@ -653,6 +671,7 @@ fn build_app_with_mempool(
             local_reverse_proxy: false,
             services: Arc::new(ergo_api::ApiServices::new()),
             script_config: Default::default(),
+            block_batch: Default::default(),
         },
         None, // admin — tests don't exercise the shutdown endpoint
     )

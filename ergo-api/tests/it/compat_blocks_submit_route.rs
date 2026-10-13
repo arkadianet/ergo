@@ -271,6 +271,7 @@ fn build_app(
         local_reverse_proxy: false,
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),
+        block_batch: Default::default(),
     };
     router_with_mempool_and_wallet_and_security(
         ctx,

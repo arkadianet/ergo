@@ -135,7 +135,8 @@ pub async fn status(State(state): State<V1State>, Path(tx_id_hex): Path<String>)
 }
 
 fn pooled_status(state: &V1State, row: crate::types::ApiMempoolTransaction) -> StatusResponse {
-    let rows = state.read.mempool_transactions().transactions;
+    let pool = state.read.mempool_transactions_shared();
+    let rows = &pool.transactions;
     let pool_size = rows.len() as u32;
 
     // Rank in the mining order (priority-weight DESC, tx_id ASC tiebreak) and
@@ -148,7 +149,7 @@ fn pooled_status(state: &V1State, row: crate::types::ApiMempoolTransaction) -> S
     // no longer in the snapshot, report "unknown" rather than a rank/ahead-bytes
     // computed against a pool that no longer contains it.
     let mut found_self = false;
-    for other in &rows {
+    for other in rows {
         max_fpb = max_fpb.max(other.fee_per_byte_nano_erg);
         if other.tx_id == row.tx_id {
             found_self = true;

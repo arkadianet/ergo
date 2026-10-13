@@ -157,6 +157,10 @@ fn eval_expr_inner(expr: &Expr, cx: EvalCtx<'_>, script_root: bool) -> Result<Va
         Expr::Unparsed(_) => Err(EvalError::UnparsedErgoTree),
     };
     *depth -= 1;
+    let result = match result {
+        Ok(v) => crate::evaluator::memory_budget::charge(&v).map(|()| v),
+        Err(e) => Err(e),
+    };
     #[cfg(feature = "value-trace")]
     if let Ok(v) = &result {
         crate::value_trace::record(expr, v);

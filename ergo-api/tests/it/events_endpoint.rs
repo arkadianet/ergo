@@ -183,6 +183,7 @@ fn activity_app_with_services(
             local_reverse_proxy: false,
             services,
             script_config: Default::default(),
+            block_batch: Default::default(),
         },
         None,
         Arc::new(ergo_api::wallet::NoopWalletAdmin),

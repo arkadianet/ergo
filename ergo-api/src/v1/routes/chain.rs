@@ -285,7 +285,8 @@ pub async fn blocks_at_height(
 }
 
 /// `POST /api/v1/chain/blocks/by-ids` — bulk full-block fetch; request order
-/// preserved, misses silently dropped, array capped at 200.
+/// preserved, repeated ids answered once, misses silently dropped, array
+/// capped at 200.
 #[utoipa::path(
     post, path = "/api/v1/chain/blocks/by-ids", tag = "chain",
     request_body(content = Vec<String>, description = "Header ids to fetch, at most 200"),
@@ -315,6 +316,8 @@ pub async fn blocks_by_ids(
     if ids.iter().any(|id| !valid_modifier_id(id)) {
         return invalid_hex();
     }
+    // Answer each distinct id once; the 200 cap above bounds the input.
+    let ids = crate::batch_ids::dedupe_and_cap(ids, 200).unwrap_or_default();
     state
         .blocking
         .clone()

@@ -205,21 +205,44 @@ pub async fn modifier_by_id_handler(
 /// - response is `Vec<ScalaFullBlock>` in request order, with missing
 ///   ids gone (not nulled)
 ///
-/// Scala does not enforce a length cap on this endpoint; we apply
-/// `MAX_HEADERS = 16384` defensively (banner-flagged in openapi).
+/// Repeated ids are answered once (first occurrence). At most
+/// [`crate::batch_ids::BlockBatchLimits::max_blocks`] distinct ids are
+/// accepted, and a response whose JSON would exceed
+/// [`crate::batch_ids::BlockBatchLimits::max_response_bytes`] is refused;
+/// both refusals are a 400. Blocks are read and serialized one at a time, so
+/// an oversized request stops at the block that crosses the budget.
 pub async fn block_by_ids_handler(
     State(q): State<Arc<dyn NodeChainQuery>>,
+    limits: Option<axum::Extension<crate::batch_ids::BlockBatchLimits>>,
     Json(ids): Json<Vec<String>>,
 ) -> Response {
-    if ids.len() as i64 > MAX_HEADERS {
-        return bad_request(&format!("No more than {MAX_HEADERS} ids can be requested"));
-    }
+    let limits = crate::batch_ids::BlockBatchLimits::from_extension(limits);
+    let ids = match crate::batch_ids::dedupe_and_cap(ids, limits.max_blocks) {
+        Ok(ids) => ids,
+        Err(detail) => return bad_request(&detail),
+    };
     for id in &ids {
         if !is_valid_modifier_hex(id) {
             return bad_request(&format!("Wrong modifierId format for: {id}"));
         }
     }
-    Json(q.full_blocks_by_header_ids(&ids)).into_response()
+    let too_large = || {
+        bad_request(&crate::batch_ids::response_too_large(
+            limits.max_response_bytes,
+        ))
+    };
+    let mut out = crate::batch_ids::BudgetedJsonArray::new(limits.max_response_bytes);
+    for id in &ids {
+        if let Some(block) = q.full_block_by_id(id) {
+            if out.push(&block).is_err() {
+                return too_large();
+            }
+        }
+    }
+    match out.finish() {
+        Ok(bytes) => crate::batch_ids::json_bytes_response(bytes),
+        Err(_) => too_large(),
+    }
 }
 
 /// Validate that a string is a 64-char lowercase/uppercase hex modifier
@@ -784,9 +807,16 @@ pub async fn utxo_with_pool_box_bytes_by_id_handler(
 /// `POST /utxo/withPool/byIds` — batch overlay lookup. Always 200 with a
 /// JSON array of resolved boxes; misses are silently dropped to match
 /// Scala's `flatMap`-based filtering (`UtxoApiRoute.scala:41-48`).
+///
+/// Repeated ids are answered once; at most
+/// [`crate::batch_ids::MAX_LOOKUP_IDS`] distinct ids per request (400 above).
 pub async fn utxo_with_pool_boxes_by_ids_handler(
     State(q): State<Arc<dyn NodeChainQuery>>,
     Json(ids): Json<Vec<String>>,
 ) -> Response {
+    let ids = match crate::batch_ids::dedupe_and_cap(ids, crate::batch_ids::MAX_LOOKUP_IDS) {
+        Ok(ids) => ids,
+        Err(detail) => return bad_request(&detail),
+    };
     Json(q.utxo_with_pool_boxes_by_ids(&ids)).into_response()
 }

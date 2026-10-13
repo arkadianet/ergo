@@ -281,8 +281,99 @@ async fn wrong_length_id_rejects_whole_request() {
 }
 
 #[tokio::test]
-async fn oversize_array_rejected() {
-    let ids: Vec<String> = (0..16385).map(|_| HEADER_ID_700K.to_string()).collect();
-    let (status, _) = json_post(build_app(), "/blocks/headerIds", serde_json::json!(ids)).await;
+async fn repeated_ids_are_answered_once() {
+    let ids: Vec<String> = (0..16_384)
+        .map(|i| {
+            if i % 2 == 0 {
+                HEADER_ID_700K.to_string()
+            } else {
+                HEADER_ID_700K.to_ascii_uppercase()
+            }
+        })
+        .collect();
+    let (status, body) = json_post(build_app(), "/blocks/headerIds", serde_json::json!(ids)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().expect("array").len(), 1);
+}
+
+#[tokio::test]
+async fn more_than_the_distinct_id_cap_is_rejected() {
+    let cap = ergo_api::batch_ids::DEFAULT_MAX_BLOCKS_PER_REQUEST;
+    let ids = |n: usize| -> Vec<String> { (0..n).map(|i| format!("{i:064x}")).collect() };
+    let (status, _) = json_post(
+        build_app(),
+        "/blocks/headerIds",
+        serde_json::json!(ids(cap)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = json_post(
+        build_app(),
+        "/blocks/headerIds",
+        serde_json::json!(ids(cap + 1)),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["reason"], "bad-request");
+    assert_eq!(
+        body["detail"],
+        format!("No more than {cap} ids can be requested")
+    );
+}
+
+fn app_with_limits(max_blocks: usize, max_response_bytes: usize) -> axum::Router {
+    build_app().layer(axum::Extension(ergo_api::batch_ids::BlockBatchLimits {
+        max_blocks,
+        max_response_bytes,
+    }))
+}
+
+#[tokio::test]
+async fn configured_distinct_id_cap_applies() {
+    let ids = |n: usize| -> Vec<String> { (0..n).map(|i| format!("{i:064x}")).collect() };
+    let (status, _) = json_post(
+        app_with_limits(3, 1 << 20),
+        "/blocks/headerIds",
+        serde_json::json!(ids(3)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = json_post(
+        app_with_limits(3, 1 << 20),
+        "/blocks/headerIds",
+        serde_json::json!(ids(4)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["detail"], "No more than 3 ids can be requested");
+}
+
+#[tokio::test]
+async fn response_above_the_size_budget_is_rejected_whole() {
+    let block_len = serde_json::to_vec(
+        &serde_json::from_str::<serde_json::Value>(FIXTURE_700K).expect("fixture json"),
+    )
+    .unwrap()
+    .len();
+    // One block plus brackets fits exactly; one byte less does not.
+    let (status, body) = json_post(
+        app_with_limits(10, block_len + 2),
+        "/blocks/headerIds",
+        serde_json::json!([HEADER_ID_700K]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().expect("array").len(), 1);
+    let (status, body) = json_post(
+        app_with_limits(10, block_len + 1),
+        "/blocks/headerIds",
+        serde_json::json!([HEADER_ID_700K]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["reason"], "bad-request");
+    assert_eq!(
+        body["detail"],
+        ergo_api::batch_ids::response_too_large(block_len + 1)
+    );
 }

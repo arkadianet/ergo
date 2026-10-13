@@ -476,8 +476,14 @@ fn execute_inner(state: &ScriptState, body: ExecuteBody) -> Result<ExecuteRespon
     let self_box = self_box_from_ctx(body.context.as_ref(), height)?;
     let limit = state.config.effective_cost_limit(body.max_cost);
 
-    let out = bounded_reduce(&tree, height, self_box.as_ref(), limit)
-        .map_err(|e| eval_error_response(&e))?;
+    let out = bounded_reduce(
+        &tree,
+        height,
+        self_box.as_ref(),
+        limit,
+        state.config.max_eval_bytes,
+    )
+    .map_err(|e| eval_error_response(&e))?;
     Ok(ExecuteResponse {
         reduced_to: render_sigma_boolean(&out.reduced_to),
         result: out.result,
@@ -545,8 +551,14 @@ fn cost_inner(state: &ScriptState, body: ExecuteBody) -> Result<CostResponse, Bo
     let self_box = self_box_from_ctx(body.context.as_ref(), height)?;
     let limit = state.config.effective_cost_limit(body.max_cost);
 
-    let out = bounded_reduce(&tree, height, self_box.as_ref(), limit)
-        .map_err(|e| eval_error_response(&e))?;
+    let out = bounded_reduce(
+        &tree,
+        height,
+        self_box.as_ref(),
+        limit,
+        state.config.max_eval_bytes,
+    )
+    .map_err(|e| eval_error_response(&e))?;
     Ok(CostResponse {
         total_cost: out.block_cost,
         within_block_limit: out.block_cost <= MAX_BLOCK_COST,
@@ -651,8 +663,14 @@ fn simulate_inner(
 ) -> Result<SimulateResponse, Box<Response>> {
     let (eval_box, tree, height) = resolve_real_box(state, &body.box_id, body.at_height)?;
     let limit = state.config.effective_cost_limit(body.max_cost);
-    let out = bounded_reduce(&tree, height, Some(&eval_box), limit)
-        .map_err(|e| eval_error_response(&e))?;
+    let out = bounded_reduce(
+        &tree,
+        height,
+        Some(&eval_box),
+        limit,
+        state.config.max_eval_bytes,
+    )
+    .map_err(|e| eval_error_response(&e))?;
     Ok(SimulateResponse {
         spendable: out.result != Some(false),
         reduced_to: render_sigma_boolean(&out.reduced_to),
@@ -770,7 +788,13 @@ fn explain_inner(
     // Traced reduction on the SAME interpreter path and reduction environment
     // as `bounded_reduce` (single owner). The trace walker adds no reduction
     // logic — it renders the interpreter's own `TraceEntry` stream.
-    let (result, entries) = bounded_reduce_traced(&tree, height, Some(&eval_box), limit);
+    let (result, entries) = bounded_reduce_traced(
+        &tree,
+        height,
+        Some(&eval_box),
+        limit,
+        state.config.max_eval_bytes,
+    );
 
     let trace_truncated = entries.len() > MAX_TRACE_ENTRIES;
     let reduction_trace: Vec<TraceView> = entries
@@ -804,6 +828,7 @@ fn explain_inner(
                 EvalError::CostExceeded(_)
                     | EvalError::JitCostOverflow(_)
                     | EvalError::DepthLimitExceeded(_)
+                    | EvalError::MemoryBudgetExceeded { .. }
             ) =>
         {
             return Err(eval_error_response(&e))
@@ -923,7 +948,13 @@ async fn diff_inner(state: &ScriptState, body: DiffBody) -> Result<DiffResponse,
             let limit = work_state.config.effective_cost_limit(body.max_cost);
 
             // Rust side: our verdict + reduced proposition + cost.
-            let rust = match bounded_reduce(&tree, height, self_box.as_ref(), limit) {
+            let rust = match bounded_reduce(
+                &tree,
+                height,
+                self_box.as_ref(),
+                limit,
+                work_state.config.max_eval_bytes,
+            ) {
                 Ok(out) => DiffSide {
                     verdict: "accept",
                     reduced_to: Some(render_sigma_boolean(&out.reduced_to)),
@@ -940,6 +971,7 @@ async fn diff_inner(state: &ScriptState, body: DiffBody) -> Result<DiffResponse,
                         EvalError::CostExceeded(_)
                             | EvalError::JitCostOverflow(_)
                             | EvalError::DepthLimitExceeded(_)
+                            | EvalError::MemoryBudgetExceeded { .. }
                     ) =>
                 {
                     return Err(eval_error_response(&e))
