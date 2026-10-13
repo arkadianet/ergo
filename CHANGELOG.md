@@ -16,6 +16,16 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-13
+
+A consensus release for mainnet, and the release that moves the wallet out of the node. Upgrade every 0.12.x node, mining nodes first. 0.12.3 was never published; its changes are included here.
+
+- **Consensus:** the script evaluator, transaction rules and AVL proof handling now reject a number of transactions the reference node rejects and that earlier releases accepted (see Fixed). Older nodes can accept a block that this release and the reference node reject.
+- **The wallet runs in its own daemon.** The node no longer hosts a wallet: its wallet and scan routes answer `410 wallet_moved`. Follow [Upgrading a node that hosted its wallet](https://github.com/arkadianet/ergo/blob/v0.13.0/docs/wallet-setup.md#upgrading-a-node-that-hosted-its-wallet) to move an existing wallet to `ergo-walletd`. A node with no wallet needs no wallet step.
+- **Mining:** a node without `[mining] miner_public_key_hex` or `miner_reward_address` keeps paying the old wallet's first-address key and logs the `miner_reward_address` line to pin it with; with neither and no old wallet, boot fails.
+- **Limits clients may notice:** block batch routes take at most 1,000 distinct ids and 64 MiB per response, token and box batch routes 1,000 ids, the v1 script playground defaults to a 1,000,000 cost limit, and P2S/P2SH sources are capped at 64 KiB (all configurable where noted below).
+- **Downgrading is not supported** once `ergo-walletd` has upgraded a keystore or the old wallet rows are purged. Back up `data_dir` before upgrading.
+
 ### Security
 
 - **Wallet keystore version 2.** New wallets use Argon2id (256 MiB, 3 passes) with AES-256-GCM that authenticates every parameter. A version-1 (Scala/Appkit PBKDF2) keystore is rewritten as version 2 in place by its first successful unlock; `ergo-wallet export-keystore` still writes version 1 for JVM tools. Version-2 files cannot be read by earlier releases. Keystore cost parameters are bounded on read.
@@ -36,6 +46,15 @@ infrastructure.
 
 ### Changed
 
+- **Mining templates:** superseded templates stay solvable by age as well as count: the newest 16, plus older ones younger than `[mining] template_retention_ms` (default 120 s), within 1,024 templates and about 256 MiB. A mempool-refresh rebuild whose block content is unchanged keeps serving the existing template. A solution for a template the node no longer holds is answered `400 stale_candidate` on `/mining/solution` and `400 expired_candidate` on `/api/v1/mining/solution` (a new v1 reason), instead of `invalid_pow`.
+- **Mining votes:** mid-epoch candidates vote only for parameters the epoch-start block cast.
+- **Header timestamps:** headers more than 10 block intervals ahead of the local clock are deferred, derived from the chain's block interval: unchanged on mainnet (20 minutes), 7.5 minutes on testnet instead of a fixed 20.
+- **P2P scoring and gossip:** misbehaviour scores are kept per IP across reconnects. `Peers` is taken only as a reply to our `GetPeers` within 60 s, capped at 64 entries, with duplicates and our own address dropped. Block-section `Inv`s are requested only for blocks whose header we hold, and repeated ids count once. The delivery tracker keys requests by modifier type and id.
+- **P2P serving:** each id in a `RequestModifier` is served once, within a per-peer budget of 200 MB per 10 s. UTXO snapshot votes count only from peers we asked in the current round and must match our header at their height.
+- **API batch limits:** `/blocks/headerIds` and `/blockchain/block/byHeaderIds` take at most `[api] max_blocks_per_request` distinct ids (default 1,000) and answer `400` when the response would exceed `[api] max_blocks_response_bytes` (default 64 MiB); `/blockchain/tokens` and `/utxo/withPool/byIds` take 1,000 ids. Repeated ids in one request are answered once.
+- **Script playground and compile limits:** `[api.script] max_cost` defaults to 1,000,000 (was 8,001,091), and the new `max_eval_bytes` (default 64 MiB) bounds the collection data one playground run builds; block, mempool and mining validation are unaffected. `/script/p2sAddress` and `/script/p2shAddress` refuse sources over 64 KiB.
+- **Mempool replacement:** a replacement must outweigh the heaviest transaction it conflicts with and pay more fee than everything it removes (before: beat the average conflict weight).
+- **Mempool accounting:** each validation attempt is charged at least 5,000 cost units, and admission resolves pooled inputs without copying the pool's outputs. A transaction that fails on its spending proofs (script, cost) is now only filtered from the peer that delivered it, since its id does not cover the proofs; other failures still filter it from every peer.
 - `[wallet] daemon_address` defaults to `http://127.0.0.1:3033`, the daemon templates' loopback listener (was `:9090`, which no daemon default used).
 - `/script/p2sAddress` and `/script/p2shAddress` compile with an empty environment: the node holds no wallet keys, so a script naming `myPubKey_N` is a `400` compile error.
 - `ergo-node wallet-scan-utxo` requires `--wallet-data-dir`. With `--wallet-key-stdin` it reads the key that `ergo-walletd export-unseal-key` prints and opens the daemon's encrypted database without the wallet password.
@@ -43,6 +62,15 @@ infrastructure.
 
 ### Fixed
 
+- Reject `substConstants` and `Global.deserializeTo` calls whose parsed bytes contain an off-curve group element, including points inside SigmaProp, Box and Header values. These calls were previously accepted (#616).
+- Size the storage-rent fee on the box bytes as received, as the reference does, instead of a re-serialization. These differ only for non-canonical stored bytes, which can arise for boxes taken from AD proofs in digest mode.
+- The candidate builder no longer fails: a fee-collection box is built within the box token and size limits; a fee transaction that still fails validation trims at most three lowest-priority user transactions and then builds without fee collection; an emission transaction that cannot be built (end of emission, zero reward, an emission box under the rule-123 threshold) leaves it out; and a rent claim that cannot be built, or a missing `storageFeeFactor`, builds without the claim. Previously each of these failed the build or left an emission-only template.
+- At the EIP-27 activation height the builder spends the injection box as the second input, as the reference generator does.
+- The rent-claim scan no longer stalls behind unclaimable boxes, skips boxes holding a re-emission obligation, and leaves boxes that a pooled transaction spends to that transaction.
+- The solution pre-check requires hit < target, as header validation does; a solution with hit equal to the target was accepted by the API and then failed block validation.
+- A version-1 block whose transactions fail a spending-proof check is fetched again (at most three times) before it is marked invalid, since a version-1 transactions root does not commit to spending proofs. A storage error while doing so no longer invalidates the block.
+- Reject a replacement transaction that spends an output of a transaction it would remove; it previously sat in the pool unminable.
+- UTXO apply rejects a block whose insert would replace an existing box instead of overwriting it.
 - Reject AVL proofs with a leaf value longer than 4 MiB, as the reference verifier (scrypto 3.1.1) does; these were previously accepted. Script proofs and block ADProofs cannot carry a value this long under current transaction, collection and box size limits.
 - Build and announce UTXO set snapshots on the last block of each 52,224-block epoch (heights 52223, 104447, ...) as the reference does, and only while within one epoch of the best header. They were previously built at heights that are multiples of 52,224, which no other node matched against its headers.
 - A pooled transaction whose regular input is in neither the UTXO set nor an output of a pooled transaction is now removed by the tip recheck, once no demoted transaction is waiting for revalidation. It previously stayed in the pool until it was squeezed out by weight. Candidate building reports such a transaction for an immediate recheck instead of skipping it silently.
@@ -65,17 +93,6 @@ infrastructure.
 - Collection element access (`getOrElse`, `apply`, `get`, `indexOf`, `slice`), `append` of primitive collections, lambda calls inside collection operations and blocks no longer copy whole collections or environments per call. A transaction indexing a 60 KB context variable 60,000 times took 20 s to validate and now takes 0.2 s; verdicts and costs are unchanged.
 - `zip` keeps its two collections and builds pairs only when they are read, so sizing, indexing or slicing a zip no longer builds every pair. A transaction that sized a zip of a 60 KB context variable once per index took 26 s to reject and now takes 0.01 s; verdicts and costs are unchanged.
 - AVL tree operations in scripts no longer allocate memory proportional to the tree's declared key length when the key has a different length. With a large declared key length, each such operation allocated up to 4 GB and took about a second; it now fails immediately with the same result and cost as before.
-
-## [0.12.3] - 2026-10-07
-
-A consensus release for mainnet. Upgrade every 0.12.2 node, mining nodes first. Upgrading changes no data: stop the node, replace the binaries and start it again.
-
-- **Group element checks in script-parsed data:** `substConstants` and `Global.deserializeTo` now reject data containing a point that is not on the curve, as the reference node does. 0.12.2 and earlier accepted it (#616).
-- **API:** a read-only `ErgoBoxCandidate::canonical_tree_bytes` accessor in `ergo-ser` (#615).
-
-### Fixed
-
-- Reject `substConstants` and `Global.deserializeTo` calls whose parsed bytes contain an off-curve group element, including points inside SigmaProp, Box and Header values. These calls were previously accepted (#616).
 
 ### Added
 

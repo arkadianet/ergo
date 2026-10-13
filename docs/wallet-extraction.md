@@ -5,7 +5,7 @@ watch-only daemon against the embedded wallet. Phase 1 landed in main through
 [#381](https://github.com/arkadianet/ergo/pull/381). All seven Phase 2 items
 landed on `integration/wallet-extraction`; [#574](https://github.com/arkadianet/ergo/pull/574)
 completed their refresh and validation. The subsequent main merge carries the
-0.12.3 node changes across the extracted boundaries in
+0.13.0 node changes across the extracted boundaries in
 [#618](https://github.com/arkadianet/ergo/pull/618). Phase 3 is complete on the
 integration branch: [#619](https://github.com/arkadianet/ergo/pull/619) added
 the seed lifecycle host and [#620](https://github.com/arkadianet/ergo/pull/620)
@@ -58,7 +58,7 @@ node's own configuration.
 The refresh retains main's rescan ownership and cancellation guarantees,
 atomic cache hydration, tracked-key/master checks, path visibility and
 derivation-counter fixes, native register/mint/burn/eligibility support, and
-coherent selection/signing snapshots. The 0.12.3 refresh also retains durable
+coherent selection/signing snapshots. The 0.13.0 refresh also retains durable
 private mining jobs, scoped API credentials, offline current-UTXO discovery,
 and pruned restore invalidation. The service owns job preparation and durable
 records; the node supplies private queue access and bounded background RPCs.
