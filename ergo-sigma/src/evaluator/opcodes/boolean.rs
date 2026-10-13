@@ -8,7 +8,7 @@
 use ergo_ser::opcode::Expr;
 use ergo_ser::sigma_value::SigmaBoolean;
 
-use super::super::cost::{add_cost, add_cost_per_item, collection_len};
+use super::super::cost::{add_cost, add_cost_per_item, collection_len, is_empty_collection};
 use super::super::dispatch::TraceEntry;
 use super::super::eval_ctx::EvalCtx;
 use super::super::helpers::trace_val;
@@ -72,7 +72,14 @@ pub(in crate::evaluator) fn eval_bin_or(
                     value: format!("left=false, right={}", trace_val(&r)),
                 });
             }
-            Ok(r)
+            // The right operand is cast to Boolean too (ClassCastException).
+            match r {
+                Value::Bool(_) => Ok(r),
+                _ => Err(EvalError::TypeError {
+                    expected: "Bool for BinOr right operand",
+                    got: format!("{r:?}"),
+                }),
+            }
         }
         _ => Err(EvalError::TypeError {
             expected: "Bool for BinOr",
@@ -111,7 +118,14 @@ pub(in crate::evaluator) fn eval_bin_and(
                     value: format!("left=true, right={}", trace_val(&r)),
                 });
             }
-            Ok(r)
+            // The right operand is cast to Boolean too (ClassCastException).
+            match r {
+                Value::Bool(_) => Ok(r),
+                _ => Err(EvalError::TypeError {
+                    expected: "Bool for BinAnd right operand",
+                    got: format!("{r:?}"),
+                }),
+            }
         }
         _ => Err(EvalError::TypeError {
             expected: "Bool for BinAnd",
@@ -158,6 +172,9 @@ pub(in crate::evaluator) fn eval_and_collection(
         }
         _ => {
             add_cost_per_item(cx.cost, 0x96, collection_len(&val, cx.ctx) as u32)?;
+            if is_empty_collection(&val, cx.ctx) {
+                return Ok(Value::Bool(true));
+            }
             Err(EvalError::TypeError {
                 expected: "Coll[Boolean]",
                 got: format!("{val:?}"),
@@ -184,6 +201,9 @@ pub(in crate::evaluator) fn eval_or_collection(
         }
         _ => {
             add_cost_per_item(cx.cost, 0x97, collection_len(&val, cx.ctx) as u32)?;
+            if is_empty_collection(&val, cx.ctx) {
+                return Ok(Value::Bool(false));
+            }
             Err(EvalError::TypeError {
                 expected: "Coll[Boolean] for OR",
                 got: format!("{val:?}"),

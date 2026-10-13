@@ -38,7 +38,7 @@
 use ergo_ser::opcode::Expr;
 use num_traits::{Signed, Zero};
 
-use super::super::cost::{add_arith_cost, add_cost, add_cost_per_item};
+use super::super::cost::{add_arith_cost, add_cost, add_cost_per_item, is_empty_collection};
 use super::super::eval_ctx::EvalCtx;
 use super::super::types::{EvalError, Value};
 use super::cast::apply_pre_v3_auto_upcast;
@@ -469,6 +469,12 @@ pub(in crate::evaluator) fn eval_xor_of(
                 bs.contains(&true) && bs.contains(&false)
             };
             Ok(Value::Bool(result))
+        }
+        // Both the JIT fold and the historical distinct-count rule give false
+        // for an empty collection, whose elements are never cast.
+        other if is_empty_collection(&other, cx.ctx) => {
+            add_cost_per_item(cx.cost, 0xFF, 0)?;
+            Ok(Value::Bool(false))
         }
         other => Err(EvalError::TypeError {
             expected: "Coll[Boolean] for XorOf",

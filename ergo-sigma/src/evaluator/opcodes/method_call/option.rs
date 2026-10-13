@@ -10,7 +10,7 @@ use ergo_ser::opcode::Expr;
 use crate::evaluator::cost::add_method_cost;
 use crate::evaluator::dispatch::eval_expr;
 use crate::evaluator::eval_ctx::EvalCtx;
-use crate::evaluator::opcodes::binding::check_closure_param_types;
+use crate::evaluator::opcodes::binding::{check_closure_arg, check_closure_result};
 use crate::evaluator::types::{EvalError, Value};
 
 // SOption(36).map(7) -> Option[B]
@@ -48,7 +48,7 @@ pub(super) fn map(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
             } => {
                 // Scala closure invocation: Value.checkType runs
                 // before the AddToEnvironment charge.
-                check_closure_param_types(&param_types).map_err(reflect_sstring_error)?;
+                check_closure_arg(&param_types, &inner, cx.ctx).map_err(reflect_sstring_error)?;
                 if let Some((_, Some(tpe))) = param_types.first() {
                     crate::evaluator::opcodes::binding::check_runtime_tuple_type(tpe, &inner)
                         .map_err(reflect_sstring_error)?;
@@ -70,6 +70,7 @@ pub(super) fn map(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
                     cx.trace,
                 )
                 .and_then(reject_sstring)
+                .and_then(|r| check_closure_result(&body, r, cx.ctx))
                 .map_err(reflect_sstring_error)?;
                 Ok(Value::Opt(Some(Box::new(result))))
             }
@@ -119,7 +120,7 @@ pub(super) fn filter(
                 body,
             } => {
                 // Scala validates the parameter before charging its binding.
-                check_closure_param_types(&param_types).map_err(reflect_sstring_error)?;
+                check_closure_arg(&param_types, &inner, cx.ctx).map_err(reflect_sstring_error)?;
                 if let Some((_, Some(tpe))) = param_types.first() {
                     crate::evaluator::opcodes::binding::check_runtime_tuple_type(tpe, &inner)
                         .map_err(reflect_sstring_error)?;
@@ -141,6 +142,7 @@ pub(super) fn filter(
                     cx.trace,
                 )
                 .and_then(reject_sstring)
+                .and_then(|r| check_closure_result(&body, r, cx.ctx))
                 .map_err(reflect_sstring_error)?;
                 match result {
                     Value::Bool(true) => Ok(Value::Opt(Some(inner))),

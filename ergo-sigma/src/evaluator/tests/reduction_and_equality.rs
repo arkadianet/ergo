@@ -281,7 +281,8 @@ fn box_collection_vs_derived_tuple() {
                 source: BoxSource::Inputs,
                 index: 1,
             },
-        ],
+        ]
+        .into(),
         Box::new(SigmaType::SBox),
     );
     assert!(values_equal(&inputs_coll, &derived, &ctx).unwrap());
@@ -292,7 +293,8 @@ fn box_collection_vs_derived_tuple() {
         vec![Value::BoxRef {
             source: BoxSource::Inputs,
             index: 0,
-        }],
+        }]
+        .into(),
         Box::new(SigmaType::SBox),
     );
     assert!(!values_equal(&inputs_coll, &partial, &ctx).unwrap());
@@ -376,7 +378,8 @@ fn coll_box_eq_cost_uses_per_item() {
                 source: BoxSource::Inputs,
                 index: 1,
             },
-        ],
+        ]
+        .into(),
         Box::new(SigmaType::SBox),
     );
     eq_with_cost(&derived, &derived, &ctx, &mut cost2).unwrap();
@@ -501,12 +504,12 @@ fn eq_with_cost_boolean_matches_values_equal() {
         (Value::CollBytes(vec![1, 2]), Value::CollBytes(vec![1, 3])),
         (Value::CollBytes(vec![1]), Value::CollBytes(vec![1, 2])),
         (
-            Value::CollGeneric(vec![ge(1)], Box::new(SigmaType::SGroupElement)),
-            Value::CollGeneric(vec![ge(1)], Box::new(SigmaType::SGroupElement)),
+            Value::CollGeneric(vec![ge(1)].into(), Box::new(SigmaType::SGroupElement)),
+            Value::CollGeneric(vec![ge(1)].into(), Box::new(SigmaType::SGroupElement)),
         ),
         (
-            Value::CollGeneric(vec![ge(1)], Box::new(SigmaType::SGroupElement)),
-            Value::CollGeneric(vec![ge(2)], Box::new(SigmaType::SGroupElement)),
+            Value::CollGeneric(vec![ge(1)].into(), Box::new(SigmaType::SGroupElement)),
+            Value::CollGeneric(vec![ge(2)].into(), Box::new(SigmaType::SGroupElement)),
         ),
         (
             Value::Tuple(vec![Value::Byte(1), Value::Byte(2)]),
@@ -523,11 +526,11 @@ fn eq_with_cost_boolean_matches_values_equal() {
         (Value::Opt(None), Value::Opt(Some(Box::new(Value::Int(5))))),
         (
             Value::CollGeneric(
-                vec![Value::CollInt(vec![1])],
+                vec![Value::CollInt(vec![1])].into(),
                 Box::new(SigmaType::SColl(Box::new(SigmaType::SInt))),
             ),
             Value::CollGeneric(
-                vec![Value::CollInt(vec![1])],
+                vec![Value::CollInt(vec![1])].into(),
                 Box::new(SigmaType::SColl(Box::new(SigmaType::SInt))),
             ),
         ),
@@ -743,7 +746,7 @@ fn empty_map_with_captured_closure_value() {
         captured_env: std::rc::Rc::new(captured_env),
         params: vec![10],
         param_types: vec![(10, Some(SigmaType::SBox))],
-        body: Box::new(mapper_body),
+        body: std::rc::Rc::new(mapper_body),
     };
 
     // Empty input collection (filter removed everything)
@@ -881,7 +884,7 @@ fn every_value_variant_equals_itself() {
         captured_env: Rc::new(Env::new()),
         params: vec![],
         param_types: vec![],
-        body: Box::new(Expr::Op(IrNode {
+        body: std::rc::Rc::new(Expr::Op(IrNode {
             opcode: 0x7F,
             payload: Payload::Zero,
         })),

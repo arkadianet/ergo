@@ -122,7 +122,7 @@ fn trace_pins_method_indexof_cumulative_total() {
     //   collection = [1, 1, 1]
     //   indexOf target = 1, from = 1  -> iterates once, hits index 1
     //   result = 1
-    //   1 == 1  -> TrivialProp(true)
+    //   sigmaProp(1 == 1)  -> TrivialProp(true)
     let coll = Expr::Op(IrNode {
         opcode: 0x83,
         payload: Payload::ConcreteCollection {
@@ -140,9 +140,13 @@ fn trace_pins_method_indexof_cumulative_total() {
             type_args: vec![],
         },
     });
+    // sigmaProp(...): a script result must be a SigmaProp.
     let body = Expr::Op(IrNode {
-        opcode: 0x93,
-        payload: Payload::Two(Box::new(indexof), Box::new(height())),
+        opcode: 0xD1,
+        payload: Payload::One(Box::new(Expr::Op(IrNode {
+            opcode: 0x93,
+            payload: Payload::Two(Box::new(indexof), Box::new(height())),
+        }))),
     });
 
     let ctx = ReductionContext {
@@ -173,7 +177,7 @@ fn trace_pins_method_indexof_cumulative_total() {
     cost_trace::enable();
     let mut cost = CostAccumulator::recording_only();
     reduce_expr_with_cost(&body, &ctx, &[], &mut cost)
-        .expect("indexOf script should reduce to Bool");
+        .expect("indexOf script should reduce to a SigmaProp");
     let trace = cost_trace::take().expect("trace should be enabled");
 
     // Shape-only invariant checks. The tree was constructed so that every

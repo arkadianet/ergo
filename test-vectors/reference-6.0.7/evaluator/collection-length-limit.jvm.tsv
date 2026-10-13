@@ -1,0 +1,14 @@
+cap-append-50000	true	12310
+cap-append-50001	false	null
+cap-flatmap-400x250	true	26853
+cap-flatmap-400x251	false	null
+cap2-patch-50001	false	null
+cap2-appendint-50001	false	null
+cap2-append-map-50001	false	null
+cap2-serialize-9999	true	15109
+cap2-serialize-10000	false	null
+p4-v3-append-empty-left-60000	true	12228
+p4-v3-patch-50000-50000-r0	true	14114
+p4-v3-patch-50000-50001-r0	false	null
+p4-v3-patch-50000-50001-r1	true	14115
+p4-v3-patch-50000-50001-r5	true	14115

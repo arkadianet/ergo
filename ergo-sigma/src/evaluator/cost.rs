@@ -2,6 +2,7 @@ use ergo_primitives::cost::{CostAccumulator, CostKind, JitCost};
 use ergo_ser::sigma_value::SigmaBoolean;
 
 use super::types::{BoxSource, EvalError, ReductionContext, Value};
+use crate::avl::MAX_SCRIPT_AVL_PROOF_HEIGHT;
 use crate::cost_table;
 
 /// Faithful port of Scala `DataValueComparer.equalSigmaBoolean` (cost AND
@@ -440,7 +441,7 @@ fn eq_with_cost_inner(
             cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
             let b_view = match right {
                 Value::Tokens(b) => token_tuple_values(b),
-                Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _) => b.clone(),
+                Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _) => (**b).clone(),
                 // `require_comparable` gates the operand types; any other right
                 // carrier is unreachable. The case-2 MatchType is charged;
                 // defer the boolean to the uncosted authority.
@@ -472,9 +473,10 @@ fn descriptor_coll_eq(
 ) -> Result<bool, EvalError> {
     fn item(value: &Value, index: usize) -> Result<Value, EvalError> {
         match value {
-            Value::CollGeneric(items, _)
-            | Value::CollLegacyPair(items, _, _)
-            | Value::CollBox(items) => Ok(items[index].clone()),
+            Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => {
+                Ok(items[index].clone())
+            }
+            Value::CollBox(items) => Ok(items[index].clone()),
             Value::CollHeader(items) => Ok(Value::Header(Box::new(items[index].clone()))),
             Value::BoxCollection(source) => Ok(Value::BoxRef {
                 source: *source,
@@ -517,7 +519,8 @@ fn eq_coll_fallback(
     // Scala `equalColls` fallback).
     let b_owned;
     let b: &[Value] = match right {
-        Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _) | Value::CollBox(b) => b,
+        Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _) => b,
+        Value::CollBox(b) => b,
         Value::Tokens(t) => {
             b_owned = token_tuple_values(t);
             &b_owned
@@ -528,7 +531,10 @@ fn eq_coll_fallback(
         // authority for the boolean; cost already reflects the MatchType.
         _ => {
             return super::helpers::values_equal(
-                &Value::CollGeneric(a.to_vec(), Box::new(ergo_ser::sigma_type::SigmaType::SAny)),
+                &Value::CollGeneric(
+                    a.to_vec().into(),
+                    Box::new(ergo_ser::sigma_type::SigmaType::SAny),
+                ),
                 right,
                 ctx,
             )
@@ -675,27 +681,44 @@ pub(crate) fn avl_cost_height(avl: &ergo_ser::sigma_value::AvlTreeData) -> u32 {
     }
 }
 
+/// Why a script-level AVL verifier could not be built.
+pub(crate) enum AvlConstructFailure {
+    /// The proof's tree is taller than [`MAX_SCRIPT_AVL_PROOF_HEIGHT`]: the
+    /// method call must fail.
+    TooTall,
+    /// Any other failure (invalid metadata, malformed proof, digest
+    /// mismatch): the method's own failed-verifier result applies.
+    Rejected,
+    /// The key length is one the JVM cannot allocate an array for: the
+    /// method call must fail.
+    KeyTooLong,
+}
+
+/// Largest byte-array length HotSpot allocates. scrypto's verifier builds an
+/// infinity key of `keyLength` bytes before it reads the proof; a longer array
+/// fails with "Requested array size exceeds VM limit", whatever the heap size,
+/// and the script fails instead of yielding the failed-verifier result.
+/// <https://github.com/input-output-hk/scrypto/blob/v3.0.0/shared/src/main/scala/scorex/crypto/authds/avltree/batch/AuthenticatedTreeOps.scala#L33>
+pub(crate) const JVM_MAX_KEY_LENGTH: i32 = i32::MAX - 2;
+
 /// Construct an AVL proof verifier from AvlTreeData and proof bytes.
 pub(crate) fn make_avl_verifier(
     avl: &ergo_ser::sigma_value::AvlTreeData,
     proof: &[u8],
-) -> Result<crate::avl::AvlVerifier, EvalError> {
+) -> Result<crate::avl::AvlVerifier, AvlConstructFailure> {
     // Reject invalid metadata up front (scrypto `require(keyLength > 0)` /
     // `require(valueLengthOpt.forall(_ >= 0))` — these fail BEFORE the tree is
     // reconstructed, yielding reconstructedTree=None). Doing this here mirrors
     // Scala AND avoids passing a wrapped-negative length to the third-party
     // crate as a huge `usize`. `try_make_avl_verifier` maps this Err to None,
     // so the method arms degrade gracefully (contains→false, etc.).
-    if avl.key_length <= 0 || avl.value_length_opt.is_some_and(|v| v < 0) {
-        return Err(EvalError::TypeError {
-            expected: "valid AVL metadata (keyLength > 0, valueLengthOpt >= 0)",
-            got: format!(
-                "keyLength={}, valueLengthOpt={:?}",
-                avl.key_length, avl.value_length_opt
-            ),
-        });
+    if avl.key_length > JVM_MAX_KEY_LENGTH {
+        return Err(AvlConstructFailure::KeyTooLong);
     }
-    crate::avl::AvlVerifier::new(
+    if avl.key_length <= 0 || avl.value_length_opt.is_some_and(|v| v < 0) {
+        return Err(AvlConstructFailure::Rejected);
+    }
+    crate::avl::AvlVerifier::new_with_height_bound(
         &avl.digest,
         proof,
         avl.key_length as usize,
@@ -709,10 +732,11 @@ pub(crate) fn make_avl_verifier(
         // one here would reject proofs the reference accepts.
         None,
         None,
+        MAX_SCRIPT_AVL_PROOF_HEIGHT,
     )
-    .map_err(|e| EvalError::TypeError {
-        expected: "valid AVL proof",
-        got: format!("verifier construction failed: {e}"),
+    .map_err(|e| match e {
+        crate::avl::AvlVerifierError::TooTall { .. } => AvlConstructFailure::TooTall,
+        crate::avl::AvlVerifierError::Rejected(_) => AvlConstructFailure::Rejected,
     })
 }
 
@@ -726,8 +750,9 @@ pub(crate) fn make_avl_verifier(
 /// per-method outcome (contains → false, get/getMany → error, insert
 /// pre-v3 → error / v3+ → None, update/remove/insertOrUpdate → None)
 /// instead of aborting the whole evaluation.
-/// The JVM's fatal Int.MaxValue-key allocation has no verification verdict;
-/// Rust rejects that metadata before constructing the upstream verifier.
+/// A key length the JVM cannot allocate ([`JVM_MAX_KEY_LENGTH`]) is NOT
+/// degraded either: the reference's infinity-key allocation throws before any
+/// proof is read, so every method that builds a verifier fails the script.
 ///
 /// COST NOTE: a failed construction yields `digest = None`, but its
 /// `treeHeight` is STILL the digest's height byte — scrypto sets
@@ -738,17 +763,28 @@ pub(crate) fn make_avl_verifier(
 /// against the JVM-blessed contains-on-bad-proof vector cost.)
 ///
 /// [`crate::avl::AvlVerifier::new`] now self-guards construction panics (returns
-/// `Err`), so this `catch_unwind` is belt-and-suspenders — it also collapses an
-/// `Err` to `None` via `.and_then(|r| r.ok())`, the fail-closed cost path.
+/// `Err`), so this `catch_unwind` is belt-and-suspenders; a rejected
+/// construction becomes `Ok(None)`, the fail-closed cost path.
+///
+/// A proof taller than [`MAX_SCRIPT_AVL_PROOF_HEIGHT`] is the one failure that
+/// is NOT degraded: it returns `Err`, so the method call fails as a script
+/// error whatever the method (never `None`, so never `contains = false`).
 pub(crate) fn try_make_avl_verifier(
     avl: &ergo_ser::sigma_value::AvlTreeData,
     proof: &[u8],
-) -> Option<crate::avl::AvlVerifier> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+) -> Result<Option<crate::avl::AvlVerifier>, EvalError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         make_avl_verifier(avl, proof)
-    }))
-    .ok()
-    .and_then(|r| r.ok())
+    })) {
+        Ok(Ok(bv)) => Ok(Some(bv)),
+        Ok(Err(AvlConstructFailure::TooTall)) => Err(EvalError::RuntimeException(
+            "AVL proof tree is taller than the script-level bound",
+        )),
+        Ok(Err(AvlConstructFailure::KeyTooLong)) => Err(EvalError::RuntimeException(
+            "AVL key length exceeds the JVM array size limit",
+        )),
+        Ok(Err(AvlConstructFailure::Rejected)) | Err(_) => Ok(None),
+    }
 }
 
 /// Get the length of a collection value (for per-item costing).
@@ -774,6 +810,27 @@ pub(crate) fn collection_len(coll: &Value, ctx: &ReductionContext) -> usize {
         },
         _ => 0,
     }
+}
+
+/// An empty collection of any element type. The Boolean reducers (AND, OR,
+/// xorOf) cast elements to Boolean only as they read them, so the reference
+/// accepts an empty collection whatever its element type.
+pub(crate) fn is_empty_collection(coll: &Value, ctx: &ReductionContext) -> bool {
+    matches!(
+        coll,
+        Value::CollBytes(_)
+            | Value::CollShort(_)
+            | Value::CollInt(_)
+            | Value::CollLong(_)
+            | Value::CollBool(_)
+            | Value::CollSigmaProp(_)
+            | Value::CollBox(_)
+            | Value::CollHeader(_)
+            | Value::Tokens(_)
+            | Value::CollGeneric(..)
+            | Value::CollLegacyPair(..)
+            | Value::BoxCollection(_)
+    ) && collection_len(coll, ctx) == 0
 }
 
 #[cfg(test)]
@@ -993,7 +1050,8 @@ mod token_eq_tests {
             vec![Value::Tuple(vec![
                 Value::CollBytes([0xAA; 32].to_vec()),
                 Value::Long(100),
-            ])],
+            ])]
+            .into(),
             Box::new(token_elem),
         );
         // left = CollGeneric (-> eq_coll_fallback), right = Tokens.
