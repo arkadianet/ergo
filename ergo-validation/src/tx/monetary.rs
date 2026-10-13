@@ -41,24 +41,18 @@ fn check_erg_conservation(
     tx: &Transaction,
     resolved_inputs: &[ErgoBox],
 ) -> Result<(), ValidationError> {
-    let input_sum: u64 = resolved_inputs
-        .iter()
-        .map(|b| b.candidate.value)
-        .try_fold(0u64, |acc, v| acc.checked_add(v))
-        .ok_or(ValidationError::ErgNotConserved {
-            inputs: u64::MAX,
-            outputs: 0,
-        })?;
+    // Scala sums both sides as `Long` with `Math.addExact`: an input sum
+    // past `i64::MAX` fails `txInputsSum` (rule 115). The output sum was
+    // already bounded statelessly (rule 106); it is re-checked here for
+    // callers that reach conservation directly.
+    // https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala#L366
+    let input_sum =
+        super::structural::sum_values_i64(resolved_inputs.iter().map(|b| b.candidate.value))
+            .ok_or(ValidationError::InputSumTooHigh)?;
 
-    let output_sum: u64 = tx
-        .output_candidates
-        .iter()
-        .map(|c| c.value)
-        .try_fold(0u64, |acc, v| acc.checked_add(v))
-        .ok_or(ValidationError::ErgNotConserved {
-            inputs: input_sum,
-            outputs: u64::MAX,
-        })?;
+    let output_sum =
+        super::structural::sum_values_i64(tx.output_candidates.iter().map(|c| c.value))
+            .ok_or(ValidationError::OutputSumTooHigh)?;
 
     // Scala `txErgPreservation` requires strict equality `inputSum == outputsSum`
     // (the miner fee is itself an output box), so any imbalance — including
