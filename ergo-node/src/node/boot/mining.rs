@@ -103,6 +103,7 @@ pub(super) fn build_subsystem(
         config.mining_config.claim_storage_rent,
         config.mining_config.max_storage_rent_claims,
     )
+    .with_template_retention_ms(config.mining_config.template_retention_ms)
     // Same EIP-27 rules the block validator and mempool use, so a candidate
     // can never carry an EIP-27-invalid emission / fee / storage-rent /
     // selected tx that block validation would later reject.

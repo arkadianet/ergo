@@ -57,7 +57,33 @@ pub(in crate::evaluator) fn eval_method_call(
     }
     let obj_val = cx.eval_expr(obj)?;
     add_cost(cx.cost, 0xDC)?;
-    match (type_id, method_id) {
+    // Every reference method is invoked on the class that declares it:
+    // reflection throws "object is not an instance of declaring class" and
+    // the numeric methods cast `obj.asInstanceOf[T]` by the method's type.
+    // That happens inside the invocation, after the arguments and the
+    // method's fixed cost, so a mismatch fails the call once its arm ran.
+    let receiver_error =
+        crate::evaluator::helpers::check_receiver(type_id, method_id, &obj_val).err();
+    // The numeric v6 methods use a user-defined invoke that reads at most the
+    // first argument (`other.head`) and ignores the rest; MethodCall still
+    // evaluates every argument first.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/ast/methods.scala#L311-L460
+    let args = if matches!(type_id, 2..=6 | 9) && (6..=13).contains(&method_id) {
+        let used = if method_id >= 9 { 1 } else { 0 };
+        if args.len() < used {
+            // `other.head` on an empty argument array.
+            return Err(EvalError::RuntimeException(
+                "numeric method: missing argument (head of empty array)",
+            ));
+        }
+        for extra in &args[used..] {
+            cx.eval_expr(extra)?;
+        }
+        &args[..used]
+    } else {
+        args
+    };
+    let result = match (type_id, method_id) {
         (12, 2) => coll::get_or_else(obj_val, args, cx),
         (12, 3) => coll::map(obj_val, args, cx),
         (12, 10) => coll::apply(obj_val, args, cx),
@@ -135,6 +161,11 @@ pub(in crate::evaluator) fn eval_method_call(
                 got: format!("type_id={}, method_id={}", type_id, method_id),
             }),
         },
+    };
+    let value = result?;
+    match receiver_error {
+        Some(e) => Err(e),
+        None => Ok(value),
     }
 }
 
@@ -197,6 +228,26 @@ pub(super) fn is_v6_method(type_id: u8, method_id: u8) -> bool {
         // encodeNbits, decodeNbits, powHit(8), some(9), none(10).
         (106, 3..=10) => true,
         _ => false,
+    }
+}
+
+/// A reflective call unboxes primitive arguments with Java's widening
+/// conversions: an `int` parameter also takes a Byte or Short value.
+pub(super) fn widen_to_int(v: &Value) -> Option<i32> {
+    match v {
+        Value::Int(n) => Some(*n),
+        Value::Short(n) => Some(i32::from(*n)),
+        Value::Byte(n) => Some(i32::from(*n)),
+        _ => None,
+    }
+}
+
+/// Java widening for a `short` parameter (Byte or Short).
+pub(super) fn widen_to_short(v: &Value) -> Option<i16> {
+    match v {
+        Value::Short(n) => Some(*n),
+        Value::Byte(n) => Some(i16::from(*n)),
+        _ => None,
     }
 }
 

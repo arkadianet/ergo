@@ -3,6 +3,7 @@ mod dispatch;
 mod eval_ctx;
 mod helpers;
 mod opcodes;
+mod static_types;
 mod types;
 
 pub use dispatch::*;

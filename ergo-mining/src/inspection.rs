@@ -280,14 +280,8 @@ pub fn rent_recreated_indices(
         };
         let recreates = match fee_factor {
             Some(factor) => {
-                let serialized = ergo_ser::ergo_box::serialize_ergo_box(original).map_err(|e| {
-                    crate::MiningError::IdComputation {
-                        op: "rent_inspection",
-                        reason: e.to_string(),
-                    }
-                })?;
                 let fee = ergo_validation::storage_rent::compute_storage_fee(
-                    serialized.len() as i32,
+                    crate::storage_rent_claim::rent_box_len(original)?,
                     factor,
                 );
                 fee > 0 && original.candidate.value > fee as u64

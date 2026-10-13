@@ -39,6 +39,11 @@ pub(super) fn map_mining_error(e: MiningApiError, unavailable: Reason) -> Respon
              the candidate was withdrawn after a block mined from it failed to apply)",
             "re-fetch GET /api/v1/mining/candidate and resubmit",
         ),
+        MiningApiError::TemplateExpired => v1_error(
+            Reason::ExpiredCandidate,
+            "the solved candidate has aged out of the node's retained templates",
+            "re-fetch GET /api/v1/mining/candidate more often",
+        ),
         MiningApiError::Unavailable(detail) => v1_error(
             unavailable,
             "the mining subsystem cannot answer right now",
@@ -487,5 +492,34 @@ pub(crate) async fn candidate_with_txs(
             "retry once the node reports at_tip",
         ),
         Err(e) => map_mining_error(e, Reason::CandidateUnavailable),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn reason_of(e: MiningApiError) -> (StatusCode, String) {
+        let response = map_mining_error(e, Reason::CandidateUnavailable);
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, body["error"]["reason"].as_str().unwrap().to_owned())
+    }
+
+    /// v1 tells an aged-out template apart from a superseded parent; the
+    /// Scala-compatible route reports both as `stale_candidate`.
+    #[tokio::test]
+    async fn expired_template_is_expired_candidate_on_v1() {
+        assert_eq!(
+            reason_of(MiningApiError::TemplateExpired).await,
+            (StatusCode::BAD_REQUEST, "expired_candidate".to_owned())
+        );
+        assert_eq!(
+            reason_of(MiningApiError::StaleParent).await,
+            (StatusCode::BAD_REQUEST, "stale_candidate".to_owned())
+        );
     }
 }

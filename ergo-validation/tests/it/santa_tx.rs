@@ -45,12 +45,12 @@ fn boxes(j: &J, field: &str) -> Result<Vec<ErgoBox>, String> {
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 #[derive(Debug)]
-enum NodeVerdict {
+pub(crate) enum NodeVerdict {
     Accept(u64),
     Reject(String),
 }
 
-fn validate(entry: &J) -> Result<NodeVerdict, String> {
+pub(crate) fn validate(entry: &J) -> Result<NodeVerdict, String> {
     let pre = &entry["preHeader"];
     let p = &entry["parameters"];
     let pre_version =

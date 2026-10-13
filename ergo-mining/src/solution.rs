@@ -3,7 +3,7 @@
 //! The API handler:
 //! 1. Looks the candidate up in the cache (by miner pk).
 //! 2. Reconstructs the header with `solution = AutolykosV2 { pk, n }`.
-//! 3. Runs the PoW pre-check: `hit_for_v2(msg, n, height, N) <= target`.
+//! 3. Runs the PoW pre-check: `hit_for_v2(msg, n, height, N) < target`.
 //! 4. Runs the parent-id pre-check: the cached candidate's parent must
 //!    still equal `state.chain_state().best_full_block_id`.
 //!
@@ -44,8 +44,14 @@ pub enum SolutionOutcome {
     /// Pre-checks passed. Submit via `Action::SubmitMinedBlock`. The
     /// executor will re-check `parent_id` under the action-loop lock.
     Accepted(SubmittedBlock),
-    /// PoW hit > target. Returns 400.
+    /// PoW hit >= target. Returns 400.
     InvalidPow,
+    /// The solution is valid proof of work for a template the node built
+    /// but no longer holds (it aged out of the retained history). Only
+    /// [`crate::handle::MiningHandle::verify_solution`] returns it. Returns
+    /// 400 (`stale_candidate` on `/mining/solution`, `expired_candidate` on
+    /// `/api/v1/mining/solution`); the miner should fetch a new candidate.
+    TemplateExpired,
     /// The solved template is no longer current. From [`verify_solution`]:
     /// its parent no longer equals the live best-full block id. From
     /// [`crate::handle::MiningHandle::verify_solution`] also: the template was
@@ -111,7 +117,7 @@ pub fn verify_solution(
     let n = calc_n(header.version, header.height);
     let hit = hit_for_v2(&candidate.msg, &nonce, header.height, n);
     let target = get_target(header.n_bits);
-    if hit > target {
+    if !hit_meets_target(&hit, &target) {
         return Ok(SolutionOutcome::InvalidPow);
     }
 
@@ -132,6 +138,12 @@ pub fn verify_solution(
         ad_proof_bytes: candidate.ad_proof_bytes.clone(),
         parent_id: candidate.parent_id,
     }))
+}
+
+/// Autolykos acceptance: the hit must be strictly below the target, as in
+/// the header validator (`check_pow_v2`) and Scala `AutolykosPowScheme`.
+fn hit_meets_target(hit: &BigUint, target: &BigUint) -> bool {
+    hit < target
 }
 
 /// Equality on `target` derived from `n_bits`. Returns the encoded
@@ -206,6 +218,14 @@ mod tests {
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn hit_meets_target_requires_hit_strictly_below_target() {
+        let target = get_target(0x1c00ffff);
+        assert!(hit_meets_target(&(&target - 1u32), &target));
+        assert!(!hit_meets_target(&target, &target));
+        assert!(!hit_meets_target(&(&target + 1u32), &target));
+    }
 
     #[test]
     fn pk_none_falls_back_to_candidate_miner_pubkey() {

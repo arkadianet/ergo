@@ -1,0 +1,10 @@
+subst-constants-tuple	false	null
+subst-constants-option	false	null
+subst-constants-unit	false	null
+subst-constants-int	true	12121
+subst-constants-coll-of-tuples	true	12125
+subst-constants-header-v2	false	null
+subst-constants-header-v3	true	12122
+subst-constants-box-v3	true	12122
+subst-constants-tuple-v1	false	null
+subst-constants-int-v1	true	12121

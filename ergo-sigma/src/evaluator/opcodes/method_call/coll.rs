@@ -53,7 +53,7 @@ use crate::evaluator::helpers::{
     coll_elem_type, collection_to_values, infer_expr_type, not_a_collection, sigma_type_compatible,
     sigma_type_to_coll_kind, value_to_sigma_type, values_equal, values_to_collection, CollKind,
 };
-use crate::evaluator::opcodes::binding::check_closure_param_types;
+use crate::evaluator::opcodes::binding::{check_closure_arg, check_closure_result};
 use crate::evaluator::types::{EvalError, Value};
 
 // Reflection-based methods evaluate arguments before their method charge.
@@ -65,12 +65,21 @@ pub(super) fn apply(
     check_arity(args, 1)?;
     let index = cx.eval_expr(&args[0])?;
     super::super::super::cost::add_cost(cx.cost, 0xB2)?;
-    let Value::Int(index) = index else {
+    let Some(index) = super::widen_to_int(&index) else {
         return Err(EvalError::TypeError {
             expected: "Int index",
             got: format!("{index:?}"),
         });
     };
+    if let Some(len) = crate::evaluator::helpers::fast_len(&obj_val) {
+        return usize::try_from(index)
+            .ok()
+            .and_then(|i| crate::evaluator::helpers::fast_element(&obj_val, i))
+            .ok_or(EvalError::TypeError {
+                expected: "valid collection index",
+                got: format!("index={index}, len={len}"),
+            });
+    }
     let (_, items) = collection_to_values(obj_val, cx.ctx)?;
     usize::try_from(index)
         .ok()
@@ -106,12 +115,22 @@ pub(super) fn get_or_else(
     let default = cx.eval_expr(&args[1])?;
     super::super::super::cost::add_cost(cx.cost, 0xB2)?;
     let default = reject_sstring(default).map_err(reflect_sstring_error)?;
-    let Value::Int(index) = index else {
+    // getOrElse_eval runs Value.checkType(mc.args.last.tpe, default)
+    // (methods.scala:842) inside the reflective call.
+    crate::evaluator::static_types::check_node(&args[1], &default, cx.ctx.is_v3_ergo_tree())
+        .map_err(|_| EvalError::InvocationTargetException("Coll.getOrElse default type"))?;
+    let Some(index) = super::widen_to_int(&index) else {
         return Err(EvalError::TypeError {
             expected: "Int index",
             got: format!("{index:?}"),
         });
     };
+    if crate::evaluator::helpers::fast_len(&obj_val).is_some() {
+        return Ok(usize::try_from(index)
+            .ok()
+            .and_then(|i| crate::evaluator::helpers::fast_element(&obj_val, i))
+            .unwrap_or(default));
+    }
     let (_, items) = collection_to_values(obj_val, cx.ctx)?;
     Ok(usize::try_from(index)
         .ok()
@@ -139,19 +158,34 @@ pub(super) fn index_of(
         });
     }
     let elem = cx.eval_expr(&args[0])?;
-    let from = match cx.eval_expr(&args[1])? {
-        Value::Int(v) => v.max(0) as usize,
-        other => {
+    let from_val = cx.eval_expr(&args[1])?;
+    let from = match super::widen_to_int(&from_val) {
+        Some(v) => v.max(0) as usize,
+        None => {
+            let other = from_val;
             return Err(EvalError::TypeError {
                 expected: "Int for indexOf from",
                 got: format!("{other:?}"),
-            })
+            });
         }
     };
-    let (_kind, items) = collection_to_values(obj_val, cx.ctx)?;
     let mut result: i32 = -1;
     let mut iters = 0u32;
-    for (i, item) in items.into_iter().enumerate().skip(from) {
+    // Read the elements in place where the carrier allows it.
+    let items: Box<dyn Iterator<Item = (usize, Value)>> =
+        match crate::evaluator::helpers::fast_len(&obj_val) {
+            Some(len) => Box::new((from.min(len)..len).filter_map(move |i| {
+                crate::evaluator::helpers::fast_element(&obj_val, i).map(|v| (i, v))
+            })),
+            None => Box::new(
+                collection_to_values(obj_val, cx.ctx)?
+                    .1
+                    .into_iter()
+                    .enumerate()
+                    .skip(from),
+            ),
+        };
+    for (i, item) in items {
         iters += 1;
         // Scala `indexOf_eval` calls `DataValueComparer.equalDataValues`
         // per iteration, charging its cost (e.g. EQ_Prim(3) for a
@@ -196,6 +230,20 @@ pub(super) fn zip(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     // with `STuple(A, B)`.
     let elem_a = coll_elem_type(&obj_val).unwrap_or(SigmaType::SAny);
     let elem_b = coll_elem_type(&ys_val).unwrap_or(SigmaType::SAny);
+    let elem_type = Box::new(SigmaType::STuple(vec![elem_a, elem_b]));
+    // Like the reference's PairOfCols, keep the two columns and build the
+    // pairs only when they are read (CollsOverArrays.scala:183-203), so a
+    // zip that is only sized, indexed or sliced does not box every row.
+    let fast = (
+        crate::evaluator::helpers::fast_len(&obj_val),
+        crate::evaluator::helpers::fast_len(&ys_val),
+    );
+    if let (Some(len_a), Some(len_b)) = fast {
+        return Ok(Value::CollGeneric(
+            crate::evaluator::CollItems::zip(obj_val, ys_val, len_a.min(len_b)),
+            elem_type,
+        ));
+    }
     let (_kind_a, items_a) = collection_to_values(obj_val, cx.ctx)?;
     let (_kind_b, items_b) = collection_to_values(ys_val, cx.ctx)?;
     let zipped: Vec<Value> = items_a
@@ -206,10 +254,7 @@ pub(super) fn zip(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     // Outer is Coll[(A, B)] — boxed-element coll carrier;
     // each inner element is a real 2-tuple pair (kept as
     // `Value::Tuple`).
-    Ok(Value::CollGeneric(
-        zipped,
-        Box::new(SigmaType::STuple(vec![elem_a, elem_b])),
-    ))
+    Ok(Value::CollGeneric(zipped.into(), elem_type))
 }
 
 // SColl(12).reverse(30) is a zero-arg method handled by the shared
@@ -256,16 +301,23 @@ pub(super) fn starts_ends_with(
 pub(super) fn get(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalError> {
     check_arity(args, 1)?;
     let idx_val = cx.eval_expr(&args[0])?;
-    let idx = match idx_val {
-        Value::Int(n) => n,
-        other => {
+    let idx = match super::widen_to_int(&idx_val) {
+        Some(n) => n,
+        None => {
+            let other = idx_val;
             return Err(EvalError::TypeError {
                 expected: "Int for SColl.get index",
                 got: format!("{other:?}"),
-            })
+            });
         }
     };
     add_method_cost(cx.cost, COST_GET)?;
+    if crate::evaluator::helpers::fast_len(&obj_val).is_some() {
+        let item = usize::try_from(idx)
+            .ok()
+            .and_then(|i| crate::evaluator::helpers::fast_element(&obj_val, i));
+        return Ok(Value::Opt(item.map(Box::new)));
+    }
     let (_kind, items) = collection_to_values(obj_val, cx.ctx)?;
     if idx < 0 || (idx as usize) >= items.len() {
         Ok(Value::Opt(None))
@@ -340,7 +392,7 @@ fn empty_coll_for_elem(elem: &SigmaType) -> Value {
         SigmaType::SSigmaProp => Value::CollSigmaProp(Vec::new()),
         SigmaType::SBox => Value::CollBox(Vec::new()),
         SigmaType::SHeader => Value::CollHeader(Vec::new()),
-        other => Value::CollGeneric(Vec::new(), Box::new(other.clone())),
+        other => Value::CollGeneric(Vec::new().into(), Box::new(other.clone())),
     }
 }
 
@@ -374,11 +426,14 @@ pub(super) fn flat_map(
             // so we can reassemble the correct output type.
             let inner_colls_was_empty = items.is_empty();
             let mut inner_colls: Vec<Value> = Vec::new();
+            // One environment for every call: the body never mutates it and
+            // each call rebinds the parameter, so the captured values are
+            // not copied per element.
+            let mut call_env = (*captured_env).clone();
             for item in items {
                 // Scala closure invocation: Value.checkType runs
                 // before the AddToEnvironment charge.
-                check_closure_param_types(&param_types).map_err(reflect_sstring_error)?;
-                let mut call_env = (*captured_env).clone();
+                check_closure_arg(&param_types, &item, cx.ctx).map_err(reflect_sstring_error)?;
                 if let Some(param_id) = params.first() {
                     // Scala FuncValue closure binds its argument on each
                     // application: addFixedCost(AddToEnvironment = 5).
@@ -395,6 +450,7 @@ pub(super) fn flat_map(
                     cx.trace,
                 )
                 .and_then(reject_sstring)
+                .and_then(|r| check_closure_result(&body, r, cx.ctx))
                 .map_err(reflect_sstring_error)?;
                 inner_colls.push(inner);
             }
@@ -413,7 +469,7 @@ pub(super) fn flat_map(
                 Value::CollHeader(_) => Value::CollHeader(vec![]),
                 Value::Tokens(_) => Value::Tokens(vec![]),
                 Value::CollGeneric(_, elem) | Value::CollLegacyPair(_, elem, _) => {
-                    Value::CollGeneric(vec![], elem.clone())
+                    Value::CollGeneric(Vec::new().into(), elem.clone())
                 }
                 _ => Value::CollBytes(vec![]),
             });
@@ -516,6 +572,9 @@ fn flatten_flat_map_results(
         }
         out_len = out_len.saturating_add(collection_len(result, ctx));
     }
+    // `builder.fromArray(toArray.flatMap(..))`: the result is one
+    // array-backed collection, built before flatMap_eval's charge.
+    crate::evaluator::helpers::check_array_length(out_len)?;
     // Box and boxed-element (`Tuple`) outputs hold one `Value` per element and
     // accept any element. Every other kind has its own carrier: convert each
     // result that uses another carrier now, one result at a time, so an
@@ -641,18 +700,18 @@ pub(super) fn patch(
     let replaced_val = cx.eval_expr(&args[2])?;
     // n.max(0) mirrors Scala's `if (from > 0) ... else 0` /
     // `if (replaced < 0) 0 else replaced` clamp.
-    let from = match from_val {
-        Value::Int(n) => n.max(0) as usize,
-        _ => {
+    let from = match super::widen_to_int(&from_val) {
+        Some(n) => n.max(0) as usize,
+        None => {
             return Err(EvalError::TypeError {
                 expected: "Int for patch from",
                 got: format!("{from_val:?}"),
             })
         }
     };
-    let replaced = match replaced_val {
-        Value::Int(n) => n.max(0) as usize,
-        _ => {
+    let replaced = match super::widen_to_int(&replaced_val) {
+        Some(n) => n.max(0) as usize,
+        None => {
             return Err(EvalError::TypeError {
                 expected: "Int for patch replaced",
                 got: format!("{replaced_val:?}"),
@@ -710,6 +769,9 @@ pub(super) fn patch(
     // overflow usize on supported targets: both args are clamped to
     // [0, i32::MAX], so the worst-case sum 2 * i32::MAX fits in u32.
     let end = (from + replaced).min(items.len());
+    // The patched array becomes a CollOverArray (MaxArrayLength).
+    let start = from.min(items.len());
+    crate::evaluator::helpers::check_array_length(items.len() - (end - start) + patch_items.len())?;
     items.splice(from.min(items.len())..end, patch_items);
     values_to_collection(kind, items, elem_type)
 }
@@ -749,9 +811,9 @@ pub(super) fn updated(
     }
     let idx_val = cx.eval_expr(&args[0])?;
     let elem_val = cx.eval_expr(&args[1])?;
-    let idx_i32 = match idx_val {
-        Value::Int(n) => n,
-        _ => {
+    let idx_i32 = match super::widen_to_int(&idx_val) {
+        Some(n) => n,
+        None => {
             return Err(EvalError::TypeError {
                 expected: "Int for updated index",
                 got: format!("{idx_val:?}"),

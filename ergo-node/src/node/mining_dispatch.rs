@@ -859,6 +859,7 @@ pub(super) fn handle_mining_request(
                     ergo_mining::solution::SolutionOutcome::Accepted(_) => "accepted",
                     ergo_mining::solution::SolutionOutcome::InvalidPow => "invalid_pow",
                     ergo_mining::solution::SolutionOutcome::StaleParent { .. } => "stale_parent",
+                    ergo_mining::solution::SolutionOutcome::TemplateExpired => "expired",
                 },
                 "mining solution verified"
             );
@@ -877,6 +878,14 @@ pub(super) fn handle_mining_request(
                     crate::metrics_counters::incr_stale_parent();
                     handle.record_outcome(None, None, "stale", None, now_unix_ms());
                     let _ = reply.send(Err(ergo_api::MiningApiError::StaleParent));
+                    return false;
+                }
+                // Valid work for a template that aged out of the history:
+                // counted with stale solutions (the work no longer applies).
+                ergo_mining::solution::SolutionOutcome::TemplateExpired => {
+                    crate::metrics_counters::incr_stale_parent();
+                    handle.record_outcome(None, None, "expired", None, now_unix_ms());
+                    let _ = reply.send(Err(ergo_api::MiningApiError::TemplateExpired));
                     return false;
                 }
             };

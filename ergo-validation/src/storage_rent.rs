@@ -25,9 +25,9 @@ pub const DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT: u32 = 1_885_000;
 /// Both inputs are i32 because the underlying voted parameter is i32
 /// (`ProtocolParams::storage_fee_factor`) and the canonical box length
 /// is bounded well below `i32::MAX` by the wire format. Callers MUST
-/// pass the same `box_bytes_len` they would feed to the validator —
-/// `ergo_ser::ergo_box::serialize_ergo_box(box)?.len() as i32` — not a
-/// re-derived length.
+/// pass the same `box_bytes_len` the validator uses — `box.bytes()?.len()`,
+/// Scala `box.bytes.length`: the bytes a stored box was read from, not a
+/// re-serialization.
 #[inline]
 pub fn compute_storage_fee(box_bytes_len: i32, storage_fee_factor: i32) -> i32 {
     storage_fee_factor.wrapping_mul(box_bytes_len)

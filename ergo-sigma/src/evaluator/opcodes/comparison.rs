@@ -157,8 +157,11 @@ pub(in crate::evaluator) fn eval_eq(
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left).and_then(reject_sstring)?;
     super::binding::check_expr_tuple_type(left, cx.constants, &l)?;
+    // Value.checkType(left, l) / (right, r) (trees.scala:1206-1228).
+    crate::evaluator::static_types::check_node(left, &l, cx.ctx.is_v3_ergo_tree())?;
     let r = cx.eval_expr(right).and_then(reject_sstring)?;
     super::binding::check_expr_tuple_type(right, cx.constants, &r)?;
+    crate::evaluator::static_types::check_node(right, &r, cx.ctx.is_v3_ergo_tree())?;
     let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     reject_mixed_numeric_equality(&l, &r)?;
     require_comparable(&l, &r)?;
@@ -173,8 +176,11 @@ pub(in crate::evaluator) fn eval_neq(
 ) -> Result<Value, EvalError> {
     let l = cx.eval_expr(left).and_then(reject_sstring)?;
     super::binding::check_expr_tuple_type(left, cx.constants, &l)?;
+    // Value.checkType(left, l) / (right, r) (trees.scala:1206-1228).
+    crate::evaluator::static_types::check_node(left, &l, cx.ctx.is_v3_ergo_tree())?;
     let r = cx.eval_expr(right).and_then(reject_sstring)?;
     super::binding::check_expr_tuple_type(right, cx.constants, &r)?;
+    crate::evaluator::static_types::check_node(right, &r, cx.ctx.is_v3_ergo_tree())?;
     let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     reject_mixed_numeric_equality(&l, &r)?;
     require_comparable(&l, &r)?;

@@ -35,6 +35,20 @@ fn property_call_and_method_call_parity_for_no_arg_methods() {
     ctx.last_headers = &headers;
 
     let context_expr = || op(0xFE, Payload::Zero);
+    let global_expr = || op(0xDD, Payload::Zero);
+    // Every receiver must be of the method's declaring type.
+    let pre_header_expr = || {
+        op(
+            0xDB,
+            Payload::MethodCall {
+                type_id: 101,
+                method_id: 3,
+                obj: Box::new(op(0xFE, Payload::Zero)),
+                args: vec![],
+                type_args: vec![],
+            },
+        )
+    };
     let self_expr = || op(0xA7, Payload::Zero);
     let groupgen_via_pc = move || {
         op(
@@ -42,7 +56,7 @@ fn property_call_and_method_call_parity_for_no_arg_methods() {
             Payload::MethodCall {
                 type_id: 106,
                 method_id: 1,
-                obj: Box::new(context_expr()),
+                obj: Box::new(global_expr()),
                 args: vec![],
                 type_args: vec![],
             },
@@ -59,11 +73,11 @@ fn property_call_and_method_call_parity_for_no_arg_methods() {
         // SContext.minerPubKey
         (101, 10, Box::new(context_expr)),
         // SPreHeader.version
-        (105, 1, Box::new(context_expr)),
+        (105, 1, Box::new(pre_header_expr)),
         // SPreHeader.height
-        (105, 5, Box::new(context_expr)),
-        // SGlobal.groupGenerator (obj is anything; SGlobal ignores it)
-        (106, 1, Box::new(context_expr)),
+        (105, 5, Box::new(pre_header_expr)),
+        // SGlobal.groupGenerator
+        (106, 1, Box::new(global_expr)),
         // SBox.tokens — PropertyCall-only inline previously; now both
         (99, 8, Box::new(self_expr)),
         // SGroupElement.getEncoded on the secp256k1 generator
@@ -791,8 +805,11 @@ fn polymorphic_lambda_through_map_rejects() {
 }
 
 #[test]
-fn polymorphic_lambda_over_empty_coll_accepts() {
-    // Zero elements → zero closure invocations → no checkType → Ok.
+fn polymorphic_lambda_over_empty_coll_still_rejects_map() {
+    // Zero elements → zero closure invocations → no argument checkType, but
+    // MapCollection converts the mapper's range `T` to an RType first
+    // (transformers.scala:43) and fails. forall/filter over an empty
+    // collection accept the same lambda (JVM-confirmed).
     let expr = op(
         0xAD,
         Payload::Two(
@@ -800,11 +817,13 @@ fn polymorphic_lambda_over_empty_coll_accepts() {
             Box::new(poly_identity_lambda()),
         ),
     );
-    match run_eval(&expr) {
-        Value::CollInt(v) => assert!(v.is_empty()),
-        Value::CollGeneric(v, _) => assert!(v.is_empty()),
-        other => panic!("expected empty collection, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            run_eval_err(&expr),
+            EvalError::RuntimeException("Don't know how to convert SType to RType")
+        ),
+        "the mapper range has no runtime type"
+    );
 }
 
 /// MapCollection (0xAD) — element binding does not bleed into the
@@ -1175,8 +1194,11 @@ fn flatmap_element_binding_does_not_leak_into_caller_env() {
     assert_eq!(run_eval(&block), Value::Int(999));
 }
 
-/// Fold (0xB0) — accumulator+element tuple binding (id=1) does not
-/// leak into the caller's env.
+/// Fold (0xB0) — the accumulator+element tuple binding (id=1) does not
+/// leak into the caller's env, but its DECLARED type does: Scala's flat,
+/// parse-order `valDefTypeStore` types the later `ValUse(1)` as `(Int, Int)`,
+/// so `Value.checkType` rejects the outer `Int` it reads (JVM-confirmed with
+/// the analogous `forall` and nested-block shapes).
 #[test]
 fn fold_acc_binding_does_not_leak_into_caller_env() {
     // Fold sums the collection: zero=0, op = (acc, x) -> acc + x.
@@ -1242,5 +1264,14 @@ fn fold_acc_binding_does_not_leak_into_caller_env() {
             )),
         },
     );
-    assert_eq!(run_eval(&block), Value::Int(999));
+    assert!(
+        matches!(
+            run_eval_err(&block),
+            EvalError::TypeError {
+                expected: "value of the static type (Value.checkType)",
+                ..
+            }
+        ),
+        "the ValUse after the lambda has the lambda argument's static type"
+    );
 }

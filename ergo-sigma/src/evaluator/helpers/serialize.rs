@@ -434,7 +434,7 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
                 .zip(vals.iter())
                 .map(|(t, v)| sigma_to_value(t, v))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::CollGeneric(items, Box::new(SigmaType::SAny)))
+            Ok(Value::CollGeneric(items.into(), Box::new(SigmaType::SAny)))
         }
         (SigmaType::SGroupElement, SigmaValue::GroupGenerator) => Ok(Value::GroupElement(
             crate::evaluator::opcodes::sigma::canonicalize_group_element(
@@ -548,7 +548,10 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
                         // type tag; carry it on the value so empty
                         // round-trips work and downstream
                         // `Coll.updated` knows the element shape.
-                        _ => Ok(Value::CollGeneric(items, Box::new(elem_type.clone()))),
+                        _ => Ok(Value::CollGeneric(
+                            items.into(),
+                            Box::new(elem_type.clone()),
+                        )),
                     }
                 }
                 // A `Bytes` payload is only consistent with element type

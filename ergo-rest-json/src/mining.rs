@@ -73,7 +73,7 @@ pub struct WorkMessageJson {
     /// Autolykos v2 hit.
     pub msg: String,
 
-    /// Mining target: the miner's hit must satisfy `hit <= target` to
+    /// Mining target: the miner's hit must satisfy `hit < target` to
     /// be a valid solution.
     ///
     /// A bare JSON NUMBER on the wire, as Scala emits it — `WorkMessage`
