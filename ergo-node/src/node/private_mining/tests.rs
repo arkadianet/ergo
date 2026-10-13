@@ -696,12 +696,7 @@ fn a_rollback_reopens_an_orphaned_confirmation_and_rescans_the_new_branch() {
         Some(5)
     );
     // A competing branch replaces block 5 and does not contain it.
-    state
-        .store
-        .as_utxo_mut()
-        .unwrap()
-        .rollback_to(4, None, None)
-        .unwrap();
+    state.store.as_utxo_mut().unwrap().rollback_to(4).unwrap();
     append_block(&mut state, vec![], 1);
     append_block(&mut state, vec![], 1);
     run_lifecycle(&mut state, &handle);
@@ -1113,12 +1108,7 @@ fn a_rollback_does_not_report_private_transactions_as_returned_to_the_mempool() 
     append_block(&mut state, vec![tx(1), tx(2)], 0);
     crate::node::action_loop::handle_mempool_tick(&mut state, None);
     // A competing branch replaces the block holding both.
-    state
-        .store
-        .as_utxo_mut()
-        .unwrap()
-        .rollback_to(4, None, None)
-        .unwrap();
+    state.store.as_utxo_mut().unwrap().rollback_to(4).unwrap();
     append_block(&mut state, vec![], 1);
     append_block(&mut state, vec![], 1);
     crate::node::action_loop::handle_mempool_tick(&mut state, None);

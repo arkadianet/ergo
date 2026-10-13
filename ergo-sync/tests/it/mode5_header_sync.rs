@@ -177,7 +177,6 @@ fn mode5_inbound_header_advances_the_digest_header_tip() {
             &mut store,
             &mut coordinator,
             now,
-            None,
         );
         assert!(
             !actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
@@ -247,7 +246,6 @@ fn mode5_unlinked_header_is_buffered_not_fatal() {
         &mut store,
         &mut coordinator,
         now,
-        None,
     );
 
     assert_eq!(
@@ -302,7 +300,6 @@ fn mode5_validation_verdict_durably_invalidates_the_branch() {
             &mut store,
             &mut coordinator,
             Instant::now(),
-            None,
         );
     }
     let rejected = header_id(&headers[&(FEED_LO + 1)]);

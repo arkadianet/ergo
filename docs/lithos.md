@@ -49,7 +49,7 @@ GCM-tag wallet files without rewriting them.
 For an existing Rust wallet, export an independently encrypted compatible copy:
 
 ```bash
-cargo build --release -p ergo-wallet
+cargo build --release -p ergo-wallet --features cli
 ./target/release/ergo-wallet export-keystore \
   --keystore /path/to/existing-wallet.json \
   --output-dir /path/to/lithos-keystore

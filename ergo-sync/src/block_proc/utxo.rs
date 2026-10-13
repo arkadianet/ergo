@@ -85,7 +85,6 @@ pub(super) fn process_block_utxo(
     script_validation_checkpoint: Option<(u32, [u8; 32])>,
     reemission: Option<&ergo_validation::ReemissionRuleInputs>,
     perf: Option<&BlockPerfCounters>,
-    wallet_hook: Option<&dyn ergo_state::wallet::WalletApplyHook>,
 ) -> Result<ProcessedBlock, BlockProcessError> {
     let t_total = Instant::now();
 
@@ -464,18 +463,7 @@ pub(super) fn process_block_utxo(
     // pass them separately.
     //
     let t0 = Instant::now();
-    // Wallet-hook plumbing (atomicity depends on path):
-    //   - sync path: chain + wallet commit inside the same redb
-    //     write_txn (truly atomic).
-    //   - pipeline path: chain commits durably first (flush + fsync
-    //     when needed), THEN wallet commits on a separate write_txn.
-    //     Two-commit, not atomic; failure mode is "wallet behind
-    //     chain" (covered by rescan), not "wallet ahead of chain".
-    //     Closing this seam requires pipeline-worker integration that
-    //     does not yet exist.
-    // Caller threads `wallet_hook` from NodeState; `None` is
-    // acceptable for tests and non-wallet deployments.
-    store.apply_block(&checked_block, voted_params_row, wallet_hook)?;
+    store.apply_block(&checked_block, voted_params_row)?;
     if mode2_trust_consumed {
         // apply_block committed the synthetic `voted_params` row (with
         // `activated_update = trusted cumulative`) and folded it into
@@ -844,10 +832,8 @@ mod tests {
             .store_block_section(&expected.extension_id, &writer.result())
             .unwrap();
         let params = ProtocolParams::mainnet_default();
-        let err = process_block_utxo(
-            &mut store, &header_id, &params, None, None, None, None, None,
-        )
-        .unwrap_err();
+        let err = process_block_utxo(&mut store, &header_id, &params, None, None, None, None)
+            .unwrap_err();
         // ErgoTransaction.scala:93-94 and ValidationRules.scala:31-35:
         // rules 100/101 are fatal validation verdicts, not parse failures.
         assert!(
@@ -865,7 +851,7 @@ mod tests {
             ergo_crypto::difficulty::DifficultyParams::mainnet(),
         );
         executor.load_header_index(&backend).unwrap();
-        executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now(), None);
+        executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now());
         assert!(backend
             .as_utxo_mut()
             .unwrap()
@@ -874,7 +860,7 @@ mod tests {
         assert_eq!(backend.chain_state_meta().best_full_block_height, 1);
         assert_eq!(backend.chain_state_meta().best_header_height, 1);
         assert_eq!(executor.block_apply_error_count(), 1);
-        executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now(), None);
+        executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now());
         assert_eq!(
             executor.block_apply_error_count(),
             1,
@@ -969,7 +955,6 @@ mod tests {
             &mut store,
             &header_id,
             &ProtocolParams::mainnet_default(),
-            None,
             None,
             None,
             None,

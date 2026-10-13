@@ -1,0 +1,218 @@
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use ergo_wallet_service::{
+    BlocksSinceRequest, BlocksSinceResponse, ChainBlock, ChainClient, ChainClientError,
+    ChainSnapshot, CommittedTip, SubmitRequest, SubmitResponse, UtxoLookup, WalletRead,
+    WalletStore, WalletStoreError, WalletWrite,
+};
+
+pub struct FakeChain {
+    pub tip: CommittedTip,
+    pub responses: Arc<Mutex<VecDeque<BlocksSinceResponse>>>,
+    pub requests: Arc<Mutex<Vec<(u32, u32)>>>,
+    /// While set, the node is unreachable: every call fails with a transport
+    /// error, as a refused connection does while a node restarts.
+    pub down: AtomicBool,
+}
+
+impl FakeChain {
+    pub fn new(tip: CommittedTip) -> Arc<Self> {
+        Arc::new(Self {
+            tip,
+            responses: Arc::new(Mutex::new(VecDeque::new())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            down: AtomicBool::new(false),
+        })
+    }
+
+    pub fn with_responses(
+        tip: CommittedTip,
+        responses: impl IntoIterator<Item = BlocksSinceResponse>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            tip,
+            responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            down: AtomicBool::new(false),
+        })
+    }
+
+    pub fn requests(&self) -> Vec<(u32, u32)> {
+        self.requests.lock().expect("requests lock").clone()
+    }
+
+    pub fn set_down(&self, down: bool) {
+        self.down.store(down, Ordering::SeqCst);
+    }
+
+    fn reachable(&self) -> Result<(), ChainClientError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(ChainClientError::Transport(
+                "connection refused".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ChainClient for FakeChain {
+    fn committed_tip(&self) -> Result<CommittedTip, ChainClientError> {
+        self.reachable()?;
+        Ok(self.tip.clone())
+    }
+
+    fn snapshot(&self) -> Result<ChainSnapshot, ChainClientError> {
+        Err(ChainClientError::Unsupported)
+    }
+
+    fn blocks_since(
+        &self,
+        request: BlocksSinceRequest,
+    ) -> Result<BlocksSinceResponse, ChainClientError> {
+        self.reachable()?;
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .push((request.cursor.height, request.limit));
+        if let Some(response) = self.responses.lock().expect("responses lock").pop_front() {
+            return Ok(response);
+        }
+        let first = request.cursor.height.saturating_add(1);
+        let last = self
+            .tip
+            .height
+            .min(first.saturating_add(request.limit.saturating_sub(1)));
+        let blocks = (first..=last).map(block).collect();
+        Ok(BlocksSinceResponse::Forward(
+            ergo_wallet_service::ForwardBlocksSince {
+                tip: self.tip.clone(),
+                blocks,
+            },
+        ))
+    }
+
+    fn lookup_utxo(
+        &self,
+        _box_id: [u8; 32],
+        _expected_tip: CommittedTip,
+    ) -> Result<UtxoLookup, ChainClientError> {
+        Err(ChainClientError::Unsupported)
+    }
+
+    fn submit(&self, _request: SubmitRequest) -> Result<SubmitResponse, ChainClientError> {
+        Err(ChainClientError::Unsupported)
+    }
+}
+
+pub fn block(height: u32) -> ChainBlock {
+    ChainBlock {
+        block_id: [height as u8; 32],
+        height,
+        parent_id: [height.saturating_sub(1) as u8; 32],
+        header_bytes: Vec::new(),
+        transactions: Vec::new(),
+    }
+}
+
+/// Delegating store that counts the write transactions opened through it.
+///
+/// `WalletStore` is two methods wide, so wrapping it is cheap, and the count is
+/// the only way to see *how much* a pass durably wrote rather than just what it
+/// ended up writing: a caught-up tick that ends on `idle` looks identical to one
+/// that wrote `running` first and then `idle`, unless the extra write is
+/// counted. Every call is forwarded, so the pass still runs the real redb path.
+pub struct WriteSpy {
+    inner: Arc<dyn WalletStore>,
+    writes: Arc<Mutex<usize>>,
+}
+
+impl WriteSpy {
+    pub fn new(inner: Arc<dyn WalletStore>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            writes: Arc::new(Mutex::new(0)),
+        })
+    }
+
+    /// Number of write transactions opened so far.
+    pub fn writes(&self) -> usize {
+        *self.writes.lock().expect("writes lock")
+    }
+}
+
+impl WalletStore for WriteSpy {
+    fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+        self.inner.begin_read()
+    }
+
+    fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+        *self.writes.lock().expect("writes lock") += 1;
+        self.inner.begin_write()
+    }
+}
+
+pub struct NoChain;
+
+impl ChainClient for NoChain {
+    fn committed_tip(&self) -> Result<CommittedTip, ChainClientError> {
+        Err(ChainClientError::Unsupported)
+    }
+
+    fn snapshot(&self) -> Result<ChainSnapshot, ChainClientError> {
+        Err(ChainClientError::Unsupported)
+    }
+
+    fn blocks_since(
+        &self,
+        _request: BlocksSinceRequest,
+    ) -> Result<BlocksSinceResponse, ChainClientError> {
+        Err(ChainClientError::Unsupported)
+    }
+
+    fn lookup_utxo(
+        &self,
+        _box_id: [u8; 32],
+        _expected_tip: CommittedTip,
+    ) -> Result<UtxoLookup, ChainClientError> {
+        Err(ChainClientError::Unsupported)
+    }
+
+    fn submit(&self, _request: SubmitRequest) -> Result<SubmitResponse, ChainClientError> {
+        Err(ChainClientError::Unsupported)
+    }
+}
+
+/// The transactions root a version-2 header commits to for `transactions`:
+/// the Merkle root of their ids followed by their witness ids.
+pub fn transactions_root(
+    transactions: &[ergo_ser::transaction::Transaction],
+) -> ergo_primitives::digest::Digest32 {
+    let ids: Vec<Vec<u8>> = transactions
+        .iter()
+        .map(|tx| {
+            ergo_ser::transaction::transaction_id(tx)
+                .unwrap()
+                .as_bytes()
+                .to_vec()
+        })
+        .collect();
+    let witnesses: Vec<Vec<u8>> = transactions
+        .iter()
+        .map(|tx| {
+            let proofs: Vec<u8> = tx
+                .inputs
+                .iter()
+                .flat_map(|input| input.spending_proof.proof.iter().copied())
+                .collect();
+            ergo_crypto::autolykos::common::blake2b256(&proofs)[1..].to_vec()
+        })
+        .collect();
+    let id_refs: Vec<&[u8]> = ids.iter().map(Vec::as_slice).collect();
+    let witness_refs: Vec<&[u8]> = witnesses.iter().map(Vec::as_slice).collect();
+    ergo_primitives::digest::Digest32::from_bytes(ergo_crypto::merkle::transactions_root(
+        &id_refs,
+        Some(&witness_refs),
+    ))
+}

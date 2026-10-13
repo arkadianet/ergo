@@ -213,7 +213,7 @@ fn executor_receive_gate_drops_sub_sentinel_persist_section() {
     // The executor takes the backend enum; wrap the UTXO store for the
     // call (the underlying store is mutated in place either way).
     let mut store = ergo_state::StateBackendKind::Utxo(store);
-    let follow_ups = exec.execute(action, &mut store, &mut coord, Instant::now(), None);
+    let follow_ups = exec.execute(action, &mut store, &mut coord, Instant::now());
     assert!(
         follow_ups.is_empty(),
         "executor must drop sub-sentinel PersistSection silently (no follow-up): {:?}",

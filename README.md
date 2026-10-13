@@ -11,7 +11,7 @@ Read the [security policy](SECURITY.md) and [compatibility limits](docs/compatib
 ### Download
 
 Download the archive for your platform from [GitHub Releases](https://github.com/arkadianet/ergo/releases).
-Each archive holds both programs, `ergo-node` and the `ergo-wallet` CLI, with
+Each archive holds `ergo-node`, the `ergo-wallet` CLI and `ergo-walletd`, with
 config templates and docs. These six platforms are built by the
 [release workflow](.github/workflows/release.yml):
 
@@ -80,14 +80,16 @@ Snapshot trust verification is provisional. Cross-check the installed UTXO root
 against a known-good reference before trusting the state. Read the [fast bootstrap guide](docs/operating.md#fast-clean-db-boot-mode-2--nipopow)
 and [configuration reference](docs/configuration.md).
 
-Mining needs either `[mining] miner_public_key_hex` (a 33-byte compressed
-secp256k1 public key, 66 hex characters; `ergo-wallet pubkey` prints it from a
-mnemonic) or an initialized node wallet, whose first EIP-3 key is used.
+Mining needs a reward key: `[mining] miner_reward_address` (a P2PK address
+from any wallet; `ergo-walletd reward-key` prints one) or
+`miner_public_key_hex` (a 33-byte compressed secp256k1 public key, 66 hex
+characters; `ergo-wallet pubkey` prints it from a mnemonic). The wallet runs in
+`ergo-walletd` beside the node; see [wallet setup](docs/wallet-setup.md).
 The node supplies mining work through REST, so GPU rigs need a Stratum server
 or pool in between: for example [ergo-solo](https://github.com/arkadianet/ergo-stratum-rs)
 for solo mining, or [Lithos](docs/lithos.md). See [mining templates](docs/operator-mining.md).
 
-### Unlock wallet and mining
+### API key
 
 **Wallet routes, mining controls, and other privileged calls need an API key.**
 The dashboard and public reads work without one. `ergo-node init` already
@@ -107,7 +109,7 @@ api_key_hash = "<64 lowercase hex characters>"
 
 Add it to `ergo-node.toml` and restart the node. Clients send the **secret**
 from the file, not the hash, in the `api_key` header; enter it in the dashboard
-to authorize privileged calls. Then initialize or unlock your wallet.
+to authorize privileged calls.
 `ergo-node api-key hash --secret-file PATH` prints the hash for an existing
 secret. See [API authentication](docs/configuration.md#apisecurity).
 
@@ -179,7 +181,7 @@ From a source checkout:
 
 ```bash
 cargo build --locked --release -p ergo-node
-cargo build --locked --release -p ergo-wallet
+cargo build --locked --release -p ergo-wallet --features cli
 ./target/release/ergo-node --config ergo-node/ergo-node.toml
 ```
 
@@ -224,6 +226,19 @@ Read [contribution rules](CONTRIBUTING.md#test-conventions) and [compatibility p
 - [Architecture](ARCHITECTURE.md) · [Codemap](docs/codemap.md) · [Overview](docs/overview.md)
 - [Compatibility](docs/compatibility.md) · [Operating-mode evidence](docs/compatibility.md#operating-mode-status)
 - [Contributing](CONTRIBUTING.md) · [Releasing](docs/releasing.md) · [Code of conduct](CODE_OF_CONDUCT.md)
+
+The wallet extraction integration also provides `ergo-walletd`, a separate
+daemon built from source. Watch-only remains its default; completed Phase 3 adds
+opt-in seed hosting for lifecycle, key management, transaction construction,
+signing and sending, scans/rescans and private mining jobs through an authenticated
+local API. Offline migration and discovery, release packaging and deployment
+guidance are included.
+See the [extraction plan](docs/wallet-extraction.md#phase-3-daemon-engine-hosting),
+[daemon guide](docs/codemap/ergo-walletd.md) and
+[daemon configuration](docs/configuration.md#ergo-walletdtoml-the-standalone-wallet-daemon).
+The default wallet library core is portable, with optional CLI/keystore features
+and Android checks. EIP-19 reduced transactions and independently reviewed
+real-context contract signing are tracked in [#612](https://github.com/arkadianet/ergo/issues/612).
 
 ## Security
 

@@ -26,9 +26,9 @@ use ergo_api::emission::{EmissionInfoJson, EmissionSchedule, EmissionScriptsJson
 use ergo_api::mining::{MiningApiError, NodeMining};
 use ergo_api::server::{
     established_openapi_operations, legacy_rust_openapi, openapi_operations, router,
-    router_with_mempool, router_with_mempool_and_wallet_and_security,
-    router_with_mempool_and_wallet_and_security_and_inventory, rust_openapi,
-    scala_openapi_operations, v1_openapi_fragment, RouteOperation, ServerCtx,
+    router_with_mempool, router_with_mempool_and_security,
+    router_with_mempool_and_security_and_inventory, rust_openapi, scala_openapi_operations,
+    v1_openapi_fragment, RouteOperation, ServerCtx,
 };
 use ergo_api::traits::{
     ChainParamsView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView, NoopNodeAdmin,
@@ -38,7 +38,6 @@ use ergo_api::types::{
     ApiMempoolTransactions, ApiPeer, ApiStatus, ApiSyncStatus, ApiTip, ApiTxSource,
     ApiWeightFunction, HealthStatus, SubmitError, SubmitMode, SyncStateLabel,
 };
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_indexer_types::{
     BalanceDto, BoxId, IndexedBoxDto, IndexedTokenDto, IndexedTxDto, IndexerQuery, IndexerStatus,
     Page, SortDir, TemplateHash, TokenId, TreeHash, TxId,
@@ -476,11 +475,13 @@ fn ctx(submit: Option<Arc<dyn NodeSubmit>>) -> ServerCtx {
         read: read(),
         compat: None,
         submit,
+        wallet_chain: None,
         indexer: None,
         mempool: Arc::new(NoopMempoolView::new()),
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
@@ -496,11 +497,13 @@ fn fully_wired_ctx() -> ServerCtx {
         read: read(),
         compat: Some(Arc::new(StubCompat)),
         submit: Some(submit()),
+        wallet_chain: None,
         indexer: Some(Arc::new(StubIndexer)),
         mempool: Arc::new(NoopMempoolView::new()),
         network: NetworkPrefix::Mainnet,
         chain_params: Some(Arc::new(StubChainParams)),
         mining: Some(Arc::new(StubMining)),
+        private_queue: None,
         emission: Some(Arc::new(StubEmission)),
         emission_scripts: Some(Arc::new(EmissionScriptsJson {
             emission: String::new(),
@@ -660,12 +663,8 @@ async fn probe_operation(app: &axum::Router, operation: &RouteOperation) -> Resp
 
 #[tokio::test]
 async fn canonical_family_inventories_are_bidirectional_and_fully_mounted() {
-    let (app, inventory) = router_with_mempool_and_wallet_and_security_and_inventory(
-        fully_wired_ctx(),
-        Some(admin()),
-        Arc::new(NoopWalletAdmin),
-        None,
-    );
+    let (app, inventory) =
+        router_with_mempool_and_security_and_inventory(fully_wired_ctx(), Some(admin()), None);
     let rust_documented = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI"));
     let scala_documented = scala_openapi_operations();
     assert_eq!(inventory.rust, rust_documented);
@@ -676,7 +675,7 @@ async fn canonical_family_inventories_are_bidirectional_and_fully_mounted() {
             .lines()
             .count()
     );
-    assert_eq!(inventory.scala.len(), 127);
+    assert_eq!(inventory.scala.len(), 92);
     assert!(inventory.rust.is_disjoint(&inventory.scala));
 
     let app = app.layer(axum::middleware::from_fn(mark_matched_route));
@@ -734,18 +733,10 @@ async fn canonical_family_inventories_are_bidirectional_and_fully_mounted() {
 
 #[tokio::test]
 async fn scala_blockchain_inventory_tracks_chain_capability() {
-    let (_, without_chain) = router_with_mempool_and_wallet_and_security_and_inventory(
-        indexer_without_chain_ctx(),
-        None,
-        Arc::new(NoopWalletAdmin),
-        None,
-    );
-    let (fully_wired, with_chain) = router_with_mempool_and_wallet_and_security_and_inventory(
-        fully_wired_ctx(),
-        Some(admin()),
-        Arc::new(NoopWalletAdmin),
-        None,
-    );
+    let (_, without_chain) =
+        router_with_mempool_and_security_and_inventory(indexer_without_chain_ctx(), None, None);
+    let (fully_wired, with_chain) =
+        router_with_mempool_and_security_and_inventory(fully_wired_ctx(), Some(admin()), None);
 
     let chain_dependent = chain_dependent_scala_operations();
     for operation in &chain_dependent {
@@ -799,18 +790,9 @@ async fn scala_blockchain_inventory_tracks_chain_capability() {
 
 #[test]
 fn production_inventory_tracks_aliases_and_all_conditional_rust_routes() {
-    let (_, base) = router_with_mempool_and_wallet_and_security_and_inventory(
-        ctx(None),
-        None,
-        Arc::new(NoopWalletAdmin),
-        None,
-    );
-    let (_, full) = router_with_mempool_and_wallet_and_security_and_inventory(
-        fully_wired_ctx(),
-        Some(admin()),
-        Arc::new(NoopWalletAdmin),
-        None,
-    );
+    let (_, base) = router_with_mempool_and_security_and_inventory(ctx(None), None, None);
+    let (_, full) =
+        router_with_mempool_and_security_and_inventory(fully_wired_ctx(), Some(admin()), None);
 
     let conditionals = full
         .rust
@@ -912,12 +894,8 @@ async fn runtime_mount_admin_wired_unconfigured_shutdown_denied() {
 
 #[tokio::test]
 async fn runtime_mount_all_wired_gates_shutdown_on_api_key() {
-    let app = router_with_mempool_and_wallet_and_security(
-        ctx(Some(submit())),
-        Some(admin()),
-        Arc::new(NoopWalletAdmin),
-        Some(security()),
-    );
+    let app =
+        router_with_mempool_and_security(ctx(Some(submit())), Some(admin()), Some(security()));
     assert_all_gets_mounted(&app).await;
     for path in SUBMIT_ROUTES {
         assert_ne!(
@@ -993,10 +971,9 @@ async fn peers_connect_unwired_admin_is_404() {
 #[tokio::test]
 async fn peers_connect_is_api_key_gated_and_records_the_addr() {
     let recorder = Arc::new(RecordingAdmin::default());
-    let app = router_with_mempool_and_wallet_and_security(
+    let app = router_with_mempool_and_security(
         ctx(None),
         Some(recorder.clone() as Arc<dyn NodeAdmin>),
-        Arc::new(NoopWalletAdmin),
         Some(security()),
     );
     // Scala: `connect` carries withAuth — bare requests reject on the key.
@@ -1019,10 +996,9 @@ async fn peers_connect_is_api_key_gated_and_records_the_addr() {
 #[tokio::test]
 async fn peers_connect_malformed_body_is_400() {
     let recorder = Arc::new(RecordingAdmin::default());
-    let app = router_with_mempool_and_wallet_and_security(
+    let app = router_with_mempool_and_security(
         ctx(None),
         Some(recorder.clone() as Arc<dyn NodeAdmin>),
-        Arc::new(NoopWalletAdmin),
         Some(security()),
     );
     // Scala: regex mismatch → ApiError.BadRequest. Both a non-address
@@ -1072,10 +1048,9 @@ fn voting_app(mining: bool) -> (axum::Router, Arc<RecordingVotingAdmin>) {
         mining,
         last: std::sync::Mutex::new(None),
     });
-    let app = router_with_mempool_and_wallet_and_security(
+    let app = router_with_mempool_and_security(
         ctx(None),
         Some(admin.clone() as Arc<dyn NodeAdmin>),
-        Arc::new(NoopWalletAdmin),
         Some(security()),
     );
     (app, admin)
@@ -1172,12 +1147,7 @@ async fn get_with_key(app: &axum::Router, path: &str, api_key: Option<&str>) -> 
 }
 
 fn all_wired_app() -> axum::Router {
-    router_with_mempool_and_wallet_and_security(
-        ctx(Some(submit())),
-        Some(admin()),
-        Arc::new(NoopWalletAdmin),
-        Some(security()),
-    )
+    router_with_mempool_and_security(ctx(Some(submit())), Some(admin()), Some(security()))
 }
 
 #[tokio::test]
@@ -1197,181 +1167,37 @@ async fn unknown_path_is_404_not_auth_gated() {
 }
 
 #[tokio::test]
-async fn unknown_wallet_subpath_keeps_whole_prefix_gated() {
-    // Scala gates the whole `wallet` pathPrefix before inner route
-    // matching (`(pathPrefix("wallet") & withAuth)`, WalletApiRoute.scala),
-    // so an unknown subpath rejects on the key first.
+async fn retired_wallet_prefixes_stay_gated_and_answer_moved() {
+    // Scala gates the whole `wallet` pathPrefix before inner route matching
+    // (`(pathPrefix("wallet") & withAuth)`, WalletApiRoute.scala). The node
+    // hosts no wallet, so once the key passes every path under the retired
+    // prefixes — known or not — answers `410 wallet_moved`, never a handler.
     let app = all_wired_app();
-    assert_eq!(
-        get_with_key(&app, "/wallet/zzz-not-a-wallet-route", None).await,
-        StatusCode::FORBIDDEN,
-        "unknown /wallet/* subpath must still hit the api_key gate bare",
-    );
-    assert_eq!(
-        get_with_key(&app, "/wallet/zzz-not-a-wallet-route", Some("hello")).await,
-        StatusCode::NOT_FOUND,
-        "unknown /wallet/* subpath is a plain 404 once the key passes \
-         (house unmounted/unknown-surface rule; Scala would render its \
-         global 400 bad.request envelope here — deliberate divergence)",
-    );
-    assert_eq!(
-        get_with_key(&app, "/wallet", None).await,
-        StatusCode::FORBIDDEN,
-        "the bare /wallet prefix itself is gated (Scala pathPrefix parity)",
-    );
-}
-
-#[tokio::test]
-async fn native_wallet_subtree_is_api_key_gated_and_mounted() {
-    // The native `/api/v1/wallet/*` surface uses the same route_layer + catch-all
-    // gate as the Scala-compat `/wallet/*`: missing key → 403, a valid key + known
-    // route reaches the handler (mounted), a valid key + unknown subpath → bare 404
-    // (never 403-masking-404).
-    let app = all_wired_app();
-
-    // Known route, no key → gated (proves it is BOTH mounted and gated).
-    assert_eq!(
-        get_with_key(&app, "/api/v1/wallet/balance", None).await,
-        StatusCode::FORBIDDEN,
-        "GET /api/v1/wallet/balance must hit the api_key gate bare",
-    );
-    // Known route, valid key → past the gate and mounted (NoopWalletAdmin's default
-    // native_balance errors `internal` → 500; the point is it is NEITHER 403 NOR 404).
-    let with_key = get_with_key(&app, "/api/v1/wallet/balance", Some("hello")).await;
-    assert!(
-        with_key != StatusCode::FORBIDDEN && with_key != StatusCode::NOT_FOUND,
-        "GET /api/v1/wallet/balance with a valid key must be mounted past the gate, got {with_key}",
-    );
-    // Unknown subpath: whole-prefix gate first (403 without key), bare 404 with key.
-    assert_eq!(
-        get_with_key(&app, "/api/v1/wallet/zzz-not-a-route", None).await,
-        StatusCode::FORBIDDEN,
-        "unknown /api/v1/wallet/* subpath must still hit the api_key gate bare",
-    );
-    assert_eq!(
-        get_with_key(&app, "/api/v1/wallet/zzz-not-a-route", Some("hello")).await,
-        StatusCode::NOT_FOUND,
-        "unknown /api/v1/wallet/* subpath is a plain 404 once the key passes",
-    );
-    // Bare prefix is gated too.
-    assert_eq!(
-        get_with_key(&app, "/api/v1/wallet", None).await,
-        StatusCode::FORBIDDEN,
-        "the bare /api/v1/wallet prefix itself is gated",
-    );
-}
-
-#[tokio::test]
-async fn native_wallet_strict_query_uses_native_envelope() {
-    // codex P1-3 (query): a rejected query (unknown key via deny_unknown_fields)
-    // must return the native `{reason:"bad_request"}` envelope, NOT Axum's default
-    // plain-text 400. Valid key so the request passes the gate and reaches the
-    // (strict) query extractor.
-    let app = all_wired_app();
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/v1/wallet/balance?bogus=1")
-                .header(API_KEY_HEADER, "hello")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-    let body = String::from_utf8_lossy(&bytes);
-    assert!(
-        body.contains("\"reason\":\"bad_request\""),
-        "expected the native error envelope, got: {body}",
-    );
-}
-
-#[tokio::test]
-async fn native_wallet_strict_json_body_uses_native_envelope() {
-    // The strict-JSON extractor must map an unknown field (deny_unknown_fields)
-    // to the native `{reason:"bad_request"}` envelope, not Axum's default 400.
-    let app = all_wired_app();
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/v1/wallet/unlock")
-                .header(API_KEY_HEADER, "hello")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"pass":"x","bogus":1}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-    let body = String::from_utf8_lossy(&bytes);
-    assert!(
-        body.contains("\"reason\":\"bad_request\""),
-        "expected the native error envelope, got: {body}",
-    );
-}
-
-#[tokio::test]
-async fn native_wallet_post_routes_are_gated() {
-    // The new POST lifecycle routes are mounted and api-key gated.
-    let app = all_wired_app();
+    for path in [
+        "/wallet",
+        "/wallet/zzz-not-a-wallet-route",
+        "/api/v1/wallet",
+        "/api/v1/wallet/balance",
+        "/api/v1/wallet/zzz-not-a-route",
+    ] {
+        assert_eq!(
+            get_with_key(&app, path, None).await,
+            StatusCode::FORBIDDEN,
+            "{path} must hit the api_key gate bare",
+        );
+        assert_eq!(
+            get_with_key(&app, path, Some("hello")).await,
+            StatusCode::GONE,
+            "{path} answers wallet_moved once the key passes",
+        );
+    }
     assert_eq!(
         post_body(&app, "/api/v1/wallet/lock", None, "").await,
-        StatusCode::FORBIDDEN,
-        "POST /api/v1/wallet/lock must hit the api_key gate bare",
+        StatusCode::FORBIDDEN
     );
-    // With a valid key the route is reached (NoopWalletAdmin.lock() → Ok → 200),
-    // i.e. NEITHER 403 NOR 404.
-    let with_key = post_body(&app, "/api/v1/wallet/lock", Some("hello"), "").await;
-    assert!(
-        with_key != StatusCode::FORBIDDEN && with_key != StatusCode::NOT_FOUND,
-        "POST /api/v1/wallet/lock with a valid key must be mounted past the gate, got {with_key}",
-    );
-}
-
-#[tokio::test]
-async fn native_wallet_init_rejects_bad_strength() {
-    // The native init handler validates mnemonic strength (12/15/18/21/24) and
-    // returns the native bad_request envelope for anything else.
-    let app = all_wired_app();
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/v1/wallet/init")
-                .header(API_KEY_HEADER, "hello")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"pass":"pw","strength":7}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-    assert!(
-        String::from_utf8_lossy(&bytes).contains("\"reason\":\"bad_request\""),
-        "expected native bad_request envelope",
-    );
-}
-
-#[tokio::test]
-async fn native_wallet_rescan_accepts_bodyless_post() {
-    // The strict extractor treats an empty body as `{}`, so a bodyless rescan
-    // POST reaches the handler (NoopWalletAdmin.rescan → a domain error, NOT a
-    // 400 body-parse error and NOT a 403/404).
-    let app = all_wired_app();
-    let status = post_body(&app, "/api/v1/wallet/rescan", Some("hello"), "").await;
-    assert!(
-        status != StatusCode::BAD_REQUEST
-            && status != StatusCode::FORBIDDEN
-            && status != StatusCode::NOT_FOUND,
-        "bodyless rescan must reach the handler (empty body → {{}}), got {status}",
+    assert_eq!(
+        post_body(&app, "/api/v1/wallet/lock", Some("hello"), "").await,
+        StatusCode::GONE
     );
 }
 
@@ -1419,12 +1245,7 @@ impl ergo_api::emission::EmissionSchedule for FixtureEmission {
 fn app_with_emission_and_security() -> axum::Router {
     let mut c = ctx(None);
     c.emission = Some(Arc::new(FixtureEmission));
-    router_with_mempool_and_wallet_and_security(
-        c,
-        Some(admin()),
-        Arc::new(NoopWalletAdmin),
-        Some(security()),
-    )
+    router_with_mempool_and_security(c, Some(admin()), Some(security()))
 }
 
 #[tokio::test]
@@ -1496,12 +1317,7 @@ async fn emission_scripts_serves_three_p2s_addresses_publicly() {
         reemission: "re-addr".to_string(),
         pay2_reemission: "p2r-addr".to_string(),
     }));
-    let app = router_with_mempool_and_wallet_and_security(
-        c,
-        Some(admin()),
-        Arc::new(NoopWalletAdmin),
-        Some(security()),
-    );
+    let app = router_with_mempool_and_security(c, Some(admin()), Some(security()));
     let resp = app
         .oneshot(
             Request::builder()
@@ -1538,12 +1354,7 @@ async fn emission_scripts_mirrors_scala_method_and_subpath_quirk() {
         reemission: "re".to_string(),
         pay2_reemission: "p2r".to_string(),
     }));
-    let app = router_with_mempool_and_wallet_and_security(
-        c,
-        Some(admin()),
-        Arc::new(NoopWalletAdmin),
-        Some(security()),
-    );
+    let app = router_with_mempool_and_security(c, Some(admin()), Some(security()));
     for (method, uri) in [
         (Method::POST, "/emission/scripts"),
         (Method::GET, "/emission/scripts/zzz"),
@@ -1578,12 +1389,8 @@ async fn emission_scripts_unwired_is_404() {
 async fn authenticated_route_scope_inventory() {
     let mut ctx = fully_wired_ctx();
     ctx.script_config.require_api_key = true;
-    let (app, inventory) = router_with_mempool_and_wallet_and_security_and_inventory(
-        ctx,
-        Some(admin()),
-        Arc::new(NoopWalletAdmin),
-        Some(security()),
-    );
+    let (app, inventory) =
+        router_with_mempool_and_security_and_inventory(ctx, Some(admin()), Some(security()));
     let dir = tempfile::tempdir().unwrap();
     let keys = [
         ergo_api::auth::CredentialScope::Mining,
@@ -1609,12 +1416,7 @@ async fn authenticated_route_scope_inventory() {
     );
     let mut ctx = fully_wired_ctx();
     ctx.script_config.require_api_key = true;
-    let scoped_app = router_with_mempool_and_wallet_and_security(
-        ctx,
-        Some(admin()),
-        Arc::new(NoopWalletAdmin),
-        Some(scoped),
-    );
+    let scoped_app = router_with_mempool_and_security(ctx, Some(admin()), Some(scoped));
     let mut rows = Vec::new();
     for op in inventory.rust.iter().chain(&inventory.scala) {
         let response = app

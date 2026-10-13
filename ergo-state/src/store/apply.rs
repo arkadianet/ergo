@@ -19,8 +19,7 @@ use ergo_validation::CheckedTransaction;
 use tracing::debug;
 
 use super::{
-    build_wallet_block_txs_checked, StateError, StateStore, UndoEntry, UtxoChangeMaps,
-    UtxoInsertMap, UtxoMutation, UtxoRemoveMap,
+    StateError, StateStore, UndoEntry, UtxoChangeMaps, UtxoInsertMap, UtxoMutation, UtxoRemoveMap,
 };
 
 /// Scala-parity compute for the Mode 3 prune low-water mark, mirroring
@@ -102,30 +101,9 @@ impl StateStore {
     /// 1. Record digest_before
     /// 2. Apply UTXO changes
     /// 3. Verify new_digest == expected_state_root (abort on mismatch)
-    /// 4. Write undo_log, chain_index, state_meta + (when active)
-    ///    wallet tables — all inside the same redb write_txn
+    /// 4. Write undo_log, chain_index, state_meta — all inside the
+    ///    same redb write_txn
     /// 5. Atomic commit
-    ///
-    /// Wallet hook atomicity (M5):
-    ///
-    /// - **Synchronous path** (no persist pipeline): the payload is
-    ///   consumed inside `persist_apply`'s write_txn before the commit
-    ///   fires. Chain + wallet state advance atomically.
-    ///
-    /// - **Pipeline path** (`enable_persist_pipeline(_)` active):
-    ///   `persist_apply` queues the chain mutation AND the wallet
-    ///   payload to the background worker. `execute_batch` (the
-    ///   worker) applies wallet writes inside the same redb
-    ///   write_txn that commits the batched chain mutations — chain
-    ///   + wallet atomic on the pipeline path too. The IBD
-    ///   throughput advantage of the pipeline is preserved (no
-    ///   per-block synchronous flush) because the worker handles
-    ///   the atomic seam.
-    ///
-    /// Either path: a crash between the two phases is no longer
-    /// reachable. Failure inside the worker's batch (chain or
-    /// wallet) aborts the whole batch via redb's documented
-    /// atomicity.
     #[tracing::instrument(
         name = "apply_block",
         level = "debug",
@@ -140,71 +118,23 @@ impl StateStore {
         &mut self,
         block: &ergo_validation::block::CheckedBlock,
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
     ) -> Result<(), StateError> {
         let header = block.header();
         let height = header.height();
         let header_id = *header.header_id();
-
-        // Pre-build the wallet payload on the main thread BEFORE chain
-        // apply. The payload bundles owned data only, so it can later
-        // cross the pipeline-worker thread boundary (M5 follow-up).
-        let payload: Option<crate::store::WalletApplyPayload> = if let Some(hook) = wallet_hook {
-            let trees = hook.tracked_p2pk_trees();
-            let pubkeys = hook.cached_pubkeys();
-            let scan_count = hook.registered_scan_count();
-            // Build a payload if there is ANY wallet tracking — tracked pubkeys
-            // OR registered scans. Scan matching is gated on `scan_count > 0`
-            // so a node with no scans pays nothing for the per-box matcher.
-            if trees.is_empty() && pubkeys.is_empty() && scan_count == 0 {
-                None
-            } else {
-                let owned = build_wallet_block_txs_checked(block.transactions(), height)?;
-                let scan_matches = if scan_count > 0 {
-                    crate::store::build_scan_match_records(block.transactions(), height, hook)?
-                } else {
-                    Vec::new()
-                };
-                Some(crate::store::WalletApplyPayload {
-                    tracked_p2pk_trees: trees,
-                    cached_pubkeys: pubkeys,
-                    block_txs_owned: owned,
-                    scan_matches,
-                    has_registered_scans: scan_count > 0,
-                })
-            }
-        } else {
-            None
-        };
-
-        // Persist-pipeline path predicate: capture BEFORE
-        // `apply_checked_transactions` so the fallback (pipeline-path
-        // separate wallet write) fires only when persist_apply did
-        // NOT consume the payload atomically.
-        let pipeline_active = self.persist_pipeline.is_some();
-
         self.apply_checked_transactions(
             height,
             &header_id,
             &header.header().state_root,
             block.transactions(),
             voted_params_row,
-            payload.as_ref(),
-        )?;
-
-        // M5 final-slice: pipeline-path wallet writes now travel
-        // through `PersistJob` and apply inside the worker's batch
-        // write_txn (see `persist::execute_batch` step 9). No
-        // separate fallback write_txn is needed — chain + wallet
-        // commit atomically on both paths.
-        let _ = pipeline_active;
-        let _ = payload;
-        Ok(())
+        )
     }
 
     /// Shared apply core for a `CheckedBlock` and the test harness path
     /// that drives individual CheckedTransactions without building a real
     /// block header. Production code should not call this directly.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_checked_transactions(
         &mut self,
         height: u32,
@@ -212,7 +142,6 @@ impl StateStore {
         expected_state_root: &ADDigest,
         checked: &[CheckedTransaction],
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
-        wallet_payload: Option<&crate::store::WalletApplyPayload>,
     ) -> Result<(), StateError> {
         if !self.genesis_committed {
             return Err(StateError::InvalidPrecondition {
@@ -251,7 +180,6 @@ impl StateStore {
             expected_state_root,
             (to_remove, to_insert, emission),
             voted_params_row,
-            wallet_payload,
         )
     }
 
@@ -298,54 +226,12 @@ impl StateStore {
         // not exercise voted-params logic. For tests that need to write a
         // voted_params row alongside an unchecked apply, see
         // `apply_block_unchecked_with_voted_params_for_test`.
-        // No wallet payload: the genesis path predates any wallet
-        // tracking, and the test harness path runs without a wallet
-        // hook.
         self.apply_utxo_changes(
             height,
             header_id,
             expected_state_root,
             (to_remove, to_insert, emission),
             None,
-            None,
-        )
-    }
-
-    #[cfg(feature = "test-helpers")]
-    pub(crate) fn apply_block_unchecked_with_wallet_for_test(
-        &mut self,
-        height: u32,
-        header_id: &[u8; 32],
-        expected_state_root: &ADDigest,
-        transactions: &[Transaction],
-        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
-    ) -> Result<(), StateError> {
-        if !self.genesis_committed {
-            return Err(StateError::InvalidPrecondition {
-                what: "apply_block called before initialize_genesis",
-            });
-        }
-        let txs: Vec<&Transaction> = transactions.iter().collect();
-        let (to_remove, to_insert) = Self::build_utxo_changes_raw(&txs)?;
-        let emission = super::emission::EmissionTransition::prepare(
-            self.chain_state.best_full_block_id,
-            height,
-            transactions.iter(),
-        )?;
-        let wallet_payload = wallet_hook.map(|hook| crate::store::WalletApplyPayload {
-            tracked_p2pk_trees: hook.tracked_p2pk_trees(),
-            cached_pubkeys: hook.cached_pubkeys(),
-            block_txs_owned: Vec::new(),
-            scan_matches: Vec::new(),
-            has_registered_scans: hook.registered_scan_count() > 0,
-        });
-        self.apply_utxo_changes(
-            height,
-            header_id,
-            expected_state_root,
-            (to_remove, to_insert, emission),
-            None,
-            wallet_payload.as_ref(),
         )
     }
 
@@ -381,7 +267,6 @@ impl StateStore {
             expected_state_root,
             (to_remove, to_insert, emission),
             voted_params_row,
-            None,
         )
     }
 
@@ -544,6 +429,7 @@ impl StateStore {
     /// (height, best_full_block, validation-settings cache) on success.
     /// On error, rebuilds in-memory state from disk via
     /// `rebuild_from_committed`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_utxo_changes(
         &mut self,
         height: u32,
@@ -555,7 +441,6 @@ impl StateStore {
             super::emission::EmissionTransition,
         ),
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
-        wallet_payload: Option<&crate::store::WalletApplyPayload>,
     ) -> Result<(), StateError> {
         let (to_remove, to_insert, emission) = changes;
         let promote_header = self.should_promote_applied_header(height, header_id)?;
@@ -571,7 +456,6 @@ impl StateStore {
             to_remove: &to_remove,
             to_insert: &to_insert,
             voted_params_row,
-            wallet_payload,
         });
         match result {
             Ok(durability) => {
@@ -664,7 +548,6 @@ impl StateStore {
             to_remove,
             to_insert,
             voted_params_row,
-            wallet_payload,
         } = mutation;
 
         let root_id_before = self.tree.root_id();
@@ -739,13 +622,6 @@ impl StateStore {
             created: box_created,
         };
 
-        // M5 atomic commit on both paths:
-        //   - Synchronous path: persist_apply consumes the wallet
-        //     payload inside the same write_txn as chain mutations.
-        //   - Pipeline path: persist_apply queues the payload on
-        //     the PersistJob; the worker's execute_batch applies it
-        //     inside the same batch write_txn that commits the
-        //     chain mutations.
         let t0 = std::time::Instant::now();
         let result = self.persist_apply(
             height,
@@ -753,7 +629,6 @@ impl StateStore {
             &new_digest,
             (&undo, &emission),
             voted_params_row,
-            wallet_payload,
         );
         let t_persist = t0.elapsed();
 

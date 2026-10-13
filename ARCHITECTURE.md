@@ -34,24 +34,63 @@ These are the standing constraints the codebase is built around:
 
 ## Crate layering
 
-The node's runtime is 18 crates forming a strict, acyclic dependency DAG
-enforced by `cargo`. Each crate adds one capability to the layer below it. A
-separate 19th workspace crate, `ergo-difftest`, is a dev/test-only
-differential-fuzz harness (`publish = false`): it depends on the consensus
-crates but nothing depends on it, so it sits outside this runtime DAG. The table
-below is a summary; the [codebase map](docs/codemap.md) has the full per-crate
-detail and the dependency graph.
+The node's runtime is 21 workspace crates forming a strict, acyclic
+dependency DAG enforced by `cargo`. A separate 22nd workspace crate,
+`ergo-difftest`, is a dev/test-only differential-fuzz harness
+(`publish = false`): it depends on the consensus crates but nothing depends
+on it, so it sits outside this runtime DAG. The table below is a summary; the
+[codebase map](docs/codemap.md) has the full per-crate detail and the
+dependency graph.
 
 | Layer | Crates | Role |
 |---|---|---|
 | **L0** foundation | `ergo-primitives` | byte codecs (VLQ/zigzag), `Digest32`/`ModifierId`/`ADDigest`, `blake2b256`, JIT cost model |
 | **L1** wire format | `ergo-ser` | byte-exact round-trippable codecs for every consensus structure |
-| **L2** capability | `ergo-chain-spec`, `ergo-crypto`, `ergo-sigma`, `ergo-compiler`, `ergo-p2p`, `ergo-rest-json`, `ergo-indexer-types` | network params; PoW + difficulty + Merkle; the ErgoTree interpreter; the ErgoScript source → ErgoTree compiler; the P2P transport; JSON DTOs; the indexer read surface |
+| **L2** capability | `ergo-chain-spec`, `ergo-crypto`, `ergo-sigma`, `ergo-compiler`, `ergo-p2p`, `ergo-rest-json`, `ergo-indexer-types`, `ergo-wallet-protocol` | network params; PoW + difficulty + Merkle; the ErgoTree interpreter and compiler; P2P transport; JSON DTOs; the indexer read surface; transport-neutral wallet wire contracts |
 | **L3** validation | `ergo-validation` | header/block/tx acceptance rules; voted-param epochs; NiPoPoW verify |
-| **L4** state | `ergo-state` | redb-backed authenticated UTXO state, AVL+ tree, atomic apply/rollback |
-| **L5** services | `ergo-mempool`, `ergo-sync`, `ergo-mining`, `ergo-indexer`, `ergo-wallet` | mempool, chain sync, block production, extra-index, HD wallet |
-| **L6** API | `ergo-api` | the HTTP/JSON server; talks to the node only through `Arc<dyn …>` traits |
-| **L7** runtime | `ergo-node` | the binary: wiring, lifecycle, the single-writer action loop |
+| **L4** wallet core | `ergo-wallet`, `ergo-wallet-service` | HD cryptography/secrets/proving; the wallet engine (every wallet command: signing, sending, sweep, keys, scans, rescan orchestration) plus service-owned wallet state, persistence, apply/rescan, and selection |
+| **L5** state | `ergo-state` | redb-backed authenticated UTXO state, AVL+ tree, atomic apply/rollback, and the legacy wallet facade |
+| **L6** subsystems | `ergo-mempool`, `ergo-sync`, `ergo-mining`, `ergo-indexer` | admission/reorg handling; chain sync; block production; extra-index |
+| **L7** API | `ergo-api` | HTTP/JSON server; talks to the node only through `Arc<dyn …>` traits and protocol DTOs |
+| **L8** runtime | `ergo-node` | the binary: process wiring, lifecycle, the single-writer chain action loop, and the chain API external wallets sync from. Hosts no wallet |
+| **L8** runtime | `ergo-walletd` | the wallet daemon: its own encrypted wallet database, an HTTP chain client, a bounded sync/reorg loop, and an authenticated local API. Watch-only by default; seed mode hosts the shared `WalletEngine`. A separate process, not a node component |
+
+The node hosts no wallet. `ergo-wallet-protocol` is transport-neutral and
+owns only wire DTOs and validation. `ergo-wallet-service` owns the wallet: its
+`WalletEngine` carries every wallet command (lifecycle, reads, build / sign /
+self-verify / send, the reward sweep, multi-sig, key derivation, `/scan/*`,
+rescan orchestration) on top of the service's state, redb tables,
+apply/rescan/sync, selection, and transaction construction. `ergo-state`
+retains the `ergo_state::wallet` facade and the one-way normal edge
+`ergo-state -> ergo-wallet-service` only to read and migrate the wallet an
+earlier release left in `state.redb`, which the node hands to `ergo-walletd`;
+chain apply writes no wallet rows. The reverse edge is forbidden.
+
+`ergo-walletd` is the wallet runtime. It runs as its own process with its own
+single-writer sync thread over its own encrypted redb store, pulls chain data
+from a node's `/api/v1/chain/*` HTTP surface (verifying every header's proof
+of work and every block's transactions root), and serves an authenticated
+local API. In the default watch-only mode it never holds a secret key; seed
+mode hosts the shared `WalletEngine` to sign and send. Every local request
+needs the daemon's own credential, the socket is created `0o600` under a
+`0o077` umask, and the optional TCP listener is restricted to loopback at
+config load. Because the daemon cannot ask a node which network it serves,
+`network` is a required config identity threaded into descriptor validation
+and into every address the API renders.
+
+Startup is two phases rather than one `async fn`. `reqwest`'s blocking client
+owns a private Tokio runtime, created and dropped inside
+`ClientBuilder::build`, and Tokio aborts when a runtime is dropped on a thread
+that is inside an async context — so building it from `run` (or from under
+`#[tokio::main]`) panicked before the first log line in a dev build. `prepare`
+does every blocking construction step and `main` calls it *before* the runtime
+exists; `run` then takes an already-built `Daemon` and cannot construct a
+client at all. In watch-only mode the daemon's only scan input is the descriptor
+file, which the strict schema limits to public keys, so the `/scan/*` registry
+the backing store also implements is always empty there and `/scans` always
+returns `[]`; that mode has no scan registration route. A seed wallet serves
+the full `/scan/*` management routes (`register`, `deregister`, `stopTracking`,
+`addBox` and the box reads).
 
 Two layering decisions diverge from the Scala reference and are worth
 internalizing first:
@@ -66,16 +105,12 @@ internalizing first:
 ## The runtime: a single-writer action loop
 
 The node is one `tokio` runtime built around a supervised **action loop**
-(`ergo-node/src/node/action_loop.rs`). There are exactly **two writers** of
-mutable consensus/wallet state, and they are never shared:
+(`ergo-node/src/node/action_loop.rs`). Chain state has one writer:
 
 1. **The action loop** owns chain-apply (`ergo-state::StateStore`) and the
-   `Mempool`, both mutated **inline** on the loop task. Chain-apply, mempool
-   admission, and reorg all run here, serialized by construction — there is no
-   lock around the UTXO state because there is only one writer.
-2. **The wallet writer task** (`ergo-node/src/node/wallet_bridge.rs`) owns
-   `WalletState` + `SecretStorage`. It receives `WalletCommand`s over an mpsc
-   channel, processes them serially, and replies on a per-command oneshot.
+   `Mempool`, both mutated inline on the loop task. Chain-apply, mempool
+   admission, and reorg are serialized by construction—there is no lock around
+   UTXO state because there is only one writer.
 
 Three background workers hang off the loop so slow work never gates it:
 
@@ -89,6 +124,14 @@ Three background workers hang off the loop so slow work never gates it:
   writer.
 - **The indexer poller** (`ergo-indexer`, optional) follows the committed tip
   and writes only to its own redb file.
+
+`ergo-wallet-service` is transport-neutral and has no node, API, tokio, or
+axum dependency; its dependency direction is `ergo-state ->
+ergo-wallet-service`, never service to state. The node supplies
+`InProcessChainClient`, which turns committed `ChainStoreReader` data into the
+chain API the daemon syncs from. Engine methods are synchronous except the
+ones that await the async `TxSubmitter`; the engine never spawns or blocks on
+a runtime, so the daemon embeds it on its own blocking workers.
 
 Reads never touch the writer. The API task serves owned DTOs from a
 `NodeSnapshot` held in an `ArcSwap`, rebuilt once per sync tick — so an HTTP
@@ -155,8 +198,10 @@ authoritative parent under the loop lock before the block is applied.
 `ergo-api` never reaches into node internals. Its entire contract is a small
 set of `Arc<dyn …>` traits; the node implements them against the per-tick
 `ArcSwap` snapshot and hands the trait objects to `serve`. Optional route
-families (`/blockchain/*`, `/mining/*`, the Scala-compat block surface,
-`/wallet/*`) are mounted only when the corresponding trait object is plumbed in.
+families (`/blockchain/*`, `/mining/*`, the Scala-compat block surface) are
+mounted only when the corresponding trait object is plumbed in. The retired
+wallet, scan and account paths answer `410 wallet_moved` with the configured
+`ergo-walletd` address, after the usual API-key check.
 
 ## Consensus, persistence & reorg contracts
 
@@ -207,9 +252,8 @@ oracle-parity tests.
 ### State, persistence & reorg (`ergo-state`)
 
 - **Atomic commit per block.** `undo_log` + AVL+ node mutations + `chain_index`
-  + `state_meta` (+ epoch-boundary `voted_params`, + wallet rows when hooked)
-  land in a **single redb write transaction**. In-memory `chain_state` advances
-  only after the commit succeeds.
+  + `state_meta` (+ epoch-boundary `voted_params`) land in a **single redb write
+  transaction**.
 - **Delta-based reorg.** There is no single "reorg" method: `rollback_to(common
   ancestor)` replays each block's changelog before-image in reverse, then
   re-applies the new branch. Any failure after an AVL mutation routes through
@@ -295,13 +339,32 @@ production build never depends on `ergo-state`/`ergo-indexer`.
 |---|---|---|
 | `NodeReadState` | sync | snapshot reads (`info`/`status`/`tip`/`peers`/`mempool_*`/`recent_blocks`/…) |
 | `NodeSubmit` | async | `submit_transaction[_json]`, `submit_full_block` — cross the loop via channel + oneshot |
-| `WalletAdmin` | async | wallet lifecycle/reads/sending; owner is the single-writer wallet task |
 | `MempoolView` | sync | pool overlay for the extra-index, composed with `IndexerQuery` at the handler |
 | `NodeChainQuery` | sync | Scala-compat block/chain queries |
 | `NodeMining` | sync | external-miner candidate/solution surface |
 | `ChainParamsView` | sync | voted-param arithmetic without a direct `ergo-validation` dep |
 | `NodeAdmin` | sync | `request_shutdown` |
 | `IndexerQuery` | sync | confirmed-only indexer reader (router gates every read on `CaughtUp`) |
+
+### Wallet protocol, service, and state boundaries
+
+The wallet split has three different contracts:
+
+- `ergo-wallet-protocol` is transport-neutral data only. Its normal
+  dependencies are `serde`, `serde_json`, and `hex`; it owns ID/byte
+  validation and native/Scala DTO shapes, not storage or runtime behavior.
+- `ergo-wallet-service` is the wallet orchestration and persistence core
+  (`WalletEngine` plus the runtime and store). Its normal direct dependencies
+  are `ergo-wallet`, `ergo-wallet-protocol`, `ergo-primitives`, `ergo-ser`,
+  `ergo-validation`, `ergo-sigma` (signed-transaction self-verify), `serde`,
+  `serde_json`, `hex`, `thiserror`, `redb`, `bincode`, `tracing`,
+  `async-trait`, `parking_lot`, `k256`, and `zeroize`. It must not depend on
+  `ergo-state`, `ergo-api`, `ergo-node`, the other node subsystems, `tokio`,
+  or `axum`, and it holds no process-global wallet state.
+- `ergo-state` depends on `ergo-wallet-service` and re-exports the service
+  wallet facade only to read and migrate the wallet an earlier release left in
+  `state.redb`. Chain apply and rollback write no wallet rows. The service must
+  not depend on state.
 
 Two more seams keep the writer model honest: `ergo-state`'s `StateBackend`
 trait family is dispatched **generically** (monomorphized `B: StateBackend`,
@@ -312,8 +375,15 @@ byte-identically.
 
 ## Where to start reading
 
-- **Runtime + action loop:** `ergo-node/src/node/` (`boot.rs`,
-  `action_loop.rs`, `sync_tick.rs`, `wallet_bridge.rs`).
+- **Runtime + action loop:** `ergo-node/src/node/` (`boot/`,
+  `action_loop.rs`, `sync_tick.rs`, `wallet_bridge.rs` for the chain API the
+  daemon uses, `legacy_wallet.rs` for the handoff).
+- **Wallet wire contracts:** `ergo-wallet-protocol/src/chain.rs` and
+  `src/native/dto/` / `src/scala/`.
+- **Wallet orchestration and persistence core:**
+  `ergo-wallet-service/src/engine/` (start at `mod.rs`), `src/runtime.rs`,
+  `src/wallet/store.rs`, and `src/wallet/apply/`; `ergo-walletd/src/` for
+  the daemon that hosts it.
 - **The API boundary:** `ergo-api/src/lib.rs`, `ergo-api/src/traits.rs`.
 - **The store + its invariants:** `ergo-state/src/lib.rs`, then `store`, `avl`,
   `persist`.

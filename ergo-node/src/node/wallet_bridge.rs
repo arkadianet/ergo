@@ -1,1123 +1,67 @@
-//! Production WalletAdmin bridge. Single-writer pattern: the action
-//! loop in ergo-node owns the wallet storage + state behind a RwLock.
-//! The axum API task sends commands via a channel; the loop processes
-//! them serially and sends the responses back via the per-command
-//! oneshot channel.
+//! Node-side adapters for the standalone wallet daemon.
+//!
+//! The node hosts no wallet. These are the seams the daemon's chain API and
+//! private mining queue are served through:
+//!
+//! - [`ChainStateAccessorImpl`]: `WalletChainAccess` over `ergo-state`'s
+//!   committed chain;
+//! - [`ChainSnapshot`]: the committed `SigningView`;
+//! - the in-process chain client and API adapter (`chain_client`);
+//! - [`StoredPrivateQueueBridge`]: the private mining queue API.
 
-use redb::ReadableDatabase;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use parking_lot::RwLock;
-use tokio::sync::{mpsc, oneshot};
+use ergo_wallet_protocol::WalletAdminError;
+use ergo_wallet_service::chain::CommittedTip;
+use ergo_wallet_service::engine::{ChainAccessError, SigningView, WalletChainAccess};
+use ergo_wallet_service::wallet::scan::{RescanBlock, RescanReadError};
 
-use ergo_api::wallet::scan::{ScanBoxEntry, ScanBoxFilter, ScanDto, ScanRequestDto};
-use ergo_api::wallet::sending::PaymentRequestDto;
-use ergo_api::wallet::sending::{
-    BoxesCollectRequest, BoxesCollectResponse, TransactionGenerateRequest,
-    TransactionGenerateResponse, TransactionGenerateUnsignedRequest,
-    TransactionGenerateUnsignedResponse, TransactionSendRequest, TransactionSignRequest,
-    TransactionSignResponse,
-};
-use ergo_api::wallet::types::{
-    Page, WalletAddressList, WalletBalances, WalletBoxesPage, WalletStatus, WalletTransactionEntry,
-    WalletTransactionsPage,
-};
-use ergo_api::wallet::{WalletAdmin, WalletAdminError};
-use ergo_wallet::state::WalletState;
-use ergo_wallet::storage::SecretStorage;
-
+pub mod chain_client;
 pub mod chain_snapshot;
-mod jobs;
-pub use chain_snapshot::{ChainSnapshot, ChainStateError, ChainTip};
-
-/// Abstracts the chain submit path so the wallet writer can submit a
-/// signed transaction without depending on the API crate's concrete
-/// `SubmitBridge`. Production impl wraps `NodeSubmit`; tests can
-/// inject a stub.
-#[async_trait]
-pub trait TxSubmitter: Send + Sync {
-    /// Submit signed tx bytes; returns the tx id on admission. The error is the
-    /// **typed** [`ergo_api::types::SubmitError`] `{reason, detail}` — NOT collapsed
-    /// to a string — so callers can distinguish a `duplicate` admission (map to an
-    /// idempotent success) from a real failure (map to 5xx) at their own boundary.
-    /// The native send path maps `duplicate` → `200 accepted`; the existing
-    /// compat callers map it to `WalletAdminError::Internal` exactly as before.
-    async fn submit_transaction(
-        &self,
-        tx_bytes: Vec<u8>,
-    ) -> Result<String, ergo_api::types::SubmitError>;
-    /// Whether this node runs a private mining queue. `false` is definitive for
-    /// the process lifetime, unlike a queue that is temporarily unavailable.
-    fn private_mining_configured(&self) -> bool {
-        false
-    }
-
-    /// Submit to the authenticated private mining queue, never public relay.
-    async fn submit_private_transaction(
-        &self,
-        _tx_bytes: Vec<u8>,
-        _options: ergo_api::mining::PrivateTransactionOptions,
-    ) -> Result<String, ergo_api::types::SubmitError> {
-        Err(ergo_api::types::SubmitError {
-            reason: "private_mining_unavailable".into(),
-            detail: None,
-        })
-    }
-
-    /// Read one bounded metadata snapshot for all approved background jobs.
-    async fn private_transactions(
-        &self,
-    ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError> {
-        Err(ergo_api::types::SubmitError {
-            reason: "private_mining_unavailable".into(),
-            detail: None,
-        })
-    }
-
-    async fn private_transaction_status(
-        &self,
-        tx_id: String,
-    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
-    {
-        self.private_transactions()
-            .await
-            .map(|items| items.into_iter().find(|entry| entry.tx_id == tx_id))
-    }
-
-    async fn cancel_private_transaction(
-        &self,
-        _tx_id: String,
-    ) -> Result<(), ergo_api::types::SubmitError> {
-        Err(ergo_api::types::SubmitError {
-            reason: "private_mining_unavailable".into(),
-            detail: None,
-        })
-    }
-}
-
-/// Production `TxSubmitter` backed by the node's `NodeSubmit` bridge.
-pub struct NodeSubmitAdapter {
-    inner: Arc<dyn ergo_api::traits::NodeSubmit>,
-    mining: Option<Arc<dyn ergo_api::NodeMining>>,
-    /// The private queue a node with mining disabled still loads from disk.
-    /// Nothing mines, reconciles or expires it then, so its records are read
-    /// and withdrawn here directly; with mining enabled the bridge owns it.
-    stored_queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
-}
-
-impl NodeSubmitAdapter {
-    pub fn new(inner: Arc<dyn ergo_api::traits::NodeSubmit>) -> Self {
-        Self {
-            inner,
-            mining: None,
-            stored_queue: None,
-        }
-    }
-    pub fn with_private_mining(mut self, mining: Option<Arc<dyn ergo_api::NodeMining>>) -> Self {
-        self.mining = mining;
-        self
-    }
-    /// The private queue loaded at boot, consulted only while mining is
-    /// disabled.
-    pub fn with_stored_private_queue(
-        mut self,
-        queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
-    ) -> Self {
-        self.stored_queue = queue;
-        self
-    }
-}
-
-#[async_trait]
-impl TxSubmitter for NodeSubmitAdapter {
-    async fn submit_transaction(
-        &self,
-        tx_bytes: Vec<u8>,
-    ) -> Result<String, ergo_api::types::SubmitError> {
-        use ergo_api::types::SubmitMode;
-        // Forward the typed SubmitError unmodified — each caller maps it intentionally.
-        self.inner
-            .submit_transaction(tx_bytes, SubmitMode::Broadcast)
-            .await
-    }
-    fn private_mining_configured(&self) -> bool {
-        self.mining.is_some()
-    }
-    async fn submit_private_transaction(
-        &self,
-        tx_bytes: Vec<u8>,
-        options: ergo_api::mining::PrivateTransactionOptions,
-    ) -> Result<String, ergo_api::types::SubmitError> {
-        let mining = self
-            .mining
-            .as_ref()
-            .ok_or_else(private_mining_unavailable)?;
-        mining
-            .submit_private_transaction(tx_bytes, options)
-            .await
-            .map(|entry| entry.tx_id)
-            .map_err(private_mining_submit_error)
-    }
-
-    async fn private_transactions(
-        &self,
-    ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError> {
-        if let Some(mining) = &self.mining {
-            return mining
-                .private_transactions()
-                .await
-                .map_err(private_mining_submit_error);
-        }
-        // Mining is disabled, but a stored queue still holds work admitted
-        // earlier, which enabling mining would mine.
-        let queue = self
-            .stored_queue
-            .as_ref()
-            .ok_or_else(private_mining_unavailable)?;
-        Ok(queue
-            .list()
-            .into_iter()
-            .map(|entry| super::private_mining::api_entry(entry, false))
-            .collect())
-    }
-
-    async fn cancel_private_transaction(
-        &self,
-        tx_id: String,
-    ) -> Result<(), ergo_api::types::SubmitError> {
-        if let Some(mining) = &self.mining {
-            return mining
-                .cancel_private_transaction(tx_id)
-                .await
-                .map(|_| ())
-                .map_err(private_mining_submit_error);
-        }
-        // Nothing else changes the stored queue while mining is disabled, so
-        // the withdrawal is written there directly. Public admission keeps
-        // declining the id until the next start.
-        let queue = self
-            .stored_queue
-            .as_ref()
-            .ok_or_else(private_mining_unavailable)?;
-        let cancelled = queue.cancel(&tx_id).map(|_| ()).map_err(|error| {
-            let reason = match error {
-                ergo_mining::private_queue::PrivateQueueError::Rejected(_) => {
-                    "private_transaction_rejected"
-                }
-                ergo_mining::private_queue::PrivateQueueError::Storage(_) => "private_mining_error",
-            };
-            ergo_api::types::SubmitError {
-                reason: reason.into(),
-                detail: Some(error.to_string()),
-            }
-        });
-        // No action-loop lifecycle runs while mining is disabled to log it.
-        super::private_mining::log_unsynced(queue);
-        cancelled
-    }
-}
-
-fn private_mining_unavailable() -> ergo_api::types::SubmitError {
-    ergo_api::types::SubmitError {
-        reason: "private_mining_unavailable".into(),
-        detail: None,
-    }
-}
-
-fn private_mining_submit_error(error: ergo_api::MiningApiError) -> ergo_api::types::SubmitError {
-    let reason = match error {
-        ergo_api::MiningApiError::Unavailable(_) => "private_mining_unavailable",
-        ergo_api::MiningApiError::Timeout(_) => "timeout",
-        ergo_api::MiningApiError::BadRequest(_) => "private_transaction_rejected",
-        _ => "private_mining_error",
-    };
-    ergo_api::types::SubmitError {
-        reason: reason.into(),
-        detail: Some(error.to_string()),
-    }
-}
-
-/// Command sent from the API task to the wallet writer task.
-pub enum WalletCommand {
-    MiningJobs {
-        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJobs, WalletAdminError>>,
-    },
-    CreateMiningJob {
-        request: ergo_api::wallet::native::dto::WalletJobRequest,
-        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError>>,
-    },
-    CancelMiningJob {
-        job_id: String,
-        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError>>,
-    },
-
-    Status {
-        reply: oneshot::Sender<Result<WalletStatus, WalletAdminError>>,
-    },
-    Init {
-        pass: String,
-        mnemonic_pass: String,
-        strength: u8,
-        reply: oneshot::Sender<Result<String, WalletAdminError>>,
-    },
-    Restore {
-        mnemonic: String,
-        mnemonic_pass: String,
-        pass: String,
-        use_pre_1627: bool,
-        reply: oneshot::Sender<Result<(), WalletAdminError>>,
-    },
-    Unlock {
-        pass: String,
-        reply: oneshot::Sender<Result<(), WalletAdminError>>,
-    },
-    Lock {
-        reply: oneshot::Sender<Result<(), WalletAdminError>>,
-    },
-    Check {
-        mnemonic: String,
-        mnemonic_pass: String,
-        reply: oneshot::Sender<Result<bool, WalletAdminError>>,
-    },
-    Rescan {
-        from_height: u32,
-        reply: oneshot::Sender<Result<(), WalletAdminError>>,
-    },
-    UpdateChangeAddress {
-        address: String,
-        reply: oneshot::Sender<Result<(), WalletAdminError>>,
-    },
-    Balances {
-        reply: oneshot::Sender<Result<WalletBalances, WalletAdminError>>,
-    },
-    BalancesWithUnconfirmed {
-        reply: oneshot::Sender<Result<WalletBalances, WalletAdminError>>,
-    },
-    /// Native `/api/v1/wallet/balance` — EIP-27-aware breakdown.
-    NativeBalance {
-        include_unconfirmed: bool,
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::WalletBalanceDto, WalletAdminError>,
-        >,
-    },
-    /// Native `/api/v1/wallet/status`.
-    NativeStatus {
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::WalletStatusDto, WalletAdminError>,
-        >,
-    },
-    /// Native `/api/v1/wallet/addresses` (paged).
-    NativeAddresses {
-        offset: u32,
-        limit: u32,
-        reply:
-            oneshot::Sender<Result<ergo_api::wallet::native::dto::AddressPage, WalletAdminError>>,
-    },
-    /// Native `/api/v1/wallet/boxes` (paged).
-    NativeBoxes {
-        offset: u32,
-        limit: u32,
-        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::BoxPage, WalletAdminError>>,
-    },
-    /// Native `/api/v1/wallet/boxes/{boxId}`.
-    NativeBoxById {
-        box_id_hex: String,
-        reply: oneshot::Sender<
-            Result<Option<ergo_api::wallet::native::dto::WalletBoxSummary>, WalletAdminError>,
-        >,
-    },
-    /// Native `/api/v1/wallet/transactions` (paged).
-    NativeTransactions {
-        offset: u32,
-        limit: u32,
-        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::TxPage, WalletAdminError>>,
-    },
-    /// Native `/api/v1/wallet/transactions/{txId}`.
-    NativeTransactionById {
-        tx_id_hex: String,
-        reply: oneshot::Sender<
-            Result<
-                Option<ergo_api::wallet::native::dto::WalletTransactionSummary>,
-                WalletAdminError,
-            >,
-        >,
-    },
-    /// Native `/api/v1/wallet/boxes/select` (burn-aware selection dry-run).
-    NativeSelectBoxes {
-        req: Box<ergo_api::wallet::native::dto::BoxSelectRequest>,
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError>,
-        >,
-    },
-    /// Native `/api/v1/wallet/transactions/build` (burn-aware unsigned build).
-    NativeBuildTransaction {
-        intent: Box<ergo_api::wallet::native::dto::TxIntent>,
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError>,
-        >,
-    },
-    /// Native `/api/v1/wallet/transactions/sign`.
-    NativeSignTransaction {
-        req: Box<ergo_api::wallet::native::dto::SignTxRequest>,
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError>,
-        >,
-    },
-    /// Native `/api/v1/wallet/transactions/send`.
-    NativeSendTransaction {
-        req: Box<ergo_api::wallet::native::dto::SendTxRequest>,
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError>,
-        >,
-    },
-    Addresses {
-        reply: oneshot::Sender<Result<WalletAddressList, WalletAdminError>>,
-    },
-    Boxes {
-        page: Page,
-        reply: oneshot::Sender<Result<WalletBoxesPage, WalletAdminError>>,
-    },
-    BoxesUnspent {
-        page: Page,
-        reply: oneshot::Sender<Result<WalletBoxesPage, WalletAdminError>>,
-    },
-    Transactions {
-        page: Page,
-        reply: oneshot::Sender<Result<WalletTransactionsPage, WalletAdminError>>,
-    },
-    TransactionById {
-        tx_id_hex: String,
-        reply: oneshot::Sender<Result<Option<WalletTransactionEntry>, WalletAdminError>>,
-    },
-    TransactionsByScanId {
-        scan_id: u32,
-        page: Page,
-        reply: oneshot::Sender<Result<WalletTransactionsPage, WalletAdminError>>,
-    },
-
-    // --- send commands ---
-    PaymentSend {
-        requests: Vec<PaymentRequestDto>,
-        reply: oneshot::Sender<Result<String, WalletAdminError>>,
-    },
-    RetrieveRewards {
-        req: ergo_api::wallet::native::dto::RetrieveRewardsRequest,
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::RetrieveRewardsResultDto, WalletAdminError>,
-        >,
-    },
-    TransactionGenerate {
-        request: TransactionGenerateRequest,
-        reply: oneshot::Sender<Result<TransactionGenerateResponse, WalletAdminError>>,
-    },
-    TransactionGenerateUnsigned {
-        request: TransactionGenerateUnsignedRequest,
-        reply: oneshot::Sender<Result<TransactionGenerateUnsignedResponse, WalletAdminError>>,
-    },
-    TransactionSign {
-        request: TransactionSignRequest,
-        reply: oneshot::Sender<Result<TransactionSignResponse, WalletAdminError>>,
-    },
-    TransactionSend {
-        request: TransactionSendRequest,
-        reply: oneshot::Sender<Result<String, WalletAdminError>>,
-    },
-    BoxesCollect {
-        request: BoxesCollectRequest,
-        reply: oneshot::Sender<Result<BoxesCollectResponse, WalletAdminError>>,
-    },
-    // --- multi-sig commands ---
-    GenerateCommitments {
-        request: ergo_api::wallet::multi_sig::GenerateCommitmentsRequest,
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::multi_sig::GenerateCommitmentsResponse, WalletAdminError>,
-        >,
-    },
-    ExtractHints {
-        request: ergo_api::wallet::multi_sig::HintExtractionRequest,
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::multi_sig::HintExtractionResponse, WalletAdminError>,
-        >,
-    },
-    // --- advanced HD-key commands ---
-    DeriveKey {
-        request: ergo_api::wallet::admin_advanced::DeriveKeyRequest,
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::admin_advanced::DeriveKeyResponse, WalletAdminError>,
-        >,
-    },
-    DeriveNextKey {
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::admin_advanced::DeriveNextKeyResponse, WalletAdminError>,
-        >,
-    },
-    GetPrivateKey {
-        request: ergo_api::wallet::admin_advanced::GetPrivateKeyRequest,
-        reply: oneshot::Sender<
-            Result<ergo_api::wallet::admin_advanced::GetPrivateKeyResponse, WalletAdminError>,
-        >,
-    },
-    // --- scan registry commands ---
-    RegisterScan {
-        request: ScanRequestDto,
-        reply: oneshot::Sender<Result<u16, WalletAdminError>>,
-    },
-    DeregisterScan {
-        scan_id: u16,
-        reply: oneshot::Sender<Result<(), WalletAdminError>>,
-    },
-    ListScans {
-        reply: oneshot::Sender<Result<Vec<ScanDto>, WalletAdminError>>,
-    },
-    ScanUnspentBoxes {
-        scan_id: u16,
-        filter: ScanBoxFilter,
-        reply: oneshot::Sender<Result<Vec<ScanBoxEntry>, WalletAdminError>>,
-    },
-    ScanSpentBoxes {
-        scan_id: u16,
-        filter: ScanBoxFilter,
-        reply: oneshot::Sender<Result<Vec<ScanBoxEntry>, WalletAdminError>>,
-    },
-    ScanStopTracking {
-        scan_id: u16,
-        box_id: String,
-        reply: oneshot::Sender<Result<(), WalletAdminError>>,
-    },
-    ScanAddBox {
-        scan_ids: Vec<u16>,
-        box_json: serde_json::Value,
-        reply: oneshot::Sender<Result<String, WalletAdminError>>,
-    },
-    ScanP2sRule {
-        p2s: String,
-        reply: oneshot::Sender<Result<u16, WalletAdminError>>,
-    },
-}
-
-/// `WalletAdmin` impl backed by a command channel. Constructed by
-/// `Node::run` and handed to `ergo-api`'s router builder.
-pub struct NodeWalletAdmin {
-    tx: mpsc::Sender<WalletCommand>,
-    rescan: Arc<crate::wallet_boot::RescanControl>,
-}
-
-impl NodeWalletAdmin {
-    pub fn new(tx: mpsc::Sender<WalletCommand>) -> Self {
-        Self::with_rescan(tx, Arc::new(crate::wallet_boot::RescanControl::default()))
-    }
-
-    pub fn with_rescan(
-        tx: mpsc::Sender<WalletCommand>,
-        rescan: Arc<crate::wallet_boot::RescanControl>,
-    ) -> Self {
-        Self { tx, rescan }
-    }
-
-    pub fn rescan_control(&self) -> &Arc<crate::wallet_boot::RescanControl> {
-        &self.rescan
-    }
-
-    async fn send_cmd<R, F>(&self, build: F) -> Result<R, WalletAdminError>
-    where
-        F: FnOnce(oneshot::Sender<Result<R, WalletAdminError>>) -> WalletCommand,
-    {
-        if self.rescan.stopping() {
-            return Err(WalletAdminError::ShuttingDown);
-        }
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx.send(build(reply_tx)).await.map_err(|_| {
-            if self.rescan.stopping() {
-                WalletAdminError::ShuttingDown
-            } else {
-                WalletAdminError::Internal("wallet writer task is gone".to_string())
-            }
-        })?;
-        reply_rx.await.map_err(|_| {
-            if self.rescan.stopping() {
-                WalletAdminError::ShuttingDown
-            } else {
-                WalletAdminError::Internal("wallet writer task dropped reply".to_string())
-            }
-        })?
-    }
-}
-
-#[async_trait]
-impl WalletAdmin for NodeWalletAdmin {
-    async fn mining_jobs(
-        &self,
-    ) -> Result<ergo_api::wallet::native::dto::WalletJobs, WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::MiningJobs { reply })
-            .await
-    }
-
-    async fn create_mining_job(
-        &self,
-        request: ergo_api::wallet::native::dto::WalletJobRequest,
-    ) -> Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::CreateMiningJob { request, reply })
-            .await
-    }
-
-    async fn cancel_mining_job(
-        &self,
-        job_id: String,
-    ) -> Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::CancelMiningJob { job_id, reply })
-            .await
-    }
-
-    async fn status(&self) -> Result<WalletStatus, WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::Status { reply }).await
-    }
-
-    async fn init(
-        &self,
-        pass: String,
-        mnemonic_pass: String,
-        strength_words: u8,
-    ) -> Result<String, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::Init {
-            pass,
-            mnemonic_pass,
-            strength: strength_words,
-            reply,
-        })
-        .await
-    }
-
-    async fn restore(
-        &self,
-        mnemonic: String,
-        mnemonic_pass: String,
-        pass: String,
-        use_pre_1627: bool,
-    ) -> Result<(), WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::Restore {
-            mnemonic,
-            mnemonic_pass,
-            pass,
-            use_pre_1627,
-            reply,
-        })
-        .await
-    }
-
-    async fn unlock(&self, pass: String) -> Result<(), WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::Unlock { pass, reply })
-            .await
-    }
-
-    async fn lock(&self) -> Result<(), WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::Lock { reply }).await
-    }
-
-    async fn check(
-        &self,
-        mnemonic: String,
-        mnemonic_pass: String,
-    ) -> Result<bool, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::Check {
-            mnemonic,
-            mnemonic_pass,
-            reply,
-        })
-        .await
-    }
-
-    async fn rescan(&self, from_height: u32) -> Result<(), WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::Rescan { from_height, reply })
-            .await
-    }
-
-    async fn update_change_address(&self, address: String) -> Result<(), WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::UpdateChangeAddress { address, reply })
-            .await
-    }
-
-    async fn balances(&self) -> Result<WalletBalances, WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::Balances { reply })
-            .await
-    }
-
-    async fn balances_with_unconfirmed(&self) -> Result<WalletBalances, WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::BalancesWithUnconfirmed { reply })
-            .await
-    }
-
-    async fn native_balance(
-        &self,
-        include_unconfirmed: bool,
-    ) -> Result<ergo_api::wallet::native::dto::WalletBalanceDto, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::NativeBalance {
-            include_unconfirmed,
-            reply,
-        })
-        .await
-    }
-
-    async fn native_status(
-        &self,
-    ) -> Result<ergo_api::wallet::native::dto::WalletStatusDto, WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::NativeStatus { reply })
-            .await
-    }
-
-    async fn native_addresses(
-        &self,
-        offset: u32,
-        limit: u32,
-    ) -> Result<ergo_api::wallet::native::dto::AddressPage, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::NativeAddresses {
-            offset,
-            limit,
-            reply,
-        })
-        .await
-    }
-
-    async fn native_boxes(
-        &self,
-        offset: u32,
-        limit: u32,
-    ) -> Result<ergo_api::wallet::native::dto::BoxPage, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::NativeBoxes {
-            offset,
-            limit,
-            reply,
-        })
-        .await
-    }
-
-    async fn native_box_by_id(
-        &self,
-        box_id_hex: String,
-    ) -> Result<Option<ergo_api::wallet::native::dto::WalletBoxSummary>, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::NativeBoxById { box_id_hex, reply })
-            .await
-    }
-
-    async fn native_transactions(
-        &self,
-        offset: u32,
-        limit: u32,
-    ) -> Result<ergo_api::wallet::native::dto::TxPage, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::NativeTransactions {
-            offset,
-            limit,
-            reply,
-        })
-        .await
-    }
-
-    async fn native_transaction_by_id(
-        &self,
-        tx_id_hex: String,
-    ) -> Result<Option<ergo_api::wallet::native::dto::WalletTransactionSummary>, WalletAdminError>
-    {
-        self.send_cmd(move |reply| WalletCommand::NativeTransactionById { tx_id_hex, reply })
-            .await
-    }
-
-    async fn select_boxes(
-        &self,
-        req: ergo_api::wallet::native::dto::BoxSelectRequest,
-    ) -> Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::NativeSelectBoxes {
-            req: Box::new(req),
-            reply,
-        })
-        .await
-    }
-
-    async fn build_transaction(
-        &self,
-        intent: ergo_api::wallet::native::dto::TxIntent,
-    ) -> Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::NativeBuildTransaction {
-            intent: Box::new(intent),
-            reply,
-        })
-        .await
-    }
-
-    async fn sign_transaction(
-        &self,
-        req: ergo_api::wallet::native::dto::SignTxRequest,
-    ) -> Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::NativeSignTransaction {
-            req: Box::new(req),
-            reply,
-        })
-        .await
-    }
-
-    async fn send_transaction(
-        &self,
-        req: ergo_api::wallet::native::dto::SendTxRequest,
-    ) -> Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::NativeSendTransaction {
-            req: Box::new(req),
-            reply,
-        })
-        .await
-    }
-
-    async fn addresses(&self) -> Result<WalletAddressList, WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::Addresses { reply })
-            .await
-    }
-
-    async fn boxes(&self, page: Page) -> Result<WalletBoxesPage, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::Boxes { page, reply })
-            .await
-    }
-
-    async fn boxes_unspent(&self, page: Page) -> Result<WalletBoxesPage, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::BoxesUnspent { page, reply })
-            .await
-    }
-
-    async fn transactions(&self, page: Page) -> Result<WalletTransactionsPage, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::Transactions { page, reply })
-            .await
-    }
-
-    async fn transaction_by_id(
-        &self,
-        tx_id_hex: String,
-    ) -> Result<Option<WalletTransactionEntry>, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::TransactionById { tx_id_hex, reply })
-            .await
-    }
-
-    async fn transactions_by_scan_id(
-        &self,
-        scan_id: u32,
-        page: Page,
-    ) -> Result<WalletTransactionsPage, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::TransactionsByScanId {
-            scan_id,
-            page,
-            reply,
-        })
-        .await
-    }
-
-    async fn payment_send(
-        &self,
-        requests: Vec<PaymentRequestDto>,
-    ) -> Result<String, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::PaymentSend { requests, reply })
-            .await
-    }
-
-    async fn retrieve_rewards(
-        &self,
-        req: ergo_api::wallet::native::dto::RetrieveRewardsRequest,
-    ) -> Result<ergo_api::wallet::native::dto::RetrieveRewardsResultDto, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::RetrieveRewards { req, reply })
-            .await
-    }
-
-    async fn transaction_generate(
-        &self,
-        request: TransactionGenerateRequest,
-    ) -> Result<TransactionGenerateResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::TransactionGenerate { request, reply })
-            .await
-    }
-
-    async fn transaction_generate_unsigned(
-        &self,
-        request: TransactionGenerateUnsignedRequest,
-    ) -> Result<TransactionGenerateUnsignedResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::TransactionGenerateUnsigned { request, reply })
-            .await
-    }
-
-    async fn transaction_sign(
-        &self,
-        request: TransactionSignRequest,
-    ) -> Result<TransactionSignResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::TransactionSign { request, reply })
-            .await
-    }
-
-    async fn transaction_send(
-        &self,
-        request: TransactionSendRequest,
-    ) -> Result<String, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::TransactionSend { request, reply })
-            .await
-    }
-
-    async fn boxes_collect(
-        &self,
-        request: BoxesCollectRequest,
-    ) -> Result<BoxesCollectResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::BoxesCollect { request, reply })
-            .await
-    }
-
-    async fn generate_commitments(
-        &self,
-        request: ergo_api::wallet::multi_sig::GenerateCommitmentsRequest,
-    ) -> Result<ergo_api::wallet::multi_sig::GenerateCommitmentsResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::GenerateCommitments { request, reply })
-            .await
-    }
-
-    async fn extract_hints(
-        &self,
-        request: ergo_api::wallet::multi_sig::HintExtractionRequest,
-    ) -> Result<ergo_api::wallet::multi_sig::HintExtractionResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::ExtractHints { request, reply })
-            .await
-    }
-
-    async fn derive_key(
-        &self,
-        request: ergo_api::wallet::admin_advanced::DeriveKeyRequest,
-    ) -> Result<ergo_api::wallet::admin_advanced::DeriveKeyResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::DeriveKey { request, reply })
-            .await
-    }
-
-    async fn derive_next_key(
-        &self,
-    ) -> Result<ergo_api::wallet::admin_advanced::DeriveNextKeyResponse, WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::DeriveNextKey { reply })
-            .await
-    }
-
-    async fn get_private_key(
-        &self,
-        request: ergo_api::wallet::admin_advanced::GetPrivateKeyRequest,
-    ) -> Result<ergo_api::wallet::admin_advanced::GetPrivateKeyResponse, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::GetPrivateKey { request, reply })
-            .await
-    }
-
-    async fn register_scan(&self, request: ScanRequestDto) -> Result<u16, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::RegisterScan { request, reply })
-            .await
-    }
-
-    async fn deregister_scan(&self, scan_id: u16) -> Result<(), WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::DeregisterScan { scan_id, reply })
-            .await
-    }
-
-    async fn list_scans(&self) -> Result<Vec<ScanDto>, WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::ListScans { reply })
-            .await
-    }
-
-    async fn scan_unspent_boxes(
-        &self,
-        scan_id: u16,
-        filter: ScanBoxFilter,
-    ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::ScanUnspentBoxes {
-            scan_id,
-            filter,
-            reply,
-        })
-        .await
-    }
-
-    async fn scan_spent_boxes(
-        &self,
-        scan_id: u16,
-        filter: ScanBoxFilter,
-    ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::ScanSpentBoxes {
-            scan_id,
-            filter,
-            reply,
-        })
-        .await
-    }
-
-    async fn scan_stop_tracking(
-        &self,
-        scan_id: u16,
-        box_id: String,
-    ) -> Result<(), WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::ScanStopTracking {
-            scan_id,
-            box_id,
-            reply,
-        })
-        .await
-    }
-
-    async fn scan_add_box(
-        &self,
-        scan_ids: Vec<u16>,
-        box_json: serde_json::Value,
-    ) -> Result<String, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::ScanAddBox {
-            scan_ids,
-            box_json,
-            reply,
-        })
-        .await
-    }
-
-    async fn scan_p2s_rule(&self, p2s: String) -> Result<u16, WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::ScanP2sRule { p2s, reply })
-            .await
-    }
-}
-
-/// Read-only access to the chain state. The writer task uses this
-/// for: (a) `walletHeight` in `/wallet/status`, (b) pruning check
-/// in `/wallet/restore`, (c) block fetch during `/wallet/rescan`,
-/// and (d) signing-context + UTXO lookup for send routes.
-pub trait ChainStateAccessor: Send + Sync {
-    fn reserved_wallet_inputs(
-        &self,
-    ) -> Result<std::collections::BTreeSet<[u8; 32]>, WalletAdminError> {
-        Ok(std::collections::BTreeSet::new())
-    }
-
-    /// Current `WALLET_SCAN_HEIGHT` — populates `walletHeight`.
-    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError>;
-    /// Best full-block tip height. Used as the rescan upper bound.
-    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError>;
-    /// True if the node is configured with `blocks_to_keep != -1`.
-    /// `/wallet/restore` refuses on pruned nodes per Scala parity.
-    fn is_pruned(&self) -> bool;
-    /// EIP-27 re-emission rule inputs for this network (`None` off EIP-27 nets,
-    /// e.g. testnet). Built at boot from the chain spec — the same source the
-    /// block/mempool validator uses. The wallet's burn-aware builder and the
-    /// self-verify EIP-27 gate read it here so a built spend can never violate
-    /// consensus. Default `None` (test stubs / non-EIP-27 backends).
-    fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
-        None
-    }
-    /// Fetch the block at `height` for rescan replay. `Ok(None)` means the
-    /// requested block is unavailable (pruned or not yet downloaded).
-    fn read_block_at(
-        &self,
-        height: u32,
-    ) -> Result<
-        Option<ergo_state::wallet::scan::RescanBlock>,
-        ergo_state::wallet::scan::RescanReadError,
-    >;
-    fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
-        Err(ChainStateError::Unsupported)
-    }
-
-    fn committed_tip(&self) -> Result<Option<ChainTip>, ChainStateError> {
-        Err(ChainStateError::Unsupported)
-    }
-
-    fn ensure_snapshot_current(&self, snapshot: &ChainSnapshot) -> Result<(), ChainStateError> {
-        let actual = self
-            .committed_tip()?
-            .ok_or(ChainStateError::NoCommittedState)?;
-        if actual == snapshot.tip() {
-            return Ok(());
-        }
-        Err(ChainStateError::StaleTip {
-            expected_height: snapshot.tip().height,
-            expected_id: hex::encode(snapshot.tip().header_id),
-            actual_height: actual.height,
-            actual_id: hex::encode(actual.header_id),
-        })
-    }
-    /// Build the blockchain state context needed for signing: last ≤10
-    /// applied headers + candidate pre-header + previous state digest.
-    /// Returns `Err` if the chain tip is below 10 blocks (still syncing).
-    fn build_signing_context(
-        &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, ChainStateError> {
-        Err(ChainStateError::Unsupported)
-    }
-
-    /// Build per-block cost parameters from the active protocol parameters
-    /// at the tip.
-    fn build_signing_params(
-        &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, ChainStateError> {
-        Err(ChainStateError::Unsupported)
-    }
-
-    /// Structural protocol parameters at the tip (min-value-per-byte,
-    /// box/collection caps) for pre-submit structural validation. Mirrors
-    /// the consensus validator's `ProtocolParams`; the wallet runs
-    /// `ergo_validation::validate_structural` against these so it never
-    /// submits a tx the node would reject (e.g. a dust output).
-    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, ChainStateError> {
-        Err(ChainStateError::Unsupported)
-    }
-
-    /// Look up a full `ErgoBox` from the UTXO set by its 32-byte box ID.
-    /// Returns `None` if the box is not present (spent or unknown).
-    fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
-        let _ = box_id;
-        None
-    }
-}
-
-pub(crate) fn map_chain_error(error: ChainStateError) -> WalletAdminError {
-    let detail = error.to_string();
-    match error {
-        ChainStateError::StaleTip { .. } => WalletAdminError::StaleChainTip(detail),
-        _ => WalletAdminError::Internal(detail),
-    }
-}
-
-/// Production `ChainStateAccessor` backed by the shared redb `Database`
-/// and a snapshot of the tip height + pruning flag captured at boot.
+pub use chain_client::{
+    ChainClientAdapter, InProcessChainClient, IntoChainSubmitter, NodeChainClient,
+    WalletChainAdapter,
+};
+use chain_snapshot::chain_state_read_failed;
+pub use chain_snapshot::ChainSnapshot;
+
+mod stored_queue_api;
+pub use stored_queue_api::StoredPrivateQueueBridge;
+
+/// [`WalletChainAccess`] over the node's committed chain, for the chain API
+/// the wallet daemon reads. It holds no wallet: `wallet_scan_height` is an
+/// error.
 ///
-/// The wallet writer task reads these values for:
-/// - `wallet_scan_height`: current `WALLET_SCAN_HEIGHT` from a fresh
-///   read transaction (reflects live chain progress without blocking the
-///   main action loop).
-/// - `tip_height`: the last full-block height snapshotted at boot — good
-///   enough for the rescan upper bound; the rescan task calls `read_tip()`
-///   in a closure that re-reads the actual chain tip from the action-loop
-///   snapshot publisher (not wired through this accessor — rescan reads
-///   the tip via the `read_tip` closure passed to
-///   `WalletScanService::rescan_full_rebuild`).
-/// - `is_pruned`: static from config (archive-only today).
+/// - `tip_height` / `committed_tip`: the committed tip.
+/// - `is_pruned`: static from config.
 /// - `read_block_at`: delegates to `block_txs_for_wallet_at_height`.
-/// - `build_signing_context` / `build_signing_params` / `lookup_utxo`:
-///   use the `ChainStoreReader` to read from committed state without
-///   acquiring the action-loop's mutable `StateStore`.
+/// - `signing_view` / `build_signing_context` / `build_signing_params` /
+///   `lookup_utxo`: use the `ChainStoreReader` to read from committed state
+///   without acquiring the action-loop's mutable `StateStore`.
 pub struct ChainStateAccessorImpl {
     private_queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
-    db: Arc<redb::Database>,
     /// Lock-free reader for chain state (headers, UTXO, active params).
     reader: ergo_state::reader::ChainStoreReader,
     is_pruned: bool,
     /// EIP-27 re-emission rules (mainnet) or `None` (testnet). See
-    /// [`ChainStateAccessor::reemission_rules`].
+    /// [`WalletChainAccess::reemission_rules`].
     reemission: Option<ergo_validation::ReemissionRuleInputs>,
 }
 
 impl ChainStateAccessorImpl {
-    pub fn new(
-        db: Arc<redb::Database>,
+    pub fn chain_only(
+        reader: ergo_state::reader::ChainStoreReader,
         is_pruned: bool,
         reemission: Option<ergo_validation::ReemissionRuleInputs>,
     ) -> Self {
-        let reader = ergo_state::reader::ChainStoreReader::new_from_db(db.clone());
         Self {
             private_queue: None,
-            db,
             reader,
             is_pruned,
             reemission,
         }
     }
+
     pub fn with_private_queue(
         mut self,
         queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
@@ -1125,29 +69,41 @@ impl ChainStateAccessorImpl {
         self.private_queue = queue;
         self
     }
+
+    /// The concrete committed [`ChainSnapshot`] behind
+    /// [`WalletChainAccess::signing_view`].
+    pub fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainAccessError> {
+        let committed = self
+            .reader
+            .committed_snapshot()
+            .map_err(chain_state_read_failed)?
+            .ok_or(ChainAccessError::NoCommittedState)?;
+        ChainSnapshot::from_committed(committed, self.reemission.as_ref())
+            .map_err(chain_state_read_failed)
+    }
 }
 
-impl ChainStateAccessor for ChainStateAccessorImpl {
+impl WalletChainAccess for ChainStateAccessorImpl {
     fn reserved_wallet_inputs(
         &self,
     ) -> Result<std::collections::BTreeSet<[u8; 32]>, WalletAdminError> {
-        let mut reserved = jobs::reserved_inputs(&self.db)?;
-        if let Some(queue) = &self.private_queue {
-            reserved.extend(queue.reserved_inputs());
-        }
-        Ok(reserved)
+        Ok(self
+            .private_queue
+            .as_ref()
+            .map(|queue| queue.reserved_inputs())
+            .unwrap_or_default())
+    }
+    fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
+        Err(ChainAccessError::State(
+            "the node hosts no wallet; its chain accessor has no wallet scan height".into(),
+        ))
     }
 
-    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
-        let read_txn = self.db.begin_read()?;
-        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        Ok(reader.scan_height()?.unwrap_or(0))
-    }
-
-    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+    fn tip_height(&self) -> Result<u32, ChainAccessError> {
         Ok(self
             .reader
-            .committed_tip()?
+            .committed_tip()
+            .map_err(|error| ChainAccessError::State(error.to_string()))?
             .map(|(height, _)| height)
             .unwrap_or(0))
     }
@@ -1160,17 +116,11 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
         self.reemission.as_ref()
     }
 
-    fn read_block_at(
-        &self,
-        height: u32,
-    ) -> Result<
-        Option<ergo_state::wallet::scan::RescanBlock>,
-        ergo_state::wallet::scan::RescanReadError,
-    > {
-        use ergo_state::store::block_txs_for_wallet_at_height;
-        use ergo_state::wallet::scan::{OwnedBlockOutput, RescanBlock, RescanTx};
+    fn read_block_at(&self, height: u32) -> Result<Option<RescanBlock>, RescanReadError> {
+        use ergo_wallet_service::wallet::scan::RescanTx;
+        use ergo_wallet_service::wallet::OwnedBlockOutput;
 
-        let (block_id, owned) = match block_txs_for_wallet_at_height(&self.db, height)? {
+        let (block_id, owned) = match self.reader.wallet_block_txs_at_height(height)? {
             Some(pair) => pair,
             None => return Ok(None),
         };
@@ -1190,6 +140,7 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
                         value: o.value,
                         assets: o.assets,
                         miner_reward_pubkey: o.miner_reward_pubkey,
+                        // Carried for the rescan scan-matcher + ScanTrackedBox.
                         box_bytes: o.box_bytes,
                     })
                     .collect(),
@@ -1199,591 +150,74 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
         Ok(Some(RescanBlock { block_id, txs }))
     }
 
-    fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
-        let committed = self
-            .reader
-            .committed_snapshot()?
-            .ok_or(ChainStateError::NoCommittedState)?;
-        ChainSnapshot::from_committed(committed, self.reemission.as_ref()).map_err(Into::into)
+    fn signing_view(&self) -> Result<Box<dyn SigningView>, ChainAccessError> {
+        Ok(Box::new(self.chain_snapshot()?))
     }
 
-    fn committed_tip(&self) -> Result<Option<ChainTip>, ChainStateError> {
+    fn committed_tip(&self) -> Result<Option<CommittedTip>, ChainAccessError> {
         Ok(self
             .reader
-            .committed_tip()?
-            .map(|(height, header_id)| ChainTip { height, header_id }))
+            .committed_tip()
+            .map_err(chain_state_read_failed)?
+            .map(|(height, header_id)| CommittedTip { height, header_id }))
     }
 
     fn build_signing_context(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, ChainStateError> {
+    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, ChainAccessError> {
         self.chain_snapshot()
             .map(|snapshot| snapshot.state_context().clone())
     }
 
     fn build_signing_params(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, ChainStateError> {
+    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, ChainAccessError> {
         self.chain_snapshot()
             .map(|snapshot| snapshot.signing_params().clone())
     }
 
-    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, ChainStateError> {
+    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, ChainAccessError> {
         self.chain_snapshot()
             .map(|snapshot| snapshot.protocol_params().clone())
     }
 
-    fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
-        use ergo_primitives::reader::VlqReader;
-        let bytes = self.reader.lookup_box(box_id).ok()??;
-        let mut r = VlqReader::new(&bytes);
-        ergo_ser::ergo_box::read_ergo_box(&mut r).ok()
-    }
-}
-
-/// Production `WalletApplyHook` backed by the shared `Arc<RwLock<WalletState>>`
-/// (synchronous `parking_lot::RwLock`).
-///
-/// Invoked from `StateStore::apply_block` and `rollback_to` on the chain-apply
-/// path inside `handle_sync_tick`. The trait is synchronous because the apply
-/// path is synchronous; the lock is synchronous because `WalletState` is plain
-/// in-memory data. Both hook methods clone one collection and drop the guard.
-///
-/// Contention coupling: admin commands (`unlock`, `restore`, `derive_*`) take
-/// the writer side across PBKDF2 / key-derivation work, so the hook can wait
-/// briefly when one is in flight. Block-apply cadence (~120 s mainnet) is
-/// much slower than even a slow PBKDF2 (sub-second), so the worst case is a
-/// single delayed apply per admin operation.
-pub struct WalletStateHook {
-    pub wallet: Arc<RwLock<ergo_wallet::state::WalletState>>,
-    pub rescan: Arc<crate::wallet_boot::RescanControl>,
-    /// Shared redb handle — used to read the registered scans for block-apply
-    /// matching (the scans live in redb, not `WalletState`).
-    pub db: Arc<redb::Database>,
-    pub store: Arc<dyn ergo_state::wallet::WalletStore>,
-}
-
-impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
-    fn tracked_p2pk_trees(&self) -> std::collections::BTreeSet<Vec<u8>> {
-        // Skip during rescan: the live apply hook returns empty so chain-apply
-        // doesn't interfere with the background rescan writing the same tables.
-        if self.rescan.in_progress() {
-            return std::collections::BTreeSet::new();
-        }
-        let state = self.wallet.read();
-        state.tracked_p2pk_trees().clone()
-    }
-
-    fn cached_pubkeys(&self) -> std::collections::BTreeMap<u64, [u8; 33]> {
-        if self.rescan.in_progress() {
-            return std::collections::BTreeMap::new();
-        }
-        let state = self.wallet.read();
-        state.cached_pubkeys().clone()
-    }
-
-    fn registered_scan_count(&self) -> usize {
-        // Skip live scan apply while a full rescan is rebuilding the scan
-        // tables: the rebuild clears and repopulates WALLET_SCAN_* block by
-        // block, so a concurrent live write would race it (miss a spend
-        // against the cleared reverse index, or stale that index). Mirrors
-        // how the pubkey path skips during a rescan. A PARTIAL
-        // rescan does not set this flag, so live scan tracking continues
-        // across it (scans have no range-rewind rebuild).
-        if self.rescan.rebuilding.load(Ordering::SeqCst) {
-            return 0;
-        }
-        // Cheap per-block gate: count rows in WALLET_SCANS. Scan tracking is
-        // independent of the wallet-pubkey rescan, so (unlike the methods above)
-        // it is NOT skipped while a *partial* rescan is in progress. A read error
-        // skips scan work for this block (logged) rather than aborting chain apply.
-        let count = self
-            .store
-            .begin_read()
-            .and_then(|read| read.registered_scan_count());
-        match count {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::error!(error = %e, "scan apply: wallet store scan count read failed; skipping this block");
-                mark_scan_invalidated(&self.db);
-                0
-            }
-        }
-    }
-
-    fn match_boxes(&self, boxes: &[ergo_ser::ergo_box::ErgoBox]) -> Vec<Vec<u16>> {
-        // Quiesced during a scan rebuild (see `registered_scan_count`). The
-        // count gate already returns 0 then, so this is defense in depth —
-        // mirrors the pubkey path gating both of its hook methods.
-        if self.rescan.rebuilding.load(Ordering::SeqCst) {
-            return vec![Vec::new(); boxes.len()];
-        }
-        // Load the registry once for the whole block, then match each box.
-        match commands::scan::load_registry_from_store(self.store.as_ref()) {
-            Ok(registry) => boxes
-                .iter()
-                .map(|b| registry.matching_scan_ids(b))
-                .collect(),
-            Err(e) => {
-                tracing::error!(error = %e, "scan apply: registry load failed; no matches this block");
-                mark_scan_invalidated(&self.db);
-                vec![Vec::new(); boxes.len()]
-            }
-        }
-    }
-}
-
-/// Best-effort: flip `WALLET_SCAN_INVALIDATED` after a scan-registry read
-/// failure silently dropped a block's matches, so `/wallet/status` surfaces
-/// `scan_invalidated` and the operator runs a `/wallet/rescan` (the contract
-/// that clears it). "Best-effort": the same redb fault that broke the read may
-/// also break this write, in which case it's only logged; a recoverable failure
-/// (e.g. one corrupt `WALLET_SCANS` row) does get flagged.
-///
-/// Deliberately reuses the wallet-wide flag rather than adding a scan-specific
-/// one: a registry read failure during apply is a corruption/IO-class event
-/// whose recovery contract is already a full rescan, so pausing all wallet apply
-/// (`apply_block_to_wallet` no-ops while set) is the correct fail-closed posture
-/// — an availability cost on an exceptional path, not a correctness risk. Runs
-/// during payload build (no chain write txn is open on this thread yet), so the
-/// short write txn here can't deadlock — at worst it briefly waits on an
-/// in-flight persist-pipeline write.
-fn mark_scan_invalidated(db: &redb::Database) {
-    if let Err(e) = try_mark_scan_invalidated(db) {
-        tracing::error!(error = %e, "scan apply: failed to set scan-invalidated flag after a registry read failure");
-    }
-}
-
-#[allow(clippy::result_large_err)] // redb::Error shape is fixed upstream
-fn try_mark_scan_invalidated(db: &redb::Database) -> Result<(), redb::Error> {
-    // Quick-repair commit (see ergo_state::begin_write_qr): a single
-    // non-quick-repair commit can force an O(file-size) repair on the next
-    // unclean restart, so route this production write through the helper.
-    let w = ergo_state::begin_write_qr(db)?;
-    w.open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)?
-        .insert((), true)?;
-    w.commit()?;
-    Ok(())
-}
-
-/// Network + operator-flag + EIP-27 config supplied at boot.
-pub struct WriterConfig {
-    pub network: ergo_ser::address::NetworkPrefix,
-    /// `[wallet] expose_private_keys`: gates `POST /wallet/getPrivateKey`.
-    /// `false` (default) returns 403 Forbidden; `true` allows the
-    /// route to return the derived secret scalar.
-    pub expose_private_keys: bool,
-    /// EIP-27 re-emission rule inputs for this network (`None` off EIP-27
-    /// nets, e.g. testnet, where `ChainSpec::reemission` is `None`). Built at
-    /// boot from `build_reemission_rules(&config.chain_spec)` — the same source
-    /// the block/mempool validator uses, so the wallet's re-emission reserve
-    /// estimate and burn-aware builder share one trigger/token-id/floor with
-    /// consensus. When `None`, the wallet surfaces no re-emission reserve.
-    pub reemission: Option<ergo_validation::ReemissionRuleInputs>,
-    /// `[mempool] min_relay_fee_nano_erg` — the local relay-fee floor. A tx built
-    /// below it is rejected by submit before validation, so fee defaults derive
-    /// from `max(MIN_FEE, this)` and overrides below it are rejected (keeps the
-    /// reward-sweep preview/execute contract honest under non-default configs).
-    pub min_relay_fee_nano_erg: u64,
-    /// `[mempool] max_tx_size_bytes` — the local admission tx-size cap. The
-    /// reward sweep bounds its built tx against this so a preview can't approve a
-    /// sweep the submit path rejects as `too_big` under a lowered config.
-    pub max_tx_size_bytes: usize,
-}
-
-/// Compatibility entry point for embedders that own the task themselves.
-/// Closing every command sender drains the writer and its rescans. Production
-/// uses the supervised entry point so shutdown does not depend on sender Drop.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_wallet_writer(
-    rx: mpsc::Receiver<WalletCommand>,
-    storage: Arc<RwLock<SecretStorage>>,
-    state: Arc<RwLock<WalletState>>,
-    db: Arc<redb::Database>,
-    chain: Arc<dyn ChainStateAccessor>,
-    cfg: WriterConfig,
-    submit_handle: Arc<dyn TxSubmitter>,
-    mempool: Arc<dyn ergo_api::MempoolView>,
-) {
-    run_wallet_writer_with_rescan(
-        rx,
-        storage,
-        state,
-        db,
-        chain,
-        cfg,
-        submit_handle,
-        mempool,
-        Arc::new(crate::wallet_boot::RescanControl::default()),
-    )
-    .await;
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn run_wallet_writer_with_rescan(
-    rx: mpsc::Receiver<WalletCommand>,
-    storage: Arc<RwLock<SecretStorage>>,
-    state: Arc<RwLock<WalletState>>,
-    db: Arc<redb::Database>,
-    chain: Arc<dyn ChainStateAccessor>,
-    cfg: WriterConfig,
-    submit_handle: Arc<dyn TxSubmitter>,
-    mempool: Arc<dyn ergo_api::MempoolView>,
-    rescan: Arc<crate::wallet_boot::RescanControl>,
-) {
-    let (_keep_alive, shutdown) = tokio::sync::watch::channel(false);
-    if let Err(error) = run_wallet_writer_supervised(
-        rx,
-        storage,
-        state,
-        db,
-        chain,
-        cfg,
-        submit_handle,
-        mempool,
-        rescan,
-        shutdown,
-    )
-    .await
-    {
-        tracing::error!(%error, "wallet writer failed");
-    }
-}
-
-/// Writer-task loop. Runs in a dedicated tokio task; receives commands and
-/// dispatches against owned `storage` + `state` + `db` + `chain` accessor.
-/// Each command's reply is sent back via its oneshot.
-#[allow(clippy::result_large_err)] // redb::Error is large; closures in rescan dispatch can't avoid it
-#[allow(clippy::too_many_arguments)] // task spawn-point: owned deps unpacked straight into WriterContext
-pub async fn run_wallet_writer_supervised(
-    mut rx: mpsc::Receiver<WalletCommand>,
-    storage: Arc<RwLock<SecretStorage>>,
-    state: Arc<RwLock<WalletState>>,
-    db: Arc<redb::Database>,
-    chain: Arc<dyn ChainStateAccessor>,
-    cfg: WriterConfig,
-    submit_handle: Arc<dyn TxSubmitter>,
-    mempool: Arc<dyn ergo_api::MempoolView>,
-    rescan: Arc<crate::wallet_boot::RescanControl>,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> Result<(), WalletAdminError> {
-    let store: Arc<dyn ergo_state::wallet::WalletStore> =
-        Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
-    let ctx = commands::WriterContext {
-        rescan: &rescan,
-        rescan_workers: &rescan.workers,
-        storage: &storage,
-        state: &state,
-        db: &db,
-        store: &store,
-        chain: &chain,
-        cfg: &cfg,
-        submit_handle: &submit_handle,
-        mempool: &mempool,
-    };
-    // Sensitive-op failed-attempt budgets, owned by this loop (the single
-    // choke point every wallet surface funnels through). See
-    // `commands::admin::AttemptLimiter`.
-    let unlock_limiter = commands::admin::AttemptLimiter::new();
-    let check_limiter = commands::admin::AttemptLimiter::new();
-    let mut failure = jobs::recover_preparing(&db).err();
-    if failure.is_some() {
-        rescan.stop();
-        rx.close();
-    }
-    let mut jobs_tick = tokio::time::interval(std::time::Duration::from_secs(2));
-    jobs_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        if rescan.stopping() || *shutdown.borrow() {
-            break;
-        }
-        // Release completed task handles during normal operation, retaining
-        // panic evidence for explicit shutdown rather than silently detaching.
-        let completed = {
-            let mut workers = rescan.workers.lock();
-            let (completed, running): (Vec<_>, Vec<_>) = std::mem::take(&mut *workers)
-                .into_iter()
-                .partition(|worker| worker.is_finished());
-            *workers = running;
-            completed
+    fn lookup_utxo(
+        &self,
+        box_id: &[u8; 32],
+    ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, ChainAccessError> {
+        let Some(bytes) = self
+            .reader
+            .lookup_box(box_id)
+            .map_err(chain_state_read_failed)?
+        else {
+            return Ok(None);
         };
-        for worker in completed {
-            if let Err(error) = worker.await {
-                failure.get_or_insert_with(|| {
-                    WalletAdminError::Internal(format!("wallet rescan worker failed: {error}"))
-                });
-            }
-        }
-        let cmd = tokio::select! {
-            biased;
-            _ = shutdown.changed() => { rescan.stop(); rx.close(); break; },
-            command = rx.recv() => match command { Some(command) => command, None => break },
-            // A failing job is recorded on that job; only a job journal that
-            // cannot be read or written stops the writer.
-            _ = jobs_tick.tick() => {
-                if let Err(error) = jobs::tick(&ctx).await {
-                    tracing::error!(%error, "wallet mining job journal failure");
-                    failure.get_or_insert(error);
-                    rescan.stop();
-                    rx.close();
-                    break;
-                }
-                continue;
-            },
-        };
-        let Some(cmd) = scan_guard::gate(cmd, store.as_ref()) else {
-            continue;
-        };
-        match cmd {
-            WalletCommand::MiningJobs { reply } => {
-                let _ = reply.send(jobs::list(&db));
-            }
-            WalletCommand::CreateMiningJob { request, reply } => {
-                let _ = reply.send(jobs::create_owned(&ctx, request).await);
-            }
-            WalletCommand::CancelMiningJob { job_id, reply } => {
-                let _ = reply.send(jobs::cancel(&ctx, &job_id).await);
-            }
-            WalletCommand::Status { reply } => commands::admin::status(&ctx, reply).await,
-            WalletCommand::Init {
-                pass,
-                mnemonic_pass,
-                strength,
-                reply,
-            } => commands::admin::init(&ctx, pass, mnemonic_pass, strength, reply).await,
-            WalletCommand::Restore {
-                mnemonic,
-                mnemonic_pass,
-                pass,
-                use_pre_1627,
-                reply,
-            } => {
-                commands::admin::restore(&ctx, mnemonic, mnemonic_pass, pass, use_pre_1627, reply)
-                    .await
-            }
-            WalletCommand::Rescan { from_height, reply } => {
-                commands::admin::rescan(&ctx, from_height, reply).await
-            }
-            WalletCommand::Unlock { pass, reply } => {
-                commands::admin::unlock(&ctx, &unlock_limiter, pass, reply).await
-            }
-            WalletCommand::Lock { reply } => commands::admin::lock(&ctx, reply).await,
-            WalletCommand::Check {
-                mnemonic,
-                mnemonic_pass,
-                reply,
-            } => commands::admin::check(&ctx, &check_limiter, mnemonic, mnemonic_pass, reply).await,
-            WalletCommand::UpdateChangeAddress { address, reply } => {
-                commands::admin::update_change_address(&ctx, address, reply).await
-            }
-            WalletCommand::Balances { reply } => commands::admin::balances(&ctx, reply).await,
-            WalletCommand::BalancesWithUnconfirmed { reply } => {
-                commands::admin::balances_with_unconfirmed(&ctx, reply).await
-            }
-            WalletCommand::NativeBalance {
-                include_unconfirmed,
-                reply,
-            } => commands::admin::native_balance(&ctx, include_unconfirmed, reply).await,
-            WalletCommand::NativeStatus { reply } => {
-                commands::admin::native_status(&ctx, reply).await
-            }
-            WalletCommand::NativeAddresses {
-                offset,
-                limit,
-                reply,
-            } => commands::admin::native_addresses(&ctx, offset, limit, reply).await,
-            WalletCommand::NativeBoxes {
-                offset,
-                limit,
-                reply,
-            } => commands::admin::native_boxes(&ctx, offset, limit, reply).await,
-            WalletCommand::NativeBoxById { box_id_hex, reply } => {
-                commands::admin::native_box_by_id(&ctx, box_id_hex, reply).await
-            }
-            WalletCommand::NativeTransactions {
-                offset,
-                limit,
-                reply,
-            } => commands::admin::native_transactions(&ctx, offset, limit, reply).await,
-            WalletCommand::NativeTransactionById { tx_id_hex, reply } => {
-                commands::admin::native_transaction_by_id(&ctx, tx_id_hex, reply).await
-            }
-            WalletCommand::NativeSelectBoxes { req, reply } => {
-                commands::send::native_select_boxes(&ctx, *req, reply).await
-            }
-            WalletCommand::NativeBuildTransaction { intent, reply } => {
-                commands::send::native_build_transaction(&ctx, *intent, reply).await
-            }
-            WalletCommand::NativeSignTransaction { req, reply } => {
-                commands::send::native_sign_transaction(&ctx, *req, reply).await
-            }
-            WalletCommand::NativeSendTransaction { req, reply } => {
-                commands::send::native_send_transaction(&ctx, *req, reply).await
-            }
-            WalletCommand::Addresses { reply } => commands::admin::addresses(&ctx, reply).await,
-            WalletCommand::Boxes { page, reply } => commands::admin::boxes(&ctx, page, reply).await,
-            WalletCommand::BoxesUnspent { page, reply } => {
-                commands::admin::boxes_unspent(&ctx, page, reply).await
-            }
-            WalletCommand::Transactions { page, reply } => {
-                commands::admin::transactions(&ctx, page, reply).await
-            }
-            WalletCommand::TransactionById { tx_id_hex, reply } => {
-                commands::admin::transaction_by_id(&ctx, tx_id_hex, reply).await
-            }
-            WalletCommand::TransactionsByScanId {
-                scan_id,
-                page,
-                reply,
-            } => commands::admin::transactions_by_scan_id(&ctx, scan_id, page, reply).await,
-            WalletCommand::PaymentSend { requests, reply } => {
-                commands::send::payment_send(&ctx, requests, reply).await
-            }
-            WalletCommand::RetrieveRewards { req, reply } => {
-                commands::send::retrieve_rewards(&ctx, req, reply).await
-            }
-            WalletCommand::TransactionGenerate { request, reply } => {
-                commands::send::transaction_generate(&ctx, request, reply).await
-            }
-            WalletCommand::TransactionGenerateUnsigned { request, reply } => {
-                commands::send::transaction_generate_unsigned(&ctx, request, reply).await
-            }
-            WalletCommand::TransactionSign { request, reply } => {
-                commands::send::transaction_sign(&ctx, request, reply).await
-            }
-            WalletCommand::TransactionSend { request, reply } => {
-                commands::send::transaction_send(&ctx, request, reply).await
-            }
-            WalletCommand::BoxesCollect { request, reply } => {
-                commands::send::boxes_collect(&ctx, request, reply).await
-            }
-            WalletCommand::GenerateCommitments { request, reply } => {
-                commands::multisig::generate_commitments(&ctx, request, reply).await
-            }
-            WalletCommand::ExtractHints { request, reply } => {
-                commands::multisig::extract_hints(&ctx, request, reply).await
-            }
-            WalletCommand::DeriveKey { request, reply } => {
-                commands::multisig::derive_key(&ctx, request, reply).await
-            }
-            WalletCommand::DeriveNextKey { reply } => {
-                commands::multisig::derive_next_key(&ctx, reply).await
-            }
-            WalletCommand::GetPrivateKey { request, reply } => {
-                commands::multisig::get_private_key(&ctx, request, reply).await
-            }
-            WalletCommand::RegisterScan { request, reply } => {
-                commands::scan::register(&ctx, request, reply).await
-            }
-            WalletCommand::DeregisterScan { scan_id, reply } => {
-                commands::scan::deregister(&ctx, scan_id, reply).await
-            }
-            WalletCommand::ListScans { reply } => commands::scan::list(&ctx, reply).await,
-            WalletCommand::ScanUnspentBoxes {
-                scan_id,
-                filter,
-                reply,
-            } => commands::scan::unspent_boxes(&ctx, scan_id, filter, reply).await,
-            WalletCommand::ScanSpentBoxes {
-                scan_id,
-                filter,
-                reply,
-            } => commands::scan::spent_boxes(&ctx, scan_id, filter, reply).await,
-            WalletCommand::ScanStopTracking {
-                scan_id,
-                box_id,
-                reply,
-            } => commands::scan::stop_tracking(&ctx, scan_id, box_id, reply).await,
-            WalletCommand::ScanAddBox {
-                scan_ids,
-                box_json,
-                reply,
-            } => commands::scan::add_box(&ctx, scan_ids, box_json, reply).await,
-            WalletCommand::ScanP2sRule { p2s, reply } => {
-                commands::scan::p2s_rule(&ctx, p2s, reply).await
-            }
-        }
+        chain_snapshot::decode_utxo_box(box_id, &bytes)
+            .map(Some)
+            .map_err(chain_state_read_failed)
     }
-    rescan.stop();
-    rx.close();
-    drop(rx);
-    if let Err(error) = rescan.join_workers().await {
-        failure.get_or_insert_with(|| {
-            WalletAdminError::Internal(format!("wallet rescan worker failed: {error}"))
-        });
-    }
-    failure.map_or(Ok(()), Err)
 }
 
-// `run_wallet_writer` per-command handlers split into per-group
-// submodules. Each handler receives a borrowed
-// `commands::WriterContext` plus the per-command params +
-// reply oneshot.
-mod commands;
-mod scan_guard;
-
-mod support;
 #[cfg(test)]
-mod scan_invalidation_tests {
+mod accessor_tests {
     use super::*;
-    use ergo_state::wallet::tables::{WALLET_SCANS, WALLET_SCAN_INVALIDATED};
 
-    fn temp_db() -> (tempfile::TempDir, Arc<redb::Database>) {
+    #[test]
+    fn rescan_preflight_no_committed_chain_returns_genesis_tip() {
         let dir = tempfile::tempdir().unwrap();
-        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
-        (dir, Arc::new(db))
-    }
-
-    fn flag_set(db: &redb::Database) -> bool {
-        let r = db.begin_read().unwrap();
-        match r.open_table(WALLET_SCAN_INVALIDATED) {
-            Ok(t) => t.get(()).unwrap().map(|g| g.value()).unwrap_or(false),
-            Err(_) => false,
-        }
-    }
-
-    #[test]
-    fn mark_scan_invalidated_sets_the_flag() {
-        let (_d, db) = temp_db();
-        assert!(!flag_set(&db), "flag starts clear");
-        mark_scan_invalidated(&db);
-        assert!(flag_set(&db), "flag set after mark");
-    }
-
-    #[test]
-    fn match_boxes_registry_load_failure_invalidates_for_rescan() {
-        let (_d, db) = temp_db();
-        // A corrupt WALLET_SCANS row (not valid Scan JSON) makes load_registry
-        // fail when match_boxes loads it for the block.
-        {
-            let w = db.begin_write().unwrap();
-            w.open_table(WALLET_SCANS)
-                .unwrap()
-                .insert(11u16, vec![0xFFu8, 0x00])
-                .unwrap();
-            w.commit().unwrap();
-        }
-        let hook = WalletStateHook {
-            rescan: Arc::new(crate::wallet_boot::RescanControl::default()),
-            wallet: Arc::new(RwLock::new(ergo_wallet::state::WalletState::empty(false))),
-            db: db.clone(),
-            store: Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone())),
-        };
-        // match_boxes loads the registry first (regardless of the box slice), so
-        // the corrupt row trips the Err branch even with no boxes.
-        let out = ergo_state::wallet::WalletApplyHook::match_boxes(&hook, &[]);
-        assert!(out.is_empty());
-        assert!(
-            flag_set(&db),
-            "a registry load failure must set WALLET_SCAN_INVALIDATED for rescan"
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let chain = ChainStateAccessorImpl::chain_only(
+            ergo_state::reader::ChainStoreReader::new_from_db(db),
+            false,
+            None,
         );
+        assert_eq!(chain.tip_height().unwrap(), 0);
     }
 
     #[test]
     fn chain_tip_no_committed_chain_returns_zero() {
-        let (_d, db) = temp_db();
-        let accessor = ChainStateAccessorImpl::new(db, false, None);
         use tracing_subscriber::prelude::*;
+
         struct WarnCounter(Arc<std::sync::atomic::AtomicUsize>);
         impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCounter {
             fn on_event(
@@ -1796,154 +230,42 @@ mod scan_invalidation_tests {
                 }
             }
         }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let chain = ChainStateAccessorImpl::chain_only(
+            ergo_state::reader::ChainStoreReader::new_from_db(db),
+            false,
+            None,
+        );
         let warnings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let subscriber = tracing_subscriber::registry().with(WarnCounter(warnings.clone()));
         tracing::subscriber::with_default(subscriber, || {
-            assert_eq!(accessor.tip_height().unwrap(), 0);
+            assert_eq!(chain.tip_height().unwrap(), 0);
         });
         assert_eq!(warnings.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]
     fn production_chain_access_propagates_database_errors() {
-        let (_d, db) = temp_db();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
         let state_meta: redb::TableDefinition<u64, u64> =
             redb::TableDefinition::new("chain_state_meta");
         let chain_index: redb::TableDefinition<u64, u64> =
             redb::TableDefinition::new("chain_index");
         {
-            let w = db.begin_write().unwrap();
-            w.open_table(state_meta).unwrap().insert(1, 1).unwrap();
-            w.open_table(chain_index).unwrap().insert(1, 1).unwrap();
-            w.commit().unwrap();
+            let write = db.begin_write().unwrap();
+            write.open_table(state_meta).unwrap().insert(1, 1).unwrap();
+            write.open_table(chain_index).unwrap().insert(1, 1).unwrap();
+            write.commit().unwrap();
         }
-        let accessor = ChainStateAccessorImpl::new(db, false, None);
-        assert!(accessor.tip_height().is_err());
-        assert!(accessor.read_block_at(1).is_err());
-    }
-}
-
-#[cfg(test)]
-mod stored_queue_tests {
-    use super::*;
-    use ergo_api::compat::types::ScalaTransactionInput;
-    use ergo_api::types::{SubmitError, SubmitMode};
-    use ergo_mining::private_queue::{PrivateTransactionQueue, PrivateTransactionState};
-    use ergo_primitives::digest::Digest32;
-
-    // ----- helpers -----
-
-    struct NoBroadcast;
-
-    #[async_trait]
-    impl ergo_api::traits::NodeSubmit for NoBroadcast {
-        async fn submit_transaction(
-            &self,
-            _: Vec<u8>,
-            _: SubmitMode,
-        ) -> Result<String, SubmitError> {
-            panic!("private queue access never broadcasts");
-        }
-        async fn submit_transaction_json(
-            &self,
-            _: ScalaTransactionInput,
-            _: SubmitMode,
-        ) -> Result<String, SubmitError> {
-            panic!("private queue access never broadcasts");
-        }
-    }
-
-    /// A queued one-input transaction spending box `[input; 32]`.
-    fn queued_entry(input: u8) -> ergo_mempool::pool::Entry {
-        use ergo_primitives::reader::VlqReader;
-        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
-        let tx = ergo_ser::transaction::Transaction {
-            inputs: vec![Input {
-                box_id: Digest32::from_bytes([input; 32]),
-                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
-            }],
-            data_inputs: vec![],
-            output_candidates: vec![ergo_ser::ergo_box::ErgoBoxCandidate::new(
-                1_000_000,
-                ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&[0, 8, 0xd3])).unwrap(),
-                100,
-                vec![],
-                ergo_ser::register::AdditionalRegisters::empty(),
-            )
-            .unwrap()],
-        };
-        let mut writer = ergo_primitives::writer::VlqWriter::new();
-        ergo_ser::transaction::write_transaction(&mut writer, &tx).unwrap();
-        let bytes = writer.result();
-        let id = ergo_ser::transaction::transaction_id(&tx).unwrap();
-        ergo_mempool::pool::Entry::new(
-            Digest32::from_bytes(*id.as_bytes()),
-            Arc::from(bytes.clone()),
-            vec![Digest32::from_bytes([input; 32])],
-            vec![],
-            vec![],
-            0,
-            0,
-            bytes.len() as u32,
-            100,
-            ergo_mempool::types::TxSource::Wallet,
-        )
-    }
-
-    // ----- mining disabled -----
-
-    #[tokio::test]
-    async fn a_stored_queue_is_listed_and_withdrawn_while_mining_is_disabled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("private-mining-queue.json");
-        let queue = Arc::new(PrivateTransactionQueue::open(&path).unwrap());
-        let entry = queued_entry(7);
-        queue.admit(&entry, Default::default(), 10, 100).unwrap();
-        let tx_id = hex::encode(entry.tx_id.as_bytes());
-        let adapter = NodeSubmitAdapter::new(Arc::new(NoBroadcast))
-            .with_stored_private_queue(Some(queue.clone()));
-        assert!(
-            !adapter.private_mining_configured(),
-            "nothing new is admitted without mining"
+        let chain = ChainStateAccessorImpl::chain_only(
+            ergo_state::reader::ChainStoreReader::new_from_db(db),
+            false,
+            None,
         );
-
-        let listed = adapter.private_transactions().await.unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].tx_id, tx_id);
-        assert_eq!(listed[0].state, "queued");
-
-        adapter
-            .cancel_private_transaction(tx_id.clone())
-            .await
-            .unwrap();
-        assert!(queue.reserved_inputs().is_empty());
-        let reopened = PrivateTransactionQueue::open(&path).unwrap();
-        assert_eq!(
-            reopened.entry(&tx_id).unwrap().state,
-            PrivateTransactionState::Cancelled,
-            "the withdrawal is durable, so enabling mining cannot mine it"
-        );
-        let unknown = adapter
-            .cancel_private_transaction("ab".repeat(32))
-            .await
-            .unwrap_err();
-        assert_eq!(unknown.reason, "private_transaction_rejected");
-    }
-
-    #[tokio::test]
-    async fn without_any_queue_private_calls_are_unavailable() {
-        let adapter = NodeSubmitAdapter::new(Arc::new(NoBroadcast));
-        assert_eq!(
-            adapter.private_transactions().await.unwrap_err().reason,
-            "private_mining_unavailable"
-        );
-        assert_eq!(
-            adapter
-                .cancel_private_transaction("ab".repeat(32))
-                .await
-                .unwrap_err()
-                .reason,
-            "private_mining_unavailable"
-        );
+        assert!(chain.tip_height().is_err());
+        assert!(chain.read_block_at(1).is_err());
     }
 }

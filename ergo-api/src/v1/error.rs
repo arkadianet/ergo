@@ -175,6 +175,7 @@ pub enum Reason {
     AcknowledgementRequired,
     SecretNotRecoverable,
     ChangeAddressUntracked,
+    WalletMoved,
 
     // ----- caps / rate (429 / 413) -----
     RateLimited,
@@ -194,6 +195,8 @@ pub enum Reason {
 
     // ----- state-conflict (409) / internal (500) -----
     AlreadyBlacklisted,
+    StaleTip,
+    HistoryPruned,
     ConfigConflict,
     InternalError,
 }
@@ -283,9 +286,10 @@ impl Reason {
             // 409 — subsystem-off (config) + state-conflict
             IndexerDisabled | IndexerSyncing | IndexerHalted | SubmitDisabled
             | MempoolViewDisabled | RealtimeDisabled | WebhooksDisabled | SnapshotDisabled
-            | MiningDisabled | SensitiveOpDisabled | AlreadyBlacklisted | ConfigConflict => {
-                StatusCode::CONFLICT
-            }
+            | MiningDisabled | SensitiveOpDisabled | AlreadyBlacklisted | StaleTip
+            | ConfigConflict => StatusCode::CONFLICT,
+
+            HistoryPruned | WalletMoved => StatusCode::GONE,
 
             // 501 — built-without / not-configured
             CompilerUnavailable | OracleUnavailable => StatusCode::NOT_IMPLEMENTED,
@@ -551,6 +555,7 @@ mod tests {
             (AcknowledgementRequired, "acknowledgement_required", cf),
             (SecretNotRecoverable, "secret_not_recoverable", cf),
             (ChangeAddressUntracked, "change_address_untracked", cf),
+            (WalletMoved, "wallet_moved", StatusCode::GONE),
             // caps / rate
             (RateLimited, "rate_limited", rl),
             (LimitExceeded, "limit_exceeded", rl),
@@ -568,6 +573,8 @@ mod tests {
             (IdleTimeout, "idle_timeout", StatusCode::REQUEST_TIMEOUT),
             // state-conflict / internal
             (AlreadyBlacklisted, "already_blacklisted", cf),
+            (StaleTip, "stale_tip", cf),
+            (HistoryPruned, "history_pruned", StatusCode::GONE),
             (ConfigConflict, "config_conflict", cf),
             (
                 InternalError,
@@ -622,11 +629,11 @@ mod tests {
     }
 
     #[test]
-    fn contract_covers_exactly_one_hundred_seventeen_reasons_no_duplicates() {
+    fn contract_covers_exactly_one_hundred_twenty_reasons_no_duplicates() {
         use std::collections::BTreeSet;
         let rows = contract();
-        assert_eq!(rows.len(), 117, "expected 117 canonical reasons");
+        assert_eq!(rows.len(), 120, "expected 120 canonical reasons");
         let wires: BTreeSet<&str> = rows.iter().map(|(_, w, _)| *w).collect();
-        assert_eq!(wires.len(), 117, "wire strings must be unique");
+        assert_eq!(wires.len(), 120, "wire strings must be unique");
     }
 }

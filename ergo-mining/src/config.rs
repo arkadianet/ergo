@@ -59,6 +59,12 @@ pub struct MiningConfig {
     #[serde(default)]
     pub miner_public_key_hex: Option<String>,
 
+    /// Miner's reward address: a P2PK address on the node's network, the
+    /// form wallets display. The node config loader decodes it into
+    /// `miner_public_key_hex`; setting both to different keys is an error.
+    #[serde(default)]
+    pub miner_reward_address: Option<String>,
+
     /// Debounce window for same-parent mempool-refresh rebuilds, in
     /// milliseconds. When the mempool changes but the tip has not, the action
     /// loop coalesces the burst and re-signals the engine at most once per
@@ -210,6 +216,7 @@ impl Default for MiningConfig {
         Self {
             enabled: false,
             miner_public_key_hex: None,
+            miner_reward_address: None,
             block_candidate_generation_interval_ms: default_candidate_interval_ms(),
             template_retention_ms: default_template_retention_ms(),
             use_external_miner: default_use_external_miner(),
@@ -238,9 +245,8 @@ impl MiningConfig {
         if !self.enabled {
             return Ok(());
         }
-        // `miner_public_key_hex` is OPTIONAL: when absent, the reward key is
-        // resolved from the wallet's EIP-3 first-address key at candidate time
-        // (Scala parity — see ergo-mining handle `RewardKeySource::Wallet`).
+        // `miner_public_key_hex` is optional for embedded mode; external mode
+        // enforces that it is present at the node config boundary.
         // But a value that IS present must be well-formed (66 hex chars → 33
         // bytes), validated early at startup rather than failing later.
         if let Some(pk_hex) = self.miner_public_key_hex.as_ref() {

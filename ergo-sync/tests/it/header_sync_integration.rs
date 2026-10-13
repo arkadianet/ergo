@@ -365,7 +365,6 @@ fn configured_genesis_mismatch_penalizes_header_sender() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
 
     assert!(actions.iter().any(|action| matches!(
@@ -610,7 +609,7 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
         coordinator.delivery().status(101, &h2_id),
         ModifierStatus::Received
     );
-    let actions = executor.execute_all(received, &mut store, &mut coordinator, now, None);
+    let actions = executor.execute_all(received, &mut store, &mut coordinator, now);
 
     assert!(
         actions.iter().any(|a| matches!(
@@ -642,7 +641,7 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
         now,
     );
     let received = coordinator.on_modifier_received(peer, 101, h2_id, h2_bytes, now);
-    let retry_actions = executor.execute_all(received, &mut store, &mut coordinator, now, None);
+    let retry_actions = executor.execute_all(received, &mut store, &mut coordinator, now);
     assert!(!retry_actions
         .iter()
         .any(|action| matches!(action, Action::Penalize { .. })));
@@ -726,7 +725,7 @@ fn malformed_header_rejects_before_ack_and_allows_valid_delivery() {
         .into_iter()
         .find(|action| matches!(action, Action::ValidateHeader { .. }))
         .expect("valid header must be routed for validation");
-    let accepted = executor.execute(validate, &mut store, &mut coordinator, now, None);
+    let accepted = executor.execute(validate, &mut store, &mut coordinator, now);
     assert!(!accepted
         .iter()
         .any(|action| matches!(action, Action::Penalize { .. })));
@@ -793,7 +792,6 @@ fn orphan_drain_checkpoint_mismatch_penalizes_sending_peer() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
     assert!(
         !orphan_actions.iter().any(|a| matches!(
@@ -824,7 +822,6 @@ fn orphan_drain_checkpoint_mismatch_penalizes_sending_peer() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
 
     assert!(
@@ -1200,7 +1197,6 @@ fn block_2_without_downloaded_proofs(best_header_height: u32, retain_proofs: boo
         &mut store,
         &mut coordinator,
         now,
-        None,
     );
 
     // Should produce RequestModifier actions for block sections
@@ -1290,8 +1286,7 @@ fn block_2_without_downloaded_proofs(best_header_height: u32, retain_proofs: boo
     // Execute all resulting actions (PersistSection + possibly AssembleBlock)
     let mut all_actions = tx_actions;
     all_actions.extend(ext_actions);
-    let _network_actions =
-        executor.execute_all(all_actions, &mut store, &mut coordinator, now, None);
+    let _network_actions = executor.execute_all(all_actions, &mut store, &mut coordinator, now);
 
     // === Step 3: Verify block was applied ===
     assert_eq!(
@@ -1662,7 +1657,7 @@ fn executor_post_restart_block_processing() {
         // Execute all actions through the executor
         let mut all_actions = tx_actions;
         all_actions.extend(ext_actions);
-        let _network = executor.execute_all(all_actions, &mut store, &mut coordinator, now, None);
+        let _network = executor.execute_all(all_actions, &mut store, &mut coordinator, now);
 
         // Verify block 6 was applied
         assert_eq!(
@@ -1741,7 +1736,6 @@ fn executor_parent_walk_requests_missing_parent() {
         &mut store,
         &mut coordinator,
         now,
-        None,
     );
 
     // The executor must emit a RequestModifier for the missing parent.
@@ -1877,7 +1871,6 @@ fn process_header_at_eip37_boundary_with_truncated_lookback_buffers_not_penalize
         &mut store,
         &mut coordinator,
         now,
-        None,
     );
 
     // 1. Critical: no peer-penalty action emitted. The peer delivered a
@@ -2068,7 +2061,6 @@ fn epoch_context_blocked_header_retries_on_later_header_progress() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
     assert!(!penalizes(&actions), "{actions:?}");
     assert_eq!(executor.orphan_headers_len(), 1);
@@ -2080,7 +2072,6 @@ fn epoch_context_blocked_header_retries_on_later_header_progress() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
     assert!(store
         .get_header(&get_header_id(&early, 2))
@@ -2096,7 +2087,6 @@ fn epoch_context_blocked_header_retries_on_later_header_progress() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
     assert!(!penalizes(&actions), "{actions:?}");
     assert!(store.get_header(&child_id).unwrap().is_some());
@@ -2131,7 +2121,6 @@ fn epoch_context_blocked_batch_header_retries_on_later_header_progress() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
     assert!(!penalizes(&actions), "{actions:?}");
     assert_eq!(executor.orphan_headers_len(), 1);
@@ -2142,7 +2131,6 @@ fn epoch_context_blocked_batch_header_retries_on_later_header_progress() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
     assert!(!penalizes(&actions), "{actions:?}");
     assert!(store.get_header(&child_id).unwrap().is_some());

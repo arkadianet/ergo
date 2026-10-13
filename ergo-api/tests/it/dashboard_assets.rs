@@ -13,13 +13,12 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+use ergo_api::server::{router_with_mempool_and_security, ServerCtx};
 use ergo_api::traits::{NodeReadState, NoopMempoolView};
 use ergo_api::types::{
     ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiPeer,
     ApiStatus, ApiSyncStatus, ApiTip,
 };
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
 
@@ -72,7 +71,9 @@ fn app() -> axum::Router {
         mempool: Arc::new(NoopMempoolView::new()),
         network: NetworkPrefix::Mainnet,
         chain_params: None,
+        wallet_chain: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
@@ -81,7 +82,7 @@ fn app() -> axum::Router {
         script_config: Default::default(),
         block_batch: Default::default(),
     };
-    router_with_mempool_and_wallet_and_security(ctx, None, Arc::new(NoopWalletAdmin), None)
+    router_with_mempool_and_security(ctx, None, None)
 }
 
 async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Vec<u8>) {
@@ -141,6 +142,12 @@ async fn every_dashboard_module_is_served_with_its_source() {
     assert!(modules.len() >= 30, "found only {} modules", modules.len());
     for (name, source) in &modules {
         let (status, body) = get(&app, &format!("/js/{name}")).await;
+        // The wallet modules live here for ergo-walletd's UI, which serves
+        // them; the node hosts no wallet.
+        if name.starts_with("wallet") {
+            assert_eq!(status, StatusCode::NOT_FOUND, "/js/{name} is served");
+            continue;
+        }
         assert_eq!(status, StatusCode::OK, "/js/{name} is not served");
         assert!(body == *source, "/js/{name} differs from web/js/{name}");
     }

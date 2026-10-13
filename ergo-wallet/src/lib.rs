@@ -1,10 +1,12 @@
 //! Ergo HD wallet.
 //!
 //! Covers BIP-39 mnemonics and EIP-3 key derivation (post- and
-//! pre-1627), AES-GCM / PBKDF2 encrypted secret storage, sigma
-//! proving (single- and multi-sig with hint-bag inputs),
-//! transaction building, and box selection. Convenience re-exports
-//! (`Mnemonic`, `ExtendedSecretKey`, `DerivationPath`, `SecretKey`,
+//! pre-1627), AES-GCM / PBKDF2 encryption, transaction selection/building, and
+//! Sigma proving with full contract reduction against an explicit signing
+//! context, and a conservative gate for synthetic contexts. File-backed secret
+//! storage requires `keystore`; the command-line binary requires `cli`.
+//! Orchestration modules live in `ergo-wallet-service`. Convenience
+//! re-exports (`Mnemonic`, `ExtendedSecretKey`, `DerivationPath`, `SecretKey`,
 //! `WalletError`) live at the crate root.
 
 pub mod address;
@@ -13,11 +15,13 @@ pub mod derivation;
 pub mod encryption;
 pub mod error;
 pub mod extended_key;
+pub mod master;
 pub mod mnemonic;
 pub mod proving;
-pub mod scan;
+pub mod reduced;
+mod reduced_message;
 pub mod secret;
-pub mod state;
+#[cfg(feature = "keystore")]
 pub mod storage;
 pub mod tx_builder;
 pub mod tx_context;
@@ -25,12 +29,12 @@ pub mod tx_context;
 pub use derivation::DerivationPath;
 pub use error::WalletError;
 pub use extended_key::{ExtendedPublicKey, ExtendedSecretKey, ExtendedSecretKeyLegacy};
+pub use master::{UnlockedMaster, UnlockedSecret};
 pub use mnemonic::Mnemonic;
+pub use reduced::{ReducedInput, ReducedTransaction};
 pub use secret::SecretKey;
-pub use state::WalletState;
-pub use storage::{
-    EncryptedSecret, LockState as WalletLockState, SecretStorage, UnlockedMaster, UnlockedSecret,
-};
+#[cfg(feature = "keystore")]
+pub use storage::{EncryptedSecret, LockState as WalletLockState, SecretStorage};
 
 /// Derive the standard EIP-3 first-address public key
 /// (`m/44'/429'/0'/0/0`) from a BIP39 seed using post-1627

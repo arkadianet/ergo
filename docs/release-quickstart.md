@@ -1,9 +1,9 @@
 # Ergo binaries
 
 One `ergo-<target>.tar.gz` archive per platform (or `.zip` on Windows) contains
-both `ergo-node` and `ergo-wallet` (with `.exe` on Windows), licenses, the
+`ergo-node`, `ergo-wallet` and `ergo-walletd` (with `.exe` on Windows), licenses, the
 changelog, configuration templates, operating docs and `deploy/` examples.
-`release-info.json` records the tag, version, source commit, target and both
+`release-info.json` records the tag, version, source commit, target and all
 executable SHA-256s. Release downloads also include `release.json` and
 `SHA256SUMS`; bare binaries and per-file checksum sidecars are no longer published.
 
@@ -101,3 +101,11 @@ For modes, monitoring, backups and graceful shutdown, read
 commands. Review [CHANGELOG.md](../CHANGELOG.md) before upgrades. Source build
 and contributor instructions live in the
 [repository](https://github.com/arkadianet/ergo).
+
+## Standalone wallet
+
+Use `./ergo-walletd --help` for the daemon and its offline migration command.
+The bundled `config/ergo-walletd.toml` selects public watch-only tracking;
+`config/ergo-walletd-seed.toml` enables an encrypted seed with an independent
+local credential. See [wallet extraction and cutover](wallet-extraction.md)
+for API, migration, external-node ownership and rollback instructions.

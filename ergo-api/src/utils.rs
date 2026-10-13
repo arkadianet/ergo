@@ -23,9 +23,9 @@
 //! | `GET`  | `/script/addressToBytes/{address}` | `{"bytes": "<Coll[Byte] const hex>"}` |
 //!
 //! `/script/*`'s two compile-requiring members, `p2sAddress` and
-//! `p2shAddress`, live in `crate::script` (M6) — they need `Arc<dyn
-//! WalletAdmin>` in addition to `NetworkPrefix`, a different state shape than
-//! the stateless routes in this file. `executeWithContext` (the one `/script/*`
+//! `p2shAddress`, live in `crate::script` (M6) — they need the compute pool in
+//! addition to `NetworkPrefix`, a different state shape than the stateless
+//! routes in this file. `executeWithContext` (the one `/script/*`
 //! member taking a caller-supplied env) remains unimplemented.
 
 use axum::{

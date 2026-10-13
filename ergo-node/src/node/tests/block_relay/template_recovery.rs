@@ -313,12 +313,9 @@ fn locally_mined_block_session_marked_failure_rebuilt_sibling_applies() {
     let mut state = make_state_with_store(store);
     state.executor = SyncExecutor::new(ProtocolParams::mainnet_default(), spec.difficulty);
     state.executor.load_header_index(&state.store).unwrap();
-    state.executor.try_apply_next_blocks(
-        &mut state.store,
-        &mut state.coordinator,
-        Instant::now(),
-        None,
-    );
+    state
+        .executor
+        .try_apply_next_blocks(&mut state.store, &mut state.coordinator, Instant::now());
     assert_eq!(state.store.chain_state_meta().best_header_id, sibling.id);
     assert_eq!(
         state.store.chain_state_meta().best_full_block_id,

@@ -1,275 +1,12 @@
 openapi: 3.1.0
 info:
   title: Ergo Rust Node — RUST API
-  description: 'Compatibility fragment for RUST API product routes under `/api/v1/*`: chain/boxes/tokens/addresses/mempool/transactions reads, tx-intelligence (build/simulate/fee-estimate/status), the ErgoScript playground (`script/*`), semantic decode (`protocols/*`, `boxes/decode`), light-client trustless-sync proofs (`light/*`), time-series analytics (`stats/*`), operator diagnostics, webhooks, real-time WebSocket subscriptions, the scan/accounts surface, and node/network/mining/voting operator controls. The canonical complete document is served at `/api-docs/openapi-rust.yaml`. Every error from these routes follows the nested error envelope (`error.reason`/`error.message`/`error.detail`); `reason` is the stable machine-readable field to switch on. Query `GET /api/v1/node/health` to confirm a running node''s state. Realtime and webhook cursors (`seq`, `previous_seq`, `event_seq`, `since`, `next_seq`, `oldest_seq`, `latest_seq`, `last_seq` and persistence watermarks) are unsigned 64-bit JSON integers and can exceed 2^53-1 after crash reservations. Clients must preserve them exactly with a lossless JSON parser; JavaScript Number and ordinary JSON.parse are unsafe. Use BigInt with a lossless parser and send cursor query parameters as decimal text.'
+  description: 'Compatibility fragment for RUST API product routes under `/api/v1/*`: chain/boxes/tokens/addresses/mempool/transactions reads, tx-intelligence (build/simulate/fee-estimate/status), the ErgoScript playground (`script/*`), semantic decode (`protocols/*`, `boxes/decode`), light-client trustless-sync proofs (`light/*`), time-series analytics (`stats/*`), operator diagnostics, webhooks, real-time WebSocket subscriptions, and node/network/mining/voting operator controls. The canonical complete document is served at `/api-docs/openapi-rust.yaml`. Every error from these routes follows the nested error envelope (`error.reason`/`error.message`/`error.detail`); `reason` is the stable machine-readable field to switch on. Query `GET /api/v1/node/health` to confirm a running node''s state. Realtime and webhook cursors (`seq`, `previous_seq`, `event_seq`, `since`, `next_seq`, `oldest_seq`, `latest_seq`, `last_seq` and persistence watermarks) are unsigned 64-bit JSON integers and can exceed 2^53-1 after crash reservations. Clients must preserve them exactly with a lossless JSON parser; JavaScript Number and ordinary JSON.parse are unsafe. Use BigInt with a lossless parser and send cursor query parameters as decimal text.'
   license:
     name: MIT OR Apache-2.0
     identifier: MIT OR Apache-2.0
   version: 0.12.3
 paths:
-  /api/v1/accounts:
-    get:
-      tags:
-      - accounts
-      summary: |-
-        Any named-account route. Net-new subsystem with
-        no `account_id` model in the wallet layer today → honest `route_unavailable`.
-        Representative mount for the whole named-accounts family — every method on
-        `/api/v1/accounts`, `/api/v1/accounts/{account_id}`,
-        `/api/v1/accounts/{account_id}/balance`, and
-        `/api/v1/accounts/{account_id}/addresses` shares this SAME handler and
-        answers identically.
-      operationId: accounts_seam
-      responses:
-        '503':
-          description: Named-accounts subsystem not wired on this node (same answer on every named-accounts route/method)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
-  /api/v1/accounts/private-key:
-    post:
-      tags:
-      - accounts
-      summary: |-
-        `POST /api/v1/accounts/private-key` — export the raw secp256k1 scalar for a
-        tracked address (the spec's `wallet/keys/derive-at-path`, relocated to a
-        collision-free T2 mount). Requires `acknowledge = true` AND
-        `[wallet] expose_private_keys = true`. `Cache-Control: no-store`.
-      description: |-
-        The T2 gate (admin api-key + loopback-preferred) is enforced by the
-        route_layer BEFORE this handler runs — a secret scalar is unreachable at
-        T0/T1 and, under hard-deny, from any non-loopback caller.
-      operationId: private_key
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/PrivateKeyRequest'
-        required: true
-      responses:
-        '200':
-          description: 'Raw secp256k1 scalar — `{ private_key }` (Cache-Control: no-store)'
-          content:
-            application/json:
-              schema: {}
-        '400':
-          description: Invalid address
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Missing acknowledgement, wallet uninitialized/locked, or sensitive-op disabled by config
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
-  /api/v1/accounts/watch:
-    get:
-      tags:
-      - accounts
-      summary: |-
-        `GET /api/v1/accounts/watch?limit=&cursor=` — watch-only scans (the
-        `wallet_interaction = "off"` marker), ascending by `scan_id`. T0.
-      description: |-
-        The scan registry stores no watch label / originating address, so those are
-        `null` here (Phase-2 durable watch registry); `tracking_rule` is the opaque
-        predicate the scan was registered with.
-      operationId: watch_list
-      parameters:
-      - name: limit
-        in: query
-        description: Page size (default 50, cap 500)
-        required: false
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - name: cursor
-        in: query
-        description: Opaque page cursor from a prior response
-        required: false
-        schema:
-          type: string
-      responses:
-        '200':
-          description: Watch-only scans — `{ items, page }` (address/label always null; Phase-2 durable registry)
-          content:
-            application/json:
-              schema: {}
-        '400':
-          description: Invalid cursor
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-    post:
-      tags:
-      - accounts
-      summary: |-
-        `POST /api/v1/accounts/watch` — register a watch-only address as an
-        `equals(R1, <script>)` scan (`scan_p2s_rule`), tracked but never spendable.
-        T1. Reuses the scan primitive; no second tracking mechanism.
-      operationId: watch_register
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/WatchRequest'
-        required: true
-      responses:
-        '200':
-          description: Registered — `{ address, scan_id, label }`
-          content:
-            application/json:
-              schema: {}
-        '400':
-          description: Invalid address
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
-  /api/v1/accounts/watch/{scan_id}:
-    delete:
-      tags:
-      - accounts
-      summary: '`DELETE /api/v1/accounts/watch/{scan_id}` — deregister a watch-only scan. T1.'
-      operationId: watch_delete
-      parameters:
-      - name: scan_id
-        in: path
-        description: Registered watch-only scan id
-        required: true
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      responses:
-        '200':
-          description: Deregistered — `{ scan_id }`
-          content:
-            application/json:
-              schema: {}
-        '404':
-          description: No watch-only scan with that id
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
-  /api/v1/accounts/watch/{scan_id}/unspent:
-    get:
-      tags:
-      - scan
-      summary: |-
-        `GET /api/v1/accounts/watch/{scan_id}/unspent` — the T0 (public) mount of
-        the unspent read, scoped to WATCH-ONLY scans exactly like `watch_list`
-        (`wallet_interaction = "off"`): a wallet-interacting operator scan answers
-        `scan_not_found` here, so the public route can never read it — only the T1
-        api-key mount (`scan/scans/{id}/unspent`) can.
-      operationId: watch_unspent
-      parameters:
-      - name: scan_id
-        in: path
-        description: Registered WATCH-ONLY scan id
-        required: true
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - name: limit
-        in: query
-        description: Page size (default 50, cap 2499)
-        required: false
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - name: cursor
-        in: query
-        description: Opaque page cursor from a prior response
-        required: false
-        schema:
-          type: string
-      - name: min_confirmations
-        in: query
-        description: Minimum confirmations
-        required: false
-        schema:
-          type: integer
-          format: int32
-      - name: max_confirmations
-        in: query
-        description: Maximum confirmations (-1 = unbounded)
-        required: false
-        schema:
-          type: integer
-          format: int32
-      - name: min_inclusion_height
-        in: query
-        description: Minimum inclusion height
-        required: false
-        schema:
-          type: integer
-          format: int32
-      - name: max_inclusion_height
-        in: query
-        description: Maximum inclusion height (-1 = unbounded)
-        required: false
-        schema:
-          type: integer
-          format: int32
-      responses:
-        '200':
-          description: Unspent boxes tracked by this watch-only scan
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Collection_ScanBoxView'
-        '400':
-          description: Invalid filter bounds/cursor
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '404':
-          description: No watch-only scan with that id
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
   /api/v1/addresses/{address}/balance:
     get:
       tags:
@@ -1249,6 +986,50 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/chain/admission:
+    post:
+      tags:
+      - chain
+      operationId: wallet_chain_admission
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WalletChainSubmitRequest'
+        required: true
+      responses:
+        '200':
+          description: Exact node admission outcome with structured rejection reason
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainAdmissionResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Committed tip changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Node unavailable or overloaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Admission timed out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/chain/blocks:
     get:
       tags:
@@ -1309,6 +1090,74 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/chain/blocks-since:
+    get:
+      tags:
+      - chain
+      operationId: wallet_chain_blocks_since
+      parameters:
+      - name: height
+        in: query
+        description: Committed cursor height (0 is the genesis cursor)
+        required: true
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: id
+        in: query
+        description: 64-character lowercase hex cursor header id (all-zero exactly at height 0)
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        description: Maximum blocks to return (default 100, cap 1024)
+        required: false
+        schema:
+          type: integer
+          format: int32
+          maximum: 1024
+          minimum: 1
+      responses:
+        '200':
+          description: Forward or ancestor result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainBlocksSinceResponse'
+        '400':
+          description: Malformed cursor, cursor/height identity mismatch, or invalid limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Committed tip changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '410':
+          description: Requested history is pruned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainPrunedBlocksSinceResponse'
+        '500':
+          description: Wallet chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Wallet chain adapter unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/chain/blocks/at-height/{height}:
     get:
       tags:
@@ -1508,6 +1357,62 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/chain/boxes/{id}:
+    get:
+      tags:
+      - chain
+      operationId: wallet_chain_box_lookup
+      parameters:
+      - name: tip
+        in: query
+        description: 64-character lowercase hex committed tip id
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Committed box
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainBoxLookupResponse'
+        '400':
+          description: Malformed box id or missing tip
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '404':
+          description: Box is not unspent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Committed tip changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Wallet chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Wallet chain adapter unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/chain/headers:
     get:
       tags:
@@ -1830,6 +1735,198 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/chain/snapshot:
+    get:
+      tags:
+      - chain
+      operationId: wallet_chain_snapshot
+      responses:
+        '200':
+          description: Committed signing snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainSnapshot'
+        '500':
+          description: Wallet chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Wallet chain adapter unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/chain/spending-context:
+    get:
+      tags:
+      - chain
+      summary: |-
+        The owned signing view includes private input reservations and therefore
+        shares the chain router's operator authentication and heavy-read budget.
+      operationId: wallet_spending_context
+      responses:
+        '200':
+          description: Versioned owned signing and complete mempool context, bounded to 8 MiB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletSpendingContext'
+        '500':
+          description: Chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Context unavailable, too large, or another response in flight
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/chain/tip:
+    get:
+      tags:
+      - chain
+      operationId: wallet_chain_tip
+      responses:
+        '200':
+          description: Committed full-block tip
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainTip'
+        '500':
+          description: Wallet chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Wallet chain adapter unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/chain/transactions:
+    post:
+      tags:
+      - chain
+      operationId: wallet_chain_submit
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WalletChainSubmitRequest'
+        required: true
+      responses:
+        '200':
+          description: Accepted or duplicate transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainSubmitResponse'
+        '400':
+          description: Malformed request (V1Error) or typed transaction rejection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainSubmitBadRequest'
+        '409':
+          description: Snapshot tip changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Wallet chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Wallet chain adapter unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Node transaction admission timed out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/chain/wallet-blocks/{height}:
+    get:
+      tags:
+      - chain
+      operationId: wallet_chain_block_at
+      parameters:
+      - name: height
+        in: path
+        description: Committed block height
+        required: true
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: tip
+        in: query
+        description: Expected committed header id
+        required: true
+        schema:
+          type: string
+      - name: tipHeight
+        in: query
+        description: Expected committed tip height
+        required: true
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      responses:
+        '200':
+          description: Block anchored to the expected committed tip
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainBlockAtResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Committed tip changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '410':
+          description: Requested history pruned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainPrunedBlocksSinceResponse'
+        '503':
+          description: Chain adapter unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/diagnostics:
     get:
       tags:
@@ -3715,364 +3812,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
-  /api/v1/scan/scans:
-    get:
-      tags:
-      - scan
-      summary: |-
-        `GET /api/v1/scan/scans?limit=&cursor=` — every registered scan, ascending
-        by `scan_id`, cursor-paginated on that natural key.
-      operationId: v1_scan_scans_get
-      parameters:
-      - name: limit
-        in: query
-        description: Page size (default 50, cap 500)
-        required: false
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - name: cursor
-        in: query
-        description: Opaque page cursor from a prior response
-        required: false
-        schema:
-          type: string
-      responses:
-        '200':
-          description: Registered scans — `{ items, page }`
-          content:
-            application/json:
-              schema: {}
-        '400':
-          description: Invalid cursor
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
-    post:
-      tags:
-      - scan
-      summary: '`POST /api/v1/scan/scans` — register a scan, returning its allocated id.'
-      operationId: v1_scan_scans_post
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ScanRegisterRequest'
-        required: true
-      responses:
-        '201':
-          description: Registered — `{ scan_id }`
-          content:
-            application/json:
-              schema: {}
-        '400':
-          description: Invalid tracking_rule/wallet_interaction
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
-  /api/v1/scan/scans/{scan_id}:
-    get:
-      tags:
-      - scan
-      summary: |-
-        `GET /api/v1/scan/scans/{scan_id}` — a single scan (filters `list_scans`).
-        A missing id is `404 scan_not_found` (a GET must 404 on absence, never the
-        compat 400).
-      operationId: get_one
-      parameters:
-      - name: scan_id
-        in: path
-        description: Registered scan id
-        required: true
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      responses:
-        '200':
-          description: The scan
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ScanView'
-        '404':
-          description: No scan with that id
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
-    delete:
-      tags:
-      - scan
-      summary: |-
-        `DELETE /api/v1/scan/scans/{scan_id}` — deregister a scan. The trait treats a
-        missing id as `bad_request`; this surface maps that to `404 scan_not_found`
-        so a DELETE of an absent scan reads as "gone", not "malformed".
-      operationId: deregister
-      parameters:
-      - name: scan_id
-        in: path
-        description: Registered scan id
-        required: true
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      responses:
-        '200':
-          description: Deregistered — `{ scan_id }`
-          content:
-            application/json:
-              schema: {}
-        '404':
-          description: No scan with that id
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
-  /api/v1/scan/scans/{scan_id}/boxes:
-    post:
-      tags:
-      - scan
-      summary: '`POST /api/v1/scan/scans/{scan_id}/boxes` — manually attach a box.'
-      operationId: attach_box
-      parameters:
-      - name: scan_id
-        in: path
-        description: Registered scan id
-        required: true
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AttachBoxRequest'
-        required: true
-      responses:
-        '200':
-          description: Attached — `{ box_id }`
-          content:
-            application/json:
-              schema: {}
-        '400':
-          description: Malformed box JSON
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
-  /api/v1/scan/scans/{scan_id}/boxes/{box_id}:
-    delete:
-      tags:
-      - scan
-      summary: |-
-        `DELETE /api/v1/scan/scans/{scan_id}/boxes/{box_id}` — stop tracking a box
-        (200, idempotent-friendly).
-      operationId: detach_box
-      parameters:
-      - name: scan_id
-        in: path
-        description: Registered scan id
-        required: true
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - name: box_id
-        in: path
-        description: 64-char lowercase hex box id
-        required: true
-        schema:
-          type: string
-      responses:
-        '200':
-          description: Untracked (idempotent) — `{ scan_id, box_id }`
-          content:
-            application/json:
-              schema: {}
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
-  /api/v1/scan/scans/{scan_id}/transactions:
-    get:
-      tags:
-      - scan
-      summary: |-
-        `GET /api/v1/scan/scans/{scan_id}/transactions` — wallet transactions tagged
-        with this scan id. An unknown/deregistered id is an empty page, not 404
-        (trait contract). Item = the wallet tx summary + `scan_ids`.
-      operationId: v1_scan_scans_scan_id_transactions_get
-      parameters:
-      - name: scan_id
-        in: path
-        description: Registered scan id (unknown/deregistered id → empty page)
-        required: true
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - name: limit
-        in: query
-        description: Page size (default 50, cap 500)
-        required: false
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - name: cursor
-        in: query
-        description: Opaque page cursor from a prior response
-        required: false
-        schema:
-          type: string
-      responses:
-        '200':
-          description: Wallet transactions tagged with this scan id — `{ items, page }`
-          content:
-            application/json:
-              schema: {}
-        '400':
-          description: Invalid cursor
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
-  /api/v1/scan/scans/{scan_id}/unspent:
-    get:
-      tags:
-      - scan
-      summary: '`GET /api/v1/scan/scans/{scan_id}/unspent` — unspent boxes tracked by a scan.'
-      operationId: unspent
-      parameters:
-      - name: scan_id
-        in: path
-        description: Registered scan id
-        required: true
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - name: limit
-        in: query
-        description: Page size (default 50, cap 2499)
-        required: false
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - name: cursor
-        in: query
-        description: Opaque page cursor from a prior response
-        required: false
-        schema:
-          type: string
-      - name: min_confirmations
-        in: query
-        description: Minimum confirmations
-        required: false
-        schema:
-          type: integer
-          format: int32
-      - name: max_confirmations
-        in: query
-        description: Maximum confirmations (-1 = unbounded)
-        required: false
-        schema:
-          type: integer
-          format: int32
-      - name: min_inclusion_height
-        in: query
-        description: Minimum inclusion height
-        required: false
-        schema:
-          type: integer
-          format: int32
-      - name: max_inclusion_height
-        in: query
-        description: Maximum inclusion height (-1 = unbounded)
-        required: false
-        schema:
-          type: integer
-          format: int32
-      responses:
-        '200':
-          description: Unspent boxes tracked by this scan
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Collection_ScanBoxView'
-        '400':
-          description: Invalid filter bounds/cursor
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-        '409':
-          description: Wallet uninitialized or locked
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
   /api/v1/script/compile:
     post:
       tags:
@@ -5175,30 +4914,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
-  /api/v1/transactions-psbt:
-    post:
-      tags:
-      - accounts
-      summary: |-
-        Any PSBT-session route. The commitment/hint math
-        exists (`generate_commitments`/`extract_hints`) but the durable session +
-        threshold state + a hints-bag sign variant do not → honest
-        `route_unavailable`, never a faked partial signature. Representative mount
-        for the whole PSBT family — every method on `/api/v1/transactions-psbt`,
-        `/api/v1/transactions-psbt/{psbt_id}`,
-        `/api/v1/transactions-psbt/{psbt_id}/contributions`, and
-        `/api/v1/transactions-psbt/{psbt_id}/finalize` shares this SAME handler and
-        answers identically.
-      operationId: psbt_seam
-      responses:
-        '503':
-          description: PSBT-session subsystem not wired on this node (same answer on every psbt route/method)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/V1Error'
-      security:
-      - ApiKeyAuth: []
   /api/v1/transactions/build:
     post:
       tags:
@@ -7605,16 +7320,6 @@ components:
           format: int32
           minimum: 0
       additionalProperties: false
-    AttachBoxRequest:
-      type: object
-      description: |-
-        `POST /api/v1/scan/scans/{scan_id}/boxes` request — attach a box (opaque
-        `ErgoBox` JSON parsed in `ergo-node`).
-      required:
-      - box
-      properties:
-        box: {}
-      additionalProperties: false
     BanRequest:
       type: object
       required:
@@ -8203,52 +7908,6 @@ components:
               reference:
                 type: string
               version:
-                type: string
-        page:
-          $ref: '#/components/schemas/Page'
-    Collection_ScanBoxView:
-      type: object
-      description: |-
-        A v1 collection: `{items, page}`. Uniform for
-        every list, even single-page ones (a block's tx list, header-ids at a
-        height): those carry `page.has_more = false`, `page.next_cursor = null`.
-      required:
-      - items
-      - page
-      properties:
-        items:
-          type: array
-          items:
-            type: object
-            description: |-
-              A box tracked by a scan (unspent surface). `spent_by` is always `null` here
-              (the `/unspent` endpoint) — carried only for shape parity with a future
-              `/spent` surface. `value` is a decimal string.
-            required:
-            - box_id
-            - value
-            - bytes
-            properties:
-              box_id:
-                type: string
-              bytes:
-                type: string
-              confirmations:
-                type:
-                - integer
-                - 'null'
-                format: int64
-              inclusion_height:
-                type:
-                - integer
-                - 'null'
-                format: int32
-                minimum: 0
-              spent_by:
-                type:
-                - string
-                - 'null'
-              value:
                 type: string
         page:
           $ref: '#/components/schemas/Page'
@@ -10170,17 +9829,6 @@ components:
           type: string
         timestamp:
           type: string
-    PrivateKeyRequest:
-      type: object
-      description: '`POST /api/v1/accounts/private-key` request. T2 (admin + loopback-preferred).'
-      required:
-      - address
-      properties:
-        acknowledge:
-          type: boolean
-        address:
-          type: string
-      additionalProperties: false
     PrivateTransactionEntry:
       type: object
       description: Owner-only queue metadata; signed bytes never appear in public snapshots.
@@ -10612,6 +10260,7 @@ components:
       - acknowledgement_required
       - secret_not_recoverable
       - change_address_untracked
+      - wallet_moved
       - rate_limited
       - limit_exceeded
       - batch_too_large
@@ -10627,6 +10276,8 @@ components:
       - slow_consumer
       - idle_timeout
       - already_blacklisted
+      - stale_tip
+      - history_pruned
       - config_conflict
       - internal_error
     RegisterRequest:
@@ -10806,81 +10457,6 @@ components:
           - 'null'
         readiness: {}
       additionalProperties: false
-    ScanBoxView:
-      type: object
-      description: |-
-        A box tracked by a scan (unspent surface). `spent_by` is always `null` here
-        (the `/unspent` endpoint) — carried only for shape parity with a future
-        `/spent` surface. `value` is a decimal string.
-      required:
-      - box_id
-      - value
-      - bytes
-      properties:
-        box_id:
-          type: string
-        bytes:
-          type: string
-        confirmations:
-          type:
-          - integer
-          - 'null'
-          format: int64
-        inclusion_height:
-          type:
-          - integer
-          - 'null'
-          format: int32
-          minimum: 0
-        spent_by:
-          type:
-          - string
-          - 'null'
-        value:
-          type: string
-    ScanRegisterRequest:
-      type: object
-      description: |-
-        `POST /api/v1/scan/scans` request — register a scan. `tracking_rule` stays an
-        opaque JSON value for Phase-1 (`ergo-api` deliberately does not depend on the
-        `ScanningPredicate` schema); a typed tagged union is Phase-2.
-      required:
-      - name
-      - tracking_rule
-      properties:
-        name:
-          type: string
-        remove_offchain:
-          type:
-          - boolean
-          - 'null'
-        tracking_rule: {}
-        wallet_interaction:
-          type:
-          - string
-          - 'null'
-      additionalProperties: false
-    ScanView:
-      type: object
-      description: A registered scan, snake_case.
-      required:
-      - scan_id
-      - name
-      - tracking_rule
-      - wallet_interaction
-      - remove_offchain
-      properties:
-        name:
-          type: string
-        remove_offchain:
-          type: boolean
-        scan_id:
-          type: integer
-          format: int32
-          minimum: 0
-        tracking_rule: {}
-        wallet_interaction:
-          type: string
     SelfBoxDto:
       type: object
       properties:
@@ -12401,19 +11977,672 @@ components:
           type: integer
           format: int32
           minimum: 0
-    WatchRequest:
+    WalletChainAdmissionResponse:
+      oneOf:
+      - type: object
+        required:
+        - txId
+        - status
+        properties:
+          status:
+            type: string
+            enum:
+            - accepted
+          txId:
+            type: string
+      - type: object
+        required:
+        - txId
+        - status
+        properties:
+          status:
+            type: string
+            enum:
+            - duplicate
+          txId:
+            type: string
+      - type: object
+        required:
+        - reason
+        - status
+        properties:
+          detail:
+            type:
+            - string
+            - 'null'
+          reason:
+            type: string
+          status:
+            type: string
+            enum:
+            - rejected
+    WalletChainAsset:
       type: object
-      description: '`POST /api/v1/accounts/watch` request.'
       required:
-      - address
+      - tokenId
+      - amount
       properties:
-        address:
+        amount:
           type: string
-        label:
+        tokenId:
+          type: string
+    WalletChainBlock:
+      type: object
+      required:
+      - blockId
+      - height
+      - parentId
+      - headerBytes
+      - transactions
+      properties:
+        blockId:
+          type: string
+        headerBytes:
+          type: string
+          description: |-
+            The canonical serialized header, PoW solution included, as lowercase
+            hex. `blake2b256(headerBytes)` is `blockId`, and the decoded header
+            carries `height` and `parentId`. Transactions are wallet-relevant parts
+            and are not bound to the header's transactions root.
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        parentId:
+          type: string
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainTransaction'
+    WalletChainBlockAtResponse:
+      type: object
+      required:
+      - tip
+      - block
+      properties:
+        block:
+          $ref: '#/components/schemas/WalletChainBlock'
+        tip:
+          $ref: '#/components/schemas/WalletChainTip'
+    WalletChainBlocksSinceResponse:
+      oneOf:
+      - type: object
+        required:
+        - tip
+        - blocks
+        - type
+        properties:
+          blocks:
+            type: array
+            items:
+              $ref: '#/components/schemas/WalletChainBlock'
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          type:
+            type: string
+            enum:
+            - forward
+      - type: object
+        required:
+        - tip
+        - ancestor
+        - type
+        properties:
+          ancestor:
+            $ref: '#/components/schemas/WalletChainCursor'
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          type:
+            type: string
+            enum:
+            - ancestor
+      - type: object
+        required:
+        - tip
+        - minimumHeight
+        - type
+        properties:
+          minimumHeight:
+            type: integer
+            format: int32
+            minimum: 0
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          type:
+            type: string
+            enum:
+            - pruned
+    WalletChainBox:
+      type: object
+      required:
+      - boxId
+      - bytes
+      - value
+      - assets
+      - creationTxId
+      - creationOutputIndex
+      - creationHeight
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainAsset'
+        boxId:
+          type: string
+        bytes:
+          type: string
+        creationHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        creationOutputIndex:
+          type: integer
+          format: int32
+          minimum: 0
+        creationTxId:
+          type: string
+        value:
+          type: string
+    WalletChainBoxLookupResponse:
+      type: object
+      required:
+      - tip
+      - box
+      properties:
+        box:
+          $ref: '#/components/schemas/WalletChainBox'
+        tip:
+          $ref: '#/components/schemas/WalletChainTip'
+    WalletChainCursor:
+      type: object
+      required:
+      - height
+      - headerId
+      properties:
+        headerId:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+    WalletChainHeader:
+      type: object
+      required:
+      - height
+      - headerId
+      - parentId
+      - timestampUnixMs
+      - headerBytes
+      properties:
+        headerBytes:
+          type: string
+          description: |-
+            The canonical serialized header, PoW solution included, as lowercase
+            hex. `blake2b256(headerBytes)` is `headerId`, and the decoded header
+            carries `height`, `parentId` and `timestampUnixMs`.
+        headerId:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        parentId:
+          type: string
+        timestampUnixMs:
+          type: integer
+          format: int64
+          minimum: 0
+    WalletChainInput:
+      type: object
+      required:
+      - boxId
+      - index
+      properties:
+        boxId:
+          type: string
+        index:
+          type: integer
+          format: int32
+          minimum: 0
+    WalletChainOutput:
+      type: object
+      required:
+      - boxId
+      - index
+      - bytes
+      properties:
+        boxId:
+          type: string
+        bytes:
+          type: string
+        index:
+          type: integer
+          format: int32
+          minimum: 0
+    WalletChainPrunedBlocksSinceResponse:
+      oneOf:
+      - type: object
+        required:
+        - tip
+        - minimumHeight
+        - type
+        properties:
+          minimumHeight:
+            type: integer
+            format: int32
+            minimum: 0
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          type:
+            type: string
+            enum:
+            - pruned
+    WalletChainReemissionInput:
+      type: object
+      required:
+      - tokenId
+      - amount
+      properties:
+        amount:
+          type: string
+        boxIds:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        tokenId:
+          type: string
+    WalletChainSnapshot:
+      type: object
+      required:
+      - tip
+      - headers
+      - activeParameters
+      - reemissionInputs
+      - snapshotId
+      properties:
+        activeParameters: {}
+        headers:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainHeader'
+        reemissionInputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainReemissionInput'
+        snapshotId:
+          type: string
+        tip:
+          $ref: '#/components/schemas/WalletChainTip'
+    WalletChainSubmitBadRequest:
+      oneOf:
+      - $ref: '#/components/schemas/V1Error'
+      - $ref: '#/components/schemas/WalletChainSubmitResponse'
+    WalletChainSubmitReason:
+      type: string
+      enum:
+      - duplicate
+      - invalid
+      - fee
+    WalletChainSubmitRequest:
+      type: object
+      required:
+      - transaction
+      properties:
+        snapshotId:
           type:
           - string
           - 'null'
-      additionalProperties: false
+        transaction:
+          type: string
+    WalletChainSubmitResponse:
+      oneOf:
+      - type: object
+        required:
+        - tip
+        - txId
+        - status
+        properties:
+          status:
+            type: string
+            enum:
+            - accepted
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          txId:
+            type: string
+      - type: object
+        required:
+        - tip
+        - txId
+        - status
+        properties:
+          status:
+            type: string
+            enum:
+            - duplicate
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          txId:
+            type: string
+      - type: object
+        required:
+        - tip
+        - reason
+        - status
+        properties:
+          detail:
+            type:
+            - string
+            - 'null'
+          reason:
+            $ref: '#/components/schemas/WalletChainSubmitReason'
+          status:
+            type: string
+            enum:
+            - rejected
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+    WalletChainTip:
+      type: object
+      required:
+      - height
+      - headerId
+      properties:
+        headerId:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+    WalletChainTransaction:
+      type: object
+      required:
+      - txId
+      - inputs
+      - outputs
+      properties:
+        inputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainInput'
+        outputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainOutput'
+        txId:
+          type: string
+    WalletSpendingContext:
+      type: object
+      required:
+      - version
+      - network
+      - tip
+      - headers
+      - preHeader
+      - preHeaderSource
+      - previousStateDigest
+      - parameters
+      - validationSettings
+      - pruned
+      - minRelayFeeNanoErg
+      - maxTxSizeBytes
+      - mempoolSequence
+      - mempoolTransactions
+      - privateMiningConfigured
+      - privateReservedInputs
+      properties:
+        headers:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainHeader'
+        maxTxSizeBytes:
+          type: integer
+          format: int32
+          minimum: 0
+        mempoolSequence:
+          type: integer
+          format: int64
+          minimum: 0
+        mempoolTransactions:
+          type: array
+          items:
+            type: string
+        minRelayFeeNanoErg:
+          type: integer
+          format: int64
+          minimum: 0
+        minimumHistoryHeight:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        network:
+          type: string
+        parameters:
+          $ref: '#/components/schemas/WalletSpendingParameters'
+        preHeader:
+          $ref: '#/components/schemas/WalletSpendingPreHeader'
+        preHeaderSource:
+          $ref: '#/components/schemas/WalletSpendingPreHeaderSource'
+        previousStateDigest:
+          type: string
+        privateMiningConfigured:
+          type: boolean
+        privateQueueRevision:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        privateReservedInputs:
+          type: array
+          items:
+            type: string
+        pruned:
+          type: boolean
+        reemission:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/WalletSpendingReemissionRules'
+        tip:
+          $ref: '#/components/schemas/WalletChainTip'
+        validationSettings:
+          type: string
+        version:
+          type: integer
+          format: int32
+          minimum: 0
+    WalletSpendingEmissionRules:
+      type: object
+      required:
+      - monetary
+      - emissionNftId
+      - emissionTree
+      properties:
+        emissionNftId:
+          type: string
+        emissionTree:
+          type: string
+        monetary:
+          $ref: '#/components/schemas/WalletSpendingMonetaryParameters'
+    WalletSpendingMonetaryParameters:
+      type: object
+      required:
+      - fixedRate
+      - fixedRatePeriod
+      - epochLength
+      - oneEpochReduction
+      - foundersInitialReward
+      - minerRewardDelay
+      properties:
+        epochLength:
+          type: integer
+          format: int32
+          minimum: 0
+        fixedRate:
+          type: integer
+          format: int64
+          minimum: 0
+        fixedRatePeriod:
+          type: integer
+          format: int32
+          minimum: 0
+        foundersInitialReward:
+          type: integer
+          format: int64
+          minimum: 0
+        minerRewardDelay:
+          type: integer
+          format: int32
+          minimum: 0
+        oneEpochReduction:
+          type: integer
+          format: int64
+          minimum: 0
+    WalletSpendingParameters:
+      type: object
+      required:
+      - missingCoreParameters
+      - epochStartHeight
+      - blockVersion
+      - storageFeeFactor
+      - minValuePerByte
+      - maxBlockSize
+      - maxBlockCost
+      - tokenAccessCost
+      - inputCost
+      - dataInputCost
+      - outputCost
+      - extra
+      - proposedUpdate
+      - activatedUpdate
+      properties:
+        activatedUpdate:
+          type: string
+        announcedSettings:
+          type:
+          - string
+          - 'null'
+        blockVersion:
+          type: integer
+          format: int32
+          minimum: 0
+        dataInputCost:
+          type: integer
+          format: int32
+        epochStartHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        extra:
+          type: array
+          items:
+            type: array
+            items: false
+            prefixItems:
+            - type: integer
+              format: int32
+              minimum: 0
+            - type: integer
+              format: int32
+        inputCost:
+          type: integer
+          format: int32
+        maxBlockCost:
+          type: integer
+          format: int32
+        maxBlockSize:
+          type: integer
+          format: int32
+        minValuePerByte:
+          type: integer
+          format: int32
+        missingCoreParameters:
+          type: integer
+          format: int32
+          minimum: 0
+        outputCost:
+          type: integer
+          format: int32
+        proposedUpdate:
+          type: string
+        storageFeeFactor:
+          type: integer
+          format: int32
+        subblocksPerBlock:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        tokenAccessCost:
+          type: integer
+          format: int32
+    WalletSpendingPreHeader:
+      type: object
+      required:
+      - version
+      - parentId
+      - height
+      - timestamp
+      - nBits
+      - votes
+      - minerPubkey
+      properties:
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        minerPubkey:
+          type: string
+        nBits:
+          type: integer
+          format: int32
+          minimum: 0
+        parentId:
+          type: string
+        timestamp:
+          type: integer
+          format: int64
+          minimum: 0
+        version:
+          type: integer
+          format: int32
+          minimum: 0
+        votes:
+          type: array
+          items:
+            type: integer
+            format: int32
+            minimum: 0
+    WalletSpendingPreHeaderSource:
+      type: string
+      enum:
+      - syntheticCommittedTip
+    WalletSpendingReemissionRules:
+      type: object
+      required:
+      - checkRules
+      - activationHeight
+      - reemissionTokenId
+      - payToReemissionTree
+      properties:
+        activationHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        checkRules:
+          type: boolean
+        emission:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/WalletSpendingEmissionRules'
+        payToReemissionTree:
+          type: string
+        reemissionTokenId:
+          type: string
     WireAsset:
       type: object
       required:

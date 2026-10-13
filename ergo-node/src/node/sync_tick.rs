@@ -213,28 +213,10 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
         if next_height <= next_header_height || cs.best_header_id != cs.best_full_block_id {
             // Try to assemble and apply blocks sequentially. Successful applies
             // are relayed by flush_actions below, alongside missing-section requests.
-            //
-            // M5 wallet-hook plumbing: build a `WalletWiring` (hook +
-            // rescan guard) and thread it through the executor so chain +
-            // wallet writes commit in one redb transaction on both the
-            // synchronous and persist-pipeline paths. Rollback also rewinds
-            // wallet state atomically; missing required sections invalidate
-            // wallet scan state for a full rescan.
-            let rescan_guard = state.wallet_rescan.as_ref();
-            let wallet_wiring =
-                state
-                    .wallet_hook
-                    .as_deref()
-                    .map(|h| ergo_state::wallet::WalletWiring {
-                        hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-                        rescan_guard,
-                    });
-            state.executor.try_apply_next_blocks(
-                &mut state.store,
-                &mut state.coordinator,
-                now,
-                wallet_wiring,
-            );
+
+            state
+                .executor
+                .try_apply_next_blocks(&mut state.store, &mut state.coordinator, now);
             // Mirror the post-apply prune sentinel into
             // sync_state. Mode 2 / NiPoPoW writers can advance
             // the sentinel even when blocks_to_keep = -1. Only
@@ -1390,10 +1372,9 @@ fn refresh_api_identity(state: &mut NodeState) {
 ///
 /// Every counter here is a known memory lever or leak indicator (issue
 /// #257): delivery-tracker maps, orphan buffer, peer/ban/address-book
-/// containers, mempool depth. Static cadence anchor follows the
-/// `ACTIVE_RESCAN` static precedent — the action loop is the single
-/// caller, so a process-wide millisecond anchor is sufficient and avoids
-/// growing `NodeState`'s constructor surface again.
+/// containers, mempool depth. Static cadence anchor: the action loop is the
+/// single caller, so a process-wide millisecond anchor is sufficient and
+/// avoids growing `NodeState`'s constructor surface again.
 fn maybe_emit_gauges(state: &mut NodeState, now: Instant) {
     static LAST_GAUGE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();

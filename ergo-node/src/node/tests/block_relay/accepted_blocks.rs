@@ -115,12 +115,9 @@ fn remote_block_sequential_apply_announces_once() {
     let mut state = make_state(&dir.path().join("state.redb"));
     let (id, _) = prepare_block(&mut state, wall_clock_ms());
     let mut rx = register_connected_peer(&mut state, test_peer());
-    state.executor.try_apply_next_blocks(
-        &mut state.store,
-        &mut state.coordinator,
-        Instant::now(),
-        None,
-    );
+    state
+        .executor
+        .try_apply_next_blocks(&mut state.store, &mut state.coordinator, Instant::now());
     assert_eq!(state.store.chain_state_meta().best_full_block_id, id);
     flush_actions(&mut state, vec![]);
     assert_eq!(inventories(&mut rx).len(), 3);
@@ -494,12 +491,9 @@ fn locally_mined_fork_block_joining_best_chain_later_announced_once() {
     assert_announced_ids_served(&mut state, &announced);
     // A child makes our already applied branch the best header chain.
     process_header(&mut state, &solved_child(&ours.header, ours.id));
-    state.executor.try_apply_next_blocks(
-        &mut state.store,
-        &mut state.coordinator,
-        Instant::now(),
-        None,
-    );
+    state
+        .executor
+        .try_apply_next_blocks(&mut state.store, &mut state.coordinator, Instant::now());
     assert_eq!(state.store.chain_state_meta().best_full_block_id, ours.id);
     flush_actions(&mut state, vec![]);
     assert!(
@@ -526,12 +520,9 @@ fn remote_blocks_real_catch_up_flush_announces_only_near_tip() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = make_state(&dir.path().join("state.redb"));
     let ids = prepare_mainnet_catch_up(state.store.as_utxo_mut().unwrap());
-    state.executor.try_apply_next_blocks(
-        &mut state.store,
-        &mut state.coordinator,
-        Instant::now(),
-        None,
-    );
+    state
+        .executor
+        .try_apply_next_blocks(&mut state.store, &mut state.coordinator, Instant::now());
     assert_eq!(
         state.store.chain_state_meta().best_full_block_height,
         10,

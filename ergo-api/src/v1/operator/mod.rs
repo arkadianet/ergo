@@ -74,12 +74,27 @@ pub struct OperatorState {
     /// Mining subsystem — `mining/{candidate,solution,reward-*}`. `None` ⇒ those
     /// endpoints answer `mining_disabled`.
     pub mining: Option<Arc<dyn NodeMining>>,
+    /// A durable queue retained while candidate mining is disabled. Only queue
+    /// reads and withdrawals use this handle; imports still require `mining`.
+    pub private_queue: Option<Arc<dyn NodeMining>>,
     /// Address-encoding network prefix (miner-stats P2PK derivation +
     /// `network/connect` address parsing).
     pub network: NetworkPrefix,
 }
 
 impl OperatorState {
+    fn private_queue(&self) -> Result<&Arc<dyn NodeMining>, Box<Response>> {
+        self.private_queue
+            .as_ref()
+            .or(self.mining.as_ref())
+            .ok_or_else(|| {
+                Box::new(v1_error(
+                    Reason::CandidateUnavailable,
+                    "the private transaction queue is unavailable",
+                    "",
+                ))
+            })
+    }
     /// The live chain reader, or the boxed `503 chain_reader_unavailable`
     /// when the node was wired without one. Boxed to keep the `Ok` path small
     /// (repo convention).

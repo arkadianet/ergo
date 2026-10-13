@@ -36,7 +36,7 @@ pub struct PaymentRequest {
 /// - `data_inputs`: read-only box references included in the unsigned tx.
 ///
 /// The builder is pure: it does not access chain state. Full ErgoBox lookup
-/// for signing happens at the writer-task boundary via `ChainStateAccessor::lookup_utxo`.
+/// for signing happens at the engine boundary via `WalletChainAccess::lookup_utxo`.
 pub struct UnsignedTxBuilder<'a> {
     pub available_summaries: &'a [BoxSummary],
     pub selector: &'a dyn BoxSelector,
@@ -54,10 +54,10 @@ pub struct UnsignedTxBuilder<'a> {
     /// the re-emission token at [`Self::reemission_height`], consensus requires
     /// the token to be burned and `1` nanoErg/token paid to the pay-to-reemission
     /// contract. The owed amount comes from the SHARED
-    /// [`ergo_validation::reemission_obligation_core`], the same obligation the
+    /// [`ergo_chain_spec::reemission_obligation_core`], the same obligation the
     /// consensus validator and the wallet balance surface use — so the figures
     /// cannot drift.
-    pub reemission: Option<&'a ergo_validation::ReemissionRuleInputs>,
+    pub reemission: Option<&'a ergo_chain_spec::ReemissionRuleInputs>,
     /// Candidate block height the re-emission burn obligation is evaluated at —
     /// the height the validator will run this tx at (`tip + 1`), which is NOT the
     /// output `creation_height` ([`Self::current_height`] = `tip`). The
@@ -99,7 +99,7 @@ pub struct SelectionPlan {
 /// grows → `select` adds inputs and the loop terminates (or reports insufficient
 /// funds). Off EIP-27 nets (`reemission` is `None`) this collapses to a single
 /// ordinary selection with no burn. The owed amount comes from the SHARED
-/// [`ergo_validation::reemission_obligation_core`] so the builder, the consensus
+/// [`ergo_chain_spec::reemission_obligation_core`] so the builder, the consensus
 /// validator, and the balance surface cannot drift.
 pub fn select_with_reemission(
     selector: &dyn BoxSelector,
@@ -107,14 +107,14 @@ pub fn select_with_reemission(
     target_erg: u64,
     target_tokens: &BTreeMap<[u8; 32], u64>,
     min_box_value: u64,
-    reemission: Option<&ergo_validation::ReemissionRuleInputs>,
+    reemission: Option<&ergo_chain_spec::ReemissionRuleInputs>,
     reemission_height: u32,
 ) -> Result<SelectionPlan, WalletError> {
     // box_id -> (value, re-emission token amount): the per-input pair the shared
     // obligation consumes (built once, only when EIP-27 rules apply).
     #[allow(clippy::type_complexity)]
     let reemission_ctx: Option<(
-        &ergo_validation::ReemissionRuleInputs,
+        &ergo_chain_spec::ReemissionRuleInputs,
         BTreeMap<[u8; 32], (u64, u64)>,
     )> = reemission.map(|rules| {
         let value_token_by_id = available
@@ -148,7 +148,7 @@ pub fn select_with_reemission(
                     .selected_ids
                     .iter()
                     .filter_map(|id| value_token_by_id.get(id).copied());
-                ergo_validation::reemission_obligation_core(
+                ergo_chain_spec::reemission_obligation_core(
                     per_input,
                     reemission_height,
                     rules.activation_height,

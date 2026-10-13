@@ -5,41 +5,20 @@ use ergo_state::store::{CommittedSnapshot, StateError};
 use ergo_validation::pre_header::CandidatePreHeader;
 use ergo_validation::{ActiveProtocolParameters, ProtocolParams, ReemissionRuleInputs};
 use ergo_wallet::tx_context::{BlockchainParameters, BlockchainStateContext};
-use thiserror::Error;
+use ergo_wallet_service::chain::CommittedTip;
+use ergo_wallet_service::engine::{ChainAccessError, SigningView};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChainTip {
-    pub height: u32,
-    pub header_id: [u8; 32],
-}
-
-#[derive(Debug, Error)]
-pub enum ChainStateError {
-    #[error("chain state read failed: {0}")]
-    State(#[source] StateError),
-    #[error("no committed chain state")]
-    NoCommittedState,
-    #[error("chain snapshot is unsupported by this accessor")]
-    Unsupported,
-    #[error("committed chain tip moved from ({expected_height}, {expected_id}) to ({actual_height}, {actual_id})")]
-    StaleTip {
-        expected_height: u32,
-        expected_id: String,
-        actual_height: u32,
-        actual_id: String,
-    },
-}
-
-impl From<StateError> for ChainStateError {
-    fn from(error: StateError) -> Self {
-        Self::State(error)
-    }
+/// A committed-state read failure, rendered exactly as the node has always
+/// reported it (`chain state read failed: ...`).
+pub(super) fn chain_state_read_failed(error: StateError) -> ChainAccessError {
+    ChainAccessError::State(format!("chain state read failed: {error}"))
 }
 
 pub struct ChainSnapshot {
     committed: CommittedSnapshot,
-    tip: ChainTip,
+    tip: CommittedTip,
     headers: Vec<Header>,
+    header_ids: Vec<[u8; 32]>,
     state_context: BlockchainStateContext,
     active_params: ActiveProtocolParameters,
     signing_params: BlockchainParameters,
@@ -47,6 +26,32 @@ pub struct ChainSnapshot {
     reemission: Option<ReemissionRuleInputs>,
     pool_outputs:
         std::sync::Arc<std::collections::HashMap<ergo_primitives::digest::Digest32, ErgoBox>>,
+}
+
+pub(super) fn decode_utxo_box(box_id: &[u8; 32], bytes: &[u8]) -> Result<ErgoBox, StateError> {
+    let mut reader = VlqReader::new(bytes);
+    let ergo_box = read_ergo_box(&mut reader)
+        .map_err(|error| StateError::Serialization(format!("UTXO box decode: {error}")))?;
+    if !reader.is_empty() {
+        return Err(StateError::Serialization(
+            "UTXO box has trailing bytes".to_string(),
+        ));
+    }
+    let actual_id = ergo_box
+        .box_id()
+        .map_err(|error| StateError::Serialization(format!("UTXO box id: {error}")))?;
+    if actual_id.as_bytes() != box_id {
+        return Err(StateError::DbCorruption {
+            table: "avl_nodes",
+            key: hex::encode(box_id),
+            reason: format!(
+                "decoded box id {} does not match requested box id {}",
+                hex::encode(actual_id.as_bytes()),
+                hex::encode(box_id)
+            ),
+        });
+    }
+    Ok(ergo_box)
 }
 
 impl ChainSnapshot {
@@ -59,11 +64,19 @@ impl ChainSnapshot {
         committed: CommittedSnapshot,
         reemission: Option<&ReemissionRuleInputs>,
     ) -> Result<Self, StateError> {
-        let tip = ChainTip {
-            height: committed.best_full_block_height(),
-            header_id: committed.best_full_block_id(),
-        };
-        let headers = committed.last_ancestor_headers_window()?;
+        let tip = CommittedTip::new(
+            committed.best_full_block_height(),
+            committed.best_full_block_id(),
+        );
+        let header_window = committed.last_ancestor_header_window_with_ids()?;
+        let headers: Vec<Header> = header_window
+            .iter()
+            .map(|(header, _)| header.clone())
+            .collect();
+        let header_ids: Vec<[u8; 32]> = header_window
+            .into_iter()
+            .map(|(_, header_id)| header_id)
+            .collect();
         let tip_header = headers.first().ok_or(StateError::InternalInvariant {
             what: "ChainSnapshot::from_committed: empty ancestor header window",
         })?;
@@ -97,6 +110,7 @@ impl ChainSnapshot {
             committed,
             tip,
             headers,
+            header_ids,
             state_context,
             active_params,
             signing_params,
@@ -106,36 +120,6 @@ impl ChainSnapshot {
         })
     }
 
-    pub fn tip(&self) -> ChainTip {
-        self.tip
-    }
-
-    pub fn headers(&self) -> &[Header] {
-        &self.headers
-    }
-
-    pub fn state_context(&self) -> &BlockchainStateContext {
-        &self.state_context
-    }
-
-    pub fn active_params(&self) -> &ActiveProtocolParameters {
-        &self.active_params
-    }
-
-    pub fn signing_params(&self) -> &BlockchainParameters {
-        &self.signing_params
-    }
-
-    pub fn protocol_params(&self) -> &ProtocolParams {
-        &self.protocol_params
-    }
-
-    pub fn reemission_rules(&self) -> Option<&ReemissionRuleInputs> {
-        self.reemission.as_ref()
-    }
-
-    /// Add an immutable pool-parent overlay for native signing. Committed UTXO
-    /// boxes take precedence when a parent confirms between build and sign.
     pub fn with_pool_outputs(
         mut self,
         outputs: std::sync::Arc<
@@ -153,21 +137,57 @@ impl ChainSnapshot {
                 .get(&ergo_primitives::digest::Digest32::from_bytes(*box_id))
                 .cloned());
         };
-        let mut reader = VlqReader::new(&bytes);
-        let ergo_box = read_ergo_box(&mut reader)
-            .map_err(|error| StateError::Serialization(format!("snapshot box decode: {error}")))?;
-        Ok(Some(ergo_box))
+        decode_utxo_box(box_id, &bytes).map(Some)
+    }
+}
+
+impl SigningView for ChainSnapshot {
+    fn tip(&self) -> CommittedTip {
+        self.tip.clone()
+    }
+
+    fn headers(&self) -> &[Header] {
+        &self.headers
+    }
+
+    fn header_ids(&self) -> &[[u8; 32]] {
+        &self.header_ids
+    }
+
+    fn state_context(&self) -> &BlockchainStateContext {
+        &self.state_context
+    }
+
+    fn active_params(&self) -> &ActiveProtocolParameters {
+        &self.active_params
+    }
+
+    fn signing_params(&self) -> &BlockchainParameters {
+        &self.signing_params
+    }
+
+    fn protocol_params(&self) -> &ProtocolParams {
+        &self.protocol_params
+    }
+
+    fn reemission_rules(&self) -> Option<&ReemissionRuleInputs> {
+        self.reemission.as_ref()
+    }
+
+    fn lookup_utxo(&self, box_id: &[u8; 32]) -> Result<Option<ErgoBox>, ChainAccessError> {
+        ChainSnapshot::lookup_utxo(self, box_id)
+            .map_err(|error| ChainAccessError::State(error.to_string()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::wallet_bridge::ChainStateAccessor;
     use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
     use ergo_ser::autolykos::AutolykosSolution;
     use ergo_ser::header::serialize_header;
     use ergo_state::store::StateStore;
+    use ergo_wallet_service::engine::WalletChainAccess;
 
     fn header(height: u32, parent: ModifierId) -> Header {
         Header {
@@ -205,19 +225,118 @@ mod tests {
         (parent, tip)
     }
 
+    fn snapshot_with_boxes(boxes: Vec<([u8; 32], Vec<u8>)>) -> (tempfile::TempDir, ChainSnapshot) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&boxes).unwrap();
+        apply_headers(&mut store, 5);
+        let reader = ergo_state::reader::ChainStoreReader::new_from_db(store.db_arc());
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(reader, false, None);
+        let snapshot = accessor.chain_snapshot().unwrap();
+        (dir, snapshot)
+    }
+
+    fn valid_box_bytes() -> ([u8; 32], Vec<u8>) {
+        let tree = ergo_ser::ergo_tree::ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: true,
+            reserved_header_bits: 0,
+            constants: vec![(
+                ergo_ser::sigma_type::SigmaType::SBoolean,
+                ergo_ser::sigma_value::SigmaValue::Boolean(true),
+            )],
+            body: ergo_ser::opcode::Expr::Const {
+                tpe: ergo_ser::sigma_type::SigmaType::SBoolean,
+                val: ergo_ser::sigma_value::SigmaValue::Boolean(true),
+            },
+        };
+        let candidate = ergo_ser::ergo_box::ErgoBoxCandidate::new(
+            1_000_000,
+            tree,
+            1,
+            Vec::new(),
+            ergo_ser::register::AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        let ergo_box = ergo_ser::ergo_box::ErgoBox {
+            candidate,
+            transaction_id: ModifierId::from_bytes([7; 32]),
+            index: 0,
+        };
+        let box_id = *ergo_box.box_id().unwrap().as_bytes();
+        let bytes = ergo_ser::ergo_box::serialize_ergo_box(&ergo_box).unwrap();
+        (box_id, bytes)
+    }
+
     #[test]
     fn snapshot_supports_short_chain_with_five_headers() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
         store.initialize_genesis(&[]).unwrap();
         apply_headers(&mut store, 5);
-        let accessor = super::super::ChainStateAccessorImpl::new(store.db_arc(), false, None);
+        let reader = ergo_state::reader::ChainStoreReader::new_from_db(store.db_arc());
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(reader, false, None);
         let snapshot = accessor.chain_snapshot().unwrap();
         assert_eq!(snapshot.tip().height, 5);
         assert_eq!(snapshot.headers().len(), 5);
         assert_eq!(snapshot.headers()[0].height, 5);
     }
 
+    #[test]
+    fn snapshot_lookup_distinguishes_absent_from_invalid_box_bytes() {
+        let invalid_id = [0x77; 32];
+        let (_dir, snapshot) = snapshot_with_boxes(vec![(invalid_id, vec![0x01, 0x02])]);
+
+        assert!(matches!(snapshot.lookup_utxo(&[0x78; 32]), Ok(None)));
+        assert!(matches!(
+            snapshot.lookup_utxo(&invalid_id),
+            Err(StateError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_lookup_rejects_trailing_bytes_and_box_id_mismatch() {
+        let (box_id, bytes) = valid_box_bytes();
+        let mut trailing = bytes.clone();
+        trailing.push(0xAA);
+        let (_dir, snapshot) = snapshot_with_boxes(vec![(box_id, trailing), ([0x99; 32], bytes)]);
+
+        assert!(matches!(
+            snapshot.lookup_utxo(&box_id),
+            Err(StateError::Serialization(message)) if message.contains("trailing")
+        ));
+        assert!(matches!(
+            snapshot.lookup_utxo(&[0x99; 32]),
+            Err(StateError::DbCorruption { .. })
+        ));
+    }
+
+    #[test]
+    fn snapshot_stale_after_committed_tip_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let (parent, _) = apply_headers(&mut store, 11);
+        let reader = ergo_state::reader::ChainStoreReader::new_from_db(store.db_arc());
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(reader, false, None);
+        let snapshot = accessor.chain_snapshot().unwrap();
+        assert_eq!(snapshot.tip().height, 11);
+        assert_eq!(snapshot.headers()[0].height, 11);
+
+        let (bytes, id) = serialize_header(&header(12, parent)).unwrap();
+        let id_bytes = *id.as_bytes();
+        store.store_header(&id_bytes, &bytes).unwrap();
+        let root = store.root_digest();
+        store
+            .apply_block_unchecked_for_test(12, &id_bytes, &root, &[])
+            .unwrap();
+
+        assert!(matches!(
+            accessor.ensure_view_current(&snapshot),
+            Err(ChainAccessError::StaleTip { .. })
+        ));
+    }
     #[test]
     fn node_contexts_retain_cumulative_statuses_after_an_empty_epoch_and_reopen() {
         use ergo_validation::{ErgoValidationSettingsUpdate, RuleStatus};
@@ -291,8 +410,10 @@ mod tests {
             assert_eq!(live.tip.height, 2048);
             assert_eq!(live.params.validation_settings, expected);
 
-            let accessor = super::super::ChainStateAccessorImpl::new(
-                node.store.as_utxo().unwrap().db_arc(),
+            let accessor = super::super::ChainStateAccessorImpl::chain_only(
+                ergo_state::reader::ChainStoreReader::new_from_db(
+                    node.store.as_utxo().unwrap().db_arc(),
+                ),
                 false,
                 None,
             );
@@ -303,6 +424,51 @@ mod tests {
 
         check(store);
         check(StateStore::open(&path).unwrap());
+    }
+    fn pool_test_engine(
+        storage: std::sync::Arc<parking_lot::RwLock<ergo_wallet::storage::SecretStorage>>,
+        state: std::sync::Arc<parking_lot::RwLock<ergo_wallet_service::state::WalletState>>,
+        db: std::sync::Arc<redb::Database>,
+        chain: std::sync::Arc<dyn ergo_wallet_service::engine::WalletChainAccess>,
+        mempool: std::sync::Arc<dyn ergo_wallet_service::engine::MempoolOverlay>,
+        submitter: std::sync::Arc<dyn ergo_wallet_service::engine::TxSubmitter>,
+    ) -> ergo_wallet_service::engine::WalletEngine {
+        use ergo_wallet_service::engine::{
+            RescanCoordinator, StoreCursorChain, WalletEngine, WalletEngineConfig,
+            WalletEngineParts,
+        };
+        let store: std::sync::Arc<dyn ergo_wallet_service::WalletStore> =
+            std::sync::Arc::new(ergo_wallet_service::RedbWalletStore::new(db));
+        WalletEngine::new(WalletEngineParts {
+            storage,
+            state,
+            store: store.clone(),
+            // The node's accessor carries no wallet; the cursor comes from
+            // the wallet store, as in the daemon.
+            chain: std::sync::Arc::new(StoreCursorChain::new(chain, store)),
+            mempool,
+            submitter,
+            service: None,
+            rescan: std::sync::Arc::new(RescanCoordinator::new()),
+            config: WalletEngineConfig {
+                network: ergo_ser::address::NetworkPrefix::Mainnet,
+                expose_private_keys: false,
+                reemission: None,
+                min_relay_fee_nano_erg: 1_000_000,
+                max_tx_size_bytes: 100_000,
+            },
+        })
+    }
+
+    struct NoPoolSubmit;
+    #[async_trait::async_trait]
+    impl ergo_wallet_service::engine::TxSubmitter for NoPoolSubmit {
+        async fn submit_transaction(
+            &self,
+            _: Vec<u8>,
+        ) -> Result<String, ergo_wallet_service::engine::TxSubmitError> {
+            panic!("sign-only test must not submit")
+        }
     }
 
     #[tokio::test]
@@ -326,7 +492,11 @@ mod tests {
             .initialize_genesis(&[(*committed_id.as_bytes(), committed_bytes)])
             .unwrap();
         apply_headers(&mut store, 5);
-        let accessor = super::super::ChainStateAccessorImpl::new(store.db_arc(), false, None);
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(
+            ergo_state::reader::ChainStoreReader::new_from_db(store.db_arc()),
+            false,
+            None,
+        );
         // A conflicting overlay value must never override an authoritative UTXO.
         let mut outputs = HashMap::from([
             (pool_id, pool_parent.clone()),
@@ -357,12 +527,12 @@ mod tests {
             .unwrap(),
             serialize_ergo_box(&committed_box).unwrap()
         );
-        accessor.ensure_snapshot_current(&captured).unwrap();
+        accessor.ensure_view_current(&captured).unwrap();
 
         // Native signing must resolve the same unconfirmed parent and run its
         // normal proof/self-verification gates, even with a locked wallet.
         struct PoolView(Arc<HashMap<Digest32, ErgoBox>>);
-        impl ergo_api::MempoolView for PoolView {
+        impl ergo_wallet_service::engine::MempoolOverlay for PoolView {
             fn is_spent_by_pool(&self, _: &Digest32) -> bool {
                 false
             }
@@ -373,7 +543,7 @@ mod tests {
                 self.0.clone()
             }
         }
-        use ergo_api::wallet::native::dto::{ExternalSecret, SignTxRequest, TxRepr};
+        use ergo_wallet_protocol::native::dto::{ExternalSecret, SignTxRequest, TxRepr};
         let unsigned = ergo_ser::transaction::UnsignedTransaction {
             inputs: vec![ergo_ser::input::UnsignedInput {
                 box_id: pool_id,
@@ -393,14 +563,19 @@ mod tests {
         let storage = parking_lot::RwLock::new(ergo_wallet::storage::SecretStorage::open(
             directory.path().join("wallet"),
         ));
-        let wallet = parking_lot::RwLock::new(ergo_wallet::state::WalletState::empty(false));
+        let wallet =
+            parking_lot::RwLock::new(ergo_wallet_service::state::WalletState::empty(false));
         let db = store.db_arc();
         let pool = PoolView(Arc::new(HashMap::from([(pool_id, pool_parent)])));
-        let signed = super::super::support::sign_submit::sign_transaction_native_impl(
-            &request, &storage, &wallet, &db, &accessor, &pool,
-        )
-        .await
-        .unwrap();
+        let engine = pool_test_engine(
+            std::sync::Arc::new(storage),
+            std::sync::Arc::new(wallet),
+            db,
+            std::sync::Arc::new(accessor),
+            std::sync::Arc::new(pool),
+            std::sync::Arc::new(NoPoolSubmit),
+        );
+        let signed = engine.native_sign_transaction(request).unwrap();
         let bytes = hex::decode(signed.signed_transaction.bytes_hex()).unwrap();
         let transaction =
             ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
@@ -418,12 +593,12 @@ mod tests {
 
     #[tokio::test]
     async fn intent_send_reuses_selection_pool_snapshot_for_signing() {
-        use ergo_api::wallet::native::dto::{InputSource, SendTxRequest, TxIntent};
         use ergo_ser::{address::NetworkPrefix, ergo_box::serialize_ergo_box};
         use ergo_state::wallet::{
             tables::WALLET_BOXES,
             types::{BoxProvenance, BoxStatus, WalletBox},
         };
+        use ergo_wallet_protocol::native::dto::{InputSource, SendTxRequest, TxIntent};
         use std::{
             collections::{HashMap, HashSet},
             sync::{
@@ -433,11 +608,11 @@ mod tests {
         };
 
         struct ChangingPool {
-            first: ergo_api::MempoolBoxSnapshot,
+            first: ergo_wallet_service::engine::mempool::MempoolBoxSnapshot,
             captures: AtomicUsize,
             committed_id: Digest32,
         }
-        impl ergo_api::MempoolView for ChangingPool {
+        impl ergo_wallet_service::engine::MempoolOverlay for ChangingPool {
             fn is_spent_by_pool(&self, _: &Digest32) -> bool {
                 panic!("intent send must use the coherent box snapshot");
             }
@@ -447,7 +622,10 @@ mod tests {
             fn pool_outputs(&self) -> Arc<HashMap<Digest32, ErgoBox>> {
                 panic!("intent send must use the coherent box snapshot");
             }
-            fn box_snapshot(&self, committed_ids: &[Digest32]) -> ergo_api::MempoolBoxSnapshot {
+            fn box_snapshot(
+                &self,
+                committed_ids: &[Digest32],
+            ) -> ergo_wallet_service::engine::mempool::MempoolBoxSnapshot {
                 if self.captures.fetch_add(1, Ordering::SeqCst) == 0 {
                     // Capturing before the wallet IDs are known would miss spent
                     // committed inputs in implementations using the trait default.
@@ -456,7 +634,7 @@ mod tests {
                 } else {
                     // The parent is evicted immediately after selection. A fresh
                     // capture during signing can no longer resolve this input.
-                    ergo_api::MempoolBoxSnapshot {
+                    ergo_wallet_service::engine::mempool::MempoolBoxSnapshot {
                         outputs: Arc::new(HashMap::new()),
                         spent_box_ids: HashSet::new(),
                     }
@@ -467,11 +645,11 @@ mod tests {
         #[derive(Default)]
         struct RecordingSubmitter(Mutex<Vec<Vec<u8>>>);
         #[async_trait::async_trait]
-        impl super::super::TxSubmitter for RecordingSubmitter {
+        impl ergo_wallet_service::engine::TxSubmitter for RecordingSubmitter {
             async fn submit_transaction(
                 &self,
                 bytes: Vec<u8>,
-            ) -> Result<String, ergo_api::types::SubmitError> {
+            ) -> Result<String, ergo_wallet_service::engine::TxSubmitError> {
                 let transaction =
                     ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
                 let id = ergo_ser::transaction::transaction_id(&transaction).unwrap();
@@ -493,11 +671,11 @@ mod tests {
                 false,
             )
             .unwrap();
-        let mut wallet = ergo_wallet::state::WalletState::empty(false);
-        crate::wallet_boot::WalletBootService::unlock_and_sync(
+        let mut wallet = ergo_wallet_service::state::WalletState::empty(false);
+        ergo_wallet_service::engine::WalletBootService::unlock_and_sync(
             &mut storage,
             &mut wallet,
-            &db,
+            &ergo_wallet_service::RedbWalletStore::new(db.clone()),
             NetworkPrefix::Mainnet,
             "test",
         )
@@ -531,7 +709,11 @@ mod tests {
             )])
             .unwrap();
         apply_headers(&mut store, 5);
-        let accessor = super::super::ChainStateAccessorImpl::new(db.clone(), false, None);
+        let accessor = super::super::ChainStateAccessorImpl::chain_only(
+            ergo_state::reader::ChainStoreReader::new_from_db(db.clone()),
+            false,
+            None,
+        );
         assert!(accessor
             .chain_snapshot()
             .unwrap()
@@ -557,7 +739,7 @@ mod tests {
         write.commit().unwrap();
 
         let pool = ChangingPool {
-            first: ergo_api::MempoolBoxSnapshot {
+            first: ergo_wallet_service::engine::mempool::MempoolBoxSnapshot {
                 outputs: Arc::new(HashMap::from([(pool_id, pool_parent)])),
                 spent_box_ids: HashSet::from([committed_id]),
             },
@@ -572,23 +754,24 @@ mod tests {
             min_confirmations: -1,
             exclude_box_ids: vec![],
         };
-        let submitter = RecordingSubmitter::default();
-        let response = super::super::support::sign_submit::send_transaction_native_impl(
-            &SendTxRequest::Intent {
+        let submitter = Arc::new(RecordingSubmitter::default());
+        let pool = Arc::new(pool);
+        let engine = pool_test_engine(
+            Arc::new(parking_lot::RwLock::new(storage)),
+            Arc::new(parking_lot::RwLock::new(wallet)),
+            db,
+            Arc::new(accessor),
+            pool.clone(),
+            submitter.clone(),
+        );
+        let response = engine
+            .native_send_transaction(SendTxRequest::Intent {
                 intent,
                 delivery: Default::default(),
                 private_options: None,
-            },
-            &parking_lot::RwLock::new(storage),
-            &parking_lot::RwLock::new(wallet),
-            &db,
-            &accessor,
-            &submitter,
-            NetworkPrefix::Mainnet,
-            &pool,
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
 
         assert!(response.accepted);
         assert_eq!(pool.captures.load(Ordering::SeqCst), 1);
@@ -607,30 +790,5 @@ mod tests {
             ),
             response.tx_id
         );
-    }
-
-    #[test]
-    fn snapshot_stale_after_committed_tip_moves() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
-        store.initialize_genesis(&[]).unwrap();
-        let (parent, _) = apply_headers(&mut store, 11);
-        let accessor = super::super::ChainStateAccessorImpl::new(store.db_arc(), false, None);
-        let snapshot = accessor.chain_snapshot().unwrap();
-        assert_eq!(snapshot.tip().height, 11);
-        assert_eq!(snapshot.headers()[0].height, 11);
-
-        let (bytes, id) = serialize_header(&header(12, parent)).unwrap();
-        let id_bytes = *id.as_bytes();
-        store.store_header(&id_bytes, &bytes).unwrap();
-        let root = store.root_digest();
-        store
-            .apply_block_unchecked_for_test(12, &id_bytes, &root, &[])
-            .unwrap();
-
-        assert!(matches!(
-            accessor.ensure_snapshot_current(&snapshot),
-            Err(ChainStateError::StaleTip { .. })
-        ));
     }
 }

@@ -949,7 +949,7 @@ fn candidate_keeps_user_transactions_when_fee_tokens_exceed_one_box() {
             inputs: tx.inputs.iter().map(|i| i.box_id).collect(),
             outputs: vec![],
             parents_in_pool: vec![],
-            output_boxes: vec![],
+            output_boxes: vec![].into(),
             fee,
             weight: fee,
             cost: 0,

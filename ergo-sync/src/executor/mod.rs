@@ -462,7 +462,6 @@ impl SyncExecutor {
         store: &mut ergo_state::StateBackendKind,
         coordinator: &mut SyncCoordinator,
         now: Instant,
-        wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) -> Vec<Action> {
         // Recheck the current mode even for actions queued before a mode
         // transition, or supplied by a public caller outside the coordinator.
@@ -488,7 +487,7 @@ impl SyncExecutor {
                 now,
             ),
             Action::AssembleBlock { header_id } => {
-                self.handle_assemble_block(&header_id, store, coordinator, wallet_wiring)
+                self.handle_assemble_block(&header_id, store, coordinator)
             }
             Action::PersistSection {
                 modifier_id,
@@ -523,7 +522,6 @@ impl SyncExecutor {
         store: &mut ergo_state::StateBackendKind,
         coordinator: &mut SyncCoordinator,
         now: Instant,
-        wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) -> Vec<Action> {
         let mut network_actions = Vec::new();
 
@@ -563,7 +561,7 @@ impl SyncExecutor {
 
         // Process remaining non-header actions
         while let Some(action) = remaining.pop_front() {
-            for a in self.execute(action, store, coordinator, now, wallet_wiring) {
+            for a in self.execute(action, store, coordinator, now) {
                 if matches!(
                     a,
                     Action::SendToPeer { .. }

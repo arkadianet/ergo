@@ -324,6 +324,7 @@ fn app_with_indexer(
     indexer: Arc<StubIndexer>,
 ) -> Router {
     let state = V1State {
+        wallet_chain: None,
         blocking: BlockingReads::new(cfg).unwrap(),
         read: Arc::new(StubRead(panic_status)),
         chain: Some(store),

@@ -141,6 +141,7 @@ macro_rules! supported_schemas {
         $check!((), u32);
         $check!((), [u8; 32]);
         $check!([u8; 32], Vec<u8>);
+        $check!([u8; 32], u64);
         $check!([u8; 34], [u8; 32]);
         $check!([u8; 36], Vec<u8>);
         $check!((), u64);

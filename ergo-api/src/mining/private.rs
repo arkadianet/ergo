@@ -41,3 +41,67 @@ pub struct PrivateTransactionRequest {
     #[serde(default)]
     pub options: PrivateTransactionOptions,
 }
+
+impl From<PrivateTransactionOptions> for ergo_wallet_protocol::mining::PrivateTransactionOptions {
+    fn from(value: PrivateTransactionOptions) -> Self {
+        Self {
+            expires_at_ms: value.expires_at_ms,
+            expires_at_height: value.expires_at_height,
+            priority: value.priority,
+            label: value.label,
+        }
+    }
+}
+
+impl From<ergo_wallet_protocol::mining::PrivateTransactionOptions> for PrivateTransactionOptions {
+    fn from(value: ergo_wallet_protocol::mining::PrivateTransactionOptions) -> Self {
+        Self {
+            expires_at_ms: value.expires_at_ms,
+            expires_at_height: value.expires_at_height,
+            priority: value.priority,
+            label: value.label,
+        }
+    }
+}
+
+impl From<PrivateTransactionEntry> for ergo_wallet_protocol::mining::PrivateTransactionEntry {
+    fn from(value: PrivateTransactionEntry) -> Self {
+        Self {
+            tx_id: value.tx_id,
+            state: value.state,
+            reason: value.reason,
+            created_at_ms: value.created_at_ms,
+            expires_at_ms: value.expires_at_ms,
+            expires_at_height: value.expires_at_height,
+            priority: value.priority,
+            label: value.label,
+            input_ids: value.input_ids,
+            fee_nano_erg: value.fee_nano_erg,
+            size_bytes: value.size_bytes,
+            validation_cost: value.validation_cost,
+            mined_block_id: value.mined_block_id,
+            mined_height: value.mined_height,
+        }
+    }
+}
+
+impl From<ergo_wallet_protocol::mining::PrivateTransactionEntry> for PrivateTransactionEntry {
+    fn from(value: ergo_wallet_protocol::mining::PrivateTransactionEntry) -> Self {
+        Self {
+            tx_id: value.tx_id,
+            state: value.state,
+            reason: value.reason,
+            created_at_ms: value.created_at_ms,
+            expires_at_ms: value.expires_at_ms,
+            expires_at_height: value.expires_at_height,
+            priority: value.priority,
+            label: value.label,
+            input_ids: value.input_ids,
+            fee_nano_erg: value.fee_nano_erg,
+            size_bytes: value.size_bytes,
+            validation_cost: value.validation_cost,
+            mined_block_id: value.mined_block_id,
+            mined_height: value.mined_height,
+        }
+    }
+}

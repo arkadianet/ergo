@@ -28,14 +28,15 @@ class ReleaseLayout(unittest.TestCase):
         cls.tag = "v" + cls.version
         cls.binaries = cls.base / "binaries"
         cls.binaries.mkdir()
-        for name in ("ergo-node", "ergo-wallet", "ergo-node.exe", "ergo-wallet.exe"):
+        for name in ("ergo-node", "ergo-wallet", "ergo-walletd", "ergo-node.exe", "ergo-wallet.exe", "ergo-walletd.exe"):
             (cls.binaries / name).write_bytes(f"fixture {name}\n".encode())
         cls.inputs = cls.base / "inputs"
         cls.inputs.mkdir()
         for target in release.TARGETS:
             with mock.patch.object(release, "git", side_effect=cls.fixture_git), \
                  mock.patch.object(release.subprocess, "run", side_effect=cls.run_binary), \
-                 mock.patch.object(release, "smoke_node", side_effect=cls.smoke_node):
+                 mock.patch.object(release, "smoke_node", side_effect=cls.smoke_node), \
+                 mock.patch.object(release, "smoke_walletd", side_effect=cls.smoke_walletd):
                 release.package(target, cls.binaries, cls.inputs / target, tag=cls.tag, sha=cls.sha)
 
     @classmethod
@@ -58,6 +59,15 @@ class ReleaseLayout(unittest.TestCase):
         extension = ".exe" if binary.suffix else ""
         if not (binary.parent / ("ergo-wallet" + extension)).is_file():
             raise AssertionError("combined archive must contain the wallet during node smoke")
+
+    @classmethod
+    def smoke_walletd(cls, binary, config, work):
+        if binary.parent != config.parent.parent or not config.is_file():
+            raise AssertionError("walletd smoke must use extracted seed configuration")
+        if binary.read_bytes() != (cls.binaries / binary.name).read_bytes():
+            raise AssertionError("walletd smoke must execute the extracted binary")
+        if 'mode = "seed"' not in config.read_text():
+            raise AssertionError("walletd smoke requires the seed template")
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -147,7 +157,8 @@ class ReleaseLayout(unittest.TestCase):
             output = self.root / target
             with mock.patch.object(release, "git", side_effect=self.fixture_git), \
                  mock.patch.object(release.subprocess, "run", side_effect=self.run_binary), \
-                 mock.patch.object(release, "smoke_node", side_effect=self.smoke_node):
+                 mock.patch.object(release, "smoke_node", side_effect=self.smoke_node), \
+                 mock.patch.object(release, "smoke_walletd", side_effect=self.smoke_walletd):
                 release.package(target, self.binaries, output, tag=self.tag, sha=self.sha)
             self.assertEqual((output / "public" / release.archive_name(target)).read_bytes(), self.archive(target).read_bytes())
 
@@ -393,12 +404,13 @@ class ReleaseLayout(unittest.TestCase):
                         release.verify_published_assets(self.output, self.tag, "owner/repo")
 
     def test_failed_smoke_never_issues_receipt(self):
-        for failure in ("version", "node"):
+        for failure in ("version", "node", "walletd"):
             output = self.root / failure
-            run = self.run_binary if failure == "node" else lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout="wrong version")
+            run = self.run_binary if failure in ("node", "walletd") else lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout="wrong version")
             with mock.patch.object(release, "git", side_effect=self.fixture_git), \
                  mock.patch.object(release.subprocess, "run", side_effect=run), \
-                 mock.patch.object(release, "smoke_node", side_effect=RuntimeError("failed node smoke")):
+                 mock.patch.object(release, "smoke_node", side_effect=RuntimeError("failed node smoke") if failure == "node" else self.smoke_node), \
+                 mock.patch.object(release, "smoke_walletd", side_effect=RuntimeError("failed walletd smoke")):
                 with self.assertRaises(RuntimeError):
                     release.package(self.target, self.binaries, output, tag=self.tag, sha=self.sha)
             self.assertEqual(list((output / "internal").iterdir()), [])

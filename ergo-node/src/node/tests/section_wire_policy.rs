@@ -106,7 +106,6 @@ fn scala_section_storage_fixture_pins_received_wire_policy_and_rest_sizes() {
                 &mut state.store,
                 &mut state.coordinator,
                 Instant::now(),
-                None,
             );
             assert_eq!(
                 state.store.get_block_section(&section_id).unwrap().unwrap(),

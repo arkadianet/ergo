@@ -72,9 +72,9 @@ pub(super) fn admin_router(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn auxiliary_router(
     network: NetworkPrefix,
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     mining: Option<Arc<dyn crate::mining::NodeMining>>,
     emission: Option<Arc<dyn crate::emission::EmissionSchedule>>,
     emission_scripts: Option<Arc<crate::emission::EmissionScriptsJson>>,
@@ -172,11 +172,7 @@ pub(super) fn auxiliary_router(
             "/script/addressToBytes/:address",
             get(crate::utils::script_address_to_bytes_handler),
         );
-    let scripts: Router<(
-        NetworkPrefix,
-        Arc<dyn crate::wallet::WalletAdmin>,
-        crate::v1::ComputePool,
-    )> = Router::new()
+    let scripts: Router<(NetworkPrefix, crate::v1::ComputePool)> = Router::new()
         .route(
             "/script/p2sAddress",
             post(crate::script::p2s_address_handler),
@@ -196,7 +192,7 @@ pub(super) fn auxiliary_router(
     FamilyRouter::new(ApiFamily::Scala).merge_documented(
         router
             .merge(utilities.with_state(network))
-            .merge(scripts.with_state((network, wallet_admin, compute))),
+            .merge(scripts.with_state((network, compute))),
         operations,
     )
 }
@@ -539,16 +535,14 @@ pub(super) fn compat_write_router(
         .merge(blocks)
 }
 
+/// The retired Scala-compatible `/wallet/*` and `/scan/*` paths, which answer
+/// `410 wallet_moved`. Undocumented: the Scala document the node serves omits
+/// them.
 pub(super) fn wallet_router(
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
+    wallet_moved: Option<&str>,
 ) -> FamilyRouter {
-    let router = super::wallet_ui_router()
-        .merge(crate::wallet::router_with_security(wallet_admin, security));
-    let operations = super::scala_openapi_operations()
-        .into_iter()
-        .filter(|operation| {
-            operation.path.starts_with("/wallet/") || operation.path.starts_with("/scan/")
-        });
-    FamilyRouter::new(ApiFamily::Scala).merge_documented(router, operations)
+    let router = super::wallet_ui_router(wallet_moved)
+        .merge(crate::wallet::compat_router(wallet_moved, security));
+    FamilyRouter::new(ApiFamily::Scala).merge_documented(router, [])
 }

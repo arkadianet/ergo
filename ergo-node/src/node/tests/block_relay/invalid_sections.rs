@@ -183,7 +183,6 @@ fn remote_block_unknown_header_sends_no_inventory() {
         &mut state.store,
         &mut state.coordinator,
         Instant::now(),
-        None,
     );
     assert_ne!(state.store.chain_state_meta().best_full_block_id, id);
     flush_actions(&mut state, actions);

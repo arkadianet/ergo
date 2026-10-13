@@ -1,0 +1,477 @@
+{
+  "provenance" : "Scala sigma-state 6.0.7 SDK ReducingInterpreter, AppKit 6.0.1 ColdErgoClient; EIP-19 CSR/CSTX and EIP-20 ErgoPay",
+  "block_version" : 4,
+  "height" : 400000,
+  "cases" : [
+    {
+      "name" : "true",
+      "source" : "",
+      "reduced_hex" : "5101c440407f6015adc558932dc4bda866e66864f7dfdb8358fcf6e4d78b1fd5cd99000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000d3c95ec95e",
+      "input_boxes" : [
+        "80c2d72f0008d3640000010101010101010101010101010101010101010101010101010101010101010100"
+      ],
+      "data_boxes" : [
+      ],
+      "sigma_hex" : [
+        "d3"
+      ],
+      "input_costs" : [
+        12105
+      ],
+      "reduction_cost" : 12105,
+      "crypto_cost" : 0,
+      "scala_proofs" : [
+        ""
+      ],
+      "unsigned_message_hex" : "01c440407f6015adc558932dc4bda866e66864f7dfdb8358fcf6e4d78b1fd5cd99000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "transaction_id" : "6ca92d82bf20b3a5f51793605709f49573f556cfa97a8ff1f6c8287893c0b778",
+      "ergopay_uri" : "ergopay:UQHEQEB_YBWtxViTLcS9qGbmaGT339uDWPz25NeLH9XNmQAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAANPJXsle",
+      "ergopay_request" : {
+        "reducedTx" : "UQHEQEB_YBWtxViTLcS9qGbmaGT339uDWPz25NeLH9XNmQAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAANPJXsle",
+        "message" : "Fixture signing request",
+        "messageSeverity" : "INFORMATION",
+        "replyTo" : "https://example.invalid/reply"
+      },
+      "cold_request" : "{\"reducedTx\":\"UQHEQEB/YBWtxViTLcS9qGbmaGT339uDWPz25NeLH9XNmQAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAANPJXsle\",\"inputs\":[\"gMLXLwAI02QAAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAA==\"]}",
+      "csr_qr_low_pages" : [
+        "{\"CSR\":\"{\\\"reducedTx\\\":\\\"UQHEQEB/YBWtxViTLcS9qGbmaGT339uDWPz25NeLH9XNmQAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAANPJXsle\\\",\\\"inputs\\\":[\\\"gMLXLwAI02QAAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAA==\\\"]}\"}"
+      ],
+      "scala_signed_hex" : "01c440407f6015adc558932dc4bda866e66864f7dfdb8358fcf6e4d78b1fd5cd99000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "appkit_signed_hex" : "01c440407f6015adc558932dc4bda866e66864f7dfdb8358fcf6e4d78b1fd5cd99000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179864000000",
+      "cold_response" : "{\"signedTx\":\"AcRAQH9gFa3FWJMtxL2oZuZoZPff24NY/Pbk14sf1c2ZAAAAAAGAwtcvAAjNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYZAAAAA==\"}",
+      "cstx_qr_low_pages" : [
+        "{\"CSTX\":\"{\\\"signedTx\\\":\\\"AcRAQH9gFa3FWJMtxL2oZuZoZPff24NY/Pbk14sf1c2ZAAAAAAGAwtcvAAjNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYZAAAAA==\\\"}\"}"
+      ]
+    },
+    {
+      "name" : "dlog",
+      "source" : "",
+      "reduced_hex" : "51010f9629bba6c5afc70be174db5e20f7fff238811fa0af1b4cd61d197ef327ab78000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798c95ec95e",
+      "input_boxes" : [
+        "80c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000010101010101010101010101010101010101010101010101010101010101010100"
+      ],
+      "data_boxes" : [
+      ],
+      "sigma_hex" : [
+        "cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      ],
+      "input_costs" : [
+        12105
+      ],
+      "reduction_cost" : 12105,
+      "crypto_cost" : 398,
+      "scala_proofs" : [
+        "8d323fccdd1756cc58910ecffdff1ffd9a5afc4665a5b15df9d3b77e63123cb2031fa218508c1d2b4ae01acba1bbaef4e12a7c5ea1ffdf6d"
+      ],
+      "unsigned_message_hex" : "010f9629bba6c5afc70be174db5e20f7fff238811fa0af1b4cd61d197ef327ab78000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "transaction_id" : "dbbe05aedbe58ddea160335b176eab6c32fa8c06a524e88e974ebe17ebc459d6",
+      "ergopay_uri" : "ergopay:UQEPlim7psWvxwvhdNteIPf_8jiBH6CvG0zWHRl-8yereAAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb_NstzijZWfKBWxb4F5jJXsle",
+      "ergopay_request" : {
+        "reducedTx" : "UQEPlim7psWvxwvhdNteIPf_8jiBH6CvG0zWHRl-8yereAAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb_NstzijZWfKBWxb4F5jJXsle",
+        "message" : "Fixture signing request",
+        "messageSeverity" : "INFORMATION",
+        "replyTo" : "https://example.invalid/reply"
+      },
+      "cold_request" : "{\"reducedTx\":\"UQEPlim7psWvxwvhdNteIPf/8jiBH6CvG0zWHRl+8yereAAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5jJXsle\",\"inputs\":[\"gMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAA==\"]}",
+      "csr_qr_low_pages" : [
+        "{\"CSR\":\"{\\\"reducedTx\\\":\\\"UQEPlim7psWvxwvhdNteIPf/8jiBH6CvG0zWHRl+8yereAAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5jJXsle\\\",\\\"inputs\\\":[\\\"gMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAA==\\\"]}\"}"
+      ],
+      "scala_signed_hex" : "010f9629bba6c5afc70be174db5e20f7fff238811fa0af1b4cd61d197ef327ab78388d323fccdd1756cc58910ecffdff1ffd9a5afc4665a5b15df9d3b77e63123cb2031fa218508c1d2b4ae01acba1bbaef4e12a7c5ea1ffdf6d0000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "appkit_signed_hex" : "010f9629bba6c5afc70be174db5e20f7fff238811fa0af1b4cd61d197ef327ab78388d323fccdd1756cc58910ecffdff1ffd9a5afc4665a5b15df9d3b77e63123cb2031fa218508c1d2b4ae01acba1bbaef4e12a7c5ea1ffdf6d0000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986400008e03",
+      "cold_response" : "{\"signedTx\":\"AQ+WKbumxa/HC+F0214g9//yOIEfoK8bTNYdGX7zJ6t4OI0yP8zdF1bMWJEOz/3/H/2aWvxGZaWxXfnTt35jEjyyAx+iGFCMHStK4BrLobuu9OEqfF6h/99tAAAAAYDC1y8ACM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5hkAACOAw==\"}",
+      "cstx_qr_low_pages" : [
+        "{\"CSTX\":\"{\\\"signedTx\\\":\\\"AQ+WKbumxa/HC+F0214g9//yOIEfoK8bTNYdGX7zJ6t4OI0yP8zdF1bMWJEOz/3/H/2aWvxGZaWxXfnTt35jEjyyAx+iGFCMHStK4BrLobuu9OEqfF6h/99tAAAAAYDC1y8ACM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5hkAACOAw==\\\"}\"}"
+      ]
+    },
+    {
+      "name" : "dht",
+      "source" : "",
+      "reduced_hex" : "5101af6a40091651743be306ad42a5781b92f515e9b7109d06f0e64e0839c901b1ce000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000ce02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee502c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee503fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a146029755603fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556c95ec95e",
+      "input_boxes" : [
+        "80c2d72f0008ce02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee502c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee503fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a146029755603fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556640000010101010101010101010101010101010101010101010101010101010101010100"
+      ],
+      "data_boxes" : [
+      ],
+      "sigma_hex" : [
+        "ce02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee502c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee503fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a146029755603fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556"
+      ],
+      "input_costs" : [
+        12105
+      ],
+      "reduction_cost" : 12105,
+      "crypto_cost" : 714,
+      "scala_proofs" : [
+        "f7af12417a1d9897858037821aa60e8b3a908163705865ae9031017c126336e688332879b52ba70e05ac1438aa8094e5411759fec0d2e4ba"
+      ],
+      "unsigned_message_hex" : "01af6a40091651743be306ad42a5781b92f515e9b7109d06f0e64e0839c901b1ce000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "transaction_id" : "2e2abd478cd980f8a6f475fc530e22f7afe4da6d3e020947759bc04bf4f7ec74",
+      "ergopay_uri" : "ergopay:UQGvakAJFlF0O-MGrUKleBuS9RXptxCdBvDmTgg5yQGxzgAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM4CxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUCxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUD__l71XVe7qQgRToUNVI104L2Ry-FaKGLLwV6FGApdVYD__l71XVe7qQgRToUNVI104L2Ry-FaKGLLwV6FGApdVbJXsle",
+      "ergopay_request" : {
+        "reducedTx" : "UQGvakAJFlF0O-MGrUKleBuS9RXptxCdBvDmTgg5yQGxzgAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM4CxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUCxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUD__l71XVe7qQgRToUNVI104L2Ry-FaKGLLwV6FGApdVYD__l71XVe7qQgRToUNVI104L2Ry-FaKGLLwV6FGApdVbJXsle",
+        "message" : "Fixture signing request",
+        "messageSeverity" : "INFORMATION",
+        "replyTo" : "https://example.invalid/reply"
+      },
+      "cold_request" : "{\"reducedTx\":\"UQGvakAJFlF0O+MGrUKleBuS9RXptxCdBvDmTgg5yQGxzgAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM4CxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUCxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUD//l71XVe7qQgRToUNVI104L2Ry+FaKGLLwV6FGApdVYD//l71XVe7qQgRToUNVI104L2Ry+FaKGLLwV6FGApdVbJXsle\",\"inputs\":[\"gMLXLwAIzgLGBH+UQe19bTBFQG6VwHzYXHeOS4zvPKerrAm5XHCe5QLGBH+UQe19bTBFQG6VwHzYXHeOS4zvPKerrAm5XHCe5QP/+XvVdV7upCBFOhQ1UjXTgvZHL4VooYsvBXoUYCl1VgP/+XvVdV7upCBFOhQ1UjXTgvZHL4VooYsvBXoUYCl1VmQAAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAA==\"]}",
+      "csr_qr_low_pages" : [
+        "{\"CSR\":\"{\\\"reducedTx\\\":\\\"UQGvakAJFlF0O+MGrUKleBuS9RXptxCdBvDmTgg5yQGxzgAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM4CxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUCxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUD//l71XVe7qQgRToUNVI104L2Ry+FaKGLLwV6FGApdVYD//l71XVe7qQgRToUNVI104L2Ry+FaKGLLwV6FGApdVbJXsle\\\",\\\"inputs\\\":[\\\"gMLXLwAIzgLGBH+UQe19bTBFQG6VwHzYXHeOS4zvPKerrAm5\",\"n\":2,\"p\":1}",
+        "{\"CSR\":\"XHCe5QLGBH+UQe19bTBFQG6VwHzYXHeOS4zvPKerrAm5XHCe5QP/+XvVdV7upCBFOhQ1UjXTgvZHL4VooYsvBXoUYCl1VgP/+XvVdV7upCBFOhQ1UjXTgvZHL4VooYsvBXoUYCl1VmQAAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAA==\\\"]}\",\"n\":2,\"p\":2}"
+      ],
+      "scala_signed_hex" : "01af6a40091651743be306ad42a5781b92f515e9b7109d06f0e64e0839c901b1ce38f7af12417a1d9897858037821aa60e8b3a908163705865ae9031017c126336e688332879b52ba70e05ac1438aa8094e5411759fec0d2e4ba0000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "appkit_signed_hex" : "01af6a40091651743be306ad42a5781b92f515e9b7109d06f0e64e0839c901b1ce38f7af12417a1d9897858037821aa60e8b3a908163705865ae9031017c126336e688332879b52ba70e05ac1438aa8094e5411759fec0d2e4ba0000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000ca05",
+      "cold_response" : "{\"signedTx\":\"Aa9qQAkWUXQ74watQqV4G5L1Fem3EJ0G8OZOCDnJAbHOOPevEkF6HZiXhYA3ghqmDos6kIFjcFhlrpAxAXwSYzbmiDMoebUrpw4FrBQ4qoCU5UEXWf7A0uS6AAAAAYDC1y8ACM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5hkAADKBQ==\"}",
+      "cstx_qr_low_pages" : [
+        "{\"CSTX\":\"{\\\"signedTx\\\":\\\"Aa9qQAkWUXQ74watQqV4G5L1Fem3EJ0G8OZOCDnJAbHOOPevEkF6HZiXhYA3ghqmDos6kIFjcFhlrpAxAXwSYzbmiDMoebUrpw4FrBQ4qoCU5UEXWf7A0uS6AAAAAYDC1y8ACM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5hkAADKBQ==\\\"}\"}"
+      ]
+    },
+    {
+      "name" : "and",
+      "source" : "",
+      "reduced_hex" : "510156ed756ecdd2b0d43ffd49de76c0660074e060fb693363b51a3589647ba2f8e3000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986400009602cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5c95ec95e",
+      "input_boxes" : [
+        "80c2d72f00089602cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5640000010101010101010101010101010101010101010101010101010101010101010100"
+      ],
+      "data_boxes" : [
+      ],
+      "sigma_hex" : [
+        "9602cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+      ],
+      "input_costs" : [
+        12105
+      ],
+      "reduction_cost" : 12105,
+      "crypto_cost" : 797,
+      "scala_proofs" : [
+        "5b7c0a18b3465b3fae57993fca4d8c08de135c29db4e21a14c038cb1503371fe51a10c5441a60df25929e961ace9ba1451255dc83ded531381245514c05237758c3d4935bba2e1b4cdf5a631383be41ba734ef37b5e739a6"
+      ],
+      "unsigned_message_hex" : "0156ed756ecdd2b0d43ffd49de76c0660074e060fb693363b51a3589647ba2f8e3000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "transaction_id" : "439252adf52455f90b5a7cea02342b4b7386c395f0de84d4a746cc1a8fc548d8",
+      "ergopay_uri" : "ergopay:UQFW7XVuzdKw1D_9Sd52wGYAdOBg-2kzY7UaNYlke6L44wAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJYCzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmM0CxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuXJXsle",
+      "ergopay_request" : {
+        "reducedTx" : "UQFW7XVuzdKw1D_9Sd52wGYAdOBg-2kzY7UaNYlke6L44wAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJYCzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmM0CxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuXJXsle",
+        "message" : "Fixture signing request",
+        "messageSeverity" : "INFORMATION",
+        "replyTo" : "https://example.invalid/reply"
+      },
+      "cold_request" : "{\"reducedTx\":\"UQFW7XVuzdKw1D/9Sd52wGYAdOBg+2kzY7UaNYlke6L44wAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJYCzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmM0CxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuXJXsle\",\"inputs\":[\"gMLXLwAIlgLNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYzQLGBH+UQe19bTBFQG6VwHzYXHeOS4zvPKerrAm5XHCe5WQAAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAA==\"]}",
+      "csr_qr_low_pages" : [
+        "{\"CSR\":\"{\\\"reducedTx\\\":\\\"UQFW7XVuzdKw1D/9Sd52wGYAdOBg+2kzY7UaNYlke6L44wAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJYCzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmM0CxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuXJXsle\\\",\\\"inputs\\\":[\\\"gMLXLwAIlgLNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYzQLGBH+UQe19bTBFQG6VwHzYXHeOS4zvPKerrAm5XHCe5WQAAAEBAQEBAQEBAQEBAQEBAQEBAQEB\",\"n\":2,\"p\":1}",
+        "{\"CSR\":\"AQEBAQEBAQEBAQEBAA==\\\"]}\",\"n\":2,\"p\":2}"
+      ],
+      "scala_signed_hex" : "0156ed756ecdd2b0d43ffd49de76c0660074e060fb693363b51a3589647ba2f8e3585b7c0a18b3465b3fae57993fca4d8c08de135c29db4e21a14c038cb1503371fe51a10c5441a60df25929e961ace9ba1451255dc83ded531381245514c05237758c3d4935bba2e1b4cdf5a631383be41ba734ef37b5e739a60000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "appkit_signed_hex" : "0156ed756ecdd2b0d43ffd49de76c0660074e060fb693363b51a3589647ba2f8e3585b7c0a18b3465b3fae57993fca4d8c08de135c29db4e21a14c038cb1503371fe51a10c5441a60df25929e961ace9ba1451255dc83ded531381245514c05237758c3d4935bba2e1b4cdf5a631383be41ba734ef37b5e739a60000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986400009d06",
+      "cold_response" : "{\"signedTx\":\"AVbtdW7N0rDUP/1J3nbAZgB04GD7aTNjtRo1iWR7ovjjWFt8ChizRls/rleZP8pNjAjeE1wp204hoUwDjLFQM3H+UaEMVEGmDfJZKelhrOm6FFElXcg97VMTgSRVFMBSN3WMPUk1u6LhtM31pjE4O+QbpzTvN7XnOaYAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJ0G\"}",
+      "cstx_qr_low_pages" : [
+        "{\"CSTX\":\"{\\\"signedTx\\\":\\\"AVbtdW7N0rDUP/1J3nbAZgB04GD7aTNjtRo1iWR7ovjjWFt8ChizRls/rleZP8pNjAjeE1wp204hoUwDjLFQM3H+UaEMVEGmDfJZKelhrOm6FFElXcg97VMTgSRVFMBSN3WMPUk1u6LhtM31pjE4O+QbpzTvN7XnOaYAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJ0G\\\"}\"}"
+      ]
+    },
+    {
+      "name" : "or",
+      "source" : "",
+      "reduced_hex" : "5101c34e0bd6523f7e6aaa56715cac8cc4ad05de9edbae37056d01145ab8dacc9946000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986400009702cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5c95ec95e",
+      "input_boxes" : [
+        "80c2d72f00089702cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5640000010101010101010101010101010101010101010101010101010101010101010100"
+      ],
+      "data_boxes" : [
+      ],
+      "sigma_hex" : [
+        "9702cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+      ],
+      "input_costs" : [
+        12105
+      ],
+      "reduction_cost" : 12105,
+      "crypto_cost" : 797,
+      "scala_proofs" : [
+        "498d62a4e3cdcad0156a5e059e3ec6e5f76e76a9528a9f5bfc660a39c9f3d69bc25d4773684047ce6654f6668bf19190bfe4a01dff8adc0872527235f4b86d06433faddefc70a057a7cc3c6ed0cf95ca7e4bba9da10a529b6c23486d87bad9978d8f4fafa3b8c71959609262ad43368c"
+      ],
+      "unsigned_message_hex" : "01c34e0bd6523f7e6aaa56715cac8cc4ad05de9edbae37056d01145ab8dacc9946000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "transaction_id" : "6db0a47b768a1cdcc424ece661d61c984366d99bb0aae7038e32f00688977899",
+      "ergopay_uri" : "ergopay:UQHDTgvWUj9-aqpWcVysjMStBd6e2643BW0BFFq42syZRgAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJcCzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmM0CxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuXJXsle",
+      "ergopay_request" : {
+        "reducedTx" : "UQHDTgvWUj9-aqpWcVysjMStBd6e2643BW0BFFq42syZRgAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJcCzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmM0CxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuXJXsle",
+        "message" : "Fixture signing request",
+        "messageSeverity" : "INFORMATION",
+        "replyTo" : "https://example.invalid/reply"
+      },
+      "cold_request" : "{\"reducedTx\":\"UQHDTgvWUj9+aqpWcVysjMStBd6e2643BW0BFFq42syZRgAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJcCzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmM0CxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuXJXsle\",\"inputs\":[\"gMLXLwAIlwLNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYzQLGBH+UQe19bTBFQG6VwHzYXHeOS4zvPKerrAm5XHCe5WQAAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAA==\"]}",
+      "csr_qr_low_pages" : [
+        "{\"CSR\":\"{\\\"reducedTx\\\":\\\"UQHDTgvWUj9+aqpWcVysjMStBd6e2643BW0BFFq42syZRgAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJcCzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmM0CxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuXJXsle\\\",\\\"inputs\\\":[\\\"gMLXLwAIlwLNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYzQLGBH+UQe19bTBFQG6VwHzYXHeOS4zvPKerrAm5XHCe5WQAAAEBAQEBAQEBAQEBAQEBAQEBAQEB\",\"n\":2,\"p\":1}",
+        "{\"CSR\":\"AQEBAQEBAQEBAQEBAA==\\\"]}\",\"n\":2,\"p\":2}"
+      ],
+      "scala_signed_hex" : "01c34e0bd6523f7e6aaa56715cac8cc4ad05de9edbae37056d01145ab8dacc994670498d62a4e3cdcad0156a5e059e3ec6e5f76e76a9528a9f5bfc660a39c9f3d69bc25d4773684047ce6654f6668bf19190bfe4a01dff8adc0872527235f4b86d06433faddefc70a057a7cc3c6ed0cf95ca7e4bba9da10a529b6c23486d87bad9978d8f4fafa3b8c71959609262ad43368c0000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "appkit_signed_hex" : "01c34e0bd6523f7e6aaa56715cac8cc4ad05de9edbae37056d01145ab8dacc994670498d62a4e3cdcad0156a5e059e3ec6e5f76e76a9528a9f5bfc660a39c9f3d69bc25d4773684047ce6654f6668bf19190bfe4a01dff8adc0872527235f4b86d06433faddefc70a057a7cc3c6ed0cf95ca7e4bba9da10a529b6c23486d87bad9978d8f4fafa3b8c71959609262ad43368c0000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986400009d06",
+      "cold_response" : "{\"signedTx\":\"AcNOC9ZSP35qqlZxXKyMxK0F3p7brjcFbQEUWrjazJlGcEmNYqTjzcrQFWpeBZ4+xuX3bnapUoqfW/xmCjnJ89abwl1Hc2hAR85mVPZmi/GRkL/koB3/itwIclJyNfS4bQZDP63e/HCgV6fMPG7Qz5XKfku6naEKUptsI0hth7rZl42PT6+juMcZWWCSYq1DNowAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJ0G\"}",
+      "cstx_qr_low_pages" : [
+        "{\"CSTX\":\"{\\\"signedTx\\\":\\\"AcNOC9ZSP35qqlZxXKyMxK0F3p7brjcFbQEUWrjazJlGcEmNYqTjzcrQFWpeBZ4+xuX3bnapUoqfW/xmCjnJ89abwl1Hc2hAR85mVPZmi/GRkL/koB3/itwIclJyNfS4bQZDP63e/HCgV6fMPG7Qz5XKfku6naEKUptsI0hth7rZl42PT6+juMcZWWCSYq1DNowAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJ0G\\\"}\"}"
+      ]
+    },
+    {
+      "name" : "threshold",
+      "source" : "",
+      "reduced_hex" : "5101f27975e74e980538dfa3e3574a7422df26a8c99eb4575ead3d709bb0e15b2e16000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000980203cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5cd02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9c95ec95e",
+      "input_boxes" : [
+        "80c2d72f0008980203cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5cd02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9640000010101010101010101010101010101010101010101010101010101010101010100"
+      ],
+      "data_boxes" : [
+      ],
+      "sigma_hex" : [
+        "980203cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5cd02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+      ],
+      "input_costs" : [
+        12105
+      ],
+      "reduction_cost" : 12105,
+      "crypto_cost" : 1199,
+      "scala_proofs" : [
+        "7154e7ad73b599f99e035cfd5b4e32c6aac0c950532b9fbba898ecfcb4125a2343116bc321342454b573e6ffe31fed74b1b86f7393675704dc30c787bd992d6d518165fa8495c27a74404d8f29610ea8c9781ee9e05461fee45b3f95780fb96ef62a105bef8a0faa56075d22df9454c08cdc7ae4fd015195b884d836214bfbcc85c194eb1259734e90ebfd9d62c38d29"
+      ],
+      "unsigned_message_hex" : "01f27975e74e980538dfa3e3574a7422df26a8c99eb4575ead3d709bb0e15b2e16000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "transaction_id" : "33d99220fb68c077f60c3663b2375c7176dc5ee377a0e24124b029d38374194e",
+      "ergopay_uri" : "ergopay:UQHyeXXnTpgFON-j41dKdCLfJqjJnrRXXq09cJuw4VsuFgAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJgCA80Ceb5mfvncu6xVoGKVzocLBwKb_NstzijZWfKBWxb4F5jNAsYEf5RB7X1tMEVAbpXAfNhcd45LjO88p6usCblccJ7lzQL5MIoBkljDEEk0T4X4nVIptTHIRYNvmbCGAfETvOA2-cleyV4=",
+      "ergopay_request" : {
+        "reducedTx" : "UQHyeXXnTpgFON-j41dKdCLfJqjJnrRXXq09cJuw4VsuFgAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJgCA80Ceb5mfvncu6xVoGKVzocLBwKb_NstzijZWfKBWxb4F5jNAsYEf5RB7X1tMEVAbpXAfNhcd45LjO88p6usCblccJ7lzQL5MIoBkljDEEk0T4X4nVIptTHIRYNvmbCGAfETvOA2-cleyV4=",
+        "message" : "Fixture signing request",
+        "messageSeverity" : "INFORMATION",
+        "replyTo" : "https://example.invalid/reply"
+      },
+      "cold_request" : "{\"reducedTx\":\"UQHyeXXnTpgFON+j41dKdCLfJqjJnrRXXq09cJuw4VsuFgAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJgCA80Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5jNAsYEf5RB7X1tMEVAbpXAfNhcd45LjO88p6usCblccJ7lzQL5MIoBkljDEEk0T4X4nVIptTHIRYNvmbCGAfETvOA2+cleyV4=\",\"inputs\":[\"gMLXLwAImAIDzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmM0CxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuXNAvkwigGSWMMQSTRPhfidUim1MchFg2+ZsIYB8RO84Db5ZAAAAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEA\"]}",
+      "csr_qr_low_pages" : [
+        "{\"CSR\":\"{\\\"reducedTx\\\":\\\"UQHyeXXnTpgFON+j41dKdCLfJqjJnrRXXq09cJuw4VsuFgAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJgCA80Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5jNAsYEf5RB7X1tMEVAbpXAfNhcd45LjO88p6usCblccJ7lzQL5MIoBkljDEEk0T4X4nVIptTHIRYNvmbCGAfETvOA2+cleyV4=\\\",\\\"inputs\\\":[\\\"gMLXLwAImAIDzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmM0CxgR/lEHtfW0wRUBulcB82Fx3\",\"n\":2,\"p\":1}",
+        "{\"CSR\":\"jkuM7zynq6wJuVxwnuXNAvkwigGSWMMQSTRPhfidUim1MchFg2+ZsIYB8RO84Db5ZAAAAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEA\\\"]}\",\"n\":2,\"p\":2}"
+      ],
+      "scala_signed_hex" : "01f27975e74e980538dfa3e3574a7422df26a8c99eb4575ead3d709bb0e15b2e1690017154e7ad73b599f99e035cfd5b4e32c6aac0c950532b9fbba898ecfcb4125a2343116bc321342454b573e6ffe31fed74b1b86f7393675704dc30c787bd992d6d518165fa8495c27a74404d8f29610ea8c9781ee9e05461fee45b3f95780fb96ef62a105bef8a0faa56075d22df9454c08cdc7ae4fd015195b884d836214bfbcc85c194eb1259734e90ebfd9d62c38d290000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "appkit_signed_hex" : "01f27975e74e980538dfa3e3574a7422df26a8c99eb4575ead3d709bb0e15b2e1690017154e7ad73b599f99e035cfd5b4e32c6aac0c950532b9fbba898ecfcb4125a2343116bc321342454b573e6ffe31fed74b1b86f7393675704dc30c787bd992d6d518165fa8495c27a74404d8f29610ea8c9781ee9e05461fee45b3f95780fb96ef62a105bef8a0faa56075d22df9454c08cdc7ae4fd015195b884d836214bfbcc85c194eb1259734e90ebfd9d62c38d290000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000af09",
+      "cold_response" : "{\"signedTx\":\"AfJ5dedOmAU436PjV0p0It8mqMmetFderT1wm7DhWy4WkAFxVOetc7WZ+Z4DXP1bTjLGqsDJUFMrn7uomOz8tBJaI0MRa8MhNCRUtXPm/+Mf7XSxuG9zk2dXBNwwx4e9mS1tUYFl+oSVwnp0QE2PKWEOqMl4HungVGH+5Fs/lXgPuW72KhBb74oPqlYHXSLflFTAjNx65P0BUZW4hNg2IUv7zIXBlOsSWXNOkOv9nWLDjSkAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAK8J\"}",
+      "cstx_qr_low_pages" : [
+        "{\"CSTX\":\"{\\\"signedTx\\\":\\\"AfJ5dedOmAU436PjV0p0It8mqMmetFderT1wm7DhWy4WkAFxVOetc7WZ+Z4DXP1bTjLGqsDJUFMrn7uomOz8tBJaI0MRa8MhNCRUtXPm/+Mf7XSxuG9zk2dXBNwwx4e9mS1tUYFl+oSVwnp0QE2PKWEOqMl4HungVGH+5Fs/lXgPuW72KhBb74oPqlYHXSLflFTAjNx65P0BUZW4hNg2IUv7zIXBlOsSWXNOkOv9nWLDjSkAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAK8J\\\"}\"}"
+      ]
+    },
+    {
+      "name" : "height_contract",
+      "source" : "{ sigmaProp(HEIGHT > 350000 && OUTPUTS(0).creationInfo._1 == 100) && proveDlog(groupGenerator) }",
+      "reduced_hex" : "5101cd833bf78d613b1bb82f183854a5983a1c4766d2281d37c79d8c6234169c179c000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798d75ed75e",
+      "input_boxes" : [
+        "80c2d72f100304e0dc2a040004c801ea02d1ed91a37300938cc7b2a5730100017302cddb6a01dd640000010101010101010101010101010101010101010101010101010101010101010100"
+      ],
+      "data_boxes" : [
+      ],
+      "sigma_hex" : [
+        "cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      ],
+      "input_costs" : [
+        12119
+      ],
+      "reduction_cost" : 12119,
+      "crypto_cost" : 398,
+      "scala_proofs" : [
+        "28f080c7c680a1f5d50a88e600446063a50646e1316a75d8eceec5fca9eb286ba31c24862baf1c6e3ed2ebfffe6a306048e4bf0ad1490ac9"
+      ],
+      "unsigned_message_hex" : "01cd833bf78d613b1bb82f183854a5983a1c4766d2281d37c79d8c6234169c179c000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "transaction_id" : "9c70790958cf94b1a9d0d4bd5e9549388f54028dea16e0d916712dc3e5fe6c89",
+      "ergopay_uri" : "ergopay:UQHNgzv3jWE7G7gvGDhUpZg6HEdm0igdN8edjGI0FpwXnAAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb_NstzijZWfKBWxb4F5jXXtde",
+      "ergopay_request" : {
+        "reducedTx" : "UQHNgzv3jWE7G7gvGDhUpZg6HEdm0igdN8edjGI0FpwXnAAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb_NstzijZWfKBWxb4F5jXXtde",
+        "message" : "Fixture signing request",
+        "messageSeverity" : "INFORMATION",
+        "replyTo" : "https://example.invalid/reply"
+      },
+      "cold_request" : "{\"reducedTx\":\"UQHNgzv3jWE7G7gvGDhUpZg6HEdm0igdN8edjGI0FpwXnAAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5jXXtde\",\"inputs\":[\"gMLXLxADBODcKgQABMgB6gLR7ZGjcwCTjMeypXMBAAFzAs3bagHdZAAAAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEA\"]}",
+      "csr_qr_low_pages" : [
+        "{\"CSR\":\"{\\\"reducedTx\\\":\\\"UQHNgzv3jWE7G7gvGDhUpZg6HEdm0igdN8edjGI0FpwXnAAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5jXXtde\\\",\\\"inputs\\\":[\\\"gMLXLxADBODcKgQABMgB6gLR7ZGjcwCTjMeypXMBAAFzAs3bagHdZAAAAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEA\\\"]}\"}"
+      ],
+      "scala_signed_hex" : "01cd833bf78d613b1bb82f183854a5983a1c4766d2281d37c79d8c6234169c179c3828f080c7c680a1f5d50a88e600446063a50646e1316a75d8eceec5fca9eb286ba31c24862baf1c6e3ed2ebfffe6a306048e4bf0ad1490ac90000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "appkit_signed_hex" : "01cd833bf78d613b1bb82f183854a5983a1c4766d2281d37c79d8c6234169c179c3828f080c7c680a1f5d50a88e600446063a50646e1316a75d8eceec5fca9eb286ba31c24862baf1c6e3ed2ebfffe6a306048e4bf0ad1490ac90000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986400008e03",
+      "cold_response" : "{\"signedTx\":\"Ac2DO/eNYTsbuC8YOFSlmDocR2bSKB03x52MYjQWnBecOCjwgMfGgKH11QqI5gBEYGOlBkbhMWp12Ozuxfyp6yhroxwkhiuvHG4+0uv//mowYEjkvwrRSQrJAAAAAYDC1y8ACM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5hkAACOAw==\"}",
+      "cstx_qr_low_pages" : [
+        "{\"CSTX\":\"{\\\"signedTx\\\":\\\"Ac2DO/eNYTsbuC8YOFSlmDocR2bSKB03x52MYjQWnBecOCjwgMfGgKH11QqI5gBEYGOlBkbhMWp12Ozuxfyp6yhroxwkhiuvHG4+0uv//mowYEjkvwrRSQrJAAAAAYDC1y8ACM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5hkAACOAw==\\\"}\"}"
+      ]
+    },
+    {
+      "name" : "spectrum_n2t_swap",
+      "source" : "{\n    val InitiallyLockedLP = 0x7fffffffffffffffL\n    val FeeDenom = 1000\n    val MinStorageRent = 10000000L  // this number of nanoErgs are going to be permanently locked\n\n    val poolNFT0    = SELF.tokens(0)\n    val reservedLP0 = SELF.tokens(1)\n    val tokenY0     = SELF.tokens(2)\n\n    val successor = OUTPUTS(0)\n\n    val feeNum0 = SELF.R4[Int].get\n    val feeNum1 = successor.R4[Int].get\n\n    val poolNFT1    = successor.tokens(0)\n    val reservedLP1 = successor.tokens(1)\n    val tokenY1     = successor.tokens(2)\n\n    val validSuccessorScript = successor.propositionBytes == SELF.propositionBytes\n    val preservedFeeConfig   = feeNum1 == feeNum0\n\n    val preservedPoolNFT     = poolNFT1 == poolNFT0\n    val validLP              = reservedLP1._1 == reservedLP0._1\n    val validY               = tokenY1._1 == tokenY0._1\n    // since tokens can be repeated, we ensure for sanity that there are no more tokens\n    val noMoreTokens         = successor.tokens.size == 3\n\n    val validStorageRent     = successor.value > MinStorageRent\n\n    val supplyLP0 = InitiallyLockedLP - reservedLP0._2\n    val supplyLP1 = InitiallyLockedLP - reservedLP1._2\n\n    val reservesX0 = SELF.value\n    val reservesY0 = tokenY0._2\n    val reservesX1 = successor.value\n    val reservesY1 = tokenY1._2\n\n    val deltaSupplyLP  = supplyLP1 - supplyLP0\n    val deltaReservesX = reservesX1 - reservesX0\n    val deltaReservesY = reservesY1 - reservesY0\n\n    val validDepositing = {\n        val sharesUnlocked = min(\n            deltaReservesX.toBigInt * supplyLP0 / reservesX0,\n            deltaReservesY.toBigInt * supplyLP0 / reservesY0\n        )\n        deltaSupplyLP <= sharesUnlocked\n    }\n\n    val validRedemption = {\n        val _deltaSupplyLP = deltaSupplyLP.toBigInt\n        // note: _deltaSupplyLP, deltaReservesX and deltaReservesY are negative\n        deltaReservesX.toBigInt * supplyLP0 >= _deltaSupplyLP * reservesX0 && deltaReservesY.toBigInt * supplyLP0 >= _deltaSupplyLP * reservesY0\n    }\n\n    val validSwap =\n        if (deltaReservesX > 0)\n            reservesY0.toBigInt * deltaReservesX * feeNum0 >= -deltaReservesY * (reservesX0.toBigInt * FeeDenom + deltaReservesX * feeNum0)\n        else\n            reservesX0.toBigInt * deltaReservesY * feeNum0 >= -deltaReservesX * (reservesY0.toBigInt * FeeDenom + deltaReservesY * feeNum0)\n\n    val validAction =\n        if (deltaSupplyLP == 0)\n            validSwap\n        else\n            if (deltaReservesX > 0 && deltaReservesY > 0) validDepositing\n            else validRedemption\n\n    sigmaProp(\n        validSuccessorScript &&\n        preservedFeeConfig &&\n        preservedPoolNFT &&\n        validLP &&\n        validY &&\n        noMoreTokens &&\n        validAction &&\n        validStorageRent\n    )\n}",
+      "reduced_hex" : "880502de50dc73f484efcd79287caa78193a8772c6596430e8e9d0a68c7f632ee52f3d0000a5a5dde833a45c4d70d69e5d06d25209d5a7a551834d0c3a892220a613329b92000000030a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0280d6c28c0410100400040204020404040405feffffffffffffffff0105feffffffffffffffff010500040004000406050004d00f04d00f05000580dac409d818d601b2a5730000d602e4c6a70404d603db63087201d604db6308a7d605b27203730100d606b27204730200d607b27203730300d608b27204730400d6099973058c720602d60a999973068c7205027209d60bc17201d60cc1a7d60d99720b720cd60e91720d7307d60f8c720802d6107e720f06d6117e720d06d612998c720702720fd6137e720c06d6147e721206d6157e720a06d6167e720906d6179c72117216d6189c72147216d1ededededededed93c27201c2a793e4c672010404720293b27203730800b27204730900938c7205018c720601938c7207018c72080193b17203730a9593720a730b95720e929c9c721072117e7202069c7ef07212069a9c72137e730c067e9c720d7e72020506929c9c721372147e7202069c7ef0720d069a9c72107e730d067e9c72127e7202050695ed720e917212730e907215a19d721772139d72187210ed9272179c721572139272189c7215721091720b730f640300010197f8ffffffffffff7f028e070104ce0f80c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986401025a00d3c57acd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ca7aca7a",
+      "input_boxes" : [
+        "8094ebdc0310100400040204020404040405feffffffffffffffff0105feffffffffffffffff010500040004000406050004d00f04d00f05000580dac409d818d601b2a5730000d602e4c6a70404d603db63087201d604db6308a7d605b27203730100d606b27204730200d607b27203730300d608b27204730400d6099973058c720602d60a999973068c7205027209d60bc17201d60cc1a7d60d99720b720cd60e91720d7307d60f8c720802d6107e720f06d6117e720d06d612998c720702720fd6137e720c06d6147e721206d6157e720a06d6167e720906d6179c72117216d6189c72147216d1ededededededed93c27201c2a793e4c672010404720293b27203730800b27204730900938c7205018c720601938c7207018c72080193b17203730a9593720a730b95720e929c9c721072117e7202069c7ef07212069a9c72137e730c067e9c720d7e72020506929c9c721372147e7202069c7ef0720d069a9c72107e730d067e9c72127e7202050695ed720e917212730e907215a19d721772139d72187210ed9272179c721572139272189c7215721091720b730f64030a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a010b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b97f8ffffffffffff7f0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0ce8070104ce0f010101010101010101010101010101010101010101010101010101010101010100",
+        "8084af5f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000020202020202020202020202020202020202020202020202020202020202020201"
+      ],
+      "data_boxes" : [
+      ],
+      "sigma_hex" : [
+        "d3",
+        "cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      ],
+      "input_costs" : [
+        15685,
+        15690
+      ],
+      "reduction_cost" : 15690,
+      "crypto_cost" : 398,
+      "scala_proofs" : [
+        "",
+        "9698ff92f0126cdd4fcbd2068601c760b05270078e07d8ad6a8003e4d2b30c9c2734b6ab464a92ebd59edca4a6f79516cb8ad7cef6c2e584"
+      ],
+      "unsigned_message_hex" : "02de50dc73f484efcd79287caa78193a8772c6596430e8e9d0a68c7f632ee52f3d0000a5a5dde833a45c4d70d69e5d06d25209d5a7a551834d0c3a892220a613329b92000000030a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0280d6c28c0410100400040204020404040405feffffffffffffffff0105feffffffffffffffff010500040004000406050004d00f04d00f05000580dac409d818d601b2a5730000d602e4c6a70404d603db63087201d604db6308a7d605b27203730100d606b27204730200d607b27203730300d608b27204730400d6099973058c720602d60a999973068c7205027209d60bc17201d60cc1a7d60d99720b720cd60e91720d7307d60f8c720802d6107e720f06d6117e720d06d612998c720702720fd6137e720c06d6147e721206d6157e720a06d6167e720906d6179c72117216d6189c72147216d1ededededededed93c27201c2a793e4c672010404720293b27203730800b27204730900938c7205018c720601938c7207018c72080193b17203730a9593720a730b95720e929c9c721072117e7202069c7ef07212069a9c72137e730c067e9c720d7e72020506929c9c721372147e7202069c7ef0720d069a9c72107e730d067e9c72127e7202050695ed720e917212730e907215a19d721772139d72187210ed9272179c721572139272189c7215721091720b730f640300010197f8ffffffffffff7f028e070104ce0f80c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986401025a00",
+      "transaction_id" : "693d4368ec7f3433293ff4e268d9af2102295c2f90124aa253e0df748f5acbe2",
+      "ergopay_uri" : "ergopay:iAUC3lDcc_SE7815KHyqeBk6h3LGWWQw6OnQpox_Yy7lLz0AAKWl3egzpFxNcNaeXQbSUgnVp6VRg00MOokiIKYTMpuSAAAAAwoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAKA1sKMBBAQBAAEAgQCBAQEBAX-__________8BBf7__________wEFAAQABAAEBgUABNAPBNAPBQAFgNrECdgY1gGypXMAANYC5ManBATWA9tjCHIB1gTbYwin1gWycgNzAQDWBrJyBHMCANYHsnIDcwMA1giycgRzBADWCZlzBYxyBgLWCpmZcwaMcgUCcgnWC8FyAdYMwafWDZlyC3IM1g6Rcg1zB9YPjHIIAtYQfnIPBtYRfnINBtYSmYxyBwJyD9YTfnIMBtYUfnISBtYVfnIKBtYWfnIJBtYXnHIRchbWGJxyFHIW0e3t7e3t7e2TwnIBwqeT5MZyAQQEcgKTsnIDcwgAsnIEcwkAk4xyBQGMcgYBk4xyBwGMcggBk7FyA3MKlZNyCnMLlXIOkpycchByEX5yAgacfvByEgaanHITfnMMBn6ccg1-cgIFBpKcnHITchR-cgIGnH7wcg0GmpxyEH5zDQZ-nHISfnICBQaV7XIOkXIScw6QchWhnXIXchOdchhyEO2SchecchVyE5JyGJxyFXIQkXILcw9kAwABAZf4________fwKOBwEEzg-AwtcvAAjNAnm-Zn753LusVaBilc6HCwcCm_zbLc4o2VnygVsW-BeYZAECWgDTxXrNAnm-Zn753LusVaBilc6HCwcCm_zbLc4o2VnygVsW-BeYynrKeg==",
+      "ergopay_request" : {
+        "reducedTx" : "iAUC3lDcc_SE7815KHyqeBk6h3LGWWQw6OnQpox_Yy7lLz0AAKWl3egzpFxNcNaeXQbSUgnVp6VRg00MOokiIKYTMpuSAAAAAwoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAKA1sKMBBAQBAAEAgQCBAQEBAX-__________8BBf7__________wEFAAQABAAEBgUABNAPBNAPBQAFgNrECdgY1gGypXMAANYC5ManBATWA9tjCHIB1gTbYwin1gWycgNzAQDWBrJyBHMCANYHsnIDcwMA1giycgRzBADWCZlzBYxyBgLWCpmZcwaMcgUCcgnWC8FyAdYMwafWDZlyC3IM1g6Rcg1zB9YPjHIIAtYQfnIPBtYRfnINBtYSmYxyBwJyD9YTfnIMBtYUfnISBtYVfnIKBtYWfnIJBtYXnHIRchbWGJxyFHIW0e3t7e3t7e2TwnIBwqeT5MZyAQQEcgKTsnIDcwgAsnIEcwkAk4xyBQGMcgYBk4xyBwGMcggBk7FyA3MKlZNyCnMLlXIOkpycchByEX5yAgacfvByEgaanHITfnMMBn6ccg1-cgIFBpKcnHITchR-cgIGnH7wcg0GmpxyEH5zDQZ-nHISfnICBQaV7XIOkXIScw6QchWhnXIXchOdchhyEO2SchecchVyE5JyGJxyFXIQkXILcw9kAwABAZf4________fwKOBwEEzg-AwtcvAAjNAnm-Zn753LusVaBilc6HCwcCm_zbLc4o2VnygVsW-BeYZAECWgDTxXrNAnm-Zn753LusVaBilc6HCwcCm_zbLc4o2VnygVsW-BeYynrKeg==",
+        "message" : "Fixture signing request",
+        "messageSeverity" : "INFORMATION",
+        "replyTo" : "https://example.invalid/reply"
+      },
+      "cold_request" : "{\"reducedTx\":\"iAUC3lDcc/SE7815KHyqeBk6h3LGWWQw6OnQpox/Yy7lLz0AAKWl3egzpFxNcNaeXQbSUgnVp6VRg00MOokiIKYTMpuSAAAAAwoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAKA1sKMBBAQBAAEAgQCBAQEBAX+//////////8BBf7//////////wEFAAQABAAEBgUABNAPBNAPBQAFgNrECdgY1gGypXMAANYC5ManBATWA9tjCHIB1gTbYwin1gWycgNzAQDWBrJyBHMCANYHsnIDcwMA1giycgRzBADWCZlzBYxyBgLWCpmZcwaMcgUCcgnWC8FyAdYMwafWDZlyC3IM1g6Rcg1zB9YPjHIIAtYQfnIPBtYRfnINBtYSmYxyBwJyD9YTfnIMBtYUfnISBtYVfnIKBtYWfnIJBtYXnHIRchbWGJxyFHIW0e3t7e3t7e2TwnIBwqeT5MZyAQQEcgKTsnIDcwgAsnIEcwkAk4xyBQGMcgYBk4xyBwGMcggBk7FyA3MKlZNyCnMLlXIOkpycchByEX5yAgacfvByEgaanHITfnMMBn6ccg1+cgIFBpKcnHITchR+cgIGnH7wcg0GmpxyEH5zDQZ+nHISfnICBQaV7XIOkXIScw6QchWhnXIXchOdchhyEO2SchecchVyE5JyGJxyFXIQkXILcw9kAwABAZf4////////fwKOBwEEzg+AwtcvAAjNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYZAECWgDTxXrNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYynrKeg==\",\"inputs\":[\"gJTr3AMQEAQABAIEAgQEBAQF/v//////////AQX+//////////8BBQAEAAQABAYFAATQDwTQDwUABYDaxAnYGNYBsqVzAADWAuTGpwQE1gPbYwhyAdYE22MIp9YFsnIDcwEA1gaycgRzAgDWB7JyA3MDANYIsnIEcwQA1gmZcwWMcgYC1gqZmXMGjHIFAnIJ1gvBcgHWDMGn1g2ZcgtyDNYOkXINcwfWD4xyCALWEH5yDwbWEX5yDQbWEpmMcgcCcg/WE35yDAbWFH5yEgbWFX5yCgbWFn5yCQbWF5xyEXIW1hicchRyFtHt7e3t7e3tk8JyAcKnk+TGcgEEBHICk7JyA3MIALJyBHMJAJOMcgUBjHIGAZOMcgcBjHIIAZOxcgNzCpWTcgpzC5VyDpKcnHIQchF+cgIGnH7wchIGmpxyE35zDAZ+nHINfnICBQaSnJxyE3IUfnICBpx+8HINBpqcchB+cw0GfpxyEn5yAgUGle1yDpFyEnMOkHIVoZ1yF3ITnXIYchDtknIXnHIVchOSchicchVyEJFyC3MPZAMKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgELCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLC5f4////////fwwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM6AcBBM4PAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEA\",\"gISvXwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAQ==\"]}",
+      "csr_qr_low_pages" : [
+        "{\"CSR\":\"{\\\"reducedTx\\\":\\\"iAUC3lDcc/SE7815KHyqeBk6h3LGWWQw6OnQpox/Yy7lLz0AAKWl3egzpFxNcNaeXQbSUgnVp6VRg00MOokiIKYTMpuSAAAAAwoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAKA1sKMBBAQBAAEAgQCBAQEBAX+//////////8BBf7//////////wEFAAQABAAEBgUABNAPBNAPBQAFgNrECdgY1gGypXMAANYC5ManBATWA9tjCHIB1gTbYwin1gWyc\",\"n\":5,\"p\":1}",
+        "{\"CSR\":\"gNzAQDWBrJyBHMCANYHsnIDcwMA1giycgRzBADWCZlzBYxyBgLWCpmZcwaMcgUCcgnWC8FyAdYMwafWDZlyC3IM1g6Rcg1zB9YPjHIIAtYQfnIPBtYRfnINBtYSmYxyBwJyD9YTfnIMBtYUfnISBtYVfnIKBtYWfnIJBtYXnHIRchbWGJxyFHIW0e3t7e3t7e2TwnIBwqeT5MZyAQQEcgKTsnIDcwgAsnIEcwkAk4xyBQGMcgYBk4xyBwGMcggBk7FyA3MKlZNyCnMLlXIOkpycchByEX5yAgacfvByEgaanHITfnMMBn6ccg1+cgIFBpKcnHITchR+cgIGnH7wcg0GmpxyEH5zDQZ+nHISfnICBQaV\",\"n\":5,\"p\":2}",
+        "{\"CSR\":\"7XIOkXIScw6QchWhnXIXchOdchhyEO2SchecchVyE5JyGJxyFXIQkXILcw9kAwABAZf4////////fwKOBwEEzg+AwtcvAAjNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYZAECWgDTxXrNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYynrKeg==\\\",\\\"inputs\\\":[\\\"gJTr3AMQEAQABAIEAgQEBAQF/v//////////AQX+//////////8BBQAEAAQABAYFAATQDwTQDwUABYDaxAnYGNYBsqVzAADWAuTGpwQE1gPbYwhyAdYE22MIp9YFsnIDcwEA1gaycgRzAgDWB7JyA3\",\"n\":5,\"p\":3}",
+        "{\"CSR\":\"MDANYIsnIEcwQA1gmZcwWMcgYC1gqZmXMGjHIFAnIJ1gvBcgHWDMGn1g2ZcgtyDNYOkXINcwfWD4xyCALWEH5yDwbWEX5yDQbWEpmMcgcCcg/WE35yDAbWFH5yEgbWFX5yCgbWFn5yCQbWF5xyEXIW1hicchRyFtHt7e3t7e3tk8JyAcKnk+TGcgEEBHICk7JyA3MIALJyBHMJAJOMcgUBjHIGAZOMcgcBjHIIAZOxcgNzCpWTcgpzC5VyDpKcnHIQchF+cgIGnH7wchIGmpxyE35zDAZ+nHINfnICBQaSnJxyE3IUfnICBpx+8HINBpqcchB+cw0GfpxyEn5yAgUGle1yDpFyEnMOkHIVoZ1yF3ITn\",\"n\":5,\"p\":4}",
+        "{\"CSR\":\"XIYchDtknIXnHIVchOSchicchVyEJFyC3MPZAMKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgELCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLC5f4////////fwwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM6AcBBM4PAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEA\\\",\\\"gISvXwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAQ==\\\"]}\",\"n\":5,\"p\":5}"
+      ],
+      "scala_signed_hex" : "02de50dc73f484efcd79287caa78193a8772c6596430e8e9d0a68c7f632ee52f3d0000a5a5dde833a45c4d70d69e5d06d25209d5a7a551834d0c3a892220a613329b92389698ff92f0126cdd4fcbd2068601c760b05270078e07d8ad6a8003e4d2b30c9c2734b6ab464a92ebd59edca4a6f79516cb8ad7cef6c2e5840000030a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0280d6c28c0410100400040204020404040405feffffffffffffffff0105feffffffffffffffff010500040004000406050004d00f04d00f05000580dac409d818d601b2a5730000d602e4c6a70404d603db63087201d604db6308a7d605b27203730100d606b27204730200d607b27203730300d608b27204730400d6099973058c720602d60a999973068c7205027209d60bc17201d60cc1a7d60d99720b720cd60e91720d7307d60f8c720802d6107e720f06d6117e720d06d612998c720702720fd6137e720c06d6147e721206d6157e720a06d6167e720906d6179c72117216d6189c72147216d1ededededededed93c27201c2a793e4c672010404720293b27203730800b27204730900938c7205018c720601938c7207018c72080193b17203730a9593720a730b95720e929c9c721072117e7202069c7ef07212069a9c72137e730c067e9c720d7e72020506929c9c721372147e7202069c7ef0720d069a9c72107e730d067e9c72127e7202050695ed720e917212730e907215a19d721772139d72187210ed9272179c721572139272189c7215721091720b730f640300010197f8ffffffffffff7f028e070104ce0f80c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986401025a00",
+      "appkit_signed_hex" : "02de50dc73f484efcd79287caa78193a8772c6596430e8e9d0a68c7f632ee52f3d0000a5a5dde833a45c4d70d69e5d06d25209d5a7a551834d0c3a892220a613329b92389698ff92f0126cdd4fcbd2068601c760b05270078e07d8ad6a8003e4d2b30c9c2734b6ab464a92ebd59edca4a6f79516cb8ad7cef6c2e5840000030a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0280d6c28c0410100400040204020404040405feffffffffffffffff0105feffffffffffffffff010500040004000406050004d00f04d00f05000580dac409d818d601b2a5730000d602e4c6a70404d603db63087201d604db6308a7d605b27203730100d606b27204730200d607b27203730300d608b27204730400d6099973058c720602d60a999973068c7205027209d60bc17201d60cc1a7d60d99720b720cd60e91720d7307d60f8c720802d6107e720f06d6117e720d06d612998c720702720fd6137e720c06d6147e721206d6157e720a06d6167e720906d6179c72117216d6189c72147216d1ededededededed93c27201c2a793e4c672010404720293b27203730800b27204730900938c7205018c720601938c7207018c72080193b17203730a9593720a730b95720e929c9c721072117e7202069c7ef07212069a9c72137e730c067e9c720d7e72020506929c9c721372147e7202069c7ef0720d069a9c72107e730d067e9c72127e7202050695ed720e917212730e907215a19d721772139d72187210ed9272179c721572139272189c7215721091720b730f640300010197f8ffffffffffff7f028e070104ce0f80c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986401025a008e03",
+      "cold_response" : "{\"signedTx\":\"At5Q3HP0hO/NeSh8qngZOodyxllkMOjp0KaMf2Mu5S89AAClpd3oM6RcTXDWnl0G0lIJ1aelUYNNDDqJIiCmEzKbkjiWmP+S8BJs3U/L0gaGAcdgsFJwB44H2K1qgAPk0rMMnCc0tqtGSpLr1Z7cpKb3lRbLitfO9sLlhAAAAwoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAKA1sKMBBAQBAAEAgQCBAQEBAX+//////////8BBf7//////////wEFAAQABAAEBgUABNAPBNAPBQAFgNrECdgY1gGypXMAANYC5ManBATWA9tjCHIB1gTbYwin1gWycgNzAQDWBrJyBHMCANYHsnIDcwMA1giycgRzBADWCZlzBYxyBgLWCpmZcwaMcgUCcgnWC8FyAdYMwafWDZlyC3IM1g6Rcg1zB9YPjHIIAtYQfnIPBtYRfnINBtYSmYxyBwJyD9YTfnIMBtYUfnISBtYVfnIKBtYWfnIJBtYXnHIRchbWGJxyFHIW0e3t7e3t7e2TwnIBwqeT5MZyAQQEcgKTsnIDcwgAsnIEcwkAk4xyBQGMcgYBk4xyBwGMcggBk7FyA3MKlZNyCnMLlXIOkpycchByEX5yAgacfvByEgaanHITfnMMBn6ccg1+cgIFBpKcnHITchR+cgIGnH7wcg0GmpxyEH5zDQZ+nHISfnICBQaV7XIOkXIScw6QchWhnXIXchOdchhyEO2SchecchVyE5JyGJxyFXIQkXILcw9kAwABAZf4////////fwKOBwEEzg+AwtcvAAjNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYZAECWgCOAw==\"}",
+      "cstx_qr_low_pages" : [
+        "{\"CSTX\":\"{\\\"signedTx\\\":\\\"At5Q3HP0hO/NeSh8qngZOodyxllkMOjp0KaMf2Mu5S89AAClpd3oM6RcTXDWnl0G0lIJ1aelUYNNDDqJIiCmEzKbkjiWmP+S8BJs3U/L0gaGAcdgsFJwB44H2K1qgAPk0rMMnCc0tqtGSpLr1Z7cpKb3lRbLitfO9sLlhAAAAwoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAKA1sKMBBAQBAAEAgQCBAQEBAX+//////////8BBf7//////////wEFA\",\"n\":3,\"p\":1}",
+        "{\"CSTX\":\"AQABAAEBgUABNAPBNAPBQAFgNrECdgY1gGypXMAANYC5ManBATWA9tjCHIB1gTbYwin1gWycgNzAQDWBrJyBHMCANYHsnIDcwMA1giycgRzBADWCZlzBYxyBgLWCpmZcwaMcgUCcgnWC8FyAdYMwafWDZlyC3IM1g6Rcg1zB9YPjHIIAtYQfnIPBtYRfnINBtYSmYxyBwJyD9YTfnIMBtYUfnISBtYVfnIKBtYWfnIJBtYXnHIRchbWGJxyFHIW0e3t7e3t7e2TwnIBwqeT5MZyAQQEcgKTsnIDcwgAsnIEcwkAk4xyBQGMcgYBk4xyBwGMcggBk7FyA3MKlZNyCnMLlXIOkpycchByEX5yAgacfvB\",\"n\":3,\"p\":2}",
+        "{\"CSTX\":\"yEgaanHITfnMMBn6ccg1+cgIFBpKcnHITchR+cgIGnH7wcg0GmpxyEH5zDQZ+nHISfnICBQaV7XIOkXIScw6QchWhnXIXchOdchhyEO2SchecchVyE5JyGJxyFXIQkXILcw9kAwABAZf4////////fwKOBwEEzg+AwtcvAAjNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYZAECWgCOAw==\\\"}\",\"n\":3,\"p\":3}"
+      ]
+    },
+    {
+      "name" : "ageusd_bank_mint",
+      "source" : "{ // this box\n  // R4: Number of stable-coins in circulation\n  // R5: Number of reserve-coins in circulation\n\n  val isExchange = if (CONTEXT.dataInputs.size > 0) {\n\n    val dataInput = CONTEXT.dataInputs(0)\n    val validDataInput = dataInput.tokens(0)._1 == oraclePoolNFT\n\n    val bankBoxIn = SELF\n    val bankBoxOut = OUTPUTS(0)\n\n    val rateBox = dataInput\n    val receiptBox = OUTPUTS(1)\n\n    val rate = rateBox.R4[Long].get / 100\n\n    val scCircIn = bankBoxIn.R4[Long].get\n    val rcCircIn = bankBoxIn.R5[Long].get\n    val bcReserveIn = bankBoxIn.value\n\n    val scTokensIn = bankBoxIn.tokens(0)._2\n    val rcTokensIn = bankBoxIn.tokens(1)._2\n\n    val scCircOut = bankBoxOut.R4[Long].get\n    val rcCircOut = bankBoxOut.R5[Long].get\n    val bcReserveOut = bankBoxOut.value\n\n    val scTokensOut = bankBoxOut.tokens(0)._2\n    val rcTokensOut = bankBoxOut.tokens(1)._2\n\n    val totalScIn = scTokensIn + scCircIn\n    val totalScOut = scTokensOut + scCircOut\n\n    val totalRcIn = rcTokensIn + rcCircIn\n    val totalRcOut = rcTokensOut + rcCircOut\n\n    val rcExchange = rcTokensIn != rcTokensOut\n    val scExchange = scTokensIn != scTokensOut\n\n    val rcExchangeXorScExchange = (rcExchange || scExchange) && !(rcExchange && scExchange)\n\n    val circDelta = receiptBox.R4[Long].get\n    val bcReserveDelta = receiptBox.R5[Long].get\n\n    val rcCircDelta = if (rcExchange) circDelta else 0L\n    val scCircDelta = if (rcExchange) 0L else circDelta\n\n    val validDeltas = (scCircIn + scCircDelta == scCircOut) &&\n                      (rcCircIn + rcCircDelta == rcCircOut) &&\n                      (bcReserveIn + bcReserveDelta == bcReserveOut) &&\n                      scCircOut >= 0 && rcCircOut >= 0\n\n    val coinsConserved = totalRcIn == totalRcOut && totalScIn == totalScOut\n\n    val tokenIdsConserved = bankBoxOut.tokens(0)._1 == bankBoxIn.tokens(0)._1 && // also ensures that at least one token exists\n                            bankBoxOut.tokens(1)._1 == bankBoxIn.tokens(1)._1 && // also ensures that at least one token exists\n                            bankBoxOut.tokens(2)._1 == bankBoxIn.tokens(2)._1    // also ensures that at least one token exists\n\n    val mandatoryRateConditions = rateBox.tokens(0)._1 == oraclePoolNFT\n    val mandatoryBankConditions = bankBoxOut.value >= 10000000L &&\n                                  bankBoxOut.propositionBytes == bankBoxIn.propositionBytes &&\n                                  rcExchangeXorScExchange &&\n                                  coinsConserved &&\n                                  validDeltas &&\n                                  tokenIdsConserved\n\n    // exchange equations\n    val bcReserveNeededOut = scCircOut * rate\n    val bcReserveNeededIn = scCircIn * rate\n    val liabilitiesIn = max(min(bcReserveIn, bcReserveNeededIn), 0)\n\n    val maxReserveRatioPercent = if (HEIGHT > 350000) defaultMaxReserveRatioPercent else 9223372036854775807L\n\n    val reserveRatioPercentOut = if (bcReserveNeededOut == 0) maxReserveRatioPercent else bcReserveOut * 100 / bcReserveNeededOut\n\n    val validReserveRatio = if (scExchange) {\n      if (scCircDelta > 0) {\n        reserveRatioPercentOut >= minReserveRatioPercent\n      } else true\n    } else {\n      if (rcCircDelta > 0) {\n        reserveRatioPercentOut <= maxReserveRatioPercent\n      } else {\n        reserveRatioPercentOut >= minReserveRatioPercent\n      }\n    }\n\n    val brDeltaExpected = if (scExchange) { // sc\n      val liableRate = if (scCircIn == 0) 9223372036854775807L else liabilitiesIn / scCircIn\n      val scNominalPrice = min(rate, liableRate)\n      scNominalPrice * scCircDelta\n    } else { // rc\n      val equityIn = bcReserveIn - liabilitiesIn\n      val equityRate = if (rcCircIn == 0) 1000000L else equityIn / rcCircIn\n      val rcNominalPrice = if (equityIn == 0) 1000000L else equityRate\n      rcNominalPrice * rcCircDelta\n    }\n\n    val fee = brDeltaExpected * 2 / 100\n\n    val actualFee = if (fee < 0) {fee * -1} else fee\n    // actualFee is always positive, irrespective of brDeltaExpected\n\n    val brDeltaExpectedWithFee = brDeltaExpected + actualFee\n\n    mandatoryRateConditions &&\n    mandatoryBankConditions &&\n    bcReserveDelta == brDeltaExpectedWithFee &&\n    validReserveRatio &&\n    validDataInput\n  } else false\n\n  sigmaProp(isExchange || INPUTS(0).tokens(0)._1 == updateNFT && CONTEXT.dataInputs.size == 0)\n}\n",
+      "reduced_hex" : "f70702d3bd4b3b828cf90742bcb9820fc1139028ec915ea53c2ccf95388037d01788fa000098c4c934cab1b2f1a448ddd1243be3a6584401966801a88cde62793cecc25ae20000014dc86deb80680cb5422f6d1663ce746cfdac6ac3e8ed9e8c4cf68e0f0bf1d356031e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f202020202020202020202020202020202020202020202020202020202020202002c0dbd9e103102c0400040004000e2014141414141414141414141414141414141414141414141414141414141414140400040204020400040004020500050005c8010500050005feffffffffffffffff0105000580897a05000580897a050405c80104e0dc2a05c00c05feffffffffffffffff01050005c8010580dac409050005000404040405000501050005a0060101050005a0060100040004000e2015151515151515151515151515151515151515151515151515151515151515150400d802d601db6501fed602b17201d1ec959172027300d821d603b27201730100d604938cb2db63087203730200017303d605b2a5730400d606c17205d607db6308a7d608b27207730500d6098c720802d60adb63087205d60bb2720a730600d60c8c720b02d60d947209720cd60eb27207730700d60f8c720e02d610b2720a730800d6118c721002d61294720f7211d613e4c6a70505d614e4c672050505d615e4c6a70405d616e4c672050405d617b2a5730900d618e4c672170405d61995720d730a7218d61a95720d7218730bd61bc1a7d61ce4c672170505d61d9de4c672030405730cd61ea2a1721b9c7215721d730dd61f9572129ca1721d95937215730e730f9d721e72157219d801d61f99721b721e9c9593721f7310731195937213731273139d721f7213721ad6209d9c721f73147315d6219c7216721dd6229591a3731673177318d62395937221731972229d9c7206731a7221edededed7204ededededed927206731b93c27205c2a7edec720d7212efed720d7212ed939a720972139a720c7214939a720f72159a72117216edededed939a721572197216939a7213721a7214939a721b721c7206927216731c927214731deded938c7210018c720e01938c720b018c720801938cb2720a731e00018cb27207731f000193721c9a721f958f722073209c722073217220957212959172197322927223732373249591721a73259072237222927223732672047327ed938cb2db6308b2a473280073290001732a937202732b640300de0701e80702010205dc0105c801c0bfb8090008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986401000a02051405808fdd09d3867ccd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817988b7c8b7c",
+      "input_boxes" : [
+        "8094ebdc03102c0400040004000e2014141414141414141414141414141414141414141414141414141414141414140400040204020400040004020500050005c8010500050005feffffffffffffffff0105000580897a05000580897a050405c80104e0dc2a05c00c05feffffffffffffffff01050005c8010580dac409050005000404040405000501050005a0060101050005a0060100040004000e2015151515151515151515151515151515151515151515151515151515151515150400d802d601db6501fed602b17201d1ec959172027300d821d603b27201730100d604938cb2db63087203730200017303d605b2a5730400d606c17205d607db6308a7d608b27207730500d6098c720802d60adb63087205d60bb2720a730600d60c8c720b02d60d947209720cd60eb27207730700d60f8c720e02d610b2720a730800d6118c721002d61294720f7211d613e4c6a70505d614e4c672050505d615e4c6a70405d616e4c672050405d617b2a5730900d618e4c672170405d61995720d730a7218d61a95720d7218730bd61bc1a7d61ce4c672170505d61d9de4c672030405730cd61ea2a1721b9c7215721d730dd61f9572129ca1721d95937215730e730f9d721e72157219d801d61f99721b721e9c9593721f7310731195937213731273139d721f7213721ad6209d9c721f73147315d6219c7216721dd6229591a3731673177318d62395937221731972229d9c7206731a7221edededed7204ededededed927206731b93c27205c2a7edec720d7212efed720d7212ed939a720972139a720c7214939a720f72159a72117216edededed939a721572197216939a7213721a7214939a721b721c7206927216731c927214731deded938c7210018c720e01938c720b018c720801938cb2720a731e00018cb27207731f000193721c9a721f958f722073209c722073217220957212959172197322927223732373249591721a73259072237222927223732672047327ed938cb2db6308b2a473280073290001732a937202732b64031e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1ee8071f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1fe8072020202020202020202020202020202020202020202020202020202020202020010205c80105c801010101010101010101010101010101010101010101010101010101010101010100",
+        "8087a70e0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000020202020202020202020202020202020202020202020202020202020202020201"
+      ],
+      "data_boxes" : [
+        "80c2d72f0008d3640114141414141414141414141414141414141414141414141414141414141414140101058084af5f030303030303030303030303030303030303030303030303030303030303030302"
+      ],
+      "sigma_hex" : [
+        "d3",
+        "cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      ],
+      "input_costs" : [
+        15878,
+        15883
+      ],
+      "reduction_cost" : 15883,
+      "crypto_cost" : 398,
+      "scala_proofs" : [
+        "",
+        "a8fb2fa2d812e5cac7096bfd90092ec5d003c1fd1f494afb8d710f56ae5582a142c26b3cafd6c6f0418211001b79eaf3f0e21bf758d4132b"
+      ],
+      "unsigned_message_hex" : "02d3bd4b3b828cf90742bcb9820fc1139028ec915ea53c2ccf95388037d01788fa000098c4c934cab1b2f1a448ddd1243be3a6584401966801a88cde62793cecc25ae20000014dc86deb80680cb5422f6d1663ce746cfdac6ac3e8ed9e8c4cf68e0f0bf1d356031e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f202020202020202020202020202020202020202020202020202020202020202002c0dbd9e103102c0400040004000e2014141414141414141414141414141414141414141414141414141414141414140400040204020400040004020500050005c8010500050005feffffffffffffffff0105000580897a05000580897a050405c80104e0dc2a05c00c05feffffffffffffffff01050005c8010580dac409050005000404040405000501050005a0060101050005a0060100040004000e2015151515151515151515151515151515151515151515151515151515151515150400d802d601db6501fed602b17201d1ec959172027300d821d603b27201730100d604938cb2db63087203730200017303d605b2a5730400d606c17205d607db6308a7d608b27207730500d6098c720802d60adb63087205d60bb2720a730600d60c8c720b02d60d947209720cd60eb27207730700d60f8c720e02d610b2720a730800d6118c721002d61294720f7211d613e4c6a70505d614e4c672050505d615e4c6a70405d616e4c672050405d617b2a5730900d618e4c672170405d61995720d730a7218d61a95720d7218730bd61bc1a7d61ce4c672170505d61d9de4c672030405730cd61ea2a1721b9c7215721d730dd61f9572129ca1721d95937215730e730f9d721e72157219d801d61f99721b721e9c9593721f7310731195937213731273139d721f7213721ad6209d9c721f73147315d6219c7216721dd6229591a3731673177318d62395937221731972229d9c7206731a7221edededed7204ededededed927206731b93c27205c2a7edec720d7212efed720d7212ed939a720972139a720c7214939a720f72159a72117216edededed939a721572197216939a7213721a7214939a721b721c7206927216731c927214731deded938c7210018c720e01938c720b018c720801938cb2720a731e00018cb27207731f000193721c9a721f958f722073209c722073217220957212959172197322927223732373249591721a73259072237222927223732672047327ed938cb2db6308b2a473280073290001732a937202732b640300de0701e80702010205dc0105c801c0bfb8090008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986401000a02051405808fdd09",
+      "transaction_id" : "8760c20e8e3e6d1d6815b2b35076e31f42390b4d1a8365a0b728bf840223c6cb",
+      "ergopay_uri" : "ergopay:9wcC071LO4KM-QdCvLmCD8ETkCjskV6lPCzPlTiAN9AXiPoAAJjEyTTKsbLxpEjd0SQ746ZYRAGWaAGojN5ieTzswlriAAABTcht64BoDLVCL20WY850bP2sasPo7Z6MTPaODwvx01YDHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAsDb2eEDECwEAAQABAAOIBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUBAAEAgQCBAAEAAQCBQAFAAXIAQUABQAF_v__________AQUABYCJegUABYCJegUEBcgBBODcKgXADAX-__________8BBQAFyAEFgNrECQUABQAEBAQEBQAFAQUABaAGAQEFAAWgBgEABAAEAA4gFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUEANgC1gHbZQH-1gKxcgHR7JWRcgJzANgh1gOycgFzAQDWBJOMsttjCHIDcwIAAXMD1gWypXMEANYGwXIF1gfbYwin1giycgdzBQDWCYxyCALWCttjCHIF1guycgpzBgDWDIxyCwLWDZRyCXIM1g6ycgdzBwDWD4xyDgLWELJyCnMIANYRjHIQAtYSlHIPchHWE-TGpwUF1hTkxnIFBQXWFeTGpwQF1hbkxnIFBAXWF7KlcwkA1hjkxnIXBAXWGZVyDXMKchjWGpVyDXIYcwvWG8Gn1hzkxnIXBQXWHZ3kxnIDBAVzDNYeoqFyG5xyFXIdcw3WH5VyEpyhch2Vk3IVcw5zD51yHnIVchnYAdYfmXIbch6clZNyH3MQcxGVk3ITcxJzE51yH3ITchrWIJ2cch9zFHMV1iGcchZyHdYilZGjcxZzF3MY1iOVk3IhcxlyIp2ccgZzGnIh7e3t7XIE7e3t7e2ScgZzG5PCcgXCp-3scg1yEu_tcg1yEu2TmnIJchOacgxyFJOacg9yFZpyEXIW7e3t7ZOachVyGXIWk5pyE3IachSTmnIbchxyBpJyFnMcknIUcx3t7ZOMchABjHIOAZOMcgsBjHIIAZOMsnIKcx4AAYyycgdzHwABk3IcmnIflY9yIHMgnHIgcyFyIJVyEpWRchlzIpJyI3MjcySVkXIacyWQciNyIpJyI3MmcgRzJ-2TjLLbYwiypHMoAHMpAAFzKpNyAnMrZAMA3gcB6AcCAQIF3AEFyAHAv7gJAAjNAnm-Zn753LusVaBilc6HCwcCm_zbLc4o2VnygVsW-BeYZAEACgIFFAWAj90J04Z8zQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmIt8i3w=",
+      "ergopay_request" : {
+        "reducedTx" : "9wcC071LO4KM-QdCvLmCD8ETkCjskV6lPCzPlTiAN9AXiPoAAJjEyTTKsbLxpEjd0SQ746ZYRAGWaAGojN5ieTzswlriAAABTcht64BoDLVCL20WY850bP2sasPo7Z6MTPaODwvx01YDHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAsDb2eEDECwEAAQABAAOIBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUBAAEAgQCBAAEAAQCBQAFAAXIAQUABQAF_v__________AQUABYCJegUABYCJegUEBcgBBODcKgXADAX-__________8BBQAFyAEFgNrECQUABQAEBAQEBQAFAQUABaAGAQEFAAWgBgEABAAEAA4gFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUEANgC1gHbZQH-1gKxcgHR7JWRcgJzANgh1gOycgFzAQDWBJOMsttjCHIDcwIAAXMD1gWypXMEANYGwXIF1gfbYwin1giycgdzBQDWCYxyCALWCttjCHIF1guycgpzBgDWDIxyCwLWDZRyCXIM1g6ycgdzBwDWD4xyDgLWELJyCnMIANYRjHIQAtYSlHIPchHWE-TGpwUF1hTkxnIFBQXWFeTGpwQF1hbkxnIFBAXWF7KlcwkA1hjkxnIXBAXWGZVyDXMKchjWGpVyDXIYcwvWG8Gn1hzkxnIXBQXWHZ3kxnIDBAVzDNYeoqFyG5xyFXIdcw3WH5VyEpyhch2Vk3IVcw5zD51yHnIVchnYAdYfmXIbch6clZNyH3MQcxGVk3ITcxJzE51yH3ITchrWIJ2cch9zFHMV1iGcchZyHdYilZGjcxZzF3MY1iOVk3IhcxlyIp2ccgZzGnIh7e3t7XIE7e3t7e2ScgZzG5PCcgXCp-3scg1yEu_tcg1yEu2TmnIJchOacgxyFJOacg9yFZpyEXIW7e3t7ZOachVyGXIWk5pyE3IachSTmnIbchxyBpJyFnMcknIUcx3t7ZOMchABjHIOAZOMcgsBjHIIAZOMsnIKcx4AAYyycgdzHwABk3IcmnIflY9yIHMgnHIgcyFyIJVyEpWRchlzIpJyI3MjcySVkXIacyWQciNyIpJyI3MmcgRzJ-2TjLLbYwiypHMoAHMpAAFzKpNyAnMrZAMA3gcB6AcCAQIF3AEFyAHAv7gJAAjNAnm-Zn753LusVaBilc6HCwcCm_zbLc4o2VnygVsW-BeYZAEACgIFFAWAj90J04Z8zQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmIt8i3w=",
+        "message" : "Fixture signing request",
+        "messageSeverity" : "INFORMATION",
+        "replyTo" : "https://example.invalid/reply"
+      },
+      "cold_request" : "{\"reducedTx\":\"9wcC071LO4KM+QdCvLmCD8ETkCjskV6lPCzPlTiAN9AXiPoAAJjEyTTKsbLxpEjd0SQ746ZYRAGWaAGojN5ieTzswlriAAABTcht64BoDLVCL20WY850bP2sasPo7Z6MTPaODwvx01YDHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAsDb2eEDECwEAAQABAAOIBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUBAAEAgQCBAAEAAQCBQAFAAXIAQUABQAF/v//////////AQUABYCJegUABYCJegUEBcgBBODcKgXADAX+//////////8BBQAFyAEFgNrECQUABQAEBAQEBQAFAQUABaAGAQEFAAWgBgEABAAEAA4gFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUEANgC1gHbZQH+1gKxcgHR7JWRcgJzANgh1gOycgFzAQDWBJOMsttjCHIDcwIAAXMD1gWypXMEANYGwXIF1gfbYwin1giycgdzBQDWCYxyCALWCttjCHIF1guycgpzBgDWDIxyCwLWDZRyCXIM1g6ycgdzBwDWD4xyDgLWELJyCnMIANYRjHIQAtYSlHIPchHWE+TGpwUF1hTkxnIFBQXWFeTGpwQF1hbkxnIFBAXWF7KlcwkA1hjkxnIXBAXWGZVyDXMKchjWGpVyDXIYcwvWG8Gn1hzkxnIXBQXWHZ3kxnIDBAVzDNYeoqFyG5xyFXIdcw3WH5VyEpyhch2Vk3IVcw5zD51yHnIVchnYAdYfmXIbch6clZNyH3MQcxGVk3ITcxJzE51yH3ITchrWIJ2cch9zFHMV1iGcchZyHdYilZGjcxZzF3MY1iOVk3IhcxlyIp2ccgZzGnIh7e3t7XIE7e3t7e2ScgZzG5PCcgXCp+3scg1yEu/tcg1yEu2TmnIJchOacgxyFJOacg9yFZpyEXIW7e3t7ZOachVyGXIWk5pyE3IachSTmnIbchxyBpJyFnMcknIUcx3t7ZOMchABjHIOAZOMcgsBjHIIAZOMsnIKcx4AAYyycgdzHwABk3IcmnIflY9yIHMgnHIgcyFyIJVyEpWRchlzIpJyI3MjcySVkXIacyWQciNyIpJyI3MmcgRzJ+2TjLLbYwiypHMoAHMpAAFzKpNyAnMrZAMA3gcB6AcCAQIF3AEFyAHAv7gJAAjNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYZAEACgIFFAWAj90J04Z8zQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmIt8i3w=\",\"inputs\":[\"gJTr3AMQLAQABAAEAA4gFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQEAAQCBAIEAAQABAIFAAUABcgBBQAFAAX+//////////8BBQAFgIl6BQAFgIl6BQQFyAEE4NwqBcAMBf7//////////wEFAAXIAQWA2sQJBQAFAAQEBAQFAAUBBQAFoAYBAQUABaAGAQAEAAQADiAVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFQQA2ALWAdtlAf7WArFyAdHslZFyAnMA2CHWA7JyAXMBANYEk4yy22MIcgNzAgABcwPWBbKlcwQA1gbBcgXWB9tjCKfWCLJyB3MFANYJjHIIAtYK22MIcgXWC7JyCnMGANYMjHILAtYNlHIJcgzWDrJyB3MHANYPjHIOAtYQsnIKcwgA1hGMchAC1hKUcg9yEdYT5ManBQXWFOTGcgUFBdYV5ManBAXWFuTGcgUEBdYXsqVzCQDWGOTGchcEBdYZlXINcwpyGNYalXINchhzC9YbwafWHOTGchcFBdYdneTGcgMEBXMM1h6ioXIbnHIVch1zDdYflXISnKFyHZWTchVzDnMPnXIechVyGdgB1h+ZchtyHpyVk3IfcxBzEZWTchNzEnMTnXIfchNyGtYgnZxyH3MUcxXWIZxyFnId1iKVkaNzFnMXcxjWI5WTciFzGXIinZxyBnMaciHt7e3tcgTt7e3t7ZJyBnMbk8JyBcKn7exyDXIS7+1yDXIS7ZOacglyE5pyDHIUk5pyD3IVmnIRchbt7e3tk5pyFXIZchaTmnITchpyFJOachtyHHIGknIWcxySchRzHe3tk4xyEAGMcg4Bk4xyCwGMcggBk4yycgpzHgABjLJyB3MfAAGTchyach+Vj3IgcyCcciBzIXIglXISlZFyGXMiknIjcyNzJJWRchpzJZByI3IiknIjcyZyBHMn7ZOMsttjCLKkcygAcykAAXMqk3ICcytkAx4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4e6AcfHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fH+gHICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICABAgXIAQXIAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAA==\",\"gIenDgAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAQ==\"]}",
+      "csr_qr_low_pages" : [
+        "{\"CSR\":\"{\\\"reducedTx\\\":\\\"9wcC071LO4KM+QdCvLmCD8ETkCjskV6lPCzPlTiAN9AXiPoAAJjEyTTKsbLxpEjd0SQ746ZYRAGWaAGojN5ieTzswlriAAABTcht64BoDLVCL20WY850bP2sasPo7Z6MTPaODwvx01YDHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAsDb2eEDECwEAAQABAAOIBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUBAAEAgQCBAAEAAQCBQAFA\",\"n\":8,\"p\":1}",
+        "{\"CSR\":\"AXIAQUABQAF/v//////////AQUABYCJegUABYCJegUEBcgBBODcKgXADAX+//////////8BBQAFyAEFgNrECQUABQAEBAQEBQAFAQUABaAGAQEFAAWgBgEABAAEAA4gFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUEANgC1gHbZQH+1gKxcgHR7JWRcgJzANgh1gOycgFzAQDWBJOMsttjCHIDcwIAAXMD1gWypXMEANYGwXIF1gfbYwin1giycgdzBQDWCYxyCALWCttjCHIF1guycgpzBgDWDIxyCwLWDZRyCXIM1g6ycgdzBwDWD4xyDgLWELJyCnMIANYRjHIQAtYSlHIPchHWE+TG\",\"n\":8,\"p\":2}",
+        "{\"CSR\":\"pwUF1hTkxnIFBQXWFeTGpwQF1hbkxnIFBAXWF7KlcwkA1hjkxnIXBAXWGZVyDXMKchjWGpVyDXIYcwvWG8Gn1hzkxnIXBQXWHZ3kxnIDBAVzDNYeoqFyG5xyFXIdcw3WH5VyEpyhch2Vk3IVcw5zD51yHnIVchnYAdYfmXIbch6clZNyH3MQcxGVk3ITcxJzE51yH3ITchrWIJ2cch9zFHMV1iGcchZyHdYilZGjcxZzF3MY1iOVk3IhcxlyIp2ccgZzGnIh7e3t7XIE7e3t7e2ScgZzG5PCcgXCp+3scg1yEu/tcg1yEu2TmnIJchOacgxyFJOacg9yFZpyEXIW7e3t7ZOachVyGXIWk5pyE3IachS\",\"n\":8,\"p\":3}",
+        "{\"CSR\":\"TmnIbchxyBpJyFnMcknIUcx3t7ZOMchABjHIOAZOMcgsBjHIIAZOMsnIKcx4AAYyycgdzHwABk3IcmnIflY9yIHMgnHIgcyFyIJVyEpWRchlzIpJyI3MjcySVkXIacyWQciNyIpJyI3MmcgRzJ+2TjLLbYwiypHMoAHMpAAFzKpNyAnMrZAMA3gcB6AcCAQIF3AEFyAHAv7gJAAjNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYZAEACgIFFAWAj90J04Z8zQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmIt8i3w=\\\",\\\"inputs\\\":[\\\"gJTr3AMQLAQABAAEAA4gFBQUFBQUF\",\"n\":8,\"p\":4}",
+        "{\"CSR\":\"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQEAAQCBAIEAAQABAIFAAUABcgBBQAFAAX+//////////8BBQAFgIl6BQAFgIl6BQQFyAEE4NwqBcAMBf7//////////wEFAAXIAQWA2sQJBQAFAAQEBAQFAAUBBQAFoAYBAQUABaAGAQAEAAQADiAVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFQQA2ALWAdtlAf7WArFyAdHslZFyAnMA2CHWA7JyAXMBANYEk4yy22MIcgNzAgABcwPWBbKlcwQA1gbBcgXWB9tjCKfWCLJyB3MFANYJjHIIAtYK22MIcgXWC7JyCnMGANYMjHILAtYNlHIJ\",\"n\":8,\"p\":5}",
+        "{\"CSR\":\"cgzWDrJyB3MHANYPjHIOAtYQsnIKcwgA1hGMchAC1hKUcg9yEdYT5ManBQXWFOTGcgUFBdYV5ManBAXWFuTGcgUEBdYXsqVzCQDWGOTGchcEBdYZlXINcwpyGNYalXINchhzC9YbwafWHOTGchcFBdYdneTGcgMEBXMM1h6ioXIbnHIVch1zDdYflXISnKFyHZWTchVzDnMPnXIechVyGdgB1h+ZchtyHpyVk3IfcxBzEZWTchNzEnMTnXIfchNyGtYgnZxyH3MUcxXWIZxyFnId1iKVkaNzFnMXcxjWI5WTciFzGXIinZxyBnMaciHt7e3tcgTt7e3t7ZJyBnMbk8JyBcKn7exyDXIS7+1yDXIS7ZO\",\"n\":8,\"p\":6}",
+        "{\"CSR\":\"acglyE5pyDHIUk5pyD3IVmnIRchbt7e3tk5pyFXIZchaTmnITchpyFJOachtyHHIGknIWcxySchRzHe3tk4xyEAGMcg4Bk4xyCwGMcggBk4yycgpzHgABjLJyB3MfAAGTchyach+Vj3IgcyCcciBzIXIglXISlZFyGXMiknIjcyNzJJWRchpzJZByI3IiknIjcyZyBHMn7ZOMsttjCLKkcygAcykAAXMqk3ICcytkAx4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4e6AcfHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fH+gHICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIC\",\"n\":8,\"p\":7}",
+        "{\"CSR\":\"ABAgXIAQXIAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAA==\\\",\\\"gIenDgAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAQ==\\\"]}\",\"n\":8,\"p\":8}"
+      ],
+      "scala_signed_hex" : "02d3bd4b3b828cf90742bcb9820fc1139028ec915ea53c2ccf95388037d01788fa000098c4c934cab1b2f1a448ddd1243be3a6584401966801a88cde62793cecc25ae238a8fb2fa2d812e5cac7096bfd90092ec5d003c1fd1f494afb8d710f56ae5582a142c26b3cafd6c6f0418211001b79eaf3f0e21bf758d4132b00014dc86deb80680cb5422f6d1663ce746cfdac6ac3e8ed9e8c4cf68e0f0bf1d356031e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f202020202020202020202020202020202020202020202020202020202020202002c0dbd9e103102c0400040004000e2014141414141414141414141414141414141414141414141414141414141414140400040204020400040004020500050005c8010500050005feffffffffffffffff0105000580897a05000580897a050405c80104e0dc2a05c00c05feffffffffffffffff01050005c8010580dac409050005000404040405000501050005a0060101050005a0060100040004000e2015151515151515151515151515151515151515151515151515151515151515150400d802d601db6501fed602b17201d1ec959172027300d821d603b27201730100d604938cb2db63087203730200017303d605b2a5730400d606c17205d607db6308a7d608b27207730500d6098c720802d60adb63087205d60bb2720a730600d60c8c720b02d60d947209720cd60eb27207730700d60f8c720e02d610b2720a730800d6118c721002d61294720f7211d613e4c6a70505d614e4c672050505d615e4c6a70405d616e4c672050405d617b2a5730900d618e4c672170405d61995720d730a7218d61a95720d7218730bd61bc1a7d61ce4c672170505d61d9de4c672030405730cd61ea2a1721b9c7215721d730dd61f9572129ca1721d95937215730e730f9d721e72157219d801d61f99721b721e9c9593721f7310731195937213731273139d721f7213721ad6209d9c721f73147315d6219c7216721dd6229591a3731673177318d62395937221731972229d9c7206731a7221edededed7204ededededed927206731b93c27205c2a7edec720d7212efed720d7212ed939a720972139a720c7214939a720f72159a72117216edededed939a721572197216939a7213721a7214939a721b721c7206927216731c927214731deded938c7210018c720e01938c720b018c720801938cb2720a731e00018cb27207731f000193721c9a721f958f722073209c722073217220957212959172197322927223732373249591721a73259072237222927223732672047327ed938cb2db6308b2a473280073290001732a937202732b640300de0701e80702010205dc0105c801c0bfb8090008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986401000a02051405808fdd09",
+      "appkit_signed_hex" : "02d3bd4b3b828cf90742bcb9820fc1139028ec915ea53c2ccf95388037d01788fa000098c4c934cab1b2f1a448ddd1243be3a6584401966801a88cde62793cecc25ae238a8fb2fa2d812e5cac7096bfd90092ec5d003c1fd1f494afb8d710f56ae5582a142c26b3cafd6c6f0418211001b79eaf3f0e21bf758d4132b00014dc86deb80680cb5422f6d1663ce746cfdac6ac3e8ed9e8c4cf68e0f0bf1d356031e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f202020202020202020202020202020202020202020202020202020202020202002c0dbd9e103102c0400040004000e2014141414141414141414141414141414141414141414141414141414141414140400040204020400040004020500050005c8010500050005feffffffffffffffff0105000580897a05000580897a050405c80104e0dc2a05c00c05feffffffffffffffff01050005c8010580dac409050005000404040405000501050005a0060101050005a0060100040004000e2015151515151515151515151515151515151515151515151515151515151515150400d802d601db6501fed602b17201d1ec959172027300d821d603b27201730100d604938cb2db63087203730200017303d605b2a5730400d606c17205d607db6308a7d608b27207730500d6098c720802d60adb63087205d60bb2720a730600d60c8c720b02d60d947209720cd60eb27207730700d60f8c720e02d610b2720a730800d6118c721002d61294720f7211d613e4c6a70505d614e4c672050505d615e4c6a70405d616e4c672050405d617b2a5730900d618e4c672170405d61995720d730a7218d61a95720d7218730bd61bc1a7d61ce4c672170505d61d9de4c672030405730cd61ea2a1721b9c7215721d730dd61f9572129ca1721d95937215730e730f9d721e72157219d801d61f99721b721e9c9593721f7310731195937213731273139d721f7213721ad6209d9c721f73147315d6219c7216721dd6229591a3731673177318d62395937221731972229d9c7206731a7221edededed7204ededededed927206731b93c27205c2a7edec720d7212efed720d7212ed939a720972139a720c7214939a720f72159a72117216edededed939a721572197216939a7213721a7214939a721b721c7206927216731c927214731deded938c7210018c720e01938c720b018c720801938cb2720a731e00018cb27207731f000193721c9a721f958f722073209c722073217220957212959172197322927223732373249591721a73259072237222927223732672047327ed938cb2db6308b2a473280073290001732a937202732b640300de0701e80702010205dc0105c801c0bfb8090008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986401000a02051405808fdd098e03",
+      "cold_response" : "{\"signedTx\":\"AtO9SzuCjPkHQry5gg/BE5Ao7JFepTwsz5U4gDfQF4j6AACYxMk0yrGy8aRI3dEkO+OmWEQBlmgBqIzeYnk87MJa4jio+y+i2BLlyscJa/2QCS7F0APB/R9JSvuNcQ9WrlWCoULCazyv1sbwQYIRABt56vPw4hv3WNQTKwABTcht64BoDLVCL20WY850bP2sasPo7Z6MTPaODwvx01YDHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAsDb2eEDECwEAAQABAAOIBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUBAAEAgQCBAAEAAQCBQAFAAXIAQUABQAF/v//////////AQUABYCJegUABYCJegUEBcgBBODcKgXADAX+//////////8BBQAFyAEFgNrECQUABQAEBAQEBQAFAQUABaAGAQEFAAWgBgEABAAEAA4gFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUEANgC1gHbZQH+1gKxcgHR7JWRcgJzANgh1gOycgFzAQDWBJOMsttjCHIDcwIAAXMD1gWypXMEANYGwXIF1gfbYwin1giycgdzBQDWCYxyCALWCttjCHIF1guycgpzBgDWDIxyCwLWDZRyCXIM1g6ycgdzBwDWD4xyDgLWELJyCnMIANYRjHIQAtYSlHIPchHWE+TGpwUF1hTkxnIFBQXWFeTGpwQF1hbkxnIFBAXWF7KlcwkA1hjkxnIXBAXWGZVyDXMKchjWGpVyDXIYcwvWG8Gn1hzkxnIXBQXWHZ3kxnIDBAVzDNYeoqFyG5xyFXIdcw3WH5VyEpyhch2Vk3IVcw5zD51yHnIVchnYAdYfmXIbch6clZNyH3MQcxGVk3ITcxJzE51yH3ITchrWIJ2cch9zFHMV1iGcchZyHdYilZGjcxZzF3MY1iOVk3IhcxlyIp2ccgZzGnIh7e3t7XIE7e3t7e2ScgZzG5PCcgXCp+3scg1yEu/tcg1yEu2TmnIJchOacgxyFJOacg9yFZpyEXIW7e3t7ZOachVyGXIWk5pyE3IachSTmnIbchxyBpJyFnMcknIUcx3t7ZOMchABjHIOAZOMcgsBjHIIAZOMsnIKcx4AAYyycgdzHwABk3IcmnIflY9yIHMgnHIgcyFyIJVyEpWRchlzIpJyI3MjcySVkXIacyWQciNyIpJyI3MmcgRzJ+2TjLLbYwiypHMoAHMpAAFzKpNyAnMrZAMA3gcB6AcCAQIF3AEFyAHAv7gJAAjNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYZAEACgIFFAWAj90JjgM=\"}",
+      "cstx_qr_low_pages" : [
+        "{\"CSTX\":\"{\\\"signedTx\\\":\\\"AtO9SzuCjPkHQry5gg/BE5Ao7JFepTwsz5U4gDfQF4j6AACYxMk0yrGy8aRI3dEkO+OmWEQBlmgBqIzeYnk87MJa4jio+y+i2BLlyscJa/2QCS7F0APB/R9JSvuNcQ9WrlWCoULCazyv1sbwQYIRABt56vPw4hv3WNQTKwABTcht64BoDLVCL20WY850bP2sasPo7Z6MTPaODwvx01YDHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgAsDb2eEDECwEA\",\"n\":4,\"p\":1}",
+        "{\"CSTX\":\"AQABAAOIBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUBAAEAgQCBAAEAAQCBQAFAAXIAQUABQAF/v//////////AQUABYCJegUABYCJegUEBcgBBODcKgXADAX+//////////8BBQAFyAEFgNrECQUABQAEBAQEBQAFAQUABaAGAQEFAAWgBgEABAAEAA4gFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUEANgC1gHbZQH+1gKxcgHR7JWRcgJzANgh1gOycgFzAQDWBJOMsttjCHIDcwIAAXMD1gWypXMEANYGwXIF1gfbYwin1giycgdzBQDWCYxyCALWCttjCHIF1guycgp\",\"n\":4,\"p\":2}",
+        "{\"CSTX\":\"zBgDWDIxyCwLWDZRyCXIM1g6ycgdzBwDWD4xyDgLWELJyCnMIANYRjHIQAtYSlHIPchHWE+TGpwUF1hTkxnIFBQXWFeTGpwQF1hbkxnIFBAXWF7KlcwkA1hjkxnIXBAXWGZVyDXMKchjWGpVyDXIYcwvWG8Gn1hzkxnIXBQXWHZ3kxnIDBAVzDNYeoqFyG5xyFXIdcw3WH5VyEpyhch2Vk3IVcw5zD51yHnIVchnYAdYfmXIbch6clZNyH3MQcxGVk3ITcxJzE51yH3ITchrWIJ2cch9zFHMV1iGcchZyHdYilZGjcxZzF3MY1iOVk3IhcxlyIp2ccgZzGnIh7e3t7XIE7e3t7e2ScgZzG5PCcgXCp\",\"n\":4,\"p\":3}",
+        "{\"CSTX\":\"+3scg1yEu/tcg1yEu2TmnIJchOacgxyFJOacg9yFZpyEXIW7e3t7ZOachVyGXIWk5pyE3IachSTmnIbchxyBpJyFnMcknIUcx3t7ZOMchABjHIOAZOMcgsBjHIIAZOMsnIKcx4AAYyycgdzHwABk3IcmnIflY9yIHMgnHIgcyFyIJVyEpWRchlzIpJyI3MjcySVkXIacyWQciNyIpJyI3MmcgRzJ+2TjLLbYwiypHMoAHMpAAFzKpNyAnMrZAMA3gcB6AcCAQIF3AEFyAHAv7gJAAjNAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYZAEACgIFFAWAj90JjgM=\\\"}\",\"n\":4,\"p\":4}"
+      ]
+    },
+    {
+      "name" : "zerojoin_full_mix_dht",
+      "source" : "{ val c1 = SELF.R4[GroupElement].get; val c2 = SELF.R5[GroupElement].get; proveDlog(c2) || proveDHTuple(c1, c1, c2, c2) }",
+      "reduced_hex" : "51010c4e55f812095d5b3fb14b731af3287beccc70ecaec8a07f77308293873a3844000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986400009702cd03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556ce02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee502c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee503fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a146029755603fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556db5edb5e",
+      "input_boxes" : [
+        "80c2d72f1000d802d601e4c6a70507d602e4c6a70407eb02cd7201ce72027202720172016400020702c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee50703fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556010101010101010101010101010101010101010101010101010101010101010100"
+      ],
+      "data_boxes" : [
+      ],
+      "sigma_hex" : [
+        "9702cd03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556ce02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee502c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee503fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a146029755603fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556"
+      ],
+      "input_costs" : [
+        12123
+      ],
+      "reduction_cost" : 12123,
+      "crypto_cost" : 1113,
+      "scala_proofs" : [
+        "c21af161acba83c1028fd55f1e090caaae1ff176aafcc67f2b7643f5b9cdae249908db1eb3d9d1ee5d5544772e36d255e7a0194eb54e9fe2264c6c575428b49ef7753bbb4f910bf8553e763303382c4fa5340409d2caac2bc13c4529305e67a1ea7c40d24515aa8824112e9936a45129"
+      ],
+      "unsigned_message_hex" : "010c4e55f812095d5b3fb14b731af3287beccc70ecaec8a07f77308293873a3844000000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "transaction_id" : "75114bc15e1369c2d5a432ed977886471d0ce7f8b1317a617d9f8e4307936267",
+      "ergopay_uri" : "ergopay:UQEMTlX4EgldWz-xS3Ma8yh77Mxw7K7IoH93MIKThzo4RAAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJcCzQP_-XvVdV7upCBFOhQ1UjXTgvZHL4VooYsvBXoUYCl1Vs4CxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUCxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUD__l71XVe7qQgRToUNVI104L2Ry-FaKGLLwV6FGApdVYD__l71XVe7qQgRToUNVI104L2Ry-FaKGLLwV6FGApdVbbXtte",
+      "ergopay_request" : {
+        "reducedTx" : "UQEMTlX4EgldWz-xS3Ma8yh77Mxw7K7IoH93MIKThzo4RAAAAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJcCzQP_-XvVdV7upCBFOhQ1UjXTgvZHL4VooYsvBXoUYCl1Vs4CxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUCxgR_lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUD__l71XVe7qQgRToUNVI104L2Ry-FaKGLLwV6FGApdVYD__l71XVe7qQgRToUNVI104L2Ry-FaKGLLwV6FGApdVbbXtte",
+        "message" : "Fixture signing request",
+        "messageSeverity" : "INFORMATION",
+        "replyTo" : "https://example.invalid/reply"
+      },
+      "cold_request" : "{\"reducedTx\":\"UQEMTlX4EgldWz+xS3Ma8yh77Mxw7K7IoH93MIKThzo4RAAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJcCzQP/+XvVdV7upCBFOhQ1UjXTgvZHL4VooYsvBXoUYCl1Vs4CxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUCxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUD//l71XVe7qQgRToUNVI104L2Ry+FaKGLLwV6FGApdVYD//l71XVe7qQgRToUNVI104L2Ry+FaKGLLwV6FGApdVbbXtte\",\"inputs\":[\"gMLXLxAA2ALWAeTGpwUH1gLkxqcEB+sCzXIBznICcgJyAXIBZAACBwLGBH+UQe19bTBFQG6VwHzYXHeOS4zvPKerrAm5XHCe5QcD//l71XVe7qQgRToUNVI104L2Ry+FaKGLLwV6FGApdVYBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQA=\"]}",
+      "csr_qr_low_pages" : [
+        "{\"CSR\":\"{\\\"reducedTx\\\":\\\"UQEMTlX4EgldWz+xS3Ma8yh77Mxw7K7IoH93MIKThzo4RAAAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAJcCzQP/+XvVdV7upCBFOhQ1UjXTgvZHL4VooYsvBXoUYCl1Vs4CxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUCxgR/lEHtfW0wRUBulcB82Fx3jkuM7zynq6wJuVxwnuUD//l71XVe7qQgRToUNVI104L2Ry+FaKGLLwV6FGApdVYD//l71XVe7qQgRToUNVI104L2Ry+FaKGLLwV6FGApdVbbXtte\\\",\\\"inputs\\\":[\\\"\",\"n\":2,\"p\":1}",
+        "{\"CSR\":\"gMLXLxAA2ALWAeTGpwUH1gLkxqcEB+sCzXIBznICcgJyAXIBZAACBwLGBH+UQe19bTBFQG6VwHzYXHeOS4zvPKerrAm5XHCe5QcD//l71XVe7qQgRToUNVI104L2Ry+FaKGLLwV6FGApdVYBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQA=\\\"]}\",\"n\":2,\"p\":2}"
+      ],
+      "scala_signed_hex" : "010c4e55f812095d5b3fb14b731af3287beccc70ecaec8a07f77308293873a384470c21af161acba83c1028fd55f1e090caaae1ff176aafcc67f2b7643f5b9cdae249908db1eb3d9d1ee5d5544772e36d255e7a0194eb54e9fe2264c6c575428b49ef7753bbb4f910bf8553e763303382c4fa5340409d2caac2bc13c4529305e67a1ea7c40d24515aa8824112e9936a451290000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "appkit_signed_hex" : "010c4e55f812095d5b3fb14b731af3287beccc70ecaec8a07f77308293873a384470c21af161acba83c1028fd55f1e090caaae1ff176aafcc67f2b7643f5b9cdae249908db1eb3d9d1ee5d5544772e36d255e7a0194eb54e9fe2264c6c575428b49ef7753bbb4f910bf8553e763303382c4fa5340409d2caac2bc13c4529305e67a1ea7c40d24515aa8824112e9936a451290000000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000d908",
+      "cold_response" : "{\"signedTx\":\"AQxOVfgSCV1bP7FLcxrzKHvszHDsrsigf3cwgpOHOjhEcMIa8WGsuoPBAo/VXx4JDKquH/F2qvzGfyt2Q/W5za4kmQjbHrPZ0e5dVUR3LjbSVeegGU61Tp/iJkxsV1QotJ73dTu7T5EL+FU+djMDOCxPpTQECdLKrCvBPEUpMF5noep8QNJFFaqIJBEumTakUSkAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAANkI\"}",
+      "cstx_qr_low_pages" : [
+        "{\"CSTX\":\"{\\\"signedTx\\\":\\\"AQxOVfgSCV1bP7FLcxrzKHvszHDsrsigf3cwgpOHOjhEcMIa8WGsuoPBAo/VXx4JDKquH/F2qvzGfyt2Q/W5za4kmQjbHrPZ0e5dVUR3LjbSVeegGU61Tp/iJkxsV1QotJ73dTu7T5EL+FU+djMDOCxPpTQECdLKrCvBPEUpMF5noep8QNJFFaqIJBEumTakUSkAAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAANkI\\\"}\"}"
+      ]
+    },
+    {
+      "name" : "context_extension",
+      "source" : "{ sigmaProp(getVar[Int](1).get == 42) && proveDlog(groupGenerator) }",
+      "reduced_hex" : "5401074952c57af2e8efe7fc99ad9b53e5611274219407aa9d3348f76934d15d9f50000101045400000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798cc5ecc5e",
+      "input_boxes" : [
+        "80c2d72f10010454ea02d193e4e301047300cddb6a01dd640000010101010101010101010101010101010101010101010101010101010101010100"
+      ],
+      "data_boxes" : [
+      ],
+      "sigma_hex" : [
+        "cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      ],
+      "input_costs" : [
+        12108
+      ],
+      "reduction_cost" : 12108,
+      "crypto_cost" : 398,
+      "scala_proofs" : [
+        "c4cf3ad7c8cdb02b4180520f9a77f1bcadc6ccef651ddac9e4ac209ec8cb489db7d7a90f1fb53347729d98cfab53b2938dccc30fb4889041"
+      ],
+      "unsigned_message_hex" : "01074952c57af2e8efe7fc99ad9b53e5611274219407aa9d3348f76934d15d9f50000101045400000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "transaction_id" : "105a7671b27bf57b391c4fa98da8947d592672a5c684e555d6d8fe035a6944e9",
+      "ergopay_uri" : "ergopay:VAEHSVLFevLo7-f8ma2bU-VhEnQhlAeqnTNI92k00V2fUAABAQRUAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb_NstzijZWfKBWxb4F5jMXsxe",
+      "ergopay_request" : {
+        "reducedTx" : "VAEHSVLFevLo7-f8ma2bU-VhEnQhlAeqnTNI92k00V2fUAABAQRUAAABgMLXLwAIzQJ5vmZ--dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb_NstzijZWfKBWxb4F5jMXsxe",
+        "message" : "Fixture signing request",
+        "messageSeverity" : "INFORMATION",
+        "replyTo" : "https://example.invalid/reply"
+      },
+      "cold_request" : "{\"reducedTx\":\"VAEHSVLFevLo7+f8ma2bU+VhEnQhlAeqnTNI92k00V2fUAABAQRUAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5jMXsxe\",\"inputs\":[\"gMLXLxABBFTqAtGT5OMBBHMAzdtqAd1kAAABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQA=\"]}",
+      "csr_qr_low_pages" : [
+        "{\"CSR\":\"{\\\"reducedTx\\\":\\\"VAEHSVLFevLo7+f8ma2bU+VhEnQhlAeqnTNI92k00V2fUAABAQRUAAABgMLXLwAIzQJ5vmZ++dy7rFWgYpXOhwsHApv82y3OKNlZ8oFbFvgXmGQAAM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5jMXsxe\\\",\\\"inputs\\\":[\\\"gMLXLxABBFTqAtGT5OMBBHMAzdtqAd1kAAABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQA=\\\"]}\"}"
+      ],
+      "scala_signed_hex" : "01074952c57af2e8efe7fc99ad9b53e5611274219407aa9d3348f76934d15d9f5038c4cf3ad7c8cdb02b4180520f9a77f1bcadc6ccef651ddac9e4ac209ec8cb489db7d7a90f1fb53347729d98cfab53b2938dccc30fb48890410101045400000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798640000",
+      "appkit_signed_hex" : "01074952c57af2e8efe7fc99ad9b53e5611274219407aa9d3348f76934d15d9f5038c4cf3ad7c8cdb02b4180520f9a77f1bcadc6ccef651ddac9e4ac209ec8cb489db7d7a90f1fb53347729d98cfab53b2938dccc30fb48890410101045400000180c2d72f0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817986400008e03",
+      "cold_response" : "{\"signedTx\":\"AQdJUsV68ujv5/yZrZtT5WESdCGUB6qdM0j3aTTRXZ9QOMTPOtfIzbArQYBSD5p38bytxszvZR3ayeSsIJ7Iy0idt9epDx+1M0dynZjPq1Oyk43Mww+0iJBBAQEEVAAAAYDC1y8ACM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5hkAACOAw==\"}",
+      "cstx_qr_low_pages" : [
+        "{\"CSTX\":\"{\\\"signedTx\\\":\\\"AQdJUsV68ujv5/yZrZtT5WESdCGUB6qdM0j3aTTRXZ9QOMTPOtfIzbArQYBSD5p38bytxszvZR3ayeSsIJ7Iy0idt9epDx+1M0dynZjPq1Oyk43Mww+0iJBBAQEEVAAAAYDC1y8ACM0Ceb5mfvncu6xVoGKVzocLBwKb/NstzijZWfKBWxb4F5hkAACOAw==\\\"}\"}"
+      ]
+    }
+  ]
+}

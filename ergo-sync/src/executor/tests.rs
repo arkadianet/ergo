@@ -374,7 +374,7 @@ fn too_deep_fork_sets_wedge_and_reagreement_clears_it() {
     assert!(executor.deep_fork_wedge().is_none());
     assert_eq!(
         executor
-            .rollback_full_chain_to_best_header(&mut store, &mut coordinator, None)
+            .rollback_full_chain_to_best_header(&mut store, &mut coordinator)
             .unwrap(),
         ReorgOutcome::TooDeep
     );
@@ -389,7 +389,7 @@ fn too_deep_fork_sets_wedge_and_reagreement_clears_it() {
     // aging honestly (mirrors the block-apply-error dedup contract).
     assert_eq!(
         executor
-            .rollback_full_chain_to_best_header(&mut store, &mut coordinator, None)
+            .rollback_full_chain_to_best_header(&mut store, &mut coordinator)
             .unwrap(),
         ReorgOutcome::TooDeep
     );
@@ -417,7 +417,7 @@ fn too_deep_fork_sets_wedge_and_reagreement_clears_it() {
     }
     assert_eq!(
         executor
-            .rollback_full_chain_to_best_header(&mut store, &mut coordinator, None)
+            .rollback_full_chain_to_best_header(&mut store, &mut coordinator)
             .unwrap(),
         ReorgOutcome::NotNeeded
     );
@@ -468,7 +468,7 @@ fn header_only_reorg_keeps_applied_chain_and_registers_fork_downloads() {
         executor.full_chain_fork_point(&store).unwrap(),
         ForkPoint::Found(1, common)
     );
-    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now());
     assert_eq!(store.chain_state_meta().best_full_block_id, old3);
     assert!(!store.is_invalid(&branch).unwrap());
     assert!(coordinator
@@ -759,7 +759,6 @@ fn batch_validation_rolls_back_hash_matching_malformed_headers() {
         &mut store,
         &mut coordinator,
         now,
-        None,
     );
 
     assert_eq!(
@@ -805,7 +804,6 @@ fn execute_penalize_returns_penalty() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
     assert_eq!(result.len(), 1);
     assert!(matches!(
@@ -844,7 +842,6 @@ fn execute_send_passes_through() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
     assert_eq!(result.len(), 1);
     assert!(matches!(result[0], Action::SendToPeer { .. }));
@@ -1517,12 +1514,7 @@ mod session_promotion {
             ProtocolParams::mainnet_default(),
             DifficultyParams::mainnet(),
         );
-        executor.try_apply_next_blocks(
-            &mut store,
-            &mut SyncCoordinator::new(0),
-            Instant::now(),
-            None,
-        );
+        executor.try_apply_next_blocks(&mut store, &mut SyncCoordinator::new(0), Instant::now());
         assert_eq!(store.chain_state_meta().best_header_id, id(2));
     }
 
@@ -1557,7 +1549,7 @@ mod session_promotion {
         assert!(store.is_durably_invalid(&id(1)).unwrap());
         assert_ne!(store.chain_state_meta().best_header_id, id(2));
         header(&mut store, 2, 0, 1, 1, false);
-        executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+        executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now());
         assert_eq!(store.chain_state_meta().best_header_id, id(2));
     }
 
@@ -1596,12 +1588,7 @@ mod session_promotion {
             ProtocolParams::mainnet_default(),
             DifficultyParams::mainnet(),
         );
-        executor.try_apply_next_blocks(
-            &mut store,
-            &mut SyncCoordinator::new(0),
-            Instant::now(),
-            None,
-        );
+        executor.try_apply_next_blocks(&mut store, &mut SyncCoordinator::new(0), Instant::now());
         assert_eq!(store.chain_state_meta().best_header_id, id(2));
     }
 
@@ -1656,8 +1643,7 @@ fn queued_body_actions_obey_current_executor_mode() {
                 },
                 &mut store,
                 &mut coordinator,
-                now,
-                None
+                now
             )
             .is_empty());
         assert!(executor
@@ -1665,8 +1651,7 @@ fn queued_body_actions_obey_current_executor_mode() {
                 Action::AssembleBlock { header_id: id(9) },
                 &mut store,
                 &mut coordinator,
-                now,
-                None
+                now
             )
             .is_empty());
         assert!(store.get_block_section(&section_id).unwrap().is_none());
@@ -1683,7 +1668,6 @@ fn queued_body_actions_obey_current_executor_mode() {
         &mut store,
         &mut coordinator,
         now,
-        None,
     );
     assert_eq!(store.get_block_section(&section_id).unwrap(), Some(bytes));
 }
@@ -2014,7 +1998,6 @@ fn sparse_popow_store_accepts_next_header_and_restarts() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
     assert!(
         !actions
@@ -2040,7 +2023,6 @@ fn sparse_popow_store_accepts_next_header_and_restarts() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
     assert_eq!(store.chain_state_meta().best_header_height, 9);
     assert_eq!(cached_heights(&restarted), vec![9, 8, 7, 6, 5]);
@@ -2067,7 +2049,6 @@ fn sparse_popow_store_accepts_next_header_batch() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
     assert!(
         !actions
@@ -2222,7 +2203,6 @@ fn sparse_store_header_fork_repair_never_walks_into_the_proof_prefix() {
                 &mut store,
                 &mut coordinator,
                 Instant::now(),
-                None,
             );
         }
         assert_eq!(store.chain_state_meta().best_header_height, 10);
@@ -2319,7 +2299,6 @@ fn local_header_failure_stops_single_header_validation() {
         &mut store,
         &mut SyncCoordinator::new(0),
         Instant::now(),
-        None,
     );
 }
 
@@ -2340,7 +2319,6 @@ fn local_header_failure_stops_batch_validation() {
         &mut store,
         &mut SyncCoordinator::new(0),
         Instant::now(),
-        None,
     );
 }
 
@@ -2375,7 +2353,6 @@ fn local_header_failure_stops_orphan_drain() {
         &mut store,
         &mut coordinator,
         Instant::now(),
-        None,
     );
 }
 

@@ -118,6 +118,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.2.17",
+ "password-hash",
+ "zeroize",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -749,6 +762,7 @@ dependencies = [
  "ergo-rest-json",
  "ergo-ser",
  "ergo-sigma",
+ "ergo-wallet-protocol",
  "futures-util",
  "hex",
  "hmac",
@@ -940,6 +954,8 @@ dependencies = [
  "ergo-sync",
  "ergo-validation",
  "ergo-wallet",
+ "ergo-wallet-protocol",
+ "ergo-wallet-service",
  "flate2",
  "fs4",
  "hex",
@@ -953,6 +969,7 @@ dependencies = [
  "redb 2.6.3",
  "redb 4.3.0",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1065,9 +1082,9 @@ dependencies = [
  "ergo-state",
  "ergo-validation",
  "ergo-wallet",
+ "ergo-wallet-service",
  "ergo_avltree_rust",
  "hex",
- "k256",
  "lru",
  "num-bigint",
  "proptest",
@@ -1139,14 +1156,15 @@ name = "ergo-wallet"
 version = "0.12.3"
 dependencies = [
  "aes-gcm",
+ "argon2",
  "assert_cmd",
+ "base64",
  "bip39",
  "clap",
+ "ergo-chain-spec",
  "ergo-primitives",
  "ergo-ser",
  "ergo-sigma",
- "ergo-state",
- "ergo-validation",
  "gf2_192",
  "hex",
  "hmac",
@@ -1164,6 +1182,93 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "ergo-wallet-protocol"
+version = "0.12.3"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ergo-wallet-service"
+version = "0.12.3"
+dependencies = [
+ "aes-gcm",
+ "async-trait",
+ "bincode",
+ "ergo-chain-spec",
+ "ergo-primitives",
+ "ergo-rest-json",
+ "ergo-ser",
+ "ergo-sigma",
+ "ergo-validation",
+ "ergo-wallet",
+ "ergo-wallet-protocol",
+ "hex",
+ "hmac",
+ "k256",
+ "parking_lot",
+ "rand 0.8.6",
+ "redb 2.6.3",
+ "redb 4.3.0",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "ergo-walletd"
+version = "0.12.3"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64",
+ "bincode",
+ "clap",
+ "ergo-api",
+ "ergo-chain-spec",
+ "ergo-crypto",
+ "ergo-mempool",
+ "ergo-mining",
+ "ergo-node",
+ "ergo-primitives",
+ "ergo-rest-json",
+ "ergo-ser",
+ "ergo-sigma",
+ "ergo-state",
+ "ergo-validation",
+ "ergo-wallet",
+ "ergo-wallet-protocol",
+ "ergo-wallet-service",
+ "hex",
+ "hyper",
+ "hyper-util",
+ "parking_lot",
+ "rand 0.8.6",
+ "redb 4.3.0",
+ "reqwest",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
  "zeroize",
 ]
 
@@ -1288,6 +1393,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -1295,6 +1401,12 @@ name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+
+[[package]]
+name = "futures-io"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cecba35d7ad927e23624b22ad55235f2239cfa44fd10428eecbeba6d6a717718"
 
 [[package]]
 name = "futures-macro"
@@ -1326,9 +1438,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
  "futures-core",
+ "futures-io",
  "futures-macro",
  "futures-sink",
  "futures-task",
+ "memchr",
  "pin-project-lite",
  "slab",
 ]
@@ -1985,6 +2099,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "pbkdf2"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2381,7 +2506,9 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",

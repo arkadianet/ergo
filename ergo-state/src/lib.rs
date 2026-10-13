@@ -150,23 +150,6 @@ pub mod test_helpers {
             self.apply_block_unchecked(height, header_id, expected_state_root, transactions)
         }
 
-        pub fn apply_block_unchecked_for_test_with_wallet(
-            &mut self,
-            height: u32,
-            header_id: &[u8; 32],
-            expected_state_root: &ADDigest,
-            transactions: &[Transaction],
-            wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
-        ) -> Result<(), StateError> {
-            self.apply_block_unchecked_with_wallet_for_test(
-                height,
-                header_id,
-                expected_state_root,
-                transactions,
-                wallet_hook,
-            )
-        }
-
         /// Same as `apply_block_unchecked_for_test` but lets the caller
         /// supply a `voted_params_row`, exercising the storage path that
         /// production block_proc uses on epoch-boundary blocks. Used by
@@ -200,46 +183,7 @@ pub mod test_helpers {
             expected_state_root: &ADDigest,
             checked: &[CheckedTransaction],
         ) -> Result<(), StateError> {
-            self.apply_checked_transactions(
-                height,
-                header_id,
-                expected_state_root,
-                checked,
-                None,
-                None,
-            )
-        }
-
-        /// Same as `apply_block_checked_for_test` but lets the caller
-        /// pass a wallet hook so the sync-path atomic wallet-apply
-        /// seam can be exercised end-to-end. Used by the M5 atomic-
-        /// commit tests.
-        pub fn apply_block_checked_for_test_with_wallet(
-            &mut self,
-            height: u32,
-            header_id: &[u8; 32],
-            expected_state_root: &ADDigest,
-            checked: &[CheckedTransaction],
-            wallet_hook: &dyn crate::wallet::WalletApplyHook,
-        ) -> Result<(), StateError> {
-            let trees = wallet_hook.tracked_p2pk_trees();
-            let pubkeys = wallet_hook.cached_pubkeys();
-            let owned = crate::store::build_wallet_block_txs_checked(checked, height)?;
-            let payload = crate::store::WalletApplyPayload {
-                tracked_p2pk_trees: trees,
-                cached_pubkeys: pubkeys,
-                block_txs_owned: owned,
-                scan_matches: Vec::new(),
-                has_registered_scans: false,
-            };
-            self.apply_checked_transactions(
-                height,
-                header_id,
-                expected_state_root,
-                checked,
-                None,
-                Some(&payload),
-            )
+            self.apply_checked_transactions(height, header_id, expected_state_root, checked, None)
         }
 
         /// Arm the Mode-2 trust-first-epoch sentinel directly. Production

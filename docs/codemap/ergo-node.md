@@ -1,21 +1,21 @@
 # ergo-node
 
-**Purpose:** The L7 binary + runtime crate. Wires every workspace component
-crate (state, p2p, sync, mempool, indexer, mining, wallet, api) into a single
-supervised `tokio` runtime, owns process-level lifecycle (config load, data-dir
-layout, genesis, graceful shutdown), runs the single-writer action loop, and
-exposes the node's behaviour to `ergo-api` through `Arc<dyn …>` trait bridges
-backed by a lock-free snapshot.
+**Purpose:** The binary and API-adapter runtime crate. Wires chain state, P2P,
+sync, mempool, mining, indexer and API into one supervised tokio process. It
+owns process lifecycle and the single-writer chain action loop. It hosts no
+wallet: it serves the chain API and private mining queue that `ergo-walletd`
+uses, and hands a wallet an earlier release left in `state.redb` to the daemon.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-chain-spec,
 ergo-crypto, ergo-validation, ergo-wallet, ergo-state, ergo-p2p, ergo-sync,
-ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
+ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma,
+ergo-wallet-service, ergo-wallet-protocol
 **Depended on by:** (see codemap index — top of the stack; nothing depends on it)
 
 ## Start here
 - `node::boot::run_inner` (`src/node/boot/mod.rs:185`) — the whole bring-up
   sequence: store/genesis/AVL, handshake + peer manager, sync executor +
-  coordinator, indexer, wallet boot, API bind, mining wire-up, action-loop
+  coordinator, indexer, legacy-wallet handoff, API bind, mining wire-up, action-loop
   spawn. Returns the live `RunHandle`. `run` (`:65`) wraps it with signals.
 - `node::action_loop::action_loop` (`src/node/action_loop.rs:41`) — the
   single-writer event loop: four timers (dial/sync/mempool/memory) + inbound
@@ -63,9 +63,15 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
 - `src/node/mining_dispatch.rs` / `mining_engine.rs` — bridge dispatch (serve
   cached candidate, apply submitted solution) + the off-loop candidate engine
   task fed `BuildIntent`s over a `watch` channel.
-- `src/node/wallet_bridge.rs` (+ `commands/`) — single-writer wallet task
-  (`run_wallet_writer`), `WalletCommand` enum, `NodeWalletAdmin` (`WalletAdmin`
-  impl), `ChainStateAccessor`, and the `WalletStateHook` chain-apply hook.
+- `src/node/wallet_bridge.rs` — node-side adapters for the wallet daemon:
+  `ChainStateAccessorImpl` (committed chain reads), the stored private mining
+  queue API, and the submodules below.
+- `src/node/wallet_bridge/chain_client.rs` — in-process chain protocol adapter
+  behind the `/api/v1/chain/*` routes the daemon syncs from.
+- `src/node/wallet_bridge/chain_snapshot.rs` — committed signing snapshot adapter.
+- `src/node/legacy_wallet.rs` — the legacy wallet an earlier release left in
+  `state.redb`: publishes the verified handoff copy at `data_dir/wallet-handoff/`
+  and resolves its first-address reward key for an unpinned miner.
 - `src/node/heartbeat.rs` — per-tick operator stderr heartbeat (diagnostics).
 - `src/node/snapshot_emit/mod.rs` / `snapshot_state.rs` — assemble `SnapshotParts`
   from `NodeState`; Mode-2 snapshot-server cache state.
@@ -91,14 +97,13 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
 - `src/genesis.rs` — genesis-box JSON loading for state init.
 - `src/anchor_map.rs` / `anchor_scheduler.rs` — REST-sourced header-anchor map
   (Step B observation) + per-peer SyncInfo crafting (Step C).
-- `src/wallet_boot.rs` — wallet unlock+hydrate+persist boot path; rescan flag.
 - `src/mem_*.rs` — optional memory-observability sampler (`ERGO_MEM_CSV`).
 
 ## Key types, traits & functions
 - `RunHandle` (struct) — live owned interface to a running node; `shutdown`/
   `Drop` enforce bounded graceful drain then durable close — `src/node/handle.rs:39`
 - `NodeState` (struct) — action-loop god-struct (store, sync, peers, mempool,
-  snapshot, wallet hook, bootstrap state machines) — `src/node/state.rs:73`
+  snapshot, bootstrap state machines) — `src/node/state.rs:73`
 - `run` / `run_inner` (async fn) — production entry / handle-returning entry —
   `src/node/boot/mod.rs:65` / `:185`
 - `action_loop` (async fn) — the single-writer select loop — `src/node/action_loop.rs:41`
@@ -112,8 +117,6 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
   `src/peer_loop.rs:21`
 - `MempoolNotifier` (struct) + `DiffSource` (trait) + `PollOutcome` (enum) —
   `src/notifier.rs:60/24/39`
-- `WalletCommand` (enum) + `NodeWalletAdmin` (struct) + `run_wallet_writer`
-  (async fn) + `WalletStateHook` (struct) — wallet single-writer — `src/node/wallet_bridge.rs:75/322/1245/1101`
 - `NodeConfig` / `StateType` (struct/enum) + `NodeConfig::load` — `src/config/resolved.rs` / `src/config/load.rs`
 - `NodeMode` (enum) + `classify_node_mode` / `validate_runtime_mode_support` —
   mode taxonomy + activation gate — `src/node/identity.rs:100/240/584`
@@ -123,7 +126,7 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
 ## Invariants & contracts
 - **Single-writer state.** All `StateStore` mutation and mempool mutation
   happen on the one action-loop task; the mempool needs no locking because it
-  is owned there. Cross-task work (API submit, mining, wallet) crosses bounded
+  is owned there. Cross-task work (API submit, mining) crosses bounded
   mpsc channels with per-request oneshot replies.
 - **Atomic durable shutdown.** Clean shutdown is bounded (5 s API drain cap)
   precisely so the action loop's terminal `StateStore::shutdown_cleanly()` runs
@@ -142,11 +145,6 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
   registered runtime from that IP — other ports and pending handshakes — is
   torn down, not just the penalized connection (`cleanup_banned_ip`,
   `src/node/peer_actions.rs:379`).
-- **Change-address updates are unlocked-only and ownership-checked.**
-  `WalletAdmin::update_change_address` requires an unlocked wallet and
-  re-derives the recorded path with the active master key before persisting, so
-  a change address can never point at a key this wallet cannot sign for
-  (`src/node/wallet_bridge/commands/admin.rs:419`).
 - **Anti-DoS recording survives a dropped reply.** A submission's mempool
   admission outcome is recorded even if the API handler already timed out and
   dropped its oneshot (`src/node/action_loop.rs:202`).
@@ -162,7 +160,6 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
   `Arc<ArcSwap<NodeSnapshot>>` rebuilt once per sync tick; snapshot construction
   is bounded and the recent-blocks tail is cached by full-block tip id
   (`src/snapshot/mod.rs`, `src/node/snapshot_emit/mod.rs`).
-- **Background-task leak safety.** `RunHandle::Drop` signals + aborts every
-  task it owns (action loop, API, inbound listener, indexer, anchor builder,
-  mining engine) and fires latched-watch cancels so a forgotten `shutdown()`
-  cannot leak tasks or bound ports (`src/node/handle.rs`).
+- **Supervised shutdown.** `RunHandle` signals the action loop to close the
+  store; `Drop` cancels or aborts its other background tasks, and explicit
+  `shutdown().await` provides the completion guarantee (`src/node/handle.rs`).

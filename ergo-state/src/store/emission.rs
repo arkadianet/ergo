@@ -681,7 +681,7 @@ mod tests {
         let a_id = box_id(&output_box(&a).unwrap()).unwrap();
         let branch_a = apply(&mut store, 2, vec![a], 2);
         let old_snapshot = store.committed_snapshot().unwrap().unwrap();
-        store.rollback_to(1, None, None).unwrap();
+        store.rollback_to(1).unwrap();
         assert_eq!(store.chain_state.best_full_block_id, common);
         assert_eq!(
             store.emission_identity(&common).unwrap(),
@@ -785,7 +785,7 @@ mod tests {
             }
             // Leave a persistence job in flight for rollback to flush.
             apply(&mut store, height + 2, vec![], 3);
-            store.rollback_to(height, None, None).unwrap();
+            store.rollback_to(height).unwrap();
             assert_eq!(store.chain_state.best_full_block_id, target);
             assert_eq!(
                 store.emission_identity(&target).unwrap(),

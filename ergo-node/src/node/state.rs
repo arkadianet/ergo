@@ -1,14 +1,13 @@
 //! `NodeState` — the runtime god-struct threaded through every
 //! action-loop handler. Owns the store, the sync coordinator +
 //! executor, the peer manager + per-peer outbound channels, the
-//! mempool, the snapshot publisher, the wallet apply hook, and every
-//! other piece of mutable runtime state the loop needs.
+//! mempool, the snapshot publisher, and every other piece of mutable
+//! runtime state the loop needs.
 //!
 //! `PeerRegistry` is the inner map of `PeerId → PeerRuntime` plus the
 //! `try_send(peer, code, payload)` accessor used by `send_to_peer`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 
 use ergo_indexer::IndexerHandle;
@@ -30,7 +29,6 @@ use crate::peer_loop::PeerEvent;
 use crate::snapshot::SnapshotPublisher;
 
 use super::snapshot_state;
-use super::wallet_bridge;
 
 // ---- Peer registry ----
 
@@ -352,13 +350,6 @@ pub(crate) struct NodeState {
     /// header chain), so the warning is emitted once per session and demoted
     /// to `debug` afterwards rather than filling the log every tick.
     pub(super) snapshot_anchor_refusal_warned: bool,
-    /// Production wallet apply hook. `Some` when the node runs with the
-    /// REST API enabled (which implies wallet subsystem boot). Called
-    /// from `sync_tick` after each block apply to keep wallet tables
-    /// up-to-date without coupling the sync layer to the wallet.
-    /// `None` in no-API / headers-only mode.
-    pub(super) wallet_rescan: Arc<crate::wallet_boot::RescanControl>,
-    pub(super) wallet_hook: Option<Arc<wallet_bridge::WalletStateHook>>,
     /// Mirrors "mining wiring exists" for the snapshot emitter (the wiring
     /// itself lives on the action loop, out of the emitter's reach).
     pub(super) mining_enabled: bool,

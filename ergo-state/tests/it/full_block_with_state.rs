@@ -255,7 +255,7 @@ fn full_block_pipeline_blocks_1_5() {
             });
 
         let tx_count = checked_block.transactions().len();
-        store.apply_block(&checked_block, None, None).unwrap();
+        store.apply_block(&checked_block, None).unwrap();
 
         validated += 1;
         eprintln!(

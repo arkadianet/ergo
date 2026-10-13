@@ -16,8 +16,6 @@ use crate::snapshot::NodeSnapshot;
 pub(crate) struct Dependencies {
     pub indexer_height: Option<u64>,
     pub indexer_healthy: bool,
-    pub wallet_height: Option<u32>,
-    pub wallet_healthy: bool,
 }
 
 pub struct PeerControlRequest {
@@ -28,7 +26,7 @@ pub struct PeerControlRequest {
     >,
 }
 
-type DependencyReader = Arc<dyn Fn(bool, bool) -> Dependencies + Send + Sync>;
+type DependencyReader = Arc<dyn Fn(bool) -> Dependencies + Send + Sync>;
 
 struct LiveConfig {
     revision: u64,
@@ -103,7 +101,6 @@ impl RuntimeControl {
                 "min_relay_fee_nano_erg": config.mempool_config.min_relay_fee_nano_erg,
                 "sort_policy": config.mempool_sort_policy,
             },
-            "wallet": {"expose_private_keys": config.wallet_expose_private_keys},
             "logging": {"default_level": config.logging.default_level, "modules": config.logging.modules},
         });
         Ok(Arc::new(Self {
@@ -239,12 +236,12 @@ impl RuntimeControl {
             &snapshot.tip.best_full_block.timestamp_unix_ms
         };
         let tip_age_ms = (*tip > 0).then(|| unix_ms.saturating_sub(*tip));
-        let deps = if live.policy.require_indexer || live.policy.require_wallet {
+        let deps = if live.policy.require_indexer {
             self.dependencies
                 .read()
                 .expect("probe dependencies poisoned")
                 .as_ref()
-                .map(|reader| reader(live.policy.require_indexer, live.policy.require_wallet))
+                .map(|reader| reader(live.policy.require_indexer))
                 .unwrap_or_default()
         } else {
             Dependencies::default()
@@ -260,11 +257,8 @@ impl RuntimeControl {
                 .require_indexer
                 .then_some(deps.indexer_height)
                 .flatten(),
-            wallet_height: live
-                .policy
-                .require_wallet
-                .then_some(deps.wallet_height)
-                .flatten(),
+            // The node hosts no wallet; `require_wallet` is ignored.
+            wallet_height: None,
         };
         let mut startup = report.clone();
         if heartbeat == 0 {
@@ -346,11 +340,6 @@ impl RuntimeControl {
             && (!deps.indexer_healthy || deps.indexer_height.is_none_or(|h| h < u64::from(height)))
         {
             readiness.reasons.push("indexer_not_ready".into());
-        }
-        if live.policy.require_wallet
-            && (!deps.wallet_healthy || deps.wallet_height.is_none_or(|h| h < height))
-        {
-            readiness.reasons.push("wallet_not_ready".into());
         }
         readiness.ready = readiness.reasons.is_empty();
         NodeProbes {
@@ -599,7 +588,7 @@ mod tests {
     fn probes_only_read_and_disclose_required_dependencies() {
         let control = RuntimeControl::new(&config()).unwrap();
         control.beat();
-        control.set_dependencies(Arc::new(|_, _| {
+        control.set_dependencies(Arc::new(|_| {
             panic!("optional dependencies must not be read")
         }));
         let snapshot = probe_snapshot();
@@ -609,12 +598,10 @@ mod tests {
         control
             .patch(serde_json::from_value(json!({"readiness":{"require_indexer":true}})).unwrap())
             .unwrap();
-        control.set_dependencies(Arc::new(|indexer, wallet| {
+        control.set_dependencies(Arc::new(|indexer| {
             assert!(indexer);
-            assert!(!wallet);
             Dependencies {
                 indexer_height: Some(10),
-                wallet_height: Some(12),
                 ..Default::default()
             }
         }));
@@ -628,7 +615,7 @@ mod tests {
         let control = RuntimeControl::new(&config()).unwrap();
         let dependency = Arc::new(());
         let weak = Arc::downgrade(&dependency);
-        control.set_dependencies(Arc::new(move |_, _| {
+        control.set_dependencies(Arc::new(move |_| {
             let _keep_alive = &dependency;
             Dependencies::default()
         }));
@@ -662,21 +649,19 @@ mod tests {
         snapshot.sync.recovery_done = true;
         snapshot.tip.best_full_block.height = 10;
         snapshot.tip.best_full_block.timestamp_unix_ms = 2_000_000;
-        control.set_dependencies(Arc::new(|_, _| Dependencies {
+        control.set_dependencies(Arc::new(|_| Dependencies {
             indexer_height: Some(9),
             indexer_healthy: true,
-            wallet_height: Some(10),
-            wallet_healthy: false,
         }));
         let report = control.probes_at(&snapshot, now, 2_000_000).readiness;
         assert!(report.reasons.contains(&"indexer_not_ready".into()));
-        assert!(report.reasons.contains(&"wallet_not_ready".into()));
+        // The node hosts no wallet: `require_wallet` never blocks readiness.
+        assert!(!report.reasons.contains(&"wallet_not_ready".into()));
+        assert!(report.wallet_height.is_none());
         assert!(control.probes_at(&snapshot, now, 2_000_000).liveness.ready);
-        control.set_dependencies(Arc::new(|_, _| Dependencies {
+        control.set_dependencies(Arc::new(|_| Dependencies {
             indexer_height: Some(10),
             indexer_healthy: true,
-            wallet_height: Some(10),
-            wallet_healthy: true,
         }));
         assert!(control.probes_at(&snapshot, now, 2_000_000).readiness.ready);
         snapshot.tip.best_full_block.timestamp_unix_ms = 1;

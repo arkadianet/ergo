@@ -5,13 +5,12 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use ergo_api::auth::ApiSecurity;
-use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+use ergo_api::server::{router_with_mempool_and_security, ServerCtx};
 use ergo_api::traits::{NodeReadState, NoopMempoolView};
 use ergo_api::types::{
     ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiPeer,
     ApiStatus, ApiSyncStatus, ApiTip,
 };
-use ergo_api::wallet::NoopWalletAdmin;
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
 
@@ -59,6 +58,7 @@ impl NodeReadState for UnusedReadState {
 
 fn app(local_reverse_proxy: bool) -> axum::Router {
     let ctx = ServerCtx {
+        wallet_chain: None,
         read: Arc::new(UnusedReadState),
         compat: None,
         submit: None,
@@ -67,6 +67,7 @@ fn app(local_reverse_proxy: bool) -> axum::Router {
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: None,
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
@@ -81,12 +82,7 @@ fn app(local_reverse_proxy: bool) -> axum::Router {
         )
         .expect("valid api key hash"),
     );
-    router_with_mempool_and_wallet_and_security(
-        ctx,
-        None,
-        Arc::new(NoopWalletAdmin),
-        Some(security),
-    )
+    router_with_mempool_and_security(ctx, None, Some(security))
 }
 
 fn request(peer: SocketAddr, forwarded_for: &str) -> Request<Body> {

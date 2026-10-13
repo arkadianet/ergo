@@ -8,10 +8,9 @@ use axum::{
 use ergo_api::{
     auth::{ApiSecurity, API_KEY_HEADER},
     mining::{MiningApiError, NodeMining},
-    server::{router_with_mempool_and_wallet_and_security, ServerCtx},
+    server::{router_with_mempool_and_security, ServerCtx},
     traits::{NodeAdmin, NodeSubmit, NoopMempoolView, VotingControlError},
     types::{SubmitError, SubmitMode},
-    wallet::{admin_advanced, multi_sig, sending, types, WalletAdmin, WalletAdminError},
 };
 use ergo_rest_json::mining::{AutolykosSolutionJson, WorkMessageJson};
 use ergo_ser::address::NetworkPrefix;
@@ -99,184 +98,9 @@ impl NodeSubmit for Dispatch {
         Ok("accepted".into())
     }
 }
-#[async_trait]
-impl WalletAdmin for Dispatch {
-    async fn status(&self) -> Result<types::WalletStatus, WalletAdminError> {
-        self.record();
-        Ok(types::WalletStatus::default())
-    }
-
-    async fn init(
-        &self,
-        _pass: String,
-        _mnemonic_pass: String,
-        _strength_words: u8,
-    ) -> Result<String, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn restore(
-        &self,
-        _mnemonic: String,
-        _mnemonic_pass: String,
-        _pass: String,
-        _use_pre_1627: bool,
-    ) -> Result<(), WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn unlock(&self, _pass: String) -> Result<(), WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn lock(&self) -> Result<(), WalletAdminError> {
-        self.record();
-        Ok(())
-    }
-
-    async fn check(
-        &self,
-        _mnemonic: String,
-        _mnemonic_pass: String,
-    ) -> Result<bool, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn rescan(&self, _from_height: u32) -> Result<(), WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn update_change_address(&self, _address: String) -> Result<(), WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn balances(&self) -> Result<types::WalletBalances, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn balances_with_unconfirmed(&self) -> Result<types::WalletBalances, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn addresses(&self) -> Result<types::WalletAddressList, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn boxes(&self, _page: types::Page) -> Result<types::WalletBoxesPage, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn boxes_unspent(
-        &self,
-        _page: types::Page,
-    ) -> Result<types::WalletBoxesPage, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn transactions(
-        &self,
-        _page: types::Page,
-    ) -> Result<types::WalletTransactionsPage, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn transaction_by_id(
-        &self,
-        _tx_id_hex: String,
-    ) -> Result<Option<types::WalletTransactionEntry>, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn transactions_by_scan_id(
-        &self,
-        _scan_id: u32,
-        _page: types::Page,
-    ) -> Result<types::WalletTransactionsPage, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn payment_send(
-        &self,
-        _requests: Vec<sending::PaymentRequestDto>,
-    ) -> Result<String, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn transaction_generate(
-        &self,
-        _request: sending::TransactionGenerateRequest,
-    ) -> Result<sending::TransactionGenerateResponse, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn transaction_generate_unsigned(
-        &self,
-        _request: sending::TransactionGenerateUnsignedRequest,
-    ) -> Result<sending::TransactionGenerateUnsignedResponse, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn transaction_sign(
-        &self,
-        _request: sending::TransactionSignRequest,
-    ) -> Result<sending::TransactionSignResponse, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn transaction_send(
-        &self,
-        _request: sending::TransactionSendRequest,
-    ) -> Result<String, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn boxes_collect(
-        &self,
-        _request: sending::BoxesCollectRequest,
-    ) -> Result<sending::BoxesCollectResponse, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn generate_commitments(
-        &self,
-        _request: multi_sig::GenerateCommitmentsRequest,
-    ) -> Result<multi_sig::GenerateCommitmentsResponse, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn extract_hints(
-        &self,
-        _request: multi_sig::HintExtractionRequest,
-    ) -> Result<multi_sig::HintExtractionResponse, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn derive_key(
-        &self,
-        _request: admin_advanced::DeriveKeyRequest,
-    ) -> Result<admin_advanced::DeriveKeyResponse, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn derive_next_key(
-        &self,
-    ) -> Result<admin_advanced::DeriveNextKeyResponse, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-
-    async fn get_private_key(
-        &self,
-        _request: admin_advanced::GetPrivateKeyRequest,
-    ) -> Result<admin_advanced::GetPrivateKeyResponse, WalletAdminError> {
-        unreachable!("unexpected wallet dispatch")
-    }
-    async fn deregister_scan(&self, _: u16) -> Result<(), WalletAdminError> {
-        self.record();
-        Ok(())
-    }
-}
 fn app(configured: bool, dispatch: Arc<Dispatch>) -> axum::Router {
     let ctx = ServerCtx {
+        wallet_chain: None,
         read: Arc::new(StubReadState),
         compat: Some(Arc::new(StubCompat)),
         submit: Some(dispatch.clone()),
@@ -285,6 +109,7 @@ fn app(configured: bool, dispatch: Arc<Dispatch>) -> axum::Router {
         network: NetworkPrefix::Mainnet,
         chain_params: None,
         mining: Some(dispatch.clone()),
+        private_queue: None,
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
@@ -293,10 +118,9 @@ fn app(configured: bool, dispatch: Arc<Dispatch>) -> axum::Router {
         script_config: Default::default(),
         block_batch: Default::default(),
     };
-    router_with_mempool_and_wallet_and_security(
+    router_with_mempool_and_security(
         ctx,
-        Some(dispatch.clone()),
-        dispatch,
+        Some(dispatch),
         configured.then(|| Arc::new(ApiSecurity::new(SCALA_HELLO_HASH.into()).unwrap())),
     )
 }
@@ -316,15 +140,6 @@ const ROUTES: &[(&str, &str, &str, StatusCode)] = &[
         r#"{"votes":[]}"#,
         StatusCode::NO_CONTENT,
     ),
-    ("GET", "/wallet/status", "", StatusCode::OK),
-    ("GET", "/wallet/lock", "", StatusCode::OK),
-    (
-        "POST",
-        "/scan/deregister",
-        r#"{"scanId":11}"#,
-        StatusCode::OK,
-    ),
-    ("POST", "/api/v1/wallet/lock", "", StatusCode::OK),
     (
         "GET",
         "/mining/candidate",

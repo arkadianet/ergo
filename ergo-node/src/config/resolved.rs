@@ -262,12 +262,9 @@ pub struct NodeConfig {
     /// builder casts at most `ParamVotesCount` (2) votes per block toward
     /// these targets. Non-empty only when `[mining] enabled = true`.
     pub voting_targets: std::collections::BTreeMap<u8, i64>,
-    /// `[wallet] expose_private_keys`: when `true`, the
-    /// `POST /wallet/getPrivateKey` route returns the derived secret
-    /// scalar for an address. Default `false` — the route otherwise
-    /// returns `403 Forbidden`. Threaded into the wallet writer task's
-    /// `WriterConfig` at boot.
-    pub wallet_expose_private_keys: bool,
+    /// `[wallet] daemon_address`: where the wallet daemon serves, returned by
+    /// the node's wallet routes (`410 wallet_moved`). The node hosts no wallet.
+    pub wallet_daemon_address: String,
     /// Step C — when `true`, the per-peer SyncInfo dispatch swaps
     /// our recent-header-tail `lastHeaderIds` for a single anchor ID
     /// drawn from the REST-built `AnchorMap` whenever the peer is

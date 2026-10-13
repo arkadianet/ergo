@@ -155,6 +155,16 @@ Private-key export is off by default: `POST /wallet/getPrivateKey` returns
 `403 Forbidden` unless the operator has explicitly set
 `[wallet] expose_private_keys = true`.
 
+Multisig signing nonces stay in `ergo-walletd` by default. A Schnorr
+signature made with a nonce someone else knows, or with one nonce for two
+messages, reveals the signing key. So `POST /wallet/generateCommitments`
+returns a single-use handle, bound to its input and public commitment, in
+place of each secret nonce, and `POST /wallet/transaction/sign` refuses a
+caller-supplied nonce for a key the wallet holds. Handles live only in
+memory, expire after an hour and are wiped when the wallet locks.
+`[security] multisig_nonces = "caller"` restores the Scala form for old
+clients; the daemon logs a warning at start when it is set.
+
 ### This is pre-stable software that can move funds
 
 The wallet can hold keys and broadcast spends, and the node validates

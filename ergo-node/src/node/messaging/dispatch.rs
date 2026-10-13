@@ -197,22 +197,9 @@ pub(in crate::node) fn handle_message(
                     state
                         .coordinator
                         .on_sync_info(peer, sv, &sync_info, &state.store, now);
-                let rescan_guard = state.wallet_rescan.as_ref();
-                let wallet_wiring =
-                    state
-                        .wallet_hook
-                        .as_deref()
-                        .map(|h| ergo_state::wallet::WalletWiring {
-                            hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-                            rescan_guard,
-                        });
-                state.executor.execute_all(
-                    actions,
-                    &mut state.store,
-                    &mut state.coordinator,
-                    now,
-                    wallet_wiring,
-                )
+                state
+                    .executor
+                    .execute_all(actions, &mut state.store, &mut state.coordinator, now)
             }
             Err(e) => {
                 warn!(peer = %peer, error = %e, "bad SyncInfo");
@@ -727,22 +714,9 @@ fn handle_inv(state: &mut NodeState, peer: PeerId, inv: InvData, now: Instant) -
         // harmless losers in a race for fastest
         // delivery.
         let actions = hedge_request_modifiers(state, actions, peer);
-        let rescan_guard = state.wallet_rescan.as_ref();
-        let wallet_wiring =
-            state
-                .wallet_hook
-                .as_deref()
-                .map(|h| ergo_state::wallet::WalletWiring {
-                    hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-                    rescan_guard,
-                });
-        state.executor.execute_all(
-            actions,
-            &mut state.store,
-            &mut state.coordinator,
-            now,
-            wallet_wiring,
-        )
+        state
+            .executor
+            .execute_all(actions, &mut state.store, &mut state.coordinator, now)
     }
 }
 
@@ -882,21 +856,10 @@ fn handle_modifier_batch(
     let cs_before = state.store.chain_state_meta();
     let fb_before = cs_before.best_full_block_height;
 
-    let rescan_guard = state.wallet_rescan.as_ref();
-    let wallet_wiring = state
-        .wallet_hook
-        .as_deref()
-        .map(|h| ergo_state::wallet::WalletWiring {
-            hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-            rescan_guard,
-        });
-    let mut all_actions = state.executor.execute_all(
-        batch_actions,
-        &mut state.store,
-        &mut state.coordinator,
-        now,
-        wallet_wiring,
-    );
+    let mut all_actions =
+        state
+            .executor
+            .execute_all(batch_actions, &mut state.store, &mut state.coordinator, now);
 
     let cs_after = state.store.chain_state_meta();
     let bh = cs_after.best_header_height;

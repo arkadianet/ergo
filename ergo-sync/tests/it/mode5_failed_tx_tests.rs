@@ -16,7 +16,7 @@ fn executor() -> SyncExecutor {
 
 fn apply_first(executor: &mut SyncExecutor, backend: &mut StateBackendKind) {
     let mut coordinator = SyncCoordinator::new(APPLY_LO - 1);
-    executor.try_apply_next_blocks(backend, &mut coordinator, std::time::Instant::now(), None);
+    executor.try_apply_next_blocks(backend, &mut coordinator, std::time::Instant::now());
     assert_eq!(
         backend.chain_state_meta().best_full_block_height,
         APPLY_LO - 1
@@ -51,7 +51,6 @@ fn digest_valid_proofs_transaction_failure_queues_exact_id_and_durably_invalidat
         &mut backend,
         &row.header_id,
         &ProtocolParams::mainnet_default(),
-        None,
         None,
         None,
         None,
