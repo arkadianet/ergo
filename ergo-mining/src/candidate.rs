@@ -57,6 +57,19 @@ use std::collections::{BTreeMap, HashSet};
 /// decrease and id-9 votes; while active only `{1..=8, 120}` are accepted.
 const RULE_HDR_VOTES_UNKNOWN: u16 = 215;
 
+/// User txs trimmed, at most, when the fee tx fails validation before the
+/// candidate is built without fee collection. `build_fee_tx` already keeps
+/// the fee box within the box limits, so a failure that survives a few trims
+/// does not come from the trimmed txs' fee outputs.
+const MAX_FEE_TX_TRIMS: usize = 3;
+
+/// After a fee tx validation failure: `true` to trim the lowest-priority user
+/// tx and retry, `false` to build without fee collection. Prioritized txs
+/// are never trimmed for this reason.
+fn trim_after_fee_tx_failure(user_txs: usize, prioritized: usize, trims_done: usize) -> bool {
+    user_txs > prioritized && trims_done < MAX_FEE_TX_TRIMS
+}
+
 use crate::candidate_proof::upcoming_transactions_proof;
 use crate::candidate_selection::{
     rent_protection, select_requested_txs_cancellable, select_user_txs_with_policy_cancellable,
@@ -968,16 +981,21 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         //     `max_block_cost`. The fee tx is validated against a FRESH overlay
         //     rebuilt from the kept set, so a trimmed tx never leaves a stale
         //     spend behind. A fee tx that fails validation trims the same way
-        //     (reason `fee_collection_invalid`) instead of failing the build.
+        //     (reason `fee_collection_invalid`), at most MAX_FEE_TX_TRIMS
+        //     times, and then builds without fee collection instead of
+        //     failing the build.
         observation.excluded.extend(selected.excluded);
         let required_ids = selected.required;
         let mut user_checked = priority.checked;
         user_checked.extend(selected.checked);
         let cost_ceiling = max_block_cost.saturating_sub(safety_gap);
-        // Set once the fee tx fails validation with nothing left to trim: the
-        // block is then built without fee collection (the fee boxes stay
-        // unspent) rather than not at all.
+        // Set once the fee tx fails validation with nothing left to trim, or
+        // after MAX_FEE_TX_TRIMS trims did not fix it: the block is then built
+        // without fee collection (the fee boxes stay unspent) rather than not
+        // at all. The cap keeps a failure that no user tx causes from
+        // trimming every optional tx, one full rebuild at a time.
         let mut skip_fee_tx = false;
+        let mut fee_tx_trims = 0usize;
         let checked_fee = loop {
             check_build_cancelled(should_cancel)?;
             let user_raw: Vec<Transaction> = user_checked
@@ -1046,12 +1064,18 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
                         Ok(cf) => (Some(cf), fee_cost_acc.total_block_cost()),
                         // A fee tx the validator rejects must not cost the
                         // template: drop the lowest-priority user tx (its fee
-                        // outputs may be the cause) and retry; with nothing
-                        // left to trim, build without fee collection.
+                        // outputs may be the cause) and retry, at most
+                        // MAX_FEE_TX_TRIMS times; then, or with nothing left
+                        // to trim, build without fee collection.
                         Err(_) => {
-                            if user_checked.len() <= prioritized_count {
+                            if !trim_after_fee_tx_failure(
+                                user_checked.len(),
+                                prioritized_count,
+                                fee_tx_trims,
+                            ) {
                                 skip_fee_tx = true;
                             } else if let Some((transaction, _)) = user_checked.pop() {
+                                fee_tx_trims += 1;
                                 let id = Digest32::from_bytes(*transaction.tx_id());
                                 observation.excluded.push(ExcludedTransaction::new(
                                     id,
@@ -1773,6 +1797,23 @@ mod tests {
     use ergo_state::store::StateError;
     use ergo_validation::popow::algos::pack_interlinks;
     use serde::Deserialize;
+
+    #[test]
+    fn fee_tx_failures_trim_at_most_the_cap_and_never_prioritized_txs() {
+        // Ten optional txs behind two prioritized ones: a fee tx that keeps
+        // failing trims MAX_FEE_TX_TRIMS of them, then fee collection is
+        // skipped and the other seven stay in the block.
+        let (mut user_txs, prioritized, mut trims) = (12, 2, 0);
+        while trim_after_fee_tx_failure(user_txs, prioritized, trims) {
+            user_txs -= 1;
+            trims += 1;
+        }
+        assert_eq!(trims, MAX_FEE_TX_TRIMS);
+        assert_eq!(user_txs, 12 - MAX_FEE_TX_TRIMS);
+        // Fewer optional txs than the cap: all of them, but no prioritized one.
+        assert!(trim_after_fee_tx_failure(3, 2, 0));
+        assert!(!trim_after_fee_tx_failure(2, 2, 0));
+    }
 
     // ----- helpers -----
 

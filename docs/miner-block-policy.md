@@ -88,8 +88,10 @@ that starts with `required_`:
   optional transaction, so that the fee transaction and section fit.
 - `required_fee_collection_invalid`: it was trimmed, after every optional
   transaction, because the fee transaction built with it did not validate.
-  If only requested transactions remain, the candidate is built without a
-  fee transaction and the fee boxes stay unspent.
+  At most three transactions are trimmed for this reason, lowest priority
+  first. If the fee transaction still does not validate, or only requested
+  transactions remain, the candidate is built without a fee transaction and
+  the fee boxes stay unspent.
 
 Bundles set an order; they are not atomic. Each member is included or
 reported on its own. Initial emission-only templates are published as usual,

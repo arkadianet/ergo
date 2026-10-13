@@ -108,15 +108,19 @@ use crate::reemission::ReemissionSettings;
 use crate::solution::{verify_solution, SolutionOutcome, SubmittedBlock};
 use crate::work_message::{MinerSolution, WorkMessage};
 
-/// Ordinary templates always kept by count, independent of requested work.
-/// Older ones are also kept while younger than the retention window.
+/// Ordinary templates kept by count whatever their age, independent of
+/// requested work. Older ones are also kept while younger than the retention
+/// window. [`MAX_ORDINARY_TEMPLATE_BYTES`] takes precedence: when the retained
+/// templates exceed it, the oldest go first even within this count, and only
+/// the newest template is always kept.
 pub const MAX_RETAINED_TEMPLATES: usize = 16;
 /// Default age for which an ordinary template stays solvable after a newer one
 /// replaced it: two of the reference node's 60 s candidate refresh periods,
 /// so a miner still hashing on an older job does not lose a found block.
 pub const DEFAULT_TEMPLATE_RETENTION_MS: u64 = 120_000;
-/// Memory bound on ordinary templates kept for their retention window
-/// (estimated retained size); past it the oldest go first, whatever their age.
+/// Memory bound on all retained ordinary templates (estimated retained size),
+/// including the newest [`MAX_RETAINED_TEMPLATES`]; past it the oldest go
+/// first, whatever their age, until only the newest is left.
 pub const MAX_ORDINARY_TEMPLATE_BYTES: usize = 256 * 1024 * 1024;
 /// Count bound on ordinary templates kept for their retention window.
 pub const MAX_ORDINARY_TEMPLATES: usize = 1024;
@@ -355,9 +359,10 @@ impl MiningCache {
     }
 
     /// Evict ordinary templates past their retention: the newest
-    /// [`MAX_RETAINED_TEMPLATES`] always stay, older ones stay while younger
-    /// than the retention window, and the memory bounds evict the oldest
-    /// first whatever their age. The newest template is never evicted.
+    /// [`MAX_RETAINED_TEMPLATES`] stay whatever their age, older ones stay
+    /// while younger than the retention window. The count and memory bounds
+    /// take precedence over both and evict the oldest first, also within the
+    /// newest [`MAX_RETAINED_TEMPLATES`]. The newest template is never evicted.
     fn evict_ordinary(&mut self, now_ms: u64) {
         let retention_ms = self.retention_ms.unwrap_or(DEFAULT_TEMPLATE_RETENTION_MS);
         loop {
@@ -2907,6 +2912,31 @@ mod tests {
                 <= MAX_ORDINARY_TEMPLATE_BYTES
         );
         assert_eq!(cache.expired.len(), 10);
+    }
+
+    #[test]
+    fn memory_bound_takes_precedence_over_the_newest_count() {
+        let parent = [0x47u8; 32];
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        h.set_best_tip(synced_tip(parent));
+        publish_failing(&h, parent, MAX_RETAINED_TEMPLATES, BUILT_AT_MS, 0);
+        let mut cache = h.cache.write().unwrap();
+        assert_eq!(cache.templates.len(), MAX_RETAINED_TEMPLATES);
+        let newest = cache.templates.back().unwrap().template.identity.clone();
+        // Sixteen quarter-budget templates: only the newest four fit.
+        for t in cache.templates.iter_mut() {
+            t.ordinary_weight = MAX_ORDINARY_TEMPLATE_BYTES / 4;
+        }
+        cache.evict_ordinary(BUILT_AT_MS);
+        assert_eq!(cache.templates.len(), 4);
+        // Even a single template over the budget keeps the newest one.
+        for t in cache.templates.iter_mut() {
+            t.ordinary_weight = MAX_ORDINARY_TEMPLATE_BYTES + 1;
+        }
+        cache.evict_ordinary(BUILT_AT_MS);
+        assert_eq!(cache.templates.len(), 1);
+        assert_eq!(cache.templates.back().unwrap().template.identity, newest);
+        assert_eq!(cache.expired.len(), MAX_RETAINED_TEMPLATES - 1);
     }
 
     #[test]
