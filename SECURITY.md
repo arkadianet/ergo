@@ -108,7 +108,8 @@ The API distinguishes public routes from privileged routes:
 | `/mining/*` (candidate, solution, reward address/public key) | Transaction submission/checks: `POST /transactions`, `/transactions/bytes`, `/transactions/check`, `/transactions/checkBytes`, `/api/v1/mempool/{submit,check}` |
 | v1 Operator/Admin routes (node config, network controls, mining controls, operator votes, scans, account management/PSBT, watch writes, private-key export, webhooks); script compute when configured to require a key | Public v1 queries including watch-only account reads, `/emission/*`, `/utils/*`, `/metrics` |
 
-The whole wallet, scan and node prefixes are gated, including unknown subpaths;
+The whole wallet, scan and node prefixes are gated, including unknown subpaths
+(the node answers its wallet and scan prefixes with `410 wallet_moved`);
 other unmatched paths return `404`. Public means no API-key authentication;
 normal validation, subsystem availability and admission policies still apply.
 
@@ -132,38 +133,49 @@ On a routable interface, `public_bind = true` makes public reads, transaction
 submission, and metrics network-callable. Keep `/metrics` on
 loopback or behind an authenticated proxy.
 
-### The wallet UI is a thin client; the browser never holds keys
+### The wallet runs in its own daemon; the node holds no keys
 
-The wallet UI served at `/wallet/ui` is a static page (public, like the
-dashboard — it is **not** behind the `api_key` gate, because the page
-itself carries no secrets). It is a thin remote control for the node's
-`/wallet/*` REST API: the browser never holds the master key, never
-derives, and never signs. Every operation is an authenticated `fetch()` to
-a `/wallet/*` route. Key material, derivation, and signing all happen
-node-side; secrets are stored encrypted at rest (AES-GCM) under the data
-directory's `wallet/` folder.
+The node hosts no wallet: it never opens wallet secrets, runs no wallet
+writer, and answers its former `/wallet/*`, `/scan/*` and `/api/v1/wallet/*`
+routes (after the API-key check) with `410 wallet_moved` and the configured
+`[wallet] daemon_address`. The wallet is `ergo-walletd`, a separate process
+with its own data directory and `wallet.redb`. It starts watch-only (public
+descriptors, read API) unless seed mode is configured; only seed mode holds
+an encrypted seed and can sign.
 
-The only credential the browser holds is the operator `api_key` the user
-pastes on first visit, kept in that tab's `sessionStorage` and sent as the
-`api_key` header. The wallet password and recovery mnemonic exist only
-transiently in page memory during init and recovery flows and are never
-written to `sessionStorage` or `localStorage`. The recovery mnemonic is
-visible on screen during initialization — anyone (or any browser
-extension) with access to that page can read it while it is displayed.
+- **Sealed and locked by default.** The daemon encrypts `wallet.redb`
+  (AES-256-GCM) and starts sealed: the database opens only when the wallet
+  password, a passphrase or an `unseal_key_file` releases it. Seed wallets
+  restart locked and lock again after `[security] idle_lock` or `max_unlock`.
+  Unlock attempts are budgeted and the budget survives restarts.
+- **Local, authenticated API.** The daemon listens on a Unix socket
+  (mode `0600`) or a loopback TCP address, with a Host-header guard, and every
+  route needs its own API credential (a file readable only by its owner). It
+  disables core dumps and ptrace before reading any credential.
+- **The browser holds no keys.** The wallet UI is a static page served by the
+  daemon. Derivation and signing happen in the daemon; the page keeps only the
+  daemon API key in `sessionStorage`. The password and recovery mnemonic exist
+  in page memory only during init and recovery, and the mnemonic is visible on
+  screen while it is displayed.
+- **Chain data is verified.** The daemon checks header proof of work and
+  that each block's transactions match its header, and authenticates box ids,
+  but trusts the node it is pointed at for chain selection and difficulty.
+- **Private-key export is off.** The daemon runs its engine with
+  `expose_private_keys = false` and has no setting that turns it on, so
+  `getPrivateKey` is refused.
+- **Multisig nonces stay in the daemon by default.** A Schnorr signature
+  made with a nonce someone else knows, or with one nonce for two messages,
+  reveals the signing key. So `generateCommitments` returns a single-use
+  handle, bound to its input and public commitment, in place of each secret
+  nonce, and signing refuses a caller-supplied nonce for a key the wallet
+  holds. This is also the default of the wallet engine itself; handing nonces
+  to the caller is an explicit opt-in, `[security] multisig_nonces = "caller"`
+  in the daemon, which restores the Scala form for old clients and logs a
+  warning at start. Handles live only in memory, expire after an hour and are
+  wiped when the wallet locks.
 
-Private-key export is off by default: `POST /wallet/getPrivateKey` returns
-`403 Forbidden` unless the operator has explicitly set
-`[wallet] expose_private_keys = true`.
-
-Multisig signing nonces stay in `ergo-walletd` by default. A Schnorr
-signature made with a nonce someone else knows, or with one nonce for two
-messages, reveals the signing key. So `POST /wallet/generateCommitments`
-returns a single-use handle, bound to its input and public commitment, in
-place of each secret nonce, and `POST /wallet/transaction/sign` refuses a
-caller-supplied nonce for a key the wallet holds. Handles live only in
-memory, expire after an hour and are wiped when the wallet locks.
-`[security] multisig_nonces = "caller"` restores the Scala form for old
-clients; the daemon logs a warning at start when it is set.
+See [wallet setup](docs/wallet-setup.md) and
+[wallet extraction](docs/wallet-extraction.md).
 
 ### This is pre-stable software that can move funds
 

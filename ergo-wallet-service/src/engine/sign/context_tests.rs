@@ -771,6 +771,128 @@ fn two_of_two_multisig_signs_with_a_custody_held_single_use_nonce() {
     );
 }
 
+/// An engine built without any nonce configuration keeps multisig nonces
+/// itself; handing them to the caller is an explicit opt-in.
+#[test]
+fn an_unconfigured_engine_keeps_nonces_and_caller_mode_is_an_opt_in() {
+    use crate::engine::{WalletEngine, WalletEngineParts};
+    use ergo_ser::sigma_value::SigmaBoolean;
+    use ergo_wallet_protocol::scala::sending::HintDto;
+
+    let mnemonic =
+        ergo_wallet::mnemonic::Mnemonic::generate(ergo_wallet::mnemonic::MnemonicStrength::Words15)
+            .unwrap();
+    let bob_pk =
+        ergo_wallet::extended_key::ExtendedSecretKey::derive_master_key(&mnemonic.to_seed("")[..])
+            .unwrap()
+            .derive_at_path(&ergo_wallet::derivation::DerivationPath::eip3_first_address())
+            .unwrap()
+            .public_key()
+            .compressed_bytes();
+    let bob = SigmaBoolean::ProveDlog(GroupElement::from_bytes(bob_pk));
+    let tree = |sb: &SigmaBoolean| {
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        w.put_u8(0x00);
+        w.put_u8(0x08);
+        ergo_ser::sigma_value::write_sigma_boolean(&mut w, sb).unwrap();
+        read_ergo_tree(&mut VlqReader::new(&w.result())).unwrap()
+    };
+    let locked = ErgoBox::new(
+        ErgoBoxCandidate::new(
+            1_000_000_000,
+            tree(&bob),
+            0,
+            vec![],
+            ergo_ser::register::AdditionalRegisters::empty(),
+        )
+        .unwrap(),
+        ModifierId::from_bytes([0x42; 32]),
+        0,
+    );
+    let fixture = fixture();
+    let (_, mut view) = case(&fixture["cases"][0]);
+    view.utxos = HashMap::from([(*locked.box_id().unwrap().as_bytes(), locked.clone())]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RedbWalletStore::new(Arc::new(
+        redb::Database::create(dir.path().join("wallet.redb")).unwrap(),
+    )));
+    let mut engine = WalletEngine::new(WalletEngineParts {
+        storage: Arc::new(RwLock::new(ergo_wallet::storage::SecretStorage::open(
+            dir.path().join("wallet"),
+        ))),
+        state: Arc::new(RwLock::new(crate::state::WalletState::empty(false))),
+        store,
+        chain: Arc::new(ControlledChain(view.clone())),
+        config: crate::engine::WalletEngineConfig {
+            network: ergo_ser::address::NetworkPrefix::Mainnet,
+            expose_private_keys: false,
+            reemission: None,
+            min_relay_fee_nano_erg: 1_000_000,
+            max_tx_size_bytes: 98_304,
+        },
+        submitter: Arc::new(NoSubmit),
+        mempool: Arc::new(crate::engine::NoopMempoolOverlay::new()),
+        service: None,
+        rescan: Arc::new(crate::engine::RescanCoordinator::new()),
+    });
+    engine
+        .restore(
+            mnemonic.phrase().to_string(),
+            String::new(),
+            "pw".into(),
+            false,
+        )
+        .unwrap();
+    engine.unlock("pw".into()).unwrap();
+    let unsigned = UnsignedTransaction {
+        inputs: vec![ergo_ser::input::UnsignedInput {
+            box_id: locked.box_id().unwrap(),
+            extension: ergo_ser::input::ContextExtension::empty(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![ErgoBoxCandidate::new(
+            1_000_000_000,
+            tree(&SigmaBoolean::TrivialProp(true)),
+            1,
+            vec![],
+            ergo_ser::register::AdditionalRegisters::empty(),
+        )
+        .unwrap()],
+    };
+    let unsigned_hex = hex::encode(serialize_unsigned_tx(&unsigned).unwrap());
+    let commit = |engine: &WalletEngine| {
+        let response = engine
+            .generate_commitments(GenerateCommitmentsRequest {
+                unsigned_tx: unsigned_hex.clone(),
+                external_secrets: None,
+                inputs: None,
+                data_inputs: None,
+            })
+            .unwrap();
+        let HintDto::OwnCommitment { secret, .. } = &response.hints.secret_hints["0"][0] else {
+            panic!("own commitment expected");
+        };
+        secret.clone()
+    };
+
+    // Default: a handle, never the nonce.
+    let secret = commit(&engine);
+    assert!(
+        secret.starts_with(crate::engine::NONCE_HANDLE_PREFIX),
+        "{secret}"
+    );
+
+    // Opt-in: the Scala wire form returns the 32-byte nonce itself.
+    engine.allow_caller_nonces();
+    let secret = commit(&engine);
+    assert!(
+        !secret.starts_with(crate::engine::NONCE_HANDLE_PREFIX),
+        "{secret}"
+    );
+    assert_eq!(hex::decode(&secret).unwrap().len(), 32);
+}
+
 #[test]
 fn a_dh_tuple_secret_counts_as_caller_held_only_when_its_scalar_matches() {
     let decode = |x: u64, v: u64| {
