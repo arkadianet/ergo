@@ -186,6 +186,8 @@ fn scala_sourced_rejection_parity() {
             | ValidationError::TooManyInputs { .. }
             | ValidationError::TooManyDataInputs { .. }
             | ValidationError::TooManyOutputs { .. }
+            | ValidationError::OutputValueTooHigh { .. }
+            | ValidationError::OutputSumTooHigh
             | ValidationError::InputBoxNotFound { .. }
             | ValidationError::DataInputBoxNotFound { .. }
             | ValidationError::ResolvedInputsMismatch { .. }
@@ -205,6 +207,7 @@ fn scala_sourced_rejection_parity() {
             // Rust pipeline stage; this category is about Scala
             // verifier provenance — the two intentionally differ.
             ValidationError::ErgNotConserved { .. }
+            | ValidationError::InputSumTooHigh
             | ValidationError::TokenNotConserved { .. }
             | ValidationError::NonPositiveTokenAmount { .. }
             | ValidationError::InvalidMinting { .. }

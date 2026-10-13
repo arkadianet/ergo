@@ -74,6 +74,24 @@ pub enum ValidationError {
         /// Minimum required (nanoErg).
         min: u64,
     },
+    /// Output `value` does not fit a signed 64-bit amount (`> i64::MAX`). The
+    /// reference reads box values as `Long`, so such a value is negative there
+    /// (`txNegativeOutput`, rule 105).
+    #[error("output {index}: value {value} exceeds {max}", max = i64::MAX)]
+    OutputValueTooHigh {
+        /// Output index inside the transaction.
+        index: usize,
+        /// Actual value (nanoErg).
+        value: u64,
+    },
+    /// The output values do not sum within a signed 64-bit amount
+    /// (`txOutputSum`, rule 106).
+    #[error("sum of output values exceeds {max}", max = i64::MAX)]
+    OutputSumTooHigh,
+    /// The input values do not sum within a signed 64-bit amount
+    /// (`txInputsSum`, rule 115).
+    #[error("sum of input values exceeds {max}", max = i64::MAX)]
+    InputSumTooHigh,
     /// Output carries more tokens than `ProtocolParams::max_tokens_per_box`.
     #[error("output {index}: {count} tokens exceeds maximum {max}")]
     TooManyTokens {
