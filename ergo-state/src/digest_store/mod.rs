@@ -182,6 +182,11 @@ impl DigestStateStore {
     pub fn database_path(&self) -> &Path {
         &self.db_path
     }
+    /// Remove one stored block section so it can be downloaded again.
+    /// Returns whether a section was stored.
+    pub fn delete_block_section(&self, modifier_id: &[u8; 32]) -> Result<bool, StateError> {
+        self.headers.delete_block_section(modifier_id)
+    }
 }
 use voted_params::{
     require_genesis_voted_params_match_or_seed, require_genesis_voted_params_present,

@@ -105,7 +105,7 @@ fn try_dial_peers_at(state: &mut NodeState, now: Instant) {
         let seed = rand::RngCore::next_u64(&mut rand::rngs::OsRng);
         if let Some(peer) = state.peer_manager.select_peer_for_gossip(now, seed) {
             if state.registry.peers.contains_key(&peer) {
-                send_to_peer(state, &peer, message::CODE_GET_PEERS, Vec::new());
+                send_get_peers(state, &peer, now);
                 debug!(peer = %peer, "periodic gossip GetPeers");
             }
         }
@@ -178,7 +178,7 @@ fn try_dial_peers_at(state: &mut NodeState, now: Instant) {
             let start =
                 (rand::RngCore::next_u64(&mut rand::rngs::OsRng) as usize) % gossip_targets.len();
             for addr in gossip_targets.iter().cycle().skip(start).take(fanout) {
-                send_to_peer(state, addr, message::CODE_GET_PEERS, Vec::new());
+                send_get_peers(state, addr, now);
             }
             debug!(
                 deficit = deficit,
@@ -427,6 +427,7 @@ pub(super) fn cleanup_disconnected_peer(state: &mut NodeState, peer: &PeerId) {
     state.registry.remove(peer);
     state.mempool.on_peer_disconnected(peer);
     state.throttle.forget_peer(peer);
+    state.serve_throttle.forget_peer(peer);
     state.snapshot_bootstrap.on_peer_disconnect(peer);
     if let Some(ca) = state.chunk_assembly.as_mut() {
         let _freed = ca.drop_peer(peer);
@@ -447,6 +448,16 @@ pub(super) fn cleanup_disconnected_peer(state: &mut NodeState, peer: &PeerId) {
     // the slots are immediately available to other peers (rather
     // than waiting out `ANCHOR_REASSIGN_TIMEOUT`).
     state.anchor_scheduler.forget_peer(*peer);
+}
+
+/// Send `GetPeers` and open the window in which that peer's `Peers` reply
+/// is accepted.
+pub(super) fn send_get_peers(state: &mut NodeState, peer: &PeerId, now: Instant) -> bool {
+    let sent = send_to_peer(state, peer, message::CODE_GET_PEERS, Vec::new());
+    if sent {
+        state.peer_manager.note_get_peers_sent(peer, now);
+    }
+    sent
 }
 
 pub(super) fn send_to_peer(state: &NodeState, peer: &PeerId, code: u8, payload: Vec<u8>) -> bool {

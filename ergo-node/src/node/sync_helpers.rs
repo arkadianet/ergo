@@ -248,6 +248,7 @@ pub(super) fn hedge_request_modifiers(
                         // Register hedge peers as late-acceptable for
                         // these IDs so their responses Accept.
                         state.coordinator.delivery_mut().register_hedge_peers(
+                            inv.type_id,
                             &inv.ids,
                             &hedge_peers,
                             Instant::now(),

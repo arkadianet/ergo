@@ -279,6 +279,22 @@ impl SyncCoordinator {
             return actions;
         }
 
+        // Only headers and the three block-section types are fetched
+        // through this path (transactions have their own); any other type
+        // has nothing to request.
+        if !is_header_inv
+            && !matches!(
+                ModifierTypeId::from_byte(inv.type_id),
+                Some(
+                    ModifierTypeId::BlockTransactions
+                        | ModifierTypeId::ADProofs
+                        | ModifierTypeId::Extension
+                )
+            )
+        {
+            return actions;
+        }
+
         // Filter to IDs we don't already have. Headers and block sections
         // use different storage lookups. Count each rejection cause so the
         // heartbeat can show where Inv-throughput goes — without this the
@@ -299,9 +315,12 @@ impl SyncCoordinator {
         let mut filt_received: u64 = 0;
         let mut filt_pruned: u64 = 0;
         let sentinel = self.sync_state.prune_sentinel();
+        // An Inv may name an id more than once; consider each id once.
+        let mut seen = std::collections::HashSet::with_capacity(inv.ids.len());
         let needed: Vec<[u8; 32]> = inv
             .ids
             .iter()
+            .filter(|id| seen.insert(**id))
             .filter(|id| {
                 let have = if is_header_inv {
                     chain.has_header(id) || chain.is_invalid(id)
@@ -314,25 +333,23 @@ impl SyncCoordinator {
                 !have
             })
             .filter(|id| {
-                // Mode 3 Phase 3a — request-side gate on the
-                // Inv-driven section path. Peers may advertise
-                // ids we never indexed (unknown sections —
-                // pass-through) or ids whose parent is below
-                // our prune sentinel (skip; we'd just evict on
-                // apply or refuse to serve later). Inert when
-                // `sentinel == 0` (archive / Mode 6 / pre-
-                // eviction store).
-                if is_header_inv || sentinel == 0 {
+                // A block section is only worth requesting when it belongs
+                // to a header we hold: `SECTION_HEIGHT_INDEX` has a row for
+                // every section id of every stored header. An id with no
+                // row names no block we know, so asking for it (and
+                // re-asking other peers when it times out) cannot help.
+                // Sections of headers we do not have yet are fetched from
+                // the header path once the header arrives.
+                //
+                // Mode 3 Phase 3a adds the prune gate on top: ids whose
+                // block is below the prune sentinel are skipped (we'd evict
+                // on apply or refuse to serve later). Inert when
+                // `sentinel == 0` (archive / Mode 6 / pre-eviction store).
+                if is_header_inv {
                     return true;
                 }
-                // Fail-CLOSED on unknown / unreadable height.
-                // The boot backfill gate makes SECTION_HEIGHT_INDEX
-                // complete when sentinel > 1, so None here means
-                // orphan id or read failure — requesting either
-                // would resurrect bytes or amplify a partial-
-                // failure state.
                 match chain.get_section_height(id) {
-                    Some(h) if h >= sentinel => true,
+                    Some(h) if sentinel == 0 || h >= sentinel => true,
                     Some(_) | None => {
                         filt_pruned += 1;
                         false
@@ -340,16 +357,16 @@ impl SyncCoordinator {
                 }
             })
             .filter(|id| {
-                let inflight =
-                    self.delivery.status(id) == ergo_p2p::delivery::ModifierStatus::Requested;
+                let inflight = self.delivery.status(inv.type_id, id)
+                    == ergo_p2p::delivery::ModifierStatus::Requested;
                 if inflight {
                     filt_inflight += 1;
                 }
                 !inflight
             })
             .filter(|id| {
-                let received =
-                    self.delivery.status(id) == ergo_p2p::delivery::ModifierStatus::Received;
+                let received = self.delivery.status(inv.type_id, id)
+                    == ergo_p2p::delivery::ModifierStatus::Received;
                 if received {
                     filt_received += 1;
                 }
@@ -429,27 +446,12 @@ impl SyncCoordinator {
         let mut actions = Vec::new();
 
         // Check delivery ownership
-        let action = self.delivery.on_received(&modifier_id, &peer);
+        // The tracker is keyed by `(type_id, modifier_id)`: a delivery under
+        // a type other than the one requested finds no request and is
+        // treated as unsolicited, leaving the real request outstanding.
+        let action = self.delivery.on_received(type_id, &modifier_id, &peer);
         match action {
             DeliveryAction::Accept => {
-                // Type-match guard: the peer's wire-claimed `type_id` must
-                // equal the type we actually requested for this id. A
-                // mismatch means the peer answered our request with the wrong
-                // modifier type (buggy or malicious) — reject BEFORE
-                // mark_received so the outstanding request survives and a
-                // retry can fetch the correct section from another peer.
-                // Routing below trusts `type_id`, so an unchecked mismatch
-                // would mis-route (e.g. persist a header's bytes as a section,
-                // or feed section bytes to header validation).
-                if let Some(requested_type) = self.delivery.modifier_type(&modifier_id) {
-                    if requested_type != type_id {
-                        actions.push(Action::Penalize {
-                            peer,
-                            penalty: Penalty::Misbehavior,
-                        });
-                        return actions;
-                    }
-                }
                 // Body-only streak reset: only an accepted block-BODY section
                 // clears the download-failure streak. A header or mempool-tx
                 // delivery must NOT reset it, or a peer that stalls on bodies
@@ -470,11 +472,8 @@ impl SyncCoordinator {
                     });
                     return actions;
                 }
-                let delivered_body = self
-                    .delivery
-                    .modifier_type(&modifier_id)
-                    .is_some_and(ModifierTypeId::is_block_body_section);
-                self.delivery.mark_received(&modifier_id);
+                let delivered_body = ModifierTypeId::is_block_body_section(type_id);
+                self.delivery.mark_received(type_id, &modifier_id);
                 // Scala `lastModifierGotTime` — any accepted modifier
                 // (header / body / tx) advances the connectivity clock
                 // used by the NonDelivery gate in `check_timeouts`.
@@ -492,10 +491,19 @@ impl SyncCoordinator {
                 return actions; // duplicate
             }
             DeliveryAction::RejectSpam => {
-                actions.push(Action::Penalize {
-                    peer,
-                    penalty: Penalty::Spam,
-                });
+                // A peer answering our request with the wrong modifier type
+                // is misbehaving rather than sending unsolicited data; the
+                // real request stays outstanding either way.
+                let penalty =
+                    if self
+                        .delivery
+                        .requested_under_other_type(type_id, &modifier_id, &peer)
+                    {
+                        Penalty::Misbehavior
+                    } else {
+                        Penalty::Spam
+                    };
+                actions.push(Action::Penalize { peer, penalty });
                 return actions;
             }
         }
@@ -697,7 +705,7 @@ impl SyncCoordinator {
             .check_timeouts_gated(now, self.last_modifier_got_time);
 
         let tx_type = ModifierTypeId::Transaction.as_byte();
-        let mut all_retryable: Vec<[u8; 32]> = Vec::new();
+        let mut all_retryable: Vec<ergo_p2p::delivery::ModifierKey> = Vec::new();
         let mut failed_peers: Vec<PeerId> = Vec::new();
         for (failed_peer, ids) in &result.retryable {
             // Scala parity (checkDelivery, ErgoNodeViewSynchronizer.scala):
@@ -705,11 +713,9 @@ impl SyncCoordinator {
             // legitimately have left the peer's mempool, so there is "no
             // reason to penalize the peer" and no re-request. Block sections
             // and headers keep the (conditionally) penalize + re-request path.
-            // The just-timed-out ids sit in the tracker's recently-released
-            // shadow, so `modifier_type` still resolves their requested class.
-            let (tx_ids, block_ids): (Vec<[u8; 32]>, Vec<[u8; 32]>) = ids
-                .iter()
-                .partition(|id| self.delivery.modifier_type(id) == Some(tx_type));
+            // Each timed-out entry carries the type it was requested as.
+            let (tx_ids, block_ids): (Vec<_>, Vec<_>) =
+                ids.iter().partition(|(t, _)| *t == tx_type);
             for tx_id in &tx_ids {
                 // Fully drop the forgotten tx so the tracker stops tracking
                 // it (no recently-released shadow, no retry count, no late
@@ -727,7 +733,7 @@ impl SyncCoordinator {
             // still re-request — a slow-but-working peer must not be
             // NonDelivery-penalized or delivery-streak-deprioritized
             // while the node is otherwise receiving data.
-            let hard_ids: Vec<[u8; 32]> = block_ids
+            let hard_ids: Vec<ergo_p2p::delivery::ModifierKey> = block_ids
                 .iter()
                 .copied()
                 .filter(|id| result.penalize.contains(id))
@@ -739,11 +745,10 @@ impl SyncCoordinator {
                 });
                 // Body-only download-quality streak (separate from the
                 // decaying score). Gated the same way as NonDelivery.
-                if hard_ids.iter().any(|id| {
-                    self.delivery
-                        .modifier_type(id)
-                        .is_some_and(ModifierTypeId::is_block_body_section)
-                }) {
+                if hard_ids
+                    .iter()
+                    .any(|(t, _)| ModifierTypeId::is_block_body_section(*t))
+                {
                     actions.push(Action::NoteDeliveryOutcome {
                         peer: *failed_peer,
                         succeeded: false,
@@ -753,10 +758,9 @@ impl SyncCoordinator {
             // Same-tick re-request excludes exhausted ids — those have
             // spent their retry budget. They remain in `retryable` only
             // so this pass can still emit the final NonDelivery /
-            // delivery-streak outcome (and read modifier_type from the
-            // retained type shadow). Fresh re-request happens later via
+            // delivery-streak outcome. Fresh re-request happens later via
             // the normal Unknown → request_missing_sections path.
-            let rerequest_ids: Vec<[u8; 32]> = block_ids
+            let rerequest_ids: Vec<ergo_p2p::delivery::ModifierKey> = block_ids
                 .iter()
                 .copied()
                 .filter(|id| !result.exhausted.contains(id))

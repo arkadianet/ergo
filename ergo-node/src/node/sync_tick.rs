@@ -620,6 +620,8 @@ fn drive_manifest_request(state: &mut NodeState, now: Instant) {
 
     state.snapshot_bootstrap.check_request_timeout(now);
 
+    prune_conflicting_snapshot_votes(state);
+
     let Some((peer, height, manifest_id)) = state.snapshot_bootstrap.should_request_manifest()
     else {
         return;
@@ -856,6 +858,63 @@ pub(crate) enum InstallAnchor {
     /// The anchor is above `best_header_height`. Header sync cannot
     /// reach it from here; the operator must intervene.
     AboveTip,
+}
+
+/// Re-check held snapshot votes against the header chain as it grows. Votes
+/// taken while headers were still syncing may later turn out to name a state
+/// root the chain contradicts, or a height above the synced header tip; those
+/// are dropped so they can neither win the selection nor park the manifest
+/// driver (which waits for headers to reach the selected height).
+pub(crate) fn prune_conflicting_snapshot_votes(state: &mut NodeState) {
+    for vote in state.snapshot_bootstrap.distinct_votes() {
+        if snapshot_vote_conflicts(state, vote.0, &vote.1) {
+            let removed = state.snapshot_bootstrap.drop_votes_for(vote);
+            if removed > 0 {
+                warn!(
+                    height = vote.0,
+                    manifest_id = %hex::encode(vote.1),
+                    removed,
+                    "dropping snapshot votes that contradict the header chain",
+                );
+            }
+        }
+    }
+}
+
+/// Whether a `SnapshotsInfo` entry `(height, manifest_id)` contradicts our
+/// header chain: a non-positive height, a best-chain header at that height
+/// whose state root does not start with `manifest_id`, a height in the
+/// unreachable NiPoPoW prefix, or a height above the best header once the
+/// header chain is synced. Entries the chain cannot judge yet (headers
+/// still syncing, or a store error) do not conflict.
+pub(crate) fn snapshot_vote_conflicts(
+    state: &NodeState,
+    height: i32,
+    manifest_id: &[u8; 32],
+) -> bool {
+    if height <= 0 {
+        return true;
+    }
+    let Some(store) = state.store.as_utxo() else {
+        return false;
+    };
+    match resolve_install_anchor(store, height as u32) {
+        Ok(InstallAnchor::Ready(header_id)) => {
+            let Ok(Some(bytes)) = ergo_state::HeaderSectionStore::get_header(store, &header_id)
+            else {
+                return false;
+            };
+            match ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(
+                &bytes,
+            )) {
+                Ok(header) => header.state_root.as_bytes()[..32] != manifest_id[..],
+                Err(_) => false,
+            }
+        }
+        Ok(InstallAnchor::UnreachableGap { .. }) => true,
+        Ok(InstallAnchor::AboveTip) => state.coordinator.sync_state().headers_chain_synced(),
+        Ok(InstallAnchor::Defer) | Err(_) => false,
+    }
 }
 
 /// Classify the snapshot anchor height against the store's

@@ -353,6 +353,15 @@ impl StateBackendKind {
         }
     }
 
+    /// Remove one stored block section so it can be downloaded again.
+    /// Returns whether a section was stored.
+    pub fn delete_block_section(&self, id: &[u8; 32]) -> Result<bool, StateError> {
+        match self {
+            Self::Utxo(s) => s.delete_block_section(id),
+            Self::Digest(d) => d.delete_block_section(id),
+        }
+    }
+
     /// Read independently committed section tables without consuming apply's
     /// persist-result channel. Availability is not a durability claim.
     pub fn read_section_for_serving(

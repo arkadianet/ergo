@@ -321,7 +321,7 @@ fn unknown_inv_type_is_rejected_before_request_registration() {
         } if *penalized_peer == peer
     )));
     assert_eq!(
-        state.coordinator.delivery().status(&id),
+        state.coordinator.delivery().status(101, &id),
         ergo_p2p::delivery::ModifierStatus::Unknown
     );
     assert!(!actions
@@ -362,7 +362,7 @@ fn unknown_modifier_type_is_rejected_before_delivery_mutation() {
         } if *penalized_peer == peer
     )));
     assert_eq!(
-        state.coordinator.delivery().status(&id),
+        state.coordinator.delivery().status(100, &id),
         ergo_p2p::delivery::ModifierStatus::Requested
     );
     assert!(!actions

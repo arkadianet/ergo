@@ -72,6 +72,9 @@ fn survives_trickle(dir: &Path, name: &str, code: u8, payload: &[u8], every: Dur
     let mut t = now;
     while t < deadline {
         t += every;
+        if code == message::CODE_PEERS {
+            state.peer_manager.note_get_peers_sent(&peer, t);
+        }
         deliver_frame(&mut state, peer, code, payload, t);
     }
     evicted_addrs(&mut state, t).is_empty()
@@ -340,4 +343,173 @@ fn no_progress_eviction_does_not_take_dial_backoff() {
             .contains(&peer),
         "a pre-handshake timeout is a dial failure and must take the backoff",
     );
+}
+
+fn gossip_spec(ip: [u8; 4], port: u32) -> PeerSpec {
+    PeerSpec {
+        agent_name: "ergoref".to_string(),
+        version: Version::NIPOPOW,
+        node_name: "gossiped".to_string(),
+        declared_address: Some(ergo_p2p::handshake::DeclaredAddress {
+            addr: ip.to_vec(),
+            port,
+        }),
+        features: Vec::new(),
+    }
+}
+
+/// `Peers` is a reply to `GetPeers`. One that arrives without a recent
+/// request from us is not taken into the address pool and is not progress.
+#[test]
+fn unsolicited_peers_are_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+    let before = state.peer_manager.known_addresses_len();
+    let payload = message::serialize_peers(&[gossip_spec([45, 79, 113, 7], 9030)]);
+
+    let _ = handle_message(&mut state, peer, message::CODE_PEERS, &payload, now);
+    assert_eq!(state.peer_manager.known_addresses_len(), before);
+
+    // A solicited reply is accepted once.
+    state.peer_manager.note_get_peers_sent(&peer, now);
+    let _ = handle_message(&mut state, peer, message::CODE_PEERS, &payload, now);
+    assert_eq!(state.peer_manager.known_addresses_len(), before + 1);
+    let second = message::serialize_peers(&[gossip_spec([45, 79, 113, 8], 9030)]);
+    let _ = handle_message(&mut state, peer, message::CODE_PEERS, &second, now);
+    assert_eq!(
+        state.peer_manager.known_addresses_len(),
+        before + 1,
+        "one GetPeers admits one Peers reply",
+    );
+
+    // A reply after the window has closed is ignored.
+    state.peer_manager.note_get_peers_sent(&peer, now);
+    let late = now + ergo_p2p::peer::PEERS_REPLY_WINDOW + Duration::from_secs(1);
+    let _ = handle_message(&mut state, peer, message::CODE_PEERS, &second, late);
+    assert_eq!(state.peer_manager.known_addresses_len(), before + 1);
+}
+
+/// A `Peers` reply is truncated to the protocol's 64-entry limit, duplicate
+/// entries are counted once, and our own declared address is not learned.
+#[test]
+fn peers_reply_is_capped_deduplicated_and_skips_self() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let own: SocketAddr = "45.80.100.200:9030".parse().unwrap();
+    state.peer_manager.set_self_addresses([own]);
+    let peer = test_peer();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+    let before = state.peer_manager.known_addresses_len();
+
+    let mut specs = vec![gossip_spec([45, 80, 100, 200], 9030)];
+    specs.push(gossip_spec([45, 79, 113, 50], 9030));
+    specs.push(gossip_spec([45, 79, 113, 50], 9030));
+    for i in 0..90u8 {
+        specs.push(gossip_spec([45, 33, i, 1], 9030));
+    }
+    let payload = message::serialize_peers(&specs);
+    state.peer_manager.note_get_peers_sent(&peer, now);
+    let _ = handle_message(&mut state, peer, message::CODE_PEERS, &payload, now);
+    // 64 entries taken: self (skipped), one duplicate pair (one add), and
+    // 61 distinct addresses.
+    assert_eq!(state.peer_manager.known_addresses_len(), before + 62);
+    assert!(state
+        .peer_manager
+        .addresses_to_connect(now, 1000)
+        .iter()
+        .all(|a| *a != own));
+}
+
+fn served_ids(actions: &[Action]) -> Vec<[u8; 32]> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::SendToPeer { code, payload, .. } if *code == message::CODE_MODIFIER => {
+                Some(message::deserialize_modifiers(payload).unwrap().modifiers)
+            }
+            _ => None,
+        })
+        .flatten()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// A `RequestModifier` naming the same id many times is answered with that
+/// modifier once; the store is read once per distinct id.
+#[test]
+fn request_modifier_serves_each_id_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let header_id = mid(1);
+    state
+        .store
+        .store_header(&header_id, &[0xAAu8; 80])
+        .expect("seed header");
+    let peer = test_peer();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+
+    let ids = vec![header_id; 400];
+    let payload = req_modifier_payload(ModifierTypeId::Header.as_byte(), &ids);
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_REQUEST_MODIFIER,
+        &payload,
+        now,
+    );
+    assert_eq!(served_ids(&actions), vec![header_id]);
+}
+
+/// Bytes served to one peer are budgeted per window: once a peer has been
+/// sent its budget, further requests go unanswered until the window moves.
+#[test]
+fn request_modifier_respects_per_peer_serve_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let header_id = mid(1);
+    state
+        .store
+        .store_header(&header_id, &[0xAAu8; 80])
+        .expect("seed header");
+    let peer = test_peer();
+    let other: SocketAddr = "10.9.9.9:9030".parse().unwrap();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+    let _rx2 = connect_test_peer(&mut state, other, now);
+    let payload = req_modifier_payload(ModifierTypeId::Header.as_byte(), &[header_id]);
+
+    let budget = ergo_p2p::throttle::SERVE_LIMITS.max_bytes_per_window;
+    state.serve_throttle.record(peer, now, budget);
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_REQUEST_MODIFIER,
+        &payload,
+        now,
+    );
+    assert!(served_ids(&actions).is_empty(), "spent budget: no reply");
+
+    // Other peers are unaffected, and the budget refills with the window.
+    let actions = handle_message(
+        &mut state,
+        other,
+        message::CODE_REQUEST_MODIFIER,
+        &payload,
+        now,
+    );
+    assert_eq!(served_ids(&actions), vec![header_id]);
+    let later = now + ergo_p2p::throttle::SERVE_LIMITS.window + Duration::from_secs(1);
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_REQUEST_MODIFIER,
+        &payload,
+        later,
+    );
+    assert_eq!(served_ids(&actions), vec![header_id]);
 }

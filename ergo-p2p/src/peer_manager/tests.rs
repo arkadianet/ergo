@@ -2554,3 +2554,69 @@ fn recovery_selection_filters_per_ip_and_per_subnet_limits() {
     mgr.restore_known_peer(allowed.clone());
     assert_eq!(mgr.addresses_for_recovery(now, 32, 0), vec![allowed.addr]);
 }
+
+#[test]
+fn penalty_score_survives_reconnect_from_same_ip() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let a = addr(10, 0, 0, 1, 40001);
+    mgr.register_inbound(a, now).unwrap();
+    mgr.complete_handshake(&a, spec(), None, now).unwrap();
+    let mut t = now;
+    for _ in 0..3 {
+        mgr.penalize(&a, Penalty::Spam, t);
+        t += crate::peer::SAFE_INTERVAL;
+    }
+    assert_eq!(mgr.get(&a).unwrap().score.raw_score(), 75);
+    mgr.disconnect(&a);
+    assert_eq!(mgr.retained_score(a.ip(), now), Some(75));
+
+    // Same IP, new ephemeral port: the score follows the address.
+    let b = addr(10, 0, 0, 1, 40002);
+    mgr.register_inbound(b, now).unwrap();
+    assert_eq!(mgr.get(&b).unwrap().score.effective_score(now), 75);
+    assert_eq!(mgr.retained_score(a.ip(), now), None);
+
+    // A different IP starts clean.
+    let c = addr(10, 0, 0, 2, 40003);
+    mgr.register_inbound(c, now).unwrap();
+    assert_eq!(mgr.get(&c).unwrap().score.effective_score(now), 0);
+}
+
+#[test]
+fn penalty_score_survives_idle_eviction() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let a = addr(10, 0, 0, 3, 9030);
+    mgr.register_outbound(a, now).unwrap();
+    mgr.penalize(&a, Penalty::Spam, now);
+    let later = now + crate::peer::CONNECT_TIMEOUT + std::time::Duration::from_secs(1);
+    assert_eq!(mgr.evict_timed_out(later).len(), 1);
+    mgr.register_outbound(a, later).unwrap();
+    assert_eq!(mgr.get(&a).unwrap().score.effective_score(later), 25);
+}
+
+#[test]
+fn reconnecting_peer_is_banned_on_cumulative_score() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let mut t = now;
+    let mut banned = false;
+    // Reconnect after every penalty: with per-connection scores this never
+    // reaches the ban threshold.
+    for i in 0..40u16 {
+        let a = addr(10, 0, 0, 4, 41000 + i);
+        if mgr.register_inbound(a, t).is_err() {
+            banned = true;
+            break;
+        }
+        if mgr.penalize(&a, Penalty::Spam, t) == PenaltyOutcome::Banned {
+            banned = true;
+            break;
+        }
+        mgr.disconnect(&a);
+        t += crate::peer::SAFE_INTERVAL;
+    }
+    assert!(banned, "repeated reconnects must not reset the score");
+    assert!(mgr.is_banned(&addr(10, 0, 0, 4, 1), t));
+}

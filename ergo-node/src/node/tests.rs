@@ -142,6 +142,7 @@ fn make_state_with_backend(
         mempool_notifier: MempoolNotifier::new(),
         mempool_gate_broken: false,
         throttle: ThroughputLimiter::with_defaults(),
+        serve_throttle: ThroughputLimiter::new(ergo_p2p::throttle::SERVE_LIMITS),
         last_seen_active_params: ergo_validation::scala_launch(),
         last_seen_validation_settings: ergo_validation::ErgoValidationSettings::empty(),
         snapshot_publisher: None,

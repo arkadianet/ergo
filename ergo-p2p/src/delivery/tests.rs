@@ -17,12 +17,12 @@ fn request_and_receive() {
 
     let registered = tracker.request(p, 101, &[id(1), id(2)], now);
     assert_eq!(registered.len(), 2);
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Requested);
-    assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::Accept);
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Requested);
+    assert_eq!(tracker.on_received(101, &id(1), &p), DeliveryAction::Accept);
 
-    tracker.mark_received(&id(1));
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Received);
-    assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::Ignore);
+    tracker.mark_received(101, &id(1));
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Received);
+    assert_eq!(tracker.on_received(101, &id(1), &p), DeliveryAction::Ignore);
     assert_eq!(tracker.inflight_count(&p), 1); // id(2) still inflight
 }
 
@@ -30,8 +30,11 @@ fn request_and_receive() {
 fn unsolicited_modifier_rejected() {
     let tracker = DeliveryTracker::new();
     let p = peer(9030);
-    assert_eq!(tracker.status(&id(99)), ModifierStatus::Unknown);
-    assert_eq!(tracker.on_received(&id(99), &p), DeliveryAction::RejectSpam);
+    assert_eq!(tracker.status(101, &id(99)), ModifierStatus::Unknown);
+    assert_eq!(
+        tracker.on_received(101, &id(99), &p),
+        DeliveryAction::RejectSpam
+    );
 }
 
 #[test]
@@ -43,9 +46,15 @@ fn wrong_peer_delivers_modifier_rejected() {
 
     tracker.request(p1, 101, &[id(1)], now);
     // p1 is the owner — p2 delivering it is spam
-    assert_eq!(tracker.on_received(&id(1), &p2), DeliveryAction::RejectSpam);
+    assert_eq!(
+        tracker.on_received(101, &id(1), &p2),
+        DeliveryAction::RejectSpam
+    );
     // p1 delivering it is accepted
-    assert_eq!(tracker.on_received(&id(1), &p1), DeliveryAction::Accept);
+    assert_eq!(
+        tracker.on_received(101, &id(1), &p1),
+        DeliveryAction::Accept
+    );
 }
 
 #[test]
@@ -87,7 +96,7 @@ fn timeout_detection() {
     // Inflight should be cleared
     assert_eq!(tracker.inflight_count(&p), 0);
     // IDs should be retryable (not received, not failed yet)
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Unknown);
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Unknown);
 }
 
 #[test]
@@ -109,21 +118,19 @@ fn mark_received_evicts_recently_released_shadow_after_late_delivery() {
     let result = tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
     assert_eq!(result.retryable.len(), 1);
     assert!(
-        tracker.recently_released.contains_key(&id(1)),
+        tracker.recently_released.contains_key(&(101, id(1))),
         "timeout should stash the type shadow"
     );
 
     // Original peer delivers late; the post-timeout window accepts it.
-    assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::Accept);
-    tracker.mark_received(&id(1));
+    assert_eq!(tracker.on_received(101, &id(1), &p), DeliveryAction::Accept);
+    tracker.mark_received(101, &id(1));
 
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Received);
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Received);
     assert!(
         tracker.recently_released.is_empty(),
         "mark_received must evict the recently_released shadow, not leak it"
     );
-    // Behavioural counterpart: the type lookup no longer resolves.
-    assert_eq!(tracker.modifier_type(&id(1)), None);
 }
 
 #[test]
@@ -140,7 +147,7 @@ fn check_timeouts_sweeps_abandoned_shadow_but_keeps_the_live_set() {
     // id(1) times out at t0 and is then abandoned (never re-requested).
     tracker.request(p, 102, &[id(1)], t0);
     tracker.check_timeouts(t0 + DELIVERY_TIMEOUT + Duration::from_secs(1));
-    assert!(tracker.recently_released.contains_key(&id(1)));
+    assert!(tracker.recently_released.contains_key(&(102, id(1))));
 
     // A later tick, past the shadow TTL, also times out a fresh id(2).
     let later = t0 + RELEASED_SHADOW_TTL + DELIVERY_TIMEOUT + Duration::from_secs(2);
@@ -150,16 +157,15 @@ fn check_timeouts_sweeps_abandoned_shadow_but_keeps_the_live_set() {
     // id(1) was abandoned long enough to be swept; id(2) is fresh and
     // must survive (it is still awaiting re-request).
     assert!(
-        !tracker.recently_released.contains_key(&id(1)),
+        !tracker.recently_released.contains_key(&(102, id(1))),
         "abandoned shadow must be swept after the TTL"
     );
     assert!(
-        tracker.recently_released.contains_key(&id(2)),
+        tracker.recently_released.contains_key(&(102, id(2))),
         "a just-released shadow must NOT be swept — it is the live set"
     );
-    assert_eq!(tracker.modifier_type(&id(2)), Some(102));
-    assert!(!tracker.retry_count.contains_key(&id(1)));
-    assert_eq!(tracker.retry_count.get(&id(2)), Some(&1));
+    assert!(!tracker.retry_count.contains_key(&(102, id(1))));
+    assert_eq!(tracker.retry_count.get(&(102, id(2))), Some(&1));
 }
 
 #[test]
@@ -173,14 +179,14 @@ fn cancel_peer_abandoned_shadow_swept_after_ttl() {
 
     tracker.request(p, 104, &[id(7)], t0);
     tracker.cancel_peer(&p, t0);
-    assert!(tracker.recently_released.contains_key(&id(7)));
+    assert!(tracker.recently_released.contains_key(&(104, id(7))));
 
     tracker.check_timeouts(t0 + RELEASED_SHADOW_TTL + Duration::from_secs(1));
     assert!(
-        !tracker.recently_released.contains_key(&id(7)),
+        !tracker.recently_released.contains_key(&(104, id(7))),
         "disconnect-originated abandoned shadow must be swept after the TTL"
     );
-    assert!(!tracker.retry_count.contains_key(&id(7)));
+    assert!(!tracker.retry_count.contains_key(&(104, id(7))));
 }
 
 #[test]
@@ -193,7 +199,7 @@ fn rerequest_makes_inflight_authoritative_and_drops_shadow() {
 
     tracker.request(p, 104, &[id(8)], now);
     tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
-    assert!(tracker.recently_released.contains_key(&id(8)));
+    assert!(tracker.recently_released.contains_key(&(104, id(8))));
 
     tracker.request(
         peer(9031),
@@ -201,8 +207,8 @@ fn rerequest_makes_inflight_authoritative_and_drops_shadow() {
         &[id(8)],
         now + DELIVERY_TIMEOUT + Duration::from_secs(2),
     );
-    assert!(!tracker.recently_released.contains_key(&id(8)));
-    assert_eq!(tracker.status(&id(8)), ModifierStatus::Requested);
+    assert!(!tracker.recently_released.contains_key(&(104, id(8))));
+    assert_eq!(tracker.status(104, &id(8)), ModifierStatus::Requested);
 }
 
 #[test]
@@ -237,23 +243,21 @@ fn retry_exhaustion_returns_to_unknown_scala_parity() {
                 result
                     .retryable
                     .iter()
-                    .any(|(peer, ids)| *peer == p && ids.contains(&id(1))),
+                    .any(|(peer, ids)| *peer == p && ids.contains(&(101, id(1)))),
                 "attempt {attempt}: exhausted id must remain peer-scoped for penalty",
             );
-            assert_eq!(result.exhausted, vec![id(1)]);
+            assert_eq!(result.exhausted, vec![(101, id(1))]);
             assert!(
-                result.penalize.contains(&id(1)),
+                result.penalize.contains(&(101, id(1))),
                 "final hard timeout must still be marked for NonDelivery"
             );
-            // Type shadow retained for body-vs-header classification.
-            assert_eq!(tracker.modifier_type(&id(1)), Some(101));
         }
     }
 
     // After exhaustion, status is Unknown (Scala parity), NOT a
     // permanent "Failed" state. The exhausted return is for
     // caller logging + same-tick re-request filtering.
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Unknown);
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Unknown);
 
     // Re-requesting after exhaustion succeeds — id is eligible
     // for a fresh attempt against a different peer next tick.
@@ -264,7 +268,7 @@ fn retry_exhaustion_returns_to_unknown_scala_parity() {
         vec![id(1)],
         "exhausted modifier must be re-requestable (Scala parity)",
     );
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Requested);
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Requested);
 }
 
 #[test]
@@ -287,16 +291,16 @@ fn allow_failed_request_revives_modifier() {
         if attempt < MAX_RETRIES {
             assert!(!result.retryable.is_empty());
         } else {
-            assert_eq!(result.exhausted, vec![id(1)]);
+            assert_eq!(result.exhausted, vec![(101, id(1))]);
         }
     }
     // No permanent Failed under 2Q — id is Unknown after exhaustion.
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Unknown);
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Unknown);
 
     let now = Instant::now();
     let registered = tracker.request_allow_failed(p, 101, &[id(1)], now);
     assert_eq!(registered, vec![id(1)]);
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Requested);
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Requested);
 }
 
 #[test]
@@ -327,7 +331,7 @@ fn skip_already_requested_or_received() {
     assert_eq!(registered, vec![id(2)]);
 
     // Mark id(1) as received
-    tracker.mark_received(&id(1));
+    tracker.mark_received(101, &id(1));
     // p2 tries to request id(1) again — should skip (already received)
     let registered = tracker.request(p2, 101, &[id(1)], now);
     assert!(registered.is_empty());
@@ -340,15 +344,15 @@ fn forget_received_allows_future_request() {
     let p = peer(9030);
 
     tracker.request(p, 101, &[id(1)], now);
-    tracker.mark_received(&id(1));
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Received);
+    tracker.mark_received(101, &id(1));
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Received);
 
-    assert!(tracker.forget_received(&id(1)));
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Unknown);
+    assert!(tracker.forget_received(101, &id(1)));
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Unknown);
 
     let registered = tracker.request(p, 101, &[id(1)], now);
     assert_eq!(registered, vec![id(1)]);
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Requested);
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Requested);
 }
 
 #[test]
@@ -413,12 +417,15 @@ fn hol_hedge_reassign_accepts_new_owner_delivery() {
     tracker.request(p1, 101, &[id(1)], now);
 
     // Reassign to p2 (HOL hedge)
-    assert!(tracker.reassign(&id(1), p2, now));
+    assert!(tracker.reassign(101, &id(1), p2, now));
     assert_eq!(tracker.inflight_count(&p1), 0);
     assert_eq!(tracker.inflight_count(&p2), 1);
 
     // p2 is now the owner — accepts
-    assert_eq!(tracker.on_received(&id(1), &p2), DeliveryAction::Accept);
+    assert_eq!(
+        tracker.on_received(101, &id(1), &p2),
+        DeliveryAction::Accept
+    );
 }
 
 #[test]
@@ -429,11 +436,14 @@ fn hol_hedge_original_peer_late_delivery_is_accepted() {
     let p2 = peer(9031);
 
     tracker.request(p1, 101, &[id(1)], now);
-    tracker.reassign(&id(1), p2, now);
+    tracker.reassign(101, &id(1), p2, now);
 
     // p1 delivers late with useful data. Accept it instead of
     // discarding the section and waiting on p2.
-    assert_eq!(tracker.on_received(&id(1), &p1), DeliveryAction::Accept);
+    assert_eq!(
+        tracker.on_received(101, &id(1), &p1),
+        DeliveryAction::Accept
+    );
 }
 
 #[test]
@@ -442,11 +452,11 @@ fn hol_hedge_inflight_age_returns_age_and_peer() {
     let now = Instant::now();
     let p = peer(9030);
 
-    assert!(tracker.inflight_age(&id(1), now).is_none());
+    assert!(tracker.inflight_age(101, &id(1), now).is_none());
 
     tracker.request(p, 101, &[id(1)], now);
     let later = now + Duration::from_secs(10);
-    let (age, owner) = tracker.inflight_age(&id(1), later).unwrap();
+    let (age, owner) = tracker.inflight_age(101, &id(1), later).unwrap();
     assert!(age >= Duration::from_secs(10));
     assert_eq!(owner, p);
 }
@@ -459,11 +469,14 @@ fn hol_hedge_late_acceptance_cleared_on_mark_received() {
     let p2 = peer(9031);
 
     tracker.request(p1, 101, &[id(1)], now);
-    tracker.reassign(&id(1), p2, now);
+    tracker.reassign(101, &id(1), p2, now);
     // new peer delivers
-    tracker.mark_received(&id(1));
+    tracker.mark_received(101, &id(1));
     // after mark_received: duplicate ignored, not spam
-    assert_eq!(tracker.on_received(&id(1), &p1), DeliveryAction::Ignore);
+    assert_eq!(
+        tracker.on_received(101, &id(1), &p1),
+        DeliveryAction::Ignore
+    );
 }
 
 #[test]
@@ -474,12 +487,12 @@ fn timeout_late_delivery_from_requested_peer_is_accepted() {
 
     tracker.request(p, 101, &[id(1)], now);
     let result = tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
-    assert_eq!(result.retryable[0].1, vec![id(1)]);
-    assert_eq!(tracker.status(&id(1)), ModifierStatus::Unknown);
+    assert_eq!(result.retryable[0].1, vec![(101, id(1))]);
+    assert_eq!(tracker.status(101, &id(1)), ModifierStatus::Unknown);
 
     // The request timed out locally, but the peer is still answering a
     // request we actually sent. Accepting this can rescue HOL progress.
-    assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::Accept);
+    assert_eq!(tracker.on_received(101, &id(1), &p), DeliveryAction::Accept);
 }
 
 /// Issue #245 / audit M-7: late-delivery allowances must expire.
@@ -497,13 +510,16 @@ fn late_acceptance_expires_after_ttl_sweep() {
 
     tracker.request(p, 101, &[id(1)], now);
     tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
-    assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::Accept);
+    assert_eq!(tracker.on_received(101, &id(1), &p), DeliveryAction::Accept);
 
     // Well past LATE_ACCEPTABLE_TTL: the next timeout sweep reclaims it.
     let later = now + DELIVERY_TIMEOUT + LATE_ACCEPTABLE_TTL + Duration::from_secs(10);
     let result = tracker.check_timeouts(later);
     assert!(result.retryable.is_empty() && result.exhausted.is_empty());
-    assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::RejectSpam);
+    assert_eq!(
+        tracker.on_received(101, &id(1), &p),
+        DeliveryAction::RejectSpam
+    );
 }
 
 #[test]
@@ -521,10 +537,10 @@ fn forget_timed_out_keeps_late_acceptance_so_a_late_tx_is_not_penalized() {
     tracker.request(p, 2 /* Transaction */, &[id(1)], now);
     tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
     // The coordinator's tx-timeout path forgets it (no penalty, no re-request).
-    tracker.forget_timed_out(&id(1));
+    tracker.forget_timed_out(&(2, id(1)));
 
     // A late delivery from the originally-requested peer is still accepted.
-    assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::Accept);
+    assert_eq!(tracker.on_received(2, &id(1), &p), DeliveryAction::Accept);
 }
 
 #[test]
@@ -547,7 +563,7 @@ fn hol_reassign_respects_new_peer_capacity() {
         MAX_IN_FLIGHT_PER_PEER
     );
 
-    assert!(!tracker.reassign(&id(1), full, now));
+    assert!(!tracker.reassign(101, &id(1), full, now));
     assert_eq!(tracker.inflight_count(&old), 1);
     assert_eq!(tracker.inflight_count(&full), MAX_IN_FLIGHT_PER_PEER);
 }
@@ -571,13 +587,18 @@ fn reassign_capped_at_max_hedges_so_stuck_section_can_time_out() {
     for i in 0..MAX_HEDGES {
         last_successful_reassign += DELIVERY_TIMEOUT / 2;
         assert!(
-            tracker.reassign(&id0, peer(9001 + u16::from(i)), last_successful_reassign),
+            tracker.reassign(
+                102,
+                &id0,
+                peer(9001 + u16::from(i)),
+                last_successful_reassign
+            ),
             "reassign #{i} within budget should succeed"
         );
     }
     let refused_at = last_successful_reassign + DELIVERY_TIMEOUT / 2;
     assert!(
-        !tracker.reassign(&id0, peer(9099), refused_at),
+        !tracker.reassign(102, &id0, peer(9099), refused_at),
         "reassign past MAX_HEDGES must be refused so the section can time out"
     );
 
@@ -599,18 +620,17 @@ fn retry_metadata_sweeps_abandoned_but_preserves_active_cycles() {
     tracker.check_timeouts(t0 + Duration::from_secs(4));
     tracker.request(p, 102, &[id(2)], t0 + Duration::from_secs(5));
     tracker.check_timeouts(t0 + Duration::from_secs(9));
-    assert_eq!(tracker.retry_count.get(&id(1)), Some(&1));
-    assert_eq!(tracker.retry_count.get(&id(2)), Some(&2));
+    assert_eq!(tracker.retry_count.get(&(102, id(1))), Some(&1));
+    assert_eq!(tracker.retry_count.get(&(102, id(2))), Some(&2));
     let later = t0 + Duration::from_secs(70);
     tracker.request(p, 102, &[id(3)], later - Duration::from_secs(1));
     tracker.request(p, 102, &[id(4)], later - Duration::from_secs(4));
     tracker.check_timeouts(later);
-    assert!(!tracker.retry_count.contains_key(&id(1)));
-    assert!(!tracker.retry_count.contains_key(&id(2)));
-    assert_eq!(tracker.retry_count.get(&id(3)), Some(&1));
-    assert_eq!(tracker.status(&id(3)), ModifierStatus::Requested);
-    assert_eq!(tracker.retry_count.get(&id(4)), Some(&1));
-    assert_eq!(tracker.modifier_type(&id(4)), Some(102));
+    assert!(!tracker.retry_count.contains_key(&(102, id(1))));
+    assert!(!tracker.retry_count.contains_key(&(102, id(2))));
+    assert_eq!(tracker.retry_count.get(&(102, id(3))), Some(&1));
+    assert_eq!(tracker.status(102, &id(3)), ModifierStatus::Requested);
+    assert_eq!(tracker.retry_count.get(&(102, id(4))), Some(&1));
 }
 
 #[test]
@@ -621,27 +641,33 @@ fn primary_disconnect_preserves_another_asked_hedge() {
     let hedge = peer(9031);
     let new_owner = peer(9032);
     tracker.request(primary, 102, &[id(1)], now);
-    tracker.register_hedge_peers(&[id(1)], &[hedge, new_owner], now);
+    tracker.register_hedge_peers(102, &[id(1)], &[hedge, new_owner], now);
     let cancelled = tracker.cancel_peer(&primary, now);
-    assert_eq!(cancelled.retryable, vec![id(1)]);
+    assert_eq!(cancelled.retryable, vec![(102, id(1))]);
     assert!(cancelled.exhausted.is_empty());
     assert_eq!(tracker.request(new_owner, 102, &[id(1)], now), vec![id(1)]);
-    assert_eq!(tracker.on_received(&id(1), &hedge), DeliveryAction::Accept);
     assert_eq!(
-        tracker.on_received(&id(1), &primary),
+        tracker.on_received(102, &id(1), &hedge),
+        DeliveryAction::Accept
+    );
+    assert_eq!(
+        tracker.on_received(102, &id(1), &primary),
         DeliveryAction::RejectSpam
     );
     assert_eq!(tracker.inflight_count(&primary), 0);
     assert_eq!(tracker.inflight_count(&new_owner), 1);
     assert_eq!(tracker.total_inflight(), 1);
-    tracker.mark_received(&id(1));
+    tracker.mark_received(102, &id(1));
     assert_eq!(tracker.total_inflight(), 0);
     assert_eq!(tracker.inflight_count(&new_owner), 0);
     assert!(tracker.late_acceptable.is_empty());
     assert!(tracker.retry_count.is_empty());
-    assert_eq!(tracker.on_received(&id(1), &hedge), DeliveryAction::Ignore);
     assert_eq!(
-        tracker.on_received(&id(1), &new_owner),
+        tracker.on_received(102, &id(1), &hedge),
+        DeliveryAction::Ignore
+    );
+    assert_eq!(
+        tracker.on_received(102, &id(1), &new_owner),
         DeliveryAction::Ignore
     );
 }
@@ -654,20 +680,59 @@ fn hedge_disconnect_revokes_only_that_peer() {
     let disconnected = peer(9031);
     let surviving = peer(9032);
     tracker.request(primary, 102, &[id(1)], now);
-    tracker.register_hedge_peers(&[id(1)], &[disconnected, surviving], now);
+    tracker.register_hedge_peers(102, &[id(1)], &[disconnected, surviving], now);
     let cancelled = tracker.cancel_peer(&disconnected, now);
     assert!(cancelled.retryable.is_empty() && cancelled.exhausted.is_empty());
     assert_eq!(tracker.total_inflight(), 1);
     assert_eq!(
-        tracker.on_received(&id(1), &primary),
+        tracker.on_received(102, &id(1), &primary),
         DeliveryAction::Accept
     );
     assert_eq!(
-        tracker.on_received(&id(1), &surviving),
+        tracker.on_received(102, &id(1), &surviving),
         DeliveryAction::Accept
     );
     assert_eq!(
-        tracker.on_received(&id(1), &disconnected),
+        tracker.on_received(102, &id(1), &disconnected),
         DeliveryAction::RejectSpam
     );
+}
+
+#[test]
+fn same_id_under_different_types_is_tracked_separately() {
+    let mut tracker = DeliveryTracker::new();
+    let now = Instant::now();
+    let announcer = peer(9030);
+    let holder = peer(9031);
+
+    // An id first requested as a transaction must not block a request for
+    // the same id as a block section, nor be satisfied by it.
+    assert_eq!(tracker.request(announcer, 2, &[id(5)], now), vec![id(5)]);
+    assert_eq!(tracker.request(holder, 102, &[id(5)], now), vec![id(5)]);
+    assert_eq!(tracker.status(2, &id(5)), ModifierStatus::Requested);
+    assert_eq!(tracker.status(102, &id(5)), ModifierStatus::Requested);
+    assert_eq!(tracker.status(101, &id(5)), ModifierStatus::Unknown);
+
+    // A delivery under a type that was not requested is unsolicited.
+    assert_eq!(
+        tracker.on_received(101, &id(5), &holder),
+        DeliveryAction::RejectSpam
+    );
+    assert_eq!(
+        tracker.on_received(2, &id(5), &holder),
+        DeliveryAction::RejectSpam
+    );
+    assert_eq!(
+        tracker.on_received(102, &id(5), &holder),
+        DeliveryAction::Accept
+    );
+
+    // Receiving one type leaves the other outstanding.
+    tracker.mark_received(102, &id(5));
+    assert_eq!(tracker.status(102, &id(5)), ModifierStatus::Received);
+    assert_eq!(tracker.status(2, &id(5)), ModifierStatus::Requested);
+
+    // Timeouts report the requested type with the id.
+    let result = tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
+    assert_eq!(result.retryable, vec![(announcer, vec![(2, id(5))])]);
 }
