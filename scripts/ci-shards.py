@@ -47,7 +47,7 @@ GROUPS = {
             "ergo-walletd --lib", "ergo-walletd --bin ergo-walletd", "ergo-walletd --test it",
         ),
         (
-            "ergo-state", "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
+            "ergo-state", "ergo-chain-spec", "ergo-primitives", "ergo-avltree", "ergo-indexer-types",
             "ergo-compiler", "ergo-sigma",
         ),
         # The last shard is the lightest and also runs the platform clippy.
@@ -57,7 +57,7 @@ GROUPS = {
         (
             "ergo-node --lib", "ergo-node --bin ergo-node", "ergo-node --example ge_soak",
             "ergo-state",
-            "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
+            "ergo-chain-spec", "ergo-primitives", "ergo-avltree", "ergo-indexer-types",
             "ergo-mining", "ergo-p2p", "ergo-sigma", "ergo-compiler",
             "ergo-wallet", "ergo-wallet-service", "ergo-wallet-protocol",
             "ergo-walletd --lib", "ergo-walletd --bin ergo-walletd", "ergo-walletd --test it",

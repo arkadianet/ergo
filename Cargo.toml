@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "ergo-primitives",
+    "ergo-avltree",
     "ergo-ser",
     "ergo-chain-spec",
     "ergo-crypto",
@@ -48,6 +49,7 @@ dbg_macro = "warn"
 [workspace.dependencies]
 # Internal crates — keep paths here so a single edit moves every member.
 ergo-primitives    = { path = "ergo-primitives" }
+ergo-avltree       = { path = "ergo-avltree" }
 ergo-ser           = { path = "ergo-ser" }
 ergo-chain-spec    = { path = "ergo-chain-spec" }
 ergo-crypto        = { path = "ergo-crypto" }
@@ -119,7 +121,6 @@ rustix     = "1.1"
 redb              = { version = "4", features = ["cache_metrics"] }
 # Read-only source locking and copy-only v2-to-v3 migration.
 redb_legacy = { package = "redb", version = "=2.6.3" }
-ergo_avltree_rust = "0.1.1"
 lru               = "0.18"
 crossbeam-channel = "0.5"
 arc-swap          = "1"

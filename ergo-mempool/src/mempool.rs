@@ -1585,7 +1585,9 @@ impl Mempool {
     /// Eviction policy: a tx is evicted when it is PROVABLY invalid at the new
     /// tip — a hard consensus failure (script/monetary/structural/cost) — or its
     /// DATA inputs no longer resolve, per `admission::is_recheck_evictable`. A
-    /// regular `UnresolvedInput`, a parse-class failure, or the validator's
+    /// regular `UnresolvedInput` while demoted txs are still queued for revalidation
+    /// (once the queue is empty it evicts too, see `is_recheck_evictable_now`), a
+    /// parse-class failure, or the validator's
     /// catch-all `Other(_)` (an internal/contract error — resolved-inputs
     /// mismatch / internal-invariant violation — not a consensus verdict) does
     /// NOT evict: an unresolved spend input can be a transient reorg-dependency
@@ -1785,7 +1787,7 @@ impl Mempool {
     /// * `Ok` (still valid) → keep; refresh only the rotation clock
     ///   (`touch_rechecked`) — deliberately NOT cost/weight, since re-pricing on
     ///   a validity check would desync `Entry.cost` from the `ByCost` weight key.
-    /// * `Err` that is NOT `is_recheck_evictable` (unresolved SPEND input /
+    /// * `Err` that is NOT evictable (unresolved SPEND input while demoted txs are queued /
     ///   parse-class / validator catch-all `Other(_)`) → keep, only advancing the
     ///   rotation clock. Such a failure is not proof of invalidity: an unresolved
     ///   spend input can be a transient reorg-dependency, dropping it to the
@@ -1841,7 +1843,7 @@ impl Mempool {
                 // inputs all resolve, which a non-resolution failure violates.
                 passed_ids.push(id);
             }
-            Err(ref err) if !admission::is_recheck_evictable(err) => {
+            Err(ref err) if !self.is_recheck_evictable_now(err) => {
                 self.pool.touch_rechecked(&id, now);
             }
             Err(err) => {
@@ -1866,6 +1868,18 @@ impl Mempool {
             }
         }
         consumed
+    }
+
+    /// Whether a recheck failure removes the pooled tx. An unresolved regular
+    /// input is evictable once no demoted transaction is waiting in the
+    /// revalidation queue: the pass overlay already holds every pooled output,
+    /// so the box is then in neither the UTXO set nor the pool and nothing
+    /// pending can supply it. While demoted transactions are queued, the
+    /// input may be one of their outputs, so the tx is kept.
+    fn is_recheck_evictable_now(&self, err: &admission::ValidationErr) -> bool {
+        admission::is_recheck_evictable(err)
+            || (matches!(err, admission::ValidationErr::UnresolvedInput)
+                && self.revalidation.is_empty())
     }
 
     /// Drain queued orphan evictions — descendants an evicting cascade left

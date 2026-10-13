@@ -67,6 +67,7 @@ mod keys;
 pub mod mempool;
 mod multisig;
 mod nonce_custody;
+mod nonce_vault;
 mod reads;
 pub mod rescan;
 mod scan;
@@ -134,7 +135,8 @@ pub struct WalletEngine {
     unlock_limiter: admin::AttemptLimiter,
     /// Failed-attempt budget for the seed `check` oracle.
     check_limiter: admin::AttemptLimiter,
-    /// When set, multisig nonces stay with the host (see [`NonceCustody`]).
+    /// Where multisig nonces are kept (see [`NonceCustody`]). Always the
+    /// engine's own vault unless the host opts into the caller form.
     nonce_custody: Option<Arc<dyn NonceCustody>>,
     /// Whether `config` came from a node refresh. The initial config carries no
     /// re-emission rules, so reads that depend on them must not run before one.
@@ -190,18 +192,29 @@ impl WalletEngine {
             rescan,
             unlock_limiter: admin::AttemptLimiter::new(),
             check_limiter: admin::AttemptLimiter::new(),
-            nonce_custody: None,
+            nonce_custody: Some(Arc::new(nonce_vault::NonceVault::default())),
             spending_config_known: false,
         }
     }
 
-    /// Keep multisig nonces in `custody`: `generateCommitments` returns
+    /// Keep multisig nonces in `custody` instead of the engine's default
+    /// in-memory vault. Custody means `generateCommitments` returns
     /// single-use handles instead of secret nonces, signing resolves them and
     /// refuses a caller-supplied nonce for a wallet key, and [`Self::lock`]
-    /// wipes every held nonce. Without custody the engine uses the Scala wire
-    /// form (`multisig_nonces = "caller"`).
+    /// wipes every held nonce.
     pub fn set_nonce_custody(&mut self, custody: Arc<dyn NonceCustody>) {
         self.nonce_custody = Some(custody);
+    }
+
+    /// Opt into the Scala wire form (`multisig_nonces = "caller"`):
+    /// `generateCommitments` returns the secret nonces to the caller, who hands
+    /// them back when signing. Anyone who sees a nonce together with the final
+    /// signature can recover the signing key, so a host enables this only
+    /// when its operator asked for it. Any nonce already held is wiped.
+    pub fn allow_caller_nonces(&mut self) {
+        if let Some(custody) = self.nonce_custody.take() {
+            custody.clear();
+        }
     }
 
     /// Seal `key` into the keystore that the next `init` or `restore`

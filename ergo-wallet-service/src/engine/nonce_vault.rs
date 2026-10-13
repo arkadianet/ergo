@@ -1,5 +1,6 @@
-//! In-memory custody of multisig signing nonces (`[security] multisig_nonces
-//! = "daemon"`).
+//! In-memory custody of multisig signing nonces. This is the engine's default;
+//! a host that wants the Scala wire form (`[security] multisig_nonces =
+//! "caller"`) opts out with `WalletEngine::allow_caller_nonces`.
 //!
 //! Each nonce produced by `generateCommitments` is kept here under a random
 //! single-use handle that is returned in its place. A handle is bound to the
@@ -11,14 +12,14 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use ergo_wallet_service::engine::{NonceBinding, NonceCustody, NonceRefusal, NONCE_HANDLE_PREFIX};
+use super::nonce_custody::{NonceBinding, NonceCustody, NonceRefusal, NONCE_HANDLE_PREFIX};
 use parking_lot::Mutex;
 use zeroize::Zeroizing;
 
 /// How long an unused commitment handle stays valid.
-pub const NONCE_TTL: Duration = Duration::from_secs(3600);
+pub(crate) const NONCE_TTL: Duration = Duration::from_secs(3600);
 /// Most nonces held at once.
-pub const MAX_NONCES: usize = 4096;
+pub(crate) const MAX_NONCES: usize = 4096;
 
 /// A held nonce, the public data it was issued for, and when.
 struct Entry {
@@ -28,7 +29,7 @@ struct Entry {
 }
 
 #[derive(Default)]
-pub struct NonceVault {
+pub(crate) struct NonceVault {
     entries: Mutex<BTreeMap<String, Entry>>,
 }
 

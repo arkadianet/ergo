@@ -153,7 +153,7 @@ migration before the handoff, offline UTXO discovery).
   (`2`) and full-block consensus-rule invalidity (`3`), including descendants.
   IO, missing context, local consistency errors and ambiguous digest failures
   use session marks instead. The sync executor owns verdict classification.
-- **AVL+ label hashing matches scorex-util / `ergo_avltree_rust`.** Leaf =
+- **AVL+ label hashing matches scorex-util / `ergo-avltree`.** Leaf =
   `blake2b256(0x00 ‖ key ‖ value ‖ next_key)`, Internal =
   `blake2b256(0x01 ‖ balance ‖ left_label ‖ right_label)`, ADDigest =
   `root_label[32] ‖ tree_height[1]`. Note the label prefixes (leaf=0,

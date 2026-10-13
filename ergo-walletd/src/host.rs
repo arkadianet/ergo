@@ -564,15 +564,12 @@ impl WalletHost {
         Ok(())
     }
 
-    /// Keep multisig nonces in the daemon: `generateCommitments` returns
-    /// single-use handles, signing refuses caller-supplied nonces for wallet
-    /// keys, and every engine lock (explicit, automatic, on a panicked
-    /// command or on drop) wipes every held nonce.
-    pub fn enable_nonce_custody(&self) {
-        self.inner
-            .engine
-            .lock()
-            .set_nonce_custody(Arc::new(crate::nonce_vault::NonceVault::default()));
+    /// Opt into the Scala wire form (`[security] multisig_nonces = "caller"`):
+    /// `generateCommitments` returns secret nonces to the caller. Without
+    /// this the daemon keeps them (single-use handles, caller nonces refused
+    /// for wallet keys, every engine lock wipes them).
+    pub fn allow_caller_nonces(&self) {
+        self.inner.engine.lock().allow_caller_nonces();
     }
 
     /// Seal the wallet database key into the keystore a later `init` or

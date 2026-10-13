@@ -2,7 +2,7 @@
 //!
 //! Consensus-critical: these hash inputs must exactly match the scorex-util
 //! AVL+ implementation used by the Ergo reference node. The authoritative
-//! Rust oracle is `ergo_avltree_rust` crate (batch_node.rs lines 83-111).
+//! Rust oracle is `ergo-avltree` crate (batch_node.rs lines 83-111).
 //!
 //! Leaf label  = blake2b256(0x00 || `key[32]` || `value[var]` || `next_leaf_key[32]`)
 //! Internal label = blake2b256(0x01 || `balance_as_u8[1]` || `left_label[32]` || `right_label[32]`)
@@ -12,7 +12,7 @@ use ergo_primitives::digest::{ADDigest, Digest32};
 
 /// Prefix byte for leaf nodes in the label hash.
 /// Note: the *serialization* format uses the opposite convention (leaf=1, internal=0)
-/// but the label hash uses leaf=0, internal=1. See ergo_avltree_rust batch_node.rs.
+/// but the label hash uses leaf=0, internal=1. See ergo-avltree batch_node.rs.
 pub const LEAF_LABEL_PREFIX: u8 = 0x00;
 
 /// Prefix byte for internal nodes in the label hash.
@@ -125,11 +125,11 @@ mod tests {
     }
 
     /// Cross-validate leaf and internal label computation against the
-    /// ergo_avltree_rust crate (the authoritative Rust oracle).
+    /// ergo-avltree crate (the authoritative Rust oracle).
     #[test]
-    fn cross_validate_labels_against_ergo_avltree_rust() {
+    fn cross_validate_labels_against_ergo_avltree() {
         use bytes::Bytes;
-        use ergo_avltree_rust::batch_node::{AVLTree, InternalNode, LeafNode, Node, NodeHeader};
+        use ergo_avltree::batch_node::{AVLTree, InternalNode, LeafNode, Node, NodeHeader};
 
         let key_len = 32;
         let tree = AVLTree::new(

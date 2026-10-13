@@ -1,14 +1,14 @@
 //! Phase-1 oracle-free differential for the AVL verifier panic guard.
 //!
 //! Asserts two safety properties of `ergo_sigma::avl::AvlVerifier` (the guarded
-//! wrapper) against the RAW `ergo_avltree_rust::BatchAVLVerifier` it wraps,
+//! wrapper) against the RAW `ergo_avltree::BatchAVLVerifier` it wraps,
 //! across a deterministic fuzz of random trees and valid/adversarial proofs:
 //!
 //!   1. FAITHFUL — on every input where the raw crate does NOT panic, the
 //!      wrapper returns the same op success/failure AND the same digest. The
 //!      guard changes nothing for honest inputs.
-//!   2. FAIL CLOSED — on every input where the raw crate PANICS (the consensus
-//!      DoS class: a structurally-valid-but-wrong proof), the wrapper instead
+//!   2. FAIL CLOSED — on every input where the raw crate PANICS (a proof
+//!      whose directions run past its end), the wrapper instead
 //!      returns a failure AND `digest()` is `None` (poisoned) — never a panic
 //!      escaping to the caller, never a half-mutated digest. This mirrors Scala's
 //!      `Try` boundary (`topNode = None` after a failed op).
@@ -23,11 +23,11 @@
 //! panic class (making the test vacuous) fails loudly.
 
 use bytes::Bytes;
-use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-use ergo_avltree_rust::batch_avl_verifier::BatchAVLVerifier;
-use ergo_avltree_rust::batch_node::{AVLTree, Node, NodeHeader};
-use ergo_avltree_rust::operation::{KeyValue, Operation};
+use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+use ergo_avltree::batch_avl_prover::BatchAVLProver;
+use ergo_avltree::batch_avl_verifier::BatchAVLVerifier;
+use ergo_avltree::batch_node::{AVLTree, Node, NodeHeader};
+use ergo_avltree::operation::{KeyValue, Operation};
 use ergo_sigma::avl::AvlVerifier;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -223,7 +223,16 @@ fn guarded_verifier_is_faithful_and_fails_closed_vs_raw_crate() {
             let proof_op = Op::pick(&mut rng, &keys);
             let verify_op = Op::pick(&mut rng, &keys);
 
-            let (start, proof) = make_case(&keys, &proof_op);
+            let (start, mut proof) = make_case(&keys, &proof_op);
+            // A quarter of the cases lose the proof's last byte. That is
+            // usually a direction byte, so the tree still reconstructs and
+            // the operation reads directions past the end of the proof: the
+            // crate still panics there (it indexes the proof directly), which
+            // keeps the guard exercised now that wrong-shape proofs return
+            // errors.
+            if rng.below(4) == 0 {
+                proof.pop();
+            }
 
             let raw = run_raw(&start, &proof, &verify_op);
             let wrapped = run_wrapped(&start, &proof, &verify_op);

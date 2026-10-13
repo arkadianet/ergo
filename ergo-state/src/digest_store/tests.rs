@@ -1717,10 +1717,10 @@ mod c2_bridge {
     use super::*;
     use crate::backend::BlockApply;
     use crate::chain::{ChainStateMeta, HeaderAvailability};
-    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-    use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-    use ergo_avltree_rust::batch_node::{AVLTree, Node, NodeHeader};
-    use ergo_avltree_rust::operation::{KeyValue, Operation};
+    use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree::batch_avl_prover::BatchAVLProver;
+    use ergo_avltree::batch_node::{AVLTree, Node, NodeHeader};
+    use ergo_avltree::operation::{KeyValue, Operation};
     use ergo_primitives::digest::{blake2b256, ADDigest, Digest32, ModifierId};
     use ergo_primitives::group_element::GroupElement;
     use ergo_primitives::writer::VlqWriter;

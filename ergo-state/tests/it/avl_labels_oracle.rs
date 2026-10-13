@@ -1,12 +1,12 @@
-//! Per-operation parity oracle against ergo_avltree_rust. After every
+//! Per-operation parity oracle against ergo-avltree. After every
 //! insert/update/remove, our root digest MUST match the reference crate.
 //! Guards consensus parity at the operation level, not just per-block.
 
 use bytes::Bytes;
-use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-use ergo_avltree_rust::batch_node::{AVLTree, Node, NodeHeader};
-use ergo_avltree_rust::operation::{KeyValue, Operation};
+use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+use ergo_avltree::batch_avl_prover::BatchAVLProver;
+use ergo_avltree::batch_node::{AVLTree, Node, NodeHeader};
+use ergo_avltree::operation::{KeyValue, Operation};
 use ergo_state::avl::tree::AvlTree;
 
 fn oracle_prover() -> BatchAVLProver {
@@ -253,7 +253,7 @@ fn random_mixed_insert_delete_matches_oracle_and_forced_recompute() {
         assert_eq!(
             ours.root_digest().as_bytes(),
             oracle.digest().unwrap().to_vec().as_slice(),
-            "divergence from ergo_avltree_rust at op {op_i}"
+            "divergence from ergo-avltree at op {op_i}"
         );
         assert_eq!(
             ours.root_digest(),

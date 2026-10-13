@@ -390,10 +390,11 @@ and `WALLET_SCAN_TXS`.
 - **Sealed at rest.** `encrypted_db` stores `wallet.redb` as AES-256-GCM
   sectors; `seal` starts the daemon without its database key and opens the
   database only when a password, passphrase or `unseal_key_file` releases it,
-  encrypting a cleartext database on the way. `nonce_vault` keeps multisig
+  encrypting a cleartext database on the way. The engine keeps multisig
   nonces in memory under single-use handles bound to their input and public
-  commitment (consumed on any attempt; 1 h expiry, 4096 cap). The engine
-  wipes it on every lock and, with custody on, refuses a hex nonce for any
+  commitment (consumed on any attempt; 1 h expiry, 4096 cap) by default;
+  `[security] multisig_nonces = "caller"` opts out. It wipes them on every
+  lock and, with custody on, refuses a hex nonce for any
   key not supplied in `externalSecrets` (`ergo-wallet-service`
   `engine/hints_codec.rs`).
 - **Locked by default, and again.** Seed wallets restart sealed and locked; `host` locks

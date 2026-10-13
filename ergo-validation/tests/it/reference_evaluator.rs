@@ -259,6 +259,11 @@ fn avl_key_length_past_the_jvm_array_limit_fails_the_script() {
 }
 
 #[test]
+fn avl_proof_leaf_value_lengths_match_reference() {
+    check_vectors("avl-value-length");
+}
+
+#[test]
 fn runtime_deserialized_code_gets_the_tree_parse_checks() {
     check_vectors("runtime-deserialized-parse-checks");
 }

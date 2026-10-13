@@ -612,7 +612,7 @@ impl AvlTree {
     // maintained by every mutation path (`insert`, `remove`, `rollback`).
     // Trust contract: the per-operation oracle in
     // `tests/avl_labels_oracle.rs` proves this cache matches
-    // `ergo_avltree_rust` at every step; production trusts it.
+    // `ergo-avltree` at every step; production trusts it.
     /// The root's label. Cached in `self.root_label`, maintained by mutations.
     pub fn root_label(&self) -> Digest32 {
         self.root_label
@@ -2038,10 +2038,10 @@ impl AvlTree {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-    use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-    use ergo_avltree_rust::batch_node::{AVLTree as OracleTree, Node, NodeHeader};
-    use ergo_avltree_rust::operation::{KeyValue, Operation};
+    use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree::batch_avl_prover::BatchAVLProver;
+    use ergo_avltree::batch_node::{AVLTree as OracleTree, Node, NodeHeader};
+    use ergo_avltree::operation::{KeyValue, Operation};
 
     fn oracle_tree() -> BatchAVLProver {
         BatchAVLProver::new(

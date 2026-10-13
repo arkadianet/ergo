@@ -32,14 +32,14 @@
 //! * [`crypto_cost`] — sigma-tree crypto cost estimator
 //!   (`estimate_crypto_cost`) — the cost added once per reduced
 //!   proposition before the actual proof verification runs.
-//! * [`avl`] — thin wrapper around `ergo_avltree_rust` for AVL+ proof
+//! * [`avl`] — thin wrapper around `ergo-avltree` for AVL+ proof
 //!   verification. Single dependency boundary so the rest of the
 //!   evaluator never imports the underlying crate.
 //! * `cost_trace` (feature `cost-trace`) — debug-only per-step cost
 //!   recorder for diagnosing divergence against the Scala oracle.
 
 // The AVL verifier wrapper (`avl`) isolates panics from the upstream
-// `ergo_avltree_rust` crate via `catch_unwind`, converting a malformed-proof
+// `ergo-avltree` crate via `catch_unwind`, converting a malformed-proof
 // panic into a fail-closed `Err` (Scala parity). `catch_unwind` is a no-op
 // under `panic = "abort"`, so building this consensus crate with abort would
 // turn an attacker-supplied malformed-proof transaction back into a node crash

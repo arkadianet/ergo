@@ -1116,14 +1116,17 @@ impl Validator for AlwaysErr {
 }
 
 #[test]
-fn recheck_unresolved_input_left_in_pool_not_evicted() {
-    // An UnresolvedInput failure at recheck is NOT proof of invalidity: the
-    // input may be a transient reorg-dependency (a demoted parent pending
-    // re-admission). The tx must be LEFT in the pool — not evicted, not
-    // cached — so it is not dropped before its parent returns; only its
-    // rotation clock advances. (A genuine confirmed double-spend is handled
-    // by on_tip_change's input-conflict cascade, not here.)
+fn recheck_unresolved_input_kept_while_demoted_txs_await_revalidation() {
+    // While demoted transactions wait in the revalidation queue, an
+    // UnresolvedInput failure at recheck may be a transient reorg-dependency
+    // (a demoted parent pending re-admission). The tx must be LEFT in the
+    // pool — not evicted, not cached — so it is not dropped before its parent
+    // returns; only its rotation clock advances.
     let mut mp = mempool_with(MempoolConfig::default());
+    mp.revalidation.push(DemotedTx {
+        tx_id: d(0x77),
+        bytes: Arc::from(tx_bytes(0x77)),
+    });
     seed(&mut mp, 1, 0x10, 0x11, 100, vec![]);
     let base = Instant::now();
     set_checked(&mut mp, 1, base);
@@ -1138,7 +1141,7 @@ fn recheck_unresolved_input_left_in_pool_not_evicted() {
 
     assert!(
         mp.contains(&d(1)),
-        "unresolved-input tx must be kept (could be a reorg-dependency)"
+        "unresolved-input tx must be kept while a demoted parent may return"
     );
     assert!(!mp.is_invalidated(&d(1)), "kept tx must not be blacklisted");
     assert!(actions.is_empty(), "no eviction action for a kept tx");
@@ -1146,6 +1149,40 @@ fn recheck_unresolved_input_left_in_pool_not_evicted() {
         mp.pool().get(&d(1)).unwrap().last_checked_at,
         now,
         "rotation clock advances even when the tx is kept"
+    );
+    mp.pool().check_invariants();
+}
+
+#[test]
+fn recheck_evicts_a_tx_whose_input_resolves_nowhere() {
+    // With no demoted transaction pending, an input that is neither in the
+    // UTXO set nor an output of a pooled tx can never be supplied: the tx and
+    // its descendants are evicted (re-admittable, not blacklisted).
+    let mut mp = mempool_with(MempoolConfig::default());
+    assert!(mp.revalidation.is_empty());
+    seed(&mut mp, 1, 0x10, 0x11, 100, vec![]);
+    let base = Instant::now();
+    set_checked(&mut mp, 1, base);
+    let utxo = FakeUtxo::empty();
+    let tip = TestTip::new();
+    let v = AlwaysErr {
+        err: ValidationErr::UnresolvedInput,
+    };
+
+    let now = base + Duration::from_secs(10);
+    let actions = mp.recheck_and_evict(now, &tip.view(&utxo), &v);
+
+    assert!(!mp.contains(&d(1)), "a tx with a vanished input is evicted");
+    assert_eq!(evicted_ids(&actions), vec![d(1)]);
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, MempoolAction::RevokeBroadcast { .. })),
+        "the evicted tx must stop being advertised"
+    );
+    assert!(
+        !mp.is_invalidated(&d(1)),
+        "the box may return after a reorg, so the tx is not blacklisted"
     );
     mp.pool().check_invariants();
 }
@@ -1465,11 +1502,14 @@ fn recheck_ids_keeps_suspect_valid_at_live_tip() {
 }
 
 #[test]
-fn recheck_ids_keeps_unresolved_suspect_not_blacklisted() {
-    // The suspect path shares the full pass's hard-invalid-only policy: an
-    // UnresolvedInput re-validation is not provable invalidity → kept, not
-    // blacklisted (could be a reorg-dependency).
+fn recheck_ids_keeps_unresolved_suspect_while_demoted_txs_are_pending() {
+    // The suspect path shares the full pass's policy: with a demoted tx still
+    // queued, an unresolved input could be its output -> kept, not blacklisted.
     let mut mp = mempool_with(MempoolConfig::default());
+    mp.revalidation.push(DemotedTx {
+        tx_id: d(0x77),
+        bytes: Arc::from(tx_bytes(0x77)),
+    });
     seed(&mut mp, 1, 0x10, 0x11, 100, vec![]);
     let utxo = FakeUtxo::empty();
     let tip = TestTip::new();
@@ -1482,6 +1522,23 @@ fn recheck_ids_keeps_unresolved_suspect_not_blacklisted() {
     assert!(mp.contains(&d(1)), "unresolved suspect kept");
     assert!(!mp.is_invalidated(&d(1)));
     assert!(actions.is_empty());
+}
+
+#[test]
+fn recheck_ids_evicts_unresolved_suspect_when_nothing_is_pending() {
+    let mut mp = mempool_with(MempoolConfig::default());
+    seed(&mut mp, 1, 0x10, 0x11, 100, vec![]);
+    let utxo = FakeUtxo::empty();
+    let tip = TestTip::new();
+    let v = AlwaysErr {
+        err: ValidationErr::UnresolvedInput,
+    };
+
+    let actions = mp.recheck_ids(Instant::now(), &tip.view(&utxo), &v, &[d(1)]);
+
+    assert!(!mp.contains(&d(1)), "a suspect with a vanished input goes");
+    assert_eq!(evicted_ids(&actions), vec![d(1)]);
+    assert!(!mp.is_invalidated(&d(1)));
 }
 
 #[test]

@@ -1405,7 +1405,7 @@ impl StateStore {
     /// Walks the full AVL+ tree — `O(N)` in tree size — so callers
     /// should only invoke this when:
     /// 1. The tip is at a Scala-aligned snapshot boundary
-    ///    (`best_full_block_height % SNAPSHOT_EVERY == 0`), AND
+    ///    (`best_full_block_height % SNAPSHOT_EVERY == SNAPSHOT_EVERY - 1`), AND
     /// 2. We don't already have a snapshot cached at this height.
     ///
     /// Mainnet uses `manifest_depth = 14`

@@ -1,6 +1,6 @@
 [package]
 name        = "ergo-sigma"
-description = "Sigma-protocol verifier and ErgoTree evaluator for the Ergo Rust node: AST-walking interpreter, JIT cost accounting, AVL+ proof verification (via ergo_avltree_rust), Schnorr/DHTuple/CAND/COR/Cthreshold verification, and the spending-proof entry points used by mempool admission and block validation."
+description = "Sigma-protocol verifier and ErgoTree evaluator for the Ergo Rust node: AST-walking interpreter, JIT cost accounting, AVL+ proof verification (via ergo-avltree), Schnorr/DHTuple/CAND/COR/Cthreshold verification, and the spending-proof entry points used by mempool admission and block validation."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,7 +20,7 @@ num-traits        = { workspace = true }
 gf2_192           = { workspace = true }
 indexmap          = { workspace = true }
 thiserror         = { workspace = true }
-ergo_avltree_rust = { workspace = true }
+ergo-avltree = { workspace = true }
 bytes             = { workspace = true }
 
 [features]

@@ -210,7 +210,7 @@ fn cached_nonempty_mainnet_advance_matches_roots_fresh_proofs_and_reopen() {
 
 #[test]
 fn snapshot_install_preserves_mainnet_lookups_forward_apply_and_reopen() {
-    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
     use ergo_ser::header::read_header;
     use ergo_state::avl::snapshot_codec::reconstruct_tree;
     use ergo_state::chain::HeaderMeta;

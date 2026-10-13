@@ -1304,7 +1304,8 @@ fn maybe_rebuild_serve_snapshot(state: &mut NodeState) {
     if tip == 0 {
         return;
     }
-    if !tip.is_multiple_of(SNAPSHOT_EVERY) {
+    let best_header_height = state.store.chain_state_meta().best_header_height;
+    if !is_snapshot_height(tip, best_header_height) {
         return;
     }
     if state.snapshot_state.cached_height() == Some(tip) {
@@ -1338,12 +1339,22 @@ fn maybe_rebuild_serve_snapshot(state: &mut NodeState) {
     }
 }
 
-/// Scala-aligned snapshot cadence. Mainnet builds a snapshot
-/// every 52,224 blocks (~5-7 days). Peers requesting
-/// `SnapshotsInfo` get the latest snapshot at one of these
-/// boundaries; off-cadence heights aren't served because no
-/// other peer would know to ask for them.
+/// Snapshot cadence. Mainnet takes a snapshot every 52,224 blocks, on the
+/// last block of each epoch (`height % 52224 == 52223`): the snapshot is the
+/// UTXO set after that block, and its manifest id is the root hash in that
+/// block's header. Peers requesting `SnapshotsInfo` get the snapshot at one of
+/// these heights; other heights aren't served because no other peer would
+/// match them against its headers.
 const SNAPSHOT_EVERY: u32 = 52_224;
+
+/// Whether a snapshot is taken after the block at `height`: the last block of
+/// a snapshot epoch, and only while the chain is within one epoch of the best
+/// known header (a node still catching up does not build snapshots for
+/// heights the network has long moved past).
+fn is_snapshot_height(height: u32, best_header_height: u32) -> bool {
+    height % SNAPSHOT_EVERY == SNAPSHOT_EVERY - 1
+        && best_header_height.saturating_sub(height) <= SNAPSHOT_EVERY
+}
 
 /// Rebuild `/api/v1/identity` from current store state and
 /// publish into the lock-free slot the API bridge reads. Called
@@ -1447,9 +1458,23 @@ fn maybe_emit_gauges(state: &mut NodeState, now: Instant) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snapshots_are_taken_on_the_last_block_of_an_epoch() {
+        // Mainnet makeSnapshotEvery = 52224: heights 52223, 104447, ...
+        assert!(is_snapshot_height(52_223, 52_300));
+        assert!(is_snapshot_height(104_447, 104_447));
+        // Epoch boundaries themselves and neighbours are not snapshot heights.
+        assert!(!is_snapshot_height(52_224, 52_300));
+        assert!(!is_snapshot_height(52_222, 52_300));
+        assert!(!is_snapshot_height(0, 100));
+        // A node more than one epoch behind the best header builds nothing.
+        assert!(is_snapshot_height(52_223, 52_223 + 52_224));
+        assert!(!is_snapshot_height(52_223, 52_223 + 52_225));
+    }
+
     use super::{
-        install_reconstructed_snapshot, recover_snapshot_bootstrap, resolve_install_anchor,
-        InstallAnchor,
+        install_reconstructed_snapshot, is_snapshot_height, recover_snapshot_bootstrap,
+        resolve_install_anchor, InstallAnchor,
     };
     use ergo_primitives::reader::VlqReader;
     use ergo_ser::header::read_header;

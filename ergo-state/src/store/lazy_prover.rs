@@ -2,8 +2,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use bytes::Bytes;
-use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-use ergo_avltree_rust::batch_node::{AVLTree, InternalNode, LeafNode, Node};
+use ergo_avltree::batch_avl_prover::BatchAVLProver;
+use ergo_avltree::batch_node::{AVLTree, InternalNode, LeafNode, Node};
 use ergo_primitives::digest::ADDigest;
 
 use super::dry_run::{apply_change_set_to_prover, DryRunInsertMap, DryRunRemoveMap};

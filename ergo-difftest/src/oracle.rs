@@ -905,7 +905,7 @@ fn validate_verdict(bytes: &[u8]) -> (Verdict, usize) {
 ///
 /// Decodes an [`crate::avl_frame::AvlFrame`], constructs the
 /// `ergo_sigma::avl::AvlVerifier` (the guarded wrapper around the upstream
-/// `ergo_avltree_rust::BatchAVLVerifier`), and applies every operation in
+/// `ergo_avltree::BatchAVLVerifier`), and applies every operation in
 /// the frame. On success returns the final tree digest as hex; on any op
 /// failure returns `Reject`.
 ///

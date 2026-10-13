@@ -43,3 +43,16 @@ over unequal context variables, in JIT and pre-JIT blocks. A JIT zip truncates
 the longer column first, so appending two zips is limited by the zipped
 length; a pre-JIT zip keeps both columns, and appending can exceed the
 100,000-item limit.
+
+`avl-value-length` covers AVL proofs for trees without a fixed value length,
+where each leaf carries a 4-byte value length: 0, a 200-byte value, negative
+lengths (including -37 and -40, which would move the read position back onto
+an end-of-tree marker earlier in the proof and give a consistent tree), a
+length past the end of the proof, 0x7fffffff and 4 MiB + 1. It runs
+`contains`, `get`, `getMany`, `insert`, `update`, `remove` and
+`insertOrUpdate` at tree versions 0 and 3 against one- and two-leaf trees,
+with ordinary encodings of the same trees as controls. Where a method returns
+an Option and the proof fails, a `-defined`/`-undefined` pair tells a script
+failure (both rejected) from a None result (`-undefined` accepted). scrypto
+3.1.1 rejects a negative length, one above 4 MiB and one past the end of the
+proof.

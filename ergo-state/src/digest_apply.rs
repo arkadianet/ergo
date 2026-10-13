@@ -86,7 +86,7 @@ pub enum DigestApplyError {
     /// be too fragile a third-party dependency.
     #[error("ADProofs verifier construction failed (session-scoped): {reason}")]
     VerifierConstructionRejected { reason: String },
-    /// The underlying `ergo_avltree_rust` crate panicked during
+    /// The underlying `ergo-avltree` crate panicked during
     /// verifier construction. The current upstream version panics
     /// on certain malformed envelopes instead of returning Err;
     /// caught here so it does not tear down the node. SEPARATE from
@@ -407,10 +407,8 @@ impl DigestProofVerifier {
         // No `catch_unwind` is needed HERE: both upstream panic classes are
         // already contained below this call. Construction panics (proof-graph
         // rebuild in `new()`) are guarded at construction (see
-        // `VerifierConstructionPanic`). Operation-time panics — a structurally-
-        // valid-but-wrong proof drives the crate to `panic!` mid-stream
-        // (`authenticated_tree_ops.rs` 413/431/635; see `ergo-sigma`'s
-        // `remove_structurally_valid_wrong_proof_fails_closed_not_panic`) — are
+        // `VerifierConstructionPanic`). Operation-time panics — an operation
+        // reading direction bits past the end of the proof — are
         // caught inside `AvlVerifier` itself (`ergo-sigma`'s `avl::guarded`),
         // which poisons the verifier and surfaces `Err(())`. So every op call
         // here observes only `Ok`/`Err`; a caught op-time panic arrives as the
@@ -674,7 +672,7 @@ mod tests {
         // Both binding checks pass (root + modifier_id match the
         // bytes), but the bytes are not a valid AVL+ proof
         // envelope. The current upstream
-        // `ergo_avltree_rust::BatchAVLVerifier` panics during
+        // `ergo_avltree::BatchAVLVerifier` panics during
         // construction (stack underflow during graph rebuild).
         // The seam catches it and surfaces as
         // `VerifierConstructionPanic` (session-scoped). A typed
@@ -778,10 +776,10 @@ mod tests {
     // NOT external Scala/mainnet oracle parity, which is a separate
     // corpus-backed gate.
 
-    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-    use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-    use ergo_avltree_rust::batch_node::{AVLTree, Node, NodeHeader};
-    use ergo_avltree_rust::operation::{KeyValue, Operation};
+    use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree::batch_avl_prover::BatchAVLProver;
+    use ergo_avltree::batch_node::{AVLTree, Node, NodeHeader};
+    use ergo_avltree::operation::{KeyValue, Operation};
     use std::collections::BTreeMap;
 
     fn new_prover() -> BatchAVLProver {

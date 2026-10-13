@@ -1,16 +1,16 @@
-//! Thin wrapper around `ergo_avltree_rust` for AVL+ tree proof verification.
+//! Thin wrapper around `ergo-avltree` for AVL+ tree proof verification.
 //!
-//! All `ergo_avltree_rust` imports are confined to this module, providing a
+//! All `ergo-avltree` imports are confined to this module, providing a
 //! single dependency boundary for the evaluator. The crate is a pure-Rust
 //! implementation of the Scorex authenticated AVL+ tree and is intentionally
 //! accepted as a runtime consensus dependency (not sigma-rust).
 //!
 //! Operations supported: lookup, update, insert, digest extraction.
 
-use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-use ergo_avltree_rust::batch_avl_verifier::BatchAVLVerifier;
-use ergo_avltree_rust::batch_node::{AVLTree, Node, NodeHeader};
-use ergo_avltree_rust::operation::{KeyDelta, KeyValue, Operation};
+use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+use ergo_avltree::batch_avl_verifier::BatchAVLVerifier;
+use ergo_avltree::batch_node::{AVLTree, Node, NodeHeader};
+use ergo_avltree::operation::{KeyDelta, KeyValue, Operation};
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -67,26 +67,32 @@ pub const MAX_SCRIPT_AVL_PROOF_HEIGHT: usize = 12_000;
 pub const AVL_DIGEST_LENGTH: usize = 33;
 
 // Packed-proof node markers (scrypto `BatchProofConstants`; the same values
-// are crate-private in `ergo_avltree_rust::batch_node`). Any other byte is an
+// are crate-private in `ergo_avltree::batch_node`). Any other byte is an
 // internal node whose value is its balance.
 const PROOF_LEAF: u8 = 2;
 const PROOF_LABEL: u8 = 3;
 const PROOF_END_OF_TREE: u8 = 4;
 const PROOF_LABEL_LENGTH: usize = 32;
+/// Longest leaf value a proof may carry, fixed-length or not (scrypto 3.1.1
+/// `BatchAVLVerifier.MaxValueLength`; the crate has the same bound).
+const PROOF_MAX_VALUE_LENGTH: usize = 4_194_304;
 
 /// Height of the tree a packed AVL+ batch proof reconstructs, computed
 /// without building it: one pass over the bytes with a heap stack of subtree
 /// heights. Leaves and label-only nodes have height 0; an internal node has
 /// height `max(left, right) + 1`.
 ///
-/// Mirrors the reconstruction in `ergo_avltree_rust`'s `BatchAVLVerifier`
+/// Mirrors the reconstruction in `ergo-avltree`'s `BatchAVLVerifier`
 /// (and scrypto's) exactly: a leaf carries its key only when the previous
 /// node was not a leaf (a label node resets this, an internal node does
 /// not), then the next-leaf key, then a 4-byte big-endian length when values
 /// are not fixed-length, then the value. Returns `None` exactly when that
 /// reconstruction fails on the proof's structure: a read past the end
-/// (including a missing end-of-tree marker), an internal node with fewer
-/// than two subtrees below it, or anything but one tree at the end. Failures
+/// (including a missing end-of-tree marker), a value longer than 4 MiB, an
+/// internal node with fewer than two subtrees below it, or anything but one
+/// tree at the end. The length field is read unsigned; the reference reads it
+/// signed and rejects a negative length, which as `u32` is above the 4 MiB
+/// bound, so the two agree. Failures
 /// that need the tree itself (node-count bound, root label versus digest)
 /// are left to the crate.
 pub fn proof_tree_height(
@@ -128,6 +134,9 @@ pub fn proof_tree_height(
                         u32::from_be_bytes(len_bytes) as usize
                     }
                 };
+                if value_length > PROOF_MAX_VALUE_LENGTH {
+                    return None;
+                }
                 i = advance(proof, i, value_length)?;
                 heights.push(0);
                 previous_was_leaf = true;
@@ -226,7 +235,7 @@ fn operation_key(operation: &Operation) -> &[u8] {
     }
 }
 
-/// Opaque handle to a BatchAVLVerifier from `ergo_avltree_rust`.
+/// Opaque handle to a BatchAVLVerifier from `ergo-avltree`.
 ///
 /// Operation methods return `Result<_, ()>` because the underlying crate's
 /// error types are opaque — callers map failures to their own error type.
@@ -235,10 +244,10 @@ fn operation_key(operation: &Operation) -> &[u8] {
 /// the underlying crate. All proof verification operations go through
 /// this type's methods.
 ///
-/// The inner verifier is an `Option` so it can be POISONED. `ergo_avltree_rust`
-/// `panic!`s (rather than returning `Err`) on a structurally-valid-but-wrong
-/// proof — e.g. a lookup proof supplied where a remove proof belongs — at
-/// several op-time sites (`authenticated_tree_ops.rs` 413/431/635/...). The
+/// The inner verifier is an `Option` so it can be POISONED. `ergo-avltree`
+/// returns `Err` for a proof of the wrong shape (e.g. a lookup proof supplied
+/// where a remove proof belongs), but still `panic!`s when an operation reads
+/// past the end of the proof (its direction bits are indexed directly). The
 /// Scala reference throws the same error but catches it in an enclosing `Try`,
 /// so the operation fails and the transaction is invalid while the node
 /// survives. `AvlVerifier::guarded` restores that fail-closed parity: a caught
@@ -305,7 +314,7 @@ pub struct AvlHeightOutOfRange {
 /// moves the height by at most one.
 const CRATE_HEIGHT_BIAS: i64 = 1 << 32;
 
-// `clippy::result_unit_err`: the underlying `ergo_avltree_rust` crate
+// `clippy::result_unit_err`: the underlying `ergo-avltree` crate
 // returns opaque errors from `perform_one_operation`; collapsing to
 // `Result<_, ()>` at this boundary lets callers map the failure into
 // their own error type without leaking the upstream type.
@@ -467,10 +476,10 @@ impl AvlVerifier {
     }
 
     /// Run `f` against the wrapped verifier, isolating any panic from the
-    /// upstream `ergo_avltree_rust` crate into the fail-closed `Err(())` path.
+    /// upstream `ergo-avltree` crate into the fail-closed `Err(())` path.
     ///
-    /// The crate `panic!`s on a structurally-valid-but-wrong proof at op time
-    /// (see the type doc). This restores Scala's `Try`-boundary semantics: a
+    /// The crate can `panic!` at op time on a proof that ends too early (see
+    /// the type doc). This restores Scala's `Try`-boundary semantics: a
     /// caught panic POISONS the verifier (the inner value was moved into the
     /// unwinding closure and dropped, so `self.inner` stays `None`) and surfaces
     /// `Err(())`. A verifier already poisoned by an earlier caught panic stays
@@ -716,10 +725,10 @@ impl AvlVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-    use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-    use ergo_avltree_rust::batch_node::{AVLTree as ProverTree, Node, NodeHeader};
-    use ergo_avltree_rust::operation::{KeyValue as ProverKv, Operation as ProverOp};
+    use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree::batch_avl_prover::BatchAVLProver;
+    use ergo_avltree::batch_node::{AVLTree as ProverTree, Node, NodeHeader};
+    use ergo_avltree::operation::{KeyValue as ProverKv, Operation as ProverOp};
 
     // ----- helpers -----
 
@@ -854,13 +863,10 @@ mod tests {
         // CONSENSUS-DoS REGRESSION. A structurally-valid LOOKUP proof supplied
         // where a REMOVE proof belongs (in a permissionless contract the spender
         // controls the proof bytes). The proof CONSTRUCTS fine, then the Remove
-        // walks into a LabelOnly node the lookup proof never materialised, and
-        // the upstream crate `panic!`s at OPERATION time
-        // (`authenticated_tree_ops.rs:635 "Not internal node"` for this shape —
-        // a sibling of the 413/431 "this proof is wrong" sites). Scala throws the
-        // same error but catches it in an enclosing `Try`, so the op fails and
-        // the tx is invalid while the node survives. The `guarded` panic boundary
-        // must reproduce that fail-closed outcome:
+        // walks into a LabelOnly node the lookup proof never materialised. The
+        // crate returns `Err` there (crates.io 0.1.1 panicked). Scala throws
+        // and catches it in an enclosing `Try`, so the op fails and the tx is
+        // invalid. The wrapper must reproduce that fail-closed outcome:
         //   1. `remove()` returns `Err` — no panic escapes to crash the node; and
         //   2. the verifier is POISONED — `digest()` reads `None`, not a
         //      half-mutated tree (which would be accept-invalid, a fork — strictly
@@ -921,11 +927,9 @@ mod tests {
         // panic) AT CONSTRUCTION; a verifier that does construct then returns
         // `Ok`/`Err` from these ops, not an operation-time panic.
         //
-        // This is NOT the whole story: a *structurally-valid-but-wrong* proof
-        // (e.g. a lookup proof used for a remove) constructs cleanly and DOES
-        // panic at operation time — see
-        // `remove_structurally_valid_wrong_proof_fails_closed_not_panic`. That
-        // op-time panic is now contained by `AvlVerifier::guarded`, so the
+        // This is NOT the whole story: a proof whose directions end too early
+        // constructs cleanly and DOES panic at operation time. That
+        // op-time panic is contained by `AvlVerifier::guarded`, so the
         // wrapper — not just `digest_apply`'s construction guard — is the panic
         // boundary. The `op_panicked` check below therefore stays green because
         // the guard converts any op-time panic into `Err`.
@@ -1009,9 +1013,8 @@ mod tests {
         // sweep) across lookup/remove/remove_with_presence/insert must all
         // return `Ok`/`Err`, never panic. This pins the benign case (an op that
         // merely falls off its witnessed access path returns `Err` on its own).
-        // It does NOT cover the structurally-valid-but-wrong proof, which panics
-        // at op time and is contained by `AvlVerifier::guarded` — see
-        // `remove_structurally_valid_wrong_proof_fails_closed_not_panic`.
+        // It does NOT cover a proof whose directions end too early, which panics
+        // at op time and is contained by `AvlVerifier::guarded`.
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
         let mut prover = new_prover();
@@ -1100,10 +1103,10 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod deep_proof_tests {
     use super::*;
-    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-    use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-    use ergo_avltree_rust::batch_node::{AVLTree as ProverTree, Node, NodeHeader};
-    use ergo_avltree_rust::operation::{KeyValue as ProverKv, Operation as ProverOp};
+    use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_avltree::batch_avl_prover::BatchAVLProver;
+    use ergo_avltree::batch_node::{AVLTree as ProverTree, Node, NodeHeader};
+    use ergo_avltree::operation::{KeyValue as ProverKv, Operation as ProverOp};
 
     // ----- helpers -----
 
@@ -1303,6 +1306,80 @@ pub(crate) mod deep_proof_tests {
         assert_eq!(proof_tree_height(&label_root, 1, Some(0)), Some(0));
     }
 
+    /// One leaf `(key, value, next)` as a packed proof, and its digest.
+    fn one_leaf_proof(value: &[u8], length_field: Option<[u8; 4]>) -> (Vec<u8>, Vec<u8>) {
+        let (key, next) = ([0x11u8; 32], [0xFFu8; 32]);
+        let mut proof = vec![PROOF_LEAF];
+        proof.extend_from_slice(&key);
+        proof.extend_from_slice(&next);
+        if let Some(field) = length_field {
+            proof.extend_from_slice(&field);
+        }
+        proof.extend_from_slice(value);
+        proof.push(PROOF_END_OF_TREE);
+        let leaf = ergo_avltree::batch_node::LeafNode::new(
+            &bytes::Bytes::copy_from_slice(&key),
+            &bytes::Bytes::copy_from_slice(value),
+            &bytes::Bytes::copy_from_slice(&next),
+        );
+        let mut digest = leaf.borrow_mut().label().to_vec();
+        digest.push(0);
+        (proof, digest)
+    }
+
+    /// scrypto 3.1.1 (ergo 6.0.7) checks every leaf value length, fixed or
+    /// read from the proof, against `0..=4 MiB` and the bytes left. Checked
+    /// on the JVM: values of exactly 4 MiB reconstruct, 4 MiB + 1 do not.
+    #[test]
+    fn proof_values_over_4_mib_are_rejected() {
+        for len in [PROOF_MAX_VALUE_LENGTH, PROOF_MAX_VALUE_LENGTH + 1] {
+            let value = vec![0x5Au8; len];
+            let accepted = len <= PROOF_MAX_VALUE_LENGTH;
+            let field = (len as u32).to_be_bytes();
+            let (proof, digest) = one_leaf_proof(&value, Some(field));
+            assert_eq!(proof_tree_height(&proof, 32, None).is_some(), accepted);
+            assert_eq!(
+                AvlVerifier::new(&digest, &proof, 32, None, None, None).is_ok(),
+                accepted,
+                "variable length {len}"
+            );
+            let (proof, digest) = one_leaf_proof(&value, None);
+            assert_eq!(proof_tree_height(&proof, 32, Some(len)).is_some(), accepted);
+            assert_eq!(
+                AvlVerifier::new(&digest, &proof, 32, Some(len), None, None).is_ok(),
+                accepted,
+                "fixed length {len}"
+            );
+        }
+    }
+
+    /// A negative length field (here -37, which would move the read position
+    /// back onto the key's last byte, an end-of-tree marker) fails
+    /// reconstruction, as it does on the JVM; the same tree with the length
+    /// written as 0 verifies.
+    #[test]
+    fn negative_value_length_field_is_rejected() {
+        let (mut proof, digest) = one_leaf_proof(&[], Some(0u32.to_be_bytes()));
+        proof[32] = PROOF_END_OF_TREE;
+        let mut key = [0x11u8; 32];
+        key[31] = PROOF_END_OF_TREE;
+        let leaf = ergo_avltree::batch_node::LeafNode::new(
+            &bytes::Bytes::copy_from_slice(&key),
+            &bytes::Bytes::new(),
+            &bytes::Bytes::copy_from_slice(&[0xFFu8; 32]),
+        );
+        let mut digest_k = leaf.borrow_mut().label().to_vec();
+        digest_k.push(0);
+        assert_ne!(digest, digest_k);
+        let mut v = AvlVerifier::new(&digest_k, &proof, 32, None, None, None).unwrap();
+        assert_eq!(v.lookup(&key), Ok(Some(Vec::new())));
+        let negative = &proof[..proof.len() - 5];
+        let mut negative = negative.to_vec();
+        negative.extend_from_slice(&(-37i32).to_be_bytes());
+        assert_eq!(proof_tree_height(&negative, 32, None), None);
+        assert!(AvlVerifier::new(&digest_k, &negative, 32, None, None, None).is_err());
+    }
+
     #[test]
     fn avl_proof_at_height_bound_is_accepted_and_one_above_is_rejected() {
         let (proof, digest) = spine_proof(300);
@@ -1472,7 +1549,7 @@ mod key_length_tests {
     /// A tree of 32-byte keys `[0x10; 32]` .. `[0x60; 32]` (each holding an
     /// 8-byte big-endian long), its digest, and a proof for `ops` against it.
     fn tree_and_proof(ops: &[(Op, Vec<u8>)]) -> (Vec<u8>, Vec<u8>) {
-        use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
+        use ergo_avltree::batch_avl_prover::BatchAVLProver;
         let mut prover = BatchAVLProver::new(
             AVLTree::new(
                 |d| Node::LabelOnly(NodeHeader::new(Some(*d), None)),

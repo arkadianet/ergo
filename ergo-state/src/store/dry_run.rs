@@ -1,6 +1,6 @@
 //! Mining-candidate dry-run: speculative AVL+ apply without persistence.
 //!
-//! `apply_change_set_via_prover` hydrates an `ergo_avltree_rust`
+//! `apply_change_set_via_prover` hydrates an `ergo-avltree`
 //! `BatchAVLProver` from the current `AvlTree` state, applies the
 //! CANONICAL operation stream — data-input lookups first (transaction
 //! order, duplicates included), then removes, then inserts (both
@@ -31,9 +31,9 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
-use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
-use ergo_avltree_rust::operation::{KeyValue, Operation};
+use ergo_avltree::authenticated_tree_ops::AuthenticatedTreeOps;
+use ergo_avltree::batch_avl_prover::BatchAVLProver;
+use ergo_avltree::operation::{KeyValue, Operation};
 use ergo_primitives::digest::ADDigest;
 
 use crate::avl::hydrate::hydrate_batch_avl_prover;
