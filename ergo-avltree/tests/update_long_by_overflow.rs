@@ -59,3 +59,32 @@ fn in_range_sums_are_unaffected() {
     // A genuinely negative result is still rejected.
     assert!(update_by(-6, 5).is_err());
 }
+
+#[test]
+fn old_value_shorter_than_8_bytes_is_err_not_a_panic() {
+    // Longs.fromByteArray needs at least 8 bytes; a shorter stored value
+    // fails the operation.
+    for len in [0usize, 1, 7] {
+        let old = Bytes::from(vec![0u8; len]);
+        let res = Operation::UpdateLongBy(KeyDelta {
+            key: key(),
+            delta: 1,
+        })
+        .update_fn(Some(old));
+        assert!(res.is_err(), "length {len}");
+    }
+}
+
+#[test]
+fn old_value_longer_than_8_bytes_uses_its_first_8() {
+    // Longs.fromByteArray reads the first 8 bytes and ignores the rest.
+    let mut old = 5i64.to_be_bytes().to_vec();
+    old.extend_from_slice(&[0xAB; 4]);
+    let res = Operation::UpdateLongBy(KeyDelta {
+        key: key(),
+        delta: 2,
+    })
+    .update_fn(Some(Bytes::from(old)))
+    .unwrap();
+    assert_eq!(res, Some(value(7)));
+}

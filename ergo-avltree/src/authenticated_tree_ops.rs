@@ -307,7 +307,7 @@ pub trait AuthenticatedTreeOps {
                                     (r_node.clone(), false, false, true, Some(r.value))
                                 }
                                 Some(v) => { // update value
-                                    assert!(self.tree().value_length.filter(|len|v.len() != *len).is_none());
+                                    ensure!(self.tree().value_length.filter(|len| v.len() != *len).is_none(), "value length does not match the tree's value length");
                                     let old_value = Some(r.value);
                                     let r_new = LeafNode::update(r_node, &r.hdr.key.unwrap(), &v, &r.next_node_key);
                                     self.on_node_visit(r_node, operation, false);
@@ -330,7 +330,7 @@ pub trait AuthenticatedTreeOps {
                                     (r_node.clone(), false, false, false, None)
                                 }
                                 Some(v) => { // insert new value
-                                    assert!(self.tree().value_length.filter(|len|v.len() != *len).is_none());
+                                    ensure!(self.tree().value_length.filter(|len| v.len() != *len).is_none(), "value length does not match the tree's value length");
                                     self.on_node_visit(r_node, operation, false);
                                     (self.add_node(r_node, &key, &v), true, true, false, None)
                                 }

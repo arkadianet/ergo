@@ -100,7 +100,13 @@ impl Operation {
                     // wrap lands exactly on zero. The reference adds with
                     // Math.addExact, whose ArithmeticException is NonFatal and
                     // so becomes a failed operation.
-                    match BigEndian::read_i64(&old).checked_add(kv.delta) {
+                    // The reference reads the old value with Longs.fromByteArray,
+                    // which requires at least 8 bytes and reads the first 8; a
+                    // shorter value fails the operation instead of panicking.
+                    if old.len() < 8 {
+                        return Err(anyhow!("Old value is shorter than 8 bytes"));
+                    }
+                    match BigEndian::read_i64(&old[..8]).checked_add(kv.delta) {
                         None => Err(anyhow!("New value overflows i64")),
                         Some(0) => Ok(None),
                         Some(new_val) if new_val > 0 => {

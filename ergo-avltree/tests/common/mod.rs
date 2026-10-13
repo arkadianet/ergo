@@ -22,8 +22,10 @@ pub const MIN_KEY: [u8; KEY_LENGTH] = [0u8; KEY_LENGTH];
 pub const MAX_KEY: [u8; KEY_LENGTH] = [0xFFu8; KEY_LENGTH];
 
 pub fn random_key_with_len(len: usize) -> ADKey {
-    let key = (0..len).map(|_| rand::random::<u8>()).collect();
-    if key < Bytes::from(MIN_KEY.to_vec()) || key > Bytes::from(MAX_KEY.to_vec()) {
+    let key: ADKey = (0..len).map(|_| rand::random::<u8>()).collect();
+    // The -inf and +inf sentinels of a `len`-byte tree are all 0x00 and all
+    // 0xFF of that length; neither can be inserted.
+    if key.iter().all(|b| *b == 0x00) || key.iter().all(|b| *b == 0xFF) {
         random_key_with_len(len)
     } else {
         key

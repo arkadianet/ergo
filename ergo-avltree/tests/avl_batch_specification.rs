@@ -1380,15 +1380,19 @@ fn test_verifier_fails() {
         assert!(v.digest().is_some()); // verification failed to construct tree
                                        // Try 5 inserts that do not match -- with overwhelming probability one of them will go to a leaf
                                        // that is not in the conveyed tree, and verifier will complain
-        for _ in 0..5 {
-            let key = random_key();
-            assert!(v
-                .perform_one_operation(&Operation::Insert(KeyValue {
-                    key: key.clone(),
-                    value: random_value()
+                                       // As in scrypto's test, only the outcome over all five is asserted: a
+                                       // random key can land in a leaf the proof does convey, so any single
+                                       // insert may succeed.
+        let failures = (0..5)
+            .filter(|_| {
+                v.perform_one_operation(&Operation::Insert(KeyValue {
+                    key: random_key(),
+                    value: random_value(),
                 }))
-                .is_err());
-        }
+                .is_err()
+            })
+            .count();
+        assert!(failures > 0);
         assert!(v.digest().is_none()); // verification succeeded when it should have failed, because of a missing leaf
 
         digest = p.digest().unwrap();
