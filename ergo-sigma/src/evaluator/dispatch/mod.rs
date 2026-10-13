@@ -45,12 +45,19 @@ pub fn reduce_expr_with_cost(
     let mut depth = 0usize;
     let mut trace = None;
     let val = eval::eval_script_expr(expr, ctx, constants, &mut env, &mut depth, cost, &mut trace)?;
+    script_result(val)
+}
+
+/// `CErgoTreeEvaluator.evalToCrypto` accepts only a SigmaProp result. A Boolean
+/// can only come from a root whose static type is not SigmaProp, which Scala
+/// never evaluates (rule 1001), or a branch of another type; a substituted
+/// Boolean root is wrapped in `BoolToSigmaProp` before evaluation.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/sigmastate/interpreter/CErgoTreeEvaluator.scala#L535-L543>
+fn script_result(val: Value) -> Result<SigmaBoolean, EvalError> {
     match val {
         Value::SigmaProp(sb) => Ok(sb),
-        Value::Bool(true) => Ok(SigmaBoolean::TrivialProp(true)),
-        Value::Bool(false) => Ok(SigmaBoolean::TrivialProp(false)),
         other => Err(EvalError::TypeError {
-            expected: "SigmaProp or Bool",
+            expected: "SigmaProp script result",
             got: format!("{other:?}"),
         }),
     }
@@ -103,14 +110,6 @@ pub fn reduce_expr_traced_with_cost(
     let result =
         eval::eval_script_expr(expr, ctx, constants, &mut env, &mut depth, cost, &mut trace);
     let entries = trace.unwrap_or_default();
-    let sb_result = result.and_then(|val| match val {
-        Value::SigmaProp(sb) => Ok(sb),
-        Value::Bool(true) => Ok(SigmaBoolean::TrivialProp(true)),
-        Value::Bool(false) => Ok(SigmaBoolean::TrivialProp(false)),
-        other => Err(EvalError::TypeError {
-            expected: "SigmaProp or Bool",
-            got: format!("{other:?}"),
-        }),
-    });
+    let sb_result = result.and_then(script_result);
     (sb_result, entries)
 }

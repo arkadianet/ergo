@@ -344,6 +344,8 @@ fn substitute_node(
                 Err(ConstructorError::ClassCast) => return Ok((changed, original_type)),
                 Ok(actual) if actual.as_ref() == Some(tpe) => {
                     *expr = script;
+                    // Scala typed the payload on its own reader.
+                    crate::evaluator::static_types::mark_fresh_root(expr);
                     return Ok((true, Ok(actual)));
                 }
                 _ => {
@@ -366,7 +368,13 @@ fn substitute_node(
     // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/interpreter/shared/src/main/scala/org/ergoplatform/ErgoLikeInterpreter.scala#L17-L39
     if source.is_none() {
         if let Some(default) = default {
-            *expr = default.clone();
+            let copy = default.clone();
+            crate::evaluator::static_types::copy_fresh_roots(default, &copy);
+            let fresh = crate::evaluator::static_types::take_fresh_root(default);
+            *expr = copy;
+            if fresh {
+                crate::evaluator::static_types::mark_fresh_root(expr);
+            }
             return Ok((true, child_types.pop().unwrap_or(Ok(None))));
         }
     }
@@ -428,7 +436,21 @@ fn deserialize_measured(
     reader.set_activated_script_version(Some(ctx.activated_script_version));
     reader.set_strict_method_resolution();
     reader.set_embeddable_activated_version(Some(ctx.activated_script_version));
+    // `SigmaSerializer.startReader` gives the payload a fresh reader: an empty
+    // `valDefTypeStore` (an unbound ValUse throws NoSuchElementException) and
+    // an empty `ConstantStore` (any ConstantPlaceholder index is out of
+    // bounds). Both are hard errors raised before the cost charge.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/data/shared/src/main/scala/sigma/serialization/SigmaSerializer.scala#L22-L33
+    reader.track_val_bindings();
+    reader.set_constant_pool_len(Some(0));
     let parsed = ergo_ser::opcode::parse_body_for_substitution(&mut reader, ctx.ergo_tree_version);
+    // ValueSerializer decodes every GroupElement as it reads it (constants,
+    // SigmaProp, Box and Header data alike), so an off-curve point throws
+    // before any later parse error, the swallowed ClassCastException below or
+    // the cost charge. The reader records exactly the points read before it
+    // stopped.
+    // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/serialization/GroupElementSerializer.scala#L34-L41
+    super::validate_recorded_group_elements(reader.group_elements())?;
     // Deliberately match Kiama.strategy's swallowed direct ClassCastException:
     // leave the live macro unresolved; do not charge a failed payload decode.
     // https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/kiama/rewriting/Rewriter.scala#L180-L191

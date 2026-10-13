@@ -77,7 +77,13 @@ fn parse_sizeless_inner_box_script_scoped(
             constants.push(read_constant(r)?);
         }
     }
-    let body = crate::opcode::parse_body_with_constants(r, version, &constants)?;
+    // The inner tree's placeholders index its own constants, whatever pool the
+    // enclosing parse has (`deserializeErgoTree` installs a fresh store).
+    let saved_pool_len = r.constant_pool_len();
+    r.set_constant_pool_len(Some(constants.len()));
+    let body = crate::opcode::parse_body_with_constants(r, version, &constants);
+    r.set_constant_pool_len(saved_pool_len);
+    let body = body?;
     // Sizeless inner tree => version 0 (the caller ran rule 1012 first), so methods
     // resolve against the v5 registry; a v6-only OR genuinely-unknown id makes Scala
     // throw a method-resolution `ValidationException`, hardened by the caller.
@@ -92,7 +98,7 @@ fn parse_sizeless_inner_box_script_scoped(
     // resolving to one) is a sizeless `ValidationException` Scala re-raises as a
     // `SerializerException` — hardened by the caller. Mirrors the box-reader
     // `check_sigma_prop_root` gate for the top-level tree.
-    if let Some(tpe) = crate::ergo_tree::determinable_root_type_of(&body, &constants) {
+    if let Some(tpe) = crate::ergo_tree::root_type::rule_1001_root_type_of(&body, &constants) {
         if tpe != crate::sigma_type::SigmaType::SSigmaProp {
             return Err(ReadError::InvalidData(format!(
                 "nested box script: sizeless root has type {tpe:?}, expected SigmaProp (CheckDeserializedScriptIsSigmaProp, rule 1001)"

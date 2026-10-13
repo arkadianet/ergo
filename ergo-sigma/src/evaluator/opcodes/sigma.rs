@@ -322,6 +322,7 @@ pub(in crate::evaluator) fn eval_xor(
         (Value::CollBytes(a), Value::CollBytes(b)) => {
             let n = a.len().min(b.len());
             add_cost_per_item(cx.cost, 0x9B, n as u32)?;
+            check_pre_jit_xor_lengths(a.len(), b.len(), cx)?;
             let out: Vec<u8> = a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect();
             Ok(Value::CollBytes(out))
         }
@@ -330,6 +331,23 @@ pub(in crate::evaluator) fn eval_xor(
             got: format!("{l:?}, {r:?}"),
         }),
     }
+}
+
+/// `Colls.xor` is `left.zip(right).map(..)`. Before JIT activation the zip
+/// keeps both full columns and `PairOfCols.map` walks the LEFT column, so a
+/// left operand longer than the right reads past the right array's end.
+/// <https://github.com/ergoplatform/sigmastate-interpreter/blob/v6.0.7/core/shared/src/main/scala/sigma/data/CollsOverArrays.scala#L316-L324>
+pub(in crate::evaluator) fn check_pre_jit_xor_lengths(
+    left: usize,
+    right: usize,
+    cx: &EvalCtx<'_>,
+) -> Result<(), EvalError> {
+    if (cx.ctx.activated_script_version as i8) < 2 && left > right {
+        return Err(EvalError::RuntimeException(
+            "pre-JIT xor: left operand longer than right (ArrayIndexOutOfBoundsException)",
+        ));
+    }
+    Ok(())
 }
 
 /// `sigma.data.COR.normalized`: a TrueProp child makes the whole OR true;
@@ -596,8 +614,16 @@ pub(in crate::evaluator) fn eval_subst_constants(
             })
         }
     };
-    // Unpack the collection of new values into individual elements
-    let value_items = unpack_collection(new_values)?;
+    // Unpack the collection of new values into individual elements. Box
+    // collections need the context to enumerate their boxes; Scala lifts a box
+    // once JIT is active. Substituting one is still unsupported here (no
+    // context reaches the constant writer).
+    let value_items = match new_values {
+        boxes @ (Value::CollBox(_) | Value::BoxCollection(_)) => {
+            super::super::helpers::collection_to_values(boxes, cx.ctx)?.1
+        }
+        other => unpack_collection(other)?,
+    };
 
     let (result, n_template_constants) = super::super::helpers::subst_constants_versioned(
         &script_bytes,
@@ -610,6 +636,8 @@ pub(in crate::evaluator) fn eval_subst_constants(
     // number of constants in the template ErgoTree. The evaluator
     // charges PerItem cost based on this count.
     add_cost_per_item(cx.cost, 0x74, n_template_constants as u32)?;
+    // `Colls.fromArray(newBytes)` (MaxArrayLength).
+    super::super::helpers::check_array_length(result.len())?;
     Ok(Value::CollBytes(result))
 }
 

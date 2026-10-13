@@ -10,6 +10,7 @@ mod reference_parameters;
 mod reference_reemission;
 mod reference_settings;
 
+mod avl_deep_proof;
 mod batch_merkle_oracle;
 mod block_version_source;
 mod bridge_type_invariants;

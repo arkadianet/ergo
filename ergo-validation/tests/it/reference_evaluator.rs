@@ -233,6 +233,71 @@ fn runtime_parsed_group_elements_match_reference() {
     check_vectors("runtime-group-elements");
 }
 
+#[test]
+fn runtime_deserialized_group_elements_are_curve_checked() {
+    check_vectors("runtime-deserialized-group-elements");
+}
+
+#[test]
+fn boolean_ops_require_boolean_operands() {
+    check_vectors("boolean-operands");
+}
+
+#[test]
+fn subst_constants_new_values_lift_like_reference() {
+    check_vectors("subst-constants-values");
+}
+
+#[test]
+fn subst_constants_template_requires_the_size_bit() {
+    check_vectors("subst-header-size-bit");
+}
+
+#[test]
+fn avl_key_length_past_the_jvm_array_limit_fails_the_script() {
+    check_vectors("avl-key-length");
+}
+
+#[test]
+fn runtime_deserialized_code_gets_the_tree_parse_checks() {
+    check_vectors("runtime-deserialized-parse-checks");
+}
+
+#[test]
+fn method_receivers_and_arguments_match_reference() {
+    check_vectors("method-receivers-and-arguments");
+}
+
+#[test]
+fn evaluated_values_are_checked_against_static_types() {
+    check_vectors("value-check-type");
+}
+
+#[test]
+fn non_sigma_prop_roots_are_never_spendable() {
+    check_vectors("root-type");
+}
+
+#[test]
+fn collections_are_limited_to_100000_items() {
+    check_vectors("collection-length-limit");
+}
+
+#[test]
+fn map_results_need_a_convertible_element_type() {
+    check_vectors("result-rtype");
+}
+
+#[test]
+fn pre_jit_xor_reads_the_right_operand_by_left_length() {
+    check_vectors("pre-jit-xor");
+}
+
+#[test]
+fn zip_pairs_read_from_their_columns() {
+    check_vectors("zip-columns");
+}
+
 /// Arithmetic over an operand whose type read fails, in output, input, nested
 /// box, `deserializeTo`, `DeserializeContext` and `DeserializeRegister` code.
 #[test]

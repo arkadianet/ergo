@@ -537,11 +537,11 @@ pub enum Value {
     /// element type — check uses `elem_type` directly) and
     /// serialized back by `value_to_typed_sigma` (inverse of the
     /// `sigma_to_value` `SColl(non-primitive)` fallback).
-    CollGeneric(Vec<Value>, Box<SigmaType>),
+    CollGeneric(CollItems, Box<SigmaType>),
     /// Pre-JIT pair representation: visible zipped items and element type,
     /// plus untruncated columns for PairOfCols. None denotes a mapped Tuple2
     /// array, whose nonempty append fails in concatArrays_v4.
-    CollLegacyPair(Vec<Value>, Box<SigmaType>, Option<Box<(Value, Value)>>),
+    CollLegacyPair(CollItems, Box<SigmaType>, Option<Box<(Value, Value)>>),
     CollBool(Vec<bool>),
     CollBytes(Vec<u8>),
     /// Token collection: Vec<(token_id_bytes, amount)> — opaque, only supports EQ
@@ -586,8 +586,217 @@ pub enum Value {
         params: Vec<u32>,
         /// Parameter types from FuncValue IR (used for type inference on empty maps).
         param_types: Vec<(u32, Option<SigmaType>)>,
-        body: Box<Expr>,
+        body: std::rc::Rc<Expr>,
     },
+}
+
+/// The items of a boxed-element collection (`CollGeneric`, `CollLegacyPair`).
+///
+/// A JIT `zip` result keeps its two columns, as the reference's `PairOfCols`
+/// does, and builds the `(a, b)` tuples only when they are read:
+/// [`CollItems::len`], [`CollItems::item`] and [`CollItems::slice`] work on
+/// the columns, and every other read (`Deref` to `Vec<Value>`) materializes
+/// the tuples once. The materialized items are exactly those of
+/// `collection_to_values(left)` zipped with `collection_to_values(right)`,
+/// so element shapes and every result are unchanged; only the work done
+/// for a zip that is merely sized, indexed or sliced shrinks.
+pub struct CollItems {
+    items: std::cell::OnceCell<Vec<Value>>,
+    /// Set while the items are the pairs of two columns; `items` is then a
+    /// cache. `None` means `items` is always initialized.
+    zip: Option<ZipView>,
+}
+
+/// Rows `from..from + len` of two collection columns (each a carrier
+/// `fast_len` accepts and at least `from + len` long).
+#[derive(Clone)]
+struct ZipView {
+    columns: std::rc::Rc<(Value, Value)>,
+    from: usize,
+    len: usize,
+}
+
+impl ZipView {
+    fn item(&self, i: usize) -> Option<Value> {
+        if i >= self.len {
+            return None;
+        }
+        let (left, right) = &*self.columns;
+        let row = self.from + i;
+        let a = crate::evaluator::helpers::fast_element(left, row)?;
+        let b = crate::evaluator::helpers::fast_element(right, row)?;
+        Some(Value::Tuple(vec![a, b]))
+    }
+
+    fn materialize(&self) -> Vec<Value> {
+        (0..self.len)
+            .map(|i| self.item(i).expect("zip columns cover every row"))
+            .collect()
+    }
+}
+
+impl CollItems {
+    /// Items held as a vector.
+    pub fn new(items: Vec<Value>) -> Self {
+        Self {
+            items: std::cell::OnceCell::from(items),
+            zip: None,
+        }
+    }
+
+    /// The pairs of the first `len` rows of `left` and `right`, built on
+    /// demand. Both must be carriers `fast_len` accepts, at least `len`
+    /// long.
+    pub(crate) fn zip(left: Value, right: Value, len: usize) -> Self {
+        debug_assert!(crate::evaluator::helpers::fast_len(&left).is_some_and(|n| n >= len));
+        debug_assert!(crate::evaluator::helpers::fast_len(&right).is_some_and(|n| n >= len));
+        Self {
+            items: std::cell::OnceCell::new(),
+            zip: Some(ZipView {
+                columns: std::rc::Rc::new((left, right)),
+                from: 0,
+                len,
+            }),
+        }
+    }
+
+    /// Number of items, without materializing a zip.
+    pub fn len(&self) -> usize {
+        match (&self.zip, self.items.get()) {
+            (_, Some(items)) => items.len(),
+            (Some(zip), None) => zip.len,
+            (None, None) => unreachable!("CollItems without items or columns"),
+        }
+    }
+
+    /// Whether there are no items, without materializing a zip.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Item `i` (a clone), without materializing a zip.
+    pub fn item(&self, i: usize) -> Option<Value> {
+        match (&self.zip, self.items.get()) {
+            (_, Some(items)) => items.get(i).cloned(),
+            (Some(zip), None) => zip.item(i),
+            (None, None) => unreachable!("CollItems without items or columns"),
+        }
+    }
+
+    /// Items `from..until` (clamped, `from <= until`); a zip stays a view of
+    /// its columns.
+    pub fn slice(&self, from: usize, until: usize) -> Self {
+        let len = self.len();
+        let from = from.min(len);
+        let until = until.min(len).max(from);
+        match (&self.zip, self.items.get()) {
+            (Some(zip), None) => Self {
+                items: std::cell::OnceCell::new(),
+                zip: Some(ZipView {
+                    columns: zip.columns.clone(),
+                    from: zip.from + from,
+                    len: until - from,
+                }),
+            },
+            _ => Self::new(self[from..until].to_vec()),
+        }
+    }
+
+    /// Whether the items exist as a vector (always, except for a zip that
+    /// has not been read element by element).
+    #[cfg(test)]
+    pub(crate) fn is_materialized(&self) -> bool {
+        self.items.get().is_some()
+    }
+
+    /// The items as a vector, materializing a zip.
+    pub fn into_vec(mut self) -> Vec<Value> {
+        let zip = self.zip.take();
+        match self.items.take() {
+            Some(items) => items,
+            None => zip
+                .expect("CollItems without items or columns")
+                .materialize(),
+        }
+    }
+}
+
+impl std::ops::Deref for CollItems {
+    type Target = Vec<Value>;
+    fn deref(&self) -> &Vec<Value> {
+        self.items.get_or_init(|| {
+            self.zip
+                .as_ref()
+                .expect("CollItems without items or columns")
+                .materialize()
+        })
+    }
+}
+
+impl std::ops::DerefMut for CollItems {
+    fn deref_mut(&mut self) -> &mut Vec<Value> {
+        if let Some(zip) = self.zip.take() {
+            if self.items.get().is_none() {
+                let _ = self.items.set(zip.materialize());
+            }
+        }
+        self.items
+            .get_mut()
+            .expect("CollItems without items or columns")
+    }
+}
+
+impl Clone for CollItems {
+    fn clone(&self) -> Self {
+        match &self.zip {
+            // A zip clones its column handle, not the materialized pairs.
+            Some(zip) => Self {
+                items: std::cell::OnceCell::new(),
+                zip: Some(zip.clone()),
+            },
+            None => Self::new((**self).clone()),
+        }
+    }
+}
+
+impl std::fmt::Debug for CollItems {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
+impl PartialEq for CollItems {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl From<Vec<Value>> for CollItems {
+    fn from(items: Vec<Value>) -> Self {
+        Self::new(items)
+    }
+}
+
+impl FromIterator<Value> for CollItems {
+    fn from_iter<I: IntoIterator<Item = Value>>(iter: I) -> Self {
+        Self::new(iter.into_iter().collect())
+    }
+}
+
+impl IntoIterator for CollItems {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a CollItems {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 impl PartialEq for Value {

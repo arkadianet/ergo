@@ -39,19 +39,26 @@ pub(in crate::evaluator) fn eval_option_get_or_else(
     let eager_default = if cx.ctx.is_v3_ergo_tree() {
         None
     } else {
-        Some(
-            cx.eval_expr(default_expr)
-                .and_then(super::super::helpers::reject_sstring)?,
-        )
+        let v = cx
+            .eval_expr(default_expr)
+            .and_then(super::super::helpers::reject_sstring)?;
+        // Value.checkType(default, dV) (transformers.scala:640).
+        crate::evaluator::static_types::check_node(default_expr, &v, false)?;
+        Some(v)
     };
     add_cost(cx.cost, 0xE5)?;
     match val {
         Value::Opt(Some(v)) => Ok(*v),
         Value::Opt(None) => match eager_default {
             Some(value) => Ok(value),
-            None => cx
-                .eval_expr(default_expr)
-                .and_then(super::super::helpers::reject_sstring),
+            None => {
+                let v = cx
+                    .eval_expr(default_expr)
+                    .and_then(super::super::helpers::reject_sstring)?;
+                // Value.checkType(default, dV) (transformers.scala:634).
+                crate::evaluator::static_types::check_node(default_expr, &v, true)?;
+                Ok(v)
+            }
         },
         _ => Err(EvalError::TypeError {
             expected: "Option for OptionGetOrElse",

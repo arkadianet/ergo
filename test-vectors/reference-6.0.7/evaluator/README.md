@@ -37,3 +37,9 @@ and several block versions, with valid-upcast controls.
 
 `lambda-sweep` covers map, filter, exists, forall, flatMap and option map/filter,
 with empty/nonempty inputs and valid and invalid callback values.
+
+`zip-columns` covers the size, indexing, slicing, nesting and append of zips
+over unequal context variables, in JIT and pre-JIT blocks. A JIT zip truncates
+the longer column first, so appending two zips is limited by the zipped
+length; a pre-JIT zip keeps both columns, and appending can exceed the
+100,000-item limit.

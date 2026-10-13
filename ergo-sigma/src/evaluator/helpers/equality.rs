@@ -66,7 +66,13 @@ pub(crate) fn check_comparable(v: &Value) -> Result<(), EvalError> {
             let _ = items;
             Ok(())
         }
-        Value::Tuple(items) | Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => {
+        Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => {
+            for item in items.iter() {
+                check_comparable(item)?;
+            }
+            Ok(())
+        }
+        Value::Tuple(items) => {
             for item in items {
                 check_comparable(item)?;
             }

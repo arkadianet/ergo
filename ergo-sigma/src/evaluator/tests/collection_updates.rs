@@ -563,65 +563,78 @@ fn coll_updated_collgeneric_accepts_option_element_via_eval() {
     }
 }
 
-// Regression pin: `SubstConstants` substituting a `Value::Opt(None)`
-// into an `Option[T]` template slot must preserve the template's
-// declared `Option[T]` type descriptor in the rewritten ErgoTree.
-// Pre-fix, `value_to_typed_sigma` returned `SOption(SAny)` for the
-// None value and that degraded type wrote back into the constant
-// pool — shifting the ErgoTree bytes (and the resulting script id)
-// away from Scala's `ErgoTreeSerializer.substituteConstants`. Post-
-// fix, the template's existing typed slot is authoritative.
+// `SubstConstants` substituting a `Coll[Option[T]]` value whose items include
+// `None` must write the template's declared `Coll[Option[T]]` type descriptor,
+// not one degraded to `Option[Any]`: the collection carrier's element type is
+// authoritative.
 #[test]
-fn subst_constants_none_preserves_template_option_type() {
+fn subst_constants_coll_of_none_preserves_template_option_type() {
     use super::helpers::subst_constants;
     use ergo_ser::ergo_tree::{read_ergo_tree, write_ergo_tree, ErgoTree};
     use ergo_ser::sigma_value::{CollValue, SigmaValue};
-    // Build a template ErgoTree with one `Option[Coll[Byte]]` constant
-    // (the body is a trivial true sigmaprop so the tree is valid).
     let opt_ty = SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(SigmaType::SByte))));
+    let coll_ty = SigmaType::SColl(Box::new(opt_ty.clone()));
     let body = Expr::Const {
         tpe: SigmaType::SSigmaProp,
         val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
     };
-    // ErgoTree version 3: SOption *data constants* are gated on
-    // isV3OrLaterErgoTreeVersion (Scala CoreDataSerializer), so a pre-v3 tree
-    // carrying an Option constant is rejected at parse (see
-    // SOption.pre_v3_data_constant). v3 is the valid version for this fixture.
+    // ErgoTree version 3: SOption data constants are gated on
+    // isV3OrLaterErgoTreeVersion (Scala CoreDataSerializer).
     let template = ErgoTree {
         version: 3,
-        has_size: false,
+        // Rule 1012: a non-zero version requires the size bit.
+        has_size: true,
         constant_segregation: true,
         reserved_header_bits: 0,
         constants: vec![(
-            opt_ty.clone(),
-            SigmaValue::Opt(Some(Box::new(SigmaValue::Coll(CollValue::Bytes(vec![
-                0xAA;
-                4
-            ]))))),
+            coll_ty.clone(),
+            SigmaValue::Coll(CollValue::Values(vec![SigmaValue::Opt(Some(Box::new(
+                SigmaValue::Coll(CollValue::Bytes(vec![0xAA; 4])),
+            )))])),
         )],
         body,
     };
     let mut w = ergo_primitives::writer::VlqWriter::new();
     write_ergo_tree(&mut w, &template).expect("template write");
     let template_bytes = w.result();
-    // Substitute the constant at index 0 with Value::Opt(None).
-    let (new_bytes, _) = subst_constants(&template_bytes, &[0], &[Value::Opt(None)], true)
+    let new_value = Value::CollGeneric(vec![Value::Opt(None)].into(), Box::new(opt_ty));
+    let (new_bytes, _) = subst_constants(&template_bytes, &[0], &[new_value], true)
         .expect("subst_constants succeeds");
-    // The rewritten tree must keep the template's declared
-    // `SOption(SColl(SByte))` type descriptor on the slot — NOT
-    // degrade to `SOption(SAny)`.
     let mut r = ergo_primitives::reader::VlqReader::new(&new_bytes);
     let rewritten = read_ergo_tree(&mut r).expect("rewritten tree re-parses");
-    assert_eq!(
-        rewritten.constants[0].0, opt_ty,
-        "Template's declared Option[Coll[Byte]] type must survive a None \
-         substitution (not degrade to Option[Any])",
-    );
+    assert_eq!(rewritten.constants[0].0, coll_ty);
     assert_eq!(
         rewritten.constants[0].1,
-        SigmaValue::Opt(None),
-        "Substituted value must be None",
+        SigmaValue::Coll(CollValue::Values(vec![SigmaValue::Opt(None)])),
     );
+}
+
+// Scala lifts every new value with `Platform.liftToConstant`, which has no case
+// for tuples, Options or Unit, so `substConstants` throws for them whether or
+// not a position substitutes them (100 is out of range here).
+#[test]
+fn subst_constants_unliftable_new_values_rejected() {
+    use super::helpers::subst_constants;
+    let template = [0x10, 0x01, 0x04, 0x02, 0x7F];
+    for value in [
+        Value::Opt(None),
+        Value::Opt(Some(Box::new(Value::Int(1)))),
+        Value::Tuple(vec![Value::Int(1), Value::Int(2)]),
+        Value::Unit,
+    ] {
+        for position in [0, 100] {
+            assert!(
+                matches!(
+                    subst_constants(&template, &[position], std::slice::from_ref(&value), true),
+                    Err(EvalError::RuntimeException(_))
+                ),
+                "{value:?} at position {position} must not lift",
+            );
+        }
+    }
+    // Control: an Int lifts, and an out-of-range position leaves the tree as is.
+    let (bytes, n) = subst_constants(&template, &[100], &[Value::Int(5)], true).unwrap();
+    assert_eq!((bytes.as_slice(), n), (template.as_slice(), 1));
 }
 
 // substConstants parity with Scala ErgoTreeSerializer.substituteConstants
@@ -845,7 +858,7 @@ fn coll_updated_collgeneric_rejects_sany_declared_carrier() {
     // signals "carrier built without proper type info". A concrete
     // replacement must REJECT here.
     let coll = Value::CollGeneric(
-        vec![Value::Opt(None), Value::Opt(None)],
+        vec![Value::Opt(None), Value::Opt(None)].into(),
         Box::new(SigmaType::SOption(Box::new(SigmaType::SAny))),
     );
     let new_concrete = Value::Opt(Some(Box::new(Value::CollBytes(vec![0xAA; 32]))));
