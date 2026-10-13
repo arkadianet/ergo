@@ -1180,6 +1180,44 @@ fn package_rbf_accepts_when_r1_and_r2_both_hold() {
 }
 
 #[test]
+fn package_replacement_spending_an_output_of_a_tx_it_removes_is_rejected() {
+    // Incumbent I spends 0x80 and creates 0x8A (fee 2M). P (fee 1M) spends the
+    // same 0x80, loses the double-spend and is held. Child C (fee 50M) spends
+    // P's output 0x81 AND I's output 0x8A. The package {P, C} would beat I on
+    // both fee tests, but replacing I removes 0x8A, so C's input would exist
+    // nowhere: the package is rejected and I stays.
+    let mut mp = mempool();
+    let utxo = FakeUtxo::with(&[0x80]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(9, 2_000_000, &[0x80], &[0x8A]) // I - incumbent
+        .plan(1, 1_000_000, &[0x80], &[0x81]) // P - double-spend loser, held
+        .plan(2, 50_000_000, &[0x81, 0x8A], &[0x8C]); // C - spends P's and I's outputs
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(9), TxSource::Api, now, &tip.view(&utxo), &v);
+    let (po, _) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(
+        po,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::DoubleSpendLoser
+        }
+    ));
+
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(mp.contains(&d(9)), "incumbent stays pooled");
+    assert!(
+        !mp.contains(&d(1)) && !mp.contains(&d(2)),
+        "neither package member entered the pool"
+    );
+    assert!(
+        broadcasts(&ca).is_empty(),
+        "a rejected package gossips nothing"
+    );
+    mp.pool().check_invariants();
+}
+
+#[test]
 fn package_rbf_rejects_pin_higher_feerate_but_lower_absolute_fee() {
     // Anti-pinning: incumbent I has a HIGH absolute fee (10M) but LOW feerate
     // (cost 100_000 → weight 102400). P (fee 1M, cost 10_000 → weight 102400)

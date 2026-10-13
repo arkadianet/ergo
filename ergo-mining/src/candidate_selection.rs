@@ -110,6 +110,12 @@ impl<'a> CandidateOverlay<'a> {
         self.spent_in_block.contains(box_id)
     }
 
+    /// True if `box_id` exists in the base UTXO set or was created by a tx
+    /// already placed in the candidate (whether or not it is spent since).
+    fn is_known(&self, box_id: &Digest32) -> bool {
+        self.in_block_outputs.contains_key(box_id) || self.base.get_box(box_id).is_some()
+    }
+
     /// Resolve a regular input: `None` if spent in-block, else an
     /// intra-block create, else the base UTXO set.
     fn resolve_input(&self, box_id: &Digest32) -> Option<ErgoBox> {
@@ -450,6 +456,15 @@ fn select_ordered_entries_cancellable(
         .saturating_add(params.input_cost)
         .saturating_add(params.output_cost);
 
+    // Boxes the pooled transactions under consideration create. An input that
+    // is in neither the UTXO overlay nor this set cannot be supplied by any
+    // pooled parent.
+    let pooled_outputs: HashSet<Digest32> = plan
+        .ordered
+        .iter()
+        .flat_map(|e| e.outputs.iter().copied())
+        .collect();
+
     for entry in plan.ordered {
         check_build_cancelled(should_cancel)?;
         let remaining_cost = cost_budget.saturating_sub(sel.total_cost);
@@ -505,6 +520,17 @@ fn select_ordered_entries_cancellable(
         // means an input is already spent in-block or not yet available
         // (e.g. a child whose parent was not included) — skip the tx.
         let Some(resolved_inputs) = overlay.resolve_inputs(&tx) else {
+            // An input that neither the UTXO set nor any pooled transaction
+            // can supply will never resolve: report the tx so the node
+            // re-checks it and drops it from the pool. A parent that was
+            // merely not included (order, budget) is not reported.
+            if entry
+                .inputs
+                .iter()
+                .any(|id| !overlay.is_known(id) && !pooled_outputs.contains(id))
+            {
+                sel.suspects.push(entry.tx_id);
+            }
             sel.exclude(entry.tx_id, "input_unavailable");
             continue;
         };
@@ -955,13 +981,28 @@ mod tests {
     }
 
     /// A mempool entry wrapping `tx` with the given fee/size for budgeting.
+    fn tx_output_ids(tx: &Transaction) -> Vec<Digest32> {
+        let tx_id = transaction_id(tx).unwrap();
+        (0..tx.output_candidates.len())
+            .map(|index| {
+                ErgoBox {
+                    candidate: tx.output_candidates[index].clone(),
+                    transaction_id: tx_id,
+                    index: index as u16,
+                }
+                .box_id()
+                .unwrap()
+            })
+            .collect()
+    }
+
     fn entry(tx: &Transaction, fee: u64, size_bytes: u32, seed: u8) -> Entry {
         let bytes = tx_bytes(tx);
         Entry {
             tx_id: Digest32::from_bytes([seed; 32]),
             bytes: std::sync::Arc::from(bytes.into_boxed_slice()),
             inputs: tx.inputs.iter().map(|i| i.box_id).collect(),
-            outputs: Vec::new(),
+            outputs: tx_output_ids(tx),
             parents_in_pool: Vec::new(),
             fee,
             weight: fee,
@@ -1310,10 +1351,9 @@ mod tests {
     }
 
     #[test]
-    fn child_before_parent_skips_child() {
-        // Same chain, but the child appears first. Its input (the parent's
-        // output) is not yet in the overlay, so it is skipped (Scala
-        // collectTxs parity — no reordering).
+    fn child_listed_before_parent_is_planned_after_it() {
+        // Same chain, but the child is listed first. The selection plan puts a
+        // pooled parent ahead of its child, so both are included.
         let in_box = box_at(1_000_000_000, HEIGHT, 0x01);
         let utxo = MapUtxo::new(std::slice::from_ref(&in_box));
         let tx_parent = spend_tx(&in_box, 1_000_000_000, HEIGHT);
@@ -1346,13 +1386,38 @@ mod tests {
 
         assert_eq!(
             sel.checked.len(),
-            1,
-            "child-before-parent: only the parent is included this block",
+            2,
+            "the plan orders the parent before the child",
         );
-        assert!(
-            sel.suspects.is_empty(),
-            "an input-resolve skip is in-block ordering, not tip-invalidity — not a suspect",
-        );
+        assert!(sel.suspects.is_empty());
+    }
+
+    #[test]
+    fn a_tx_whose_input_no_pooled_parent_can_supply_is_a_suspect() {
+        // The input box is in neither the UTXO set nor any pooled tx's
+        // outputs: the tx can never resolve, so it is reported for a recheck.
+        let missing = box_at(1_000_000_000, HEIGHT, 0x01);
+        let other = box_at(1_000_000_000, HEIGHT, 0x02);
+        let utxo = MapUtxo::new(std::slice::from_ref(&other));
+        let stale = spend_tx(&missing, 1_000_000_000, HEIGHT);
+        let snap = MempoolReadSnapshot::from_entries(vec![entry(&stale, 10, 100, 0xA0)]);
+
+        let mut overlay = CandidateOverlay::new(&utxo);
+        let sel = select_user_txs(
+            &mut overlay,
+            &snap,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+
+        assert!(sel.checked.is_empty());
+        assert_eq!(sel.suspects, vec![Digest32::from_bytes([0xA0; 32])]);
+        assert_eq!(sel.excluded[0].reason, "input_unavailable");
     }
 
     #[test]
