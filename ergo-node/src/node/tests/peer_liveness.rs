@@ -455,7 +455,13 @@ fn request_modifier_serves_each_id_once() {
 
     let ids = vec![header_id; 400];
     let payload = req_modifier_payload(ModifierTypeId::Header.as_byte(), &ids);
-    let actions = handle_message(&mut state, peer, message::CODE_REQUEST_MODIFIER, &payload, now);
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_REQUEST_MODIFIER,
+        &payload,
+        now,
+    );
     assert_eq!(served_ids(&actions), vec![header_id]);
 }
 
@@ -479,13 +485,31 @@ fn request_modifier_respects_per_peer_serve_budget() {
 
     let budget = ergo_p2p::throttle::SERVE_LIMITS.max_bytes_per_window;
     state.serve_throttle.record(peer, now, budget);
-    let actions = handle_message(&mut state, peer, message::CODE_REQUEST_MODIFIER, &payload, now);
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_REQUEST_MODIFIER,
+        &payload,
+        now,
+    );
     assert!(served_ids(&actions).is_empty(), "spent budget: no reply");
 
     // Other peers are unaffected, and the budget refills with the window.
-    let actions = handle_message(&mut state, other, message::CODE_REQUEST_MODIFIER, &payload, now);
+    let actions = handle_message(
+        &mut state,
+        other,
+        message::CODE_REQUEST_MODIFIER,
+        &payload,
+        now,
+    );
     assert_eq!(served_ids(&actions), vec![header_id]);
     let later = now + ergo_p2p::throttle::SERVE_LIMITS.window + Duration::from_secs(1);
-    let actions = handle_message(&mut state, peer, message::CODE_REQUEST_MODIFIER, &payload, later);
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_REQUEST_MODIFIER,
+        &payload,
+        later,
+    );
     assert_eq!(served_ids(&actions), vec![header_id]);
 }
