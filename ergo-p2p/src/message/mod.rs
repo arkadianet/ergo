@@ -37,7 +37,9 @@ pub const MAX_INV_OBJECTS: usize = 400;
 const MAX_MODIFIERS: usize = 400;
 const MODIFIER_ID_SIZE: usize = 32;
 const MAX_MODIFIER_MESSAGE_SIZE: usize = 2_048_576;
-const MAX_MODIFIER_WITH_RESERVE: usize = MAX_MODIFIER_MESSAGE_SIZE * 4;
+/// Upper bound on the encoded size of one `Modifier` (code 33) payload; the
+/// encoder drops entries past it.
+pub const MAX_MODIFIER_WITH_RESERVE: usize = MAX_MODIFIER_MESSAGE_SIZE * 4;
 
 /// Smallest possible on-wire size of one `Modifiers` entry: a 32-byte
 /// modifier id plus the ≥1-byte VLQ length prefix of its payload. The

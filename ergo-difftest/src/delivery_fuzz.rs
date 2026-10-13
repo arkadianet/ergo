@@ -10,9 +10,11 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use ergo_p2p::delivery::{
-    DeliveryAction, DeliveryTracker, ModifierStatus, DELIVERY_TIMEOUT, MAX_HEDGES,
+    DeliveryAction, DeliveryTracker, ModifierKey, ModifierStatus, DELIVERY_TIMEOUT, MAX_HEDGES,
     MAX_IN_FLIGHT_PER_PEER,
 };
+
+const TYPES: [u8; 5] = [101, 102, 104, 108, 2];
 
 const PEERS: usize = 4;
 const ID_SPACE: usize = 4096;
@@ -21,7 +23,6 @@ const MAX_STEPS: usize = 128;
 #[derive(Clone, Copy)]
 struct Owner {
     peer: SocketAddr,
-    type_id: u8,
     at: Instant,
     hedges: u8,
 }
@@ -39,12 +40,12 @@ pub fn fuzz_delivery(data: &[u8]) {
         SocketAddr::new(Ipv4Addr::new(127, 0, 0, (i + 1) as u8).into(), 9030)
     });
     let mut tracker = DeliveryTracker::new();
-    let mut owners = BTreeMap::<[u8; 32], Owner>::new();
-    let mut received = BTreeSet::new();
+    let mut owners = BTreeMap::<ModifierKey, Owner>::new();
+    let mut received = BTreeSet::<ModifierKey>::new();
     // An overapproximation of peers actually asked for each modifier. It lets
     // us reject never-requested senders without duplicating the tracker's late
     // allowance TTL/retry policy in the model.
-    let mut asked = BTreeMap::<[u8; 32], BTreeSet<SocketAddr>>::new();
+    let mut asked = BTreeMap::<ModifierKey, BTreeSet<SocketAddr>>::new();
     let mut now = Instant::now();
     let mut last_got = None;
 
@@ -53,6 +54,14 @@ pub fn fuzz_delivery(data: &[u8]) {
         let index = u16::from_le_bytes([instruction[2], instruction[3]]) as usize;
         let id = modifier_id(index);
         let arg = instruction[4];
+        // Single-key operations act on a tracked type of this id when there
+        // is one, otherwise on the type selected by `arg`.
+        let key: ModifierKey = owners
+            .keys()
+            .chain(received.iter())
+            .find(|(_, tracked)| *tracked == id)
+            .copied()
+            .unwrap_or((TYPES[arg as usize % TYPES.len()], id));
         match instruction[0] % 10 {
             0..=2 => {
                 let batch = if instruction[0] % 10 == 1 {
@@ -61,17 +70,17 @@ pub fn fuzz_delivery(data: &[u8]) {
                     usize::from(arg % 17)
                 };
                 let ids: Vec<_> = (0..batch).map(|i| modifier_id(index + i)).collect();
-                let type_id = [101, 102, 104, 108, 2][arg as usize % 5];
+                let type_id = TYPES[arg as usize % TYPES.len()];
                 let capacity = MAX_IN_FLIGHT_PER_PEER
                     - owners.values().filter(|owner| owner.peer == peer).count();
                 let mut unique = BTreeSet::new();
                 let expected: Vec<_> = ids
                     .iter()
                     .filter(|id| {
-                        !owners.contains_key(*id)
-                            && !received.contains(*id)
+                        !owners.contains_key(&(type_id, **id))
+                            && !received.contains(&(type_id, **id))
                             && (instruction[0] % 10 == 2
-                                || tracker.status(id) != ModifierStatus::Failed)
+                                || tracker.status(type_id, id) != ModifierStatus::Failed)
                             && unique.insert(**id)
                     })
                     .take(capacity)
@@ -85,33 +94,49 @@ pub fn fuzz_delivery(data: &[u8]) {
                 assert_eq!(actual, expected, "request respects ownership and capacity");
                 for id in actual {
                     owners.insert(
-                        id,
+                        (type_id, id),
                         Owner {
                             peer,
-                            type_id,
                             at: now,
                             hedges: 0,
                         },
                     );
-                    asked.entry(id).or_default().insert(peer);
+                    asked.entry((type_id, id)).or_default().insert(peer);
                 }
             }
             3 => {
-                let action = tracker.on_received(&id, &peer);
-                if received.contains(&id) {
+                let action = tracker.on_received(key.0, &key.1, &peer);
+                if received.contains(&key) {
                     assert_eq!(action, DeliveryAction::Ignore);
-                } else if owners.get(&id).is_some_and(|owner| owner.peer == peer) {
+                } else if owners.get(&key).is_some_and(|owner| owner.peer == peer) {
                     assert_eq!(action, DeliveryAction::Accept);
-                } else if !asked.get(&id).is_some_and(|peers| peers.contains(&peer)) {
+                } else if !asked.get(&key).is_some_and(|peers| peers.contains(&peer)) {
                     assert_eq!(action, DeliveryAction::RejectSpam);
                 }
+                // The same id under any other type is a separate modifier.
+                for other in TYPES.iter().filter(|t| **t != key.0) {
+                    if !owners.contains_key(&(*other, id))
+                        && !received.contains(&(*other, id))
+                        && !asked
+                            .get(&(*other, id))
+                            .is_some_and(|peers| peers.contains(&peer))
+                    {
+                        assert_eq!(
+                            tracker.on_received(*other, &id, &peer),
+                            DeliveryAction::RejectSpam
+                        );
+                    }
+                }
                 if action == DeliveryAction::Accept {
-                    tracker.mark_received(&id);
-                    owners.remove(&id);
-                    received.insert(id);
+                    tracker.mark_received(key.0, &key.1);
+                    owners.remove(&key);
+                    received.insert(key);
                     last_got = Some(now);
                     for sender in peers {
-                        assert_eq!(tracker.on_received(&id, &sender), DeliveryAction::Ignore);
+                        assert_eq!(
+                            tracker.on_received(key.0, &key.1, &sender),
+                            DeliveryAction::Ignore
+                        );
                     }
                 }
             }
@@ -162,19 +187,19 @@ pub fn fuzz_delivery(data: &[u8]) {
                 }
             }
             5 => {
-                let expected = owners.get(&id).is_some_and(|owner| {
+                let expected = owners.get(&key).is_some_and(|owner| {
                     owner.peer != peer
                         && owner.hedges < MAX_HEDGES
                         && owners.values().filter(|owner| owner.peer == peer).count()
                             < MAX_IN_FLIGHT_PER_PEER
                 });
-                assert_eq!(tracker.reassign(&id, peer, now), expected);
+                assert_eq!(tracker.reassign(key.0, &key.1, peer, now), expected);
                 if expected {
-                    let owner = owners.get_mut(&id).unwrap();
+                    let owner = owners.get_mut(&key).unwrap();
                     owner.peer = peer;
                     owner.at = now;
                     owner.hedges += 1;
-                    asked.entry(id).or_default().insert(peer);
+                    asked.entry(key).or_default().insert(peer);
                 }
             }
             6 => {
@@ -194,18 +219,24 @@ pub fn fuzz_delivery(data: &[u8]) {
                 owners.retain(|_, owner| owner.peer != peer);
             }
             7 => {
-                assert_eq!(tracker.forget_received(&id), received.remove(&id));
+                assert_eq!(
+                    tracker.forget_received(key.0, &key.1),
+                    received.remove(&key)
+                );
             }
             8 => {
-                if owners.contains_key(&id) {
-                    tracker.register_hedge_peers(&[id], &[peer], now);
-                    asked.entry(id).or_default().insert(peer);
-                    assert_eq!(tracker.on_received(&id, &peer), DeliveryAction::Accept);
+                if owners.contains_key(&key) {
+                    tracker.register_hedge_peers(key.0, &[key.1], &[peer], now);
+                    asked.entry(key).or_default().insert(peer);
+                    assert_eq!(
+                        tracker.on_received(key.0, &key.1, &peer),
+                        DeliveryAction::Accept
+                    );
                 }
             }
             9 => {
-                if !owners.contains_key(&id) {
-                    tracker.forget_timed_out(&id);
+                if !owners.contains_key(&key) {
+                    tracker.forget_timed_out(&key);
                 }
             }
             _ => unreachable!(),
@@ -225,20 +256,22 @@ pub fn fuzz_delivery(data: &[u8]) {
                 count < MAX_IN_FLIGHT_PER_PEER
             );
         }
-        for (id, owner) in &owners {
-            assert_eq!(tracker.status(id), ModifierStatus::Requested);
-            assert_eq!(tracker.modifier_type(id), Some(owner.type_id));
+        for ((type_id, id), owner) in &owners {
+            assert_eq!(tracker.status(*type_id, id), ModifierStatus::Requested);
             assert_eq!(
-                tracker.inflight_age(id, now),
+                tracker.inflight_age(*type_id, id, now),
                 Some((now.duration_since(owner.at), owner.peer))
             );
-            assert_eq!(tracker.on_received(id, &owner.peer), DeliveryAction::Accept);
+            assert_eq!(
+                tracker.on_received(*type_id, id, &owner.peer),
+                DeliveryAction::Accept
+            );
         }
         let gauges = tracker.gauges();
         assert_eq!(gauges.inflight, owners.len());
         assert_eq!(gauges.received_set, received.len());
-        assert!(gauges.late_acceptable <= ID_SPACE);
-        assert!(gauges.recently_released <= ID_SPACE);
+        assert!(gauges.late_acceptable <= ID_SPACE * TYPES.len());
+        assert!(gauges.recently_released <= ID_SPACE * TYPES.len());
     }
 }
 

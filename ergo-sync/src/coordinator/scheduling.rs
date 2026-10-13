@@ -158,7 +158,7 @@ impl SyncCoordinator {
                 // post-snapshot catch-up. Surfaced by Mode 2 part 2
                 // live-test where the 7.6k-block post-install gap never
                 // closed.
-                let status = self.delivery.status(&section_id);
+                let status = self.delivery.status(type_id, &section_id);
                 if matches!(
                     status,
                     ergo_p2p::delivery::ModifierStatus::Requested
@@ -307,7 +307,7 @@ impl SyncCoordinator {
                 // `request_force` below. Without this the sequential
                 // apply pipeline stalls on the first 3-times-unlucky
                 // section.
-                let status = self.delivery.status(&section_id);
+                let status = self.delivery.status(type_id, &section_id);
                 if matches!(
                     status,
                     ergo_p2p::delivery::ModifierStatus::Requested
@@ -507,12 +507,13 @@ impl SyncCoordinator {
             {
                 continue;
             }
-            match self.delivery.status(&section_id) {
+            match self.delivery.status(type_id, &section_id) {
                 ModifierStatus::Requested => {
-                    let (age, old_peer) = match self.delivery.inflight_age(&section_id, now) {
-                        Some(v) => v,
-                        None => continue,
-                    };
+                    let (age, old_peer) =
+                        match self.delivery.inflight_age(type_id, &section_id, now) {
+                            Some(v) => v,
+                            None => continue,
+                        };
                     if age <= hol_threshold {
                         continue;
                     }
@@ -524,7 +525,7 @@ impl SyncCoordinator {
                     else {
                         continue;
                     };
-                    if self.delivery.reassign(&section_id, new_peer, now) {
+                    if self.delivery.reassign(type_id, &section_id, new_peer, now) {
                         by_peer_type
                             .entry((new_peer, type_id))
                             .or_default()
@@ -580,7 +581,7 @@ impl SyncCoordinator {
     /// the first available peer (rare — headers are synced before block IBD).
     pub(super) fn rerequest_modifiers_bucketed(
         &mut self,
-        ids: &[[u8; 32]],
+        ids: &[ergo_p2p::delivery::ModifierKey],
         peers: &[PeerId],
         now: Instant,
     ) -> Vec<Action> {
@@ -593,12 +594,8 @@ impl SyncCoordinator {
         let mut ad_proofs_ids: Vec<[u8; 32]> = Vec::new();
         let mut header_ids: Vec<[u8; 32]> = Vec::new();
 
-        for id in ids {
-            let type_id = self
-                .delivery
-                .modifier_type(id)
-                .or_else(|| self.assembly.identify_section(id).map(|(t, _)| t))
-                .unwrap_or(ModifierTypeId::Header.as_byte());
+        for (type_id, id) in ids {
+            let type_id = *type_id;
             if type_id == ModifierTypeId::BlockTransactions.as_byte() {
                 tx_ids.push(*id);
             } else if type_id == ModifierTypeId::Extension.as_byte() {
@@ -607,7 +604,7 @@ impl SyncCoordinator {
                 // Preserve type 104 on retry — dropping it into the header
                 // fallback would re-request an ADProof section as a Header.
                 ad_proofs_ids.push(*id);
-            } else {
+            } else if type_id == ModifierTypeId::Header.as_byte() {
                 header_ids.push(*id);
             }
         }

@@ -113,6 +113,9 @@ pub(crate) struct NodeState {
     // Consulted on every inbound frame; over-limit frames drop and
     // emit a Misbehavior penalty.
     pub(super) throttle: ThroughputLimiter,
+    /// Per-peer budget for modifier bytes we serve in answer to
+    /// `RequestModifier` ([`ergo_p2p::throttle::SERVE_LIMITS`]).
+    pub(super) serve_throttle: ThroughputLimiter,
     // Last-observed active voted parameters / validation settings, used
     // to detect epoch-boundary changes that must trigger mempool
     // revalidation. Compared against `store.active_params()` /

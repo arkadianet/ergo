@@ -17,6 +17,7 @@
 
 pub mod api_family;
 pub mod auth;
+pub mod batch_ids;
 pub mod blockchain;
 pub mod compat;
 pub mod emission;

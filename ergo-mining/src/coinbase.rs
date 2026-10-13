@@ -16,7 +16,8 @@
 //!    all fee-locked outputs from selected user transactions (boxes
 //!    whose `ergo_tree_bytes == MAINNET_FEE_PROPOSITION_BYTES` and
 //!    that aren't spent within the block), aggregates their values
-//!    and tokens into a single miner reward box.
+//!    and tokens into a single miner reward box, collecting only the
+//!    fee boxes that keep that box within the output limits.
 
 #[cfg(test)]
 use ergo_primitives::digest::Digest32;
@@ -26,15 +27,12 @@ use ergo_ser::input::{ContextExtension, Input, SpendingProof};
 use ergo_ser::register::AdditionalRegisters;
 use ergo_ser::token::Token;
 use ergo_ser::transaction::{bytes_to_sign, Transaction};
-use ergo_validation::MAINNET_FEE_PROPOSITION_BYTES;
+use ergo_validation::tx::structural::serialized_box_size;
+use ergo_validation::{ProtocolParams, MAINNET_FEE_PROPOSITION_BYTES};
 
 use crate::emission_rules::{miners_reward_at_height, MonetarySettings};
 use crate::error::MiningError;
 use crate::reward_script::reward_output_script;
-
-/// Maximum tokens per ErgoBox per Scala
-/// `sdk.wallet.Constants.MaxAssetsPerBox`.
-pub const MAX_ASSETS_PER_BOX: usize = 255;
 
 /// Build the pre-EIP-27 emission transaction for a candidate at
 /// `next_height`. Mirrors the pre-activation branch of
@@ -128,44 +126,80 @@ pub fn build_pre_eip27_emission_tx(
 
 /// Build the fee transaction. Returns `None` when the selected
 /// transactions produce no fee-locked outputs (or all such outputs
-/// are spent within the same block).
+/// are spent within the same block, or none fits the miner box).
 ///
-/// Mirrors `CandidateGenerator.collectRewards` lines 803-820.
+/// Mirrors `CandidateGenerator.collectRewards` lines 803-820, with one
+/// addition: the single miner output must pass the same output checks
+/// the validator applies (`params.max_box_size` measured by
+/// [`serialized_box_size`], `params.max_tokens_per_box`). Fee boxes are
+/// visited in block order (transaction order, then output index); equal
+/// token ids are merged with checked addition, and a fee box is collected
+/// only if the miner box still fits every limit with it included. A box
+/// that does not fit is left uncollected: it stays an ordinary unspent
+/// fee-proposition box and can be collected by a later block.
 pub fn build_fee_tx(
     selected_user_txs: &[Transaction],
     miner_pk: &[u8; 33],
     next_height: u32,
+    params: &ProtocolParams,
 ) -> Result<Option<Transaction>, MiningError> {
     let fee_boxes = find_unspent_fee_boxes(selected_user_txs)?;
     if fee_boxes.is_empty() {
         return Ok(None);
     }
 
-    let total_value: u64 = fee_boxes.iter().map(|b| b.candidate.value).sum();
-    // Aggregate tokens, capped at MAX_ASSETS_PER_BOX.
-    let mut combined_tokens: Vec<Token> = Vec::new();
-    for b in &fee_boxes {
-        for t in &b.candidate.tokens {
-            if combined_tokens.len() >= MAX_ASSETS_PER_BOX {
-                break;
-            }
-            combined_tokens.push(t.clone());
-        }
-    }
-
     let reward_script_bytes = reward_output_script(miner_pk).to_vec();
     let reward_tree = parse_ergo_tree(&reward_script_bytes)?;
-    let miner_box = ErgoBoxCandidate::from_trusted_raw_parts(
-        total_value,
-        reward_tree,
-        reward_script_bytes,
-        next_height,
-        combined_tokens,
-        AdditionalRegisters::empty(),
-        vec![0x00],
-    );
+    let miner_box_with = |value: u64, tokens: Vec<Token>| {
+        ErgoBoxCandidate::from_trusted_raw_parts(
+            value,
+            reward_tree.clone(),
+            reward_script_bytes.clone(),
+            next_height,
+            tokens,
+            AdditionalRegisters::empty(),
+            vec![0x00],
+        )
+    };
+    let max_box_size = params.max_box_size as usize;
+    let max_tokens = params.max_tokens_per_box as usize;
 
-    let inputs: Vec<Input> = fee_boxes
+    let mut collected: Vec<&ErgoBox> = Vec::new();
+    let mut miner_box: Option<ErgoBoxCandidate> = None;
+    let mut total_value: u64 = 0;
+    let mut combined_tokens: Vec<Token> = Vec::new();
+    for b in &fee_boxes {
+        let Some(value) = total_value
+            .checked_add(b.candidate.value)
+            .filter(|v| *v <= i64::MAX as u64)
+        else {
+            continue;
+        };
+        let Some(tokens) = merge_tokens(&combined_tokens, &b.candidate.tokens) else {
+            continue;
+        };
+        if tokens.len() > max_tokens {
+            continue;
+        }
+        let probe = miner_box_with(value, tokens.clone());
+        // The miner box is output 0 of the fee transaction.
+        let size = serialized_box_size(&probe, 0).map_err(|e| MiningError::IdComputation {
+            op: "fee_box_size",
+            reason: format!("{e:?}"),
+        })?;
+        if size > max_box_size {
+            continue;
+        }
+        total_value = value;
+        combined_tokens = tokens;
+        miner_box = Some(probe);
+        collected.push(b);
+    }
+    let Some(miner_box) = miner_box else {
+        return Ok(None);
+    };
+
+    let inputs: Vec<Input> = collected
         .iter()
         .map(|b| {
             b.box_id().map(|box_id| Input {
@@ -185,6 +219,24 @@ pub fn build_fee_tx(
         data_inputs: Vec::new(),
         output_candidates: vec![miner_box],
     }))
+}
+
+/// Merge `extra` into a copy of `base`: equal token ids sum their amounts,
+/// new ids are appended in first-seen order. `None` when a sum leaves the
+/// positive signed-Long range token amounts must stay within.
+fn merge_tokens(base: &[Token], extra: &[Token]) -> Option<Vec<Token>> {
+    let mut merged = base.to_vec();
+    for token in extra {
+        if let Some(existing) = merged.iter_mut().find(|t| t.token_id == token.token_id) {
+            existing.amount = existing
+                .amount
+                .checked_add(token.amount)
+                .filter(|v| *v <= i64::MAX as u64)?;
+        } else {
+            merged.push(token.clone());
+        }
+    }
+    Some(merged)
 }
 
 /// Walk `txs` and return every output box whose script bytes match
@@ -441,8 +493,164 @@ mod tests {
     #[test]
     fn build_fee_tx_returns_none_for_empty_batch() {
         let miner_pk = [0x02u8; 33];
-        let fee = build_fee_tx(&[], &miner_pk, 1_000_000).expect("ok");
+        let fee = build_fee_tx(
+            &[],
+            &miner_pk,
+            1_000_000,
+            &ProtocolParams::mainnet_default(),
+        )
+        .expect("ok");
         assert!(fee.is_none(), "empty user-tx batch must produce no fee tx");
+    }
+
+    fn token(seed: u8, index: u8, amount: u64) -> Token {
+        let mut id = [seed; 32];
+        id[0] = index;
+        Token {
+            token_id: Digest32::from_bytes(id),
+            amount,
+        }
+    }
+
+    fn fee_output(value: u64, tokens: Vec<Token>) -> ErgoBoxCandidate {
+        let tree = parse_ergo_tree(MAINNET_FEE_PROPOSITION_BYTES).expect("fee tree");
+        ErgoBoxCandidate::from_trusted_raw_parts(
+            value,
+            tree,
+            MAINNET_FEE_PROPOSITION_BYTES.to_vec(),
+            1_000,
+            tokens,
+            AdditionalRegisters::empty(),
+            vec![0x00],
+        )
+    }
+
+    /// A user transaction (inputs are irrelevant to fee collection) whose
+    /// outputs are the given fee boxes.
+    fn user_tx(seed: u8, outputs: Vec<ErgoBoxCandidate>) -> Transaction {
+        Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes([seed; 32]),
+                spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty())
+                    .expect("proof"),
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: outputs,
+        }
+    }
+
+    fn assert_within_limits(tx: &Transaction, params: &ProtocolParams) {
+        assert_eq!(tx.output_candidates.len(), 1);
+        let miner_box = &tx.output_candidates[0];
+        assert!(miner_box.tokens.len() <= params.max_tokens_per_box as usize);
+        let size = serialized_box_size(miner_box, 0).expect("size");
+        assert!(
+            size <= params.max_box_size as usize,
+            "miner box is {size} bytes"
+        );
+    }
+
+    #[test]
+    fn fee_collection_merges_equal_token_ids() {
+        let params = ProtocolParams::mainnet_default();
+        let miner_pk = [0x02u8; 33];
+        // 122 entries of one token id, split over two fee outputs of two
+        // transactions, plus a second id: the miner box carries two entries.
+        let repeated = |n: usize| vec![token(7, 0, 1); n];
+        let mut second = repeated(61);
+        second.push(token(8, 1, 5));
+        let txs = vec![
+            user_tx(1, vec![fee_output(1_000_000, repeated(61))]),
+            user_tx(2, vec![fee_output(2_000_000, second)]),
+        ];
+        let fee_tx = build_fee_tx(&txs, &miner_pk, 1_001, &params)
+            .expect("build")
+            .expect("fee tx");
+        assert_eq!(fee_tx.inputs.len(), 2, "both fee boxes are collected");
+        let miner_box = &fee_tx.output_candidates[0];
+        assert_eq!(miner_box.value, 3_000_000);
+        assert_eq!(miner_box.tokens, vec![token(7, 0, 122), token(8, 1, 5)]);
+        assert_within_limits(&fee_tx, &params);
+    }
+
+    #[test]
+    fn fee_collection_stays_within_box_limits() {
+        let params = ProtocolParams::mainnet_default();
+        let miner_pk = [0x02u8; 33];
+        // Five fee boxes of 70 distinct tokens each (350 ids in total) and a
+        // final token-free fee box.
+        let mut txs: Vec<Transaction> = (1..=5u8)
+            .map(|seed| {
+                let tokens = (0..70).map(|i| token(seed, i, 1)).collect();
+                user_tx(seed, vec![fee_output(1_000_000, tokens)])
+            })
+            .collect();
+        txs.push(user_tx(9, vec![fee_output(500_000, Vec::new())]));
+        let fee_tx = build_fee_tx(&txs, &miner_pk, 1_001, &params)
+            .expect("build")
+            .expect("fee tx");
+        assert_within_limits(&fee_tx, &params);
+
+        // Each 70-token box adds ~2.3 KiB, so only the first token box fits;
+        // the later ones are skipped, the token-free box still fits.
+        let fee_boxes = find_unspent_fee_boxes(&txs).expect("fee boxes");
+        let collected: Vec<_> = fee_tx.inputs.iter().map(|i| i.box_id).collect();
+        let expected: Vec<_> = [0usize, 5]
+            .iter()
+            .map(|&i| fee_boxes[i].box_id().expect("id"))
+            .collect();
+        assert_eq!(collected, expected);
+        let miner_box = &fee_tx.output_candidates[0];
+        assert_eq!(miner_box.value, 1_500_000);
+        assert_eq!(miner_box.tokens, fee_boxes[0].candidate.tokens);
+
+        // The same input yields the same transaction.
+        let again = build_fee_tx(&txs, &miner_pk, 1_001, &params)
+            .expect("build")
+            .expect("fee tx");
+        assert_eq!(again, fee_tx);
+    }
+
+    #[test]
+    fn fee_collection_respects_the_token_count_limit() {
+        let mut params = ProtocolParams::mainnet_default();
+        params.max_tokens_per_box = 3;
+        let miner_pk = [0x02u8; 33];
+        let txs = vec![
+            user_tx(
+                1,
+                vec![fee_output(1_000_000, vec![token(1, 0, 1), token(1, 1, 1)])],
+            ),
+            user_tx(
+                2,
+                vec![fee_output(1_000_000, vec![token(2, 0, 1), token(2, 1, 1)])],
+            ),
+            // Repeats an id already collected: merging keeps the count at 2.
+            user_tx(3, vec![fee_output(1_000_000, vec![token(1, 0, 4)])]),
+        ];
+        let fee_tx = build_fee_tx(&txs, &miner_pk, 1_001, &params)
+            .expect("build")
+            .expect("fee tx");
+        assert_eq!(fee_tx.inputs.len(), 2);
+        let miner_box = &fee_tx.output_candidates[0];
+        assert_eq!(miner_box.value, 2_000_000);
+        assert_eq!(miner_box.tokens, vec![token(1, 0, 5), token(1, 1, 1)]);
+    }
+
+    #[test]
+    fn fee_collection_skips_a_box_whose_token_sum_overflows() {
+        let params = ProtocolParams::mainnet_default();
+        let miner_pk = [0x02u8; 33];
+        let max = i64::MAX as u64;
+        let txs = vec![
+            user_tx(1, vec![fee_output(1_000_000, vec![token(1, 0, max)])]),
+            user_tx(2, vec![fee_output(1_000_000, vec![token(1, 0, 1)])]),
+        ];
+        let fee_tx = build_fee_tx(&txs, &miner_pk, 1_001, &params)
+            .expect("build")
+            .expect("fee tx");
+        assert_eq!(fee_tx.inputs.len(), 1);
+        assert_eq!(fee_tx.output_candidates[0].tokens, vec![token(1, 0, max)]);
     }
 
     // ----- error paths -----

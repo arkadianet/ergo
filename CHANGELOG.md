@@ -42,6 +42,8 @@ infrastructure.
 
 ### Fixed
 
+- Reject transactions with an output value above 9,223,372,036,854,775,807 nanoERG (`i64::MAX`), or whose output values or input values sum above it (rules 105, 106 and 115), as the reference does, since it reads and sums box values as signed 64-bit amounts. These were previously accepted up to 2^64 − 1. A real chain's total supply is far below this bound, so only fabricated or test states are affected.
+- Reject ErgoTrees with header version 0, 1 or 2 whose arithmetic operation (`+`, `-`, `*`, `/`, `%`, `min`, `max`) has an operand whose type cannot be read, such as a `filter` over a number, with sized or sizeless headers, as the reference does at parse time. The same code in `DeserializeContext` or `DeserializeRegister` payloads, nested box scripts and `Global.deserializeTo` is now handled the same way. These trees were previously accepted when the other operand had a different numeric type.
 - Reject ErgoTrees without a size field whose root is a nested function application that does not return SigmaProp, as the reference node does. These trees were previously accepted.
 - Reject inputs whose `DeserializeContext` or `DeserializeRegister` code contains an off-curve group element, including one in a branch that is never evaluated or before a parse error the evaluator ignores. These inputs were previously accepted.
 - Reject `||` and `&&` whose evaluated right operand is not a Boolean; these were previously accepted. Accept `allOf`, `anyOf` and `xorOf` over an empty collection of any element type, as the reference does; these were previously rejected.

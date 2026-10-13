@@ -81,6 +81,7 @@ fn moved_app_with_security(address: &str, security: Option<Arc<ApiSecurity>>) ->
 
 fn moved_app_at(address: Option<&str>, security: Option<Arc<ApiSecurity>>) -> axum::Router {
     let ctx = ServerCtx {
+        block_batch: Default::default(),
         local_reverse_proxy: false,
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),

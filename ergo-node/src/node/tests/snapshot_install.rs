@@ -17,6 +17,10 @@ fn inbound_snapshots_info_below_quorum_keeps_bootstrap_querying() {
     let tmp = tempfile::tempdir().unwrap();
     let mut state = make_state(&tmp.path().join("state.redb"));
     let payload = snapshots_info_payload(&[(52_224, mid(0xAA))]);
+    // SnapshotsInfo counts only as a reply to our GetSnapshotsInfo.
+    for p in 1..=3u16 {
+        state.snapshot_bootstrap.mark_queried(synthetic_peer(p));
+    }
 
     for p in 1..=2u16 {
         let actions = handle_message(
@@ -42,6 +46,10 @@ fn inbound_snapshots_info_at_quorum_advances_bootstrap_to_selected() {
     let tmp = tempfile::tempdir().unwrap();
     let mut state = make_state(&tmp.path().join("state.redb"));
     let payload = snapshots_info_payload(&[(52_224, mid(0xAA))]);
+    // SnapshotsInfo counts only as a reply to our GetSnapshotsInfo.
+    for p in 1..=3u16 {
+        state.snapshot_bootstrap.mark_queried(synthetic_peer(p));
+    }
 
     for p in 1..=3u16 {
         handle_message(
@@ -95,6 +103,10 @@ fn peer_disconnect_drops_snapshot_bootstrap_vote() {
     let tmp = tempfile::tempdir().unwrap();
     let mut state = make_state(&tmp.path().join("state.redb"));
     let payload = snapshots_info_payload(&[(52_224, mid(0xAA))]);
+    // SnapshotsInfo counts only as a reply to our GetSnapshotsInfo.
+    for p in 1..=3u16 {
+        state.snapshot_bootstrap.mark_queried(synthetic_peer(p));
+    }
 
     for p in 1..=3u16 {
         handle_message(

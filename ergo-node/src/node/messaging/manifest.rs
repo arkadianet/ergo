@@ -366,4 +366,139 @@ mod tests {
             Some(peer)
         );
     }
+
+    // ----- snapshot votes -----
+
+    fn snapshots_info(peer_state: &mut NodeState, port: u16, entries: &[(i32, [u8; 32])]) {
+        let payload =
+            ergo_p2p::message::serialize_snapshots_info(&ergo_p2p::types::SnapshotsInfo {
+                available_manifests: entries.to_vec(),
+            })
+            .unwrap();
+        let _ = crate::node::handle_message(
+            peer_state,
+            ([10, 0, 0, 2], port).into(),
+            ergo_p2p::message::CODE_SNAPSHOTS_INFO,
+            &payload,
+            Instant::now(),
+        );
+    }
+
+    /// The fixture's header chain (state root `id` at 522_239) with no
+    /// votes or requests yet.
+    fn vote_state(path: &std::path::Path) -> (NodeState, [u8; 32]) {
+        let id: [u8; 32] =
+            hex::decode("7858b36c8c7596da9999a013d91608a341583a0a1f5d4859c5d80e5d296e0fac")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let mut state = crate::node::tests::make_state(&path.join("votes.redb"));
+        let root = ADDigest::from_bytes(
+            hex::decode("7858b36c8c7596da9999a013d91608a341583a0a1f5d4859c5d80e5d296e0fac17")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        let (header_id, header_bytes) =
+            crate::node::tests::synthetic_header_with_state_root(522_239, root);
+        let store = state.store.as_utxo_mut().unwrap();
+        store.store_header(&header_id, &header_bytes).unwrap();
+        store
+            .test_force_set_best_header_unsafe(header_id, 522_239, vec![5])
+            .unwrap();
+        store
+            .test_force_put_header_chain_index(522_239, &header_id)
+            .unwrap();
+        (state, id)
+    }
+
+    #[test]
+    fn unsolicited_snapshots_info_is_not_a_vote() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, id) = vote_state(dir.path());
+        for port in 1..=3 {
+            snapshots_info(&mut state, port, &[(522_239, id)]);
+        }
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Idle);
+
+        for port in 1..=3 {
+            state
+                .snapshot_bootstrap
+                .mark_queried(([10, 0, 0, 2], port).into());
+            snapshots_info(&mut state, port, &[(522_239, id)]);
+        }
+        assert_eq!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::Selected {
+                height: 522_239,
+                manifest_id: id
+            }
+        );
+    }
+
+    #[test]
+    fn snapshots_info_entry_contradicting_header_is_not_a_vote() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, id) = vote_state(dir.path());
+        let wrong = [0x55; 32];
+        for port in 1..=3 {
+            state
+                .snapshot_bootstrap
+                .mark_queried(([10, 0, 0, 2], port).into());
+            // Each peer also lists the real snapshot; the contradicting
+            // entry must not displace it as the peer's vote.
+            snapshots_info(&mut state, port, &[(522_239, wrong), (522_239, id)]);
+        }
+        assert_eq!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::Selected {
+                height: 522_239,
+                manifest_id: id
+            }
+        );
+    }
+
+    #[test]
+    fn vote_above_synced_header_tip_is_dropped_instead_of_parking() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, id) = vote_state(dir.path());
+        // Three peers vote for a height far above our headers while header
+        // sync is still running: it cannot be judged yet and wins the
+        // selection (highest height with quorum).
+        for port in 1..=3 {
+            state
+                .snapshot_bootstrap
+                .mark_queried(([10, 0, 0, 2], port).into());
+            snapshots_info(&mut state, port, &[(i32::MAX, [0x77; 32])]);
+        }
+        for port in 4..=6 {
+            state
+                .snapshot_bootstrap
+                .mark_queried(([10, 0, 0, 2], port).into());
+            snapshots_info(&mut state, port, &[(522_239, id)]);
+        }
+        crate::node::sync_tick::prune_conflicting_snapshot_votes(&mut state);
+        assert!(matches!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::Selected {
+                height: i32::MAX,
+                ..
+            }
+        ));
+
+        // Once headers are synced the above-tip vote is dropped and the
+        // real snapshot is selected.
+        state
+            .coordinator
+            .sync_state_mut()
+            .mark_headers_chain_synced();
+        crate::node::sync_tick::prune_conflicting_snapshot_votes(&mut state);
+        assert_eq!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::Selected {
+                height: 522_239,
+                manifest_id: id
+            }
+        );
+    }
 }

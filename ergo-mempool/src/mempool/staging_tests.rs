@@ -950,8 +950,8 @@ fn package_hard_invalid_child_is_penalized_and_blacklisted() {
         "{actions:?}"
     );
     assert!(
-        mp.is_invalidated(&d(2)),
-        "Inv fetch filter learns the child"
+        mp.is_invalidated_from(&d(2), peer),
+        "Inv fetch filter learns the child for the delivering peer"
     );
     assert_eq!(mp.staging_len(), 1, "held parent stays");
 }

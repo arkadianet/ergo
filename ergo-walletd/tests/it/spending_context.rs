@@ -63,7 +63,7 @@ impl ergo_api::NodeReadState for SnapshotRead {
         self.0.load().mempool.clone()
     }
     fn mempool_transactions(&self) -> ergo_api::types::ApiMempoolTransactions {
-        self.0.load().mempool_transactions.clone()
+        (*self.0.load().mempool_transactions).clone()
     }
     fn mempool_transaction(&self, _: &str) -> Option<ergo_api::types::ApiMempoolTransaction> {
         None

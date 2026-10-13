@@ -435,10 +435,13 @@ impl SyncCoordinator {
         &mut self.assembly
     }
 
-    /// Clear a `Received` delivery marker for a payload the executor chose not
+    /// Clear a `Received` delivery marker for a header the executor chose not
     /// to retain. This keeps future legitimate `Inv`s requestable.
     pub fn forget_received_modifier(&mut self, modifier_id: &[u8; 32]) -> bool {
-        self.delivery.forget_received(modifier_id)
+        self.delivery.forget_received(
+            ergo_p2p::types::ModifierTypeId::Header.as_byte(),
+            modifier_id,
+        )
     }
 
     /// Test-only mutable accessor for the delivery tracker. Used to

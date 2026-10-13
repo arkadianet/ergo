@@ -116,6 +116,7 @@ pub enum Reason {
     NoInputsFound,
     DustChange,
     StaleCandidate,
+    ExpiredCandidate,
     ForcedTxExceedsBudget,
     InsufficientSignatures,
     ScriptError,
@@ -271,6 +272,7 @@ impl Reason {
             | NoInputsFound
             | DustChange
             | StaleCandidate
+            | ExpiredCandidate
             | ForcedTxExceedsBudget
             | InsufficientSignatures
             | ScriptError
@@ -501,6 +503,7 @@ mod tests {
             (NoInputsFound, "no_inputs_found", br),
             (DustChange, "dust_change", br),
             (StaleCandidate, "stale_candidate", br),
+            (ExpiredCandidate, "expired_candidate", br),
             (ForcedTxExceedsBudget, "forced_tx_exceeds_budget", br),
             (InsufficientSignatures, "insufficient_signatures", br),
             (ScriptError, "script_error", br),
@@ -626,11 +629,11 @@ mod tests {
     }
 
     #[test]
-    fn contract_covers_exactly_one_hundred_nineteen_reasons_no_duplicates() {
+    fn contract_covers_exactly_one_hundred_twenty_reasons_no_duplicates() {
         use std::collections::BTreeSet;
         let rows = contract();
-        assert_eq!(rows.len(), 119, "expected 119 canonical reasons");
+        assert_eq!(rows.len(), 120, "expected 120 canonical reasons");
         let wires: BTreeSet<&str> = rows.iter().map(|(_, w, _)| *w).collect();
-        assert_eq!(wires.len(), 119, "wire strings must be unique");
+        assert_eq!(wires.len(), 120, "wire strings must be unique");
     }
 }

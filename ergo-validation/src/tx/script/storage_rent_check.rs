@@ -90,8 +90,12 @@ pub(super) fn check_storage_rent(
         None => return StorageRentCheck::ScriptFallback,
     };
 
-    // Compute box size (serialized bytes length)
-    let box_bytes_len = match ergo_ser::ergo_box::serialize_ergo_box(input_box) {
+    // Box size: Scala `box.bytes.length`. For a box read from state or a
+    // proof that is the exact bytes it was parsed from (the bytes its id
+    // hashes), not a re-serialization; `ErgoBox::bytes` keeps the same
+    // distinction. A box created earlier in the same block has no received
+    // bytes, and both sides serialize it.
+    let box_bytes_len = match input_box.bytes() {
         Ok(bytes) => bytes.len() as i32,
         Err(e) => {
             // Unreachable from `validate_scripts`: `ergo_box_to_eval_box`
@@ -628,6 +632,46 @@ mod tests {
             check_storage_rent(&in_box, &short_ext, &tx, current_height, &p),
             StorageRentCheck::Accepted,
             "the same output must pass when indexed by a Short",
+        );
+    }
+
+    // ----- oracle parity -----
+
+    /// The fee is charged on the bytes a box was parsed from. Box vector from
+    /// SANTA `Box.tree_parse_acceptance` (a bare TrueLeaf body, `00d17f`,
+    /// whose canonical form `00d10101` is one byte longer). Oracle: an
+    /// ergo 6.0.7 JVM run of `ErgoBox.sigmaSerializer.fromBytes` on these
+    /// bytes gives `box.bytes.length = 42` (`id = 733c16ca…`, the hash of the
+    /// received bytes) and a re-serialized length of 43. With a factor
+    /// of 23_500 the fee is covered at 42 bytes (987_000 < 1_000_000) and
+    /// not at 43, so only the received length requires the output to
+    /// preserve the box.
+    #[test]
+    fn fee_uses_received_box_bytes_not_reserialization() {
+        let tail = "0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400";
+        let bytes = hex::decode(format!("c0843d00d17f{tail}")).unwrap();
+        let mut r =
+            ergo_primitives::reader::VlqReader::new(&bytes).with_activated_script_version(3);
+        let in_box = ergo_ser::ergo_box::read_ergo_box(&mut r).unwrap();
+        assert_eq!(in_box.bytes().unwrap().len(), 42);
+        assert_eq!(
+            ergo_ser::ergo_box::serialize_ergo_box(&in_box)
+                .unwrap()
+                .len(),
+            43
+        );
+        assert_eq!(
+            hex::encode(in_box.box_id().unwrap().as_bytes()),
+            "733c16cac9f5d9187eda2cffcd57830e0173aaf1650e55ba9e4b8f1b43cbd1c3"
+        );
+
+        let out = make_output(1, 999, alt_tree(), vec![], empty_regs());
+        let tx = make_tx_with_one_input_and_outputs(vec![out]);
+        let ext = ctx_ext_with_output_idx(0);
+        assert_eq!(
+            check_storage_rent(&in_box, &ext, &tx, 200, &params_with_factor(23_500)),
+            StorageRentCheck::Rejected,
+            "a covered fee requires the output to preserve the box",
         );
     }
 }

@@ -257,6 +257,8 @@ beyond loopback.
 | `public_bind` | bool | `false` | Permits binding a non-loopback address. A non-loopback `bind` without `public_bind = true` is rejected at load. See the security note below. |
 | `local_reverse_proxy` | bool | `false` | Declares a reverse proxy terminating on loopback in front of the API. When `true`, loopback peers lose the v1 rate-limit exemption, Admin requests use the remote warn-and-allow policy, and API transaction submissions use the public mempool budget. Proxied clients share limits by peer IP; see the security notes below. `X-Forwarded-For` is not trusted. |
 | `allowed_hosts` | array of string | `[]` | Extra `Host` header values the DNS-rebinding guard accepts, beyond `localhost` / `127.0.0.1` / `::1` / the literal `bind` address (always accepted on a loopback bind). An entry may include a port (`"example.com:9099"`) to pin it, or omit one to match any port. On a non-loopback bind, the guard only activates when this list is non-empty — see the security note below. |
+| `max_blocks_per_request` | integer | `1000` | Distinct header ids accepted per `POST /blocks/headerIds` or `POST /blockchain/block/byHeaderIds` request; accepts `1..=16384`. A larger request answers 400. |
+| `max_blocks_response_bytes` | integer | `67108864` | Serialized response budget, in bytes, for the same two routes (64 MiB); accepts `1048576..=4294967296`. Blocks are serialized one at a time and the request answers 400 as soon as the response would exceed the budget; no partial result is returned. |
 
 ### Webhook state
 
@@ -417,7 +419,8 @@ change authentication on the Scala-compatible `/script/p2sAddress` and
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `require_api_key` | bool | `false` | Require a configured API credential for all seven native script endpoints. When enabled without a configured hash, those endpoints fail closed. |
-| `max_cost` | u64 | `8001091` | Maximum native reduction cost; accepts `1..=8001091`. A request can lower the limit, and cannot raise it above this policy. Invalid values reject configuration even when the API is disabled. |
+| `max_cost` | u64 | `1000000` | Maximum native reduction cost; accepts `1..=8001091`. A request can lower the limit, and cannot raise it above this policy. Invalid values reject configuration even when the API is disabled. The default matches the reference node's default per-transaction cost limit; raise it to dry-run scripts that cost more. |
+| `max_eval_bytes` | u64 | `67108864` | Budget, in bytes, for the collection values one reduction may build (64 MiB). Each collection a script produces is counted by element count times element size; a reduction above the budget answers `400 cost_limit`. Accepts `1024..=4294967296`. Applies only to the playground; block and mempool validation are not affected. |
 
 Compilation and reduction use a per-node compute pool with two running jobs,
 eight waiting jobs, a two-second queue wait and a thirty-second response
@@ -427,6 +430,27 @@ does not stop an accepted blocking job: it retains its slot until execution
 finishes, and shutdown drains accepted jobs. Point and scan read lanes use
 sixteen/four running jobs and sixty-four/sixteen waiting jobs respectively.
 These resource limits are code defaults rather than TOML keys.
+
+Scala-compatible P2S/P2SH compilation accepts at most 65536 bytes of `source`
+(the same cap as `/api/v1/script/compile`); a longer source answers 400.
+
+#### Batch-by-id routes
+
+These routes answer each distinct id once: repeated ids in one request
+(compared case-insensitively) are folded to their first occurrence before the
+count cap applies. A request above the cap answers 400 with the usual
+`{"error": 400, "reason": "bad-request", "detail": ...}` body. The two
+full-block routes take their cap and a response-size budget from
+`[api] max_blocks_per_request` and `max_blocks_response_bytes`; the other caps
+are code defaults rather than TOML keys.
+
+| Route | Distinct ids per request |
+|---|---|
+| `POST /blocks/headerIds` | `[api] max_blocks_per_request` (1000), response ≤ `max_blocks_response_bytes` (64 MiB) |
+| `POST /blockchain/block/byHeaderIds` | `[api] max_blocks_per_request` (1000), response ≤ `max_blocks_response_bytes` (64 MiB) |
+| `POST /blockchain/tokens` | 1000 |
+| `POST /utxo/withPool/byIds` | 1000 |
+| `POST /api/v1/chain/blocks/by-ids` | 200 (unchanged; repeated ids now answered once) |
 
 ### Security notes for the API
 
@@ -651,10 +675,11 @@ either way.
 | `enabled` | bool | `false` | Enables the external-miner subsystem and mounts `/mining/*`. Rejected when `state_type = "digest"` (candidate generation needs UTXO state). CLI flag `--mining-enabled` forces it on. |
 | `miner_public_key_hex` | string (hex) | none | 33-byte compressed secp256k1 public key (66 hex chars) for the reward output. With mining enabled and neither this nor `miner_reward_address` set, boot takes the first-address key of a wallet left in `state.redb` by an earlier release and logs how to pin it; with no such wallet, boot fails. A value that is present must be well-formed (66 hex chars → 33 bytes) or load fails. CLI flag: `--mining-public-key`. |
 | `miner_reward_address` | string | none | P2PK reward address, as wallets display it. Decoded into the reward key and checked against the node's `network`; setting it together with a different `miner_public_key_hex` is a load error. See [Wallet setup](wallet-setup.md). |
-| `block_candidate_generation_interval_ms` | u64 | `250` | Minimum interval (ms) between same-parent mempool-refresh signals; must be at least 50. The first pool change after a quiet interval signals immediately. Changes within the interval share a deadline and refresh the latest pool snapshot when it expires, independently of the mempool polling tick. Applied-parent changes bypass this interval; header-only changes do not rebuild work once mining has started. Lower values refresh transaction contents sooner but increase build load and churn of the 16 retained templates. |
+| `block_candidate_generation_interval_ms` | u64 | `250` | Minimum interval (ms) between same-parent mempool-refresh signals; must be at least 50. The first pool change after a quiet interval signals immediately. Changes within the interval share a deadline and refresh the latest pool snapshot when it expires, independently of the mempool polling tick. Applied-parent changes bypass this interval; header-only changes do not rebuild work once mining has started. Lower values refresh transaction contents sooner but increase build load. A pool-refresh rebuild whose block content is unchanged (same transactions, extension and votes) keeps serving the existing template. |
+| `template_retention_ms` | u64 | `120000` | How long a superseded template stays solvable. The newest 16 templates are kept whatever their age; older ones are kept while younger than this. Either way the history stays within 1,024 templates and about 256 MiB: past those limits the oldest templates go first, even among the newest 16, and only the newest template is always kept. A solution for a template the node no longer holds is answered `400 stale_candidate` on `/mining/solution` and `400 expired_candidate` on `/api/v1/mining/solution` instead of `invalid_pow`. `0` keeps only the newest 16. |
 | `use_external_miner` | bool | `true` | Must be `true` — an internal CPU miner is not supported, so `false` is rejected at load. |
 | `candidate_base_cache` | bool | `false` | With the default `false`, candidate proofs load only authenticated AVL operation paths from the committed snapshot and retain no full-tree graph between builds. Legacy v1 nodes without child labels may require subtree reads. Setting `true` enables the alternative cache of the hydrated AVL working set between candidate builds, keyed on the committed tip. Same-tip rebuilds reuse the tree and loaded paths; transaction validation and proof generation for changed transaction sets still run. Independently of this setting, the worker can reuse a prior state root and proof for an identical applied parent and ordered transaction bytes after fresh transaction validation. When the committed tip moves, the engine walks back at most six headers to the cached tip or to one of up to three retained ancestor trees, and replays the stored blocks from there. It checks each block's state root against its header and the final root against the committed state. This covers growth by a few blocks and reorgs up to three deep. Full rehydration remains the fallback beyond that window, and on missing data, decode or prover errors, or digest mismatches. Holds the full UTXO AVL node graph resident — multi-GB on a mainnet archival node, scaling with the UTXO-set size — so enable it only on a mining node with RAM headroom. |
-| `claim_storage_rent` | bool | `false` | When `true`, the node sweeps storage-rent-eligible boxes into a self-claim transaction paid to the miner's reward key, inserted ahead of mempool selection so any conflicting fee-bearing claim on the same box is excluded. Opt-in: it changes block contents and seizes rent to the miner. Requires `[indexer] enabled = true` (see cross-section rules). While the index backfills, enumeration may be partial but never claims an invalid box — a lagging index only under-collects. |
+| `claim_storage_rent` | bool | `false` | When `true`, the node sweeps storage-rent-eligible boxes into a self-claim transaction paid to the miner's reward key, inserted ahead of mempool selection. Boxes that a pooled transaction spends are left to that transaction, and boxes the indexed size and value show to be unclaimable are skipped without using a claim slot. A failed rent build leaves the claim out of that candidate; it never blocks the candidate. Opt-in: it changes block contents and seizes rent to the miner. Requires `[indexer] enabled = true` (see cross-section rules). While the index backfills, enumeration may be partial but never claims an invalid box — a lagging index only under-collects. |
 | `max_storage_rent_claims` | u32 | `4096` | Safety ceiling on the number of storage-rent boxes swept into one block's self-claim. The block's cost and size budgets are the real binding limit (typically ~3,700 boxes by cost on mainnet); this cap prevents unbounded iteration. Lower it to leave more room for fee-paying user transactions. Only meaningful when `claim_storage_rent = true`. |
 
 The node also accepts authenticated `POST /mining/candidateWithTxs` (a JSON
@@ -684,8 +709,10 @@ configured parameters one step per block toward your target value. The node
 only ever casts votes that the consensus header-vote rules accept (at most two
 parameter votes, no duplicates or contradictions, and only known increases at
 an epoch-start block); a parameter already at its target — or already at its
-`min`/`max` bound — casts no vote. Soft-fork voting and `blockVersion` (123)
-are **not** operator-settable here.
+`min`/`max` bound — casts no vote. A vote only counts when the voting epoch's
+first block cast it, so blocks inside an epoch vote only for parameters that
+block seeded. Soft-fork voting and `blockVersion` (123) are **not**
+operator-settable here.
 
 `GET /api/v1/votes` shows the live votable set with each parameter's current
 value, step, and bounds, plus the votes this node is configured to cast.

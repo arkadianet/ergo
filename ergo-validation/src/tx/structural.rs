@@ -36,6 +36,7 @@ pub fn validate_structural(
     check_has_inputs(tx)?;
     check_has_outputs(tx)?;
     check_collection_caps(tx)?;
+    check_output_values(tx)?;
     check_no_duplicate_inputs(tx)?;
     // Repeated data inputs are a stateful, height-gated rule (110); see
     // `tx::data_inputs`.
@@ -101,6 +102,33 @@ fn check_no_duplicate_inputs(tx: &Transaction) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Rules 105 (`txNegativeOutput`) and 106 (`txOutputSum`), in the order
+/// `validateStateless` applies them. The reference reads box values as
+/// `Long`, so a value above `i64::MAX` is negative there, and it sums the
+/// outputs with `Math.addExact`. Neither rule can be disabled.
+/// <https://github.com/ergoplatform/ergo/blob/v6.0.7/ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala#L83-L99>
+fn check_output_values(tx: &Transaction) -> Result<(), ValidationError> {
+    for (index, out) in tx.output_candidates.iter().enumerate() {
+        if out.value > i64::MAX as u64 {
+            return Err(ValidationError::OutputValueTooHigh {
+                index,
+                value: out.value,
+            });
+        }
+    }
+    sum_values_i64(tx.output_candidates.iter().map(|c| c.value))
+        .ok_or(ValidationError::OutputSumTooHigh)?;
+    Ok(())
+}
+
+/// Sum of nanoErg values with `Math.addExact` (`Long`) overflow semantics:
+/// `None` once the total passes `i64::MAX`.
+pub(crate) fn sum_values_i64(values: impl IntoIterator<Item = u64>) -> Option<u64> {
+    values.into_iter().try_fold(0u64, |acc, v| {
+        acc.checked_add(v).filter(|&s| s <= i64::MAX as u64)
+    })
+}
+
 fn check_output_box(
     index: usize,
     out: &ErgoBoxCandidate,
@@ -163,12 +191,14 @@ fn check_output_box(
     Ok(())
 }
 
-/// Compute the serialized size of a box for min-value calculation.
+/// Compute the serialized size of output `index` as the box-size (rule
+/// 120) and min-value (rule 111) checks measure it.
 ///
 /// Scala uses `box.bytes.length` which includes transaction_id (32 bytes)
 /// and the VLQ-encoded output index. We serialize the candidate and add
-/// 32 + vlq_size(index) to match.
-fn serialized_box_size(out: &ErgoBoxCandidate, index: u16) -> Result<usize, ValidationError> {
+/// 32 + vlq_size(index) to match. Public so transaction builders can size
+/// an output with exactly the measure this validator applies.
+pub fn serialized_box_size(out: &ErgoBoxCandidate, index: u16) -> Result<usize, ValidationError> {
     let mut w = VlqWriter::new();
     ergo_ser::ergo_box::write_ergo_box_candidate_versioned(&mut w, out, 1)
         .map_err(|e| ValidationError::Deserialization(e.to_string()))?;

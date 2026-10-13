@@ -180,6 +180,12 @@ pub(super) struct TomlApi {
     pub(super) allowed_hosts: Option<Vec<String>>,
     /// Declare a loopback reverse proxy in front of the API. Default `false`.
     pub(super) local_reverse_proxy: Option<bool>,
+    /// Distinct ids per `/blocks/headerIds` and
+    /// `/blockchain/block/byHeaderIds` request. Default 1000.
+    pub(super) max_blocks_per_request: Option<usize>,
+    /// Serialized response budget, in bytes, for those two routes; a larger
+    /// response is refused with 400. Default 67108864 (64 MiB).
+    pub(super) max_blocks_response_bytes: Option<usize>,
     /// Optional `[api.security]` subsection. Without a hash, privileged
     /// routes stay closed; supplied hashes are validated at load.
     pub(super) security: Option<TomlApiSecurity>,
@@ -210,6 +216,7 @@ pub(super) struct TomlApiSecurity {
 pub(super) struct TomlApiScript {
     pub(super) require_api_key: Option<bool>,
     pub(super) max_cost: Option<u64>,
+    pub(super) max_eval_bytes: Option<u64>,
 }
 
 /// `[mempool]` TOML section: unconfirmed transaction pool configuration.

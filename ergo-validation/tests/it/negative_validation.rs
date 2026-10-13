@@ -302,6 +302,94 @@ fn reject_erg_inflation() {
     assert!(matches!(err, ValidationError::ErgNotConserved { .. }));
 }
 
+// --- Box values outside the reference's `Long` range ---
+
+/// Validate a one-shot transaction spending `input_values` (fabricated UTXO
+/// boxes) into outputs of `output_values`.
+fn validate_values(input_values: &[u64], output_values: &[u64]) -> Result<(), ValidationError> {
+    let mut utxo_map = HashMap::new();
+    let mut inputs = Vec::new();
+    for (i, value) in input_values.iter().enumerate() {
+        let input_box = make_ergo_box(*value, i as u8 + 1);
+        let id = input_box.box_id().unwrap();
+        utxo_map.insert(id, input_box);
+        inputs.push(Input {
+            box_id: id,
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        });
+    }
+    let tx = Transaction {
+        inputs,
+        data_inputs: vec![],
+        output_candidates: output_values.iter().map(|v| make_candidate(*v)).collect(),
+    };
+    let tx_bytes = serialize_tx(&tx);
+    let utxo = TestUtxo(utxo_map);
+    let mut cost = CostAccumulator::recording_only();
+    let ctx = default_ctx();
+    let params = ProtocolParams::mainnet_default();
+    let policy = LocalPolicy::default_policy();
+    let mut tx_cx = ergo_validation::TxValidationCtx {
+        ctx: &ctx,
+        params: &params,
+        cost: &mut cost,
+        last_headers: &[],
+        rules: ergo_validation::TxValidationRules::default(),
+    };
+    validate_transaction(&tx_bytes, &utxo, &policy, &mut tx_cx).map(|_| ())
+}
+
+const TWO_POW_62: u64 = 1 << 62;
+const TWO_POW_63: u64 = 1 << 63;
+
+#[test]
+fn reject_output_value_above_i64_max() {
+    // Rule 105: the reference reads the value as a negative `Long`. The
+    // conserved input makes the stateless rule the only failure.
+    for value in [TWO_POW_63, u64::MAX] {
+        let err = validate_values(&[value], &[value]).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::OutputValueTooHigh { index: 0, value: v } if v == value),
+            "{value}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn reject_output_sum_above_i64_max() {
+    // Rule 106: each output fits a `Long`, their sum does not.
+    let err = validate_values(&[TWO_POW_62, TWO_POW_62], &[TWO_POW_62, TWO_POW_62]).unwrap_err();
+    assert!(matches!(err, ValidationError::OutputSumTooHigh), "{err:?}");
+}
+
+#[test]
+fn reject_input_sum_above_i64_max() {
+    // Rule 115: the inputs overflow a `Long` even though the outputs fit.
+    let err = validate_values(&[TWO_POW_62, TWO_POW_62], &[1_000_000_000]).unwrap_err();
+    assert!(matches!(err, ValidationError::InputSumTooHigh), "{err:?}");
+}
+
+#[test]
+fn values_up_to_i64_max_pass_the_range_rules() {
+    // The largest `Long` is a valid amount; conservation decides as before.
+    let max = i64::MAX as u64;
+    let err = validate_values(&[max], &[max]);
+    assert!(
+        !matches!(
+            err,
+            Err(ValidationError::OutputValueTooHigh { .. }
+                | ValidationError::OutputSumTooHigh
+                | ValidationError::InputSumTooHigh)
+        ),
+        "{err:?}"
+    );
+    let err = validate_values(&[max - 1, 1], &[max]);
+    assert!(
+        !matches!(err, Err(ValidationError::InputSumTooHigh)),
+        "{err:?}"
+    );
+}
+
 // --- Monetary: invalid token minting ---
 
 #[test]

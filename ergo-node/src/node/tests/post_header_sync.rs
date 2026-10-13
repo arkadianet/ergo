@@ -81,7 +81,7 @@ mod post_header_sync {
             flush_actions(&mut state, actions);
             assert_eq!(state.store.chain_state_meta().best_header_height, 1);
             assert_eq!(
-                state.coordinator.delivery().status(&id),
+                state.coordinator.delivery().status(101, &id),
                 ModifierStatus::Requested
             );
         }
@@ -101,7 +101,7 @@ mod post_header_sync {
         }
         if duplicate {
             assert_eq!(
-                state.coordinator.delivery().status(&id),
+                state.coordinator.delivery().status(101, &id),
                 ModifierStatus::Received
             );
             deliver(&mut state, peer, &payload, coalesced);
@@ -179,7 +179,7 @@ mod post_header_sync {
         // Connect after the Inv so this peer was not included in request hedging.
         let mut spam_rx = connect_test_peer(&mut state, spammer, now);
         assert_eq!(
-            state.coordinator.delivery().on_received(&id, &spammer),
+            state.coordinator.delivery().on_received(101, &id, &spammer),
             ergo_p2p::delivery::DeliveryAction::RejectSpam
         );
         // Wrong peer goes first while P still owns the request (RejectSpam).

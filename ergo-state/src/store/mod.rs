@@ -2480,6 +2480,13 @@ impl StateStore {
         self.headers.get_block_section(modifier_id)
     }
 
+    /// Remove one stored block section so it can be downloaded again.
+    /// Returns whether a section was stored.
+    pub fn delete_block_section(&self, modifier_id: &[u8; 32]) -> Result<bool, StateError> {
+        self.drain_persist_results()?;
+        self.headers.delete_block_section(modifier_id)
+    }
+
     /// Store header metadata (parent, height, cumulative score, validity).
     pub fn store_header_meta(
         &self,
@@ -4287,6 +4294,38 @@ mod tests {
             StateStore::open(&path),
             Err(StateError::LegacySnapshotNodeIds)
         ));
+    }
+
+    #[test]
+    fn apply_rejects_an_insert_of_an_existing_box_and_keeps_state() {
+        let (mut store, _directory) = fresh_store();
+        let existing = [0x42; 32];
+        store
+            .initialize_genesis(&[(existing, vec![1, 2, 3])])
+            .unwrap();
+        let root = store.root_digest();
+        let mut to_insert: UtxoInsertMap = BTreeMap::new();
+        // Same bytes, so the state root would not change if the insert were
+        // allowed to overwrite.
+        to_insert.insert(existing, vec![1, 2, 3]);
+        let emission = super::emission::EmissionTransition::prepare(
+            store.chain_state.best_full_block_id,
+            2,
+            std::iter::empty(),
+        )
+        .unwrap();
+        let result = store.apply_utxo_changes(
+            2,
+            &[2; 32],
+            &root,
+            (BTreeMap::new(), to_insert, emission),
+            None,
+        );
+        assert!(
+            matches!(result, Err(StateError::BoxAlreadyExists(_))),
+            "{result:?}"
+        );
+        assert_eq!(store.root_digest(), root);
     }
 
     #[test]

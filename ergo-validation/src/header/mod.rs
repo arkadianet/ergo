@@ -15,7 +15,8 @@ mod timestamp;
 mod votes;
 
 pub use timestamp::{
-    check_future_timestamp, check_parent_id, check_timestamp, FUTURE_TIMESTAMP_DRIFT_MS,
+    check_future_timestamp, check_future_timestamp_with_cap, check_parent_id, check_timestamp,
+    future_timestamp_drift_ms, FUTURE_TIMESTAMP_DRIFT_MS,
 };
 pub use votes::{
     check_votes_known, check_votes_known_active, check_votes_no_contradictions,

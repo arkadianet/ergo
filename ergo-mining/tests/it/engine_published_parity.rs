@@ -613,7 +613,7 @@ fn candidate_metrics_describe_retained_transactions_and_collected_fees() {
         inputs: vec![input.box_id().unwrap()],
         outputs: vec![],
         parents_in_pool: vec![],
-        output_boxes: vec![],
+        output_boxes: vec![].into(),
         // Deliberately stale admission metadata: the metric must use the final
         // fee transaction and fresh validation, not these cached values.
         fee: 999,
@@ -744,7 +744,7 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
             inputs: tx.inputs.iter().map(|i| i.box_id).collect(),
             outputs: vec![],
             parents_in_pool: vec![],
-            output_boxes: vec![],
+            output_boxes: vec![].into(),
             fee: FEE,
             weight: FEE,
             cost: 0,
@@ -834,6 +834,169 @@ fn required_transaction_trimmed_for_the_fee_transaction_is_reported_not_fatal() 
         if reason.contains("final fee transaction exceed the block budget")),
         "{error}"
     );
+}
+
+/// Fee outputs whose combined tokens cannot fit one miner box do not stop
+/// the template from carrying user transactions: fee collection takes the
+/// fee boxes that fit and leaves the rest unspent.
+#[test]
+fn candidate_keeps_user_transactions_when_fee_tokens_exceed_one_box() {
+    use ergo_mempool::{pool::Entry, types::TxSource};
+    use ergo_ser::{
+        ergo_tree::ErgoTree,
+        opcode::Expr,
+        sigma_type::SigmaType,
+        sigma_value::{SigmaBoolean, SigmaValue},
+    };
+    const TOKENS_PER_BOX: u8 = 100;
+    const TOKEN_FEE: u64 = 2_000_000;
+    const PLAIN_FEE: u64 = 1_100_000;
+    let regime = Regime::pre_eip27();
+    let tree = ErgoTree {
+        version: 0,
+        has_size: true,
+        constant_segregation: false,
+        reserved_header_bits: 0,
+        constants: vec![],
+        body: Expr::Const {
+            tpe: SigmaType::SSigmaProp,
+            val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+        },
+    };
+    let input_box = |seed: u8, tokens: Vec<Token>| ErgoBox {
+        candidate: ErgoBoxCandidate::new(
+            100_000_000,
+            tree.clone(),
+            0,
+            tokens,
+            AdditionalRegisters::empty(),
+        )
+        .unwrap(),
+        transaction_id: ModifierId::from_bytes([seed; 32]),
+        index: 0,
+    };
+    let distinct_tokens = |seed: u8| -> Vec<Token> {
+        (0..TOKENS_PER_BOX)
+            .map(|i| {
+                let mut id = [seed; 32];
+                id[0] = i;
+                Token {
+                    token_id: Digest32::from_bytes(id),
+                    amount: 1,
+                }
+            })
+            .collect()
+    };
+    // Three inputs of 100 distinct tokens each: together 300 token ids, more
+    // than one box can carry.
+    let token_inputs: Vec<ErgoBox> = (1..=3u8)
+        .map(|seed| input_box(0xA0 + seed, distinct_tokens(seed)))
+        .collect();
+    let plain_input = input_box(0xB0, vec![]);
+    let mut all_inputs = token_inputs.clone();
+    all_inputs.push(plain_input.clone());
+    let (_dir, store, _tip) = synced_store_with_inputs(&regime, &all_inputs, |tip| {
+        pack_interlinks(&[ModifierId::from_bytes(*tip)])
+    });
+    let fee_tree = read_ergo_tree(&mut VlqReader::new(
+        ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES,
+    ))
+    .unwrap();
+    let height = regime.parent_height + 1;
+    let output = |value: u64, tree: &ErgoTree, tokens: Vec<Token>| {
+        ErgoBoxCandidate::new(
+            value,
+            tree.clone(),
+            height,
+            tokens,
+            AdditionalRegisters::empty(),
+        )
+        .unwrap()
+    };
+    let spend = |inputs: &[ErgoBox], outputs: Vec<ErgoBoxCandidate>| Transaction {
+        inputs: inputs
+            .iter()
+            .map(|b| Input {
+                box_id: b.box_id().unwrap(),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            })
+            .collect(),
+        data_inputs: vec![],
+        output_candidates: outputs,
+    };
+    // One fee output per token input, each carrying that input's tokens.
+    let mut token_outputs = vec![output(3 * 100_000_000 - 3 * TOKEN_FEE, &tree, vec![])];
+    token_outputs.extend(
+        token_inputs
+            .iter()
+            .map(|b| output(TOKEN_FEE, &fee_tree, b.candidate.tokens.clone())),
+    );
+    let token_tx = spend(&token_inputs, token_outputs);
+    let plain_tx = spend(
+        std::slice::from_ref(&plain_input),
+        vec![
+            output(100_000_000 - PLAIN_FEE, &tree, vec![]),
+            output(PLAIN_FEE, &fee_tree, vec![]),
+        ],
+    );
+    let entry = |tx: &Transaction, fee: u64| {
+        let raw = serialize_txs(std::slice::from_ref(tx)).pop().unwrap();
+        let id = ergo_ser::transaction::transaction_id(tx).unwrap();
+        Entry {
+            tx_id: Digest32::from_bytes(*id.as_bytes()),
+            size_bytes: raw.len() as u32,
+            bytes: Arc::from(raw.into_boxed_slice()),
+            inputs: tx.inputs.iter().map(|i| i.box_id).collect(),
+            outputs: vec![],
+            parents_in_pool: vec![],
+            output_boxes: vec![].into(),
+            fee,
+            weight: fee,
+            cost: 0,
+            source: TxSource::Api,
+            created_at: std::time::Instant::now(),
+            last_checked_at: std::time::Instant::now(),
+        }
+    };
+    let (candidate, _, _) = generate_candidate(
+        &store,
+        ergo_chain_spec::Network::Mainnet,
+        BuildMode::Full,
+        &MempoolReadSnapshot::from_entries(vec![
+            entry(&token_tx, 3 * TOKEN_FEE),
+            entry(&plain_tx, PLAIN_FEE),
+        ]),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        None,
+        None,
+        &DifficultyParams::mainnet(),
+        &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
+        &[],
+        &mut Vec::new(),
+    )
+    .expect("the build succeeds")
+    .expect("a candidate is produced");
+
+    assert!(
+        candidate.observation.excluded.is_empty(),
+        "no user transaction is dropped: {:?}",
+        candidate.observation.excluded
+    );
+    assert_eq!(
+        candidate.transactions.len(),
+        4,
+        "emission, both user transactions, fee collection"
+    );
+    let fee_tx = candidate.transactions.last().unwrap();
+    let miner_box = &fee_tx.output_candidates[0];
+    // The first token fee box and the plain fee box fit; the other two token
+    // fee boxes stay uncollected.
+    assert_eq!(fee_tx.inputs.len(), 2);
+    assert_eq!(miner_box.value, TOKEN_FEE + PLAIN_FEE);
+    assert_eq!(miner_box.tokens, token_inputs[0].candidate.tokens);
 }
 
 // ----- happy path -----
@@ -2687,4 +2850,47 @@ fn requested_worker_reuse_matches_frozen_ownership() {
     assert_ne!(sequences[0], sequences[1]);
     assert_eq!(sequences[0], sequences[2]);
     assert_eq!(sequences[1], sequences[3]);
+}
+
+#[test]
+fn same_parent_rebuild_with_unchanged_content_keeps_the_served_template() {
+    use ergo_mining::{engine::build_and_publish_cached, state_view::CandidateProofCache};
+
+    let regime = Regime::pre_eip27();
+    let (_directory, store, tip) = synced_store(&regime);
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+    let mut intent = build_intent(tip, regime.parent_height);
+    let mut sequences = Vec::new();
+    for (reason, built_at) in [
+        (BuildReason::Tip, BUILT_AT_MS),
+        (BuildReason::MempoolRefresh, BUILT_AT_MS + 5_000),
+        (BuildReason::MempoolRefresh, BUILT_AT_MS + 10_000),
+    ] {
+        intent.reason = reason;
+        let outcome = build_and_publish_cached(
+            &store.reader_handle(),
+            &handle,
+            &intent,
+            BuildMode::Full,
+            None,
+            &mut CandidateProofCache::default(),
+            move || built_at,
+            |_, _| Vec::new(),
+            &mut None,
+        )
+        .unwrap();
+        let BuildOutcome::Published { template_seq, .. } = outcome else {
+            panic!("{outcome:?}")
+        };
+        sequences.push(template_seq);
+    }
+    // Only the timestamp moved: the first template keeps being served and
+    // the history holds one job.
+    assert_eq!(sequences, [sequences[0]; 3]);
+    assert_eq!(handle.inspect_history().len(), 1);
 }

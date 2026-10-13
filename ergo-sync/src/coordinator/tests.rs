@@ -34,6 +34,8 @@ struct MockChain {
     best_header_score: Vec<u8>,
     id_to_score: std::collections::HashMap<[u8; 32], Vec<u8>>,
     recent_ids: Vec<[u8; 32]>,
+    /// Section id → block height, for sections of headers the chain holds.
+    section_heights: std::collections::HashMap<[u8; 32], u32>,
 }
 
 impl MockChain {
@@ -49,6 +51,7 @@ impl MockChain {
             best_header_score: vec![1],
             id_to_score: std::collections::HashMap::new(),
             recent_ids: Vec::new(),
+            section_heights: std::collections::HashMap::new(),
         }
     }
 
@@ -64,6 +67,9 @@ impl MockChain {
 }
 
 impl ChainView for MockChain {
+    fn get_section_height(&self, modifier_id: &[u8; 32]) -> Option<u32> {
+        self.section_heights.get(modifier_id).copied()
+    }
     fn best_header_id(&self) -> [u8; 32] {
         self.best_header_id
     }
@@ -158,6 +164,7 @@ fn on_inv_section_uses_has_block_section_not_has_header() {
     let mut chain = MockChain::new(10, 10);
     chain.known_headers.insert(mk(1)); // known as header
                                        // has_block_section returns false for everything in MockChain
+    chain.section_heights.insert(mk(1), 5);
     let now = Instant::now();
     let p = peer(9030);
 
@@ -289,7 +296,7 @@ fn on_modifier_received_rejects_header_id_mismatch_without_ack() {
         .iter()
         .any(|a| matches!(a, Action::ValidateHeader { .. })));
     assert_eq!(
-        coord.delivery().status(&claimed_id),
+        coord.delivery().status(101, &claimed_id),
         ModifierStatus::Requested
     );
 }
@@ -301,7 +308,8 @@ fn on_modifier_received_rejects_wire_type_mismatch() {
     // against the requested type: penalize misbehavior, do NOT route, and keep
     // the request outstanding (no mark_received) so a retry can still land.
     let mut coord = SyncCoordinator::new(100);
-    let chain = MockChain::new(101, 100);
+    let mut chain = MockChain::new(101, 100);
+    chain.section_heights.insert(mk(7), 101);
     let now = Instant::now();
     let p = peer(9030);
 
@@ -869,14 +877,9 @@ fn timed_out_transaction_is_forgotten_without_penalty() {
 
     // The tracker no longer tracks the forgotten tx.
     assert_eq!(
-        coord.delivery.status(&tx_id),
+        coord.delivery.status(2, &tx_id),
         ergo_p2p::delivery::ModifierStatus::Unknown,
         "forgotten tx should return to Unknown status"
-    );
-    assert_eq!(
-        coord.delivery.modifier_type(&tx_id),
-        None,
-        "forgotten tx should leave no residual type record in the tracker"
     );
 }
 
@@ -991,7 +994,7 @@ fn orphan_parent_request_revives_exhausted_header_id() {
 
     // After exhaustion: Unknown (not Failed) per Scala parity.
     assert_eq!(
-        coord.delivery().status(&header_id),
+        coord.delivery().status(101, &header_id),
         ergo_p2p::delivery::ModifierStatus::Unknown,
     );
 
@@ -1002,7 +1005,7 @@ fn orphan_parent_request_revives_exhausted_header_id() {
         "parent-walk must be able to request an exhausted root header again"
     );
     assert_eq!(
-        coord.delivery().status(&header_id),
+        coord.delivery().status(101, &header_id),
         ergo_p2p::delivery::ModifierStatus::Requested,
     );
 }
@@ -1040,7 +1043,7 @@ fn orphan_parent_requests_chunk_before_delivery_registration() {
     assert_eq!(sizes, vec![400, 1]);
     assert_eq!(sent, ids);
     for id in &sent {
-        assert_eq!(coord.delivery().status(id), ModifierStatus::Requested);
+        assert_eq!(coord.delivery().status(101, id), ModifierStatus::Requested);
     }
     assert!(coord
         .request_missing_header_parents(p, &ids, Instant::now())
@@ -1883,11 +1886,10 @@ fn s1_bucketed_rotation_cursor_advances() {
                     .expected_section_ids(hid)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|(_, id)| id)
             })
             .collect();
-        for id in &ids {
-            coord.delivery.test_reset_status(id);
+        for (type_id, id) in &ids {
+            coord.delivery.test_reset_status(*type_id, id);
         }
 
         let actions = coord.request_missing_sections_bucketed(&chain, Instant::now(), &peers);
@@ -2136,7 +2138,7 @@ fn hol_repair_revives_failed_head_section() {
         if attempt + 1 < ergo_p2p::delivery::MAX_RETRIES {
             assert!(!result.retryable.is_empty());
         } else {
-            assert_eq!(result.exhausted, vec![tx_section]);
+            assert_eq!(result.exhausted, vec![(tx_type, tx_section)]);
         }
     }
     // 2Q Scala-parity: post-exhaustion status is Unknown, not Failed.
@@ -2147,7 +2149,10 @@ fn hol_repair_revives_failed_head_section() {
     // handled by the main request loop). This is identical to Scala:
     // ErgoNodeViewSynchronizer.scala:1287 sets setUnknown for
     // exhausted sections and leaves re-request to CheckModifiersToDownload.
-    assert_eq!(coord.delivery.status(&tx_section), ModifierStatus::Unknown);
+    assert_eq!(
+        coord.delivery.status(tx_type, &tx_section),
+        ModifierStatus::Unknown
+    );
 
     // Verify re-request goes through cleanly (delivery accepts it
     // without needing the request_allow_failed escape hatch).
@@ -2161,7 +2166,7 @@ fn hol_repair_revives_failed_head_section() {
         "exhausted section must be re-requestable in normal delivery path (Scala parity)",
     );
     assert_eq!(
-        coord.delivery.status(&tx_section),
+        coord.delivery.status(tx_type, &tx_section),
         ModifierStatus::Requested,
     );
 }
@@ -2379,7 +2384,7 @@ fn s3_bucketed_one_sided_demand_uses_full_budget() {
                     // during tx_ids collection.
                     let reg = coord.delivery.request(peers[0], tid, &[sid], now);
                     if !reg.is_empty() {
-                        coord.delivery.mark_received(&sid);
+                        coord.delivery.mark_received(tid, &sid);
                     }
                 }
             }
@@ -2390,7 +2395,7 @@ fn s3_bucketed_one_sided_demand_uses_full_budget() {
         if let Some(sections) = coord.assembly.expected_section_ids(hid) {
             for (tid, sid) in sections {
                 if tid == tx_code {
-                    coord.delivery.mark_received(&sid);
+                    coord.delivery.mark_received(tid, &sid);
                 }
             }
         }
@@ -3809,4 +3814,46 @@ fn v1_empty_and_pregenesis_peers_receive_initial_continuation() {
         coord.peer_sync[&p].status,
         ergo_p2p::sync::PeerChainStatus::Equal
     );
+}
+
+#[test]
+fn on_inv_skips_sections_of_unknown_blocks_and_duplicate_ids() {
+    let mut coord = SyncCoordinator::new(0);
+    let mut chain = MockChain::new(10, 10);
+    chain.section_heights.insert(mk(1), 9);
+    let now = Instant::now();
+    let p = peer(9030);
+
+    // mk(2) is not a section of any header we hold; mk(1) is listed twice.
+    let inv = InvData {
+        type_id: ModifierTypeId::BlockTransactions.as_byte(),
+        ids: vec![mk(2), mk(1), mk(1)],
+    };
+    let actions = coord.on_inv(p, &inv, &chain, now);
+    let requested: Vec<[u8; 32]> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::SendToPeer { code, payload, .. } if *code == message::CODE_REQUEST_MODIFIER => {
+                Some(message::deserialize_inv(payload).unwrap().ids)
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(requested, vec![mk(1)]);
+    assert_eq!(
+        coord
+            .delivery()
+            .status(ModifierTypeId::BlockTransactions.as_byte(), &mk(2)),
+        ModifierStatus::Unknown
+    );
+
+    // A transaction-typed or unknown-typed Inv is not fetched here.
+    for type_id in [ModifierTypeId::Transaction.as_byte(), 77] {
+        let inv = InvData {
+            type_id,
+            ids: vec![mk(3)],
+        };
+        assert!(coord.on_inv(p, &inv, &chain, now).is_empty());
+    }
 }

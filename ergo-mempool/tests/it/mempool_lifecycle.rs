@@ -261,8 +261,12 @@ fn failed_admission_populates_is_invalidated_inv_filter() {
     );
     assert!(matches!(out, AdmissionOutcome::Rejected { .. }));
     assert!(
-        mempool.is_invalidated(&digest(7)),
+        mempool.is_invalidated_from(&digest(7), peer),
         "Inv filter must see the canonical tx_id after a validation failure"
     );
-    assert!(!mempool.is_invalidated(&digest(8)));
+    // A script failure depends on the delivered proofs: other peers may
+    // still serve the id.
+    let other = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 9001);
+    assert!(!mempool.is_invalidated_from(&digest(7), other));
+    assert!(!mempool.is_invalidated_from(&digest(8), peer));
 }

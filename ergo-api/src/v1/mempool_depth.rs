@@ -168,7 +168,7 @@ pub fn sample_into(read: &dyn NodeReadState, ring: &MempoolDepthRing) {
         .unwrap_or(0);
     let summary = read.mempool_summary();
     let min_fee_per_byte = read
-        .mempool_transactions()
+        .mempool_transactions_shared()
         .transactions
         .iter()
         .map(|t| t.fee_per_byte_nano_erg)

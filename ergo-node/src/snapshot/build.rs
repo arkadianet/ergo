@@ -175,7 +175,7 @@ pub(super) fn build_snapshot(
         sync,
         peers,
         mempool,
-        mempool_transactions: p.mempool_transactions,
+        mempool_transactions: std::sync::Arc::new(p.mempool_transactions),
         health,
         produced_at: p.snapshot_built_at,
         best_header_score: p.best_header_score,

@@ -430,7 +430,7 @@ impl StateStore {
     /// On error, rebuilds in-memory state from disk via
     /// `rebuild_from_committed`.
     #[allow(clippy::too_many_arguments)]
-    fn apply_utxo_changes(
+    pub(super) fn apply_utxo_changes(
         &mut self,
         height: u32,
         header_id: &[u8; 32],
@@ -577,7 +577,17 @@ impl StateStore {
         }
 
         for (box_id, serialized) in to_insert {
-            self.tree.insert(*box_id, serialized.clone());
+            // An insert never replaces a live box: the AVL+ insert operation
+            // fails on an existing key, which rejects the block.
+            if self.tree.insert(*box_id, serialized.clone()).is_some() {
+                tracing::warn!(
+                    height,
+                    header_id = %hex::encode(header_id),
+                    box_id = %hex::encode(box_id),
+                    "apply: box already exists for insert — rejecting block"
+                );
+                return Err(StateError::BoxAlreadyExists(hex::encode(box_id)));
+            }
             box_created.push(*box_id);
         }
         let t_tree = t0.elapsed();

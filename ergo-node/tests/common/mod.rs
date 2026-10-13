@@ -81,6 +81,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         api_allowed_hosts: Vec::new(),
         api_local_reverse_proxy: false,
         api_script: Default::default(),
+        api_block_batch: Default::default(),
         api_scoped_keys: Vec::new(),
         api_limits: Default::default(),
         api_readiness: Default::default(),

@@ -24,7 +24,7 @@ use crate::peer_loop::{self, PeerEvent};
 
 use super::{
     admit_frame, cleanup_disconnected_peer, flush_actions, handle_message, penalize_peer,
-    send_post_header_sync_info, send_to_peer, NodeState, PeerRuntime,
+    send_post_header_sync_info, NodeState, PeerRuntime,
 };
 
 /// events flow through `handle_event` individually as before.
@@ -191,7 +191,11 @@ fn process_header_modifier_batch(
     let mut requested_peers: Vec<_> = requested_headers
         .into_iter()
         .filter(|(_, id)| {
-            state.coordinator.delivery().status(id) == ergo_p2p::delivery::ModifierStatus::Received
+            state
+                .coordinator
+                .delivery()
+                .status(ergo_p2p::types::ModifierTypeId::Header.as_byte(), id)
+                == ergo_p2p::delivery::ModifierStatus::Received
         })
         .map(|(peer, _)| peer)
         .collect();
@@ -447,7 +451,7 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             // Sync-S4: request the peer's known addresses so the dial
             // pool can fill beyond the CLI-seeded peer(s) over time.
             if state.peer_manager.needs_outbound() {
-                send_to_peer(state, &addr, message::CODE_GET_PEERS, Vec::new());
+                super::peer_actions::send_get_peers(state, &addr, now);
                 debug!(
                     peer = %addr,
                     deficit = state.peer_manager.outbound_deficit(),

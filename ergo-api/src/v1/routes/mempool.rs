@@ -134,7 +134,7 @@ fn scope_tag(kind: &str, key: &str) -> String {
 /// filtered for the `by-*` views); the pool is bounded, so the in-memory sort
 /// is cheap and the resulting cursor is genuinely stable under a moving pool.
 fn render_mempool_page(
-    mut rows: Vec<ApiMempoolTransaction>,
+    mut rows: Vec<&ApiMempoolTransaction>,
     order: Order,
     limit: u32,
     cursor: Option<&str>,
@@ -186,7 +186,7 @@ fn render_mempool_page(
     });
     let has_more = next_cursor.is_some();
 
-    let items: Vec<V1MempoolTx> = rows.iter().map(mempool_tx_from_api).collect();
+    let items: Vec<V1MempoolTx> = rows.iter().copied().map(mempool_tx_from_api).collect();
     Json(Collection {
         items,
         page: Page {
@@ -202,13 +202,11 @@ fn render_mempool_page(
 /// `by-*` hook), preserving nothing but membership — ordering + pagination are
 /// applied by [`render_mempool_page`]. A tx present in the hook result but
 /// absent from the rich snapshot (a rare cross-read race) is simply dropped.
-fn rehydrate(
-    all: Vec<ApiMempoolTransaction>,
+fn rehydrate<'a>(
+    all: &'a [ApiMempoolTransaction],
     matched: &HashSet<String>,
-) -> Vec<ApiMempoolTransaction> {
-    all.into_iter()
-        .filter(|t| matched.contains(&t.tx_id))
-        .collect()
+) -> Vec<&'a ApiMempoolTransaction> {
+    all.iter().filter(|t| matched.contains(&t.tx_id)).collect()
 }
 
 // ----- error helpers ------------------------------------------------------
@@ -339,9 +337,9 @@ pub async fn transactions(
         Err(e) => return *e,
     };
     let limit = clamp_limit(q.limit, LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT);
-    let rows = state.read.mempool_transactions().transactions;
+    let pool = state.read.mempool_transactions_shared();
     render_mempool_page(
-        rows,
+        pool.transactions.iter().collect(),
         order,
         limit,
         q.cursor.as_deref(),
@@ -529,8 +527,8 @@ pub struct ByQuery {
 /// view's [`scope_tag`] (route family + filter value).
 fn render_by(state: &V1State, matched: HashSet<String>, q: &ByQuery, scope: String) -> Response {
     let limit = clamp_limit(q.limit, BY_DEFAULT_LIMIT, BY_MAX_LIMIT);
-    let all = state.read.mempool_transactions().transactions;
-    let rows = rehydrate(all, &matched);
+    let pool = state.read.mempool_transactions_shared();
+    let rows = rehydrate(&pool.transactions, &matched);
     render_mempool_page(rows, Order::Weight, limit, q.cursor.as_deref(), scope)
 }
 
@@ -798,7 +796,8 @@ mod tests {
     fn rehydrate_keeps_only_matched_ids() {
         let all = vec![tx("aa", 3, 3, 3), tx("bb", 2, 2, 2), tx("cc", 1, 1, 1)];
         let matched: HashSet<String> = ["aa".to_string(), "cc".to_string()].into_iter().collect();
-        let kept = rehydrate(all, &matched);
+        let kept: Vec<ApiMempoolTransaction> =
+            rehydrate(&all, &matched).into_iter().cloned().collect();
         assert_eq!(ids(&kept), vec!["aa".to_string(), "cc".to_string()]);
     }
 

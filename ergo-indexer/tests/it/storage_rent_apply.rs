@@ -812,3 +812,42 @@ fn read_storage_rent_eligible_paged_offset_cursor_backfills_across_pages() {
     assert_eq!(pages, 3);
     assert_eq!(collected, expected);
 }
+
+#[test]
+fn read_storage_rent_eligible_after_walks_by_key_without_gaps() {
+    let (store, _tmp) = open_store();
+    let tx = Transaction {
+        inputs: vec![fake_input(0xAB)],
+        data_inputs: vec![],
+        output_candidates: (0..5).map(|_| candidate(1_000_000, 1)).collect(),
+    };
+    let block = IndexerBlock {
+        height: 1,
+        header_id: Digest32::from_bytes([0x12; 32]),
+        transactions: std::slice::from_ref(&tx),
+    };
+    apply_block(&store, &IndexerMeta::empty(), &block).unwrap();
+    let expected: Vec<Digest32> = (0..5).map(|i| sealed_box_id(&tx, i)).collect();
+
+    let mut collected = Vec::new();
+    let mut after = None;
+    let mut pages = 0;
+    loop {
+        let page = store.read_storage_rent_eligible_after(1, after, 2).unwrap();
+        pages += 1;
+        collected.extend(page.iter().map(|r| r.box_id));
+        let Some(last) = page.last() else { break };
+        after = Some((last.creation_height, last.global_box_index));
+        assert!(pages < 10, "paging did not terminate");
+    }
+    assert_eq!(collected, expected);
+    // A cutoff below every row, and a cursor past the cutoff, are empty.
+    assert!(store
+        .read_storage_rent_eligible_after(0, None, 10)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .read_storage_rent_eligible_after(1, Some((1, i64::MAX)), 10)
+        .unwrap()
+        .is_empty());
+}

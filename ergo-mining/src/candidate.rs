@@ -43,7 +43,7 @@ use ergo_validation::popow::algos::{is_genesis, unpack_interlinks};
 use ergo_validation::voting::validation_settings::validation_settings_update_to_extension_fields;
 use ergo_validation::{
     compute_epoch_votes, compute_next_params, validate_transaction_parsed,
-    voting::{derive_activated_script_version, select_candidate_votes},
+    voting::{derive_activated_script_version, select_candidate_votes_seeded},
     ActiveProtocolParameters, ChainHeaderReader, ChainHeaderReaderError, CheckedTransaction,
     CostAccumulator, ErgoValidationSettings, ErgoValidationSettingsUpdate, HeaderView, JitCost,
     ProtocolParams, ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules,
@@ -57,6 +57,19 @@ use std::collections::{BTreeMap, HashSet};
 /// decrease and id-9 votes; while active only `{1..=8, 120}` are accepted.
 const RULE_HDR_VOTES_UNKNOWN: u16 = 215;
 
+/// User txs trimmed, at most, when the fee tx fails validation before the
+/// candidate is built without fee collection. `build_fee_tx` already keeps
+/// the fee box within the box limits, so a failure that survives a few trims
+/// does not come from the trimmed txs' fee outputs.
+const MAX_FEE_TX_TRIMS: usize = 3;
+
+/// After a fee tx validation failure: `true` to trim the lowest-priority user
+/// tx and retry, `false` to build without fee collection. Prioritized txs
+/// are never trimmed for this reason.
+fn trim_after_fee_tx_failure(user_txs: usize, prioritized: usize, trims_done: usize) -> bool {
+    user_txs > prioritized && trims_done < MAX_FEE_TX_TRIMS
+}
+
 use crate::candidate_proof::upcoming_transactions_proof;
 use crate::candidate_selection::{
     rent_protection, select_requested_txs_cancellable, select_user_txs_with_policy_cancellable,
@@ -64,12 +77,14 @@ use crate::candidate_selection::{
 };
 use crate::coinbase::{build_fee_tx, build_pre_eip27_emission_tx};
 use crate::emission_box::lookup_emission_box_from_parent;
-use crate::emission_rules::MonetarySettings;
+use crate::emission_rules::{miners_reward_at_height, MonetarySettings};
 use crate::error::{check_build_cancelled, MiningError};
 use crate::extension_builder::build_candidate_extension_fields;
 use crate::inspection::{CandidateObservation, ExcludedTransaction, TransactionObservation};
 use crate::policy::BlockPolicy;
-use crate::reemission::{build_post_eip27_emission_tx, ReemissionSettings};
+use crate::reemission::{
+    build_activation_emission_tx, build_post_eip27_emission_tx, ReemissionSettings,
+};
 use crate::state_view::CandidateStateView;
 use crate::storage_rent_claim::build_budget_bounded_rent_claim_with_policy;
 use crate::tx_selection::block_cost_safety_gap;
@@ -143,7 +158,7 @@ pub struct Candidate {
     /// `blake2b256(serialize_header_without_pow(header))` — the
     /// external miner hashes this with their nonce.
     pub msg: [u8; 32],
-    /// Mining target. The miner's hit must be `<= target` to count
+    /// Mining target. The miner's hit must be `< target` to count
     /// as a valid solution.
     pub target: BigUint,
     /// Frozen `chain_state().best_full_block_id` at generation time.
@@ -541,12 +556,26 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
     //     triple the header-votes validator accepts; at an epoch start the
     //     suppression of decreases / id 9 follows the live rule-215 status
     //     (disabled by mainnet 6.0). Empty targets ⇒ `[0,0,0]`.
+    //     Mid-epoch, only the votes the epoch-start header seeded are cast:
+    //     the tally counts nothing else. If that header cannot be read the
+    //     selection is unrestricted (still a valid header).
     let rule_215_disabled = validation_settings.is_rule_disabled(RULE_HDR_VOTES_UNKNOWN);
-    let candidate_votes = select_candidate_votes(
+    let epoch_start_height =
+        candidate_height - candidate_height % voting_settings.voting_length.max(1);
+    let epoch_seed = (!is_epoch_start && epoch_start_height > 0 && !voting_targets.is_empty())
+        .then(|| {
+            ViewChainHeaderReader { view }
+                .header_at(epoch_start_height)
+                .ok()
+        })
+        .flatten()
+        .map(|header| header.votes);
+    let candidate_votes = select_candidate_votes_seeded(
         vote_selection_params(&active_params, epoch_payload.as_ref()),
         voting_targets,
         is_epoch_start,
         rule_215_disabled,
+        epoch_seed.as_ref(),
     );
 
     check_build_cancelled(should_cancel)?;
@@ -643,36 +672,34 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
     timings.setup = setup_start.elapsed();
     check_build_cancelled(should_cancel)?;
 
-    // 8. Coinbase: emission tx. Three regimes:
-    //   - reemission = Some + height > activation_height: post-EIP-27,
-    //     one input, deducts reemission tokens per block (mainnet
-    //     regime since h=777_217).
-    //   - reemission = Some + height <= activation_height: pre-EIP-27
-    //     emission tx (mainnet pre-777_217 history; not exercised in
-    //     practice now that mainnet is past activation).
-    //   - reemission = None: network has no EIP-27 protocol (new
-    //     public testnet); always pre-EIP-27 emission tx.
+    // 8. Coinbase: emission tx (regimes in `build_emission_tx`). An emission
+    //    tx that cannot be built or does not pass validation is left out and
+    //    the candidate is built without it: a block without a coinbase is
+    //    valid, and requested, rent, mempool and fee transactions can still be
+    //    mined. Nothing is built once the per-block reward is zero.
     let phase_start = std::time::Instant::now();
     let emission_box = if genesis {
         Some(crate::genesis::emission_box(view)?)
     } else {
         lookup_emission_box_from_parent(view, &parent_id, &parent_header, network, reemission)?
     };
-    let emission_tx = emission_box
-        .as_ref()
-        .map(|emission_box| match reemission {
-            Some(reem) if candidate_height > reem.activation_height => {
-                build_post_eip27_emission_tx(
-                    emission_box,
-                    miner_pk,
-                    candidate_height,
-                    monetary,
-                    reem,
-                )
+    let built_emission = match emission_box.as_ref() {
+        None => None,
+        Some(emission_box) => match build_emission_tx(
+            view,
+            emission_box,
+            miner_pk,
+            candidate_height,
+            monetary,
+            reemission,
+        ) {
+            Ok(built) => built,
+            Err(error) => {
+                warn_emission_omitted(candidate_height, "build", &error);
+                None
             }
-            _ => build_pre_eip27_emission_tx(emission_box, miner_pk, candidate_height, monetary),
-        })
-        .transpose()?;
+        },
+    };
 
     // 9. Validate the emission (coinbase) tx → CheckedTransaction, using the
     //    target voted parameters and accumulated script statuses, matching
@@ -700,38 +727,42 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         pre_header_votes: candidate_votes,
     };
 
-    let (checked_emission, emission_size, emission_cost_acc) =
-        if let (Some(emission_tx), Some(emission_box)) = (&emission_tx, &emission_box) {
-            let emission_bytes = serialize_tx(emission_tx, "serialize_emission_tx")?;
+    let validated_emission = match built_emission {
+        Some((emission_tx, emission_inputs)) => {
+            let emission_bytes = serialize_tx(&emission_tx, "serialize_emission_tx")?;
             let emission_size = emission_bytes.len() as u64;
             let mut emission_cost_acc = CostAccumulator::new(block_cap);
-            let checked_emission = {
-                let mut tx_ctx = TxValidationCtx {
-                    ctx: &ctx,
-                    params: &params,
-                    cost: &mut emission_cost_acc,
-                    last_headers: last_headers.as_slice(),
-                    rules: TxValidationRules {
-                        reemission: reemission_rules,
-                    },
-                };
-                validate_transaction_parsed(
-                    emission_tx.clone(),
-                    &emission_bytes,
-                    vec![emission_box.clone()],
-                    Vec::new(),
-                    false,
-                    &mut tx_ctx,
-                )
-                .map_err(|e| MiningError::IdComputation {
-                    op: "validate_emission_tx",
-                    reason: format!("{e:?}"),
-                })?
+            let mut tx_ctx = TxValidationCtx {
+                ctx: &ctx,
+                params: &params,
+                cost: &mut emission_cost_acc,
+                last_headers: last_headers.as_slice(),
+                rules: TxValidationRules {
+                    reemission: reemission_rules,
+                },
             };
-            (Some(checked_emission), emission_size, emission_cost_acc)
-        } else {
-            (None, 0, CostAccumulator::new(block_cap))
-        };
+            match validate_transaction_parsed(
+                emission_tx.clone(),
+                &emission_bytes,
+                emission_inputs,
+                Vec::new(),
+                false,
+                &mut tx_ctx,
+            ) {
+                Ok(checked) => Some((emission_tx, checked, emission_size, emission_cost_acc)),
+                Err(error) => {
+                    warn_emission_omitted(candidate_height, "validate", &error);
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let (emission_tx, checked_emission, emission_size, emission_cost_acc) = match validated_emission
+    {
+        Some((tx, checked, size, cost)) => (Some(tx), Some(checked), size, cost),
+        None => (None, None, 0, CostAccumulator::new(block_cap)),
+    };
     let emission_cost = emission_cost_acc.total_block_cost();
     let mut final_validation_cost = emission_cost;
     let mut final_section_size = None;
@@ -743,9 +774,8 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
     //        minimal template is the strict [emission] prefix of a full
     //        block — same shape, same consensus pipeline below.
     let mut prioritized_count = 0;
-    let (checked_rent, user_checked, checked_fee) = if mode == BuildMode::Minimal
-        && prioritized.is_empty()
-    {
+    let emission_only = mode == BuildMode::Minimal && prioritized.is_empty();
+    let (checked_rent, user_checked, checked_fee) = if emission_only {
         (None, Vec::new(), None)
     } else {
         // 9b. Seed an in-block overlay (over the committed state tip — the same
@@ -854,35 +884,53 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
             operator_work_waiting,
             protection.required_size,
         );
+        // A box a pooled transaction spends is left to that transaction: its
+        // owner pays a fee to move it, and claiming it first would drop that
+        // transaction and its fee.
+        let pooled_inputs: HashSet<Digest32> = mempool
+            .iter()
+            .chain(private_transactions.iter())
+            .flat_map(|entry| entry.inputs.iter().copied())
+            .collect();
         let rent_boxes: Vec<_> = eligible_rent_boxes
             .iter()
             .filter(|box_| {
-                box_.box_id()
-                    .is_ok_and(|id| !protection.inputs.contains(&id) && !overlay.is_spent(&id))
+                box_.box_id().is_ok_and(|id| {
+                    !protection.inputs.contains(&id)
+                        && !overlay.is_spent(&id)
+                        && !pooled_inputs.contains(&id)
+                })
             })
             .cloned()
             .collect();
-        let (checked_rent, rent_cost, rent_size) =
-            match build_budget_bounded_rent_claim_with_policy(
-                &rent_boxes,
-                candidate_height,
-                &params,
-                rent_boxes.len(),
-                miner_pk,
-                &ctx,
-                last_headers.as_slice(),
-                rent_cost_ceiling,
-                rent_size_ceiling,
-                reemission_rules,
-                policy.rent_token_policy,
-                &mut observation.rent_skipped_preservation,
-            )? {
-                Some((checked, cost, size)) => {
-                    overlay.apply_checked(&checked);
-                    (Some(checked), cost, size)
-                }
-                None => (None, 0, 0),
-            };
+        // A rent claim is optional: a build error leaves it out, never the
+        // whole candidate.
+        let (checked_rent, rent_cost, rent_size) = match build_budget_bounded_rent_claim_with_policy(
+            &rent_boxes,
+            candidate_height,
+            &params,
+            rent_boxes.len(),
+            miner_pk,
+            &ctx,
+            last_headers.as_slice(),
+            rent_cost_ceiling,
+            rent_size_ceiling,
+            reemission_rules,
+            policy.rent_token_policy,
+            &mut observation.rent_skipped_preservation,
+        ) {
+            Ok(Some((checked, cost, size))) => {
+                overlay.apply_checked(&checked);
+                (Some(checked), cost, size)
+            }
+            Ok(None) => (None, 0, 0),
+            Err(MiningError::BuildCancelled) => return Err(MiningError::BuildCancelled),
+            Err(error) => {
+                warn_rent_claim_omitted(candidate_height, &error);
+                observation.rent_skipped_preservation = 0;
+                (None, 0, 0)
+            }
+        };
         final_rent_cost = rent_cost;
         timings.rent = phase_start.elapsed();
         check_build_cancelled(should_cancel)?;
@@ -932,19 +980,33 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         //     a block could pass the dry-run yet be rejected at submit on
         //     `max_block_cost`. The fee tx is validated against a FRESH overlay
         //     rebuilt from the kept set, so a trimmed tx never leaves a stale
-        //     spend behind.
+        //     spend behind. A fee tx that fails validation trims the same way
+        //     (reason `fee_collection_invalid`), at most MAX_FEE_TX_TRIMS
+        //     times, and then builds without fee collection instead of
+        //     failing the build.
         observation.excluded.extend(selected.excluded);
         let required_ids = selected.required;
         let mut user_checked = priority.checked;
         user_checked.extend(selected.checked);
         let cost_ceiling = max_block_cost.saturating_sub(safety_gap);
+        // Set once the fee tx fails validation with nothing left to trim, or
+        // after MAX_FEE_TX_TRIMS trims did not fix it: the block is then built
+        // without fee collection (the fee boxes stay unspent) rather than not
+        // at all. The cap keeps a failure that no user tx causes from
+        // trimming every optional tx, one full rebuild at a time.
+        let mut skip_fee_tx = false;
+        let mut fee_tx_trims = 0usize;
         let checked_fee = loop {
             check_build_cancelled(should_cancel)?;
             let user_raw: Vec<Transaction> = user_checked
                 .iter()
                 .map(|(c, _)| c.transaction().clone())
                 .collect();
-            let fee_tx_opt = build_fee_tx(&user_raw, miner_pk, candidate_height)?;
+            let fee_tx_opt = if skip_fee_tx {
+                None
+            } else {
+                build_fee_tx(&user_raw, miner_pk, candidate_height, &params)?
+            };
             check_build_cancelled(should_cancel)?;
 
             // Fresh overlay over [emission, rent, kept user txs] so the fee tx's
@@ -979,7 +1041,7 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
                         })?;
                     let mut fee_cost_acc = CostAccumulator::new(block_cap);
                     check_build_cancelled(should_cancel)?;
-                    let cf = {
+                    let validated = {
                         let mut fee_ctx = TxValidationCtx {
                             ctx: &ctx,
                             params: &params,
@@ -997,12 +1059,33 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
                             false,
                             &mut fee_ctx,
                         )
-                        .map_err(|e| MiningError::IdComputation {
-                            op: "validate_fee_tx",
-                            reason: format!("{e:?}"),
-                        })?
                     };
-                    (Some(cf), fee_cost_acc.total_block_cost())
+                    match validated {
+                        Ok(cf) => (Some(cf), fee_cost_acc.total_block_cost()),
+                        // A fee tx the validator rejects must not cost the
+                        // template: drop the lowest-priority user tx (its fee
+                        // outputs may be the cause) and retry, at most
+                        // MAX_FEE_TX_TRIMS times; then, or with nothing left
+                        // to trim, build without fee collection.
+                        Err(_) => {
+                            if !trim_after_fee_tx_failure(
+                                user_checked.len(),
+                                prioritized_count,
+                                fee_tx_trims,
+                            ) {
+                                skip_fee_tx = true;
+                            } else if let Some((transaction, _)) = user_checked.pop() {
+                                fee_tx_trims += 1;
+                                let id = Digest32::from_bytes(*transaction.tx_id());
+                                observation.excluded.push(ExcludedTransaction::new(
+                                    id,
+                                    "fee_collection_invalid",
+                                    required_ids.contains(&id),
+                                ));
+                            }
+                            continue;
+                        }
+                    }
                 }
                 None => (None, 0),
             };
@@ -1292,6 +1375,92 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
 /// `block_transactions_section_size` guard trims the assembly if it still
 /// overruns, so this only reduces how often that trim loop runs.
 const BLOCK_ASSEMBLY_SIZE_RESERVE: u64 = 32_768;
+
+/// Emission (coinbase) transaction for `candidate_height` and the boxes it
+/// spends, or `None` once the per-block reward is zero (end of emission).
+/// Regimes, as in Scala `CandidateGenerator.collectRewards`:
+/// - EIP-27 configured and `height > activation_height`: one input; the
+///   emission box's reemission stash pays the miner's share.
+/// - EIP-27 configured and `height == activation_height`: two inputs, the
+///   emission box and the configured injection box, whose NFT and token
+///   stash move into the new emission box.
+/// - otherwise (pre-activation, or no EIP-27 on this network): pre-EIP-27
+///   emission tx.
+fn build_emission_tx<V: CandidateStateView>(
+    view: &V,
+    emission_box: &ErgoBox,
+    miner_pk: &[u8; 33],
+    candidate_height: u32,
+    monetary: &MonetarySettings,
+    reemission: Option<&ReemissionSettings>,
+) -> Result<Option<(Transaction, Vec<ErgoBox>)>, MiningError> {
+    if miners_reward_at_height(candidate_height, monetary) == 0 {
+        return Ok(None);
+    }
+    let built = match reemission {
+        Some(reem) if candidate_height > reem.activation_height => (
+            build_post_eip27_emission_tx(emission_box, miner_pk, candidate_height, monetary, reem)?,
+            vec![emission_box.clone()],
+        ),
+        Some(reem) if candidate_height == reem.activation_height => {
+            let injection_box = view.get_box(&reem.injection_box_id).ok_or_else(|| {
+                MiningError::EmissionInvariant {
+                    op: "injection_box_lookup",
+                    reason: format!(
+                        "injection box {} is absent from committed UTXO state",
+                        hex::encode(reem.injection_box_id.as_bytes())
+                    ),
+                }
+            })?;
+            let tx = build_activation_emission_tx(
+                emission_box,
+                &injection_box,
+                miner_pk,
+                candidate_height,
+                monetary,
+                reem,
+            )?;
+            (tx, vec![emission_box.clone(), injection_box])
+        }
+        _ => (
+            build_pre_eip27_emission_tx(emission_box, miner_pk, candidate_height, monetary)?,
+            vec![emission_box.clone()],
+        ),
+    };
+    Ok(Some(built))
+}
+
+/// Height of the last candidate whose emission tx was left out, so the
+/// warning fires once per height rather than on every same-height rebuild.
+static LAST_EMISSION_OMITTED_HEIGHT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(u32::MAX);
+
+fn warn_emission_omitted(height: u32, stage: &'static str, error: &dyn std::fmt::Debug) {
+    let previous = LAST_EMISSION_OMITTED_HEIGHT.swap(height, std::sync::atomic::Ordering::Relaxed);
+    if previous != height {
+        tracing::warn!(
+            height,
+            stage,
+            error = ?error,
+            "mining: emission transaction left out of the candidate",
+        );
+    }
+}
+
+/// Height of the last candidate whose rent claim failed to build.
+static LAST_RENT_OMITTED_HEIGHT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(u32::MAX);
+
+fn warn_rent_claim_omitted(height: u32, error: &MiningError) {
+    let previous = LAST_RENT_OMITTED_HEIGHT.swap(height, std::sync::atomic::Ordering::Relaxed);
+    if previous != height {
+        tracing::warn!(
+            height,
+            error = %error,
+            "mining: storage-rent claim left out of the candidate",
+        );
+    }
+}
 
 fn serialize_tx(tx: &Transaction, op: &'static str) -> Result<Vec<u8>, MiningError> {
     let mut w = VlqWriter::new();
@@ -1628,6 +1797,23 @@ mod tests {
     use ergo_state::store::StateError;
     use ergo_validation::popow::algos::pack_interlinks;
     use serde::Deserialize;
+
+    #[test]
+    fn fee_tx_failures_trim_at_most_the_cap_and_never_prioritized_txs() {
+        // Ten optional txs behind two prioritized ones: a fee tx that keeps
+        // failing trims MAX_FEE_TX_TRIMS of them, then fee collection is
+        // skipped and the other seven stay in the block.
+        let (mut user_txs, prioritized, mut trims) = (12, 2, 0);
+        while trim_after_fee_tx_failure(user_txs, prioritized, trims) {
+            user_txs -= 1;
+            trims += 1;
+        }
+        assert_eq!(trims, MAX_FEE_TX_TRIMS);
+        assert_eq!(user_txs, 12 - MAX_FEE_TX_TRIMS);
+        // Fewer optional txs than the cap: all of them, but no prioritized one.
+        assert!(trim_after_fee_tx_failure(3, 2, 0));
+        assert!(!trim_after_fee_tx_failure(2, 2, 0));
+    }
 
     // ----- helpers -----
 
@@ -1979,6 +2165,10 @@ mod tests {
     /// transaction list.
     struct RentView {
         stub: ExhaustedView,
+        /// Tracked emission box (must be in `utxo`); `None` = exhausted.
+        emission_id: Option<Digest32>,
+        /// Absent-parameter bits reported by the tip parameters.
+        missing_core_parameters: u16,
         utxo: std::collections::HashMap<Digest32, ErgoBox>,
     }
 
@@ -1989,11 +2179,8 @@ mod tests {
     }
 
     impl CandidateStateView for RentView {
-        fn emission_identity(
-            &self,
-            tip: &[u8; 32],
-        ) -> Result<Option<Option<Digest32>>, StateError> {
-            self.stub.emission_identity(tip)
+        fn emission_identity(&self, _: &[u8; 32]) -> Result<Option<Option<Digest32>>, StateError> {
+            Ok(Some(self.emission_id))
         }
         fn best_full_block_id(&self) -> [u8; 32] {
             self.stub.best_full_block_id()
@@ -2024,6 +2211,7 @@ mod tests {
         > {
             let (mut params, settings) = self.stub.tip_snapshot_params()?;
             params.block_version = self.stub.header.version;
+            params.missing_core_parameters = self.missing_core_parameters;
             Ok((params, settings))
         }
         fn candidate_dry_run(
@@ -2122,6 +2310,8 @@ mod tests {
         let spendable = genesis_era_box(u16::MAX);
         let view = RentView {
             stub: ExhaustedView { header },
+            emission_id: None,
+            missing_core_parameters: 0,
             utxo: std::collections::HashMap::from([(
                 spendable.box_id().unwrap(),
                 spendable.clone(),
@@ -2220,6 +2410,314 @@ mod tests {
         );
     }
 
+    /// A box under a constant `sigmaProp(spendable)` script.
+    fn constant_script_box(
+        value: u64,
+        spendable: bool,
+        tokens: Vec<ergo_ser::token::Token>,
+        seed: u8,
+    ) -> ErgoBox {
+        use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
+        let tree = ergo_ser::ergo_tree::ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: false,
+            reserved_header_bits: 0,
+            constants: vec![],
+            body: ergo_ser::opcode::Expr::Const {
+                tpe: ergo_ser::sigma_type::SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(spendable)),
+            },
+        };
+        ErgoBox {
+            candidate: ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                value,
+                tree,
+                1,
+                tokens,
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+            transaction_id: ModifierId::from_bytes([seed; 32]),
+            index: 0,
+        }
+    }
+
+    /// A view at `parent_height` whose tracked emission box is `emission`,
+    /// plus one spendable box and a pooled transaction that spends it.
+    fn emission_case(
+        parent_height: u32,
+        emission: ErgoBox,
+        extra: Vec<ErgoBox>,
+    ) -> (RentView, MempoolReadSnapshot, Transaction) {
+        let mut header = crate::genesis::parent_header();
+        header.height = parent_height;
+        header.n_bits = 16_842_752;
+        let spendable = genesis_era_box(u16::MAX);
+        let mut utxo = std::collections::HashMap::from([
+            (spendable.box_id().unwrap(), spendable.clone()),
+            (emission.box_id().unwrap(), emission.clone()),
+        ]);
+        for b in extra {
+            utxo.insert(b.box_id().unwrap(), b);
+        }
+        let view = RentView {
+            stub: ExhaustedView { header },
+            emission_id: Some(emission.box_id().unwrap()),
+            missing_core_parameters: 0,
+            utxo,
+        };
+        let pooled = Transaction {
+            inputs: vec![ergo_ser::input::Input {
+                box_id: spendable.box_id().unwrap(),
+                spending_proof: ergo_ser::input::SpendingProof::new(
+                    Vec::new(),
+                    ergo_ser::input::ContextExtension::empty(),
+                )
+                .unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![spendable.candidate.clone()],
+        };
+        let id = ergo_ser::transaction::transaction_id(&pooled).unwrap();
+        let bytes = serialize_tx(&pooled, "test").unwrap();
+        let entry = ergo_mempool::pool::Entry::new(
+            Digest32::from_bytes(*id.as_bytes()),
+            bytes.clone().into(),
+            vec![spendable.box_id().unwrap()],
+            vec![],
+            vec![],
+            0,
+            0,
+            bytes.len() as u32,
+            1,
+            ergo_mempool::types::TxSource::Api,
+        );
+        (view, MempoolReadSnapshot::from_entries(vec![entry]), pooled)
+    }
+
+    fn generate_emission_case(
+        view: &RentView,
+        mode: BuildMode,
+        mempool: &MempoolReadSnapshot,
+        reemission: Option<&ReemissionSettings>,
+    ) -> Option<Candidate> {
+        generate_candidate_with_policy_cancellable(
+            view,
+            ergo_chain_spec::Network::Mainnet,
+            mode,
+            mempool,
+            &RENT_MINER_PK,
+            &MonetarySettings::mainnet(),
+            reemission,
+            None,
+            &DifficultyParams::mainnet(),
+            &[],
+            &BTreeMap::new(),
+            &VotingSettings::mainnet(),
+            &[],
+            &mut vec![],
+            &[],
+            &BlockPolicy::default(),
+            0,
+            0,
+            &|| false,
+        )
+        .expect("an unusable emission box never fails the build")
+        .map(|(candidate, _, _)| candidate)
+    }
+
+    fn categories(candidate: &Candidate) -> Vec<&'static str> {
+        candidate
+            .observation
+            .transactions
+            .iter()
+            .map(|t| t.category)
+            .collect()
+    }
+
+    #[test]
+    fn candidate_builds_without_emission_when_the_emission_box_cannot_be_spent() {
+        // Three unusable emission boxes: too little value to pay the reward
+        // (build fails), a script that rejects the spend (validation fails),
+        // and the last coins of the emission, whose spend leaves a 0-value
+        // emission output (validation fails).
+        let last_reward = miners_reward_at_height(2_080_799, &MonetarySettings::mainnet());
+        assert!(last_reward > 0);
+        let cases = [
+            (1_100_005, constant_script_box(1, true, vec![], 0x51)),
+            (
+                1_100_005,
+                constant_script_box(1_000 * 1_000_000_000, false, vec![], 0x52),
+            ),
+            (
+                2_080_798,
+                constant_script_box(last_reward, true, vec![], 0x53),
+            ),
+        ];
+        for (parent_height, emission) in cases {
+            let (view, mempool, pooled) = emission_case(parent_height, emission, vec![]);
+            assert!(
+                generate_emission_case(&view, BuildMode::Minimal, &mempool, None).is_none(),
+                "an emission-only template without an emission tx is empty"
+            );
+            let full = generate_emission_case(&view, BuildMode::Full, &mempool, None)
+                .expect("the pooled transaction is still mined");
+            assert_eq!(categories(&full), ["public"]);
+            assert_eq!(full.transactions, vec![pooled]);
+        }
+    }
+
+    #[test]
+    fn candidate_skips_emission_once_the_reward_is_zero() {
+        assert_eq!(
+            miners_reward_at_height(2_080_801, &MonetarySettings::mainnet()),
+            0
+        );
+        let emission = constant_script_box(3 * 1_000_000_000, true, vec![], 0x54);
+        let (view, mempool, pooled) = emission_case(2_080_800, emission, vec![]);
+        assert!(generate_emission_case(&view, BuildMode::Minimal, &mempool, None).is_none());
+        let full = generate_emission_case(&view, BuildMode::Full, &mempool, None).unwrap();
+        assert_eq!(full.transactions, vec![pooled]);
+    }
+
+    #[test]
+    fn candidate_at_reemission_activation_spends_the_injection_box() {
+        let nft = Digest32::from_bytes([0x61; 32]);
+        let reemission_token = Digest32::from_bytes([0x62; 32]);
+        let stash = 1_000_000 * 1_000_000_000;
+        let injection = constant_script_box(
+            2 * 1_000_000_000,
+            true,
+            vec![
+                ergo_ser::token::Token {
+                    token_id: nft,
+                    amount: 1,
+                },
+                ergo_ser::token::Token {
+                    token_id: reemission_token,
+                    amount: stash,
+                },
+            ],
+            0x63,
+        );
+        let emission = constant_script_box(1_000 * 1_000_000_000, true, vec![], 0x64);
+        let reemission = ReemissionSettings {
+            activation_height: 1_100_006,
+            reemission_start_height: 2_080_800,
+            emission_nft_id: nft,
+            reemission_nft_id: Digest32::from_bytes([0x65; 32]),
+            reemission_token_id: reemission_token,
+            injection_box_id: injection.box_id().unwrap(),
+        };
+        let (view, mempool, _) =
+            emission_case(1_100_005, emission.clone(), vec![injection.clone()]);
+        let candidate =
+            generate_emission_case(&view, BuildMode::Minimal, &mempool, Some(&reemission))
+                .expect("activation emission tx validates");
+        assert_eq!(categories(&candidate), ["emission"]);
+        let tx = &candidate.transactions[0];
+        let inputs: Vec<_> = tx.inputs.iter().map(|i| i.box_id).collect();
+        assert_eq!(
+            inputs,
+            [emission.box_id().unwrap(), injection.box_id().unwrap()]
+        );
+        let share = reemission_for_height_at(1_100_006, &reemission);
+        assert_eq!(tx.output_candidates[0].tokens[0].token_id, nft);
+        assert_eq!(tx.output_candidates[0].tokens[1].amount, stash - share);
+        assert_eq!(tx.output_candidates[1].tokens[0].amount, share);
+
+        // Without the injection box in state the candidate still builds, as
+        // the pooled transaction alone.
+        let (view, mempool, pooled) = emission_case(1_100_005, emission, vec![]);
+        let full =
+            generate_emission_case(&view, BuildMode::Full, &mempool, Some(&reemission)).unwrap();
+        assert_eq!(full.transactions, vec![pooled]);
+    }
+
+    /// The exhausted-emission rent view with one rent-eligible box that a
+    /// pooled transaction spends.
+    fn pooled_rent_case(
+        missing_core_parameters: u16,
+    ) -> (RentView, MempoolReadSnapshot, Transaction) {
+        let (mut view, mempool, pooled) = emission_case(
+            1_100_005,
+            constant_script_box(1, true, vec![], 0x71),
+            vec![],
+        );
+        view.emission_id = None;
+        view.missing_core_parameters = missing_core_parameters;
+        (view, mempool, pooled)
+    }
+
+    #[test]
+    fn mid_epoch_candidate_votes_only_for_seeded_parameters() {
+        // The stub serves its one header at every height, so the epoch-start
+        // header seeds `+3`. Targets move 1, 2 and 3; mid-epoch only 3 counts.
+        let (mut view, mempool, _) = pooled_rent_case(0);
+        view.stub.header.votes = [3, 0, 0];
+        let targets: BTreeMap<u8, i64> = [(1u8, 2_000_000i64), (2, 9_000), (3, 600_000)]
+            .into_iter()
+            .collect();
+        let candidate = generate_candidate_with_policy_cancellable(
+            &view,
+            ergo_chain_spec::Network::Mainnet,
+            BuildMode::Full,
+            &mempool,
+            &RENT_MINER_PK,
+            &MonetarySettings::mainnet(),
+            None,
+            None,
+            &DifficultyParams::mainnet(),
+            &[],
+            &targets,
+            &VotingSettings::mainnet(),
+            &[],
+            &mut vec![],
+            &[],
+            &BlockPolicy::default(),
+            0,
+            0,
+            &|| false,
+        )
+        .unwrap()
+        .unwrap()
+        .0;
+        assert_eq!(candidate.header.votes, [3, 0, 0]);
+    }
+
+    #[test]
+    fn candidate_without_storage_fee_factor_builds_without_rent() {
+        let (view, mempool, pooled) = pooled_rent_case(1); // parameter 1 absent
+        let rent_boxes: Vec<_> = (0..10).map(genesis_era_box).collect();
+        let candidate = generate_with_rent(&view, &mempool, &rent_boxes, &BlockPolicy::default());
+        assert_eq!(categories(&candidate), ["public"]);
+        assert_eq!(candidate.transactions, vec![pooled]);
+    }
+
+    #[test]
+    fn rent_claim_leaves_boxes_spent_by_pooled_transactions() {
+        let (view, mempool, pooled) = pooled_rent_case(0);
+        let spent_by_pool = pooled.inputs[0].box_id;
+        let mut rent_boxes: Vec<_> = (0..10).map(genesis_era_box).collect();
+        // The pooled transaction's input is itself rent-eligible.
+        rent_boxes.insert(0, view.utxo[&spent_by_pool].clone());
+        let candidate = generate_with_rent(&view, &mempool, &rent_boxes, &BlockPolicy::default());
+        assert_eq!(categories(&candidate), ["rent", "public"]);
+        assert!(candidate.transactions.contains(&pooled));
+        let rent_inputs: Vec<_> = candidate.transactions[0]
+            .inputs
+            .iter()
+            .map(|i| i.box_id)
+            .collect();
+        assert_eq!(rent_inputs.len(), 10);
+        assert!(!rent_inputs.contains(&spent_by_pool));
+    }
+
+    fn reemission_for_height_at(height: u32, reemission: &ReemissionSettings) -> u64 {
+        crate::reemission::reemission_for_height(height, &MonetarySettings::mainnet(), reemission)
+    }
+
     #[test]
     fn requested_prefix_precedes_rent_and_satisfies_operator_requirements() {
         let mut header = crate::genesis::parent_header();
@@ -2230,6 +2728,8 @@ mod tests {
         let private_box = genesis_era_box(u16::MAX - 1);
         let view = RentView {
             stub: ExhaustedView { header },
+            emission_id: None,
+            missing_core_parameters: 0,
             utxo: std::collections::HashMap::from([
                 (spendable.box_id().unwrap(), spendable.clone()),
                 (private_box.box_id().unwrap(), private_box.clone()),
@@ -2434,6 +2934,8 @@ mod tests {
         .unwrap();
         let view = RentView {
             stub: ExhaustedView { header },
+            emission_id: None,
+            missing_core_parameters: 0,
             utxo: std::collections::HashMap::from([(
                 historical.box_id().unwrap(),
                 historical.clone(),

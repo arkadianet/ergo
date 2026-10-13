@@ -488,6 +488,7 @@ fn ctx(submit: Option<Arc<dyn NodeSubmit>>) -> ServerCtx {
         local_reverse_proxy: false,
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),
+        block_batch: Default::default(),
     }
 }
 
@@ -513,6 +514,7 @@ fn fully_wired_ctx() -> ServerCtx {
         local_reverse_proxy: false,
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),
+        block_batch: Default::default(),
     }
 }
 

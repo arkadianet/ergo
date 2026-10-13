@@ -584,6 +584,10 @@ impl NodeReadState for SnapshotReadState {
     }
 
     fn mempool_transactions(&self) -> ApiMempoolTransactions {
+        ApiMempoolTransactions::clone(&self.handle.load().mempool_transactions)
+    }
+
+    fn mempool_transactions_shared(&self) -> Arc<ApiMempoolTransactions> {
         self.handle.load().mempool_transactions.clone()
     }
 

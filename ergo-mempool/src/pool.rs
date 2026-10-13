@@ -37,10 +37,11 @@ pub struct Entry {
     pub last_checked_at: Instant,
     pub source: TxSource,
     /// Materialized output boxes aligned with `outputs` by index.
-    /// Populated by admission so `OrderedPool::output_map` can build
-    /// the overlay for pool-chained dependencies. Tests that don't
-    /// exercise chaining leave this empty.
-    pub output_boxes: Vec<ErgoBox>,
+    /// Populated by admission so pool-chained inputs resolve through
+    /// [`OrderedPool::output_box`]. Shared, so a staging copy of the pool
+    /// does not copy the boxes. Tests that don't exercise chaining leave
+    /// this empty.
+    pub output_boxes: Arc<[ErgoBox]>,
 }
 
 impl Entry {
@@ -74,14 +75,14 @@ impl Entry {
             created_at: now,
             last_checked_at: now,
             source,
-            output_boxes: Vec::new(),
+            output_boxes: Arc::from(Vec::new()),
         }
     }
 
     /// Attach materialized output boxes. Lengths of `outputs` and
     /// `output_boxes` must match; admission ensures this.
     pub fn with_output_boxes(mut self, boxes: Vec<ErgoBox>) -> Self {
-        self.output_boxes = boxes;
+        self.output_boxes = boxes.into();
         self
     }
 }
@@ -188,7 +189,8 @@ pub struct OrderedPool {
     ordered: BTreeMap<WeightedKey, Entry>,
     by_tx_id: HashMap<TxId, WeightedKey>,
     by_input: HashMap<Digest32, TxId>,
-    by_output: HashMap<Digest32, TxId>,
+    /// Output box id → (creating tx, index in its `outputs`).
+    by_output: HashMap<Digest32, (TxId, u32)>,
     /// Parent → children. Populated whenever a child is inserted that
     /// spends an output currently in `by_output`. Edges are removed
     /// when either endpoint leaves the pool.
@@ -369,8 +371,8 @@ impl OrderedPool {
         for b in &entry.inputs {
             self.by_input.insert(*b, tx_id);
         }
-        for b in &entry.outputs {
-            self.by_output.insert(*b, tx_id);
+        for (index, b) in entry.outputs.iter().enumerate() {
+            self.by_output.insert(*b, (tx_id, index as u32));
         }
         self.total_bytes = self.total_bytes.saturating_add(entry.bytes.len());
         self.by_tx_id.insert(tx_id, key);
@@ -596,7 +598,7 @@ impl OrderedPool {
         let mut seen: std::collections::HashSet<TxId> = std::collections::HashSet::new();
         let parents: Vec<(TxId, u64, Vec<Digest32>)> = seed_inputs
             .iter()
-            .filter_map(|box_id| self.by_output.get(box_id).copied())
+            .filter_map(|box_id| self.by_output.get(box_id).map(|(id, _)| *id))
             .filter(|id| seen.insert(*id))
             .filter_map(|id| self.get(&id).map(|e| (id, e.weight, e.inputs.clone())))
             .collect();
@@ -667,7 +669,46 @@ impl OrderedPool {
     /// Tx id(s) that created the given output box_id. Used by
     /// admission to compute `parents_in_pool` for an incoming tx.
     pub fn parent_for_output(&self, box_id: &Digest32) -> Option<TxId> {
-        self.by_output.get(box_id).copied()
+        self.by_output.get(box_id).map(|(id, _)| *id)
+    }
+
+    /// The materialized pool output `box_id`, borrowed from its creating
+    /// entry. `None` when no pooled tx creates it or the entry carries no
+    /// materialized boxes. Lets admission resolve pool-chained inputs
+    /// without building a map of every pooled output.
+    pub fn output_box(&self, box_id: &Digest32) -> Option<&ErgoBox> {
+        let (tx_id, index) = self.by_output.get(box_id)?;
+        self.get(tx_id)?.output_boxes.get(*index as usize)
+    }
+
+    /// Read-only: the entries `remove_with_descendants_*` would remove for
+    /// each of `roots` (the root plus its in-pool descendants, at most
+    /// `max_nodes` per root), each listed once. Used to price and check a
+    /// replacement before the pool is touched.
+    pub(crate) fn descendant_closure(&self, roots: &[TxId], max_nodes: usize) -> Vec<&Entry> {
+        let mut seen: std::collections::HashSet<TxId> = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for root in roots {
+            let mut to_visit = vec![*root];
+            let mut visited_here = 0usize;
+            while let Some(next) = to_visit.pop() {
+                if visited_here >= max_nodes.max(1) {
+                    break;
+                }
+                if !seen.insert(next) {
+                    continue;
+                }
+                let Some(entry) = self.get(&next) else {
+                    continue;
+                };
+                visited_here += 1;
+                out.push(entry);
+                if let Some(children) = self.children_of.get(&next) {
+                    to_visit.extend(children.iter().filter(|c| !seen.contains(*c)));
+                }
+            }
+        }
+        out
     }
 
     /// Materialize a `BoxId → ErgoBox` map over all pool-created outputs.
@@ -731,7 +772,7 @@ impl OrderedPool {
                     seen_outputs.insert(*b),
                     "duplicate output across pool: {b:?}"
                 );
-                assert_eq!(self.by_output.get(b), Some(&entry.tx_id));
+                assert_eq!(self.by_output.get(b).map(|(id, _)| id), Some(&entry.tx_id));
             }
             computed_bytes += entry.bytes.len();
         }

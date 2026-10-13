@@ -26,6 +26,9 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const INACTIVE_TIMEOUT: Duration = Duration::from_secs(600); // 10 min
 pub const SAFE_INTERVAL: Duration = Duration::from_secs(120); // 2 min between penalties
 
+/// How long after a `GetPeers` the peer's `Peers` reply is accepted.
+pub const PEERS_REPLY_WINDOW: Duration = Duration::from_secs(60);
+
 pub const DEGRADED_THRESHOLD: i32 = 50;
 pub const BAN_THRESHOLD: i32 = 500;
 pub const SCORE_DECAY_PER_INTERVAL: i32 = 10;
@@ -314,6 +317,10 @@ pub struct PeerInfo {
     /// Scala-parity decaying score. A fresh `PeerInfo` (reconnect) starts at
     /// 0, giving a returning peer a clean slate.
     delivery_failure_streak: u32,
+    /// When we last sent this peer a `GetPeers`. A `Peers` reply is only
+    /// taken into the address pool while this is recent; see
+    /// [`PeerInfo::take_peers_reply_allowance`].
+    get_peers_sent_at: Option<Instant>,
     /// Populated after handshake completes.
     pub peer_spec: Option<PeerSpec>,
     /// Determined from peer_spec.version after handshake.
@@ -341,6 +348,7 @@ impl PeerInfo {
             last_seen: now,
             last_progress: now,
             delivery_failure_streak: 0,
+            get_peers_sent_at: None,
             peer_spec: None,
             sync_version: SyncVersion::V2, // default until handshake
             bytes_in: Arc::new(AtomicU64::new(0)),
@@ -364,6 +372,7 @@ impl PeerInfo {
             last_seen: now,
             last_progress: now,
             delivery_failure_streak: 0,
+            get_peers_sent_at: None,
             peer_spec: None,
             sync_version: SyncVersion::V2,
             bytes_in: Arc::new(AtomicU64::new(0)),
@@ -474,6 +483,21 @@ impl PeerInfo {
             self.delivery_failure_streak = 0;
         } else {
             self.delivery_failure_streak = self.delivery_failure_streak.saturating_add(1);
+        }
+    }
+
+    /// Record that we sent this peer a `GetPeers`.
+    pub fn note_get_peers_sent(&mut self, now: Instant) {
+        self.get_peers_sent_at = Some(now);
+    }
+
+    /// Whether a `Peers` message from this peer answers a `GetPeers` we sent
+    /// within [`PEERS_REPLY_WINDOW`]. Consumes the allowance, so one request
+    /// admits one reply.
+    pub fn take_peers_reply_allowance(&mut self, now: Instant) -> bool {
+        match self.get_peers_sent_at.take() {
+            Some(sent) => now.saturating_duration_since(sent) <= PEERS_REPLY_WINDOW,
+            None => false,
         }
     }
 

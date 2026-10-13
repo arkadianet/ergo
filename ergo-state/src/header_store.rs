@@ -274,6 +274,23 @@ impl HeaderSectionTables {
         Ok(())
     }
 
+    /// Remove one stored block section (bytes and type-index row) so it
+    /// can be downloaded again. Returns whether a section was stored.
+    pub(crate) fn delete_block_section(&self, modifier_id: &[u8; 32]) -> Result<bool, StateError> {
+        let write_txn = crate::begin_write_qr(&self.db)?;
+        let removed = {
+            let mut table = write_txn.open_table(BLOCK_SECTIONS)?;
+            let removed = table.remove(modifier_id.as_slice())?.is_some();
+            removed
+        };
+        {
+            let mut idx = write_txn.open_table(MODIFIER_TYPE_INDEX)?;
+            idx.remove(modifier_id.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(removed)
+    }
+
     /// Retrieve a block section by its computed modifier ID.
     ///
     /// The embedding store drains the persist pipeline before

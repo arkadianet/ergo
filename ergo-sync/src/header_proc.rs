@@ -616,12 +616,17 @@ fn process_header_inner<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     // can be ahead of ours; we surface it as a rejection here and let
     // the coordinator decide whether to retry. Read `now_ms` once at
     // the ingress point so retries against a later clock can succeed
-    // naturally.
+    // naturally. The cap is 10 block intervals of this chain (Scala
+    // `MaxTimeDrift`): 20 min on mainnet, 7.5 min on testnet.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(u64::MAX);
-    if let Err(e) = ergo_validation::header::check_future_timestamp(&header, now_ms) {
+    let drift_cap_ms =
+        ergo_validation::header::future_timestamp_drift_ms(config.desired_interval_ms);
+    if let Err(e) =
+        ergo_validation::header::check_future_timestamp_with_cap(&header, now_ms, drift_cap_ms)
+    {
         return Err(HeaderProcessError::Validation(e));
     }
 

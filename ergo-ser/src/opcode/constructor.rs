@@ -271,4 +271,70 @@ mod tests {
             }
         }
     }
+
+    /// Arithmetic over operands whose type read fails, at every tree version,
+    /// as a bare body (the runtime deserialization path) and as a sized or
+    /// sizeless tree. Pre-v3 `applyUpcast` reads both operand types; v3
+    /// `ArithOp.opType` does. Controls cover valid upcasts.
+    #[test]
+    fn arith_operand_type_reads_match_jvm_607() {
+        let rows = include_str!("../../../test-vectors/scala/sigma/arith_upcast_type_reads.tsv");
+        let mut count = 0;
+        for row in rows
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let f: Vec<_> = row.split('\t').collect();
+            let [_, surface, version, hex, phase, result] = f[..] else {
+                panic!("malformed row: {row}");
+            };
+            let bytes = hex::decode(hex).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            match surface {
+                "body" => {
+                    let got =
+                        super::super::parse_body_for_substitution(&mut r, version.parse().unwrap());
+                    let ok = match (phase, result) {
+                        ("DECODE_FAIL", "ClassCastException") => {
+                            matches!(got, Err(ReadError::ClassCast(_)))
+                        }
+                        ("DECODE_FAIL", _) => matches!(got, Err(ReadError::HardReject(_))),
+                        ("TYPE_FAIL", "ClassCastException") => {
+                            matches!(got, Ok((_, Err(ConstructorError::ClassCast))))
+                        }
+                        ("TYPE", name) => {
+                            let expected = match name {
+                                "SByte$" => SigmaType::SByte,
+                                "SInt$" => SigmaType::SInt,
+                                "SLong$" => SigmaType::SLong,
+                                "SBoolean" => SigmaType::SBoolean,
+                                _ => panic!("unhandled oracle type: {name}"),
+                            };
+                            matches!(&got, Ok((_, Ok(Some(t)))) if *t == expected) && r.is_empty()
+                        }
+                        _ => panic!("unhandled oracle result: {row}"),
+                    };
+                    assert!(ok, "{row}: {got:?}");
+                }
+                "tree" => {
+                    let got = crate::ergo_tree::read_ergo_tree(&mut r);
+                    let ok = match (phase, result) {
+                        ("ACCEPT", "parsed") => {
+                            matches!(&got, Ok(t) if !matches!(t.body, Expr::Unparsed(_)))
+                                && r.is_empty()
+                        }
+                        ("REJECT", "ClassCastException") => {
+                            matches!(got, Err(ReadError::ClassCast(_)))
+                        }
+                        ("REJECT", _) => matches!(got, Err(ReadError::HardReject(_))),
+                        _ => panic!("unhandled oracle result: {row}"),
+                    };
+                    assert!(ok, "{row}: {got:?}");
+                }
+                _ => panic!("unknown surface: {row}"),
+            }
+            count += 1;
+        }
+        assert_eq!(count, 1062);
+    }
 }

@@ -625,7 +625,7 @@ pub async fn mempool_depth(
         let s = state.read.mempool_summary();
         let min_fee_per_byte = state
             .read
-            .mempool_transactions()
+            .mempool_transactions_shared()
             .transactions
             .iter()
             .map(|t| t.fee_per_byte_nano_erg)

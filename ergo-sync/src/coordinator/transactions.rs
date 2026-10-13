@@ -74,9 +74,10 @@ impl SyncCoordinator {
         tx_id: &[u8; 32],
         now: Instant,
     ) -> DeliveryAction {
-        let action = self.delivery.on_received(tx_id, &peer);
+        let tx_type = ModifierTypeId::Transaction.as_byte();
+        let action = self.delivery.on_received(tx_type, tx_id, &peer);
         if let DeliveryAction::Accept = action {
-            self.delivery.mark_received(tx_id);
+            self.delivery.mark_received(tx_type, tx_id);
             self.last_modifier_got_time = Some(now);
         }
         action

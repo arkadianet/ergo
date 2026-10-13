@@ -54,8 +54,10 @@ Send the configured `api_key` header to all inventory and history endpoints:
   with reason `template_not_found`; missing current work returns 503 with
   `candidate_unavailable`. Both use the v1 error envelope. Status distinguishes
   `current`, `superseded`, `stale_parent` and `withdrawn`.
-- `GET /api/v1/mining/history` returns the most recent 16 retained templates plus
-  at most 128 local solution outcomes. Template retention resets on restart.
+- `GET /api/v1/mining/history` returns the retained templates (the newest 16,
+  plus older ones still inside `[mining] template_retention_ms`) and at most 128
+  local solution outcomes. Template retention resets on restart. A solution for
+  a template that has aged out is recorded as `expired`.
 - `GET /api/v1/mining/status` is public and reports real current-template age,
   height, work ID and sequence without transaction or wallet contents. With mining
   enabled its `synced` flag is the mining-started latch, matching the candidate

@@ -431,11 +431,17 @@ pub struct ReemissionParams {
     /// 32-byte id of the reemission token unlocked per block.
     /// Scala `reemission.reemissionTokenId`.
     pub reemission_token_id: Digest32,
+    /// Id of the injection box the activation-height emission
+    /// transaction spends as its second input (it carries the emission
+    /// NFT and the reemission token stash). Scala derives it from
+    /// `reemission.injectionBoxBytesEncoded`.
+    pub injection_box_id: Digest32,
 }
 
 impl ReemissionParams {
     /// Mainnet defaults. Source: `mainnet.conf:43-57` plus the running
-    /// Scala node at activation height 777_217.
+    /// Scala node at activation height 777_217. The injection box id is
+    /// input 1 of the mainnet activation emission transaction.
     pub fn mainnet() -> Self {
         Self {
             activation_height: 777_217,
@@ -448,6 +454,9 @@ impl ReemissionParams {
             ),
             reemission_token_id: parse_id_hex(
                 "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+            ),
+            injection_box_id: parse_id_hex(
+                "997369af025fa60dab11d11f94bd5492dbb8731ea3a31154a0388e329f7edf4a",
             ),
         }
     }
@@ -961,6 +970,9 @@ mod tests {
                 ),
                 reemission_token_id: parse_id_hex(
                     "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+                ),
+                injection_box_id: parse_id_hex(
+                    "997369af025fa60dab11d11f94bd5492dbb8731ea3a31154a0388e329f7edf4a",
                 ),
             })
         );

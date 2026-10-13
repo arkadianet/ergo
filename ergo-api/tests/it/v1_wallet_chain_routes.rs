@@ -345,6 +345,7 @@ fn production_app_with_security(
     security: Arc<ApiSecurity>,
 ) -> Router {
     let ctx = ServerCtx {
+        block_batch: Default::default(),
         local_reverse_proxy: false,
         services: Arc::new(ergo_api::ApiServices::new()),
         script_config: Default::default(),

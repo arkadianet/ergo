@@ -277,6 +277,85 @@ async fn blocks_by_header_ids_200_returns_known_blocks_in_input_order() {
 }
 
 #[tokio::test]
+async fn blocks_by_header_ids_answers_repeated_ids_once_and_caps_distinct_ids() {
+    let tx_a = fixture_tx(TX_HEX_AA, 700_000, 0, 100);
+    let block_a = fixture_full_block(HEX_64_AA, 700_000, vec![scala_tx(TX_HEX_AA, 100)], true);
+    let chain = stub_chain(vec![(HEX_64_AA.to_string(), block_a)]);
+    let indexer: Arc<dyn IndexerQuery> = Arc::new(StubIndexer::caught_up().with_tx(tx_a));
+    let app = build_app_with_indexer(indexer, Some(chain));
+    let body_json = serde_json::to_vec(&vec![HEX_64_AA; 20_000]).unwrap();
+    let (status, body) = json_post(app, "/blockchain/block/byHeaderIds", body_json).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+
+    let cap = ergo_api::batch_ids::DEFAULT_MAX_BLOCKS_PER_REQUEST;
+    let at_cap: Vec<String> = (0..cap).map(|i| format!("{i:064x}")).collect();
+    let app = build_app(caught_up_handle(), Some(empty_chain()));
+    let (status, _) = json_post(
+        app,
+        "/blockchain/block/byHeaderIds",
+        serde_json::to_vec(&at_cap).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<String> = (0..=cap).map(|i| format!("{i:064x}")).collect();
+    let app = build_app(caught_up_handle(), Some(empty_chain()));
+    let (status, body) = json_post(
+        app,
+        "/blockchain/block/byHeaderIds",
+        serde_json::to_vec(&ids).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["reason"], "bad-request");
+}
+
+#[tokio::test]
+async fn blocks_by_header_ids_refuses_a_response_above_the_size_budget() {
+    let tx_a = fixture_tx(TX_HEX_AA, 700_000, 0, 100);
+    let tx_b = fixture_tx(TX_HEX_BB, 700_001, 0, 200);
+    let block_a = fixture_full_block(HEX_64_AA, 700_000, vec![scala_tx(TX_HEX_AA, 100)], true);
+    let block_b = fixture_full_block(HEX_64_BB, 700_001, vec![scala_tx(TX_HEX_BB, 200)], true);
+    let app = || {
+        let chain = stub_chain(vec![
+            (HEX_64_AA.to_string(), block_a.clone()),
+            (HEX_64_BB.to_string(), block_b.clone()),
+        ]);
+        let indexer: Arc<dyn IndexerQuery> = Arc::new(
+            StubIndexer::caught_up()
+                .with_tx(tx_a.clone())
+                .with_tx(tx_b.clone()),
+        );
+        build_app_with_indexer(indexer, Some(chain))
+    };
+    let body_json = serde_json::to_vec(&vec![HEX_64_AA, HEX_64_BB]).unwrap();
+    let (status, full) = json_post(app(), "/blockchain/block/byHeaderIds", body_json.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let full_len = serde_json::to_vec(&full).unwrap().len();
+    let limited = |bytes: usize| {
+        app().layer(axum::Extension(ergo_api::batch_ids::BlockBatchLimits {
+            max_blocks: 10,
+            max_response_bytes: bytes,
+        }))
+    };
+    let (status, _) = json_post(
+        limited(full_len),
+        "/blockchain/block/byHeaderIds",
+        body_json.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = json_post(
+        limited(full_len - 1),
+        "/blockchain/block/byHeaderIds",
+        body_json,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["reason"], "bad-request");
+}
+
+#[tokio::test]
 async fn blocks_by_header_ids_200_drops_block_with_missing_indexer_tx() {
     // Chain has both blocks, but indexer is missing the tx for block A.
     // Response keeps only block B.

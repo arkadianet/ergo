@@ -428,6 +428,9 @@ pub enum StateError {
     Serialization(String),
     #[error("box not found: {0}")]
     BoxNotFound(String),
+    /// A block would create a box whose id is already in the UTXO set.
+    #[error("box already exists: {0}")]
+    BoxAlreadyExists(String),
     #[error("no committed state")]
     NoCommittedState,
     #[error("reorg too deep: {depth} blocks exceeds rollback window of {max}")]

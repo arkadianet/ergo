@@ -567,9 +567,9 @@ fn far_ahead_orphan_during_ibd_is_deferred_and_requestable_later() {
     );
     coordinator
         .delivery_mut_for_test()
-        .mark_received(&header_id);
+        .mark_received(101, &header_id);
     assert_eq!(
-        coordinator.delivery().status(&header_id),
+        coordinator.delivery().status(101, &header_id),
         ergo_p2p::delivery::ModifierStatus::Received,
     );
 
@@ -591,7 +591,7 @@ fn far_ahead_orphan_during_ibd_is_deferred_and_requestable_later() {
     assert!(!kept);
     assert!(executor.orphan_headers.is_empty());
     assert_eq!(
-        coordinator.delivery().status(&header_id),
+        coordinator.delivery().status(101, &header_id),
         ergo_p2p::delivery::ModifierStatus::Unknown,
         "deferred bytes were dropped, so the header must remain requestable later",
     );
@@ -626,7 +626,7 @@ fn near_orphan_during_ibd_is_buffered_for_parent_walk() {
     );
     coordinator
         .delivery_mut_for_test()
-        .mark_received(&header_id);
+        .mark_received(101, &header_id);
 
     let pre = header_proc::PreValidatedHeader::for_test_unchecked(
         header_id,
@@ -653,7 +653,7 @@ fn near_orphan_during_ibd_is_buffered_for_parent_walk() {
     assert_eq!(stored[0].0, p);
     assert_eq!(stored[0].2, bytes);
     assert_eq!(
-        coordinator.delivery().status(&header_id),
+        coordinator.delivery().status(101, &header_id),
         ergo_p2p::delivery::ModifierStatus::Received,
     );
 }
@@ -736,10 +736,12 @@ fn batch_validation_rolls_back_hash_matching_malformed_headers() {
         &[first_id, second_id],
         now,
     );
-    coordinator.delivery_mut_for_test().mark_received(&first_id);
     coordinator
         .delivery_mut_for_test()
-        .mark_received(&second_id);
+        .mark_received(101, &first_id);
+    coordinator
+        .delivery_mut_for_test()
+        .mark_received(101, &second_id);
 
     let actions = executor.execute_all(
         vec![
@@ -767,11 +769,11 @@ fn batch_validation_rolls_back_hash_matching_malformed_headers() {
         2
     );
     assert_eq!(
-        coordinator.delivery().status(&first_id),
+        coordinator.delivery().status(101, &first_id),
         ergo_p2p::delivery::ModifierStatus::Unknown
     );
     assert_eq!(
-        coordinator.delivery().status(&second_id),
+        coordinator.delivery().status(101, &second_id),
         ergo_p2p::delivery::ModifierStatus::Unknown
     );
 }
@@ -2352,4 +2354,185 @@ fn local_header_failure_stops_orphan_drain() {
         &mut coordinator,
         Instant::now(),
     );
+}
+
+// ----- version-1 block transactions refetch -----
+
+mod v1_body_refetch {
+    use super::*;
+    use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
+
+    fn stored_header(store: &mut ergo_state::StateBackendKind, version: u8) -> [u8; 32] {
+        let solution = if version == 1 {
+            AutolykosSolution::V1 {
+                pk: GroupElement::from_bytes([2u8; GROUP_ELEMENT_LENGTH]),
+                w: GroupElement::from_bytes([2u8; GROUP_ELEMENT_LENGTH]),
+                nonce: [0u8; 8],
+                d: vec![1],
+            }
+        } else {
+            AutolykosSolution::V2 {
+                pk: GroupElement::from_bytes([2u8; GROUP_ELEMENT_LENGTH]),
+                nonce: [0u8; 8],
+            }
+        };
+        let header = Header {
+            version,
+            parent_id: ModifierId::from_bytes([0u8; 32]),
+            ad_proofs_root: Digest32::ZERO,
+            transactions_root: Digest32::from_bytes([0x33; 32]),
+            state_root: ADDigest::from_bytes([0u8; 33]),
+            timestamp: 1_600_000_000_000,
+            extension_root: Digest32::ZERO,
+            n_bits: 0,
+            height: 1,
+            votes: [0, 0, 0],
+            unparsed_bytes: Vec::new(),
+            solution,
+        };
+        let mut w = VlqWriter::new();
+        write_header(&mut w, &header).unwrap();
+        let bytes = w.result();
+        let header_id = *blake2b256(&bytes).as_bytes();
+        store
+            .store_validated_header(
+                &header_id,
+                &bytes,
+                &ergo_state::chain::HeaderMeta {
+                    parent_id: [0; 32],
+                    height: 1,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp: 1,
+                },
+                Some((1, vec![1])),
+            )
+            .unwrap();
+        header_id
+    }
+
+    fn body_id(header_id: &[u8; 32]) -> [u8; 32] {
+        compute_section_id(TYPE_BLOCK_TRANSACTIONS, header_id, &[0x33; 32])
+    }
+
+    fn tx_failure() -> block_proc::BlockProcessError {
+        block_proc::BlockProcessError::TransactionValidation {
+            tx_id: [9; 32],
+            source: ergo_validation::block::BlockValidationError::Transaction {
+                index: 0,
+                error: ergo_validation::ValidationError::ProofFailed { index: 0 },
+            },
+        }
+    }
+
+    #[test]
+    fn v1_tx_failure_refetches_body_a_bounded_number_of_times() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        let header_id = stored_header(&mut store, 1);
+        let section = body_id(&header_id);
+        let mut coordinator = SyncCoordinator::new(0);
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        for attempt in 0..reorg::MAX_V1_BODY_REFETCHES {
+            store
+                .store_block_section_typed(&section, &[1, 2, 3], TYPE_BLOCK_TRANSACTIONS)
+                .unwrap();
+            coordinator.delivery_mut().request(
+                peer(1),
+                TYPE_BLOCK_TRANSACTIONS,
+                &[section],
+                Instant::now(),
+            );
+            coordinator
+                .delivery_mut()
+                .mark_received(TYPE_BLOCK_TRANSACTIONS, &section);
+            assert_eq!(
+                executor.refetch_v1_block_transactions(
+                    &mut store,
+                    &mut coordinator,
+                    header_id,
+                    10,
+                    &tx_failure(),
+                ),
+                reorg::V1Refetch::Scheduled,
+                "attempt {attempt} must schedule a refetch",
+            );
+            assert!(
+                store.get_block_section(&section).unwrap().is_none(),
+                "the stored body is discarded"
+            );
+            assert_eq!(
+                coordinator
+                    .delivery()
+                    .status(TYPE_BLOCK_TRANSACTIONS, &section),
+                ergo_p2p::delivery::ModifierStatus::Unknown,
+                "the body is requestable again",
+            );
+            assert!(!store.is_durably_invalid(&header_id).unwrap());
+        }
+        // Budget spent: the failure is handled as a verdict.
+        assert_eq!(
+            executor.refetch_v1_block_transactions(
+                &mut store,
+                &mut coordinator,
+                header_id,
+                10,
+                &tx_failure(),
+            ),
+            reorg::V1Refetch::NotApplicable
+        );
+    }
+
+    #[test]
+    fn v2_or_non_transaction_failures_are_not_refetched() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        let v2 = stored_header(&mut store, 2);
+        let mut coordinator = SyncCoordinator::new(0);
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        assert_eq!(
+            executor.refetch_v1_block_transactions(
+                &mut store,
+                &mut coordinator,
+                v2,
+                10,
+                &tx_failure(),
+            ),
+            reorg::V1Refetch::NotApplicable
+        );
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        let v1 = stored_header(&mut store, 1);
+        assert_eq!(
+            executor.refetch_v1_block_transactions(
+                &mut store,
+                &mut coordinator,
+                v1,
+                10,
+                &block_proc::BlockProcessError::Deserialize("local".into()),
+            ),
+            reorg::V1Refetch::NotApplicable
+        );
+        // A failure the transaction id already commits to (no outputs) is a
+        // verdict on the block itself.
+        assert_eq!(
+            executor.refetch_v1_block_transactions(
+                &mut store,
+                &mut coordinator,
+                v1,
+                10,
+                &block_proc::BlockProcessError::TransactionValidation {
+                    tx_id: [9; 32],
+                    source: ergo_validation::block::BlockValidationError::Transaction {
+                        index: 0,
+                        error: ergo_validation::ValidationError::NoOutputs,
+                    },
+                },
+            ),
+            reorg::V1Refetch::NotApplicable
+        );
+    }
 }

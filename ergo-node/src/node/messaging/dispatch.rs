@@ -40,7 +40,7 @@ use std::time::Instant;
 use ergo_p2p::handshake::PeerSpec;
 use ergo_p2p::message;
 use ergo_p2p::peer::{PeerId, Penalty, SyncVersion};
-use ergo_p2p::peer_manager::MAX_SHARED_PEER_SPECS;
+use ergo_p2p::peer_manager::{MAX_ACCEPTED_PEER_SPECS, MAX_SHARED_PEER_SPECS};
 use ergo_p2p::throttle::LimiterVerdict;
 use ergo_p2p::types::{InvData, ModifierTypeId, ModifiersData};
 use ergo_primitives::digest::Digest32;
@@ -228,42 +228,7 @@ pub(in crate::node) fn handle_message(
         message::CODE_REQUEST_MODIFIER => match message::deserialize_inv(payload) {
             Ok(inv) => {
                 let type_id = inv.type_id;
-                let hits: Vec<([u8; 32], Vec<u8>)> = match ModifierTypeId::from_byte(type_id) {
-                    Some(ModifierTypeId::Transaction) => inv
-                        .ids
-                        .iter()
-                        .filter_map(|id| {
-                            state
-                                .mempool
-                                .get_bytes(&Digest32::from_bytes(*id))
-                                .map(|b| (*id, b.to_vec()))
-                        })
-                        .collect(),
-                    Some(ModifierTypeId::Header) => inv
-                        .ids
-                        .iter()
-                        .filter_map(|id| {
-                            state.store.get_header(id).ok().flatten().map(|b| (*id, b))
-                        })
-                        .collect(),
-                    Some(
-                        ModifierTypeId::BlockTransactions
-                        | ModifierTypeId::ADProofs
-                        | ModifierTypeId::Extension,
-                    ) => {
-                        let Some(sentinel) = serving_sentinel(&state.store) else {
-                            return Vec::new();
-                        };
-                        inv.ids
-                            .iter()
-                            .filter_map(|id| {
-                                servable_section(&state.store, id, sentinel)
-                                    .map(|bytes| (*id, bytes))
-                            })
-                            .collect()
-                    }
-                    None => Vec::new(),
-                };
+                let hits = collect_requested_modifiers(state, peer, inv, now);
                 if hits.is_empty() {
                     // Asking costs nothing; being served does. Only a
                     // request we actually answered counts as progress, so
@@ -278,11 +243,14 @@ pub(in crate::node) fn handle_message(
                         modifiers: hits,
                     };
                     match message::serialize_modifiers(&data) {
-                        Ok(payload) => vec![Action::SendToPeer {
-                            peer,
-                            code: message::CODE_MODIFIER,
-                            payload,
-                        }],
+                        Ok(payload) => {
+                            state.serve_throttle.record(peer, now, payload.len() as u64);
+                            vec![Action::SendToPeer {
+                                peer,
+                                code: message::CODE_MODIFIER,
+                                payload,
+                            }]
+                        }
                         Err(e) => {
                             warn!(type_id = type_id, error = %e, "failed to serialize Modifier");
                             Vec::new()
@@ -337,6 +305,14 @@ pub(in crate::node) fn handle_message(
         }
         message::CODE_PEERS => match message::deserialize_peers(payload, 100) {
             Ok(peers) => {
+                // Only a reply to a `GetPeers` we sent recently is taken
+                // into the address pool; Scala and Rust nodes send `Peers`
+                // only in answer to `GetPeers`. Anything else is dropped
+                // without a penalty (a late reply is not misbehaviour).
+                if !state.peer_manager.take_peers_reply_allowance(&peer, now) {
+                    debug!(peer = %peer, count = peers.len(), "unsolicited Peers; ignoring");
+                    return Vec::new();
+                }
                 // Only a `Peers` reply carrying something we could
                 // actually dial is progress. An empty list is as cheap as
                 // a keepalive, and so is a list of specs with no declared
@@ -354,18 +330,27 @@ pub(in crate::node) fn handle_message(
         },
         message::CODE_SNAPSHOTS_INFO => match message::deserialize_snapshots_info(payload) {
             Ok(info) => {
+                // Votes count only from peers we asked in this discovery
+                // epoch; a SnapshotsInfo nobody asked for is dropped
+                // without a penalty (a late reply is not misbehaviour).
+                if !state.snapshot_bootstrap.was_queried(&peer) {
+                    debug!(peer = %peer, "unsolicited SnapshotsInfo; ignoring");
+                    return Vec::new();
+                }
                 note_progress(state, &peer, now);
-                // Feed the discovery reducer. The reducer tracks per-peer
-                // votes and applies the Scala quorum rule. Eligibility
-                // filtering — restricting which peers we *ask* for
-                // SnapshotsInfo — lives in the outbound fan-out instead.
-                // Inbound, we accept what we're given: a
-                // Mode 5/6 peer that pushes a SnapshotsInfo unsolicited
-                // will send an empty list anyway (they have no UTXO
-                // state) and the reducer drops empty-list votes.
-                state
-                    .snapshot_bootstrap
-                    .on_snapshots_info(peer, &info.available_manifests);
+                // Entries that contradict our header chain (wrong state
+                // root at that height, or above a synced header tip) are
+                // not votes. Entries we cannot judge yet are kept and
+                // re-checked by the manifest driver each tick.
+                let manifests: Vec<(i32, [u8; 32])> = info
+                    .available_manifests
+                    .iter()
+                    .copied()
+                    .filter(|(h, id)| {
+                        !crate::node::sync_tick::snapshot_vote_conflicts(state, *h, id)
+                    })
+                    .collect();
+                state.snapshot_bootstrap.on_snapshots_info(peer, &manifests);
                 Vec::new()
             }
             Err(e) => {
@@ -584,6 +569,76 @@ pub(in crate::node) fn handle_message(
     }
 }
 
+/// Read the modifiers a `RequestModifier` asks for, in request order.
+///
+/// Each id is looked up once even when the request repeats it, and reading
+/// stops once the bytes collected reach what one `Modifier` reply can carry
+/// or what is left of the peer's serve budget
+/// ([`ergo_p2p::throttle::SERVE_LIMITS`]), whichever is smaller — the
+/// encoder would drop anything beyond that, so it is never read. A peer
+/// whose budget is spent gets no reply until the window moves on.
+fn collect_requested_modifiers(
+    state: &mut NodeState,
+    peer: PeerId,
+    inv: InvData,
+    now: Instant,
+) -> Vec<([u8; 32], Vec<u8>)> {
+    let Some(kind) = ModifierTypeId::from_byte(inv.type_id) else {
+        return Vec::new();
+    };
+    let budget = state
+        .serve_throttle
+        .remaining_bytes(peer, now)
+        .min(message::MAX_MODIFIER_WITH_RESERVE as u64);
+    if budget == 0 {
+        debug!(peer = %peer, "serve budget spent; not answering RequestModifier");
+        return Vec::new();
+    }
+    let sentinel = match kind {
+        ModifierTypeId::BlockTransactions
+        | ModifierTypeId::ADProofs
+        | ModifierTypeId::Extension => match serving_sentinel(&state.store) {
+            Some(sentinel) => Some(sentinel),
+            None => return Vec::new(),
+        },
+        _ => None,
+    };
+    let mut seen = std::collections::HashSet::with_capacity(inv.ids.len());
+    let mut hits = Vec::new();
+    let mut collected: u64 = 0;
+    for id in inv.ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        let bytes = match kind {
+            ModifierTypeId::Transaction => state
+                .mempool
+                .get_bytes(&Digest32::from_bytes(id))
+                .map(|b| b.to_vec()),
+            ModifierTypeId::Header => state.store.get_header(&id).ok().flatten(),
+            ModifierTypeId::BlockTransactions
+            | ModifierTypeId::ADProofs
+            | ModifierTypeId::Extension => {
+                servable_section(&state.store, &id, sentinel.unwrap_or_default())
+            }
+        };
+        let Some(bytes) = bytes else {
+            continue;
+        };
+        // id + length prefix + payload, as the encoder accounts it.
+        let entry = 36 + bytes.len() as u64;
+        if collected + entry > budget && !hits.is_empty() {
+            break;
+        }
+        collected += entry;
+        hits.push((id, bytes));
+        if collected >= budget {
+            break;
+        }
+    }
+    hits
+}
+
 /// Handle a parsed `Inv` (message code 60): tx-typed advertisements are
 /// filtered against the pool + rejection cache before requesting, then
 /// dispatched via `request_transactions` (which does its own dedupe/cap
@@ -608,7 +663,7 @@ fn handle_inv(state: &mut NodeState, peer: PeerId, inv: InvData, now: Instant) -
                 if state.mempool.contains(&tx_id) || state.mempool.is_private_transaction(&tx_id) {
                     return None;
                 }
-                if state.mempool.is_invalidated(&tx_id) {
+                if state.mempool.is_invalidated_from(&tx_id, peer) {
                     return None;
                 }
                 Some(*id)
@@ -843,7 +898,11 @@ fn handle_modifier_batch(
     // Scala sends only for valid requested headers. The executor forgets
     // rejected deliveries, but retains AlreadyKnown and buffered headers.
     let delivered_requested_header = requested_headers.iter().any(|id| {
-        state.coordinator.delivery().status(id) == ergo_p2p::delivery::ModifierStatus::Received
+        state
+            .coordinator
+            .delivery()
+            .status(ModifierTypeId::Header.as_byte(), id)
+            == ergo_p2p::delivery::ModifierStatus::Received
     });
     if delivered_requested_header {
         send_post_header_sync_info(state, peer, now, &mut all_actions);
@@ -872,7 +931,8 @@ fn handle_peers_response(state: &mut NodeState, peer: PeerId, peers: Vec<PeerSpe
     let mut malformed = 0usize;
     let mut filtered = 0usize;
     let mut dropped_pool_full = 0usize;
-    for spec in peers {
+    let mut seen = std::collections::HashSet::new();
+    for spec in peers.into_iter().take(MAX_ACCEPTED_PEER_SPECS) {
         let Some(declared) = &spec.declared_address else {
             no_declared += 1;
             continue;
@@ -886,6 +946,10 @@ fn handle_peers_response(state: &mut NodeState, peer: PeerId, peers: Vec<PeerSpe
             malformed += 1;
             continue;
         };
+        if !seen.insert(sock) {
+            already_known += 1;
+            continue;
+        }
         match state
             .peer_manager
             .add_known_address(sock, PeerOrigin::Gossip)
@@ -943,7 +1007,7 @@ fn frame_answers_our_request(state: &NodeState, peer: &PeerId, payload: &[u8]) -
     let delivery = state.coordinator.delivery();
     mods.modifiers
         .iter()
-        .any(|(id, _)| delivery.on_received(id, peer) == DeliveryAction::Accept)
+        .any(|(id, _)| delivery.on_received(mods.type_id, id, peer) == DeliveryAction::Accept)
 }
 
 /// Does `bytes` actually parse to a `Transaction` whose canonical

@@ -96,6 +96,11 @@ pub async fn tokens_by_ids_handler(
     State(state): State<BlockchainState>,
     Json(ids_hex): Json<Vec<String>>,
 ) -> Response {
+    let ids_hex = match crate::batch_ids::dedupe_and_cap(ids_hex, crate::batch_ids::MAX_LOOKUP_IDS)
+    {
+        Ok(ids) => ids,
+        Err(detail) => return super::bad_request(&detail),
+    };
     let ids: Vec<TokenId> = ids_hex
         .iter()
         .filter_map(|s| parse_modifier_id(s).map(TokenId::from_bytes))

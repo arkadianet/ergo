@@ -778,13 +778,41 @@ impl NodeConfig {
             require_api_key: script.require_api_key.unwrap_or(false),
             max_cost: script
                 .max_cost
-                .unwrap_or(ergo_api::v1::script::MAX_BLOCK_COST),
+                .unwrap_or(ergo_api::v1::script::DEFAULT_MAX_COST),
+            max_eval_bytes: script
+                .max_eval_bytes
+                .unwrap_or(ergo_api::v1::script::DEFAULT_MAX_EVAL_BYTES),
         };
+        if !(1024..=4 * 1024 * 1024 * 1024).contains(&api_script.max_eval_bytes) {
+            return Err(
+                "[api.script] max_eval_bytes must be between 1024 and 4294967296".to_string(),
+            );
+        }
         if !(1..=ergo_api::v1::script::MAX_BLOCK_COST).contains(&api_script.max_cost) {
             return Err(format!(
                 "[api.script] max_cost must be between 1 and {}",
                 ergo_api::v1::script::MAX_BLOCK_COST
             ));
+        }
+
+        let api_block_batch = ergo_api::batch_ids::BlockBatchLimits {
+            max_blocks: toml_cfg
+                .api
+                .max_blocks_per_request
+                .unwrap_or(ergo_api::batch_ids::DEFAULT_MAX_BLOCKS_PER_REQUEST),
+            max_response_bytes: toml_cfg
+                .api
+                .max_blocks_response_bytes
+                .unwrap_or(ergo_api::batch_ids::DEFAULT_MAX_BLOCKS_RESPONSE_BYTES),
+        };
+        if !(1..=16_384).contains(&api_block_batch.max_blocks) {
+            return Err("[api] max_blocks_per_request must be between 1 and 16384".to_string());
+        }
+        if !(1024 * 1024..=4 * 1024 * 1024 * 1024).contains(&api_block_batch.max_response_bytes) {
+            return Err(
+                "[api] max_blocks_response_bytes must be between 1048576 and 4294967296"
+                    .to_string(),
+            );
         }
 
         // [mempool] — TOML overrides defaults; CLI flags override TOML.
@@ -1266,6 +1294,7 @@ impl NodeConfig {
             api_allowed_hosts,
             api_local_reverse_proxy,
             api_script,
+            api_block_batch,
             allow_direct_block_submit: toml_cfg.api.allow_direct_block_submit.unwrap_or(false),
             devnet_max_block_cost,
             mempool_config,

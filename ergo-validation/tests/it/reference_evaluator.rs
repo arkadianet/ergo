@@ -297,3 +297,10 @@ fn pre_jit_xor_reads_the_right_operand_by_left_length() {
 fn zip_pairs_read_from_their_columns() {
     check_vectors("zip-columns");
 }
+
+/// Arithmetic over an operand whose type read fails, in output, input, nested
+/// box, `deserializeTo`, `DeserializeContext` and `DeserializeRegister` code.
+#[test]
+fn arith_operand_type_read_failures_match_reference() {
+    check_vectors("arith-upcast-type-reads");
+}

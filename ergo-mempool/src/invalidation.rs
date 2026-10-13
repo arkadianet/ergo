@@ -5,13 +5,24 @@
 //! tx_id and a repeat within `spam_window` have distinct library lookup
 //! results. Production uses this cache to filter inventory fetches;
 //! received transaction bytes still undergo full admission validation.
+//!
+//! A transaction id does not cover its input proofs, so entries come in two
+//! scopes. A failure the proofs cannot change (structure, amounts, relay
+//! policy) is recorded for the id and filters every peer's inventory. A
+//! failure that depends on the delivered proofs (script, cost) is recorded
+//! for the id *and the peer that delivered it*, so another peer can still
+//! serve the same id with different proofs. Every lookup honours the TTL,
+//! whether or not a later insert has pruned the entry yet.
 
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
 
-use crate::types::TxId;
+use crate::types::{PeerId, TxId};
+
+/// Cache key: an id-wide entry (`None`) or one scoped to the delivering peer.
+type Key = (TxId, Option<PeerId>);
 
 /// Why a tx was marked invalid. Preserved for observability only — the
 /// cache does not treat reasons differently.
@@ -49,7 +60,7 @@ pub enum LookupResult {
 pub struct InvalidationCache {
     // One bounded node per ID, with no stale insertion descriptors. Use
     // peek/peek_mut for reads so this cache retains insertion-order policy.
-    entries: Option<LruCache<TxId, Record>>,
+    entries: Option<LruCache<Key, Record>>,
     ttl: Duration,
     spam_window: Duration,
 }
@@ -89,8 +100,25 @@ impl InvalidationCache {
         }
     }
 
-    /// Record an invalidation. Evicts oldest if at capacity.
+    /// Record an id-wide invalidation (filters the id from every peer).
+    /// Evicts oldest if at capacity.
     pub fn insert(&mut self, tx_id: TxId, reason: InvalidationReason, now: Instant) {
+        self.insert_key((tx_id, None), reason, now);
+    }
+
+    /// Record an invalidation that holds only for bytes delivered by `peer`
+    /// (a proof-dependent failure). Evicts oldest if at capacity.
+    pub fn insert_for_peer(
+        &mut self,
+        tx_id: TxId,
+        peer: PeerId,
+        reason: InvalidationReason,
+        now: Instant,
+    ) {
+        self.insert_key((tx_id, Some(peer)), reason, now);
+    }
+
+    fn insert_key(&mut self, key: Key, reason: InvalidationReason, now: Instant) {
         self.prune_expired(now);
         let Some(entries) = self.entries.as_mut() else {
             return;
@@ -101,7 +129,7 @@ impl InvalidationCache {
             hits: 0,
             reason,
         };
-        entries.put(tx_id, rec);
+        entries.put(key, rec);
     }
 
     /// Look up a tx. Increments the hit counter and returns whether
@@ -111,7 +139,7 @@ impl InvalidationCache {
         match self
             .entries
             .as_mut()
-            .and_then(|entries| entries.peek_mut(tx_id))
+            .and_then(|entries| entries.peek_mut(&(*tx_id, None)))
         {
             None => LookupResult::NotCached,
             Some(rec) => {
@@ -133,17 +161,32 @@ impl InvalidationCache {
         }
     }
 
+    /// Is there a live id-wide entry for `tx_id`?
     pub fn contains(&self, tx_id: &TxId) -> bool {
-        self.entries
-            .as_ref()
-            .is_some_and(|entries| entries.contains(tx_id))
+        self.contains_at(tx_id, Instant::now())
+    }
+
+    /// [`Self::contains`] evaluated at `now`: an entry older than the TTL
+    /// does not count, even before a later insert prunes it.
+    pub fn contains_at(&self, tx_id: &TxId, now: Instant) -> bool {
+        self.live(&(*tx_id, None), now).is_some()
+    }
+
+    /// Should an inventory of `tx_id` from `peer` be skipped at `now`? True
+    /// for a live id-wide entry or a live entry scoped to that peer.
+    pub fn contains_for_peer(&self, tx_id: &TxId, peer: PeerId, now: Instant) -> bool {
+        self.contains_at(tx_id, now) || self.live(&(*tx_id, Some(peer)), now).is_some()
     }
 
     pub fn reason(&self, tx_id: &TxId) -> Option<InvalidationReason> {
+        self.live(&(*tx_id, None), Instant::now()).map(|r| r.reason)
+    }
+
+    fn live(&self, key: &Key, now: Instant) -> Option<&Record> {
         self.entries
             .as_ref()
-            .and_then(|entries| entries.peek(tx_id))
-            .map(|r| r.reason)
+            .and_then(|entries| entries.peek(key))
+            .filter(|record| now.saturating_duration_since(record.inserted_at) < self.ttl)
     }
 }
 
@@ -297,6 +340,35 @@ mod tests {
         c.insert(id(1), InvalidationReason::DoubleSpendLoser, t0);
         assert_eq!(c.reason(&id(1)), Some(InvalidationReason::DoubleSpendLoser));
         assert_eq!(c.reason(&id(2)), None);
+    }
+
+    fn peer(port: u16) -> PeerId {
+        PeerId::from(([127, 0, 0, 1], port))
+    }
+
+    #[test]
+    fn lookups_honour_the_ttl_without_a_later_insert() {
+        let c = {
+            let mut c = cache();
+            c.insert(id(1), InvalidationReason::ValidationFailed, Instant::now());
+            c
+        };
+        let now = Instant::now();
+        assert!(c.contains_at(&id(1), now));
+        assert!(!c.contains_at(&id(1), now + Duration::from_secs(61)));
+        assert!(!c.contains_for_peer(&id(1), peer(1), now + Duration::from_secs(61)));
+    }
+
+    #[test]
+    fn peer_scoped_entry_filters_only_that_peer() {
+        let mut c = cache();
+        let now = Instant::now();
+        c.insert_for_peer(id(1), peer(1), InvalidationReason::ValidationFailed, now);
+        assert!(c.contains_for_peer(&id(1), peer(1), now));
+        assert!(!c.contains_for_peer(&id(1), peer(2), now));
+        assert!(!c.contains_at(&id(1), now), "no id-wide entry");
+        c.insert(id(1), InvalidationReason::ValidationFailed, now);
+        assert!(c.contains_for_peer(&id(1), peer(2), now));
     }
 
     #[test]

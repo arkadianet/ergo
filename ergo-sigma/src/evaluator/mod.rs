@@ -2,12 +2,14 @@ mod cost;
 mod dispatch;
 mod eval_ctx;
 mod helpers;
+mod memory_budget;
 mod opcodes;
 mod static_types;
 mod types;
 
 pub use dispatch::*;
 pub use helpers::sigma_to_value;
+pub use memory_budget::EvalMemoryBudget;
 
 /// A short, human-readable rendering of a runtime value (the form the
 /// evaluator's own trace uses; long values are truncated).

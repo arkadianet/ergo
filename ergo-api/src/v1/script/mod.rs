@@ -40,8 +40,8 @@ use ergo_ser::ergo_tree::{read_ergo_tree, ErgoTree};
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
 use ergo_sigma::evaluator::{
-    reduce_expr_traced_with_cost, reduce_expr_with_cost, EvalBox, EvalError, ReductionContext,
-    TraceEntry,
+    reduce_expr_traced_with_cost, reduce_expr_with_cost, EvalBox, EvalError, EvalMemoryBudget,
+    ReductionContext, TraceEntry,
 };
 
 use crate::compat::NodeChainQuery;
@@ -57,6 +57,17 @@ use axum::response::Response;
 /// Consensus `maxBlockCost` default: the ceiling a
 /// per-request cost cap may never exceed. Block-cost units.
 pub const MAX_BLOCK_COST: u64 = 8_001_091;
+
+/// Default per-request reduction cost ceiling (`[api.script] max_cost`):
+/// the reference node's default per-transaction cost limit. Ordinary scripts
+/// cost a few thousand to a few hundred thousand units; operators who need
+/// more can raise it up to [`MAX_BLOCK_COST`].
+pub const DEFAULT_MAX_COST: u64 = 1_000_000;
+
+/// Default budget, in bytes, for the collection values one reduction may
+/// materialise (`[api.script] max_eval_bytes`). See
+/// [`ergo_sigma::evaluator::EvalMemoryBudget`].
+pub const DEFAULT_MAX_EVAL_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Hard cap on the hex length of an `ergo_tree` input (bytes on the wire are
 /// half this). Bounds the parse/reduce work an unauthenticated caller can ask
@@ -79,13 +90,18 @@ pub struct ScriptConfig {
     /// anti-DoS bound. Clamped to `[1, MAX_BLOCK_COST]`; a per-request
     /// `max_cost` in the body may only lower it, never raise it.
     pub max_cost: u64,
+    /// Per-request budget on the collection bytes one reduction may
+    /// materialise. Cost bounds evaluation work; this bounds the memory a
+    /// cheap-per-item collection build can take.
+    pub max_eval_bytes: u64,
 }
 
 impl Default for ScriptConfig {
     fn default() -> Self {
         Self {
             require_api_key: false,
-            max_cost: MAX_BLOCK_COST,
+            max_cost: DEFAULT_MAX_COST,
+            max_eval_bytes: DEFAULT_MAX_EVAL_BYTES,
         }
     }
 }
@@ -382,8 +398,10 @@ pub(crate) fn bounded_reduce(
     height: u32,
     self_box: Option<&EvalBox>,
     limit_block_cost: u64,
+    max_eval_bytes: u64,
 ) -> Result<ReduceOutput, EvalError> {
     let (mut cost, ctx) = reduction_env(tree, height, self_box, limit_block_cost);
+    let _budget = EvalMemoryBudget::install(max_eval_bytes);
     let reduced_to = reduce_expr_with_cost(&tree.body, &ctx, &tree.constants, &mut cost)?;
     let result = match reduced_to {
         SigmaBoolean::TrivialProp(b) => Some(b),
@@ -404,8 +422,10 @@ pub(crate) fn bounded_reduce_traced(
     height: u32,
     self_box: Option<&EvalBox>,
     limit_block_cost: u64,
+    max_eval_bytes: u64,
 ) -> (Result<SigmaBoolean, EvalError>, Vec<TraceEntry>) {
     let (mut cost, ctx) = reduction_env(tree, height, self_box, limit_block_cost);
+    let _budget = EvalMemoryBudget::install(max_eval_bytes);
     reduce_expr_traced_with_cost(&tree.body, &ctx, &tree.constants, &mut cost)
 }
 
@@ -434,6 +454,11 @@ pub(crate) fn eval_error_response(e: &EvalError) -> Box<Response> {
         EvalError::CostExceeded(_) | EvalError::JitCostOverflow(_) => err(
             Reason::CostLimit,
             "script reduction exceeded the per-request cost bound",
+            e.to_string(),
+        ),
+        EvalError::MemoryBudgetExceeded { .. } => err(
+            Reason::CostLimit,
+            "script reduction exceeded the per-request memory bound",
             e.to_string(),
         ),
         EvalError::DepthLimitExceeded(_) => err(
@@ -485,11 +510,11 @@ mod tests {
     fn effective_cost_limit_clamps_and_lowers_only() {
         let cfg = ScriptConfig::default();
         // No request cap ⇒ the group ceiling.
-        assert_eq!(cfg.effective_cost_limit(None), MAX_BLOCK_COST);
+        assert_eq!(cfg.effective_cost_limit(None), DEFAULT_MAX_COST);
         // A request cap only lowers.
         assert_eq!(cfg.effective_cost_limit(Some(100)), 100);
         // A request cap ABOVE the ceiling is clamped down, never raised.
-        assert_eq!(cfg.effective_cost_limit(Some(u64::MAX)), MAX_BLOCK_COST);
+        assert_eq!(cfg.effective_cost_limit(Some(u64::MAX)), DEFAULT_MAX_COST);
         // Zero clamps to at least 1.
         assert_eq!(cfg.effective_cost_limit(Some(0)), 1);
     }
@@ -521,6 +546,41 @@ mod tests {
         let mut m = std::collections::BTreeMap::new();
         m.insert("x".to_string(), tc("Int", "not-a-number"));
         assert!(build_env(Some(&m)).is_err());
+    }
+
+    /// A tree whose lambda returns a 2 KiB collection once per element of
+    /// that collection: cheap in cost, about 4 MiB of collection results.
+    fn collection_fanout_tree() -> ErgoTree {
+        let mut env = ScriptEnv::new();
+        env.insert("big".to_string(), EnvValue::ByteArray(vec![1i8; 2048]));
+        let compiled = ergo_compiler::compile(
+            &env,
+            "{ sigmaProp(big.map({ (x: Byte) => big }).size > 0) }",
+            0,
+            NetworkPrefix::Mainnet,
+        )
+        .expect("fan-out source compiles");
+        parse_tree_bytes(&compiled.tree_bytes).expect("compiled tree parses")
+    }
+
+    #[test]
+    fn bounded_reduce_stops_at_the_evaluation_memory_budget() {
+        let tree = collection_fanout_tree();
+        let err = bounded_reduce(&tree, 1, None, DEFAULT_MAX_COST, 1024 * 1024)
+            .err()
+            .expect("a 1 MiB budget stops the fan-out");
+        assert!(
+            matches!(err, EvalError::MemoryBudgetExceeded { .. }),
+            "{err:?}"
+        );
+        let out = bounded_reduce(&tree, 1, None, DEFAULT_MAX_COST, DEFAULT_MAX_EVAL_BYTES)
+            .expect("the default budget admits the same tree");
+        assert_eq!(out.result, Some(true));
+        let (traced, _) = bounded_reduce_traced(&tree, 1, None, DEFAULT_MAX_COST, 1024 * 1024);
+        assert!(matches!(
+            traced,
+            Err(EvalError::MemoryBudgetExceeded { .. })
+        ));
     }
 
     #[test]

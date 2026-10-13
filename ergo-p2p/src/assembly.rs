@@ -122,6 +122,22 @@ impl AssemblyTracker {
         }
     }
 
+    /// Record that a received section was discarded and must arrive again
+    /// before its block counts as complete. No-op for an untracked section.
+    pub fn section_dropped(&mut self, modifier_id: &[u8; 32]) {
+        let Some((section_type, header_id)) = self.section_index.get(modifier_id).copied() else {
+            return;
+        };
+        if let Some(state) = self.headers.get_mut(&header_id) {
+            match section_type {
+                TYPE_BLOCK_TRANSACTIONS => state.has_transactions = false,
+                TYPE_EXTENSION => state.has_extension = false,
+                TYPE_AD_PROOFS => state.has_ad_proofs = false,
+                _ => {}
+            }
+        }
+    }
+
     /// Check if a full block is ready for a given header (all required sections
     /// present — includes ADProofs for a digest-verifier node).
     pub fn is_complete(&self, header_id: &[u8; 32]) -> bool {

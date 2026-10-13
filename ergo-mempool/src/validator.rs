@@ -280,6 +280,8 @@ fn map_validation_error(err: ValidationError) -> ValidationErr {
         | E::TooManyDataInputs { .. }
         | E::TooManyOutputs { .. }
         | E::OutputValueTooLow { .. }
+        | E::OutputValueTooHigh { .. }
+        | E::OutputSumTooHigh
         | E::TooManyTokens { .. }
         | E::BoxTooLarge { .. }
         | E::PropositionTooLarge { .. }
@@ -299,6 +301,7 @@ fn map_validation_error(err: ValidationError) -> ValidationErr {
             ValidationErr::Other("internal validator invariant violated".into())
         }
         E::ErgNotConserved { .. }
+        | E::InputSumTooHigh
         | E::TokenNotConserved { .. }
         | E::NonPositiveTokenAmount { .. }
         | E::InvalidMinting { .. }

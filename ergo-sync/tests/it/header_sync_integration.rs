@@ -606,7 +606,7 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
     );
     let received = coordinator.on_modifier_received(peer, 101, h2_id, h2_bytes.clone(), now);
     assert_eq!(
-        coordinator.delivery().status(&h2_id),
+        coordinator.delivery().status(101, &h2_id),
         ModifierStatus::Received
     );
     let actions = executor.execute_all(received, &mut store, &mut coordinator, now);
@@ -626,7 +626,7 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
         "a header rejected by the checkpoint must not be persisted"
     );
     assert_eq!(
-        coordinator.delivery().status(&h2_id),
+        coordinator.delivery().status(101, &h2_id),
         ModifierStatus::Unknown
     );
 
@@ -647,7 +647,7 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
         .any(|action| matches!(action, Action::Penalize { .. })));
     assert!(store.get_header(&h2_id).unwrap().is_some());
     assert_eq!(
-        coordinator.delivery().status(&h2_id),
+        coordinator.delivery().status(101, &h2_id),
         ModifierStatus::Received
     );
 }
@@ -691,7 +691,7 @@ fn malformed_header_rejects_before_ack_and_allows_valid_delivery() {
     );
     let received = coordinator.on_modifier_received(peer, 101, malformed_id, malformed, now);
     assert_eq!(
-        coordinator.delivery().status(&malformed_id),
+        coordinator.delivery().status(101, &malformed_id),
         ModifierStatus::Requested
     );
     assert!(!received
@@ -718,7 +718,7 @@ fn malformed_header_rejects_before_ack_and_allows_valid_delivery() {
     );
     let received = coordinator.on_modifier_received(peer, 101, valid_id, valid_bytes, now);
     assert_eq!(
-        coordinator.delivery().status(&valid_id),
+        coordinator.delivery().status(101, &valid_id),
         ModifierStatus::Received
     );
     let validate = received
@@ -731,7 +731,7 @@ fn malformed_header_rejects_before_ack_and_allows_valid_delivery() {
         .any(|action| matches!(action, Action::Penalize { .. })));
     assert!(store.get_header(&valid_id).unwrap().is_some());
     assert_eq!(
-        coordinator.delivery().status(&valid_id),
+        coordinator.delivery().status(101, &valid_id),
         ModifierStatus::Received
     );
 }
