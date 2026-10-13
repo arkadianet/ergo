@@ -86,6 +86,18 @@ struct AvailableChain {
 /// transaction-validation failure before the failure is treated as a
 /// verdict on the block.
 pub(super) const MAX_V1_BODY_REFETCHES: u8 = 3;
+
+/// What [`SyncExecutor::refetch_v1_block_transactions`] did with a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum V1Refetch {
+    /// Not a refetch case: the caller gives the failure its block verdict.
+    NotApplicable,
+    /// The stored body was discarded and will be fetched again: no verdict.
+    Scheduled,
+    /// Storage failed while deciding or discarding: no verdict, so a
+    /// transient storage error never invalidates the block.
+    StorageFailed,
+}
 /// Bound on blocks tracked for v1 refetches at once.
 const MAX_V1_REFETCH_ENTRIES: usize = 1024;
 
@@ -229,8 +241,8 @@ impl SyncExecutor {
     ///
     /// At most [`MAX_V1_BODY_REFETCHES`] refetches are made per block; after
     /// that the failure is handled as a verdict like any other block, so a
-    /// block that is really invalid does not loop. Returns `true` when a
-    /// refetch was scheduled and the caller must not invalidate.
+    /// block that is really invalid does not loop. Only
+    /// [`V1Refetch::NotApplicable`] lets the caller record a verdict.
     pub(super) fn refetch_v1_block_transactions(
         &mut self,
         store: &mut ergo_state::StateBackendKind,
@@ -238,7 +250,7 @@ impl SyncExecutor {
         header_id: [u8; 32],
         height: u32,
         err: &block_proc::BlockProcessError,
-    ) -> bool {
+    ) -> V1Refetch {
         // Only failures the spending proofs can cause: everything else in a
         // transaction (inputs, outputs, data inputs) is covered by its id.
         use ergo_validation::block::BlockValidationError;
@@ -255,23 +267,33 @@ impl SyncExecutor {
                 ..
             }
         ) {
-            return false;
+            return V1Refetch::NotApplicable;
         }
-        let Ok(Some(bytes)) = store.get_header(&header_id) else {
-            return false;
+        let bytes = match store.get_header(&header_id) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return V1Refetch::NotApplicable,
+            Err(error) => {
+                super::report_sync_storage_failure(
+                    store,
+                    "block_apply",
+                    "read_v1_refetch_header",
+                    &error,
+                );
+                return V1Refetch::StorageFailed;
+            }
         };
         let Ok(header) =
             ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
         else {
-            return false;
+            return V1Refetch::NotApplicable;
         };
         if header.version != 1 {
-            return false;
+            return V1Refetch::NotApplicable;
         }
         let attempts = self.v1_body_refetches.get(&header_id).copied().unwrap_or(0);
         if attempts >= MAX_V1_BODY_REFETCHES {
             self.v1_body_refetches.remove(&header_id);
-            return false;
+            return V1Refetch::NotApplicable;
         }
         use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
         let section_id = compute_section_id(
@@ -286,7 +308,7 @@ impl SyncExecutor {
                 "delete_v1_block_transactions",
                 &error,
             );
-            return false;
+            return V1Refetch::StorageFailed;
         }
         if self.v1_body_refetches.len() >= MAX_V1_REFETCH_ENTRIES {
             self.v1_body_refetches.clear();
@@ -305,7 +327,7 @@ impl SyncExecutor {
             "version-1 block transactions failed validation; discarding the stored \
              section and fetching it again",
         );
-        true
+        V1Refetch::Scheduled
     }
 
     pub(super) fn invalidate_or_session_mark(
@@ -666,10 +688,14 @@ impl SyncExecutor {
                     self.reorg_blocks.clear();
                     guard.failure();
                     super::block_apply::report_block_process_failure(store, &header_id, &e);
-                    self.record_failed_transaction(&e);
-                    self.record_block_apply_error(header_id, next, e.to_string());
-                    if !self.refetch_v1_block_transactions(store, coordinator, header_id, next, &e)
+                    // A scheduled refetch or a storage failure is not a
+                    // verdict: record the rejection and invalidate only
+                    // otherwise.
+                    if self.refetch_v1_block_transactions(store, coordinator, header_id, next, &e)
+                        == V1Refetch::NotApplicable
                     {
+                        self.record_failed_transaction(&e);
+                        self.record_block_apply_error(header_id, next, e.to_string());
                         self.invalidate_or_session_mark(store, coordinator, header_id, next, &e);
                     }
                     break;

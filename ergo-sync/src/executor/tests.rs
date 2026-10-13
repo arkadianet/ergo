@@ -2471,7 +2471,7 @@ mod v1_body_refetch {
             coordinator
                 .delivery_mut()
                 .mark_received(TYPE_BLOCK_TRANSACTIONS, &section);
-            assert!(
+            assert_eq!(
                 executor.refetch_v1_block_transactions(
                     &mut store,
                     &mut coordinator,
@@ -2479,6 +2479,7 @@ mod v1_body_refetch {
                     10,
                     &tx_failure(),
                 ),
+                reorg::V1Refetch::Scheduled,
                 "attempt {attempt} must schedule a refetch",
             );
             assert!(
@@ -2495,13 +2496,16 @@ mod v1_body_refetch {
             assert!(!store.is_durably_invalid(&header_id).unwrap());
         }
         // Budget spent: the failure is handled as a verdict.
-        assert!(!executor.refetch_v1_block_transactions(
-            &mut store,
-            &mut coordinator,
-            header_id,
-            10,
-            &tx_failure(),
-        ));
+        assert_eq!(
+            executor.refetch_v1_block_transactions(
+                &mut store,
+                &mut coordinator,
+                header_id,
+                10,
+                &tx_failure(),
+            ),
+            reorg::V1Refetch::NotApplicable
+        );
     }
 
     #[test]
@@ -2513,36 +2517,45 @@ mod v1_body_refetch {
             ProtocolParams::mainnet_default(),
             DifficultyParams::mainnet(),
         );
-        assert!(!executor.refetch_v1_block_transactions(
-            &mut store,
-            &mut coordinator,
-            v2,
-            10,
-            &tx_failure(),
-        ));
+        assert_eq!(
+            executor.refetch_v1_block_transactions(
+                &mut store,
+                &mut coordinator,
+                v2,
+                10,
+                &tx_failure(),
+            ),
+            reorg::V1Refetch::NotApplicable
+        );
         let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
         let v1 = stored_header(&mut store, 1);
-        assert!(!executor.refetch_v1_block_transactions(
-            &mut store,
-            &mut coordinator,
-            v1,
-            10,
-            &block_proc::BlockProcessError::Deserialize("local".into()),
-        ));
+        assert_eq!(
+            executor.refetch_v1_block_transactions(
+                &mut store,
+                &mut coordinator,
+                v1,
+                10,
+                &block_proc::BlockProcessError::Deserialize("local".into()),
+            ),
+            reorg::V1Refetch::NotApplicable
+        );
         // A failure the transaction id already commits to (no outputs) is a
         // verdict on the block itself.
-        assert!(!executor.refetch_v1_block_transactions(
-            &mut store,
-            &mut coordinator,
-            v1,
-            10,
-            &block_proc::BlockProcessError::TransactionValidation {
-                tx_id: [9; 32],
-                source: ergo_validation::block::BlockValidationError::Transaction {
-                    index: 0,
-                    error: ergo_validation::ValidationError::NoOutputs,
+        assert_eq!(
+            executor.refetch_v1_block_transactions(
+                &mut store,
+                &mut coordinator,
+                v1,
+                10,
+                &block_proc::BlockProcessError::TransactionValidation {
+                    tx_id: [9; 32],
+                    source: ergo_validation::block::BlockValidationError::Transaction {
+                        index: 0,
+                        error: ergo_validation::ValidationError::NoOutputs,
+                    },
                 },
-            },
-        ));
+            ),
+            reorg::V1Refetch::NotApplicable
+        );
     }
 }
