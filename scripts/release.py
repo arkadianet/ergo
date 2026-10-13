@@ -170,6 +170,11 @@ def checksum(path):
     return digest
 
 
+# Seed init, unlock and unseal run Argon2id (256 MiB, 3 passes) once or twice;
+# slower release runners (macOS, Windows) need well over the 3 s other requests get.
+KDF_TIMEOUT = 60
+
+
 def smoke_walletd(binary, config_template, work):
     """Exercise packaged seed hosting without a remote node or public network."""
     port = free_port()
@@ -193,7 +198,7 @@ def smoke_walletd(binary, config_template, work):
     path.write_text(config, encoding="utf-8")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    def request(route, *, authenticated=True, body=None):
+    def request(route, *, authenticated=True, body=None, timeout=3):
         headers = {"api_key": local_key} if authenticated else {}
         data = None
         if body is not None:
@@ -201,7 +206,7 @@ def smoke_walletd(binary, config_template, work):
             headers["Content-Type"] = "application/json"
         query = urllib.request.Request(f"http://127.0.0.1:{port}{route}", headers=headers, data=data)
         try:
-            response = opener.open(query, timeout=3)
+            response = opener.open(query, timeout=timeout)
         except urllib.error.HTTPError as error:
             response = error
         with response:
@@ -235,16 +240,16 @@ def smoke_walletd(binary, config_template, work):
                 if request("/api/v1/wallet/lifecycle/status", authenticated=False)[0] != 401:
                     raise RuntimeError("walletd seed read accepted missing credential")
                 if boot == "fresh":
-                    if request("/api/v1/wallet/init", body={"pass": password, "strength": 12})[0] != 200:
+                    if request("/api/v1/wallet/init", body={"pass": password, "strength": 12}, timeout=KDF_TIMEOUT)[0] != 200:
                         raise RuntimeError("walletd seed initialization failed")
-                    if request("/api/v1/wallet/unlock", body={"pass": password})[0] != 200:
+                    if request("/api/v1/wallet/unlock", body={"pass": password}, timeout=KDF_TIMEOUT)[0] != 200:
                         raise RuntimeError("walletd seed unlock failed")
                     if request("/api/v1/wallet/lifecycle/status")[2] != {"initialized": True, "locked": False}:
                         raise RuntimeError("walletd initialized seed did not unlock")
                 else:
                     if request("/api/v1/wallet/addresses")[0] != 503:
                         raise RuntimeError("walletd sealed seed served wallet data")
-                    if request("/api/v1/wallet/unlock", body={"pass": password})[0] != 200:
+                    if request("/api/v1/wallet/unlock", body={"pass": password}, timeout=KDF_TIMEOUT)[0] != 200:
                         raise RuntimeError("walletd sealed seed did not unseal")
                     if request("/api/v1/wallet/lifecycle/status")[2] != {"initialized": True, "locked": False}:
                         raise RuntimeError("walletd unsealed seed did not unlock")
