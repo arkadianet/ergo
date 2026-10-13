@@ -748,7 +748,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "ergo-api"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-avltree"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "base16",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-chain-spec"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "ergo-primitives",
  "ergo-ser",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-compiler"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "base64",
  "bs58",
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-crypto"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "blake2",
  "ergo-chain-spec",
@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-difftest"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -874,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-indexer"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "ergo-indexer-types",
  "ergo-primitives",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-indexer-types"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "ergo-primitives",
  "ergo-ser",
@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-mempool"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "ergo-chain-spec",
  "ergo-mempool",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-mining"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "ergo-chain-spec",
  "ergo-crypto",
@@ -945,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-node"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-p2p"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "ergo-primitives",
  "ergo-ser",
@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-primitives"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "blake2",
  "hex",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-rest-json"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "ergo-crypto",
  "ergo-primitives",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-ser"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "bs58",
  "ergo-primitives",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-sigma"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-state"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "bincode",
  "blake2",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-sync"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "ergo-chain-spec",
  "ergo-crypto",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-validation"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "ergo-chain-spec",
  "ergo-crypto",
@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-wallet"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1201,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-wallet-protocol"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "hex",
  "serde",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-wallet-service"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "ergo-walletd"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "async-trait",
  "axum",
