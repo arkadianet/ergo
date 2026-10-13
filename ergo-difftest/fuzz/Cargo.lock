@@ -454,6 +454,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "ergo-avltree"
+version = "0.12.3"
+dependencies = [
+ "anyhow",
+ "base16",
+ "blake2",
+ "byteorder",
+ "bytes",
+ "rand",
+ "sha2 0.9.9",
+]
+
+[[package]]
 name = "ergo-chain-spec"
 version = "0.12.3"
 dependencies = [
@@ -568,10 +581,10 @@ name = "ergo-sigma"
 version = "0.12.3"
 dependencies = [
  "bytes",
+ "ergo-avltree",
  "ergo-crypto",
  "ergo-primitives",
  "ergo-ser",
- "ergo_avltree_rust",
  "gf2_192",
  "indexmap",
  "k256",
@@ -590,6 +603,7 @@ dependencies = [
  "blake2",
  "bytes",
  "crossbeam-channel",
+ "ergo-avltree",
  "ergo-chain-spec",
  "ergo-crypto",
  "ergo-primitives",
@@ -598,7 +612,6 @@ dependencies = [
  "ergo-validation",
  "ergo-wallet",
  "ergo-wallet-service",
- "ergo_avltree_rust",
  "hex",
  "lru",
  "num-bigint",
@@ -695,21 +708,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "zeroize",
-]
-
-[[package]]
-name = "ergo_avltree_rust"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "040e68223ab3775e54463c0f97b340d8fe6b4080acc5236fb4c19da477650668"
-dependencies = [
- "anyhow",
- "base16",
- "blake2",
- "byteorder",
- "bytes",
- "rand",
- "sha2 0.9.9",
 ]
 
 [[package]]
