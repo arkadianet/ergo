@@ -5,13 +5,18 @@
 //! depth cap and can add frames beneath that recursion. A stack floor supplements
 //! those guards; it cannot replace them.
 //!
-//! Tests exercise several deep transaction shapes on half the floor. They are
-//! regression checks for the compiled profile and platform, not a proof of the
-//! maximum stack consumption across all possible inputs or compiler versions.
+//! The floor also has to hold script evaluation: AVL+ proof verification walks
+//! the reconstructed proof tree recursively, one frame per level, up to the
+//! script-level proof height bound in `ergo-sigma`.
+//!
+//! Tests exercise several deep transaction shapes on a fixed 4 MiB decode
+//! budget, well below the floor. They are regression checks for the compiled
+//! profile and platform, not a proof of the maximum stack consumption across
+//! all possible inputs or compiler versions.
 
 /// Stack size, in bytes, for the Tokio runtime's threads (workers and blocking
 /// pool), Rayon, startup, mining and indexing threads.
-pub const DECODE_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+pub const DECODE_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests {
@@ -20,6 +25,11 @@ mod tests {
     use ergo_primitives::reader::{ReadError, VlqReader};
 
     // ----- helpers -----
+
+    /// Stack the deep decode shapes below must fit in. Decoding alone stays
+    /// far below the thread floor, so a fixed budget keeps these tests
+    /// sensitive to frame growth.
+    const DECODE_TEST_STACK_BUDGET: usize = 4 * 1024 * 1024;
 
     /// A one-output transaction whose output proposition nests `levels` `SBox`
     /// constants: each level is a size-delimited v0 tree whose body is an
@@ -71,6 +81,11 @@ mod tests {
     // ----- guard -----
 
     #[test]
+    fn decode_test_budget_is_well_below_the_thread_floor() {
+        const { assert!(DECODE_TEST_STACK_BUDGET <= DECODE_THREAD_STACK_BYTES / 2) };
+    }
+
+    #[test]
     fn value_depth_boundaries_match_captured_scala_verdicts() {
         for line in include_str!("../../test-vectors/scala/sigma/decode_depth.tsv").lines() {
             if line.starts_with('#') || line.is_empty() {
@@ -101,12 +116,12 @@ mod tests {
 
     /// A script chain far past the budget, which
     /// the decoder follows until the shared depth limit stops it at 110. It must
-    /// be rejected, and it must fit in HALF the floor — so a change that makes
+    /// be rejected, and it must fit in the decode test budget — so a change that makes
     /// frames grow fails here, with the floor itself still intact, instead of
     /// eroding the margin unseen.
     #[test]
-    fn script_descent_fits_half_the_decode_stack_floor() {
-        let err = decode_on_stack(nested_box_transaction(400), DECODE_THREAD_STACK_BYTES / 2)
+    fn script_descent_fits_the_decode_test_budget() {
+        let err = decode_on_stack(nested_box_transaction(400), DECODE_TEST_STACK_BUDGET)
             .expect_err("a 400-level nested box chain is past the depth budget");
         assert!(
             matches!(err, ReadError::DepthLimitExceeded { max: 110 }),
@@ -114,10 +129,10 @@ mod tests {
         );
     }
 
-    /// A deep complete transaction must fit in half the floor too.
+    /// A deep complete transaction must fit in the decode test budget too.
     #[test]
-    fn accepted_script_chain_fits_half_the_decode_stack_floor() {
-        decode_on_stack(nested_box_transaction(53), DECODE_THREAD_STACK_BYTES / 2)
+    fn accepted_script_chain_fits_the_decode_test_budget() {
+        decode_on_stack(nested_box_transaction(53), DECODE_TEST_STACK_BUDGET)
             .expect("a 53-level chain must decode completely");
     }
 
@@ -138,13 +153,13 @@ mod tests {
     }
 
     #[test]
-    fn register_descent_fits_half_the_decode_stack_floor() {
+    fn register_descent_fits_the_decode_test_budget() {
         // Include the reported deep transaction shapes. Input depth must not
         // turn into call-stack depth after the shared budget is exhausted.
         for levels in [400, 800, 3_000] {
             let err = decode_on_stack(
                 register_transaction(levels, &[4, 2]),
-                DECODE_THREAD_STACK_BYTES / 2,
+                DECODE_TEST_STACK_BUDGET,
             )
             .expect_err("register nesting must consume the shared budget");
             assert!(
@@ -155,27 +170,21 @@ mod tests {
     }
 
     #[test]
-    fn accepted_register_chain_fits_half_the_decode_stack_floor() {
-        decode_on_stack(
-            register_transaction(53, &[4, 2]),
-            DECODE_THREAD_STACK_BYTES / 2,
-        )
-        .expect("complete register chain within the byte and depth limits");
+    fn accepted_register_chain_fits_the_decode_test_budget() {
+        decode_on_stack(register_transaction(53, &[4, 2]), DECODE_TEST_STACK_BUDGET)
+            .expect("complete register chain within the byte and depth limits");
     }
 
     #[test]
-    fn mixed_register_expression_type_descent_fits_half_the_decode_stack_floor() {
+    fn mixed_register_expression_type_descent_fits_the_decode_test_budget() {
         // At the bottom of 45 boxes, parse 18 unary expressions followed by a
         // 9-layer type descriptor. Types allow 8 recursive calls plus an embedded terminal.
         // An empty outer collection needs no values for its nested element type.
         let mut leaf = vec![0xef; 18]; // LogicalNot
         leaf.extend_from_slice(&[0x0c; 8]); // Coll[...]
         leaf.extend_from_slice(&[0x10, 0]); // Coll[Int], empty outer collection
-        let err = decode_on_stack(
-            register_transaction(45, &leaf),
-            DECODE_THREAD_STACK_BYTES / 2,
-        )
-        .expect_err("register expressions must be evaluated values");
+        let err = decode_on_stack(register_transaction(45, &leaf), DECODE_TEST_STACK_BUDGET)
+            .expect_err("register expressions must be evaluated values");
         assert!(
             matches!(err, ReadError::InvalidData(ref msg) if msg.contains("unsupported expression opcode")),
             "{err:?}"

@@ -474,7 +474,12 @@ pub(in crate::evaluator) fn eval_property_call(
     let obj_val = cx.eval_expr(obj)?;
     add_cost(cx.cost, 0xDB)?;
     match eval_no_arg_method(type_id, method_id, &obj_val, cx.ctx, cx.cost)? {
-        Some(v) => Ok(v),
+        // The reference's invocation rejects a receiver of another class
+        // after the method's fixed cost (see `eval_method_call`).
+        Some(v) => {
+            crate::evaluator::helpers::check_receiver(type_id, method_id, &obj_val)?;
+            Ok(v)
+        }
         None => Err(EvalError::TypeError {
             expected: "supported PropertyCall",
             got: format!("type_id={type_id}, method_id={method_id}"),
@@ -1075,7 +1080,7 @@ pub(super) fn eval_no_arg_method(
                     let elem_type = coll_elem_type(&other).unwrap_or(SigmaType::SAny);
                     let (_kind, mut items) = collection_to_values(other, ctx)?;
                     items.reverse();
-                    Value::CollGeneric(items, Box::new(elem_type))
+                    Value::CollGeneric(items.into(), Box::new(elem_type))
                 }
             };
             Ok(Some(reversed))

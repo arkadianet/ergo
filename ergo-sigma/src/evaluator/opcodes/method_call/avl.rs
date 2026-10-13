@@ -75,7 +75,7 @@ pub(super) fn contains(
     };
     // Construct before charging lookup. Invalid metadata or proof reconstruction
     // is retained as a failed verifier; contains maps its lookup failure to false.
-    let verifier = try_make_avl_verifier(avl, &proof);
+    let verifier = try_make_avl_verifier(avl, &proof)?;
     cx.cost.add(lookup_cost.compute(avl_cost_height(avl))?)?;
     match verifier {
         Some(mut bv) => match bv.lookup(&key) {
@@ -136,7 +136,7 @@ pub(super) fn get(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     };
     // A reconstructed verifier with a bad proof still pays for lookup; get
     // reports that lookup failure as InterpreterException, including at v3.
-    let verifier = try_make_avl_verifier(avl, &proof);
+    let verifier = try_make_avl_verifier(avl, &proof)?;
     cx.cost.add(lookup_cost.compute(avl_cost_height(avl))?)?;
     match verifier {
         Some(mut bv) => match bv.lookup(&key) {
@@ -228,7 +228,7 @@ pub(super) fn get_many(
     // Failure (construction OR lookup) errors when a key is processed
     // (NOT version-gated). A witnessed-absent key yields a None
     // element.
-    let mut bv_opt = try_make_avl_verifier(avl, &proof);
+    let mut bv_opt = try_make_avl_verifier(avl, &proof)?;
     let tree_height = avl_cost_height(avl);
     let mut results = Vec::with_capacity(keys.len());
     for key in keys {
@@ -252,7 +252,7 @@ pub(super) fn get_many(
     // the carrier with that exact element type so empty
     // results and serialize-back preserve the right shape.
     Ok(Value::CollGeneric(
-        results,
+        results.into(),
         Box::new(SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(
             SigmaType::SByte,
         ))))),
@@ -435,7 +435,7 @@ pub(super) fn remove(
         per_chunk: JitCost::from_jit(15),
         chunk_size: 1,
     };
-    let mut bv_opt = try_make_avl_verifier(&avl, &proof);
+    let mut bv_opt = try_make_avl_verifier(&avl, &proof)?;
     // treeHeight == digest height byte even on a failed construction.
     let nitems = avl_cost_height(&avl).max(1);
     // Scala remove_eval uses cfor (NOT forall): every key is charged
@@ -450,7 +450,7 @@ pub(super) fn remove(
     // remove uniquely charges digest_Info(15) UNCONDITIONALLY after
     // the loop (insert/update/insertOrUpdate do not).
     cx.cost.add(JitCost::from_jit(15))?;
-    match bv_opt.as_ref().and_then(|bv| bv.digest()) {
+    match checked_avl_digest(bv_opt.as_ref())? {
         Some(d) if d.len() == 33 => {
             cx.cost.add(JitCost::from_jit(40))?; // updateDigest_Info
             let mut updated = avl.clone();
@@ -684,7 +684,7 @@ fn eval_avl_mutate(
             chunk_size: 1,
         },
     };
-    let mut bv_opt = try_make_avl_verifier(avl, proof);
+    let mut bv_opt = try_make_avl_verifier(avl, proof)?;
     // nItems = max(treeHeight,1); treeHeight == the digest's height byte even
     // on a failed construction (rootNodeHeight is set before the proof parse).
     let nitems = avl_cost_height(avl).max(1);
@@ -734,7 +734,7 @@ fn eval_avl_mutate(
         }
         return Ok(Value::Opt(None));
     }
-    match bv_opt.as_ref().and_then(|bv| bv.digest()) {
+    match checked_avl_digest(bv_opt.as_ref())? {
         Some(d) if d.len() == 33 => {
             cx.cost.add(JitCost::from_jit(40))?; // updateDigest_Info (success only)
             let mut updated = avl.clone();
@@ -742,5 +742,19 @@ fn eval_avl_mutate(
             Ok(Value::Opt(Some(Box::new(Value::AvlTree(updated)))))
         }
         _ => Ok(Value::Opt(None)),
+    }
+}
+
+/// The digest after a successful run of AVL mutations, or a script error when
+/// the root height left the range a digest's height byte can hold. The
+/// starting height byte is not authenticated by the proof, so an insert at
+/// height 255 or a remove at height 0 can push it out of range; the result is
+/// a failed method call, not an absent tree.
+fn checked_avl_digest(bv: Option<&crate::avl::AvlVerifier>) -> Result<Option<Vec<u8>>, EvalError> {
+    match bv {
+        None => Ok(None),
+        Some(bv) => bv.digest_checked().map_err(|_| {
+            EvalError::RuntimeException("AvlTree root height out of range after operations")
+        }),
     }
 }

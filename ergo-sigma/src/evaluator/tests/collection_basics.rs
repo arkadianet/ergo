@@ -288,3 +288,155 @@ fn opcode_or_collection() {
     let expr = op(0x97, Payload::One(Box::new(coll)));
     assert_eq!(run_eval(&expr), Value::Bool(true));
 }
+
+// ── zip keeps its columns ──
+// The reference's zip builds a PairOfCols over the two columns; size, apply,
+// getOrElse, get and slice read the columns. The Rust zip keeps the columns
+// too and builds `(a, b)` tuples only when they are read, so a zip that is
+// only sized or indexed costs no per-row work. Every read must still see
+// exactly the tuples the eager zip produced.
+
+fn zip_call(xs: Expr, ys: Expr) -> Expr {
+    op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 12,
+            method_id: 29,
+            obj: Box::new(xs),
+            args: vec![ys],
+            type_args: vec![],
+        },
+    )
+}
+
+fn eager_zip(xs: Value, ys: Value) -> Vec<Value> {
+    let ctx = ReductionContext::minimal(500_000, 0);
+    let (_, a) = collection_to_values(xs, &ctx).unwrap();
+    let (_, b) = collection_to_values(ys, &ctx).unwrap();
+    a.into_iter()
+        .zip(b)
+        .map(|(a, b)| Value::Tuple(vec![a, b]))
+        .collect()
+}
+
+fn zip_items(value: &Value) -> &CollItems {
+    match value {
+        Value::CollGeneric(items, _) => items,
+        other => panic!("zip result is a boxed-element collection, got {other:?}"),
+    }
+}
+
+#[test]
+fn zip_reads_rows_from_its_columns_without_materializing() {
+    let xs = const_bytes(vec![1, 2, 3, 4, 5]);
+    let ys = const_coll_long(vec![10, 20, 30]);
+    let zipped = run_eval(&zip_call(xs.clone(), ys.clone()));
+    let items = zip_items(&zipped);
+    assert!(!items.is_materialized());
+    assert_eq!(items.len(), 3);
+    let expected = eager_zip(run_eval(&xs), run_eval(&ys));
+    for (i, row) in expected.iter().enumerate() {
+        assert_eq!(items.item(i).as_ref(), Some(row));
+    }
+    assert_eq!(items.item(3), None);
+    let sliced = items.slice(1, 9);
+    assert_eq!(sliced.len(), 2);
+    assert_eq!(sliced.item(0).as_ref(), Some(&expected[1]));
+    let copy = zipped.clone();
+    assert!(!items.is_materialized());
+    assert!(!sliced.is_materialized());
+    assert!(!zip_items(&copy).is_materialized());
+    // Any other read materializes exactly the eager tuples.
+    assert_eq!(**items, expected);
+    assert_eq!(*sliced, expected[1..3].to_vec());
+    assert_eq!(zip_items(&copy).clone().into_vec(), expected);
+}
+
+#[test]
+fn zip_rows_match_the_eager_zip_for_every_column_carrier() {
+    let pairs_coll = zip_call(
+        const_coll_int(vec![7, 8]),
+        const_coll_bool(vec![true, false]),
+    );
+    let cases = [
+        (const_coll_int(vec![1, 2, 3]), const_bytes(vec![9, 8, 7])),
+        (const_coll_bool(vec![true]), const_coll_short(vec![4, 5])),
+        (
+            const_coll_sigma_prop_trivial(vec![true, false]),
+            const_coll_long(vec![1, 2]),
+        ),
+        // A zip of a zip: the inner zip is itself a column.
+        (pairs_coll.clone(), const_coll_int(vec![1, 2, 3])),
+        (const_bytes(vec![]), pairs_coll),
+    ];
+    for (xs, ys) in cases {
+        let zipped = run_eval(&zip_call(xs.clone(), ys.clone()));
+        let expected = eager_zip(run_eval(&xs), run_eval(&ys));
+        let items = zip_items(&zipped);
+        assert_eq!(items.len(), expected.len());
+        let rows: Vec<_> = (0..items.len()).map(|i| items.item(i).unwrap()).collect();
+        assert_eq!(rows, expected);
+        assert_eq!(**items, expected);
+    }
+}
+
+#[test]
+fn zip_size_index_and_slice_read_the_columns() {
+    let xs = || const_bytes((0..=255u8).collect());
+    let ys = || const_coll_int((0..100).collect());
+    let size = op(0xB1, Payload::One(Box::new(zip_call(xs(), ys()))));
+    let ctx = ReductionContext::minimal(500_000, 0);
+    let (value, size_cost) = eval_value_and_cost(&size, &ctx);
+    assert_eq!(value.unwrap(), Value::Int(100));
+    let by_index = op_by_index(zip_call(xs(), ys()), const_int(99));
+    let (value, index_cost) = eval_value_and_cost(&by_index, &ctx);
+    assert_eq!(
+        value.unwrap(),
+        Value::Tuple(vec![Value::Byte(99), Value::Int(99)])
+    );
+    // Both charge the zip on the receiver length (256 rows), not the pairs.
+    assert_eq!(
+        index_cost - size_cost,
+        cost_of(&op_by_index(const_coll_int(vec![0]), const_int(0)))
+            - cost_of(&op(0xB1, Payload::One(Box::new(const_coll_int(vec![0])))))
+    );
+    let out_of_range = op_by_index(zip_call(xs(), ys()), const_int(100));
+    assert!(eval_value_and_cost(&out_of_range, &ctx).0.is_err());
+    let slice = op(
+        0xB4,
+        Payload::Three(
+            Box::new(zip_call(xs(), ys())),
+            Box::new(const_int(98)),
+            Box::new(const_int(200)),
+        ),
+    );
+    let sliced = run_eval(&slice);
+    assert!(!zip_items(&sliced).is_materialized());
+    assert_eq!(
+        **zip_items(&sliced),
+        vec![
+            Value::Tuple(vec![Value::Byte(98), Value::Int(98)]),
+            Value::Tuple(vec![Value::Byte(99), Value::Int(99)]),
+        ]
+    );
+}
+
+#[test]
+fn coll_items_mutation_detaches_a_zip_from_its_columns() {
+    let zipped = run_eval(&zip_call(
+        const_coll_int(vec![1, 2]),
+        const_coll_int(vec![3, 4]),
+    ));
+    let Value::CollGeneric(mut items, _) = zipped.clone() else {
+        panic!("zip result is a boxed-element collection");
+    };
+    items[0] = Value::Int(0);
+    assert!(items.is_materialized());
+    assert_eq!(items.len(), 2);
+    assert_eq!(items.item(0), Some(Value::Int(0)));
+    // The original zip still reads its columns.
+    assert_eq!(
+        zip_items(&zipped).item(0),
+        Some(Value::Tuple(vec![Value::Int(1), Value::Int(3)]))
+    );
+}

@@ -276,7 +276,8 @@ mod tests {
 
     #[test]
     fn transaction_trivial_proposition_still_extracts_no_hints() {
-        let (tx, boxes, state) = extraction_transaction(&[0, 1, 1]);
+        // A constant TrueProp root (`sigmaProp(true)`).
+        let (tx, boxes, state) = extraction_transaction(&[0, 0x08, 0xd3]);
         let bag = bag_for_transaction(&tx, &boxes, &[], &state, &[], &[]).unwrap();
         assert!(bag.all_for_input(0).hints.is_empty());
     }

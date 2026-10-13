@@ -53,8 +53,13 @@ pub(super) fn encode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value,
 pub(super) fn decode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalError> {
     check_arity(args, 1)?;
     let v_val = cx.eval_expr(&args[0])?;
+    // Reflection unboxes the argument with Java's widening conversions, so a
+    // Byte, Short or Int argument is accepted for the `Long` parameter.
     let compact = match v_val {
         Value::Long(n) => n,
+        Value::Int(n) => i64::from(n),
+        Value::Short(n) => i64::from(n),
+        Value::Byte(n) => i64::from(n),
         other => {
             return Err(EvalError::TypeError {
                 expected: "Long for SGlobal.decodeNbits",
@@ -108,13 +113,15 @@ pub(super) fn some(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalErr
 // block validator's PoW check uses via the `hit_for_v2` wrapper.
 pub(super) fn pow_hit(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalError> {
     check_arity(args, 5)?;
-    let k = match cx.eval_expr(&args[0])? {
-        Value::Int(v) => v,
-        other => {
+    let k_val = cx.eval_expr(&args[0])?;
+    let k = match super::widen_to_int(&k_val) {
+        Some(v) => v,
+        None => {
+            let other = k_val;
             return Err(EvalError::TypeError {
                 expected: "Int k for SGlobal.powHit",
                 got: format!("{other:?}"),
-            })
+            });
         }
     };
     let msg = match cx.eval_expr(&args[1])? {
@@ -144,13 +151,15 @@ pub(super) fn pow_hit(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, Eval
             })
         }
     };
-    let n_param = match cx.eval_expr(&args[4])? {
-        Value::Int(v) => v,
-        other => {
+    let n_val = cx.eval_expr(&args[4])?;
+    let n_param = match super::widen_to_int(&n_val) {
+        Some(v) => v,
+        None => {
+            let other = n_val;
             return Err(EvalError::TypeError {
                 expected: "Int N for SGlobal.powHit",
                 got: format!("{other:?}"),
-            })
+            });
         }
     };
     // PowHitCostKind, charged before the (heavy) hit computation.
@@ -242,6 +251,8 @@ pub(super) fn deserialize_to(
     let mut r = ergo_primitives::reader::VlqReader::new(&bytes)
         .with_activated_script_version(cx.ctx.activated_script_version);
     r.set_ergo_tree_version(Some(cx.ctx.ergo_tree_version));
+    // A fresh reader: a nested box script's unbound ValUse is decidable.
+    r.track_val_bindings();
     let parsed = ergo_ser::sigma_value::read_value(&mut r, target_type).map_err(|e| {
         // DataSerializer preserves ValidationException, including rule 1020.
         // It arises during evaluation and remains a hard spend failure.
@@ -363,6 +374,7 @@ pub(super) fn xor(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalErro
     };
     let n = a.len().min(b.len());
     add_cost_per_item(cx.cost, 0x9B, n as u32)?;
+    crate::evaluator::opcodes::sigma::check_pre_jit_xor_lengths(a.len(), b.len(), cx)?;
     let out: Vec<u8> = a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect();
     Ok(Value::CollBytes(out))
 }
@@ -389,7 +401,10 @@ pub(super) fn serialize(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, Ev
     add_method_cost(cx.cost, 10)?;
     let mut w = ergo_primitives::writer::VlqWriter::new();
     serialize_runtime_value(&v, &mut w, cx)?;
-    Ok(Value::CollBytes(w.result()))
+    let bytes = w.result();
+    // `Colls.fromArray(bytes)` (MaxArrayLength).
+    crate::evaluator::helpers::check_array_length(bytes.len())?;
+    Ok(Value::CollBytes(bytes))
 }
 
 /// Walk runtime containers in write order. Converting a whole tuple first would

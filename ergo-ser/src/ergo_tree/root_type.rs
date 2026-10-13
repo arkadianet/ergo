@@ -10,7 +10,22 @@ use super::ErgoTree;
 /// This judgment is deliberately independent of exact substitution inference:
 /// unknown tuple components or function ranges cannot make those roots SigmaProp.
 pub(super) fn determinable_root_type(tree: &ErgoTree) -> Option<crate::sigma_type::SigmaType> {
-    determinable_root_type_of(&tree.body, &tree.constants)
+    rule_1001_root_type_of(&tree.body, &tree.constants)
+}
+
+/// The root type rule 1001 (`CheckDeserializedScriptIsSigmaProp`) judges.
+/// Where [`determinable_root_type_of`] stays lenient (`None`) — projections it
+/// does not track, such as `Coll(1).map(_ => true)(0)`, `(c ++ c)(0)` or
+/// `((x: Int) => true)(1)` — the exact parse-order typer that substitution
+/// uses supplies Scala's `Value.tpe`. Its `SAny` placeholder stays lenient.
+pub(crate) fn rule_1001_root_type_of(
+    body: &crate::opcode::Expr,
+    constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
+) -> Option<crate::sigma_type::SigmaType> {
+    determinable_root_type_of(body, constants).or_else(|| {
+        super::type_infer::exact_type_of(body, constants)
+            .filter(|t| *t != crate::sigma_type::SigmaType::SAny)
+    })
 }
 
 /// `determinable_root_type` over a raw `(body, constants)` pair — so the nested
@@ -1181,14 +1196,19 @@ mod tests {
                 "{body}"
             );
 
-            // A lenient sized projection consumes the structural expression,
-            // whereas a definite non-SigmaProp root consumes its declared region.
+            // The rule-1001 gate falls back to the exact typer for these
+            // projections: a definite non-SigmaProp root is wrapped and
+            // consumes its declared region, as Scala's UnparsedErgoTree does.
             let mut sized = vec![8, bytes.len() as u8];
             sized.extend_from_slice(&bytes[1..]);
             sized.push(0);
             let mut reader = VlqReader::new(&sized);
-            read_ergo_tree(&mut reader).unwrap();
-            assert_eq!(reader.position(), sized.len() - 1, "{body}");
+            let wrapped = read_ergo_tree(&mut reader).unwrap();
+            assert!(
+                matches!(wrapped.body, crate::opcode::Expr::Unparsed(_)),
+                "{body}"
+            );
+            assert_eq!(reader.position(), sized.len(), "{body}");
         }
         // The wire parser now rejects these unbound references. The typer
         // still needs a conservative answer for directly constructed ASTs.
