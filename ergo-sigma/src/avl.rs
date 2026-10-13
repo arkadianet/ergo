@@ -73,6 +73,9 @@ const PROOF_LEAF: u8 = 2;
 const PROOF_LABEL: u8 = 3;
 const PROOF_END_OF_TREE: u8 = 4;
 const PROOF_LABEL_LENGTH: usize = 32;
+/// Longest leaf value a proof may carry, fixed-length or not (scrypto 3.1.1
+/// `BatchAVLVerifier.MaxValueLength`; the crate has the same bound).
+const PROOF_MAX_VALUE_LENGTH: usize = 4_194_304;
 
 /// Height of the tree a packed AVL+ batch proof reconstructs, computed
 /// without building it: one pass over the bytes with a heap stack of subtree
@@ -85,8 +88,11 @@ const PROOF_LABEL_LENGTH: usize = 32;
 /// not), then the next-leaf key, then a 4-byte big-endian length when values
 /// are not fixed-length, then the value. Returns `None` exactly when that
 /// reconstruction fails on the proof's structure: a read past the end
-/// (including a missing end-of-tree marker), an internal node with fewer
-/// than two subtrees below it, or anything but one tree at the end. Failures
+/// (including a missing end-of-tree marker), a value longer than 4 MiB, an
+/// internal node with fewer than two subtrees below it, or anything but one
+/// tree at the end. The length field is read unsigned; the reference reads it
+/// signed and rejects a negative length, which as `u32` is above the 4 MiB
+/// bound, so the two agree. Failures
 /// that need the tree itself (node-count bound, root label versus digest)
 /// are left to the crate.
 pub fn proof_tree_height(
@@ -128,6 +134,9 @@ pub fn proof_tree_height(
                         u32::from_be_bytes(len_bytes) as usize
                     }
                 };
+                if value_length > PROOF_MAX_VALUE_LENGTH {
+                    return None;
+                }
                 i = advance(proof, i, value_length)?;
                 heights.push(0);
                 previous_was_leaf = true;
@@ -1295,6 +1304,80 @@ pub(crate) mod deep_proof_tests {
         label_root.extend_from_slice(&[0u8; PROOF_LABEL_LENGTH]);
         label_root.push(PROOF_END_OF_TREE);
         assert_eq!(proof_tree_height(&label_root, 1, Some(0)), Some(0));
+    }
+
+    /// One leaf `(key, value, next)` as a packed proof, and its digest.
+    fn one_leaf_proof(value: &[u8], length_field: Option<[u8; 4]>) -> (Vec<u8>, Vec<u8>) {
+        let (key, next) = ([0x11u8; 32], [0xFFu8; 32]);
+        let mut proof = vec![PROOF_LEAF];
+        proof.extend_from_slice(&key);
+        proof.extend_from_slice(&next);
+        if let Some(field) = length_field {
+            proof.extend_from_slice(&field);
+        }
+        proof.extend_from_slice(value);
+        proof.push(PROOF_END_OF_TREE);
+        let leaf = ergo_avltree::batch_node::LeafNode::new(
+            &bytes::Bytes::copy_from_slice(&key),
+            &bytes::Bytes::copy_from_slice(value),
+            &bytes::Bytes::copy_from_slice(&next),
+        );
+        let mut digest = leaf.borrow_mut().label().to_vec();
+        digest.push(0);
+        (proof, digest)
+    }
+
+    /// scrypto 3.1.1 (ergo 6.0.7) checks every leaf value length, fixed or
+    /// read from the proof, against `0..=4 MiB` and the bytes left. Checked
+    /// on the JVM: values of exactly 4 MiB reconstruct, 4 MiB + 1 do not.
+    #[test]
+    fn proof_values_over_4_mib_are_rejected() {
+        for len in [PROOF_MAX_VALUE_LENGTH, PROOF_MAX_VALUE_LENGTH + 1] {
+            let value = vec![0x5Au8; len];
+            let accepted = len <= PROOF_MAX_VALUE_LENGTH;
+            let field = (len as u32).to_be_bytes();
+            let (proof, digest) = one_leaf_proof(&value, Some(field));
+            assert_eq!(proof_tree_height(&proof, 32, None).is_some(), accepted);
+            assert_eq!(
+                AvlVerifier::new(&digest, &proof, 32, None, None, None).is_ok(),
+                accepted,
+                "variable length {len}"
+            );
+            let (proof, digest) = one_leaf_proof(&value, None);
+            assert_eq!(proof_tree_height(&proof, 32, Some(len)).is_some(), accepted);
+            assert_eq!(
+                AvlVerifier::new(&digest, &proof, 32, Some(len), None, None).is_ok(),
+                accepted,
+                "fixed length {len}"
+            );
+        }
+    }
+
+    /// A negative length field (here -37, which would move the read position
+    /// back onto the key's last byte, an end-of-tree marker) fails
+    /// reconstruction, as it does on the JVM; the same tree with the length
+    /// written as 0 verifies.
+    #[test]
+    fn negative_value_length_field_is_rejected() {
+        let (mut proof, digest) = one_leaf_proof(&[], Some(0u32.to_be_bytes()));
+        proof[32] = PROOF_END_OF_TREE;
+        let mut key = [0x11u8; 32];
+        key[31] = PROOF_END_OF_TREE;
+        let leaf = ergo_avltree::batch_node::LeafNode::new(
+            &bytes::Bytes::copy_from_slice(&key),
+            &bytes::Bytes::new(),
+            &bytes::Bytes::copy_from_slice(&[0xFFu8; 32]),
+        );
+        let mut digest_k = leaf.borrow_mut().label().to_vec();
+        digest_k.push(0);
+        assert_ne!(digest, digest_k);
+        let mut v = AvlVerifier::new(&digest_k, &proof, 32, None, None, None).unwrap();
+        assert_eq!(v.lookup(&key), Ok(Some(Vec::new())));
+        let negative = &proof[..proof.len() - 5];
+        let mut negative = negative.to_vec();
+        negative.extend_from_slice(&(-37i32).to_be_bytes());
+        assert_eq!(proof_tree_height(&negative, 32, None), None);
+        assert!(AvlVerifier::new(&digest_k, &negative, 32, None, None, None).is_err());
     }
 
     #[test]
